@@ -258,11 +258,13 @@ async fn start_failures_fail_input_and_retry_requeues() {
         )
         .await;
     }
+    // The row and the computed state are read by separate queries: wait for both.
     let v = hub
-        .wait_session(&sid, "error", |v| v["state"] == "error")
+        .wait_session(&sid, "error", |v| {
+            v["state"] == "error" && v["agent"]["start_failures"] == 3
+        })
         .await;
     assert_eq!(v["queue_len"], 0);
-    assert_eq!(v["agent"]["start_failures"], 3);
     w.expect_silence(Duration::from_millis(300)).await;
 
     let events = hub.events(&sid).await;
@@ -286,6 +288,78 @@ async fn start_failures_fail_input_and_retry_requeues() {
         .wait_session(&sid, "running", |v| v["state"] == "running")
         .await;
     assert_eq!(v["agent"]["start_failures"], 0);
+    hub.finish().await;
+}
+
+/// 3c. A failed start is reported like the real worker does it: `session.state` starting and
+/// stopped around the `error`, in either order. The `stopped` must not restart the agent at
+/// once: starts are retried after `start_retry_delay`, three in all, and the input fails with
+/// a single `agent_start_failed` (SPEC §5.2).
+#[tokio::test]
+async fn failed_start_with_state_frames_waits_between_retries() {
+    let hub = TestHub::start().await;
+    let delay = test_timing().start_retry_delay;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("broken").await;
+    ack_start(&mut w, &sid).await;
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (s, _) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "hi"}))
+        .await;
+    assert_eq!(s, 201);
+
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let state = |ps: &str| json!({"session_id": sid, "process_state": ps, "locked_by": "none"});
+    let error = json!({"code": "agent_start_failed", "message": "claude exited right after start", "retryable": true});
+    let mut last: Option<tokio::time::Instant> = None;
+    let mut acks = 0;
+    for i in 0..3 {
+        // Acks to our `session.state` frames may come before or after the next start.
+        let f = loop {
+            let f = w.recv().await;
+            if f["type"] == "ack" {
+                acks += 1;
+            } else {
+                assert_eq!(f["type"], "session.start", "unexpected frame {f}");
+                break f;
+            }
+        };
+        let now = tokio::time::Instant::now();
+        if let Some(prev) = last {
+            assert!(
+                now - prev >= delay,
+                "start {i} came {:?} after the previous one",
+                now - prev
+            );
+        }
+        last = Some(now);
+        w.send("session.state", state("starting")).await;
+        if i % 2 == 0 {
+            w.send("session.state", state("stopped")).await;
+            w.reply(&f["id"], "error", error.clone()).await;
+        } else {
+            w.reply(&f["id"], "error", error.clone()).await;
+            w.send("session.state", state("stopped")).await;
+        }
+    }
+    hub.wait_session(&sid, "error", |v| {
+        v["state"] == "error" && v["agent"]["start_failures"] == 3
+    })
+    .await;
+    for _ in acks..6 {
+        w.expect("ack").await;
+    }
+    w.expect_silence(delay * 10).await;
+    let failed = hub
+        .events(&sid)
+        .await
+        .into_iter()
+        .filter(|e| e["payload"]["code"] == "agent_start_failed")
+        .count();
+    assert_eq!(failed, 1);
     hub.finish().await;
 }
 

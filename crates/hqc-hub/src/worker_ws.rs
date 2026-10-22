@@ -450,16 +450,23 @@ async fn on_session_state(
         {
             let mut st = conn.st.lock().await;
             if let Some(sc) = st.sessions.get_mut(&session_id) {
-                sc.start = StartState::NotStarted;
-                sc.inflight.clear();
+                // A failed start reports `stopped` too; the reply to the outstanding
+                // `session.start` decides what happens next, not this frame.
+                if sc.start != StartState::Starting {
+                    sc.start = StartState::NotStarted;
+                    sc.inflight.clear();
+                }
             }
         }
         for p in db::open_requests_of_session(&app.db, session_id).await? {
             requests::cancel(app, &p, CancelReason::Stopped).await?;
         }
         events::turn_lost(app, session_id).await?;
-        // Pending input brings the agent back up (idle_timeout, SPEC §17.3).
-        delivery::kick(app, session_id, false).await;
+        // Pending input brings the agent back up (idle_timeout, SPEC §17.3). After a failed
+        // start the retry belongs to `on_start_failed`, after its pause (SPEC §5.2).
+        if s.start_failures == 0 {
+            delivery::kick(app, session_id, false).await;
+        }
     }
     app.session_changed(session_id);
     Ok(())

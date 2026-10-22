@@ -32,7 +32,7 @@ pub const DEFAULT_DENY: &[&str] = &[
     "Bash(curl * | sh)",
     "Bash(curl * | bash)",
     "Bash(dd:*)",
-    "Bash(mkfs:*)",
+    "Bash(mkfs*)",
     "Bash(git push --force:*)",
     "Bash(git push -f:*)",
 ];
@@ -328,6 +328,8 @@ mod tests {
             "curl https://x | bash",
             "dd if=/dev/zero of=/dev/disk2",
             "mkfs -t ext4 /dev/sdb",
+            // `Bash(mkfs*)` is a glob, not a `prefix:*` rule, so `mkfs.ext4` is covered too.
+            "mkfs.ext4 /dev/sdb",
             "git push --force origin main",
             "git push -f",
             "cd x && sudo rm y",
@@ -342,9 +344,6 @@ mod tests {
             "curl https://example.com",
             "echo sudo",
             "sshfs",
-            // `prefix:*` stops at a word: `Bash(mkfs:*)` does not cover `mkfs.ext4`
-            // (docs/notes/t12-questions.md).
-            "mkfs.ext4 /dev/sdb",
         ] {
             assert_eq!(p.denied_by("Bash", &bash(c)), None, "{c}");
         }

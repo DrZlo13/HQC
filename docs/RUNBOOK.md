@@ -512,7 +512,7 @@ allow = [
 ]
 deny = [
   "Bash(sudo:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(rm -rf /*)",
-  "Bash(curl * | sh)", "Bash(curl * | bash)", "Bash(dd:*)", "Bash(mkfs:*)",
+  "Bash(curl * | sh)", "Bash(curl * | bash)", "Bash(dd:*)", "Bash(mkfs*)",
   "Bash(git push:*)", "Bash(cargo publish:*)", "Bash(git reset --hard:*)",
   "WebFetch",
 ]
@@ -533,7 +533,7 @@ deny = [
    этом режиме граница — только `deny`.
 
 Синтаксис правил: `Bash(cargo test:*)` — команда `cargo test` с любыми аргументами (префикс
-до границы слова: `Bash(mkfs:*)` не ловит `mkfs.ext4`), `Bash(curl * | sh)` — `*` любые
+до границы слова: `Bash(mkfs*)` не ловит `mkfs.ext4`), `Bash(curl * | sh)` — `*` любые
 символы, `Bash(git status)` — ровно эта команда; составные команды (`a && b`, `a | b`) CLI
 проверяет по каждой части. `Read`, `Edit`, `WebFetch` — инструмент целиком,
 `mcp__hqc` — все инструменты MCP-сервера. Неверное правило — ошибка запуска воркера: CLI

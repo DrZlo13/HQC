@@ -1113,7 +1113,7 @@ deny = ["Bash(sudo:*)", "Bash(git push:*)"]  # никогда не выполн�
   граница — только `deny`; воркер пишет предупреждение в лог при старте;
 - `allow` по умолчанию пуст;
 - `deny`, если поля (или блока) нет: `Bash(sudo:*)`, `Bash(ssh:*)`, `Bash(scp:*)`,
-  `Bash(rm -rf /*)`, `Bash(curl * | sh)`, `Bash(curl * | bash)`, `Bash(dd:*)`, `Bash(mkfs:*)`,
+  `Bash(rm -rf /*)`, `Bash(curl * | sh)`, `Bash(curl * | bash)`, `Bash(dd:*)`, `Bash(mkfs*)`,
   `Bash(git push --force:*)`, `Bash(git push -f:*)`; `deny = []` его отключает
   **[решение]**;
 - правило — `Инструмент` или `Инструмент(содержимое)`: имя из латиницы, цифр и `_`
@@ -1370,6 +1370,9 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 ## 23. История изменений
 
 ### 0.13 → 0.14 (T12, политика разрешений)
+Итерация 1 закрыта: 2026-10-22 проверены с телефона вход через Access, установка PWA
+и push на approval.request; в Cloudflare выставлены SameSite Lax, Binding Cookie и
+Rate Limiting на /worker/*; HQC_VAPID_SUBJECT задан. Критерий §19.1 выполнен целиком.
 По спайку на Claude Code 2.1.308 (`docs/notes/claude-control-protocol.md`, «Permission
 policy, 2.1.308», фикстуры `*-2.1.308.jsonl`). §14: блок `[permissions]` локального конфига
 (`mode` ask/auto, `allow`, `deny` с набором по умолчанию **[решение]**, проверка правил)

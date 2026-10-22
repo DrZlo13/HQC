@@ -131,6 +131,28 @@ claude_bin = "$(command -v claude || echo "$HOME/.local/bin/claude")"
 
 [workspace]
 path = "$WORKSPACE"
+
+# Политика одобрений (SPEC §14, RUNBOOK §2.2): allow — без вопросов, deny — никогда и без
+# вопроса (сильнее always), остальное спрашивает. Свой deny заменяет набор по умолчанию.
+[permissions]
+mode = "ask"
+allow = [
+  "Read", "Glob", "Grep", "Edit", "Write",
+  "Bash(cargo build:*)", "Bash(cargo check:*)", "Bash(cargo test:*)", "Bash(cargo clippy:*)",
+  "Bash(cargo fmt:*)", "Bash(cargo run:*)", "Bash(cargo doc:*)",
+  "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npm ci:*)", "Bash(node:*)",
+  "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+  "Bash(git add:*)", "Bash(git commit:*)", "Bash(git stash:*)", "Bash(git checkout:*)", "Bash(git switch:*)",
+  "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)", "Bash(rg:*)",
+  "Bash(find:*)", "Bash(mkdir:*)", "Bash(touch:*)", "Bash(sed -n:*)", "Bash(diff:*)", "Bash(which:*)",
+  "mcp__hqc",
+]
+deny = [
+  "Bash(sudo:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(rm -rf /*)",
+  "Bash(curl * | sh)", "Bash(curl * | bash)", "Bash(dd:*)", "Bash(mkfs*)",
+  "Bash(git push:*)", "Bash(git reset --hard:*)", "Bash(cargo publish:*)", "Bash(npm publish:*)",
+  "WebFetch",
+]
 TOML
     WORKER=(env HQC_HOME="$RUN/home" HQC_TOKEN_STORE=file RUST_LOG="${RUST_LOG:-info}" "$BIN/hqc-worker")
     if [ ! -s "$RUN/home/token" ]; then

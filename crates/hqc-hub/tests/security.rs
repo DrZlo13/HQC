@@ -307,10 +307,11 @@ async fn field_and_message_limits() {
 
     // WebSocket messages over 1 MiB end the connection.
     let mut c = FakeClient::connect(&hub).await;
-    c.send(json!({"type": "ping", "pad": "x".repeat(1 << 20)}))
+    c.send_unchecked(json!({"type": "ping", "pad": "x".repeat(1 << 20)}))
         .await;
     c.expect_closed().await;
-    w.send("event", json!({"event": {"pad": "x".repeat(1 << 20)}}))
+    w.send_unchecked(json!({"id": "w-big", "type": "event",
+                            "payload": {"event": {"pad": "x".repeat(1 << 20)}}}))
         .await;
     w.expect_closed().await;
     hub.finish().await;

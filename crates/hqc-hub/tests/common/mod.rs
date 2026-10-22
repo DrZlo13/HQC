@@ -390,6 +390,11 @@ impl FakeWorker {
             .unwrap();
     }
 
+    /// Send that may fail: the hub may close the connection while this is still writing.
+    pub async fn send_unchecked(&mut self, v: Value) {
+        let _ = self.ws.send(Message::Text(v.to_string().into())).await;
+    }
+
     pub async fn reply(&mut self, id: &Value, ty: &str, payload: Value) {
         self.send_raw(json!({"id": id, "type": ty, "payload": payload}))
             .await;
@@ -505,6 +510,11 @@ impl FakeClient {
         recv_json(&mut self.ws, WAIT)
             .await
             .expect("client: no frame from hub")
+    }
+
+    /// Send that may fail: the hub may close the connection while this is still writing.
+    pub async fn send_unchecked(&mut self, v: Value) {
+        let _ = self.ws.send(Message::Text(v.to_string().into())).await;
     }
 
     /// Skip frames until one with type `ty`.

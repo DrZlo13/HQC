@@ -18,7 +18,8 @@ home-mac: hqc-worker run ──HTTPS/WSS /worker/* (без Access, токен в
 ## 0. Сборка
 
 Нужны Rust stable (версия зафиксирована в `rust-toolchain.toml`, `rustup` поставит её сам)
-и Node.js 20+ для клиента.
+и Node.js 20.19+ для сборки клиента (для его тестов — 22+). Хаб для DMZ собирать не нужно:
+есть готовый Docker-образ с клиентом внутри (§1.8).
 
 ```sh
 git clone <repo> hqc && cd hqc
@@ -29,7 +30,7 @@ cd client && npm ci && npm run build              # client/dist
 ```
 
 Хаб собирайте на той ОС и архитектуре, где он будет работать (на Linux-хосте DMZ — там
-же или в CI), воркер — на маке. Бинарники самодостаточны: Postgres-клиент встроен,
+же или в CI; Docker-образ собирает CI, §1.8), воркер — на маке. Бинарники самодостаточны: Postgres-клиент встроен,
 SQLite outbox воркера тоже.
 
 ## 1. Хаб в DMZ
@@ -61,7 +62,7 @@ createdb hqc
 | переменная | обязательна | что это |
 |---|---|---|
 | `HQC_DATABASE_URL` | да | строка подключения Postgres, например `postgresql://hqc:<пароль>@127.0.0.1/hqc` |
-| `HQC_HUB_LISTEN` | нет, `127.0.0.1:8080` | адрес и порт HTTP. Хаб слушает только интерфейс, на который ходит `cloudflared` (§20); с туннелем на том же хосте — loopback |
+| `HQC_HUB_LISTEN` | нет, `127.0.0.1:8080` | адрес и порт HTTP. Хаб слушает только интерфейс, на который ходит `cloudflared` (§20); с туннелем на том же хосте — loopback. В Docker-образе — `0.0.0.0:8080` внутри контейнера, порт наружу не публикуется (§1.8) |
 | `HQC_ACCESS_TEAM_DOMAIN` | да (без `HQC_DEV`) | домен команды Cloudflare Zero Trust, `<team>.cloudflareaccess.com` (можно с `https://` и `/` — хаб обрежет). Из него хаб берёт issuer `https://<team>.cloudflareaccess.com` и JWKS `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` |
 | `HQC_ACCESS_AUD` | да (без `HQC_DEV`) | Application Audience (AUD) tag Access-приложения хаба; хаб проверяет `aud` в JWT `Cf-Access-Jwt-Assertion` |
 | `HQC_VAPID_PRIVATE` | нет | закрытый ключ VAPID для Web Push: 32 байта скаляра P-256, base64url без `=` (§1.5). Задаётся вместе с `HQC_VAPID_PUBLIC` или не задаётся вовсе — иначе хаб не стартует |
@@ -82,6 +83,8 @@ createdb hqc
 `hqc-hub listening addr=… protocol=1`.
 
 ### 1.3 systemd (Linux)
+
+Без Docker; с Docker — §1.8.
 
 `/etc/hqc/hub.env` (права `0600`, владелец `root`; в файле пароль базы и ключ VAPID):
 
@@ -216,7 +219,8 @@ ingress:
   - service: http_status:404
 ```
 
-`sudo cloudflared service install` ставит его службой (systemd или launchd). WebSocket
+`sudo cloudflared service install` ставит его службой (systemd или launchd). Хаб в Docker
+(§1.8): `service: http://hqc-hub:8080` у cloudflared в той же Docker-сети. WebSocket
 туннель пропускает без настроек; долгие соединения держатся heartbeat'ом хаба и
 воркера (20 с) и переподключением.
 
@@ -248,7 +252,150 @@ ingress:
 API, за тем же приложением Access. Проще всего — отдать его самим хабом:
 `HQC_CLIENT_DIR=/opt/hqc/client` (скопировать туда содержимое `client/dist`). `index.html`,
 `sw.js` и манифест отдаются с `Cache-Control: no-cache`, файлы `assets/*` (имена с хэшем) —
-как неизменяемые.
+как неизменяемые. В Docker-образе (§1.8) клиент уже лежит в `/opt/hqc/client` и включён.
+
+### 1.8 Хаб в Docker
+
+Вместо §1.3: готовый образ `ghcr.io/drzlo13/hqc-hub` (linux/amd64; Dockerfile в корне
+репозитория). На сервере ничего не собирается — только `docker compose pull`. Образ
+собирает workflow `.github/workflows/image.yml`, только после зелёного `ci` на том же коммите.
+
+**Теги.**
+
+| тег | когда появляется | для чего |
+|---|---|---|
+| `sha-<7 знаков коммита>` | каждая сборка | развёртывание: неизменяемый, откат — предыдущий `sha-…` |
+| `master` | каждый зелёный push в `master` | плавающий, «последний master»; в боевом compose не использовать |
+| `X.Y.Z`, `X.Y`, `latest` | тег `vX.Y.Z` (версия обязана совпасть с `workspace.package.version` в `Cargo.toml`) | релизы; `vX.Y.Z-rc.N` даёт только `X.Y.Z-rc.N` и `sha-…` |
+
+В compose пишите конкретный `sha-…` или `X.Y.Z`. Версию в образе показывает
+`docker run --rm ghcr.io/drzlo13/hqc-hub:<тег> --version` (`hqc-hub 0.1.0`), коммит — метка
+`org.opencontainers.image.revision` (`docker image inspect`). Пакет публичный: `pull` без
+логина. Если пакет закрыт — `docker login ghcr.io -u <github-логин>` с classic PAT
+только с `read:packages`.
+
+**Что в образе.** `/usr/local/bin/hqc-hub` (`ENTRYPOINT`, аргументов не нужно), клиент
+в `/opt/hqc/client`, пользователь `hqc` (uid/gid 10001), порт 8080, из пакетов —
+`ca-certificates` и `libssl3t64`. Заданы по умолчанию (§1.2; переопределяются в env):
+
+| переменная | значение в образе |
+|---|---|
+| `HQC_HUB_LISTEN` | `0.0.0.0:8080` |
+| `HQC_CLIENT_DIR` | `/opt/hqc/client` |
+| `RUST_LOG` | `info` |
+| `NO_COLOR` | `1` — логи без ANSI-цветов |
+
+Задать нужно: `HQC_DATABASE_URL`, `HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD`; для push —
+`HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT` (§1.5). `HQC_DEV` в
+контейнере не работает и не нужен: с `0.0.0.0` хаб в dev-режиме откажется стартовать.
+
+**Состояние.** Хаб хранит всё в Postgres; на диске контейнера он ничего не пишет (корень
+образа можно монтировать read-only, `/tmp` не нужен), логи — в stdout. Volume нужен только
+базе.
+
+**`0.0.0.0:8080` безопасен, только пока порт не опубликован наружу.** Внутри контейнера
+это интерфейс compose-сети, а не хоста; Access (§1.6) защищает только то, что приходит
+через туннель. Поэтому у `hqc-hub` нет `ports:` — `cloudflared` или Caddy ходят к нему по
+имени `hqc-hub:8080` в той же сети. Если они на хосте, а не в контейнере, публикуйте только
+на loopback: `ports: ["127.0.0.1:8080:8080"]`, никогда `8080:8080` (Docker открывает такой
+порт на всех интерфейсах в обход ufw/nftables хоста).
+
+`/srv/hqc/compose.yml`:
+
+```yaml
+services:
+  hqc-db:
+    image: postgres:17
+    restart: unless-stopped
+    env_file: ./db.env
+    volumes:
+      - hqc-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "hqc", "-d", "hqc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  hqc-hub:
+    image: ghcr.io/drzlo13/hqc-hub:sha-<коммит>   # или X.Y.Z
+    restart: unless-stopped
+    depends_on:
+      hqc-db:
+        condition: service_healthy
+    env_file: ./hub.env
+    read_only: true
+    # без ports: наружу хаб виден только через cloudflared/Caddy в этой же сети
+    networks: [default, edge]
+
+volumes:
+  hqc-db:
+
+networks:
+  # Общая сеть с cloudflared/Caddy из их compose-проекта: docker network create edge.
+  # Если они описаны в этом же compose.yml — уберите edge и оставьте default.
+  edge:
+    external: true
+```
+
+`/srv/hqc/db.env` и `/srv/hqc/hub.env` — права `0600`, в git не класть; пароль в обоих
+один и тот же (`openssl rand -hex 24`; hex — чтобы не экранировать его в URL):
+
+```sh
+# db.env
+POSTGRES_USER=hqc
+POSTGRES_DB=hqc
+POSTGRES_PASSWORD=<пароль>
+```
+
+```sh
+# hub.env
+HQC_DATABASE_URL=postgresql://hqc:<пароль>@hqc-db/hqc
+HQC_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
+HQC_ACCESS_AUD=<AUD tag>
+HQC_VAPID_PRIVATE=<base64url>
+HQC_VAPID_PUBLIC=<base64url>
+HQC_VAPID_SUBJECT=mailto:<you>@<domain>
+```
+
+База — в той же compose-сети и без опубликованного порта, поэтому подключение без TLS
+(§1.1) здесь допустимо. `POSTGRES_*` действуют только при первом запуске на пустом volume:
+сменить пароль потом — `ALTER ROLE hqc PASSWORD …` в базе и правка обоих файлов.
+
+В туннеле (§1.6) вместо `http://127.0.0.1:8080` — `http://hqc-hub:8080` (cloudflared в
+контейнере в сети `edge`); Caddy — `reverse_proxy hqc-hub:8080`.
+
+```sh
+cd /srv/hqc
+docker compose pull && docker compose up -d
+docker compose logs -f hqc-hub       # ждать: hqc-hub listening addr=0.0.0.0:8080 protocol=1
+docker compose exec hqc-db psql -U hqc -d hqc -c 'select version, description from _sqlx_migrations'
+```
+
+`HEALTHCHECK` в образе нет (в нём нет `curl`); `GET /health` → `ok` проверяет прокси или
+`curl` с хоста, где виден хаб. Если база недоступна, хаб завершается с ошибкой, и его
+перезапускает `restart: unless-stopped`.
+
+**Обновление.** Миграции применяются при старте нового контейнера (§1.1), отката миграций
+нет — поэтому сначала дамп:
+
+```sh
+cd /srv/hqc
+docker compose exec -T hqc-db pg_dump -U hqc -Fc hqc > backup/hqc-$(date +%F-%H%M).dump
+# в compose.yml: image: ghcr.io/drzlo13/hqc-hub:<новый тег>
+docker compose pull hqc-hub
+docker compose up -d hqc-hub
+docker compose logs --since 5m hqc-hub
+```
+
+Откат: прежний тег в `compose.yml` и `up -d`. Если новая версия успела применить
+миграцию, старый хаб на такой базе может не стартовать — тогда восстановить дамп:
+`docker compose stop hqc-hub`,
+`docker compose exec -T hqc-db pg_restore -U hqc -d hqc --clean --if-exists < backup/<файл>.dump`,
+затем `up -d`. Мажорная версия Postgres привязана к volume: `postgres:17` → `18` только
+через `pg_dump`/`pg_restore` в новый volume, не сменой тега.
+
+Собрать образ самому: `docker build -t hqc-hub .` в корне репозитория (на машине той же
+архитектуры, что сервер, или с `--platform linux/amd64`).
 
 ## 2. Воркер на macOS
 
@@ -457,7 +604,7 @@ run hqc-worker enroll again`. На самой
 8. «Стоп» во время следующего хода прерывает его; открытый запрос разрешения при этом
    закрывается как отменённый.
 
-Если что-то не так: лог хаба (`journalctl -u hqc-hub`), лог воркера
+Если что-то не так: лог хаба (`journalctl -u hqc-hub`, в Docker — `docker compose logs hqc-hub`), лог воркера
 (`~/Library/Logs/hqc-worker.log`), состояние сессии в клиенте (`ошибка` — нажать
 «Повторить» после исправления причины).
 

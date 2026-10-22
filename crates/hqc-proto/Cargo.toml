@@ -1,0 +1,12 @@
+[package]
+name = "hqc-proto"
+description = "Shared event and frame schema for hqc hub, worker and clients (SPEC §4, §5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true

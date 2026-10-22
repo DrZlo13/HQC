@@ -1,0 +1,15 @@
+[package]
+name = "hqc-worker"
+description = "hqc worker daemon: runtime adapters, MCP server, mirror, workspaces (SPEC §2, §5, §8, §9, §14)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hqc-proto = { path = "../hqc-proto" }
+hqc-claude-jsonl = { path = "../hqc-claude-jsonl" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }

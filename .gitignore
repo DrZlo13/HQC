@@ -1,0 +1,8 @@
+/target
+**/node_modules
+/client/dist
+/tmp
+.env
+.env.*
+*.local.json
+.DS_Store

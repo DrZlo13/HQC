@@ -50,6 +50,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   ]).toString('base64url');
   const pushSubscriptions = [];
   const enrolled = [];
+  const revoked = new Set();
 
   /** @type {Map<string, any>} */
   const sessions = new Map();
@@ -448,8 +449,12 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     workers: [
       { id: ex['hub.hello.ack'].payload.worker_id, name: 'home-mac', os: 'macos', status: 'online' },
       ...enrolled,
-    ],
+    ].filter((w) => !revoked.has(w.id)),
   }));
+  route('DELETE', '/api/workers/:id', (p) => {
+    revoked.add(p.id);
+    return withStatus(204, null);
+  });
   route('POST', '/api/workers/enroll/confirm', (_, body) => {
     const code = String(body?.code ?? '').trim().toUpperCase();
     if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(code)) throw fail(404, 'not_found', 'not found');
@@ -472,7 +477,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const r = routes.find((x) => x.method === req.method && x.re.test(url.pathname));
     const reply = (status, data) => {
       res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(data));
+      res.end(status === 204 ? undefined : JSON.stringify(data));
     };
     if (!r) return reply(404, { error: 'not_found', message: `${req.method} ${url.pathname}` });
     let body;

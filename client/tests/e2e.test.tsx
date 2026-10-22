@@ -28,6 +28,7 @@ function installGlobals(w: Window) {
     addEventListener: w.addEventListener.bind(w),
     removeEventListener: w.removeEventListener.bind(w),
     prompt: () => 'e2e',
+    confirm: () => true,
     // preact/hooks runs effects after the next animation frame.
     requestAnimationFrame: w.requestAnimationFrame.bind(w),
     cancelAnimationFrame: w.cancelAnimationFrame.bind(w),
@@ -132,4 +133,14 @@ it('runs the iteration 1 scenario through the UI', async () => {
   await until('idle', () => $('.chat .state')?.textContent?.includes('свободна'));
   expect($('.bubble-streaming')).toBeNull();
   expect($$('.card-tool.tool-ok').length).toBeGreaterThanOrEqual(2);
+});
+
+it('revokes a worker from the settings screen', async () => {
+  win.location.hash = '#/settings';
+  const row = await until('worker list', () =>
+    $$('.plain-list li').find((li) => li.textContent?.includes('home-mac')),
+  );
+  row.querySelector<HTMLButtonElement>('.btn-revoke')!.click();
+  await until('worker gone', () => !$$('.plain-list li').some((li) => li.textContent?.includes('home-mac')));
+  expect((await app.api.workers()).some((w) => w.name === 'home-mac')).toBe(false);
 });

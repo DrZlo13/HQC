@@ -78,5 +78,5 @@ vitest и happy-dom. Preact выбран как самый маленький к
    Service workers → Push, с телом вида
    `{"session_id":"0199f3a2-7c10-7000-8000-000000000001","type":"approval.request","payload":{"tool":"Bash","description":"cargo test"}}`.
 
-В проде клиент раздаёт хаб за Cloudflare Access; авторизацию клиент не делает и только
-читает `GET /api/me`.
+В проде клиент раздаёт хаб (`HQC_CLIENT_DIR=<путь к dist>`) за Cloudflare Access, см.
+`docs/RUNBOOK.md`; авторизацию клиент не делает и только читает `GET /api/me`.

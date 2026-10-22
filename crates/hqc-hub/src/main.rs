@@ -4,6 +4,13 @@ use hqc_hub::{config::AuthConfig, db, push, Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if let Some(arg) = std::env::args().nth(1) {
+        if arg == "--version" || arg == "-V" {
+            println!("hqc-hub {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        anyhow::bail!("unknown argument {arg:?}; the hub is configured by HQC_* environment variables (--version prints the version)");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),

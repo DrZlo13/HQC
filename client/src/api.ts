@@ -160,6 +160,11 @@ export class Api {
     return data.workers as WorkerInfo[];
   }
 
+  /** Revokes the worker's token and drops its connection (SPEC §5.1). */
+  async revokeWorker(id: string): Promise<void> {
+    await this.req('DELETE', `/api/workers/${enc(id)}`);
+  }
+
   async enrollConfirm(code: string): Promise<unknown> {
     return this.req('POST', '/api/workers/enroll/confirm', { code });
   }

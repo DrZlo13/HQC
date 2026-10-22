@@ -1,7 +1,8 @@
 //! hqc hub core (SPEC §2, §5, §6, §10.1, §16, §17, §20; docs/ITERATION-1.md T2).
 //!
 //! - `/api/*` — people, authenticated by Cloudflare Access (or `HQC_DEV=1`);
-//! - `/worker/*` — workers: enrollment and the `/worker/ws` WebSocket with a bearer token.
+//! - `/worker/*` — workers: enrollment and the `/worker/ws` WebSocket with a bearer token;
+//! - everything else — the web client from `HQC_CLIENT_DIR`, if set.
 
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use sqlx::PgPool;
 pub mod api;
 pub mod app;
 pub mod auth;
+pub mod client_files;
 pub mod client_ws;
 pub mod config;
 pub mod db;
@@ -70,6 +72,7 @@ pub fn router(app: AppState) -> Router {
         .route("/worker/enroll", post(api::worker_enroll))
         .route("/worker/enroll/poll", post(api::worker_enroll_poll))
         .route("/worker/ws", get(worker_ws::handler))
+        .fallback(client_files::handler)
         .with_state(app)
 }
 

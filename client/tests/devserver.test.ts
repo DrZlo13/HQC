@@ -33,7 +33,9 @@ afterAll(async () => {
 it('serves the app and proxies REST', async () => {
   const html = await (await fetch(`http://${base}/`)).text();
   expect(html).toContain('<div id="app">');
-  const me = await (await fetch(`http://${base}/api/me`)).json();
+  // Behind Cloudflare Access the manifest needs the session cookie.
+  expect(html).toMatch(/<link rel="manifest"[^>]*crossorigin="use-credentials"/);
+  const me =await (await fetch(`http://${base}/api/me`)).json();
   expect(me.personal_project_id).toBeTruthy();
   const sw = await fetch(`http://${base}/sw.js`);
   expect(sw.ok).toBe(true);

@@ -1,6 +1,6 @@
 //! Hub configuration from the environment.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{bail, Context};
 
@@ -10,6 +10,8 @@ pub struct Config {
     pub listen: String,
     pub auth: AuthConfig,
     pub vapid: Option<VapidConfig>,
+    /// The built web client (`client/dist`) served on `/`; `None`: the hub serves only the APIs.
+    pub client_dir: Option<PathBuf>,
     pub timing: Timing,
 }
 
@@ -82,7 +84,7 @@ impl Default for Timing {
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`,
-    /// `HQC_VAPID_SUBJECT`.
+    /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -124,11 +126,22 @@ impl Config {
             _ => bail!("set both HQC_VAPID_PRIVATE and HQC_VAPID_PUBLIC, or neither"),
         };
 
+        let client_dir = var("HQC_CLIENT_DIR").map(PathBuf::from);
+        if let Some(dir) = &client_dir {
+            if !dir.join("index.html").is_file() {
+                bail!(
+                    "HQC_CLIENT_DIR={}: no index.html (build the client: npm run build in client/)",
+                    dir.display()
+                );
+            }
+        }
+
         Ok(Self {
             database_url,
             listen,
             auth,
             vapid,
+            client_dir,
             timing: Timing::default(),
         })
     }

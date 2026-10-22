@@ -24,6 +24,17 @@ export function Settings({ app }: { app: AppState }) {
     app.api.workers().then(setWorkers, () => setWorkers(null));
   }, [app]);
 
+  const revoke = async (w: WorkerInfo) => {
+    if (!confirm(`Отозвать токен воркера «${w.name}»? Машину придётся регистрировать заново.`)) return;
+    setError(null);
+    try {
+      await app.api.revokeWorker(w.id);
+      setWorkers(await app.api.workers());
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const subscribe = async () => {
     setBusy(true);
     setError(null);
@@ -62,7 +73,10 @@ export function Settings({ app }: { app: AppState }) {
           <ul class="plain-list">
             {workers.map((w) => (
               <li key={w.id}>
-                <b>{w.name}</b> <span class="muted">{[w.os, w.status].filter(Boolean).join(' · ')}</span>
+                <b>{w.name}</b> <span class="muted">{[w.os, w.status].filter(Boolean).join(' · ')}</span>{' '}
+                <button type="button" class="btn btn-revoke" onClick={() => revoke(w)}>
+                  Отозвать
+                </button>
               </li>
             ))}
           </ul>

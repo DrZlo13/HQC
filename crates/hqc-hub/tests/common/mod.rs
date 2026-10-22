@@ -124,6 +124,7 @@ impl TestHub {
             listen: "127.0.0.1:0".into(),
             auth,
             vapid: None,
+            client_dir: None,
             timing: test_timing(),
         };
         let push = Arc::new(RecordingPush::default());

@@ -58,6 +58,119 @@ impl Spawner for Recording {
     }
 }
 
+/// T9 (SPEC §8.1): a repository's `.claude/settings.json` with `defaultMode:
+/// bypassPermissions` and a hook is not applied (`--setting-sources user,local`,
+/// `--permission-mode`), `always` is still offered and writes its rule to
+/// `.claude/settings.local.json`; the agent runs with the cleared environment and the
+/// `--disallowedTools` / `--append-system-prompt` flags.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_repo_settings_ignored -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_repo_settings_ignored() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    let work = root.join(format!("live-settings-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(work.join(".claude")).unwrap();
+    let work = work.canonicalize().unwrap();
+    std::fs::write(
+        work.join(".claude/settings.json"),
+        serde_json::json!({
+            "permissions": {"defaultMode": "bypassPermissions"},
+            "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": "touch hook-ran"}
+            ]}]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let spawner = Arc::new(Recording::default());
+    let factory = ClaudeCodeAdapters::new(opts, spawner.clone());
+    let session_id = Uuid::now_v7();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: work.clone(),
+        workdir: work.clone(),
+        environment: "default".into(),
+        runtime_session_id: Some(Uuid::new_v4().to_string()),
+        system_prompt: Some("Be brief.".into()),
+        disallowed_tools: vec!["WebFetch".into()],
+        restricted: false,
+        auto_approve: false,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+    adapter
+        .input(&SessionInput {
+            session_id,
+            event_id: Uuid::now_v7(),
+            text: PROMPT.into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+        })
+        .await
+        .unwrap();
+
+    let mut options_seen = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("turn did not end in 180 s")
+            .expect("channel closed");
+        match &ev {
+            AdapterEvent::Event(e) => {
+                if let EventKind::ApprovalRequest {
+                    request_id,
+                    tool,
+                    options,
+                    ..
+                } = &e.kind
+                {
+                    let ids: Vec<String> = options.iter().map(|o| o.id.clone()).collect();
+                    println!("approval.request {tool} {ids:?} -> always");
+                    options_seen = Some(ids);
+                    adapter.answer_approval(request_id, "always").await.unwrap();
+                }
+            }
+            AdapterEvent::TurnEnded => break,
+            AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+            _ => {}
+        }
+    }
+    adapter.kill().await.unwrap();
+    let cmd = spawner.0.lock().unwrap()[0].clone();
+    println!("claude {}", cmd.args.join(" "));
+
+    let ids = options_seen.expect("bypassPermissions from the repo did not apply: approval asked");
+    assert!(
+        ids.iter().any(|i| i == "always"),
+        "always is offered with --setting-sources user,local: {ids:?}"
+    );
+    assert!(work.join("hqc-live").exists(), "the command ran");
+    assert!(!work.join("hook-ran").exists(), "the repo's hook ran");
+    let local = std::fs::read_to_string(work.join(".claude/settings.local.json"))
+        .expect("always wrote settings.local.json");
+    println!("settings.local.json: {local}");
+    assert!(local.contains("Bash"), "{local}");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 #[tokio::test]
 async fn live_bash_turn_with_approval() {
     if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
@@ -71,6 +184,7 @@ async fn live_bash_turn_with_approval() {
 
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
+        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         ..ClaudeOptions::default()
     };
     let config_dir = opts.config_dir.clone().expect("claude config dir");
@@ -90,7 +204,7 @@ async fn live_bash_turn_with_approval() {
         disallowed_tools: vec![],
         restricted: false,
         auto_approve: false,
-        session_token: "st".into(),
+        session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
     };
     let (tx, mut rx) = mpsc::channel(4096);

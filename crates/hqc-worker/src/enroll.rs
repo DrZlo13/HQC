@@ -18,20 +18,26 @@ use chrono::Utc;
 use hqc_proto::api::{EnrollPoll, EnrollPollRequest, EnrollRequest, EnrollStarted};
 use uuid::Uuid;
 
+use crate::config::check_hub_url;
 use crate::token::{Secret, TokenStore};
 
 const MIN_POLL: Duration = Duration::from_millis(50);
 
 /// Enrolls with `hub_url`, saves the token to `store` and returns the worker id.
-/// Human-readable progress goes to `out`.
+/// Human-readable progress goes to `out`. `hub_url` is https unless it is a loopback host
+/// or `insecure_http` (see [`check_hub_url`]).
 pub async fn enroll(
     hub_url: &str,
+    insecure_http: bool,
     store: &TokenStore,
     out: &mut (impl Write + Send),
 ) -> anyhow::Result<Uuid> {
+    check_hub_url(hub_url, insecure_http)?;
     let hub = hub_url.trim_end_matches('/');
+    // A redirect would re-send the body (with `poll_token`) to another origin.
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let resp = http
         .post(format!("{hub}/worker/enroll"))

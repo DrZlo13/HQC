@@ -18,6 +18,7 @@ pub struct CommandSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// The whole environment of the process: nothing is inherited from the worker.
     pub env: Vec<(String, String)>,
 }
 
@@ -76,6 +77,7 @@ impl Spawner for OsSpawner {
         let mut c = tokio::process::Command::new(&cmd.program);
         c.args(&cmd.args)
             .current_dir(&cmd.cwd)
+            .env_clear()
             .envs(cmd.env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -22,7 +22,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Register this machine with a hub (SPEC §5.1): prints a code to confirm in the web UI.
-    Enroll { hub_url: String },
+    Enroll {
+        /// `https://...`; `http://` only for localhost / 127.0.0.0/8 / [::1].
+        hub_url: String,
+        /// Allow `http://` to a non-loopback hub: the token travels unencrypted.
+        #[arg(long)]
+        insecure_http: bool,
+    },
     /// Run the daemon (SPEC §2).
     Run,
     /// Serve the hqc MCP server over stdio for one session (SPEC §7); spawned by runtimes.
@@ -54,9 +60,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Enroll { hub_url } => {
+        Cmd::Enroll {
+            hub_url,
+            insecure_http,
+        } => {
             let store = TokenStore::from_env(&hub_url)?;
-            enroll::enroll(&hub_url, &store, &mut std::io::stdout()).await?;
+            enroll::enroll(&hub_url, insecure_http, &store, &mut std::io::stdout()).await?;
             if let Ok(path) = config::config_path() {
                 if !path.exists() {
                     println!(
@@ -79,8 +88,9 @@ async fn run() -> anyhow::Result<()> {
         .load()?
         .context("no worker token; run `hqc-worker enroll <hub_url>` first")?;
     let capabilities = capabilities::detect(config.claude_bin.as_deref()).await;
-    tracing::info!(hub = %config.hub_url, workspace = %config.workspace.display(), %capabilities, "starting worker");
-    let adapters = Arc::new(BuiltinAdapters::from_config(&config));
+    let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
+    tracing::info!(hub = %config.hub_url, workspace = %config.workspace.display(), %capabilities, %permission_mode, "starting worker");
+    let adapters = Arc::new(BuiltinAdapters::from_config(&config, permission_mode));
     let worker = Worker {
         config,
         token,

@@ -3,7 +3,8 @@
 //! A rule is remembered from the request the owner answered with `session`: the exact
 //! `(tool_name, input)` pair always, plus whatever the CLI suggested in
 //! `permission_suggestions[].rules` that the adapter can match safely:
-//! - `{toolName}` without `ruleContent` — the whole tool;
+//! - `{toolName}` without `ruleContent` — the whole tool, except for tools that run commands
+//!   (`Bash`, `PowerShell`, ...): for them such a suggestion is ignored;
 //! - Bash `ruleContent` `"<prefix> *"` or `"<prefix>:*"` — commands equal to the prefix or
 //!   starting with `"<prefix> "`, and only commands without shell operators, so
 //!   `touch x; rm -rf ~` does not ride on a `touch x *` rule;
@@ -25,6 +26,9 @@ enum Rule {
 #[derive(Debug, Default)]
 pub struct SessionRules(Vec<Rule>);
 
+/// Tools that run commands or code: never approved as a whole tool.
+const EXEC_TOOLS: &[&str] = &["Bash", "PowerShell", "BashOutput", "KillShell", "KillBash"];
+
 /// Characters that chain, substitute or redirect in a shell command.
 const SHELL_META: &[char] = &[';', '&', '|', '`', '$', '(', ')', '<', '>', '\n', '\r'];
 
@@ -41,6 +45,9 @@ impl SessionRules {
                 continue;
             }
             let rule = match s.get("ruleContent").and_then(Value::as_str) {
+                // A whole command-running tool for the rest of the session would approve
+                // every command; only the exact input is remembered then.
+                None if EXEC_TOOLS.contains(&tool) => None,
                 None => Some(Rule::Tool(tool.into())),
                 Some(c) if tool == "Bash" => bash_rule(c),
                 Some(_) => None,
@@ -153,6 +160,17 @@ mod tests {
             &[json!({"toolName": "Bash"})],
         );
         assert!(!r.matches("Bash", &bash("ls")));
+    }
+
+    #[test]
+    fn no_whole_tool_rule_for_command_tools() {
+        let mut r = SessionRules::default();
+        r.add("Bash", &bash("ls"), &[json!({"toolName": "Bash"})]);
+        assert!(r.matches("Bash", &bash("ls")), "the exact input still");
+        assert!(!r.matches("Bash", &bash("rm -rf ~")));
+        let ps = json!({"command": "dir"});
+        r.add("PowerShell", &ps, &[json!({"toolName": "PowerShell"})]);
+        assert!(!r.matches("PowerShell", &json!({"command": "del x"})));
     }
 
     #[test]

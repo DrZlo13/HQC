@@ -462,6 +462,84 @@ async fn start_mode_selects_start_or_resume() {
     w.stop().await;
 }
 
+// T9: enrollment talks https (plain http only to loopback or with --insecure-http) and does
+// not follow redirects, which would re-send the poll secret elsewhere.
+#[tokio::test]
+async fn enroll_refuses_plain_http_and_redirects() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = hqc_worker::token::TokenStore::File(dir.path().join("token"));
+    let mut out = Vec::new();
+    let e = hqc_worker::enroll::enroll("http://hub.example.com", false, &store, &mut out)
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("plain http"), "{e:#}");
+
+    let elsewhere_hit = Arc::new(AtomicUsize::new(0));
+    let hit = elsewhere_hit.clone();
+    let elsewhere = http_server(move |_, _| {
+        hit.fetch_add(1, Ordering::SeqCst);
+        (200, json!({}))
+    })
+    .await;
+    let hub = http_server(move |path, _| {
+        (
+            307,
+            json!({"location": format!("http://{elsewhere}{path}")}),
+        )
+    })
+    .await;
+    let e = hqc_worker::enroll::enroll(&format!("http://{hub}"), false, &store, &mut out)
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("307"), "{e:#}");
+    assert_eq!(
+        elsewhere_hit.load(Ordering::SeqCst),
+        0,
+        "redirect not followed"
+    );
+    assert!(store.load().unwrap().is_none());
+}
+
+// T9: at most `max_sessions` agents run; one more start is retryable `agent_start_failed`.
+#[tokio::test]
+async fn max_sessions_limits_running_agents() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut config = env.config(&hub.url());
+    config.max_sessions = 1;
+    let w = start_worker_with(&env, config, &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+
+    let first = Uuid::now_v7();
+    start_session(&mut c, &env, first).await;
+    let second = Uuid::now_v7();
+    let id = c.frame("session.start", env.start_payload(second)).await;
+    let err = c.expect("error").await;
+    assert_eq!(err["id"], id.as_str());
+    assert_eq!(err["payload"]["code"], "agent_start_failed");
+    assert_eq!(err["payload"]["retryable"], true);
+
+    let id = c.frame("session.kill", json!({"session_id": first})).await;
+    loop {
+        let f = c.expect("ack").await;
+        if f["id"] == id.as_str() {
+            break;
+        }
+    }
+    start_session(&mut c, &env, second).await;
+    assert_eq!(
+        adapters
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, FakeCall::Start(_)))
+            .count(),
+        2
+    );
+    w.stop().await;
+}
+
 // A failed spawn is `agent_start_failed`, retryable, for the start and for queued inputs.
 #[tokio::test]
 async fn failed_start_is_retryable() {

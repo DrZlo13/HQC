@@ -14,6 +14,8 @@
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - `idle_timeout` (SPEC §17.3): an idle process is killed, the next input resumes it.
+//! - `max_sessions`: at most that many agent processes at once; one more start is
+//!   `agent_start_failed`, retryable.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -24,7 +26,7 @@ use hqc_proto::frame::{
     error_code, Ack, Envelope, HubFrame, LockedBy, ProcessState, SessionInput, StartMode,
     WireError, WorkerFrame,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -70,6 +72,8 @@ pub struct Supervisor {
     link: HubLink,
     sessions: HashMap<Uuid, SessionHandle>,
     shutdown_timeout: Duration,
+    /// One permit per running agent process (`max_sessions`).
+    slots: Arc<Semaphore>,
 }
 
 struct SessionHandle {
@@ -116,6 +120,7 @@ impl Supervisor {
         shutdown_timeout: Duration,
     ) -> Self {
         Self {
+            slots: Arc::new(Semaphore::new(cfg.max_sessions)),
             cfg,
             factory,
             link,
@@ -269,6 +274,9 @@ impl Supervisor {
             events_open: true,
             link: self.link.clone(),
             idle_timeout: self.cfg.idle_timeout,
+            slots: self.slots.clone(),
+            max_sessions: self.cfg.max_sessions,
+            slot: None,
             state: ProcessState::Stopped,
             runtime_session_id: None,
             started_once: false,
@@ -317,6 +325,10 @@ struct Session {
     events_open: bool,
     link: HubLink,
     idle_timeout: Option<Duration>,
+    slots: Arc<Semaphore>,
+    max_sessions: usize,
+    /// Held while the agent process runs.
+    slot: Option<OwnedSemaphorePermit>,
     state: ProcessState,
     runtime_session_id: Option<String>,
     started_once: bool,
@@ -570,6 +582,16 @@ impl Session {
     }
 
     async fn ensure_running(&mut self) -> anyhow::Result<()> {
+        if self.slot.is_none() {
+            // Retryable for the hub: a slot frees up when another agent stops.
+            match self.slots.clone().try_acquire_owned() {
+                Ok(p) => self.slot = Some(p),
+                Err(_) => anyhow::bail!(
+                    "{} agents already run on this worker (max_sessions)",
+                    self.max_sessions
+                ),
+            }
+        }
         self.set_state(ProcessState::Starting);
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
@@ -614,6 +636,9 @@ impl Session {
     }
 
     fn set_state(&mut self, s: ProcessState) {
+        if s == ProcessState::Stopped {
+            self.slot = None;
+        }
         if self.state != s {
             self.state = s;
             self.send_state();

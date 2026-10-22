@@ -363,9 +363,14 @@ where
                 }
                 let body = serde_json::from_slice(&buf[head_end..]).unwrap_or(Value::Null);
                 let (status, resp) = handler(&path, body);
+                // A redirect: `{"location": ...}` becomes the Location header.
+                let location = match resp["location"].as_str() {
+                    Some(l) if (300..400).contains(&status) => format!("Location: {l}\r\n"),
+                    _ => String::new(),
+                };
                 let resp = resp.to_string();
                 let out = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp}",
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{resp}",
                     resp.len()
                 );
                 let _ = s.write_all(out.as_bytes()).await;

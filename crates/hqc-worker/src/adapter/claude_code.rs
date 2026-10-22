@@ -43,6 +43,37 @@ const KILL_GRACE: Duration = Duration::from_secs(5);
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
 const STDERR_TAIL: usize = 2048;
 
+/// Settings files the CLI reads: the user's own and `.claude/settings.local.json` (where
+/// `always` writes, SPEC §8.1), not the repository's `.claude/settings.json`.
+pub const SETTING_SOURCES: &str = "user,local";
+
+/// The agent's environment: only these variables of the worker's (SPEC §14), never `HQC_*`
+/// (the worker's token store, config) or other secrets the worker runs with. `SHELL` and
+/// `LOGNAME` are what the CLI's Bash tool and the Keychain lookup need besides the list of
+/// SPEC §14; variables of the workspace's environment come on top (iteration 5).
+pub fn child_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    const NAMES: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "TERM",
+        "TMPDIR",
+        "SSH_AUTH_SOCK",
+    ];
+    const PREFIXES: &[&str] = &["LC_", "CLAUDE_", "ANTHROPIC_"];
+    let mut env: Vec<(String, String)> = vars
+        .filter(|(k, _)| {
+            !k.starts_with("HQC_")
+                && (NAMES.contains(&k.as_str()) || PREFIXES.iter().any(|p| k.starts_with(p)))
+        })
+        .collect();
+    env.sort();
+    env
+}
+
 #[derive(Debug, Clone)]
 pub struct ClaudeOptions {
     /// `claude_bin` from the worker config; `claude` from `PATH` if unset.
@@ -53,6 +84,10 @@ pub struct ClaudeOptions {
     pub mcp_config: Option<String>,
     /// Appended to the command line (tests: `--max-turns`).
     pub extra_args: Vec<String>,
+    /// `--permission-mode`, always passed so that a `defaultMode` from settings
+    /// (`bypassPermissions`, `acceptEdits`) does not apply: the CLI's "ask" mode, `default`
+    /// or `manual` by version ([`crate::capabilities::claude_permission_mode`]).
+    pub permission_mode: String,
     /// Interrupt → SIGINT fallback delay.
     pub stop_grace: Duration,
     /// A process that dies this soon after spawning fails `start` instead of being
@@ -67,6 +102,7 @@ impl Default for ClaudeOptions {
             config_dir: paths::default_config_dir(),
             mcp_config: None,
             extra_args: vec![],
+            permission_mode: "default".into(),
             stop_grace: Duration::from_secs(10),
             early_exit: Duration::from_millis(500),
         }
@@ -88,10 +124,11 @@ impl ClaudeCodeAdapters {
         }
     }
 
-    pub fn from_config(cfg: &Config) -> Self {
+    pub fn from_config(cfg: &Config, permission_mode: String) -> Self {
         Self::new(
             ClaudeOptions {
                 claude_bin: cfg.claude_bin.clone(),
+                permission_mode,
                 ..ClaudeOptions::default()
             },
             Arc::new(OsSpawner),
@@ -188,6 +225,14 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// The CLI command line (SPEC §8.1). Besides the protocol flags:
+    /// - `--setting-sources user,local` and `--permission-mode default`: a repository's own
+    ///   `.claude/settings.json` (hooks, `defaultMode`) is not applied; `local` stays for the
+    ///   rules `always` writes;
+    /// - `restricted` → `--restricted` (no command-running tools, file tools confined to the
+    ///   working directory, no settings files; SPEC §8.4);
+    /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
+    ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(&self, spec: &StartSpec, uuid: &Uuid, resume: bool) -> CommandSpec {
         let mut args: Vec<String> = [
             "-p",
@@ -209,6 +254,23 @@ impl ClaudeCodeAdapter {
             args.extend(["--mcp-config".into(), m.clone()]);
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);
+        if !spec.disallowed_tools.is_empty() {
+            // Variadic: the entries run up to the next flag.
+            args.push("--disallowedTools".into());
+            args.extend(spec.disallowed_tools.iter().cloned());
+        }
+        if spec.restricted {
+            args.push("--restricted".into());
+        } else {
+            args.extend(["--setting-sources".into(), SETTING_SOURCES.into()]);
+        }
+        args.extend([
+            "--permission-mode".into(),
+            self.opts.permission_mode.clone(),
+        ]);
+        if let Some(p) = spec.system_prompt.as_deref().filter(|p| !p.is_empty()) {
+            args.extend(["--append-system-prompt".into(), p.to_string()]);
+        }
         args.extend([
             if resume { "--resume" } else { "--session-id" }.into(),
             uuid.to_string(),
@@ -226,7 +288,7 @@ impl ClaudeCodeAdapter {
                 .unwrap_or_else(|| PathBuf::from("claude")),
             args,
             cwd: spec.workdir.clone(),
-            env: vec![],
+            env: child_env(std::env::vars()),
         }
     }
 
@@ -234,6 +296,7 @@ impl ClaudeCodeAdapter {
         if self.proc.is_some() {
             self.kill().await?;
         }
+        spec.recheck_workdir()?;
         let (uuid, generated) = self.runtime_uuid(spec)?;
         let transcript = self
             .opts

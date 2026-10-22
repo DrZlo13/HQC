@@ -32,10 +32,13 @@ pub struct Entry {
 }
 
 impl Outbox {
-    /// Opens (creating if needed) `<dir>/outbox.sqlite3`.
+    /// Opens (creating if needed) `<dir>/outbox.sqlite3`. The directory is 0700 and the
+    /// database 0600: it holds agent messages and tool previews. SQLite gives its `-wal` and
+    /// `-shm` files the database's mode.
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        private_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
         let path = dir.join("outbox.sqlite3");
+        private_file(&path).with_context(|| format!("creating {}", path.display()))?;
         let db = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
         db.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -125,10 +128,70 @@ impl Outbox {
     }
 }
 
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Creates `path` 0600 if missing; tightens an existing one (older workers made it 0644).
+fn private_file(path: &Path) -> std::io::Result<()> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for p in [
+            path.to_path_buf(),
+            path.with_extension("sqlite3-wal"),
+            path.with_extension("sqlite3-shm"),
+        ] {
+            if p.exists() {
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("outbox");
+        let ob = Outbox::open(&dir).unwrap();
+        ob.push(Uuid::now_v7(), &json!({})).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        for f in std::fs::read_dir(&dir).unwrap() {
+            let p = f.unwrap().path();
+            assert_eq!(mode(&p), 0o600, "{}", p.display());
+        }
+        // An outbox of an older worker is tightened on open.
+        drop(ob);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = dir.join("outbox.sqlite3");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Outbox::open(&dir).unwrap();
+        assert_eq!((mode(&dir), mode(&db)), (0o700, 0o600));
+    }
 
     #[test]
     fn order_ack_and_reopen() {

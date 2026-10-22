@@ -96,9 +96,10 @@ pub struct BuiltinAdapters {
 }
 
 impl BuiltinAdapters {
-    pub fn from_config(cfg: &Config) -> Self {
+    /// `permission_mode`: see [`crate::capabilities::claude_permission_mode`].
+    pub fn from_config(cfg: &Config, permission_mode: String) -> Self {
         Self {
-            claude: ClaudeCodeAdapters::from_config(cfg),
+            claude: ClaudeCodeAdapters::from_config(cfg, permission_mode),
         }
     }
 }

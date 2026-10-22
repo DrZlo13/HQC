@@ -124,6 +124,8 @@ fn options(config_dir: &std::path::Path) -> ClaudeOptions {
 }
 
 fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> StartSpec {
+    // As `Config::check_start` gives it: canonical (/var -> /private/var on macOS).
+    let workdir = &workdir.canonicalize().unwrap();
     StartSpec {
         session_id,
         runtime: Runtime::ClaudeCode,
@@ -136,7 +138,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         disallowed_tools: vec![],
         restricted: false,
         auto_approve: false,
-        session_token: "st".into(),
+        session_token: crate::token::Secret::new("st"),
         ask_timeout_s: 600,
     }
 }
@@ -526,7 +528,7 @@ async fn command_line_new_then_resume() {
     a.start(&s).await.unwrap();
     let cmd = &claude.commands()[0];
     assert_eq!(cmd.program, std::path::PathBuf::from("/opt/test/claude"));
-    assert_eq!(cmd.cwd, work.path());
+    assert_eq!(cmd.cwd, s.workdir);
     let expect = |mode: &str| -> Vec<String> {
         [
             "-p",
@@ -543,6 +545,10 @@ async fn command_line_new_then_resume() {
             "--strict-mcp-config",
             "--allowedTools",
             "mcp__hqc",
+            "--setting-sources",
+            "user,local",
+            "--permission-mode",
+            "default",
             mode,
             &claude_session.to_string(),
             "--verbose",
@@ -562,7 +568,7 @@ async fn command_line_new_then_resume() {
     a.kill().await.unwrap();
 
     // `start` with a transcript on disk (worker restart) resumes.
-    let t = super::paths::transcript_path(config.path(), work.path(), &claude_session);
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &claude_session);
     std::fs::create_dir_all(t.parent().unwrap()).unwrap();
     std::fs::write(&t, "").unwrap();
     a.start(&s).await.unwrap();
@@ -571,6 +577,135 @@ async fn command_line_new_then_resume() {
 
     // Killed processes are not reported as exited.
     assert!(rx.try_recv().is_err());
+}
+
+/// SPEC §8.1, §8.4: session restrictions reach the CLI; nothing is dropped silently.
+#[tokio::test]
+async fn command_line_carries_session_restrictions() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let claude_session = Uuid::new_v4();
+    let mut s = spec(Uuid::now_v7(), work.path(), claude_session);
+    s.disallowed_tools = vec!["WebFetch".into(), "Bash(git push:*)".into()];
+    s.system_prompt = Some("Answer in Russian.".into());
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let args = claude.commands()[0].args.clone();
+    let after = |flag: &str| -> Vec<String> {
+        let i = args
+            .iter()
+            .position(|a| a == flag)
+            .unwrap_or_else(|| panic!("{flag} missing: {args:?}"));
+        args[i + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .cloned()
+            .collect()
+    };
+    assert_eq!(after("--disallowedTools"), ["WebFetch", "Bash(git push:*)"]);
+    assert_eq!(after("--append-system-prompt"), ["Answer in Russian."]);
+    assert_eq!(after("--setting-sources"), ["user,local"]);
+    assert_eq!(after("--permission-mode"), ["default"]);
+    assert!(!args.contains(&"--restricted".to_string()));
+    a.kill().await.unwrap();
+
+    // Restricted: `--restricted` instead of the settings files.
+    s.restricted = true;
+    s.disallowed_tools.clear();
+    s.system_prompt = None;
+    a.start(&s).await.unwrap();
+    let args = claude.commands()[1].args.clone();
+    assert!(args.contains(&"--restricted".to_string()), "{args:?}");
+    for absent in [
+        "--setting-sources",
+        "--disallowedTools",
+        "--append-system-prompt",
+    ] {
+        assert!(!args.contains(&absent.to_string()), "{absent}: {args:?}");
+    }
+    assert!(args
+        .windows(2)
+        .any(|w| w == ["--permission-mode", "default"]));
+    a.kill().await.unwrap();
+}
+
+/// The agent gets a cleared environment with only the allowed variables (SPEC §14).
+#[tokio::test]
+async fn child_environment_is_an_allowlist() {
+    let vars = [
+        ("PATH", "/usr/bin"),
+        ("HOME", "/Users/me"),
+        ("USER", "me"),
+        ("LANG", "en_US.UTF-8"),
+        ("LC_ALL", "C"),
+        ("TERM", "xterm"),
+        ("TMPDIR", "/tmp/x"),
+        ("SSH_AUTH_SOCK", "/tmp/agent"),
+        ("CLAUDE_CONFIG_DIR", "/c"),
+        ("ANTHROPIC_MODEL", "m"),
+        ("HQC_HOME", "/Users/me/.hqc"),
+        ("HQC_TOKEN_STORE", "file"),
+        ("AWS_SECRET_ACCESS_KEY", "s"),
+        ("GITHUB_TOKEN", "t"),
+        ("RUST_LOG", "trace"),
+    ]
+    .map(|(k, v)| (k.to_string(), v.to_string()));
+    let env = super::child_env(vars.into_iter());
+    let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "ANTHROPIC_MODEL",
+            "CLAUDE_CONFIG_DIR",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "PATH",
+            "SSH_AUTH_SOCK",
+            "TERM",
+            "TMPDIR",
+            "USER"
+        ]
+    );
+
+    // And the command carries it: no HQC_* of the worker's own environment.
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let env = claude.commands()[0].env.clone();
+    assert!(env.iter().any(|(k, _)| k == "PATH"));
+    assert!(env.iter().all(|(k, _)| !k.starts_with("HQC_")), "{env:?}");
+    a.kill().await.unwrap();
+}
+
+/// The working directory is checked again before each spawn.
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_rechecks_the_working_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = root.path().canonicalize().unwrap().join("ws");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), &ws.join("sub"), Uuid::new_v4());
+    s.workspace = ws.clone();
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.kill().await.unwrap();
+    std::fs::remove_dir(ws.join("sub")).unwrap();
+    std::os::unix::fs::symlink(root.path(), ws.join("sub")).unwrap();
+    assert!(a.start(&s).await.is_err());
+    assert_eq!(claude.commands().len(), 1, "nothing spawned");
 }
 
 #[tokio::test]

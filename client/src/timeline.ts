@@ -168,6 +168,16 @@ export class Timeline {
     return this.results.get(callId);
   }
 
+  /** The tool of the last `tool.call` while it has no `tool.result`. */
+  runningTool(): string | undefined {
+    const evs = this.events();
+    for (let i = evs.length - 1; i >= 0; i--) {
+      const e = evs[i];
+      if (e.type === 'tool.call') return this.results.has(e.payload.call_id) ? undefined : e.payload.tool;
+    }
+    return undefined;
+  }
+
   /** Results whose call is in the timeline are shown inside the call's card. */
   hasCall(callId: string): boolean {
     return this.calls.has(callId);

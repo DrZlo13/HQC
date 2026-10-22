@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import { ChatSession } from '../session';
-import { ChatItems, StreamingBubble, type ChatActions } from './cards';
+import { ActivityLine, BusyIndicator, ChatItems, StreamingBubble, type ChatActions } from './cards';
 import { useSubscription } from './hooks';
 import { STATE_LABELS } from './labels';
 
@@ -72,6 +72,7 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
         <div class="bar-title">
           <div class="title">{info?.title || 'Сессия'}</div>
           <div class={`state state-${state}`}>
+            <BusyIndicator state={state} />
             {STATE_LABELS[state]}
             {info && info.queue_len > 0 && ` · в очереди ${info.queue_len}`}
             {app.conn !== 'open' && ' · нет связи'}
@@ -98,6 +99,7 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
       >
         <ChatItems items={t.items()} actions={actions} />
         {t.streaming && <StreamingBubble text={t.streaming} />}
+        <ActivityLine state={state} timeline={t} />
       </div>
       {notice && (
         <div class="notice" role="alert" onClick={() => setNotice(null)}>

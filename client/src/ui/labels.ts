@@ -29,6 +29,21 @@ export const STATE_LABELS: Record<SessionState, string> = {
   unknown: 'неизвестно',
 };
 
+/** The line under the chat while a turn is on. There is no event for it: it follows the
+ *  session `state` (SPEC §17.1) and, while running, the last `tool.call` without a result. */
+export function activityLabel(state: SessionState, tool?: string): string | null {
+  switch (state) {
+    case 'running':
+      return tool ? `выполняет ${tool}` : 'агент работает';
+    case 'queued':
+      return 'ввод в очереди';
+    case 'waiting':
+      return 'ждёт подтверждения';
+    default:
+      return null;
+  }
+}
+
 /** `approval.request.policy_hint` (SPEC §8.1, §14). */
 export const POLICY_HINT_LABELS: Record<PolicyHint, string> = {
   allow: 'разрешено политикой воркера',

@@ -8,7 +8,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEvent, parseServerFrame, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
-import { ChatItems, type ChatActions } from '../src/ui/cards';
+import { ActivityLine, BusyIndicator, ChatItems, type ChatActions } from '../src/ui/cards';
 import { CANONICAL_LABELS, POLICY_HINT_LABELS } from '../src/ui/labels';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -56,7 +56,8 @@ describe('every example event renders', () => {
       const t = new Timeline();
       t.apply(ev(name, withSeq(i + 1)));
       show(t);
-      expect(root.children.length).toBeGreaterThan(0);
+      // `status` is drawn only for an error with a reason (T13).
+      expect(root.children.length).toBe(name === 'event.status' ? 0 : 1);
     });
   }
 
@@ -303,13 +304,23 @@ describe('messages', () => {
     expect(t.events()).toHaveLength(2);
   });
 
-  it('renders status and system as lines', () => {
+  it('renders system as a line, status only for an error with a reason', () => {
     const t = new Timeline();
-    t.apply(ev('event.status', withSeq(1)));
+    const status = (seq: number, state: string, detail?: string) =>
+      ev('event.status', (e) => {
+        e.seq = seq;
+        e.payload = detail === undefined ? { state } : { state, detail };
+      });
+    t.apply(status(1, 'waiting', 'approval requested'));
     t.apply(ev('event.system', withSeq(2)));
+    t.apply(status(3, 'idle'));
+    t.apply(status(4, 'running'));
+    t.apply(status(5, 'error'));
+    t.apply(status(6, 'error', 'claude exited with code 1'));
     show(t);
     const lines = [...root.querySelectorAll('.line')].map((l) => l.textContent);
-    expect(lines).toEqual(['ждёт ответа · approval requested', 'Session created']);
+    expect(lines).toEqual(['Session created', 'ошибка · claude exited with code 1']);
+    expect(t.events()).toHaveLength(6);
   });
 
   it('marks a call denied by the worker policy', () => {
@@ -327,5 +338,78 @@ describe('messages', () => {
     const line = root.querySelector('.line-system-policy_denied')!;
     expect(line.textContent).toContain('Запрещено политикой воркера');
     expect(line.textContent).toContain('git push');
+  });
+});
+
+describe('turn indicator (T13): from the session state, no events of its own', () => {
+  const call = (seq: number, call_id: string, tool: string) =>
+    ev('event.tool.call', (e) => {
+      e.seq = seq;
+      e.payload = { ...e.payload, call_id, tool };
+    });
+  const result = (seq: number, call_id: string) =>
+    ev('event.tool.result', (e) => {
+      e.seq = seq;
+      e.payload = { ...e.payload, call_id };
+    });
+
+  function draw(state: any, timeline = new Timeline()) {
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    act(() =>
+      render(
+        <>
+          <header>
+            <BusyIndicator state={state} />
+          </header>
+          <ActivityLine state={state} timeline={timeline} />
+        </>,
+        root,
+      ),
+    );
+    return {
+      busy: root.querySelector('header .busy'),
+      line: root.querySelector('.activity')?.textContent ?? null,
+    };
+  }
+
+  it('running: spinner in the header and "агент работает"', () => {
+    const r = draw('running');
+    expect(r.busy).not.toBeNull();
+    expect(r.line).toBe('агент работает');
+  });
+
+  it('running with the last tool.call unanswered: "выполняет <tool>"', () => {
+    const t = new Timeline();
+    t.apply(call(1, 'a', 'Read'));
+    t.apply(result(2, 'a'));
+    t.apply(call(3, 'b', 'Bash'));
+    expect(draw('running', t).line).toBe('выполняет Bash');
+    t.apply(result(4, 'b'));
+    render(null, root);
+    expect(draw('running', t).line).toBe('агент работает');
+  });
+
+  it('queued and waiting: their line, no spinner in the header', () => {
+    for (const [state, text] of [
+      ['queued', 'ввод в очереди'],
+      ['waiting', 'ждёт подтверждения'],
+    ]) {
+      const t = new Timeline();
+      t.apply(call(1, 'a', 'Bash'));
+      const r = draw(state, t);
+      expect(r.busy).toBeNull();
+      expect(r.line).toBe(text);
+      render(null, root);
+    }
+  });
+
+  it('nothing in other states', () => {
+    for (const state of ['idle', 'error', 'archived', 'worker_offline', 'locked_vscode', 'unknown']) {
+      const r = draw(state);
+      expect(r.busy).toBeNull();
+      expect(r.line).toBeNull();
+      render(null, root);
+    }
   });
 });

@@ -549,6 +549,42 @@ pre {
   text-align: center;
 }
 
+/* A turn is on: header next to the state, and the activity line under the chat. */
+.busy {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-right: 0.35em;
+  vertical-align: -0.05em;
+  border: 2px solid var(--accent);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .busy {
+    animation: none;
+    border-right-color: var(--accent);
+  }
+}
+
+.activity {
+  align-self: flex-start;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.activity-waiting {
+  color: var(--warn);
+}
+
 .line-status.state-error,
 .line-cancel {
   color: var(--deny);

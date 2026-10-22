@@ -2,11 +2,12 @@
 // Unknown and invalid events render as a collapsed card and never throw.
 
 import { useState } from 'preact/hooks';
-import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent } from '../proto';
+import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import {
   CANCEL_LABELS,
   POLICY_HINT_LABELS,
+  activityLabel,
   STATE_LABELS,
   SYSTEM_CODE_LABELS,
   formatDuration,
@@ -43,6 +44,24 @@ export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActi
         }
       })}
     </>
+  );
+}
+
+/** A turn is on: shown in the session header next to the state. */
+export function BusyIndicator({ state }: { state: SessionState }) {
+  if (state !== 'running') return null;
+  return <span class="busy" role="img" aria-label="ход идёт" />;
+}
+
+/** The last line of the chat while a turn is on or input waits (SPEC §17.1). */
+export function ActivityLine({ state, timeline }: { state: SessionState; timeline: Timeline }) {
+  const label = activityLabel(state, state === 'running' ? timeline.runningTool() : undefined);
+  if (!label) return null;
+  return (
+    <div class={`activity activity-${state}`} role="status" aria-live="polite">
+      {state === 'running' && <span class="busy" aria-hidden="true" />}
+      {label}
+    </div>
   );
 }
 
@@ -132,10 +151,12 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
       );
     }
     case 'status':
+      // The state is in the header and the activity line; only an error with a reason
+      // is worth a line of its own.
+      if (event.payload.state !== 'error' || !event.payload.detail) return null;
       return (
-        <Line kind={`status state-${event.payload.state}`}>
-          {STATE_LABELS[event.payload.state]}
-          {event.payload.detail ? ` · ${event.payload.detail}` : ''}
+        <Line kind="status state-error">
+          {STATE_LABELS.error} · {event.payload.detail}
         </Line>
       );
     case 'system': {

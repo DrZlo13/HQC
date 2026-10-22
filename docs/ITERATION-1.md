@@ -30,7 +30,8 @@
 
 Разделы: §3, §4, §5.3, §5.4. Скелет уже есть. Довести: все фреймы §5.3/§5.4 итерации 1
 (`session.start`, `session.input`, `session.stop`, `session.kill`, `approval.response`,
-`approval.cancel`, `hello`/`hello.ack`, `event`/`ack`, `session.state`, `error`),
+`clarify.response`, `hello`/`hello.ack`, `event`/`ack`, `session.state`, `error`;
+`approval.cancel` — событие §4 внутри `event`, не фрейм),
 типы `Author`, `Delivery`, `SessionState`; тесты сериализации на каждый фрейм с
 JSON-примером из спеки. Приёмка: `cargo test -p hqc-proto`, JSON-имена совпадают со спекой.
 

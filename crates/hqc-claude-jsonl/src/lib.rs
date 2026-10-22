@@ -1,9 +1,9 @@
 //! Tolerant parser for Claude Code transcripts (SPEC §9.4): unknown record types are kept
 //! as `Record::Other` and never fail the parse. Fixtures in `fixtures/` were captured from
-//! Claude Code 2.1.300 with `api-request*` records removed and the file snapshot stripped.
+//! Claude Code 2.1.307 with `api-request*` records removed and the file snapshot stripped.
 //!
 //! Record `uuid`s are shared between the jsonl file and stream-json output (verified on
-//! 2.1.300, SPEC §8.1), which is what makes mirror/adapter event ids line up.
+//! 2.1.307, SPEC §8.1), which is what makes mirror/adapter event ids line up.
 
 use serde::Deserialize;
 use uuid::Uuid;
@@ -63,7 +63,7 @@ pub fn parse_str(s: &str) -> (Vec<Record>, usize) {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = include_str!("../fixtures/tool-call-2.1.300.jsonl");
+    const FIXTURE: &str = include_str!("../fixtures/tool-call-2.1.307.jsonl");
 
     #[test]
     fn fixture_parses_and_keeps_main_chain() {

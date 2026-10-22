@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.5, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.6, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -122,7 +122,8 @@ Workspace — **логическая** граница: все операции h
 
 ### Agent (встроен в Session)
 `runtime` (claude_code / acp / bare), `acp_agent` (имя агента из локального конфига
-воркера для `acp`), `model`, `runtime_session_id`, `process_state`
+воркера для `acp`), `model`, `runtime_session_id` (строка: uuid jsonl у Claude Code,
+произвольный id у ACP-агентов), `process_state`
 (stopped/starting/running/stopping), `system_prompt`, `disallowed_tools[]`,
 `restricted` (§8.4), `start_failures` (счётчик, §5.2). Смена рантайма между ходами
 означает **новую сессию рантайма с пустым контекстом**: `runtime_session_id`
@@ -275,7 +276,7 @@ MCP-вызовы (worker → hub → worker):
 ### 5.4 Фреймы worker → hub
 - `hello` {protocol_version, capabilities, environments[], env_bindings[],
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[]}
-- `event` {session_id, event} → `ack`
+- `event` {event} → `ack` (`session_id` внутри события)
 - `session.state` {session_id, process_state, runtime_session_id, locked_by}
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event} — события из
   зеркала (§9.2); хаб создаёт сессию для неизвестного `runtime_session_id`.
@@ -415,7 +416,7 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 и `.mcp.json` проекта; разрешить их можно только через окружение (§14,
 `allow_local_mcp`). В env процесса — `MCP_TOOL_TIMEOUT` (§7.1).
 
-Идентификаторы. Проверено на 2.1.300: `uuid` у сообщений `assistant` и `user`
+Идентификаторы. Проверено на 2.1.307: `uuid` у сообщений `assistant` и `user`
 (включая `tool_result`) в stream-json **совпадает** с `uuid` соответствующих записей
 в jsonl. Поэтому адаптер выводит `event_id` как uuid v5 от этого `uuid`, как и зеркало
 (§3 Event, §9.2). Запись исходного промпта пользователя в stream-json без эха
@@ -555,7 +556,7 @@ SDK) **не используется**: нативный адаптер §8.1 п
 Поэтому рабочий каталог сессии воркер берёт из поля `cwd` в записях jsonl, держит
 кэш «файл → cwd» на диске (§5.2) и имя папки использует только как ключ. Подпапки
 с транскриптами субагентов и файлы, не являющиеся `<uuid>.jsonl`, игнорируются.
-Проверено на 2.1.300: кроме `user`/`assistant` в файле есть записи `attachment`,
+Проверено на 2.1.307: кроме `user`/`assistant` в файле есть записи `attachment`,
 `file-history-snapshot`, `api-request*`, `last-prompt`, `ai-title`, `cost-state`,
 `queue-operation`, `system` и другие; парсер их пропускает.
 
@@ -595,7 +596,7 @@ SDK) **не используется**: нативный адаптер §8.1 п
   останавливает своего агента после текущего хода, ставит `locked_by: vscode`, хаб
   пишет `system`. Пока hqc-процесс не запущен, любая такая запись переводит сессию
   в `locked_by: vscode`. **[проверить]** фикстурой: один ход с вызовом инструмента,
-  сопоставить uuid из stream-json и jsonl (первичная проверка на 2.1.300 показала
+  сопоставить uuid из stream-json и jsonl (первичная проверка на 2.1.307 показала
   полное совпадение для `assistant` и `user`/`tool_result`).
 - Одновременно сессию ведёт ровно один из двух.
 
@@ -923,6 +924,11 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.5 → 0.6 (сверка со скелетом кода)
+Фрейм `event` без дублирующего `session_id`: он берётся из события (§5.4);
+`runtime_session_id` — строка, у ACP-агентов не обязательно uuid (§3 Agent);
+версия CLI в проверках uuid исправлена на 2.1.307 по фикстурам (§8.1, §9, §9.3).
 
 ### 0.4 → 0.5 (по ревью 5 и 6)
 Проверено на сборках: uuid сообщений stream-json совпадают с uuid записей jsonl,

@@ -26,8 +26,8 @@ pub struct WireError {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum WorkerFrame {
     Hello(Hello),
+    /// `event.session_id` identifies the session; it is not repeated in the frame (SPEC §5.4).
     Event {
-        session_id: Uuid,
         event: Event,
     },
     #[serde(rename = "session.state")]

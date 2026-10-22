@@ -13,6 +13,7 @@ import {
   oneLine,
   optionLabel,
 } from './labels';
+import { CopyButton, Markdown } from './Markdown';
 
 /** What cards need from the chat: lookups and actions. */
 export interface ChatActions {
@@ -111,7 +112,10 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
             {event.payload.mode === 'ask' ? 'Вопрос' : 'Сообщение'} от сессии{' '}
             <code>{event.payload.from_session_id.slice(-8)}</code>
           </div>
-          <div class="text">{event.payload.text}</div>
+          <Markdown class="text" text={event.payload.text} />
+          <div class="meta">
+            <CopyButton text={event.payload.text} />
+          </div>
         </div>
       );
     case 'usage': {
@@ -133,7 +137,11 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
         </Line>
       );
     case 'system':
-      return <Line kind="system">{event.payload.text}</Line>;
+      return (
+        <Line kind="system">
+          <Markdown text={event.payload.text} />
+        </Line>
+      );
     case 'unknown':
       return (
         <details class="card card-unknown">
@@ -152,8 +160,9 @@ function UserBubble({ event }: { event: EventOf<'user.message'> }) {
   const d = event.delivery;
   return (
     <div class="bubble bubble-user">
-      <div class="text">{event.payload.text}</div>
+      <Markdown class="text" text={event.payload.text} />
       <div class="meta">
+        <CopyButton text={event.payload.text} />
         {event.payload.artifact_ids.length > 0 && <span>вложений: {event.payload.artifact_ids.length} · </span>}
         {formatTime(event.ts)}
         {d === 'pending' && <span class="delivery"> · ждёт доставки</span>}
@@ -166,7 +175,7 @@ function UserBubble({ event }: { event: EventOf<'user.message'> }) {
 function PendingBubble({ pending, actions }: { pending: PendingMessage; actions: ChatActions }) {
   return (
     <div class={`bubble bubble-user bubble-pending ${pending.status === 'failed' ? 'bubble-failed' : ''}`}>
-      <div class="text">{pending.text}</div>
+      <Markdown class="text" text={pending.text} />
       <div class="meta">
         {pending.status === 'sending' ? (
           'отправка…'
@@ -189,8 +198,11 @@ function PendingBubble({ pending, actions }: { pending: PendingMessage; actions:
 function AgentBubble({ event }: { event: EventOf<'agent.message'> }) {
   return (
     <div class={`bubble bubble-agent ${event.payload.final ? 'bubble-final' : 'bubble-interim'}`}>
-      <div class="text">{event.payload.text}</div>
-      <div class="meta">{formatTime(event.ts)}</div>
+      <Markdown class="text" text={event.payload.text} />
+      <div class="meta">
+        <CopyButton text={event.payload.text} />
+        {formatTime(event.ts)}
+      </div>
     </div>
   );
 }
@@ -198,10 +210,8 @@ function AgentBubble({ event }: { event: EventOf<'agent.message'> }) {
 export function StreamingBubble({ text }: { text: string }) {
   return (
     <div class="bubble bubble-agent bubble-streaming" aria-live="polite">
-      <div class="text">
-        {text}
-        <span class="cursor" />
-      </div>
+      {/* The cursor is drawn by CSS after the last block. */}
+      <Markdown class="text" text={text} />
     </div>
   );
 }

@@ -135,6 +135,27 @@ it('runs the iteration 1 scenario through the UI', async () => {
   expect($$('.card-tool.tool-ok').length).toBeGreaterThanOrEqual(2);
 });
 
+it('renders a markdown answer, streamed and final', async () => {
+  const area = $<HTMLTextAreaElement>('.chat textarea')!;
+  area.value = 'Покажи markdown';
+  area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
+  await until('send enabled', () => !$<HTMLButtonElement>('.composer button')!.disabled);
+  $<HTMLButtonElement>('.composer button')!.click();
+
+  await until('streamed heading', () => $('.bubble-streaming h2'));
+  const final = await until('final markdown answer', () =>
+    $$('.bubble-final').find((b) => b.querySelector('table')),
+  );
+  await until('idle', () => $('.chat .state')?.textContent?.includes('свободна'));
+  expect(final.querySelector('h2')!.textContent).toBe('Итоги прогона');
+  expect(final.querySelectorAll('table tbody tr')).toHaveLength(3);
+  expect(final.querySelector('.md-code-lang')!.textContent).toBe('rust');
+  expect(final.querySelector('a[href="https://example.com/ci/42"]')).not.toBeNull();
+  expect(final.querySelector('img, script')).toBeNull();
+  expect(final.textContent).toContain('<img src=x onerror=alert(1)>');
+  expect(final.textContent).toContain('[javascript:](javascript:alert(1))');
+});
+
 it('revokes a worker from the settings screen', async () => {
   win.location.hash = '#/settings';
   const row = await until('worker list', () =>

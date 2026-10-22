@@ -11,7 +11,8 @@
 // -> tool.call/tool.result (Read) -> tool.call (Bash) -> approval.request, wait for the
 // answer -> approval.response -> tool.result -> agent.delta -> agent.message (final) ->
 // usage -> status idle. A message containing "вопрос" or "clarify" asks a clarify.request
-// instead of the approval.
+// instead of the approval; one containing "markdown" or "разметка" gets MARKDOWN_ANSWER
+// streamed and nothing else.
 
 import { createServer } from 'node:http';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
@@ -22,6 +23,40 @@ import { WebSocketServer } from 'ws';
 
 const WIRE = join(dirname(fileURLToPath(import.meta.url)), '../../crates/hqc-proto/examples/wire');
 const STATUS = Symbol('status');
+
+/** The answer to a message with "markdown" or "разметка": every element of T11 to look at. */
+export const MARKDOWN_ANSWER = `## Итоги прогона
+
+Проверил **три** крейта, *один* с предупреждениями; подробности в [CI](https://example.com/ci/42).
+Вторая строка того же абзаца, \`cargo test --workspace\` прошёл.
+
+### Что сделано
+
+1. Обновил парсер
+   - добавил терпимость к новым полям
+   - [x] тесты на фикстуры
+   - [ ] фикстуры для 2.2
+2. Поправил ~~старый~~ вывод ошибок
+
+| крейт | тестов | статус |
+|:------|-------:|:------:|
+| hqc-proto | 42 | ✓ |
+| hqc-hub | 117 | ✓ |
+| hqc-worker | 63 | предупреждения |
+
+\`\`\`rust
+fn main() {
+    println!("<hello>");
+}
+\`\`\`
+
+> Цитата: незакрытые блоки кода в потоке не ломают вёрстку.
+
+---
+
+HTML показывается текстом: <img src=x onerror=alert(1)> и <script>alert(1)</script>,
+ссылка [javascript:](javascript:alert(1)) тоже текст, картинка не грузится: ![схема](https://example.com/d.png).
+`;
 
 export function loadExamples(dir = WIRE) {
   const out = {};
@@ -268,6 +303,13 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const askClarify = /вопрос|clarify/i.test(input.payload.text);
     status(s, 'running');
     await step(t, 300);
+
+    if (/markdown|разметк/i.test(input.payload.text)) {
+      await stream(s, t, MARKDOWN_ANSWER);
+      store(s, mk(s, 'event.agent.message', { text: MARKDOWN_ANSWER, final: true, in_reply_to: input.event_id }));
+      store(s, mk(s, 'event.usage'));
+      return;
+    }
 
     const intro = 'Сейчас посмотрю на проект и запущу тесты.';
     await stream(s, t, intro);

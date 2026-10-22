@@ -346,9 +346,6 @@ pre {
   overflow-wrap: anywhere;
 }
 
-.bubble .text {
-  white-space: pre-wrap;
-}
 
 .bubble .meta {
   margin-top: 2px;
@@ -380,7 +377,8 @@ pre {
   color: var(--muted);
 }
 
-.cursor {
+.bubble-streaming .md > :last-child::after {
+  content: '';
   display: inline-block;
   width: 0.5em;
   height: 1em;
@@ -638,4 +636,199 @@ pre {
 .plain-list {
   margin: 0;
   padding-left: 20px;
+}
+
+/* ---- markdown (T11) ---- */
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p,
+.md ul,
+.md ol,
+.md blockquote,
+.md-table,
+.md-code {
+  margin: 0.5em 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 0.7em 0 0.35em;
+  line-height: 1.25;
+}
+
+.md h1 {
+  font-size: 1.3em;
+}
+.md h2 {
+  font-size: 1.18em;
+}
+.md h3 {
+  font-size: 1.06em;
+}
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 1em;
+}
+
+.md ul,
+.md ol {
+  padding-left: 1.5em;
+}
+
+.md li > ul,
+.md li > ol {
+  margin: 0.2em 0;
+}
+
+.md li.md-task {
+  list-style: none;
+}
+
+.md-checkbox {
+  margin: 0 0.4em 0 -1.3em;
+  vertical-align: middle;
+}
+
+.md blockquote {
+  padding: 0 0 0 10px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+  margin-left: 0;
+  margin-right: 0;
+}
+
+.md hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0.8em 0;
+}
+
+.md :not(pre) > code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--code-bg);
+}
+
+.md-html {
+  white-space: pre-wrap;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.md-code {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+
+.md-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 2px 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.75rem;
+  color: var(--muted);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.md-code pre {
+  margin: 0;
+  padding: 8px;
+  overflow-x: auto;
+  white-space: pre;
+  font-size: 0.85em;
+}
+
+.md-code pre code {
+  font-size: 1em;
+}
+
+.md-table {
+  overflow-x: auto;
+}
+
+.md table {
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.md th,
+.md td {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md th {
+  background: var(--code-bg);
+  font-weight: 600;
+}
+
+.md .align-center {
+  text-align: center;
+}
+
+.md .align-right {
+  text-align: right;
+}
+
+.md-image-alt {
+  font-style: italic;
+}
+
+.md-image-alt::before {
+  content: '🖼 ';
+  font-style: normal;
+}
+
+.line .md p {
+  margin: 0;
+}
+
+.btn-copy {
+  min-height: 24px;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+.md-code-bar .btn-copy {
+  margin-right: 0;
+}
+
+/* The textarea copyText() selects when the Clipboard API is not available. */
+.copy-buffer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
 }

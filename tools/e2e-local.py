@@ -77,6 +77,9 @@ def client():
         ct, body = r.headers.get("Content-Type", ""), r.read().decode()
     if not ct.startswith("text/html") or "<html" not in body.lower():
         raise SystemExit(f"GET /: {ct!r}, not the client's index.html")
+    csp = r.headers.get("Content-Security-Policy", "")
+    if "frame-ancestors 'none'" not in csp or r.headers.get("X-Frame-Options") != "DENY":
+        raise SystemExit(f"GET /: security headers missing (CSP {csp!r})")
     with urllib.request.urlopen(HUB + "/sw.js", timeout=10) as r:
         r.read()
     log("web client served from HQC_CLIENT_DIR")

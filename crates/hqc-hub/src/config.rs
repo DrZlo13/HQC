@@ -101,6 +101,10 @@ pub struct Timing {
     pub enroll_ttl: Duration,
     /// `ask_timeout_s` in `session.start` (SPEC §7.1).
     pub ask_timeout_s: u32,
+    /// A `running` session with no event from its worker for this long loses its turn
+    /// (SPEC §17.3); `HQC_TURN_WATCHDOG_S`, `None` (0) turns the watchdog off. Checked every
+    /// `expiry_interval`.
+    pub turn_watchdog: Option<Duration>,
 }
 
 impl Default for Timing {
@@ -113,14 +117,28 @@ impl Default for Timing {
             expiry_interval: Duration::from_secs(1),
             enroll_ttl: Duration::from_secs(600),
             ask_timeout_s: 600,
+            turn_watchdog: Some(Duration::from_secs(DEFAULT_TURN_WATCHDOG_S)),
         }
     }
+}
+
+pub const DEFAULT_TURN_WATCHDOG_S: u64 = 900;
+
+/// `HQC_TURN_WATCHDOG_S`: whole seconds, 0 = off, unset = [`DEFAULT_TURN_WATCHDOG_S`].
+pub fn turn_watchdog_from(v: Option<&str>) -> anyhow::Result<Option<Duration>> {
+    let secs = match v.map(str::trim).filter(|v| !v.is_empty()) {
+        None => DEFAULT_TURN_WATCHDOG_S,
+        Some(v) => v
+            .parse::<u64>()
+            .with_context(|| format!("HQC_TURN_WATCHDOG_S={v}: expected whole seconds"))?,
+    };
+    Ok((secs > 0).then(|| Duration::from_secs(secs)))
 }
 
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`,
-    /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`.
+    /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -178,7 +196,10 @@ impl Config {
             auth,
             vapid,
             client_dir,
-            timing: Timing::default(),
+            timing: Timing {
+                turn_watchdog: turn_watchdog_from(var("HQC_TURN_WATCHDOG_S").as_deref())?,
+                ..Timing::default()
+            },
             limits: Limits::default(),
         })
     }
@@ -226,6 +247,16 @@ mod tests {
         ] {
             assert!(!is_loopback_listen(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn turn_watchdog_variable() {
+        let d = |s| Some(Duration::from_secs(s));
+        assert_eq!(turn_watchdog_from(None).unwrap(), d(900));
+        assert_eq!(turn_watchdog_from(Some(" ")).unwrap(), d(900));
+        assert_eq!(turn_watchdog_from(Some("30")).unwrap(), d(30));
+        assert_eq!(turn_watchdog_from(Some("0")).unwrap(), None);
+        assert!(turn_watchdog_from(Some("15m")).is_err());
     }
 
     #[test]

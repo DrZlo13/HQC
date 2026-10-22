@@ -7,6 +7,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use tokio::time::Instant;
+
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::{broadcast, Semaphore};
@@ -33,6 +35,9 @@ pub struct Inner {
     pub limiter: RateLimiter,
     /// Token lookups of `/worker/ws` in flight (SPEC §20).
     pub ws_auth: Arc<Semaphore>,
+    /// Session -> the last sign of life of its turn: an event from the worker, or the moment
+    /// the watchdog first saw the session `running` (SPEC §17.3, [`crate::watchdog`]).
+    pub turn_activity: Mutex<HashMap<Uuid, Instant>>,
 }
 
 impl Deref for AppState {
@@ -76,6 +81,7 @@ impl AppState {
             watchers: Mutex::new(HashMap::new()),
             limiter: RateLimiter::default(),
             ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),
+            turn_activity: Mutex::new(HashMap::new()),
             config,
         }))
     }
@@ -83,6 +89,14 @@ impl AppState {
     pub fn notify(&self, n: Notice) {
         // No receivers is fine: nobody is watching.
         let _ = self.bus.send(Arc::new(n));
+    }
+
+    /// The worker sent something for the session (any event, `agent.delta` included).
+    pub fn worker_activity(&self, session_id: Uuid) {
+        self.turn_activity
+            .lock()
+            .unwrap()
+            .insert(session_id, Instant::now());
     }
 
     pub fn session_changed(&self, session_id: Uuid) {

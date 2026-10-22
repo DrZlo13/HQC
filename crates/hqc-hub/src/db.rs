@@ -728,6 +728,28 @@ pub async fn set_turn(db: &PgPool, id: Uuid, open: bool, error: bool) -> sqlx::R
     Ok(())
 }
 
+pub async fn clear_turn_error(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET last_turn_error = false WHERE id = $1 AND last_turn_error")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Sessions whose computed state is `running` apart from worker presence (SPEC §17.1): a
+/// turn is open and nothing ranks above it. The caller checks that the worker is online.
+pub async fn running_turns(db: &PgPool) -> sqlx::Result<Vec<(Uuid, Option<Uuid>)>> {
+    sqlx::query_as(
+        "SELECT s.id, s.worker_id FROM sessions s
+         WHERE s.turn_open AND NOT s.archived AND NOT s.last_turn_error AND s.locked_by <> 'vscode'
+           AND NOT EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
+                           AND p.closed_at IS NULL AND p.kind IN ('approval', 'clarify'))
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed')",
+    )
+    .fetch_all(db)
+    .await
+}
+
 /// The final `agent.message` answering input `input_id` is stored already.
 pub async fn turn_answered(db: &PgPool, session_id: Uuid, input_id: Uuid) -> sqlx::Result<bool> {
     sqlx::query_scalar(

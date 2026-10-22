@@ -386,6 +386,8 @@ pub async fn input(
             return Ok(reply(StatusCode::OK, &r));
         }
     }
+    // A failed turn shows `error` until the next input (SPEC §17.1).
+    db::clear_turn_error(&app.db, id).await?;
     let stored = events::store_hub_event(
         &app,
         &s,

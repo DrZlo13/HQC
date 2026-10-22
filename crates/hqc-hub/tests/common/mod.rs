@@ -81,6 +81,7 @@ pub fn test_timing() -> Timing {
         expiry_interval: Duration::from_millis(100),
         enroll_ttl: Duration::from_secs(600),
         ask_timeout_s: 600,
+        turn_watchdog: None,
     }
 }
 
@@ -115,6 +116,29 @@ impl TestHub {
     }
 
     pub async fn start_full(auth: AuthConfig, email: String, limits: Limits) -> Self {
+        Self::start_timed(auth, email, limits, test_timing()).await
+    }
+
+    /// Dev auth with a fresh user and the given timing.
+    pub async fn start_timing(timing: Timing) -> Self {
+        let email = format!("user-{}@example.com", Uuid::new_v4().simple());
+        Self::start_timed(
+            AuthConfig::Dev {
+                email: email.clone(),
+            },
+            email,
+            Limits::default(),
+            timing,
+        )
+        .await
+    }
+
+    pub async fn start_timed(
+        auth: AuthConfig,
+        email: String,
+        limits: Limits,
+        timing: Timing,
+    ) -> Self {
         let url = db_url();
         let admin = PgPoolOptions::new()
             .max_connections(1)
@@ -142,7 +166,7 @@ impl TestHub {
             auth,
             vapid: None,
             client_dir: None,
-            timing: test_timing(),
+            timing,
             limits,
         };
         let push = Arc::new(RecordingPush::default());

@@ -49,6 +49,7 @@ pub async fn ingest_worker_event(
         tracing::warn!(session_id = %ev.session_id, worker_id = %conn.worker_id, "event for another worker's session dropped");
         return Ok(dropped);
     }
+    app.worker_activity(s.id);
     if matches!(ev.kind, EventKind::AgentDelta { .. }) {
         // Transport only: to clients without seq, never stored (SPEC §4).
         app.notify(Notice::Event {
@@ -224,6 +225,35 @@ async fn after_store(
     }
     push::on_event(app, s, row, kind);
     app.session_changed(s.id);
+    Ok(())
+}
+
+/// The worker sent nothing for a `running` session for `idle` (SPEC §17.3): open
+/// approval/clarify requests are cancelled with `timeout`, the turn is closed without a
+/// final answer and the session shows `error` until the next input.
+pub async fn turn_timed_out(
+    app: &AppState,
+    session_id: Uuid,
+    idle: std::time::Duration,
+) -> anyhow::Result<()> {
+    let Some(s) = db::session(&app.db, session_id).await? else {
+        return Ok(());
+    };
+    if !s.turn_open {
+        return Ok(());
+    }
+    tracing::warn!(%session_id, idle_s = idle.as_secs(), "turn watchdog: no events from the worker, turn lost");
+    for p in db::open_requests_of_session(&app.db, session_id).await? {
+        requests::cancel(app, &p, hqc_proto::event::CancelReason::Timeout).await?;
+    }
+    db::set_turn(&app.db, session_id, false, true).await?;
+    system(
+        app,
+        &s,
+        "turn_lost",
+        &format!("no events for {} s", idle.as_secs()),
+    )
+    .await?;
     Ok(())
 }
 

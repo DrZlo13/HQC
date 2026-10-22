@@ -1043,6 +1043,97 @@ async fn archive_cancels_and_fails() {
     hub.finish().await;
 }
 
+/// T13 (SPEC §17.3): a `running` session whose worker sends nothing (not even
+/// `agent.delta`) for the watchdog period loses its turn: `system turn_lost` "no events for
+/// N s", state `error` until the next input. Waiting for an answer does not count.
+#[tokio::test]
+async fn turn_watchdog_closes_a_silent_turn() {
+    let limit = Duration::from_millis(600);
+    let hub = TestHub::start_timing(hqc_hub::config::Timing {
+        expiry_interval: Duration::from_millis(50),
+        turn_watchdog: Some(limit),
+        ..test_timing()
+    })
+    .await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("silent").await;
+    ack_start(&mut w, &sid).await;
+    async fn input(hub: &TestHub, w: &mut FakeWorker, sid: &str) {
+        let (s, r) = hub
+            .post(&format!("/api/sessions/{sid}/input"), json!({"text": "go"}))
+            .await;
+        assert_eq!(s, 201, "{r}");
+        assert_ne!(hub.session(sid).await["state"], "error");
+        let si = w.expect("session.input").await;
+        w.reply(
+            &si["id"],
+            "ack",
+            json!({"event_id": r["event"]["event_id"]}),
+        )
+        .await;
+        hub.wait_session(sid, "running", |v| v["state"] == "running")
+            .await;
+    }
+    async fn lost(hub: &TestHub, sid: &str) -> Vec<Value> {
+        hub.events(sid)
+            .await
+            .into_iter()
+            .filter(|e| e["payload"]["code"] == "turn_lost")
+            .collect()
+    }
+
+    input(&hub, &mut w, &sid).await;
+    // A delta keeps the turn alive.
+    tokio::time::sleep(limit * 2 / 3).await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "…"})))
+        .await;
+    tokio::time::sleep(limit * 2 / 3).await;
+    assert_eq!(hub.session(&sid).await["state"], "running");
+    assert!(lost(&hub, &sid).await.is_empty());
+
+    let v = hub
+        .wait_session(&sid, "error", |v| v["state"] == "error")
+        .await;
+    assert_eq!(v["queue_len"], 0);
+    let l = lost(&hub, &sid).await;
+    assert_eq!(l.len(), 1, "{l:?}");
+    assert!(
+        l[0]["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("no events for "),
+        "{}",
+        l[0]
+    );
+    assert_eq!(l[0]["author"]["kind"], "system");
+
+    // The next input clears the error; an open approval stops the clock.
+    input(&hub, &mut w, &sid).await;
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-w", "2099-01-01T00:00:00Z"),
+    ))
+    .await;
+    tokio::time::sleep(limit * 2).await;
+    assert_eq!(hub.session(&sid).await["state"], "waiting");
+    let (s, _) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/req-w"),
+            json!({"option_id": "allow"}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    w.expect("approval.response").await;
+    hub.wait_session(&sid, "running", |v| v["state"] == "running")
+        .await;
+    hub.wait_session(&sid, "error", |v| v["state"] == "error")
+        .await;
+    assert_eq!(lost(&hub, &sid).await.len(), 2);
+    hub.finish().await;
+}
+
 /// T13: a session without a title is «Сессия N»; the runtime's title (`session.state.title`)
 /// replaces a default or runtime title, never one the user set (SPEC §3 Session).
 #[tokio::test]

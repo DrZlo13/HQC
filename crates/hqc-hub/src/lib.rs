@@ -26,6 +26,7 @@ pub mod push;
 pub mod requests;
 pub mod security;
 pub mod state;
+pub mod watchdog;
 pub mod worker_ws;
 
 pub use app::AppState;
@@ -90,5 +91,8 @@ pub fn service(
 pub fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> AppState {
     let app = AppState::new(db, config, push);
     tokio::spawn(requests::expiry_loop(app.clone()));
+    if let Some(limit) = app.config.timing.turn_watchdog {
+        tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));
+    }
     app
 }

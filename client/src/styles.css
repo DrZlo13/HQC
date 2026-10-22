@@ -605,6 +605,22 @@ pre {
   margin: 0;
 }
 
+.enroll-info {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.enroll-info dt {
+  color: var(--muted);
+}
+
+.enroll-info dd {
+  margin: 0;
+  font-weight: 500;
+}
+
 .field {
   display: flex;
   flex-direction: column;

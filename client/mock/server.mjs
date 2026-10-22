@@ -455,6 +455,16 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     revoked.add(p.id);
     return withStatus(204, null);
   });
+  route('GET', '/api/workers/enroll/:code', (p) => {
+    const code = String(p.code).trim().toUpperCase();
+    if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(code)) throw fail(404, 'not_found', 'not found');
+    return {
+      name: `worker-${code.slice(0, 4).toLowerCase()}`,
+      os: 'macos',
+      created_at: new Date().toISOString(),
+      country: 'DE',
+    };
+  });
   route('POST', '/api/workers/enroll/confirm', (_, body) => {
     const code = String(body?.code ?? '').trim().toUpperCase();
     if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(code)) throw fail(404, 'not_found', 'not found');
@@ -543,7 +553,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     });
   });
 
-  await new Promise((r) => server.listen(port, r));
+  // Loopback only: the mock has no authentication.
+  await new Promise((r) => server.listen(port, '127.0.0.1', r));
   const actual = server.address().port;
   return {
     port: actual,

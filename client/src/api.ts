@@ -2,6 +2,7 @@
 // client sends cookies along and never handles tokens itself.
 
 import {
+  parseEnrollInfo,
   parseEvent,
   parseEventPage,
   parseInputResponse,
@@ -10,6 +11,7 @@ import {
   parseSessionList,
   parseVapidKey,
   type ClarifyAnswer,
+  type EnrollInfo,
   type HqcEvent,
   type Me,
   type SessionInfo,
@@ -163,6 +165,11 @@ export class Api {
   /** Revokes the worker's token and drops its connection (SPEC §5.1). */
   async revokeWorker(id: string): Promise<void> {
     await this.req('DELETE', `/api/workers/${enc(id)}`);
+  }
+
+  /** What the worker that printed `code` said about itself; 404 for an unknown code. */
+  async enrollInfo(code: string): Promise<EnrollInfo> {
+    return parseEnrollInfo(await this.req('GET', `/api/workers/enroll/${enc(code)}`));
   }
 
   async enrollConfirm(code: string): Promise<unknown> {

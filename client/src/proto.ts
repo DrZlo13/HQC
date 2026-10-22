@@ -712,6 +712,25 @@ export function parseApiError(v: unknown): { error: string; message: string } {
 }
 
 /** `{public_key}` of `GET /api/push/vapid`; `null` when the hub has no push. */
+/** `GET /api/workers/enroll/{code}` (SPEC §5.1, §6): who asks to be enrolled. */
+export interface EnrollInfo {
+  name: string;
+  os: string;
+  created_at: string;
+  /** Cloudflare's CF-IPCountry of the enrolling request. */
+  country?: string;
+}
+
+export function parseEnrollInfo(v: unknown): EnrollInfo {
+  const o = obj(v, 'enroll info');
+  return {
+    name: str(o, 'name'),
+    os: str(o, 'os'),
+    created_at: str(o, 'created_at'),
+    country: optStr(o, 'country'),
+  };
+}
+
 export function parseVapidKey(v: unknown): string | null {
   const o = obj(v, 'vapid');
   return o.public_key === null ? null : str(o, 'public_key');

@@ -640,6 +640,18 @@ pub async fn set_turn(db: &PgPool, id: Uuid, open: bool, error: bool) -> sqlx::R
     Ok(())
 }
 
+/// The final `agent.message` answering input `input_id` is stored already.
+pub async fn turn_answered(db: &PgPool, session_id: Uuid, input_id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE session_id = $1 AND type = 'agent.message'
+            AND payload->>'final' = 'true' AND payload->>'in_reply_to' = $2)",
+    )
+    .bind(session_id)
+    .bind(input_id.to_string())
+    .fetch_one(db)
+    .await
+}
+
 pub async fn set_process_state(
     db: &PgPool,
     id: Uuid,

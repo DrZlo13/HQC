@@ -203,8 +203,12 @@ pub async fn on_input_ack(
     if let Some(row) = db::mark_delivered(&app.db, event_id).await? {
         notify_delivery(app, &row);
         // The worker hands input to the runtime one turn at a time (SPEC §17.2), so a
-        // delivered input means its turn has started.
-        db::set_turn(&app.db, session_id, true, false).await?;
+        // delivered input means its turn has started. The ack bypasses the worker's outbox
+        // and may come after the turn's own events (SPEC §5.2): a turn that already has
+        // its final answer stays closed.
+        if !db::turn_answered(&app.db, session_id, event_id).await? {
+            db::set_turn(&app.db, session_id, true, false).await?;
+        }
     }
     db::reset_start_failures(&app.db, session_id).await?;
     app.session_changed(session_id);

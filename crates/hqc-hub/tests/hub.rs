@@ -543,6 +543,34 @@ async fn boot_id_tells_restart_from_reconnect() {
     hub.finish().await;
 }
 
+/// SPEC §5.2: the input ack bypasses the worker's outbox and can arrive after the final
+/// answer of its turn; the turn must not be reopened.
+#[tokio::test]
+async fn late_input_ack_does_not_reopen_the_turn() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("late ack").await;
+    ack_start(&mut w, &sid).await;
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "hi"}))
+        .await;
+    let eid = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "done", "final": true, "in_reply_to": eid}),
+    ))
+    .await;
+    w.reply(&si["id"], "ack", json!({"event_id": eid})).await;
+    let v = hub
+        .wait_session(&sid, "delivered", |v| v["queue_len"] == 0)
+        .await;
+    assert_eq!(v["state"], "idle", "{v}");
+    hub.finish().await;
+}
+
 /// SPEC §5.2: after hello the hub sends session.start (mode resume) and only after its ack
 /// the pending input, in seq order.
 #[tokio::test]

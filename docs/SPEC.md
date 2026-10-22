@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.10, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.11, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -89,7 +89,7 @@ Project, Workspace, Session, Artifact, Grant, ScheduledMessage. У Event вла�
 
 ### Worker
 `owner_id`, `name`, `os`, `token_hash`, `status` (online/offline), `last_seen`,
-`protocol_version`, `capabilities` (`claude_code: {version}`, `acp_agents[{name,
+`protocol_version`, `boot_id` (из последнего `hello`, §5.2), `capabilities` (`claude_code: {version}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — результат `initialize` каждого
 агента при старте воркера), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (имена), `env_bindings[]` (путь → окружение, профиль Hermes),
@@ -133,8 +133,10 @@ Workspace — **логическая** граница: все операции h
 ### Event
 `session_id`, `event_id` (uuid; для событий, порождённых записями jsonl Claude Code —
 и адаптером, и зеркалом, и импортом — это uuid v5 от `uuid` записи, поэтому один
-и тот же факт из двух источников даёт один `event_id`; для остальных — v7 от
-отправителя), `seq` (назначает хаб, монотонный в сессии), `ts`, `author`
+и тот же факт из двух источников даёт один `event_id`; если в записи несколько блоков
+контента, блок 0 получает v5 от `uuid`, блок `i > 0` — v5 от строки `"<uuid>/<i>"`
+в том же пространстве имён, правило обязательно для всех трёх источников (§9.2);
+для остальных — v7 от отправителя), `seq` (назначает хаб, монотонный в сессии), `ts`, `author`
 (`{kind: user|agent, id}` или `{kind: system}` без `id`; для агента `id` = его
 `session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops}` для цепочек
 агент→агент, иначе null), `client_op_id` (эхо для клиента), `delivery` и
@@ -142,7 +144,7 @@ Workspace — **логическая** граница: все операции h
 `delivery` ∈ `pending | delivered | failed`, `delivered_at` — время доставки.
 
 ### ReadCursor
-`user_id`, `session_id`, `last_read_seq`. Источник «непрочитанного».
+`user_id`, `session_id`, `last_read_seq`. Источник «непрочитанного» (правило — §6).
 
 ### Artifact
 `owner_id`, `session_id`, `kind` (file/image/diff/html/text), `mime`, `size`,
@@ -181,7 +183,7 @@ Workspace — **логическая** граница: все операции h
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (краткий текст ошибки), `duration_ms?`, `artifact_id?` (дифф или большой результат, §12) | адаптер |
 | `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?` | адаптер; `options` — **реальные варианты агента**, `canonical` ∈ once/session/always/deny/deny_always для кнопок клиента |
 | `approval.response` | `request_id`, `option_id`, `by` (user id или `auto`) | клиент или хаб при `auto_approve` |
-| `approval.cancel` | `request_id`, `reason` (timeout/stopped/answered_elsewhere/worker_restart/archived) | адаптер, воркер или хаб |
+| `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived) | адаптер, воркер или хаб. Ответ с другого устройства отменой не считается: первый ответ закрывает запрос, второй получает `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, options?: [string], multi?: bool}]` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput.answers` (проверено на 2.1.307 при `--permission-prompt-tool stdio`, §8.1). У ACP-агентов источника нет |
 | `clarify.response` | `request_id`, `answers` (`{<id вопроса>: string \| [string]}`) | клиент |
 | `clarify.cancel` | `request_id`, `reason` (тот же набор, что у `approval.cancel`) | адаптер, воркер или хаб |
@@ -189,7 +191,19 @@ Workspace — **логическая** граница: все операции h
 | `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id?` (для ask) | хаб по `hqc_send`/`hqc_ask` |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `model?` | адаптер Claude Code по `result`; у ACP-агентов необязательно и без `cost_usd` (стандартного usage в ACP v1 нет) |
 | `status` | `state` (§17.1), `detail?` | воркер или хаб |
-| `system` | `text`, `code` | хаб: сессия создана, подхвачена, workspace удалён, ввод не доставлен и т.п. |
+| `system` | `text`, `code` | хаб или воркер; коды — ниже |
+
+Коды `system` (список открытый, неизвестный код клиент показывает как текст):
+
+| code | источник | смысл |
+|---|---|---|
+| `session_created` | хаб | сессия создана |
+| `turn_lost` | хаб | ход потерян: процесс агента остановился посреди хода или воркер перезапустился (§17.3) |
+| `agent_exited` | воркер | процесс агента завершился сам с ошибкой или посреди хода (§17.3) |
+| `agent_start_failed` | хаб | агент не стартовал 3 раза подряд (или неретраибельно), `pending` вводы стали `failed` (§5.2) |
+| `input_rejected` | хаб | воркер отклонил ввод не как неудачный старт, ввод стал `failed` (§5.2) |
+| `ask_cancelled` | хаб | отложенный `hqc_ask` закрыт `mcp.cancel` от воркера (§5.2), итерация 3 |
+| `session_taken_over` | хаб | сессию подхватили (`POST /takeover`, §9.3), итерация 2 |
 
 Правила:
 
@@ -224,18 +238,26 @@ heartbeat 20 с, переподключение с экспоненциальн�
   список открытый; неизвестный код обрабатывается как `internal`.
 
 ### 5.1 Регистрация и версия
-`hqc-worker enroll <hub-url>` печатает код, пользователь подтверждает его в вебе под
-своим логином, воркер получает долгоживущий токен (хранится в локальном secure store:
-Keychain, libsecret, DPAPI). Токен отзывается из UI. В `hello` воркер шлёт
+`hqc-worker enroll <hub-url>` печатает код и готовую ссылку
+`<hub-url>/#/enroll?code=XXXX-XXXX` (экран подтверждения клиента с подставленным кодом),
+пользователь подтверждает код в вебе под своим логином, воркер получает долгоживущий
+токен. Хранение токена: на macOS — Keychain (generic password, service `hqc-worker`,
+account = URL хаба); на других ОС в первой версии — файл `$HQC_HOME/token` с правами 0600
+(каталог 0700, запись через временный файл и rename); libsecret и DPAPI — позже.
+Токен отзывается из UI. В `hello` воркер шлёт
 `protocol_version`; хаб отвечает `hello.ack {protocol_version, worker_id, server_time}`
-или `error {code: protocol_version_unsupported, details: {min_version}}`. При
+или `error {code: protocol_version_unsupported, details: {min_version}}`. Версию хаб
+проверяет до строгого разбора `hello`: `hello` другой версии может иметь другую форму,
+но всё равно должен получить `protocol_version_unsupported`, а не `invalid_frame`. При
 несовместимости воркер пишет в лог и в трей «нужно обновление», повторяет попытку
 раз в час и не делает ничего другого; обновление — руками или `hqc-worker update`.
 
-Регистрация по HTTP (маршрут `/worker/*`, без Access, с rate limit):
-- `POST /worker/enroll {name, os}` → `{code, poll_token, expires_at, poll_interval_s}`;
-  `code` — 8 символов `XXXX-XXXX` без похожих букв, живёт 10 минут; `poll_token` —
-  секрет воркера, в базе только хэш.
+Регистрация по HTTP (маршрут `/worker/*`, без Access, с rate limit; тела —
+`hqc_proto::api`, примеры `examples/wire/api.enroll*.json`):
+- `POST /worker/enroll {name, os, protocol_version}` → `{code, poll_token, expires_at,
+  poll_interval_s}`; `protocol_version` справочный (решает `hello`), неизвестные поля
+  тела хаб игнорирует; `code` — 8 символов `XXXX-XXXX` без похожих букв, живёт 10 минут;
+  `poll_token` — секрет воркера, передаётся только в теле (не в URL), в базе только хэш.
 - Пользователь вводит код в вебе: `POST /api/workers/enroll/confirm {code, name?}` →
   `{worker_id, name}`; регистр и дефис в коде не важны.
 - Воркер опрашивает `POST /worker/enroll/poll {poll_token}` → `{status: pending}`,
@@ -263,20 +285,34 @@ Worker → hub:
 - `seq` назначает хаб; клиенты видят только события с `seq`.
 - `agent.delta` в outbox не пишется и при обрыве теряется, это допустимо. Идёт тем же
   фреймом `event`; хаб отвечает `ack {event_id}` без `seq` и не сохраняет его.
+- `ack` на `session.input` и `agent.delta` идут мимо outbox, а события хода — через него,
+  поэтому хаб может получить `ack` ввода и дельты позже `tool.call`/`approval.request`
+  того же хода. Хаб не полагается на порядок между ними (проверено на адаптере T4):
+  `ack` ввода, пришедший после `agent.message` с `final: true` и `in_reply_to` этого
+  ввода, ход заново не открывает. Ход, закончившийся без финального текста (только
+  `status idle|error`), при таком опоздании `ack` остаётся «идущим» до следующего хода
+  **[проверить]**.
 - Событие для сессии чужого воркера обрабатывается как для неизвестной: `ack` без `seq`.
 
 Hub → worker:
 - `user.message` и `peer.message` хаб хранит с `delivery: pending` и шлёт как
   `session.input`. Воркер отвечает `ack {event_id}` после передачи ввода в рантайм (Claude Code —
   после эха `--replay-user-messages`; ACP — после отправки `session/prompt`). После
-  `hello` хаб досылает все `pending` вводы сессий этого воркера в порядке `seq`.
+  `hello` хаб шлёт `session.start` с `mode: resume` каждой сессии этого воркера, у которой
+  есть `pending` ввод, открытый `approval`/`clarify` или ответ на запрос, ещё не
+  подтверждённый воркером; после `ack` на него — неподтверждённые ответы, затем
+  `pending` вводы в порядке `seq`. Воркер на ввод сессии, для которой в его процессе не
+  было `session.start`, отвечает `error {code: unknown_session, retryable: true}`.
 - Если процесс агента не стартует (нет бинарника, профиль не настроен), воркер
   отвечает `error {retryable: true}`; после **3 неудачных стартов** подряд хаб ставит
   вводу `delivery: failed`, пишет `system` с причиной, сессия переходит в `error`;
   кнопка «повторить» сбрасывает счётчик и возвращает ввод в `pending`.
 - На каждом соединении хаб шлёт `session.start` до первого `session.input` сессии
   и досылает вводы только после `ack` на него; `session.state {process_state: stopped}`
-  сбрасывает это, и следующий ввод снова начинается с `session.start`. Ответ `error`
+  сбрасывает это, и следующий ввод снова начинается с `session.start`. `mode` в
+  `session.start` (§5.3): `new`, если хаб ещё ни разу не отправлял `session.start` этой
+  сессии, иначе `resume`. `session.start` для живого процесса воркер подтверждает `ack`,
+  не трогая процесс. Ответ `error`
   на `session.input` с `retryable: true` или кодом `agent_start_failed` считается
   неудачным стартом; иная ошибка помечает этот ввод `failed` (`system` с кодом
   `input_rejected`). Неудачный старт повторяется через паузу, пока есть `pending`
@@ -285,10 +321,13 @@ Hub → worker:
   попытку старта; «повторить» (`POST /retry`) обнуляет счётчик.
 - Очередь ввода воркера (§17.2) в памяти; источник истины — `pending` события
   в хабе, перезапуск воркера их не теряет.
-- `hello` хаб считает перезапуском воркера (§17.3): открытые `approval`/`clarify`
-  его сессий отменяются с `worker_restart` (событие плюс фрейм с `deny`), незакрытый
-  ход — `system` с кодом `turn_lost`. Отличить обрыв связи от перезапуска хаб пока
-  не может **[решение]**.
+- Перезапуск воркера хаб узнаёт по `boot_id` в `hello` (§5.4): воркер генерирует его
+  при старте процесса, хаб хранит последний. Новый `boot_id` — перезапуск (§17.3):
+  открытые `approval`/`clarify` сессий воркера отменяются с `worker_restart` (только
+  событие: ни один процесс запрос уже не держит, фрейм `deny` не шлётся), ответы,
+  которые воркер не подтвердил, отбрасываются, незакрытый ход получает `system` с кодом
+  `turn_lost`, `process_state` сессий становится `stopped`. Тот же `boot_id` — обрыв
+  связи: хаб ничего не отменяет, процесс и его запросы живы **[решение]**.
 - Смещения зеркала по каждому файлу jsonl и кэш «файл → cwd» воркер хранит на диске.
 
 MCP-вызовы (worker → hub → worker):
@@ -305,10 +344,12 @@ MCP-вызовы (worker → hub → worker):
   не шлёт, её ход идёт дальше.
 
 ### 5.3 Фреймы hub → worker
-- `session.start` {session_id, runtime, acp_agent?, model?, workspace_path | null, cwd,
-  environment, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
+- `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
+  cwd, environment, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s}
-  — `owner_is_worker_owner` нужен воркеру для `allow_foreign_sessions`, выбора
+  — `mode`: `new` | `resume` (§5.2); воркер вызывает `start` или `resume` адаптера (§8),
+  адаптер Claude Code при `new` всё равно проверяет jsonl с этим uuid и при наличии
+  продолжает его через `--resume` (§8.1); `owner_is_worker_owner` нужен воркеру для `allow_foreign_sessions`, выбора
   профиля Hermes и допуска `isolation: none`; `ask_timeout_s` — чтобы выставить
   таймаут MCP-инструмента рантайма (§7.1); без `model` воркер берёт модель рантайма
   по умолчанию.
@@ -324,8 +365,8 @@ MCP-вызовы (worker → hub → worker):
 - `session.kill` {session_id} — завершить процесс агента.
 - `approval.response` {session_id, request_id, option_id},
   `clarify.response` {session_id, request_id, answers}; поля `by` во фреймах нет, оно
-  только в событиях. Фрейма `approval.cancel` нет: отменяя запрос сам (таймаут, ответ
-  с другого устройства, архивация), хаб пишет событие `approval.cancel` и шлёт воркеру
+  только в событиях. Фрейма `approval.cancel` нет: отменяя запрос сам (таймаут, `stop`,
+  архивация), хаб пишет событие `approval.cancel` и шлёт воркеру
   `approval.response` с `option_id` варианта `canonical: deny`, чтобы адаптер закрыл
   запрос в рантайме. Так же для `clarify`: хаб пишет событие `clarify.cancel` и шлёт
   `clarify.response` с `answers: {}` — пустой объект означает отмену; адаптер Claude
@@ -342,8 +383,13 @@ MCP-вызовы (worker → hub → worker):
 - `mcp.result` {request_id, result | error}
 
 ### 5.4 Фреймы worker → hub
-- `hello` {protocol_version, capabilities, environments[], env_bindings[],
+- `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[]}
+  — `boot_id`: uuid, новый на каждый запуск процесса воркера, одинаковый во всех `hello`
+  этого процесса (§5.2, §17.3). В `capabilities` в итерации 1 воркер кладёт
+  `workspace_path` — единственный workspace из своего конфига; хаб создаёт по нему
+  workspace в личном проекте владельца, без него сессию не создать (`409 no_workspace`).
+  Временное поле до `workspace.create` (TODO §19, итерация 2).
 - `event` {event} → `ack` (`session_id` внутри события)
 - `session.state` {session_id, process_state, runtime_session_id?, locked_by}
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event} — события из
@@ -363,55 +409,84 @@ MCP-вызовы (worker → hub → worker):
 токены воркеров; маршрут людей `/api/*` принимает только JWT Access. Хаб слушает только
 интерфейс туннеля.
 
+Dev-режим (локальная разработка без Access): `HQC_DEV=1` вместе с `HQC_DEV_USER=<email>`,
+все запросы `/api/*` идут от этого пользователя. Хаб отказывается стартовать, если
+при этом заданы `HQC_ACCESS_*` или `HQC_HUB_LISTEN` — не loopback (`127.0.0.0/8`,
+`[::1]`, `localhost`); при старте пишет громкое предупреждение (§20).
+
+Тела REST и фреймы `/api/ws` типизированы в `hqc-proto` (`api`, `client_frame`),
+примеры-контракт — `examples/wire/api.*.json` и `client.*.json`; их читают тесты хаба
+и клиента. Неизвестные поля игнорируются в обе стороны.
+
 HTTP API итерации 1 (список не полный; остальное помечено «позже»):
 
 - `GET /api/me`; позже `PATCH /api/me` (ключи, часовой пояс)
 - `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/{id}`
-- `GET/POST /api/projects/{id}/sessions`, `GET/PATCH/DELETE /api/sessions/{id}` (§17.4)
-- `GET /api/sessions/{id}/events?after_seq=&limit=` — пагинация по `seq`
-- `POST /api/sessions/{id}/input` {text, artifact_ids[], client_op_id}
+- `GET/POST /api/projects/{id}/sessions` (список — `{sessions: [<сессия>]}`, создание —
+  `201` и объект сессии), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4)
+- `GET /api/sessions/{id}/events?after_seq=&limit=` — пагинация по `seq`, ответ
+  `{events[], last_seq}`
+- `POST /api/sessions/{id}/input` {text, artifact_ids[], client_op_id} → `201 {event}` —
+  сохранённое `user.message` с `client_op_id` и `delivery: pending`; повтор с тем же
+  `client_op_id` (дедупликация по `(session_id, client_op_id)`) → `200 {event}` с событием,
+  сохранённым в первый раз
 - `POST /api/sessions/{id}/stop`, `/steer`, `/takeover` (§9.3), `/archive`,
   `/unarchive`, `/retry` (§5.2)
-- `POST /api/sessions/{id}/requests/{request_id}` {option_id | answers}
+- `POST /api/sessions/{id}/requests/{request_id}` {option_id | answers} → `{event_id, seq}`
+  сохранённого ответа; закрытый запрос — `409 request_closed` (§10.1)
 - `POST /api/artifacts` (multipart) → `{id}`; `GET /api/artifacts/{id}/url` →
   подписанная ссылка (§12)
 - `PUT /api/sessions/{id}/read_cursor` {last_read_seq}
-- `GET /api/workers`, `POST /api/workers/enroll/confirm` {code},
+- `GET /api/workers` → `{workers[]}`, `POST /api/workers/enroll/confirm` {code, name?} →
+  `{worker_id, name}` (клиент открывает экран и по ссылке `#/enroll?code=XXXX-XXXX`, §5.1),
   `DELETE /api/workers/{id}`, `GET /api/workers/{id}/candidates`
 - `GET/POST /api/workspaces`, `PATCH /api/workspaces/{id}` (зеркало, метка),
   `DELETE /api/workspaces/{id}`
 - `GET /api/search?q=&project=&fuzzy=`
 - `GET/POST/DELETE /api/grants`
-- `POST /api/push/subscribe` (тело — `PushSubscription.toJSON()`: `{endpoint, keys:
-  {p256dh, auth}}`), `DELETE /api/push/subscribe {endpoint}`, `GET /api/push/vapid` →
-  `{public_key}` (`null`, если push не настроен)
+- `POST /api/push/subscribe` (тело — `PushSubscription.toJSON()`: `{endpoint,
+  expirationTime?, keys: {p256dh, auth}}`), `DELETE /api/push/subscribe {endpoint}`,
+  `GET /api/push/vapid` → `{public_key}` (base64url несжатой точки P-256; `null`, если
+  push не настроен — клиент показывает «уведомления на хабе выключены»). Тело самого
+  push — §16.
 - позже: `/api/schedules` (ScheduledMessage), `/api/projects/{id}/template`
+
+Объект сессии (`GET /api/sessions/{id}`, список, создание, `PATCH`, `archive`):
+`{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, slug, agent: {runtime,
+acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
+disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
+last_seq, archived, state, queue_len, last_read_seq, unread, created_at, updated_at}`.
+`state`, `queue_len` (§17.1), `last_read_seq` и `unread` вычисляются для запросившего
+пользователя.
 
 WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` и получает
 события с `seq > after_seq`, затем живой поток; `agent.delta` без `seq`. Событие,
 сохранённое из ввода клиента, несёт его `client_op_id`, чтобы клиент показывал
 сообщение сразу и сверял с эхом (приём из Agent Host Protocol, §22). Отдельная
-подписка `subscribe_summary {}` даёт `state`, `queue_len` и непрочитанное по сессиям.
+подписка `subscribe_summary` даёт `state`, `queue_len` и непрочитанное по сессиям.
 После переподключения клиент повторяет `subscribe` с последним виденным `seq`.
 
-Фреймы `/api/ws` — JSON без `id`:
+Фреймы `/api/ws` — плоские JSON-объекты `{type, ...}` без `id` и без обёртки `payload`:
 - клиент → хаб: `{type: subscribe, session_id, after_seq?}`, `{type: unsubscribe,
   session_id}`, `{type: subscribe_summary}`, `{type: ping}`;
 - хаб → клиент: `{type: event, event}` — событие как хранится (§3), у `agent.delta` без
   `seq`; `{type: subscribed, session_id, last_seq}` — история после `after_seq` отдана,
   дальше живой поток; `{type: delivery, session_id, event_id, seq, delivery,
-  delivered_at}` — изменилась доставка ввода; `{type: summary, sessions[]}` и
-  `{type: session.summary, session}` с `{session_id, project_id, title, state,
-  queue_len, unread, last_seq, last_read_seq}`; `{type: pong}`; `{type: error, code,
-  message, session_id?}`.
-- `unread` — число событий `agent.message`, `approval.request`, `clarify.request`,
-  `peer.message`, `system` с `seq > last_read_seq`.
+  delivered_at?}` — изменилась доставка ввода, само событие повторно не присылается,
+  клиент обновляет у себя `delivery`/`delivered_at` события с этим `seq`;
+  `{type: summary, sessions[]}` — ответ на `subscribe_summary`, все сессии пользователя;
+  `{type: session.summary, session}` — изменилась одна сессия; элемент — `{session_id,
+  project_id, title, state, queue_len, unread, last_seq, last_read_seq}` (то же, что
+  в объекте сессии); `{type: pong}`; `{type: error, code, message, session_id?}`.
+  Неизвестный `type` клиент игнорирует.
+- `unread` — число событий с `seq > last_read_seq` среди: `agent.message` с
+  `final: true`, `approval.request`, `clarify.request`, `peer.message`, `system`.
+  Промежуточные `agent.message` (`final: false`), `status`, `usage`, вызовы инструментов
+  и вводы непрочитанным не считаются.
 
 Ошибки REST: `{error: <code>, message}` с HTTP-статусом; `409` с кодами `archived`,
 `locked_vscode`, `request_closed`, `no_worker`, `no_workspace`. `GET .../events`
-дополнительно принимает `before_seq` (последние `limit` событий до него), ответ
-`{events[], last_seq}`. Повторный `POST /input` с тем же `client_op_id` возвращает
-уже сохранённое событие.
+дополнительно принимает `before_seq` (последние `limit` событий до него).
 
 ## 7. MCP-инструменты для агентов
 
@@ -527,7 +602,10 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 --permission-prompt-tool stdio --strict-mcp-config --mcp-config '<json>'
 --allowedTools mcp__hqc --session-id <uuid>` для новой сессии
 (uuid назначает хаб, кладёт в `runtime_session_id`) и `--resume <uuid>` для
-продолжения. `--permission-prompt-tool stdio` обязателен: без него CLI ничего
+продолжения. Выбор между ними делает наличие транскрипта
+`<config>/projects/<encoded cwd>/<uuid>.jsonl` (§9), а не `mode` из `session.start`:
+и `start`, и `resume` адаптера при существующем файле используют `--resume`, иначе
+`--session-id`. `--permission-prompt-tool stdio` обязателен: без него CLI ничего
 не спрашивает у хоста, а сразу отклоняет всё, что требует подтверждения
 (`system/permission_denied`, `permission_decision.source: config`), и `AskUserQuestion`
 не попадает в список инструментов (проверено на 2.1.307). `--allowedTools mcp__hqc`
@@ -577,6 +655,16 @@ allow|deny`. Варианты для клиента: `once`, `session`, `always`
 CLI повторяет в stdout каждый `control_response`, который адаптер отправил в stdin;
 адаптер такие строки пропускает. `in_reply_to` = `event_id` ввода, который адаптер
 отправил последним.
+
+Не каждый вызов инструмента спрашивает разрешение: команды только для чтения (например,
+`echo`) CLI разрешает сам, без `can_use_tool`, поэтому `approval.request` приходит не на
+каждый `Bash` (проверено на 2.1.308 живым прогоном T4).
+
+Прерывание хода (`session.stop`): адаптер шлёт в stdin `control_request {subtype:
+"interrupt"}`; CLI завершает ход записью `result` с `subtype: error_during_execution`,
+частичный текст ответа приходит отдельной записью `assistant`, процесс остаётся жив
+(проверено на 2.1.308). Если `result` нет за 10 с, группе процесса уходит SIGINT; CLI
+на нём завершается, и следующий ввод поднимает процесс через `--resume`.
 
 Рабочий каталог — `<workspace>/<cwd>`. Окружение процесса — из привязки пути
 workspace в локальном конфиге воркера (§14). Авторизация — подписка, уже залогиненная
@@ -684,9 +772,15 @@ SDK) **не используется**: нативный адаптер §8.1 п
 ## 9. Зеркало и импорт сессий Claude Code
 
 Плагин VS Code и CLI пишут одни и те же файлы
-`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. Имя папки получается из пути заменой
-символов на `-` и **обратно не декодируется** (`/a/b.c` и `/a/b-c` совпадают).
-Поэтому рабочий каталог сессии воркер берёт из поля `cwd` в записях jsonl, держит
+`<config>/projects/<encoded-cwd>/<uuid>.jsonl`, где `<config>` — `$CLAUDE_CONFIG_DIR` или
+`~/.claude`. Кодирование имени папки (как в CLI 2.1.308, сверено с именами папок
+прогонов T0 и с эталоном функции CLI): кодируется реальный путь рабочего каталога
+(`process.cwd()`, симлинки раскрыты: `/tmp` → `/private/tmp` на macOS); каждая UTF-16
+единица, не являющаяся ASCII-буквой или цифрой, заменяется на `-`; если результат длиннее
+200 символов — первые 200 символов, `-` и base36 от модуля 32-битного хэша строки
+(`h = (h << 5) - h + unit | 0` по UTF-16 единицам). Так адаптер и зеркало находят
+файл по пути. Обратно имя **не декодируется** (`/a/b.c` и `/a/b-c` совпадают),
+поэтому рабочий каталог сессии воркер берёт из поля `cwd` в записях jsonl, держит
 кэш «файл → cwd» на диске (§5.2) и имя папки использует только как ключ. Подпапки
 с транскриптами субагентов и файлы, не являющиеся `<uuid>.jsonl`, игнорируются.
 Проверено на 2.1.307: кроме `user`/`assistant` в файле есть записи `attachment`,
@@ -712,6 +806,9 @@ SDK) **не используется**: нативный адаптер §8.1 п
   с `locked_by: vscode` и `cwd` из записи.
 - Поскольку адаптер и зеркало выводят `event_id` из одного и того же `uuid` записи,
   стык при переключении `locked_by` в любую сторону гасится уникальным индексом.
+  Для записи с несколькими блоками контента правило §3 Event обязательно и для
+  зеркала: блок `i > 0` — v5 от `"<uuid>/<i>"`. CLI до сих пор писал один блок на
+  запись (все фикстуры и живые прогоны), но иначе стык дал бы дубли.
 
 Сессия с `locked_by: vscode` видна в хабе read-only с пометкой «ведётся в VS Code».
 
@@ -745,11 +842,16 @@ SDK) **не используется**: нативный адаптер §8.1 п
 **варианты из `options[]` запроса**, с подписями по `canonical`; у Claude Code это
 once / session / always / deny, у ACP-агентов — то, что предложил агент. Запрос
 уходит **владельцу воркера**; коллега с `write` видит запрос, но ответить не может.
-Первый ответ побеждает; истечение, `session.stop`, ответ с другого устройства,
+Первый ответ побеждает: он закрывает запрос, событие `approval.response` видят все
+устройства, и клиент убирает кнопки. Второй ответ (с другого устройства) получает
+`409 request_closed`; события отмены при этом не пишется. Истечение, `POST /stop`,
 перезапуск воркера и архивация дают `approval.cancel`, клиент убирает кнопки.
-Если отмену инициирует хаб (истечение, ответ с другого устройства, архивация), он пишет
-событие `approval.cancel` и шлёт воркеру фрейм `approval.response` с вариантом
-`canonical: deny`, чтобы адаптер закрыл запрос в рантайме (§5.3). Открытый `clarify`
+Все эти отмены пишет хаб: при истечении, `stop` и архивации он пишет событие
+`approval.cancel` и шлёт воркеру фрейм `approval.response` с вариантом `canonical: deny`,
+чтобы адаптер закрыл запрос в рантайме (§5.3); при перезапуске воркера — только событие
+(§5.2). При `POST /stop` хаб сначала отменяет открытые запросы с `stopped`, затем шлёт
+`session.stop`; адаптер и супервизор воркера при `session.stop` отмену не эмитят (запросы,
+открытые к концу прерванного хода, адаптер Claude Code молча забывает). Открытый `clarify`
 хаб отменяет так же: событие `clarify.cancel` и фрейм `clarify.response` с
 `answers: {}`; адаптер отвечает рантайму `deny`, ход продолжается без ответов.
 При `auto_approve` хаб отвечает первым вариантом с `canonical: once`, `by: auto`;
@@ -919,6 +1021,15 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 только из установленного PWA — ограничение первой версии. Мост в Telegram —
 опционально, через `hermes send`.
 
+Тело push (JSON, `hqc_proto::api::PushMessage`, пример `examples/wire/api.push.json`):
+`{session_id, type, title?, body?, tag?, payload?}`, где `type` — тип события,
+`payload` — само событие §4 как хранится. Хаб кладёт `title` (название сессии), `body`
+(краткий текст), `tag` (`<session_id>:<request_id>` для запросов, иначе
+`<session_id>:<type>`: уведомление с тем же тегом заменяет предыдущее) и опускает
+`payload`, если сообщение не влезает в push (около 4 КБ). Сервис-воркер клиента без
+`title`/`body` строит их по `type` и `payload`, показывает `approval.request` и
+`clarify.request` с `requireInteraction`, по клику открывает `#/s/<session_id>`.
+
 Крон хаба: `ScheduledMessage` — в `at` или по `cron` в `timezone` пользователя
 отправить `message` в `session_id`, либо создать сессию по шаблону проекта
 в `workspace_id` и отправить туда. Пропущенные запуски (хаб лежал): при `catch_up`
@@ -963,9 +1074,17 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 - Воркер офлайн: ввод копится в хабе (`pending`), сессия `worker_offline`,
   доставка при подключении в порядке `seq`. Открытые `approval` на офлайн-воркере
   остаются открытыми до его возвращения или `expires_at`.
-- Перезапуск воркера: все агенты `stopped`; открытые `approval` получают
-  `approval.cancel {worker_restart}`; незавершённый ход теряется, хаб пишет `system`;
-  `pending` вводы досылаются после `hello`.
+- Перезапуск воркера хаб узнаёт по новому `boot_id` в `hello` (§5.2): все агенты
+  `stopped`; открытые `approval`/`clarify` получают `approval.cancel`/`clarify.cancel
+  {worker_restart}`; незавершённый ход теряется, хаб пишет `system turn_lost`;
+  `pending` вводы досылаются после `hello` (через `session.start` с `mode: resume`).
+  Переподключение с тем же `boot_id` — не перезапуск, ничего не отменяется.
+- Процесс агента, завершившийся в первые 500 мс после запуска, считается неудачным
+  стартом: `start`/`resume` адаптера возвращает ошибку (воркер отвечает
+  `agent_start_failed`, retryable, §5.2), а не «процесс завершился» — иначе воркер с
+  непустой очередью поднимал бы его по кругу. Процесс, умерший позже с ошибкой или
+  посреди хода, даёт `system agent_exited`; воркер поднимает его через `resume`, если в
+  очереди есть ввод.
 - Перезапуск хаба: воркеры переподключаются, досылают outbox; `PendingRequest`
   восстанавливаются из базы, недоставленные `mcp.result` досылаются.
 
@@ -985,7 +1104,9 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 - Worker: Rust, один статический бинарник на macOS/Linux/Windows, systemd/launchd/
   служба Windows, опциональная иконка в трее. MCP-сервер на `rmcp` (подкоманда
   `hqc-worker mcp`). ACP-клиент — крейт `agent-client-protocol` (официальный Rust SDK
-  протокола) **[проверить]** актуальность. Secure store для токенов и ключей.
+  протокола) **[проверить]** актуальность. Secure store для токенов и ключей: Keychain
+  на macOS; на Linux и Windows в первой версии токен воркера — файл 0600 (§5.1),
+  libsecret и DPAPI позже.
 - Client: TypeScript, адаптивный веб, PWA; Tauri на том же коде позже.
 - Общие крейты: `hqc-proto` (схема событий и фреймов, версионируется),
   `hqc-claude-jsonl` (парсер транскриптов), адаптеры — отдельные крейты.
@@ -1014,6 +1135,8 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 - Хаб слушает только интерфейс туннеля; `/api/*` за Cloudflare Access с проверкой
   JWT; `/worker/*` вне Access, только токены воркеров, rate limit на enroll;
   `artifacts.<hub-domain>` публичный, только подписанные ссылки с TTL.
+- Dev-режим хаба (`HQC_DEV=1`, без Access) допускается только на loopback-адресе
+  `HQC_HUB_LISTEN` и без `HQC_ACCESS_*`; иначе хаб не стартует (§6).
 - Токены воркеров — случайные 256 бит, в базе только хэш; отзыв из UI.
 - `api_keys` пользователей шифруются мастер-ключом из env хаба.
 - Cloudflare Tunnel: лимит тела запроса ~100 МБ (совпадает с лимитом артефакта),
@@ -1067,6 +1190,39 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.10 → 0.11 (T7, сведение протокола хаба, воркера и клиента)
+Ветки T2–T5 разошлись в деталях провода; победила форма 0.10 (T2), воркер и клиент
+подстроились, исключения ниже. Изменения `hqc-proto`: `hello.boot_id`, `session.start.mode`,
+причина `answered_elsewhere` убрана, новые модули `client_frame` и `api` с примерами
+`client.*.json` и `api.*.json`; новая миграция хаба `0002` (`workers.boot_id`,
+`sessions.start_sent`).
+§5.1: тело `POST /worker/enroll` — `{name, os, protocol_version}`, неизвестные поля
+игнорируются; воркер опрашивает по `poll_token` (не `enroll_id`) и печатает ссылку
+`<hub>/#/enroll?code=`; версия `hello` проверяется до строгого разбора; токен вне macOS —
+файл 0600, libsecret/DPAPI позже (и §18). §5.2: перезапуск воркера — только смена
+`boot_id` (отмена запросов `worker_restart` без фрейма, сброс неподтверждённых ответов,
+`turn_lost`), тот же `boot_id` ничего не отменяет — снято прежнее «не отличает»
+**[решение]**; после `hello` — `session.start` (`mode: resume`) сессиям с `pending`
+вводом, открытым запросом или неподтверждённым ответом, затем ответы, затем вводы;
+`ack` ввода и `agent.delta` идут мимо outbox, хаб не полагается на их порядок (поздний
+`ack` не открывает ход, на который уже есть финальный ответ).
+§5.3: `mode` (`new` | `resume`). §5.4: `boot_id`, временный
+`capabilities.workspace_path` (TODO §19). §3: правило `event_id` для записи с
+несколькими блоками (и §9.2); `Worker.boot_id`. §4: список кодов `system`;
+`answered_elsewhere` убран. §6: dev-режим только на loopback (и §20); тела и фреймы из
+`hqc-proto`; плоские фреймы `/api/ws`, `delivery` вместо повторной отправки события,
+`delivered_at?`; объект сессии; списки `{sessions}`, `{events, last_seq}`; ответ
+`POST /input` — `{event}` (201, повтор `client_op_id` — 200); `unread` считает только
+финальный `agent.message`; `public_key: null`. §8.1: прерывание хода `control_request
+interrupt` с запасным SIGINT через 10 с; команды только для чтения CLI разрешает сам;
+`--resume`/`--session-id` по наличию транскрипта. §9: точное правило кодирования папки
+(CLI 2.1.308) вместо одного «не декодируется». §10.1: второй ответ — `409
+request_closed` без события отмены; отмены при `stop` пишет только хаб. §16: тело push
+`{session_id, type, title?, body?, tag?, payload?}` с событием в `payload`
+(исключение из принципа: форма клиента). §17.3: `boot_id`; процесс, умерший в первые
+500 мс, — неудачный старт. Вопросы и решения — `docs/notes/t2..t5-questions.md`
+(«Решено в 0.11»).
 
 ### 0.9 → 0.10 (T2)
 Записано поведение хаба, которое спека не фиксировала. §5.1: HTTP-регистрация воркера

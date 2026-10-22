@@ -16,11 +16,13 @@
    - `enroll_id` — секрет между воркером и хабом, передаётся в теле, не в URL (не попадает
      в access-логи). По умолчанию опрос раз в 2 с, ожидание до `expires_at` или 15 мин.
    **→ спека §5.1/§6, согласовать с T2.**
+   Решено в 0.11: форма хаба — `{code, poll_token, expires_at, poll_interval_s}` и опрос по `poll_token`; воркер печатает и ссылку `<hub>/#/enroll?code=` (§5.1).
 2. **Secure store.** macOS — Keychain (generic password, service `hqc-worker`,
    account = `hub_url`). Другие ОС — файл `$HQC_HOME/token` с правами 0600 (каталог 0700,
    запись через временный файл и rename). libsecret/DPAPI из §5.1 не сделаны.
    `HQC_TOKEN_STORE=file` включает файловый бэкенд на любой ОС (так работают тесты).
    **→ спека §5.1: пометка «вне macOS пока файл 0600».**
+   Решено в 0.11: записано в §5.1 и §18 (файл 0600 в первой версии, libsecret и DPAPI позже).
 3. `enroll` не пишет `worker.toml`: `hub_url` в конфиге задаётся руками; если конфига нет,
    enroll подсказывает путь.
 
@@ -51,15 +53,18 @@
    `idle_timeout`, падения), иначе `Adapter::start`. После перезапуска воркера первый
    запуск — `start`; адаптер Claude Code (T4) должен сам перейти на `--resume`, если
    jsonl с этим uuid уже есть. **→ спека §5.3: флаг `resume` в `session.start`?**
+   Решено в 0.11: `session.start.mode` (`new` → `Adapter::start`, `resume` → `Adapter::resume`); внутренние перезапуски процесса по-прежнему `resume` (§5.3).
 8. **Ввод для сессии без `session.start`** в текущем процессе (например, хаб после `hello`
    досылает `pending`, не прислав `session.start`) → `error {code: unknown_session,
    retryable: true}`. Ожидаем, что хаб шлёт `session.start` перед досылкой вводов.
    **→ согласовать с T2.**
+   Решено в 0.11: после `hello` хаб шлёт `session.start` (`mode: resume`) и только после `ack` досылает ответы и вводы; ответ `unknown_session` retryable остаётся (§5.2).
 9. `ack` на `session.start` — пустой `{}` после успешного `start`/`resume`; повторный
    `session.start` для живого процесса — тоже `ack {}` (процесс не пересоздаётся).
    `ack {}` на `session.stop`, `session.kill`, `approval.response`, `clarify.response`;
    ошибка адаптера на них — `error {internal}`. `session.kill` для неизвестной сессии —
    `ack {}` (убивать нечего).
+   Решено в 0.11: `ack` на `session.start` для живого процесса записан в §5.2 (хаб на это опирается при переподключении).
 10. **`session.kill` очищает очередь воркера.** Вводы остаются `pending` в хабе, но хаб
     досылает их только после следующего `hello`. **→ вопрос к T2/спеке: что хаб делает
     с очередью при kill.**
@@ -76,6 +81,7 @@
     событие `system {code: "agent_exited"}` через outbox; если в очереди есть вводы,
     процесс поднимается через `resume`. Код `agent_exited` новый. **→ спека §4: список
     кодов `system`.**
+    Решено в 0.11: список кодов `system` с `agent_exited` — в §4.
 15. `session.state`: `locked_by: hqc`, пока процесс не `stopped`, иначе `none`. Все
     состояния переотправляются после каждого `hello.ack`.
 16. `error` от хаба на фрейм `event`: `retryable: false` — событие удаляется из outbox

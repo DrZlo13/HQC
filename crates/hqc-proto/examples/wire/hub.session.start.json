@@ -1,0 +1,19 @@
+{
+  "id": "f-2",
+  "type": "session.start",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "runtime": "claude_code",
+    "model": "claude-sonnet-5-5",
+    "workspace_path": "/Users/home-mac/work/hqc",
+    "cwd": ".",
+    "environment": "default",
+    "runtime_session_id": "36c72c19-b4ad-4d95-a482-ce4e281952cb",
+    "disallowed_tools": [],
+    "restricted": false,
+    "auto_approve": false,
+    "session_token": "st_example",
+    "owner_is_worker_owner": true,
+    "ask_timeout_s": 600
+  }
+}

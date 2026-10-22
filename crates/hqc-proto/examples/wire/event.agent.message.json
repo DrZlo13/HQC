@@ -1,0 +1,9 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000103",
+  "seq": 42,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "agent.message",
+  "payload": { "text": "All tests pass.", "final": true, "in_reply_to": "0199f3a2-7c10-7000-8000-000000000101" }
+}

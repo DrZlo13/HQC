@@ -42,6 +42,10 @@ JSON-примером из спеки. Приёмка: `cargo test -p hqc-proto`
 - Postgres, миграции `sqlx`: users, workers, projects, sessions, events (уникальный
   индекс по `event_id`, `seq` на сессию), pending_requests, read_cursors,
   push_subscriptions, enroll_codes.
+- Хранение событий: `payload` пишется в `jsonb` ровно в том виде, в каком пришёл от
+  воркера или клиента, и клиентам отдаётся тот же сырой JSON. Типы `hqc-proto` — только
+  для логики хаба; из них обратно в хранилище ничего не сериализуется, иначе значения
+  перечислений от более нового воркера превратятся в `unknown` (§4, §5.2).
 - Проверка JWT `Cf-Access-Jwt-Assertion` по JWKS; dev-режим `HQC_DEV_USER=<email>`
   без Access для локальной разработки, явно только при `HQC_DEV=1`.
 - Маршрут `/worker/ws`: токен воркера, `hello`/`hello.ack` с версией, `event` → `ack`
@@ -90,6 +94,9 @@ JSON-примером из спеки. Приёмка: `cargo test -p hqc-proto`
 - Эхо собственных `control_response` в stdout пропускается; `ack` на `session.input` —
   по `user` с `isReplay: true`.
 - `AskUserQuestion` → `clarify.request`, ответ — `updatedInput.answers` (T0 подтвердил).
+  Фрейм `clarify.response` с `answers: {}` — отмена хабом: адаптер отвечает на
+  `can_use_tool` для `AskUserQuestion` поведением `deny`, модель продолжает ход без
+  ответов (§5.3, §10.1).
 - `usage` по `result`, `status idle`.
 - Ввод во время хода не отправляется в процесс: очередь ведёт супервизор (§17.2).
 Приёмка: тесты на фикстурах stream-json без запуска `claude`; один живой тест за

@@ -1,0 +1,14 @@
+{
+  "id": "w-1",
+  "type": "hello",
+  "payload": {
+    "protocol_version": 1,
+    "capabilities": { "claude_code": { "version": "2.1.307" }, "acp_agents": [] },
+    "environments": ["default"],
+    "env_bindings": [],
+    "allowed_roots": ["/Users/home-mac/work"],
+    "allow_foreign_sessions": false,
+    "share_local_models": false,
+    "local_models": []
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "w-1",
+  "type": "error",
+  "payload": {
+    "code": "protocol_version_unsupported",
+    "message": "worker protocol 0 is older than 1",
+    "retryable": false,
+    "details": {
+      "min_version": 1
+    }
+  }
+}

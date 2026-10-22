@@ -1,0 +1,19 @@
+{
+  "id": "f-3",
+  "type": "session.input",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "event_id": "0199f3a2-7c10-7000-8000-000000000101",
+    "text": "Run the tests",
+    "artifact_ids": [
+      "0199f3a2-7c10-7000-8000-0000000000f1"
+    ],
+    "peer_prefix": [
+      {
+        "from": "personal/build-bot",
+        "text": "Nightly build is green.",
+        "ts": "2026-10-22T09:30:00Z"
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-00000000010f",
+  "seq": 42,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "usage",
+  "payload": { "input_tokens": 1200, "output_tokens": 340, "cache_read": 9000, "cache_write": 0, "cost_usd": 0.0123, "model": "claude-sonnet-5-5" }
+}

@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.8, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.9, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -135,10 +135,11 @@ Workspace — **логическая** граница: все операции h
 и адаптером, и зеркалом, и импортом — это uuid v5 от `uuid` записи, поэтому один
 и тот же факт из двух источников даёт один `event_id`; для остальных — v7 от
 отправителя), `seq` (назначает хаб, монотонный в сессии), `ts`, `author`
-(`{kind: user|agent|system, id}`; для агента `id` = его `session_id`), `type`,
-`payload`, `chain` (`{chain_id, depth, hops}` для цепочек агент→агент, иначе null),
-`client_op_id` (эхо для клиента), `delivery` (для `user.message` и `peer.message`:
-`pending | delivered | failed`, `delivered_at`).
+(`{kind: user|agent, id}` или `{kind: system}` без `id`; для агента `id` = его
+`session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops}` для цепочек
+агент→агент, иначе null), `client_op_id` (эхо для клиента), `delivery` и
+`delivered_at` — два плоских поля события, только у `user.message` и `peer.message`:
+`delivery` ∈ `pending | delivered | failed`, `delivered_at` — время доставки.
 
 ### ReadCursor
 `user_id`, `session_id`, `last_read_seq`. Источник «непрочитанного».
@@ -166,28 +167,37 @@ Workspace — **логическая** граница: все операции h
 ## 4. Схема событий
 
 Единая схема для всех рантаймов. Адаптер переводит поток рантайма в эти события,
-клиент рендерит только их. Неизвестные поля в `payload` допустимы. Колонка «источник» —
-компонент, который производит событие; `author` задаётся по §3.
+клиент рендерит только их. Колонка «источник» — компонент, который производит событие;
+`author` задаётся по §3. `?` — необязательное поле: отсутствует, если значения нет
+(`null` читается так же).
 
 | type | payload | источник |
 |---|---|---|
 | `user.message` | `text`, `artifact_ids[]` | клиент |
 | `agent.delta` | `text` | адаптер; только транспорт, в базу не пишется |
-| `agent.message` | `text`, `final`, `in_reply_to` (event_id ввода, начавшего ход) | адаптер. `final: true` — конец хода; `final: false` — текст между вызовами инструментов |
+| `agent.message` | `text`, `final`, `in_reply_to?` (event_id ввода, начавшего ход) | адаптер. `final: true` — конец хода; `final: false` — текст между вызовами инструментов |
 | `agent.thinking` | `text` | адаптер, если рантайм отдаёт |
 | `tool.call` | `call_id`, `tool`, `args_preview` | адаптер |
-| `tool.result` | `call_id`, `result_preview`, `error`, `duration_ms`, `artifact_id?` (дифф или большой результат, §12) | адаптер |
-| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at` | адаптер; `options` — **реальные варианты агента**, `canonical` ∈ once/session/always/deny/deny_always для кнопок клиента |
+| `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (краткий текст ошибки), `duration_ms?`, `artifact_id?` (дифф или большой результат, §12) | адаптер |
+| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?` | адаптер; `options` — **реальные варианты агента**, `canonical` ∈ once/session/always/deny/deny_always для кнопок клиента |
 | `approval.response` | `request_id`, `option_id`, `by` (user id или `auto`) | клиент или хаб при `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/answered_elsewhere/worker_restart/archived) | адаптер, воркер или хаб |
-| `clarify.request` / `clarify.response` / `clarify.cancel` | `request_id`, `questions[]` / `answers` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput.answers` (проверено на 2.1.307 при `--permission-prompt-tool stdio`, §8.1). У ACP-агентов источника нет |
-| `attachment` | `artifact_id`, `kind`, `name`, `caption` | клиент или агент через `hqc_attach` |
-| `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id` (для ask) | хаб по `hqc_send`/`hqc_ask` |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read`, `cache_write`, `cost_usd?`, `model` | адаптер Claude Code по `result`; у ACP-агентов необязательно и без `cost_usd` (стандартного usage в ACP v1 нет) |
-| `status` | `state` (§17.1), `detail` | воркер или хаб |
+| `clarify.request` | `request_id`, `questions[{id, text, options?: [string], multi?: bool}]` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput.answers` (проверено на 2.1.307 при `--permission-prompt-tool stdio`, §8.1). У ACP-агентов источника нет |
+| `clarify.response` | `request_id`, `answers` (`{<id вопроса>: string \| [string]}`) | клиент |
+| `clarify.cancel` | `request_id`, `reason` (тот же набор, что у `approval.cancel`) | адаптер, воркер или хаб |
+| `attachment` | `artifact_id`, `kind`, `name`, `caption?` | клиент или агент через `hqc_attach` |
+| `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id?` (для ask) | хаб по `hqc_send`/`hqc_ask` |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `model?` | адаптер Claude Code по `result`; у ACP-агентов необязательно и без `cost_usd` (стандартного usage в ACP v1 нет) |
+| `status` | `state` (§17.1), `detail?` | воркер или хаб |
 | `system` | `text`, `code` | хаб: сессия создана, подхвачена, workspace удалён, ввод не доставлен и т.п. |
 
 Правила:
+
+- События терпимые: неизвестные поля в `payload` игнорируются; событие неизвестного
+  `type` разбирается как «неизвестное» и хранится и пересылается как есть, клиенты его
+  не рендерят, но не падают; неизвестное значение перечисления внутри события
+  (`state`, `canonical`, `mode`, `kind`, `reason`) читается как «неизвестное». Событие
+  известного `type` с неверным `payload` — ошибка.
 
 - `artifact_ids[]` в `user.message` — вложения к сообщению; отдельное событие
   `attachment` — для файлов без текста.
@@ -203,14 +213,22 @@ Workspace — **логическая** граница: все операции h
 heartbeat 20 с, переподключение с экспоненциальной задержкой.
 
 Каждый фрейм: `{id, type, payload}`. Ответ на фрейм-запрос:
-`{id, type: "ack"|"result"|"error", payload}` с тем же `id`. Ошибка:
-`{code, message, retryable}`.
+`{id, type: "ack"|"result"|"error", payload}` с тем же `id` (на `hello` — `hello.ack`
+или `error`). Поля с `?` — как в §4.
+
+- `ack` {event_id?, seq?}: на `event` — `{event_id, seq}` (§5.2), на `session.input` —
+  `{event_id}` доставленного ввода, в остальных случаях пустой `{}`.
+- `error` {code, message, retryable, details?}. Начальный список `code`:
+  `protocol_version_unsupported` (`details: {min_version}`), `unauthorized`,
+  `unknown_session`, `invalid_frame`, `agent_start_failed`, `internal`. Коды — строки,
+  список открытый; неизвестный код обрабатывается как `internal`.
 
 ### 5.1 Регистрация и версия
 `hqc-worker enroll <hub-url>` печатает код, пользователь подтверждает его в вебе под
 своим логином, воркер получает долгоживущий токен (хранится в локальном secure store:
 Keychain, libsecret, DPAPI). Токен отзывается из UI. В `hello` воркер шлёт
-`protocol_version`; хаб отвечает `hello.ack` или `error {min_version}`. При
+`protocol_version`; хаб отвечает `hello.ack {protocol_version, worker_id, server_time}`
+или `error {code: protocol_version_unsupported, details: {min_version}}`. При
 несовместимости воркер пишет в лог и в трей «нужно обновление», повторяет попытку
 раз в час и не делает ничего другого; обновление — руками или `hqc-worker update`.
 
@@ -219,14 +237,23 @@ Worker → hub:
 - Воркер ведёт **outbox** на диске: событие сначала пишется в outbox, потом отправляется.
   Через outbox идут `event`, `mirror.event`, `mcp.call`.
 - Хаб отвечает `ack {event_id, seq}`; до ack воркер повторяет после переподключения.
-- Дубли отбрасываются по `event_id` (уникальный индекс). События для сессий, которых
-  хаб не знает (удалены), получают `ack` и отбрасываются.
+- Дубли отбрасываются по `event_id` (уникальный индекс) и получают `ack` с `seq` уже
+  сохранённого события. События для сессий, которых хаб не знает (удалены), получают
+  `ack` с `seq: null` (поле может и отсутствовать) и отбрасываются.
+- Фреймы worker ↔ hub строгие: версия согласована в `hello`, фрейм неизвестного `type`
+  или с неверным `payload` получает `error {code: invalid_frame}`. Терпимость к
+  неизвестному — только внутри событий (§4): хаб сохраняет событие неизвестного
+  `type` как есть.
+- Хаб хранит `payload` события в том виде, в каком получил (`jsonb` как есть), и отдаёт
+  клиентам тот же сырой JSON; типизированный разбор — только для логики хаба, обратно
+  в хранилище из типов ничего не сериализуется, поэтому значения от более нового
+  воркера не теряются.
 - `seq` назначает хаб; клиенты видят только события с `seq`.
 - `agent.delta` в outbox не пишется и при обрыве теряется, это допустимо.
 
 Hub → worker:
 - `user.message` и `peer.message` хаб хранит с `delivery: pending` и шлёт как
-  `session.input`. Воркер отвечает `ack` после передачи ввода в рантайм (Claude Code —
+  `session.input`. Воркер отвечает `ack {event_id}` после передачи ввода в рантайм (Claude Code —
   после эха `--replay-user-messages`; ACP — после отправки `session/prompt`). После
   `hello` хаб досылает все `pending` вводы сессий этого воркера в порядке `seq`.
 - Если процесс агента не стартует (нет бинарника, профиль не настроен), воркер
@@ -251,13 +278,15 @@ MCP-вызовы (worker → hub → worker):
   не шлёт, её ход идёт дальше.
 
 ### 5.3 Фреймы hub → worker
-- `session.start` {session_id, runtime, acp_agent?, model, workspace_path | null, cwd,
+- `session.start` {session_id, runtime, acp_agent?, model?, workspace_path | null, cwd,
   environment, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s}
   — `owner_is_worker_owner` нужен воркеру для `allow_foreign_sessions`, выбора
   профиля Hermes и допуска `isolation: none`; `ask_timeout_s` — чтобы выставить
-  таймаут MCP-инструмента рантайма (§7.1).
-- `session.input` {session_id, event_id, text, artifact_ids[], peer_prefix[]} —
+  таймаут MCP-инструмента рантайма (§7.1); без `model` воркер берёт модель рантайма
+  по умолчанию.
+- `session.input` {session_id, event_id, text, artifact_ids[],
+  peer_prefix[{from: "<project-slug>/<session-slug>", text, ts}]} —
   артефакты воркер скачивает через `GET /worker/artifacts/{id}` своим токеном
   (без TTL) в `<workspace>/<cwd>/.hqc/inbox/<event_id>/` и подставляет пути; папка
   `.hqc/` добавляется в `.git/info/exclude` workspace. `peer_prefix` — накопленные
@@ -266,7 +295,15 @@ MCP-вызовы (worker → hub → worker):
 - `session.steer` {session_id, text} — вмешаться в ход без прерывания, если рантайм
   умеет (Hermes: `/steer`, §8.2.1); иначе `error`.
 - `session.kill` {session_id} — завершить процесс агента.
-- `approval.response`, `clarify.response` {session_id, request_id, ...}
+- `approval.response` {session_id, request_id, option_id},
+  `clarify.response` {session_id, request_id, answers}; поля `by` во фреймах нет, оно
+  только в событиях. Фрейма `approval.cancel` нет: отменяя запрос сам (таймаут, ответ
+  с другого устройства, архивация), хаб пишет событие `approval.cancel` и шлёт воркеру
+  `approval.response` с `option_id` варианта `canonical: deny`, чтобы адаптер закрыл
+  запрос в рантайме. Так же для `clarify`: хаб пишет событие `clarify.cancel` и шлёт
+  `clarify.response` с `answers: {}` — пустой объект означает отмену; адаптер Claude
+  Code отвечает на `can_use_tool` для `AskUserQuestion` поведением `deny`, модель
+  продолжает ход без ответов.
 - `workspace.create` {request_id, kind: clone|worktree|dir, path, origin_url?,
   origin_path?, branch?, requested_by_owner} → `result {ok, path, error?}`
 - `workspace.delete` {request_id, path, requested_by_owner} → `result` (§13.2)
@@ -281,7 +318,7 @@ MCP-вызовы (worker → hub → worker):
 - `hello` {protocol_version, capabilities, environments[], env_bindings[],
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[]}
 - `event` {event} → `ack` (`session_id` внутри события)
-- `session.state` {session_id, process_state, runtime_session_id, locked_by}
+- `session.state` {session_id, process_state, runtime_session_id?, locked_by}
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event} — события из
   зеркала (§9.2); хаб создаёт сессию для неизвестного `runtime_session_id`.
 - `worker.approval.request` {request_id, kind, description, expires_at}
@@ -476,7 +513,9 @@ allow|deny`. Варианты для клиента: `once`, `session`, `always`
 до конца процесса. В `--restricted` (§8.4) локальные настройки не применяются,
 `always` маппится в `session`. Хаб постоянные разрешения не хранит. Инструмент
 `AskUserQuestion` приходит тем же `can_use_tool`: адаптер превращает его
-в `clarify.request`, ответы возвращает через `updatedInput.answers`. Формат
+в `clarify.request`, присваивая вопросам свои `id`, ответы возвращает через
+`updatedInput.answers`, ключи которых — текст вопроса, а значения — `label` варианта
+(адаптер сам сопоставляет `id` с текстом). Формат
 `control_request`/`control_response` проверен на 2.1.307 при `--permission-prompt-tool stdio`
 : точные JSON — `docs/notes/claude-control-protocol.md`, фикстуры —
 `crates/hqc-claude-jsonl/fixtures/*-2.1.307.jsonl`.
@@ -660,6 +699,11 @@ once / session / always / deny, у ACP-агентов — то, что пред�
 уходит **владельцу воркера**; коллега с `write` видит запрос, но ответить не может.
 Первый ответ побеждает; истечение, `session.stop`, ответ с другого устройства,
 перезапуск воркера и архивация дают `approval.cancel`, клиент убирает кнопки.
+Если отмену инициирует хаб (истечение, ответ с другого устройства, архивация), он пишет
+событие `approval.cancel` и шлёт воркеру фрейм `approval.response` с вариантом
+`canonical: deny`, чтобы адаптер закрыл запрос в рантайме (§5.3). Открытый `clarify`
+хаб отменяет так же: событие `clarify.cancel` и фрейм `clarify.response` с
+`answers: {}`; адаптер отвечает рантайму `deny`, ход продолжается без ответов.
 При `auto_approve` хаб отвечает первым вариантом с `canonical: once`, `by: auto`;
 режим включает только владелец воркера, в UI подсвечен; на расшаренном проекте он
 означает выполнение кода коллегами без подтверждений, UI предупреждает об этом при
@@ -970,6 +1014,27 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.8 → 0.9 (T1)
+Схема `hqc-proto` сверена со спекой, закрыты вопросы T1. §3: `author` с `kind: system`
+без `id`; `delivery` и `delivered_at` — плоские поля события. §4: знак `?` для
+необязательных полей (`in_reply_to`, `duration_ms`, `expires_at`, `caption`, `detail`,
+`request_id` у `peer.message`, у `usage` всё, кроме `input_tokens`/`output_tokens`); новое
+`tool.result.error_text?`; форма `clarify.request.questions[{id, text, options?, multi?}]`
+и `clarify.response.answers {id: string | [string]}`, `clarify.cancel {request_id, reason}`;
+принцип терпимости событий (неизвестный `type` хранится как есть, неизвестные значения
+перечислений — «неизвестное»). §5: общая форма `ack {event_id?, seq?}` и `error {code,
+message, retryable, details?}` с начальным списком кодов; `hello.ack {protocol_version,
+worker_id, server_time}` (§5.1); `ack` на дубль несёт `seq` сохранённого события, на
+неизвестную сессию — `seq: null`; `ack {event_id}` на `session.input`; фреймы строгие,
+неизвестный — `invalid_frame` (§5.2); `peer_prefix[{from, text, ts}]`, `model?`
+в `session.start`, точные поля `approval.response`/`clarify.response`, фрейма
+`approval.cancel` нет — хаб шлёт `approval.response` с вариантом `deny` (§5.3, §10.1);
+`runtime_session_id?` в `session.state` (§5.4). §8.1: адаптер сопоставляет `id` вопроса
+с текстом для `updatedInput.answers`. Хаб хранит `payload` событий сырым JSON (`jsonb`
+как есть) и отдаёт его клиентам без пересериализации из типов (§5.2). Отмена `clarify`
+хабом: событие `clarify.cancel` и фрейм `clarify.response` с `answers: {}`, адаптер
+отвечает рантайму `deny` (§5.3, §10.1).
 
 ### 0.7 → 0.8 (выводы T0 в тексте)
 Расхождения из 0.7 закрыты в §8.1: в команде запуска `--permission-prompt-tool stdio`

@@ -1,0 +1,5 @@
+{
+  "id": "f-2",
+  "type": "error",
+  "payload": { "code": "agent_start_failed", "message": "claude: command not found", "retryable": true }
+}

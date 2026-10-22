@@ -1,0 +1,15 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000107",
+  "seq": 42,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "approval.request",
+  "payload": { "request_id": "req-1", "tool": "Bash", "description": "cargo test", "options": [
+    { "id": "allow", "label": "Allow once", "canonical": "once" },
+    { "id": "allow_session", "label": "Allow for this session", "canonical": "session" },
+    { "id": "allow_always", "label": "Always allow", "canonical": "always" },
+    { "id": "deny", "label": "Deny", "canonical": "deny" },
+    { "id": "deny_always", "label": "Always deny", "canonical": "deny_always" }
+  ], "expires_at": "2026-10-22T11:00:00Z" }
+}

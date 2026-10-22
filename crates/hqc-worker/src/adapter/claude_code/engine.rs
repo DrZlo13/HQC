@@ -13,6 +13,9 @@
 //!   immediate allow by a `session` rule;
 //! - `control_response` lines are the CLI's echo of ours and are skipped.
 //!
+//! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
+//! [`preview`]): the hub's Postgres refuses it (SPEC §5.2).
+//!
 //! Messages of subagents (`parent_tool_use_id` set) are not mapped: their records live in
 //! separate sidechain files, not in the session transcript.
 
@@ -285,7 +288,7 @@ impl Core {
         let ev = &v["event"];
         if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
             if let Some(t) = ev["delta"]["text"].as_str().filter(|t| !t.is_empty()) {
-                return vec![self.emit_new(EventKind::AgentDelta { text: t.into() })];
+                return vec![self.emit_new(EventKind::AgentDelta { text: text(t) })];
             }
         }
         vec![]
@@ -301,12 +304,12 @@ impl Core {
             let id = record_event_id(&uuid, i);
             match block["type"].as_str() {
                 Some("text") => {
-                    let text = block["text"].as_str().unwrap_or("");
-                    if text.is_empty() {
+                    let t = block["text"].as_str().unwrap_or("");
+                    if t.is_empty() {
                         continue;
                     }
                     out.extend(self.flush(false));
-                    self.held = Some((id, text.into()));
+                    self.held = Some((id, text(t)));
                 }
                 Some("tool_use") => {
                     out.extend(self.flush(false));
@@ -320,12 +323,12 @@ impl Core {
                     ));
                 }
                 Some("thinking") => {
-                    let text = block["thinking"].as_str().unwrap_or("");
-                    if text.is_empty() {
+                    let t = block["thinking"].as_str().unwrap_or("");
+                    if t.is_empty() {
                         continue;
                     }
                     out.extend(self.flush(false));
-                    out.push(self.emit(id, EventKind::AgentThinking { text: text.into() }));
+                    out.push(self.emit(id, EventKind::AgentThinking { text: text(t) }));
                 }
                 _ => {}
             }
@@ -611,22 +614,23 @@ fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Vec<String>)>
     let mut questions = Vec::new();
     let mut texts = Vec::new();
     for (i, q) in qs.iter().enumerate() {
-        let text = q["question"].as_str()?.to_owned();
+        // The raw question goes back to the CLI as the key of its answer.
+        let raw = q["question"].as_str()?;
         let options: Vec<String> = q["options"]
             .as_array()
             .map(|o| {
                 o.iter()
-                    .filter_map(|o| o["label"].as_str().map(str::to_owned))
+                    .filter_map(|o| o["label"].as_str().map(text))
                     .collect()
             })
             .unwrap_or_default();
         questions.push(ClarifyQuestion {
             id: (i + 1).to_string(),
-            text: text.clone(),
+            text: text(raw),
             options: (!options.is_empty()).then_some(options),
             multi: q["multiSelect"].as_bool(),
         });
-        texts.push(text);
+        texts.push(raw.to_owned());
     }
     Some((questions, texts))
 }
@@ -652,8 +656,15 @@ fn compact(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_default()
 }
 
-/// At most `limit` bytes, cut at a char boundary.
+/// Event text: U+0000 (binary tool output) becomes U+FFFD, which the hub can store
+/// (SPEC §5.2).
+pub fn text(s: &str) -> String {
+    hqc_proto::replace_nul(s).into_owned()
+}
+
+/// [`text`], then at most `limit` bytes, cut at a char boundary.
 pub fn preview(s: &str, limit: usize) -> String {
+    let s = &*hqc_proto::replace_nul(s);
     if s.len() <= limit {
         return s.to_owned();
     }

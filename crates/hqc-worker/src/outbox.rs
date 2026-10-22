@@ -10,6 +10,9 @@
 //! stored twice) and no compaction to write; the volume is small (events of a few
 //! sessions), so the cost of a synchronous commit per event does not matter. Access is
 //! synchronous under a mutex: each call is one short local transaction.
+//!
+//! `attempts` counts retryable `error` replies of the hub to an event; the connection drops
+//! an event after [`crate::connection::MAX_EVENT_ATTEMPTS`] of them (SPEC §5.2).
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -46,10 +49,23 @@ impl Outbox {
              CREATE TABLE IF NOT EXISTS outbox (
                  seq INTEGER PRIMARY KEY AUTOINCREMENT,
                  event_id TEXT NOT NULL UNIQUE,
-                 event TEXT NOT NULL
+                 event TEXT NOT NULL,
+                 attempts INTEGER NOT NULL DEFAULT 0
              );",
         )
         .context("initializing the outbox")?;
+        // Outboxes of workers before T10 have no `attempts`.
+        let has_attempts: bool = db
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('outbox') WHERE name = 'attempts'",
+                [],
+                |r| r.get(0),
+            )
+            .context("reading the outbox schema")?;
+        if !has_attempts {
+            db.execute_batch("ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+                .context("adding outbox.attempts")?;
+        }
         Ok(Self { db: Mutex::new(db) })
     }
 
@@ -74,6 +90,19 @@ impl Outbox {
             )
             .context("deleting from the outbox")?;
         Ok(n > 0)
+    }
+
+    /// Counts one more failed send of `event_id`; returns the count, `None` if the event is
+    /// not there.
+    pub fn failed(&self, event_id: Uuid) -> anyhow::Result<Option<u32>> {
+        self.db()
+            .query_row(
+                "UPDATE outbox SET attempts = attempts + 1 WHERE event_id = ?1 RETURNING attempts",
+                params![event_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("counting a failed send")
     }
 
     /// Entries with local `seq > after`, in order.
@@ -214,5 +243,31 @@ mod tests {
         assert_eq!(all[0].event, json!({ "n": 0 }));
         assert_eq!(ob.after(all[1].seq).unwrap().len(), 1);
         assert!(ob.contains(ids[3]).unwrap());
+        assert_eq!(ob.failed(ids[3]).unwrap(), Some(1));
+        assert_eq!(ob.failed(ids[3]).unwrap(), Some(2));
+        assert_eq!(ob.failed(ids[1]).unwrap(), None);
+    }
+
+    #[test]
+    fn old_outbox_gets_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::now_v7();
+        {
+            let db = Connection::open(dir.path().join("outbox.sqlite3")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                     event_id TEXT NOT NULL UNIQUE, event TEXT NOT NULL);",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO outbox (event_id, event) VALUES (?1, '{}')",
+                params![id.to_string()],
+            )
+            .unwrap();
+        }
+        let ob = Outbox::open(dir.path()).unwrap();
+        assert_eq!(ob.failed(id).unwrap(), Some(1));
+        drop(ob);
+        Outbox::open(dir.path()).unwrap();
     }
 }

@@ -150,6 +150,87 @@ async fn duplicate_event_keeps_seq() {
     hub.finish().await;
 }
 
+/// T10. U+0000 (binary command output) is stored as U+FFFD: Postgres refuses it in jsonb
+/// and text (SPEC §5.2). Same for client input and titles.
+#[tokio::test]
+async fn nul_is_stored_as_replacement_char() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("nul\u{0}title").await;
+    ack_start(&mut w, &sid).await;
+    assert_eq!(hub.session(&sid).await["title"], "nul\u{FFFD}title");
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+
+    let ev = agent_event(
+        &sid,
+        "tool.result",
+        json!({"call_id": "toolu_01", "result_preview": "ELF\u{0}\u{0}bin", "error": false,
+               "extra\u{0}": ["\u{0}"]}),
+    );
+    let a = w.event(ev.clone()).await;
+    assert_eq!(a, json!({"event_id": ev["event_id"], "seq": 2}));
+    let live = c.until("event").await["event"].clone();
+    assert_eq!(live["seq"], 2);
+    let want = json!({"call_id": "toolu_01", "result_preview": "ELF\u{FFFD}\u{FFFD}bin",
+                      "error": false, "extra\u{FFFD}": ["\u{FFFD}"]});
+    assert_eq!(live["payload"], want);
+    assert_eq!(hub.events(&sid).await[1]["payload"], want);
+
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "a\u{0}b"}),
+        )
+        .await;
+    assert!(s < 300, "{s} {v}");
+    let input = c.until("event").await["event"].clone();
+    assert_eq!(input["payload"]["text"], "a\u{FFFD}b");
+    hub.finish().await;
+}
+
+/// T10. An event the database refuses (here a `client_op_id` too long for its index) gets
+/// `invalid_frame`, not retryable: the worker drops it. A database that is gone stays
+/// `internal`, retryable (SPEC §5.2).
+#[tokio::test]
+async fn refused_event_is_not_retryable_but_db_outage_is() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("refused").await;
+    ack_start(&mut w, &sid).await;
+
+    // Random hex does not compress below the btree row limit (2704 bytes).
+    let long: String = (0..100)
+        .map(|_| Uuid::new_v4().simple().to_string())
+        .collect();
+    let mut ev = agent_event(&sid, "agent.thinking", json!({"text": "hm"}));
+    ev["client_op_id"] = json!(long);
+    let id = w.send("event", json!({ "event": ev })).await;
+    let e = w.expect("error").await;
+    assert_eq!(e["id"], id);
+    assert_eq!(e["payload"]["code"], "invalid_frame", "{e}");
+    assert_eq!(e["payload"]["retryable"], false);
+
+    // The connection and the session still work.
+    let ok = agent_event(&sid, "agent.thinking", json!({"text": "ok"}));
+    assert_eq!(w.event(ok).await["seq"], 2);
+
+    hub.app.db.close().await;
+    let id = w
+        .send(
+            "event",
+            json!({"event": agent_event(&sid, "agent.thinking", json!({"text": "later"}))}),
+        )
+        .await;
+    let e = w.expect("error").await;
+    assert_eq!(e["id"], id);
+    assert_eq!(e["payload"]["code"], "internal", "{e}");
+    assert_eq!(e["payload"]["retryable"], true);
+    hub.finish().await;
+}
+
 /// 3a. Input sent while the worker is offline is delivered after its hello.
 #[tokio::test]
 async fn pending_input_is_delivered_after_hello() {

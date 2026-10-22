@@ -1,6 +1,8 @@
 //! Storing events and their side effects (SPEC §4, §5.2).
 //!
-//! The stored `author` and `payload` are the JSON exactly as received; the typed
+//! The stored `author` and `payload` are the JSON exactly as received, except U+0000, which
+//! Postgres refuses and which becomes U+FFFD (worker frames in `worker_ws`, hub events in
+//! [`store_hub_event`]; SPEC §5.2); the typed
 //! [`EventKind`] drives only the hub's own logic (open requests, turn bookkeeping, push).
 
 use chrono::Utc;
@@ -97,12 +99,15 @@ pub async fn ingest_worker_event(
 pub async fn store_hub_event(
     app: &AppState,
     s: &SessionRow,
-    author: Value,
+    mut author: Value,
     kind: &str,
-    payload: Value,
+    mut payload: Value,
     client_op_id: Option<String>,
     delivery: Option<&str>,
 ) -> anyhow::Result<EventRow> {
+    hqc_proto::replace_nul_json(&mut author);
+    hqc_proto::replace_nul_json(&mut payload);
+    let client_op_id = client_op_id.map(|c| hqc_proto::replace_nul(&c).into_owned());
     let typed: EventKind = serde_json::from_value(json!({"type": kind, "payload": payload}))?;
     let new = NewEvent {
         event_id: db::new_id(),

@@ -2,7 +2,7 @@
 //!
 //! Frames are strict (SPEC §5.2): the first frame must be `hello`; a frame that does not
 //! parse gets `error {code: invalid_frame}`. Events inside `event` frames are tolerant and
-//! stored as received.
+//! stored as received, except U+0000, which becomes U+FFFD in every incoming frame.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -273,7 +273,7 @@ async fn handle_text(
     registered: &mut bool,
     text: &str,
 ) -> ControlFlow<()> {
-    let raw: Value = match serde_json::from_str(text) {
+    let mut raw: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
             conn.error(
@@ -285,6 +285,8 @@ async fn handle_text(
             return ControlFlow::Continue(());
         }
     };
+    // Before anything is parsed or stored: Postgres takes no U+0000 (SPEC §5.2).
+    hqc_proto::replace_nul_json(&mut raw);
     let id = raw
         .get("id")
         .and_then(Value::as_str)
@@ -350,6 +352,18 @@ async fn handle_text(
             match events::ingest_worker_event(app, conn, raw_event, &event).await {
                 Ok(ack) => {
                     conn.reply(&id, HubFrame::Ack(ack));
+                    Ok(())
+                }
+                // Data the database refuses would be refused on every resend: the worker
+                // drops it. A database that is down is worth a retry (SPEC §5.2).
+                Err(e) if db::is_data_error(&e) => {
+                    tracing::error!(worker_id = %conn.worker_id, event_id = %event.event_id, error = %e, "event refused by the database, rejected");
+                    conn.error(
+                        &id,
+                        error_code::INVALID_FRAME,
+                        "event refused by the database",
+                        false,
+                    );
                     Ok(())
                 }
                 Err(e) => {

@@ -1003,3 +1003,67 @@ fn held_text_is_not_final_before_a_tool_call() {
         "message":{"content":[{"type":"text","text":"inner"}]}});
     assert!(core.on_line(&sub.to_string()).is_empty());
 }
+
+/// T10: U+0000 in anything the CLI prints (binary tool output) becomes U+FFFD in events:
+/// the hub's Postgres refuses it (SPEC §5.2).
+#[test]
+fn nul_never_reaches_an_event() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    core.input(&SessionInput {
+        session_id: sid,
+        event_id: Uuid::now_v7(),
+        text: "x".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+    });
+    let lines = [
+        json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta",
+            "delta":{"type":"text_delta","text":"d\u{0}"}}}),
+        json!({"type":"assistant","uuid":Uuid::new_v4(),"parent_tool_use_id":null,
+            "message":{"content":[{"type":"text","text":"m\u{0}"}]}}),
+        json!({"type":"assistant","uuid":Uuid::new_v4(),"parent_tool_use_id":null,
+            "message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cat a.bin\u{0}"}}]}}),
+        json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool",
+            "tool_name":"Bash","input":{"command":"cat a.bin\u{0}"},"description":"Read\u{0}"}}),
+        json!({"type":"user","uuid":Uuid::new_v4(),"parent_tool_use_id":null,
+            "message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,
+                "content":"ELF\u{0}\u{0}\u{1}"}]}}),
+        json!({"type":"result","subtype":"success","usage":{}}),
+    ];
+    let mut kinds = vec![];
+    for l in lines {
+        for a in core.on_line(&l.to_string()) {
+            if let Action::Emit(AdapterEvent::Event(e)) = a {
+                let v = serde_json::to_value(&e).unwrap();
+                let mut clean = v.clone();
+                hqc_proto::replace_nul_json(&mut clean);
+                assert_eq!(clean, v);
+                kinds.push(e.kind);
+            }
+        }
+    }
+    assert!(kinds.contains(&EventKind::AgentDelta {
+        text: "d\u{FFFD}".into()
+    }));
+    let mut seen = 0;
+    for k in &kinds {
+        match k {
+            EventKind::AgentMessage { text, .. } => assert_eq!(text, "m\u{FFFD}"),
+            EventKind::ApprovalRequest { description, .. } => {
+                assert_eq!(description, "Read\u{FFFD}\ncat a.bin\u{FFFD}")
+            }
+            EventKind::ToolResult {
+                result_preview,
+                error_text,
+                ..
+            } => {
+                assert_eq!(result_preview, "ELF\u{FFFD}\u{FFFD}\u{1}");
+                assert_eq!(error_text.as_deref(), Some(result_preview.as_str()));
+            }
+            _ => continue,
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 3, "{kinds:?}");
+}

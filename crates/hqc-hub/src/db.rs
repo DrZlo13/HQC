@@ -797,6 +797,22 @@ pub enum Inserted {
     UnknownSession,
 }
 
+/// Whether `e` is the database refusing the data itself (it would fail the same way on every
+/// retry) rather than the database being unreachable or busy: SQLSTATE classes 22 (data
+/// exception: encoding, value out of range, string too long), 23 (integrity constraint) and
+/// 54 (program limit: index row or value too big), or a value the driver could not encode.
+pub fn is_data_error(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<sqlx::Error>())
+        .any(|e| match e {
+            sqlx::Error::Database(d) => d
+                .code()
+                .is_some_and(|c| c.starts_with("22") || c.starts_with("23") || c.starts_with("54")),
+            sqlx::Error::Encode(_) => true,
+            _ => false,
+        })
+}
+
 /// Append an event, assigning the next `seq` of its session (SPEC §5.2). The session row
 /// lock serializes appends per session; the unique `event_id` drops duplicates.
 pub async fn insert_event(db: &PgPool, e: &NewEvent) -> sqlx::Result<Inserted> {

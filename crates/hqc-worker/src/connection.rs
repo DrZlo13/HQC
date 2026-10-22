@@ -9,7 +9,8 @@
 //!   [`ConnOptions::dead_after`] is dropped.
 //! - After `hello.ack` the whole outbox is sent in order, then new entries as they come;
 //!   `ack {event_id}` deletes the entry. A non-retryable `error` on an event frame drops
-//!   the event (it would fail the same way forever).
+//!   the event (it would fail the same way forever); a retryable one keeps it for the next
+//!   connection, up to [`MAX_EVENT_ATTEMPTS`] such errors (SPEC §5.2).
 //! - On stop, the outbox is flushed for up to [`ConnOptions::flush_timeout`]; what is left
 //!   stays on disk for the next run.
 
@@ -32,6 +33,10 @@ use uuid::Uuid;
 use crate::link::{Direct, HubLink};
 use crate::supervisor::{wire_error, Inbound};
 use crate::token::Secret;
+
+/// Retryable hub errors on one event after which it is dropped: a hub that fails it on
+/// every resend must not keep it in the outbox forever (SPEC §5.2).
+pub const MAX_EVENT_ATTEMPTS: u32 = 10;
 
 #[derive(Debug, Clone)]
 pub struct ConnOptions {
@@ -462,9 +467,20 @@ impl Connection {
                     tracing::error!(event_id = %eid, code = %e.code, "hub rejected an event, dropping it: {}", e.message);
                     let _ = self.link.outbox.remove(eid);
                 }
-                Some(eid) => {
-                    tracing::warn!(event_id = %eid, code = %e.code, "hub error on an event, will resend after reconnect: {}", e.message);
-                }
+                Some(eid) => match self.link.outbox.failed(eid) {
+                    Ok(Some(n)) if n >= MAX_EVENT_ATTEMPTS => {
+                        tracing::error!(event_id = %eid, code = %e.code, attempts = n, "hub keeps failing an event, dropping it: {}", e.message);
+                        if let Err(e) = self.link.outbox.remove(eid) {
+                            tracing::error!(event_id = %eid, "outbox delete failed: {e:#}");
+                        }
+                    }
+                    Ok(n) => {
+                        tracing::warn!(event_id = %eid, code = %e.code, attempts = ?n, "hub error on an event, will resend after reconnect: {}", e.message);
+                    }
+                    Err(err) => {
+                        tracing::error!(event_id = %eid, "outbox update failed: {err:#}");
+                    }
+                },
                 None => tracing::warn!(id = %f.id, code = %e.code, "hub error: {}", e.message),
             },
             HubFrame::HelloAck { .. } => tracing::warn!("unexpected hello.ack"),

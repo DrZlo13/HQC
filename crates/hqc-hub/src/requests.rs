@@ -98,7 +98,8 @@ pub async fn answer(
             if answers.is_empty() {
                 return Err(ApiError::BadRequest("answers must not be empty".into()));
             }
-            let answers = serde_json::to_value(answers).map_err(anyhow::Error::from)?;
+            let mut answers = serde_json::to_value(answers).map_err(anyhow::Error::from)?;
+            hqc_proto::replace_nul_json(&mut answers);
             (
                 json!({"type": "clarify.response",
                        "payload": {"session_id": s.id, "request_id": request_id, "answers": answers}}),

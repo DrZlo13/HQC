@@ -304,6 +304,53 @@ async fn outbox_survives_reconnect_and_restart() {
     w2.stop().await;
 }
 
+// T10. An event the hub answers with a retryable error is resent after each reconnect, but
+//      only until the tenth such error: then it is dropped from the outbox.
+#[tokio::test]
+async fn event_failing_retryably_is_dropped_after_ten_attempts() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+
+    let mut first = hub.accept().await;
+    first.handshake().await;
+    start_session(&mut first, &env, sid).await;
+    let ev = agent_message(sid, "binary");
+    adapters.emit(sid, AdapterEvent::Event(ev.clone())).await;
+    let mut first = Some(first);
+    for attempt in 1..=hqc_worker::connection::MAX_EVENT_ATTEMPTS {
+        let mut c = match first.take() {
+            Some(c) => c,
+            None => {
+                let mut c = hub.accept().await;
+                c.handshake().await;
+                c
+            }
+        };
+        let f = stored_event(&mut c).await;
+        assert_eq!(event_id(&f), ev.event_id, "attempt {attempt}");
+        c.send(json!({"id": f["id"], "type": "error", "payload": {
+            "code": "internal", "message": "event not stored", "retryable": true}}))
+            .await;
+        if attempt < hqc_worker::connection::MAX_EVENT_ATTEMPTS {
+            // Still waiting in the outbox after this error.
+            let ob = Outbox::open(&env.outbox()).unwrap();
+            assert!(ob.contains(ev.event_id).unwrap(), "attempt {attempt}");
+        }
+        c.close().await;
+    }
+    wait_outbox(&env, "the event dropped", |ob| {
+        !ob.contains(ev.event_id).unwrap()
+    })
+    .await;
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    assert!(c.maybe("event", Duration::from_millis(300)).await.is_none());
+    w.stop().await;
+}
+
 // 3. An input arriving during a turn waits for the turn to end and then goes to the
 //    adapter; each ack comes only after the adapter confirms the input.
 #[tokio::test]

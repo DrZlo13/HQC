@@ -219,6 +219,7 @@ pub async fn create_session(
         .filter(|t| !t.is_empty())
         .unwrap_or("New session");
     check_title(title)?;
+    let title = &*hqc_proto::replace_nul(title);
     let id = db::create_session(
         &app.db,
         db::NewSession {
@@ -272,7 +273,7 @@ pub async fn patch_session(
         // The slug stays: it is the session's address (SPEC §7).
         sqlx::query("UPDATE sessions SET title = $2, updated_at = now() WHERE id = $1")
             .bind(id)
-            .bind(t)
+            .bind(hqc_proto::replace_nul(t).as_ref())
             .execute(&app.db)
             .await?;
     }

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use hqc_worker::adapter::fake::FakeAdapters;
+use hqc_worker::adapter::AdapterFactory;
 use hqc_worker::config::Config;
 use hqc_worker::connection::{ConnOptions, Status};
 use hqc_worker::token::Secret;
@@ -290,10 +291,18 @@ pub fn start_worker(env: &Env, hub_url: &str, adapters: &FakeAdapters) -> Runnin
 }
 
 pub fn start_worker_with(env: &Env, config: Config, adapters: &FakeAdapters) -> RunningWorker {
+    start_worker_factory(env, config, Arc::new(adapters.clone()))
+}
+
+pub fn start_worker_factory(
+    env: &Env,
+    config: Config,
+    adapters: Arc<dyn AdapterFactory>,
+) -> RunningWorker {
     let w = Worker {
         config,
         token: Secret::new(TOKEN),
-        adapters: Arc::new(adapters.clone()),
+        adapters,
         capabilities: hqc_worker::capabilities::build(Some("2.1.307")),
         outbox_dir: env.outbox(),
         conn: fast_conn(),

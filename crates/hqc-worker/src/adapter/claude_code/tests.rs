@@ -1,0 +1,870 @@
+//! T4 acceptance on the T0 fixtures (Claude Code 2.1.307), without spawning `claude`: the
+//! adapter runs against [`ScriptedClaude`] playing the captured stdout, and its stdin is
+//! compared with what the spike driver wrote.
+
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use hqc_proto::event::{
+    ApprovalCanonical, Author, ClarifyAnswer, ClarifyQuestion, Event, EventKind, SessionState,
+};
+use hqc_proto::frame::{Runtime, SessionInput};
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use uuid::Uuid;
+
+use super::engine::{Action, Core};
+use super::process::Sig;
+use super::scripted::ScriptedClaude;
+use super::{ClaudeCodeAdapters, ClaudeOptions};
+use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
+use crate::config::StartSpec;
+
+struct Fixture {
+    transcript: &'static str,
+    stream: &'static str,
+    stdin: &'static str,
+}
+
+macro_rules! fixture {
+    ($name:literal) => {
+        Fixture {
+            transcript: include_str!(concat!(
+                "../../../../hqc-claude-jsonl/fixtures/",
+                $name,
+                "-2.1.307.jsonl"
+            )),
+            stream: include_str!(concat!(
+                "../../../../hqc-claude-jsonl/fixtures/stream-",
+                $name,
+                "-2.1.307.jsonl"
+            )),
+            stdin: include_str!(concat!(
+                "../../../../hqc-claude-jsonl/fixtures/stdin-",
+                $name,
+                "-2.1.307.jsonl"
+            )),
+        }
+    };
+}
+
+fn lines(s: &str) -> Vec<Value> {
+    s.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+impl Fixture {
+    fn prompt(&self) -> String {
+        lines(self.stdin)[0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+
+    fn claude_session(&self) -> Uuid {
+        lines(self.stream)
+            .iter()
+            .find(|v| v["type"] == "system" && v["subtype"] == "init")
+            .and_then(|v| v["session_id"].as_str())
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Event ids of transcript records that must produce an event: tool calls, tool
+    /// results and non-empty text or thinking.
+    fn expected_ids(&self) -> HashSet<Uuid> {
+        lines(self.transcript)
+            .iter()
+            .filter(|r| {
+                (r["type"] == "assistant" || r["type"] == "user") && r["isSidechain"] != true
+            })
+            .filter(|r| {
+                r["message"]["content"].as_array().is_some_and(|c| {
+                    c.iter().any(|b| match b["type"].as_str() {
+                        Some("tool_use") | Some("tool_result") => true,
+                        Some("text") => b["text"].as_str().is_some_and(|t| !t.is_empty()),
+                        Some("thinking") => b["thinking"].as_str().is_some_and(|t| !t.is_empty()),
+                        _ => false,
+                    })
+                })
+            })
+            .map(|r| Event::id_from_claude_record(&r["uuid"].as_str().unwrap().parse().unwrap()))
+            .collect()
+    }
+
+    fn all_record_ids(&self) -> HashSet<Uuid> {
+        lines(self.transcript)
+            .iter()
+            .filter_map(|r| r["uuid"].as_str())
+            .map(|u| Event::id_from_claude_record(&u.parse().unwrap()))
+            .collect()
+    }
+}
+
+struct Harness {
+    adapter: Box<dyn Adapter>,
+    events: mpsc::Receiver<AdapterEvent>,
+    claude: ScriptedClaude,
+    session_id: Uuid,
+    _dirs: (tempfile::TempDir, tempfile::TempDir),
+}
+
+fn options(config_dir: &std::path::Path) -> ClaudeOptions {
+    ClaudeOptions {
+        claude_bin: Some("/opt/test/claude".into()),
+        config_dir: Some(config_dir.to_path_buf()),
+        early_exit: Duration::from_millis(20),
+        stop_grace: Duration::from_millis(100),
+        ..ClaudeOptions::default()
+    }
+}
+
+fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> StartSpec {
+    StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: workdir.to_path_buf(),
+        workdir: workdir.to_path_buf(),
+        environment: "default".into(),
+        runtime_session_id: Some(claude_session.to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: false,
+        session_token: "st".into(),
+        ask_timeout_s: 600,
+    }
+}
+
+impl Harness {
+    async fn start(stream: &str, claude_session: Uuid) -> Self {
+        let work = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let claude = ScriptedClaude::new(stream);
+        let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+        let session_id = Uuid::now_v7();
+        let spec = spec(session_id, work.path(), claude_session);
+        let (tx, events) = mpsc::channel(1024);
+        let mut adapter = factory.create(&spec, tx);
+        adapter.start(&spec).await.unwrap();
+        Self {
+            adapter,
+            events,
+            claude,
+            session_id,
+            _dirs: (work, config),
+        }
+    }
+
+    async fn next(&mut self) -> AdapterEvent {
+        tokio::time::timeout(Duration::from_secs(5), self.events.recv())
+            .await
+            .expect("no adapter event in 5 s")
+            .expect("event channel closed")
+    }
+
+    /// Runs one turn; `approval` picks the option for each `approval.request`, `clarify`
+    /// answers each `clarify.request`.
+    async fn turn(
+        &mut self,
+        text: &str,
+        input_id: Uuid,
+        approval: &str,
+        clarify: BTreeMap<String, ClarifyAnswer>,
+    ) -> Vec<AdapterEvent> {
+        self.adapter
+            .input(&SessionInput {
+                session_id: self.session_id,
+                event_id: input_id,
+                text: text.into(),
+                artifact_ids: vec![],
+                peer_prefix: vec![],
+            })
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        loop {
+            let ev = self.next().await;
+            out.push(ev.clone());
+            match ev {
+                AdapterEvent::TurnEnded => return out,
+                AdapterEvent::Event(e) => match &e.kind {
+                    EventKind::ApprovalRequest { request_id, .. } => self
+                        .adapter
+                        .answer_approval(request_id, approval)
+                        .await
+                        .unwrap(),
+                    EventKind::ClarifyRequest { request_id, .. } => self
+                        .adapter
+                        .answer_clarify(request_id, &clarify)
+                        .await
+                        .unwrap(),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `accepted`, `delta`, `tool.call`, `agent.message:final`, ... with runs of deltas folded.
+fn shape(events: &[AdapterEvent]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for ev in events {
+        let s = match ev {
+            AdapterEvent::InputAccepted { .. } => "accepted".into(),
+            AdapterEvent::TurnEnded => "turn_ended".into(),
+            AdapterEvent::Exited { .. } => "exited".into(),
+            AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
+            AdapterEvent::Event(e) => match &e.kind {
+                EventKind::AgentDelta { .. } => "delta".into(),
+                EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
+                k => serde_json::to_value(k).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            },
+        };
+        if s == "delta" && out.last().is_some_and(|l| l == "delta") {
+            continue;
+        }
+        out.push(s);
+    }
+    out
+}
+
+fn events(evs: &[AdapterEvent]) -> Vec<&Event> {
+    evs.iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Event(e) => Some(e),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every record-derived event id matches a transcript record, and every record that
+/// should produce an event did.
+fn check_ids(fx: &Fixture, evs: &[AdapterEvent], session_id: Uuid, input_id: Uuid) {
+    let all = fx.all_record_ids();
+    let mut from_records = HashSet::new();
+    for e in events(evs) {
+        assert_eq!(e.session_id, session_id);
+        assert_eq!(e.author, Author::Agent { id: session_id });
+        assert!(e.seq.is_none());
+        match &e.kind {
+            EventKind::ToolCall { .. }
+            | EventKind::ToolResult { .. }
+            | EventKind::AgentMessage { .. }
+            | EventKind::AgentThinking { .. } => {
+                assert!(
+                    all.contains(&e.event_id),
+                    "{:?} has no transcript record",
+                    e.kind
+                );
+                from_records.insert(e.event_id);
+            }
+            _ => assert!(!all.contains(&e.event_id)),
+        }
+        if let EventKind::AgentMessage { in_reply_to, .. } = &e.kind {
+            assert_eq!(*in_reply_to, Some(input_id));
+        }
+    }
+    assert_eq!(from_records, fx.expected_ids());
+    assert!(evs.contains(&AdapterEvent::InputAccepted { event_id: input_id }));
+}
+
+async fn run(
+    fx: &Fixture,
+    approval: &str,
+    clarify: BTreeMap<String, ClarifyAnswer>,
+) -> (Harness, Vec<AdapterEvent>, Uuid) {
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    let input_id = Uuid::now_v7();
+    let evs = h.turn(&fx.prompt(), input_id, approval, clarify).await;
+    check_ids(fx, &evs, h.session_id, input_id);
+    (h, evs, input_id)
+}
+
+fn approval_options(evs: &[AdapterEvent]) -> Vec<(String, ApprovalCanonical)> {
+    events(evs)
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::ApprovalRequest { options, .. } => Some(
+                options
+                    .iter()
+                    .map(|o| (o.id.clone(), o.canonical))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("approval.request")
+}
+
+#[tokio::test]
+async fn permission_allow_once() {
+    let fx = fixture!("permission-allow");
+    let (h, evs, _) = run(&fx, "once", BTreeMap::new()).await;
+    assert_eq!(
+        shape(&evs),
+        [
+            "accepted",
+            "tool.call",
+            "approval.request",
+            "tool.result",
+            "delta",
+            "agent.message:true",
+            "usage",
+            "status",
+            "turn_ended"
+        ]
+    );
+    assert_eq!(h.claude.stdin(), lines(fx.stdin));
+    assert_eq!(
+        approval_options(&evs),
+        [
+            ("once".into(), ApprovalCanonical::Once),
+            ("session".into(), ApprovalCanonical::Session),
+            ("always".into(), ApprovalCanonical::Always),
+            ("deny".into(), ApprovalCanonical::Deny),
+        ]
+    );
+    let evs = events(&evs);
+    let call = evs
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::ToolCall {
+                call_id,
+                tool,
+                args_preview,
+            } => Some((call_id.clone(), tool.clone(), args_preview.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(call.0, "toolu_01VkowPqKRFd3dYT6tKPSUwo");
+    assert_eq!(call.1, "Bash");
+    assert!(call.2.contains("touch hqc-marker-once"));
+    let req = evs
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::ApprovalRequest {
+                request_id,
+                tool,
+                description,
+                ..
+            } => Some((request_id.clone(), tool.clone(), description.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(req.0, "277e1a0e-1e92-4891-b337-a8d7b97fe1ec");
+    assert_eq!(req.1, "Bash");
+    assert_eq!(
+        req.2,
+        "Create empty marker file hqc-marker-once\ntouch hqc-marker-once"
+    );
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::ToolResult { call_id, error: false, error_text: None, .. }
+            if call_id == "toolu_01VkowPqKRFd3dYT6tKPSUwo"
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::AgentMessage { text, r#final: true, .. } if text == "DONE"
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::Usage { input_tokens: 4, output_tokens: 96, cache_read: Some(36251), cache_write: Some(12206), cost_usd: Some(_), model: Some(m) }
+            if m == "claude-haiku-5-5"
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::Status {
+            state: SessionState::Idle,
+            detail: None
+        }
+    )));
+}
+
+#[tokio::test]
+async fn permission_deny() {
+    let fx = fixture!("permission-deny");
+    let (h, evs, _) = run(&fx, "deny", BTreeMap::new()).await;
+    assert_eq!(
+        shape(&evs),
+        [
+            "accepted",
+            "tool.call",
+            "approval.request",
+            "tool.result",
+            "delta",
+            "agent.message:true",
+            "usage",
+            "status",
+            "turn_ended"
+        ]
+    );
+    // The same answer as the spike's, except for the message text.
+    let mut want = lines(fx.stdin);
+    let mut got = h.claude.stdin();
+    assert_eq!(
+        got[1]["response"]["response"]["message"],
+        super::engine::DENY_MESSAGE
+    );
+    for v in [&mut want[1], &mut got[1]] {
+        v["response"]["response"]
+            .as_object_mut()
+            .unwrap()
+            .remove("message");
+    }
+    assert_eq!(got, want);
+    assert!(events(&evs).iter().any(|e| matches!(
+        &e.kind,
+        EventKind::ToolResult { error: true, error_text: Some(t), .. } if t == "denied by hqc spike"
+    )));
+}
+
+#[tokio::test]
+async fn permission_always_sends_only_local_add_rules() {
+    let fx = fixture!("permission-always");
+    let (h, evs, _) = run(&fx, "always", BTreeMap::new()).await;
+    assert_eq!(shape(&evs).last().unwrap(), "turn_ended");
+    // The spike passed every suggestion; the adapter keeps only addRules → localSettings.
+    let mut want = lines(fx.stdin);
+    let perms = want[1]["response"]["response"]["updatedPermissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["type"] == "addRules" && p["destination"] == "localSettings")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(perms.len(), 1);
+    want[1]["response"]["response"]["updatedPermissions"] = Value::Array(perms);
+    assert_eq!(h.claude.stdin(), want);
+}
+
+#[tokio::test]
+async fn ask_user_question_becomes_clarify() {
+    let fx = fixture!("ask-user-question");
+    let answers = BTreeMap::from([(
+        "1".to_string(),
+        ClarifyAnswer::One("Hub (Recommended)".into()),
+    )]);
+    let (h, evs, _) = run(&fx, "deny", answers).await;
+    assert_eq!(
+        shape(&evs),
+        [
+            "accepted",
+            "tool.call",
+            "clarify.request",
+            "tool.result",
+            "delta",
+            "agent.message:true",
+            "usage",
+            "status",
+            "turn_ended"
+        ]
+    );
+    let questions = events(&evs)
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::ClarifyRequest { questions, .. } => Some(questions.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        questions,
+        [ClarifyQuestion {
+            id: "1".into(),
+            text: "Which area should I focus on first?".into(),
+            options: Some(vec![
+                "Hub (Recommended)".into(),
+                "Worker".into(),
+                "Protocol".into(),
+                "Client".into()
+            ]),
+            multi: Some(false),
+        }]
+    );
+    assert_eq!(h.claude.stdin(), lines(fx.stdin));
+}
+
+#[tokio::test]
+async fn mcp_timeout_turn_ends_with_detail() {
+    let fx = fixture!("mcp-timeout");
+    let (h, evs, _) = run(&fx, "once", BTreeMap::new()).await;
+    assert_eq!(h.claude.stdin(), lines(fx.stdin));
+    let evs = events(&evs);
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::Status { state: SessionState::Idle, detail: Some(d) } if d == "error_max_turns"
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::ToolResult { error: true, error_text: Some(t), .. } if t.contains("timed out after 3s")
+    )));
+    // No text in the turn: no agent.message.
+    assert!(!evs
+        .iter()
+        .any(|e| matches!(e.kind, EventKind::AgentMessage { .. })));
+}
+
+#[tokio::test]
+async fn command_line_new_then_resume() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let claude_session = Uuid::new_v4();
+    let s = spec(Uuid::now_v7(), work.path(), claude_session);
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+
+    a.start(&s).await.unwrap();
+    let cmd = &claude.commands()[0];
+    assert_eq!(cmd.program, std::path::PathBuf::from("/opt/test/claude"));
+    assert_eq!(cmd.cwd, work.path());
+    let expect = |mode: &str| -> Vec<String> {
+        [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--input-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--replay-user-messages",
+            "--permission-prompts",
+            "host",
+            "--permission-prompt-tool",
+            "stdio",
+            "--strict-mcp-config",
+            "--allowedTools",
+            "mcp__hqc",
+            mode,
+            &claude_session.to_string(),
+            "--verbose",
+            "--model",
+            "claude-haiku-5-5",
+        ]
+        .map(String::from)
+        .into()
+    };
+    assert_eq!(cmd.args, expect("--session-id"));
+    a.kill().await.unwrap();
+    assert_eq!(claude.signals(), [Sig::Terminate]);
+
+    // `resume` without a transcript (the process never got a prompt) starts it new.
+    a.resume(&s).await.unwrap();
+    assert_eq!(claude.commands()[1].args, expect("--session-id"));
+    a.kill().await.unwrap();
+
+    // `start` with a transcript on disk (worker restart) resumes.
+    let t = super::paths::transcript_path(config.path(), work.path(), &claude_session);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, "").unwrap();
+    a.start(&s).await.unwrap();
+    assert_eq!(claude.commands()[2].args, expect("--resume"));
+    a.kill().await.unwrap();
+
+    // Killed processes are not reported as exited.
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn stop_interrupts_then_falls_back_to_sigint() {
+    let fx = fixture!("permission-allow");
+    // Echo and a delta, then silence: the turn never ends by itself.
+    let stream: String = fx
+        .stream
+        .lines()
+        .filter(|l| l.contains("\"isReplay\": true") || l.contains("\"text_delta\""))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let mut h = Harness::start(&stream, fx.claude_session()).await;
+    let input_id = Uuid::now_v7();
+    h.adapter
+        .input(&SessionInput {
+            session_id: h.session_id,
+            event_id: input_id,
+            text: "hi".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.next().await,
+        AdapterEvent::InputAccepted { event_id: input_id }
+    );
+    assert_eq!(shape(&[h.next().await]), ["delta"]);
+    h.adapter.stop().await.unwrap();
+    // The scripted CLI ignores the interrupt; after `stop_grace` the group gets SIGINT,
+    // the process dies, and the exit is reported.
+    let mut last = h.next().await;
+    while matches!(last, AdapterEvent::Event(_)) {
+        last = h.next().await;
+    }
+    assert!(
+        matches!(last, AdapterEvent::Exited { error: Some(_) }),
+        "{last:?}"
+    );
+    let stdin = h.claude.stdin();
+    assert_eq!(stdin[1]["type"], "control_request");
+    assert_eq!(stdin[1]["request"], json!({"subtype": "interrupt"}));
+    assert_eq!(h.claude.signals(), [Sig::Interrupt]);
+    // The process is gone: input fails, kill is a no-op.
+    assert!(h
+        .adapter
+        .input(&SessionInput {
+            session_id: h.session_id,
+            event_id: Uuid::now_v7(),
+            text: "again".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+        })
+        .await
+        .is_err());
+    h.adapter.kill().await.unwrap();
+    assert_eq!(h.claude.signals(), [Sig::Interrupt]);
+}
+
+#[tokio::test]
+async fn early_exit_fails_start() {
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut opts = options(config.path());
+    // Exits at once with status 1, like a CLI rejecting its flags.
+    opts.claude_bin = Some("/usr/bin/false".into());
+    opts.early_exit = Duration::from_secs(5);
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(super::process::OsSpawner));
+    let s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    let e = a.start(&s).await.unwrap_err();
+    assert!(
+        format!("{e:#}").contains("exited right after start (exit code 1)"),
+        "{e:#}"
+    );
+    // Reported through `start`, not as `Exited`.
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn missing_binary_fails_start() {
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let mut opts = options(config.path());
+    opts.claude_bin = Some("/nonexistent/claude".into());
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(super::process::OsSpawner));
+    let s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    let e = a.start(&s).await.unwrap_err();
+    assert!(format!("{e:#}").contains("/nonexistent/claude"), "{e:#}");
+}
+
+// ---- engine-level ----------------------------------------------------------------------
+
+fn can_use_tool_line(fx: &Fixture, request_id: &str, command: Option<&str>) -> String {
+    let mut v = lines(fx.stream)
+        .into_iter()
+        .find(|v| v["type"] == "control_request")
+        .unwrap();
+    v["request_id"] = json!(request_id);
+    if let Some(c) = command {
+        v["request"]["input"]["command"] = json!(c);
+    }
+    v.to_string()
+}
+
+fn approvals(actions: &[Action]) -> usize {
+    actions
+        .iter()
+        .filter(|a| {
+            matches!(a, Action::Emit(AdapterEvent::Event(e)) if matches!(e.kind, EventKind::ApprovalRequest { .. }))
+        })
+        .count()
+}
+
+fn writes(actions: &[Action]) -> Vec<Value> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Write(v) => Some(v.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Task 2: after `session`, the same request is allowed without `approval.request`.
+#[test]
+fn session_rule_answers_repeats_itself() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+
+    let a = core.on_line(&can_use_tool_line(&fx, "r1", None));
+    assert_eq!(approvals(&a), 1);
+    let w = writes(&core.answer_approval("r1", "session").unwrap());
+    assert_eq!(w[0]["response"]["response"]["behavior"], "allow");
+    assert!(w[0]["response"]["response"]
+        .get("updatedPermissions")
+        .is_none());
+
+    let a = core.on_line(&can_use_tool_line(&fx, "r2", None));
+    assert_eq!(approvals(&a), 0);
+    let w = writes(&a);
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0]["response"]["request_id"], "r2");
+    assert_eq!(w[0]["response"]["response"]["behavior"], "allow");
+    assert_eq!(
+        w[0]["response"]["response"]["updatedInput"]["command"],
+        "touch hqc-marker-once"
+    );
+
+    // The suggested rule `touch hqc-marker-once *` covers arguments, not other commands
+    // or chained ones.
+    let a = core.on_line(&can_use_tool_line(
+        &fx,
+        "r3",
+        Some("touch hqc-marker-once -c"),
+    ));
+    assert_eq!((approvals(&a), writes(&a).len()), (0, 1));
+    let a = core.on_line(&can_use_tool_line(&fx, "r4", Some("touch other")));
+    assert_eq!((approvals(&a), writes(&a).len()), (1, 0));
+    let a = core.on_line(&can_use_tool_line(
+        &fx,
+        "r5",
+        Some("touch hqc-marker-once && rm -rf ~"),
+    ));
+    assert_eq!((approvals(&a), writes(&a).len()), (1, 0));
+
+    // A new process starts with no rules.
+    let mut fresh = Core::new(Uuid::now_v7(), false);
+    assert_eq!(
+        approvals(&fresh.on_line(&can_use_tool_line(&fx, "r6", None))),
+        1
+    );
+}
+
+#[test]
+fn approval_errors_and_restricted_always() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), true);
+    let a = core.on_line(&can_use_tool_line(&fx, "r1", None));
+    // Restricted: no `always` offered.
+    let ids: Vec<String> = match &a[0] {
+        Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+            EventKind::ApprovalRequest { options, .. } => {
+                options.iter().map(|o| o.id.clone()).collect()
+            }
+            _ => panic!(),
+        },
+        _ => panic!(),
+    };
+    assert_eq!(ids, ["once", "session", "deny"]);
+    assert!(core.answer_approval("r1", "bogus").is_err());
+    assert!(core.answer_approval("nope", "once").is_err());
+    // `always` in restricted mode behaves as `session`: no updatedPermissions.
+    let w = writes(&core.answer_approval("r1", "always").unwrap());
+    assert!(w[0]["response"]["response"]
+        .get("updatedPermissions")
+        .is_none());
+    assert_eq!(core.session_rules(), 2);
+    // Answered: a second answer is an error.
+    assert!(core.answer_approval("r1", "once").is_err());
+}
+
+#[test]
+fn clarify_cancel_and_multi() {
+    let fx = fixture!("ask-user-question");
+    let req = lines(fx.stream)
+        .into_iter()
+        .find(|v| v["type"] == "control_request")
+        .unwrap();
+    let mut core = Core::new(Uuid::now_v7(), false);
+    core.on_line(&req.to_string());
+    let rid = req["request_id"].as_str().unwrap();
+    // The hub cancelled: empty answers → deny.
+    let w = writes(&core.answer_clarify(rid, &BTreeMap::new()).unwrap());
+    assert_eq!(w[0]["response"]["response"]["behavior"], "deny");
+    assert!(core.answer_clarify(rid, &BTreeMap::new()).is_err());
+
+    core.on_line(&req.to_string());
+    let answers = BTreeMap::from([
+        (
+            "1".to_string(),
+            ClarifyAnswer::Many(vec!["Hub (Recommended)".into(), "Worker".into()]),
+        ),
+        ("7".to_string(), ClarifyAnswer::One("ignored".into())),
+    ]);
+    let w = writes(&core.answer_clarify(rid, &answers).unwrap());
+    assert_eq!(
+        w[0]["response"]["response"]["updatedInput"]["answers"],
+        json!({"Which area should I focus on first?": "Hub (Recommended), Worker"})
+    );
+}
+
+#[test]
+fn control_response_echo_and_unknown_requests() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let echo = r#"{"type":"control_response","response":{"subtype":"success","request_id":"x","response":{"behavior":"allow"}}}"#;
+    assert!(core.on_line(echo).is_empty());
+    assert!(core.on_line("not json").is_empty());
+    let w = writes(&core.on_line(
+        r#"{"type":"control_request","request_id":"h1","request":{"subtype":"hook_callback"}}"#,
+    ));
+    assert_eq!(w[0]["response"]["subtype"], "error");
+    assert_eq!(w[0]["response"]["request_id"], "h1");
+    // A replay echo with no input in flight is ignored.
+    assert!(core
+        .on_line(r#"{"type":"user","isReplay":true,"uuid":"adbf4a08-b683-4a10-af11-6bd389a5a73e","message":{"role":"user","content":"x"}}"#)
+        .is_empty());
+}
+
+#[test]
+fn held_text_is_not_final_before_a_tool_call() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = Uuid::now_v7();
+    core.input(&SessionInput {
+        session_id: sid,
+        event_id: input,
+        text: "x".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+    });
+    let u1 = Uuid::new_v4();
+    let u2 = Uuid::new_v4();
+    let text = json!({"type":"assistant","uuid":u1,"parent_tool_use_id":null,
+        "message":{"content":[{"type":"text","text":"Let me look."}]}});
+    let tool = json!({"type":"assistant","uuid":u2,"parent_tool_use_id":null,
+        "message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/a"}}]}});
+    assert!(core.on_line(&text.to_string()).is_empty());
+    let a = core.on_line(&tool.to_string());
+    let kinds: Vec<(Uuid, EventKind)> = a
+        .into_iter()
+        .map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => (e.event_id, e.kind),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        kinds[0],
+        (
+            Event::id_from_claude_record(&u1),
+            EventKind::AgentMessage {
+                text: "Let me look.".into(),
+                r#final: false,
+                in_reply_to: Some(input)
+            }
+        )
+    );
+    assert_eq!(kinds[1].0, Event::id_from_claude_record(&u2));
+    // Subagent traffic is not mapped.
+    let sub = json!({"type":"assistant","uuid":Uuid::new_v4(),"parent_tool_use_id":"t1",
+        "message":{"content":[{"type":"text","text":"inner"}]}});
+    assert!(core.on_line(&sub.to_string()).is_empty());
+}

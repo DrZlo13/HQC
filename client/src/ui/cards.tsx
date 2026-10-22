@@ -1,0 +1,387 @@
+// Rendering of chat items: one component per event type of SPEC §4.
+// Unknown and invalid events render as a collapsed card and never throw.
+
+import { useState } from 'preact/hooks';
+import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent } from '../proto';
+import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
+import {
+  CANCEL_LABELS,
+  STATE_LABELS,
+  formatDuration,
+  formatTime,
+  isDeny,
+  oneLine,
+  optionLabel,
+} from './labels';
+
+/** What cards need from the chat: lookups and actions. */
+export interface ChatActions {
+  timeline: Timeline;
+  approve(requestId: string, optionId: string): Promise<void>;
+  answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
+  resend(clientOpId: string): void;
+  discard(clientOpId: string): void;
+  openArtifact(id: string): void;
+  /** Wall clock, injectable for tests. */
+  now?: () => number;
+}
+
+export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
+  return (
+    <>
+      {items.map((it) => {
+        switch (it.kind) {
+          case 'event':
+            return <EventView key={it.key} event={it.event} actions={actions} />;
+          case 'invalid':
+            return <InvalidCard key={it.key} invalid={it.invalid} />;
+          case 'pending':
+            return <PendingBubble key={it.key} pending={it.pending} actions={actions} />;
+        }
+      })}
+    </>
+  );
+}
+
+export function EventView({ event, actions }: { event: HqcEvent; actions: ChatActions }) {
+  switch (event.type) {
+    case 'user.message':
+      return <UserBubble event={event} />;
+    case 'agent.delta':
+      return <StreamingBubble text={event.payload.text} />;
+    case 'agent.message':
+      return <AgentBubble event={event} />;
+    case 'agent.thinking':
+      return (
+        <details class="card card-thinking">
+          <summary>Размышления · {oneLine(event.payload.text, 60)}</summary>
+          <pre class="pre">{event.payload.text}</pre>
+        </details>
+      );
+    case 'tool.call':
+      return <ToolCard call={event} result={actions.timeline.resultFor(event.payload.call_id)} actions={actions} />;
+    case 'tool.result':
+      // Shown inside its call's card; a result without a call gets its own card.
+      return actions.timeline.hasCall(event.payload.call_id) ? null : <ToolCard result={event} actions={actions} />;
+    case 'approval.request':
+      return <ApprovalCard event={event} actions={actions} />;
+    case 'approval.response': {
+      const req = actions.timeline.request(event.payload.request_id);
+      const opt =
+        req?.type === 'approval.request'
+          ? req.payload.options.find((o) => o.id === event.payload.option_id)
+          : undefined;
+      const by = event.payload.by === 'auto' ? ' (автоматически)' : '';
+      return (
+        <Line kind="approval">
+          {req?.type === 'approval.request' ? `${req.payload.tool}: ` : ''}
+          {opt ? optionLabel(opt) : event.payload.option_id}
+          {by}
+        </Line>
+      );
+    }
+    case 'approval.cancel':
+    case 'clarify.cancel':
+      return (
+        <Line kind="cancel">
+          {event.type === 'approval.cancel' ? 'Запрос разрешения' : 'Вопрос'} отменён:{' '}
+          {CANCEL_LABELS[event.payload.reason]}
+        </Line>
+      );
+    case 'clarify.request':
+      return <ClarifyCard event={event} actions={actions} />;
+    case 'clarify.response':
+      return <Line kind="approval">Ответы отправлены</Line>;
+    case 'attachment':
+      return (
+        <div class="card card-attachment">
+          <div class="card-title">
+            Вложение · {event.payload.name} <span class="muted">({event.payload.kind})</span>
+          </div>
+          {event.payload.caption && <div>{event.payload.caption}</div>}
+          <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(event.payload.artifact_id)}>
+            Открыть
+          </button>
+        </div>
+      );
+    case 'peer.message':
+      return (
+        <div class="card card-peer">
+          <div class="card-title">
+            {event.payload.mode === 'ask' ? 'Вопрос' : 'Сообщение'} от сессии{' '}
+            <code>{event.payload.from_session_id.slice(-8)}</code>
+          </div>
+          <div class="text">{event.payload.text}</div>
+        </div>
+      );
+    case 'usage': {
+      const p = event.payload;
+      return (
+        <Line kind="usage">
+          {p.input_tokens} → {p.output_tokens} токенов
+          {p.cache_read ? ` · кэш ${p.cache_read}` : ''}
+          {p.cost_usd !== undefined ? ` · $${p.cost_usd.toFixed(4)}` : ''}
+          {p.model ? ` · ${p.model}` : ''}
+        </Line>
+      );
+    }
+    case 'status':
+      return (
+        <Line kind={`status state-${event.payload.state}`}>
+          {STATE_LABELS[event.payload.state]}
+          {event.payload.detail ? ` · ${event.payload.detail}` : ''}
+        </Line>
+      );
+    case 'system':
+      return <Line kind="system">{event.payload.text}</Line>;
+    case 'unknown':
+      return (
+        <details class="card card-unknown">
+          <summary>Неизвестное событие · {event.wire_type}</summary>
+          <pre class="pre">{JSON.stringify(event.payload, null, 2)}</pre>
+        </details>
+      );
+  }
+}
+
+function Line({ kind, children }: { kind: string; children: preact.ComponentChildren }) {
+  return <div class={`line line-${kind}`}>{children}</div>;
+}
+
+function UserBubble({ event }: { event: EventOf<'user.message'> }) {
+  const d = event.delivery;
+  return (
+    <div class="bubble bubble-user">
+      <div class="text">{event.payload.text}</div>
+      <div class="meta">
+        {event.payload.artifact_ids.length > 0 && <span>вложений: {event.payload.artifact_ids.length} · </span>}
+        {formatTime(event.ts)}
+        {d === 'pending' && <span class="delivery"> · ждёт доставки</span>}
+        {d === 'failed' && <span class="delivery delivery-failed"> · не доставлено</span>}
+      </div>
+    </div>
+  );
+}
+
+function PendingBubble({ pending, actions }: { pending: PendingMessage; actions: ChatActions }) {
+  return (
+    <div class={`bubble bubble-user bubble-pending ${pending.status === 'failed' ? 'bubble-failed' : ''}`}>
+      <div class="text">{pending.text}</div>
+      <div class="meta">
+        {pending.status === 'sending' ? (
+          'отправка…'
+        ) : (
+          <>
+            не отправлено: {pending.error}{' '}
+            <button type="button" class="btn btn-small" onClick={() => actions.resend(pending.client_op_id)}>
+              Ещё раз
+            </button>{' '}
+            <button type="button" class="btn btn-small btn-ghost" onClick={() => actions.discard(pending.client_op_id)}>
+              Убрать
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AgentBubble({ event }: { event: EventOf<'agent.message'> }) {
+  return (
+    <div class={`bubble bubble-agent ${event.payload.final ? 'bubble-final' : 'bubble-interim'}`}>
+      <div class="text">{event.payload.text}</div>
+      <div class="meta">{formatTime(event.ts)}</div>
+    </div>
+  );
+}
+
+export function StreamingBubble({ text }: { text: string }) {
+  return (
+    <div class="bubble bubble-agent bubble-streaming" aria-live="polite">
+      <div class="text">
+        {text}
+        <span class="cursor" />
+      </div>
+    </div>
+  );
+}
+
+function ToolCard({
+  call,
+  result,
+  actions,
+}: {
+  call?: EventOf<'tool.call'>;
+  result?: EventOf<'tool.result'>;
+  actions: ChatActions;
+}) {
+  const r = result?.payload;
+  const state = !r ? 'running' : r.error ? 'error' : 'ok';
+  const mark = { running: '…', error: '✕', ok: '✓' }[state];
+  const name = call?.payload.tool ?? 'Результат инструмента';
+  const preview = call ? oneLine(call.payload.args_preview, 60) : oneLine(r?.result_preview ?? '', 60);
+  return (
+    <details class={`card card-tool tool-${state}`}>
+      <summary>
+        <span class="tool-mark" aria-label={state}>
+          {mark}
+        </span>{' '}
+        <b>{name}</b> <span class="muted">{preview}</span>
+        {r?.duration_ms !== undefined && <span class="muted"> · {formatDuration(r.duration_ms)}</span>}
+      </summary>
+      {call && (
+        <>
+          <div class="label">Аргументы</div>
+          <pre class="pre">{call.payload.args_preview}</pre>
+        </>
+      )}
+      {r && (
+        <>
+          <div class="label">{r.error ? 'Ошибка' : 'Результат'}</div>
+          {r.error_text && <div class="error-text">{r.error_text}</div>}
+          {r.result_preview && <pre class="pre">{r.result_preview}</pre>}
+          {r.artifact_id && (
+            <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(r.artifact_id!)}>
+              Полный результат
+            </button>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
+function useAction() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    fn()
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false));
+  };
+  return { busy, error, run };
+}
+
+export function ApprovalCard({ event, actions }: { event: EventOf<'approval.request'>; actions: ChatActions }) {
+  const p = event.payload;
+  const fate = actions.timeline.requestFate(p.request_id);
+  const { busy, error, run } = useAction();
+  const now = actions.now?.() ?? Date.now();
+  const expired = p.expires_at !== undefined && Date.parse(p.expires_at) <= now;
+  const chosen =
+    fate.response && 'option_id' in fate.response
+      ? p.options.find((o) => o.id === (fate.response as { option_id: string }).option_id)
+      : undefined;
+  const open = !fate.response && !fate.cancel;
+  return (
+    <div class={`card card-approval ${open ? 'is-open' : 'is-closed'}`}>
+      <div class="card-title">
+        Разрешение · <b>{p.tool}</b>
+      </div>
+      <pre class="pre">{p.description}</pre>
+      {open && !expired && (
+        <div class="actions">
+          {p.options.map((o) => (
+            <button
+              type="button"
+              key={o.id}
+              class={`btn ${isDeny(o) ? 'btn-deny' : o.canonical === 'once' ? 'btn-primary' : ''}`}
+              data-option={o.id}
+              data-canonical={o.canonical}
+              title={o.label}
+              disabled={busy}
+              onClick={() => run(() => actions.approve(p.request_id, o.id))}
+            >
+              {optionLabel(o)}
+            </button>
+          ))}
+        </div>
+      )}
+      {open && expired && <div class="muted">Срок ответа истёк</div>}
+      {open && !expired && p.expires_at && <div class="muted small">до {formatTime(p.expires_at)}</div>}
+      {fate.response && (
+        <div class="outcome">Ответ: {chosen ? optionLabel(chosen) : (fate.response as { option_id?: string }).option_id}</div>
+      )}
+      {fate.cancel && <div class="outcome">Отменён: {CANCEL_LABELS[fate.cancel.reason]}</div>}
+      {error && <div class="error-text">{error}</div>}
+    </div>
+  );
+}
+
+export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
+  const p = event.payload;
+  const fate = actions.timeline.requestFate(p.request_id);
+  const open = !fate.response && !fate.cancel;
+  const [answers, setAnswers] = useState<Record<string, ClarifyAnswer>>({});
+  const { busy, error, run } = useAction();
+  const given = fate.response && 'answers' in fate.response ? fate.response.answers : undefined;
+
+  const set = (q: ClarifyQuestion, v: string, checked: boolean) => {
+    setAnswers((a) => {
+      if (!q.multi) return { ...a, [q.id]: v };
+      const cur = Array.isArray(a[q.id]) ? (a[q.id] as string[]) : [];
+      return { ...a, [q.id]: checked ? [...cur, v] : cur.filter((x) => x !== v) };
+    });
+  };
+
+  return (
+    <form
+      class={`card card-clarify ${open ? 'is-open' : 'is-closed'}`}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (open) run(() => actions.answer(p.request_id, answers));
+      }}
+    >
+      <div class="card-title">Вопрос агента</div>
+      {p.questions.map((q) => (
+        <fieldset key={q.id} class="question" disabled={!open || busy}>
+          <legend>{q.text}</legend>
+          {q.options?.map((o) => {
+            const cur = (given ?? answers)[q.id];
+            const input = {
+              name: `${p.request_id}-${q.id}`,
+              value: o,
+              checked: Array.isArray(cur) ? cur.includes(o) : cur === o,
+              onChange: (e: Event) => set(q, o, (e.currentTarget as HTMLInputElement).checked),
+            };
+            return (
+              <label key={o} class="choice">
+                {q.multi ? <input type="checkbox" {...input} /> : <input type="radio" {...input} />} {o}
+              </label>
+            );
+          })}
+          {!q.options?.length && (
+            <input
+              class="input"
+              type="text"
+              value={String((given ?? answers)[q.id] ?? '')}
+              onInput={(e) => set(q, (e.currentTarget as HTMLInputElement).value, true)}
+            />
+          )}
+        </fieldset>
+      ))}
+      {open && (
+        <div class="actions">
+          <button type="submit" class="btn btn-primary" disabled={busy}>
+            Ответить
+          </button>
+        </div>
+      )}
+      {fate.cancel && <div class="outcome">Отменён: {CANCEL_LABELS[fate.cancel.reason]}</div>}
+      {error && <div class="error-text">{error}</div>}
+    </form>
+  );
+}
+
+function InvalidCard({ invalid }: { invalid: InvalidEvent }) {
+  const type = (invalid.raw as { type?: unknown })?.type;
+  return (
+    <details class="card card-unknown card-invalid">
+      <summary>Некорректное событие · {typeof type === 'string' ? type : '?'}</summary>
+      <div class="error-text">{invalid.error}</div>
+      <pre class="pre">{JSON.stringify(invalid.raw, null, 2)}</pre>
+    </details>
+  );
+}

@@ -1,0 +1,625 @@
+/* Mobile first; two columns from 900px. Light and dark follow the system. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --text: #1b1f27;
+  --muted: #6b7280;
+  --line: #e3e6eb;
+  --accent: #3367e0;
+  --accent-text: #ffffff;
+  --user: #dfe8ff;
+  --agent: #ffffff;
+  --deny: #c62f3a;
+  --ok: #1f8a4c;
+  --warn: #b7791f;
+  --code-bg: #f0f2f5;
+  --radius: 12px;
+  --bar-h: 56px;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
+  -webkit-text-size-adjust: 100%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b;
+    --panel: #1b1f27;
+    --text: #e6e8ec;
+    --muted: #9099a8;
+    --line: #2b313c;
+    --accent: #6b9bff;
+    --accent-text: #0d1117;
+    --user: #24365e;
+    --agent: #1f242d;
+    --deny: #ff6b74;
+    --ok: #4cc283;
+    --warn: #e0a43a;
+    --code-bg: #161a21;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#app {
+  height: 100dvh;
+}
+
+a {
+  color: var(--accent);
+}
+
+code,
+pre {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+/* ---- layout ---- */
+
+.layout {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.sidebar,
+.main {
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Phone: one screen at a time. */
+.route-list .main,
+.layout:not(.route-list) .sidebar {
+  display: none;
+}
+
+@media (min-width: 900px) {
+  .layout {
+    grid-template-columns: 320px 1fr;
+  }
+  .route-list .main,
+  .layout:not(.route-list) .sidebar {
+    display: flex;
+  }
+  .sidebar {
+    border-right: 1px solid var(--line);
+  }
+  .chat .back,
+  .page .back[href='#/'] {
+    display: none;
+  }
+}
+
+.placeholder {
+  margin: auto;
+}
+
+.sessions,
+.chat,
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ---- top bar ---- */
+
+.bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--bar-h);
+  padding: 8px 12px;
+  padding-top: calc(8px + env(safe-area-inset-top));
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.bar-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.bar .title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar .state {
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.back {
+  font-size: 2rem;
+  line-height: 1;
+  text-decoration: none;
+  padding: 0 8px 4px 0;
+  min-width: 32px;
+}
+
+/* ---- buttons and inputs ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-small {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 0.9rem;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.btn-deny {
+  color: var(--deny);
+  border-color: color-mix(in srgb, var(--deny) 50%, transparent);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.input {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  /* 16px keeps iOS Safari from zooming into the field. */
+  font: inherit;
+  font-size: 16px;
+}
+
+.input:focus,
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---- session list ---- */
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 env(safe-area-inset-bottom);
+  overflow-y: auto;
+  flex: 1;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  min-height: 64px;
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+
+.session-row.is-current {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.session-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-title {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-state {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.dot.state-running,
+.dot.state-queued {
+  background: var(--accent);
+}
+.dot.state-waiting {
+  background: var(--warn);
+}
+.dot.state-error {
+  background: var(--deny);
+}
+.dot.state-idle {
+  background: var(--ok);
+}
+
+.session-state.state-waiting {
+  color: var(--warn);
+  font-weight: 500;
+}
+.session-state.state-error {
+  color: var(--deny);
+}
+
+.badge {
+  flex: none;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.8rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty {
+  padding: 24px 16px;
+  color: var(--muted);
+}
+
+/* ---- chat ---- */
+
+.timeline {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bubble {
+  max-width: min(85%, 720px);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.bubble .text {
+  white-space: pre-wrap;
+}
+
+.bubble .meta {
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.bubble-user {
+  align-self: flex-end;
+  background: var(--user);
+  border-color: transparent;
+}
+
+.bubble-pending {
+  opacity: 0.7;
+}
+
+.bubble-failed {
+  opacity: 1;
+  border-color: var(--deny);
+}
+
+.bubble-agent {
+  align-self: flex-start;
+  background: var(--agent);
+}
+
+.bubble-interim {
+  color: var(--muted);
+}
+
+.cursor {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: blink 1s steps(2) infinite;
+}
+
+@keyframes blink {
+  to {
+    opacity: 0;
+  }
+}
+
+.delivery-failed {
+  color: var(--deny);
+}
+
+.card {
+  align-self: stretch;
+  max-width: 720px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow-wrap: anywhere;
+}
+
+.card summary {
+  cursor: pointer;
+  min-height: 28px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card[open] summary {
+  white-space: normal;
+}
+
+.card-title {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.card .label {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pre {
+  margin: 4px 0 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.tool-mark {
+  display: inline-block;
+  width: 1.2em;
+  text-align: center;
+  font-weight: 700;
+}
+.tool-ok .tool-mark {
+  color: var(--ok);
+}
+.tool-error .tool-mark {
+  color: var(--deny);
+}
+.tool-running .tool-mark {
+  color: var(--accent);
+}
+
+.card-approval.is-open,
+.card-clarify.is-open {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px var(--warn);
+}
+
+.card-approval .card-title {
+  color: var(--text);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Phone: approval buttons stack full width, easy to hit with a thumb. */
+@media (max-width: 520px) {
+  .card-approval .actions .btn {
+    flex: 1 1 100%;
+  }
+}
+
+.outcome {
+  margin-top: 6px;
+  font-weight: 500;
+}
+
+.outcome.ok {
+  color: var(--ok);
+}
+
+.error-text {
+  margin-top: 6px;
+  color: var(--deny);
+}
+
+.question {
+  border: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.question legend {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.choice input {
+  width: 20px;
+  height: 20px;
+}
+
+.card-unknown {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.line {
+  align-self: center;
+  max-width: 100%;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.line-status.state-error,
+.line-cancel {
+  color: var(--deny);
+}
+
+.line-status.state-waiting {
+  color: var(--warn);
+}
+
+.line-approval {
+  color: var(--ok);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.8rem;
+}
+
+.notice {
+  flex: none;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--deny) 15%, var(--panel));
+  font-size: 0.9rem;
+}
+
+.composer {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 8px 12px;
+  padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
+.composer .input {
+  resize: none;
+  max-height: 200px;
+}
+
+/* ---- pages ---- */
+
+.page-body {
+  padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-start;
+  max-width: 640px;
+}
+
+.page-body h2 {
+  margin: 12px 0 0;
+  font-size: 1.05rem;
+}
+
+.page-body p {
+  margin: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.input-code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 1.4rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.plain-list {
+  margin: 0;
+  padding-left: 20px;
+}

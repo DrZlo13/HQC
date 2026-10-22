@@ -139,6 +139,34 @@ impl TestHub {
         limits: Limits,
         timing: Timing,
     ) -> Self {
+        Self::start_upgraded(auth, email, limits, timing, None).await
+    }
+
+    /// Dev auth with a fresh user over a database that went through the migrations before
+    /// `version` only, then got `seed` (`{email}` replaced by the user's email), and is then
+    /// migrated to the current schema: an upgrade of a hub with existing data.
+    pub async fn start_upgrading(version: i64, seed: &str) -> Self {
+        let email = format!("user-{}@example.com", Uuid::new_v4().simple());
+        let seed = seed.replace("{email}", &email);
+        Self::start_upgraded(
+            AuthConfig::Dev {
+                email: email.clone(),
+            },
+            email,
+            Limits::default(),
+            test_timing(),
+            Some((version, seed)),
+        )
+        .await
+    }
+
+    async fn start_upgraded(
+        auth: AuthConfig,
+        email: String,
+        limits: Limits,
+        timing: Timing,
+        upgrade: Option<(i64, String)>,
+    ) -> Self {
         let url = db_url();
         let admin = PgPoolOptions::new()
             .max_connections(1)
@@ -158,6 +186,20 @@ impl TestHub {
             .connect_with(opts)
             .await
             .unwrap();
+        if let Some((version, seed)) = upgrade {
+            let before = sqlx::migrate::Migrator {
+                migrations: std::borrow::Cow::Owned(
+                    MIGRATOR
+                        .iter()
+                        .filter(|m| m.version < version)
+                        .cloned()
+                        .collect(),
+                ),
+                ..sqlx::migrate::Migrator::DEFAULT
+            };
+            before.run(&pool).await.unwrap();
+            sqlx::raw_sql(&seed).execute(&pool).await.unwrap();
+        }
         MIGRATOR.run(&pool).await.unwrap();
 
         let config = Config {
@@ -294,6 +336,37 @@ impl TestHub {
         )
     }
 
+    /// `POST /api/workspaces` in `project` on `w`'s worker while `w` answers the `fs.*`
+    /// requests it gets meanwhile (none, when the hub refuses before asking).
+    pub async fn add_workspace(
+        &self,
+        w: &mut FakeWorker,
+        project: &str,
+        path: &str,
+    ) -> (u16, Value) {
+        let body = json!({"project_id": project, "worker_id": w.worker_id, "path": path});
+        self.while_worker_answers(w, self.post("/api/workspaces", body))
+            .await
+    }
+
+    /// Run a request while `w` answers the `fs.*` frames the hub sends it.
+    pub async fn while_worker_answers<F: std::future::Future<Output = (u16, Value)>>(
+        &self,
+        w: &mut FakeWorker,
+        req: F,
+    ) -> (u16, Value) {
+        tokio::pin!(req);
+        loop {
+            tokio::select! {
+                r = &mut req => return r,
+                Some(f) = recv_json(&mut w.ws, WAIT) => {
+                    let (ty, payload) = w.fs_reply(&f);
+                    w.reply(&f["id"], ty, payload).await;
+                }
+            }
+        }
+    }
+
     pub async fn create_session(&self, title: &str) -> String {
         let pid = self.personal_project().await;
         let (s, v) = self
@@ -353,6 +426,10 @@ async fn recv_json(ws: &mut Ws, timeout: Duration) -> Option<Value> {
 pub struct FakeWorker {
     ws: Ws,
     next: u64,
+    /// `allowed_roots` of its `hello`; [`FakeWorker::fs_reply`] answers by them.
+    pub roots: Vec<String>,
+    /// From `hello.ack`.
+    pub worker_id: String,
 }
 
 impl FakeWorker {
@@ -363,14 +440,21 @@ impl FakeWorker {
         req.headers_mut()
             .insert("Authorization", format!("Bearer {token}").parse().unwrap());
         match tokio_tungstenite::connect_async(req).await {
-            Ok((ws, _)) => Ok(Self { ws, next: 1 }),
+            Ok((ws, _)) => Ok(Self {
+                ws,
+                next: 1,
+                roots: vec![],
+                worker_id: String::new(),
+            }),
             Err(e) => Err(e.to_string()),
         }
     }
 
-    /// Connect and complete `hello` announcing `workspace_path`, with the hub's
+    /// Connect and complete `hello` with `allowed_roots = [workspace]`, with the hub's
     /// [`TestHub::boot_id`]: every `online` of a test is the same worker process
-    /// reconnecting. Returns `hello.ack`.
+    /// reconnecting. The first time, `workspace` is added to the personal project through
+    /// `POST /api/workspaces` (the worker answering `fs.stat`), so sessions can be created.
+    /// Returns `hello.ack`.
     pub async fn online(hub: &TestHub, token: &str, workspace: &str) -> (Self, Value) {
         Self::online_boot(hub, token, workspace, hub.boot_id).await
     }
@@ -382,23 +466,44 @@ impl FakeWorker {
         workspace: &str,
         boot_id: Uuid,
     ) -> (Self, Value) {
-        let mut w = Self::connect(hub, token).await.expect("worker connect");
-        let ack = w.hello(workspace, boot_id).await;
+        let (mut w, ack) = Self::online_bare(hub, token, workspace, boot_id).await;
+        let (_, list) = hub.get("/api/workspaces").await;
+        let known = list["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["worker_id"] == w.worker_id.as_str() && x["path"] == workspace);
+        if !known {
+            let pid = hub.personal_project().await;
+            let (s, v) = hub.add_workspace(&mut w, &pid, workspace).await;
+            assert_eq!(s, 201, "{v}");
+        }
         (w, ack)
     }
 
-    pub async fn hello(&mut self, workspace: &str, boot_id: Uuid) -> Value {
+    /// Connect and `hello` with `allowed_roots = [root]`, no workspace added.
+    pub async fn online_bare(
+        hub: &TestHub,
+        token: &str,
+        root: &str,
+        boot_id: Uuid,
+    ) -> (Self, Value) {
+        let mut w = Self::connect(hub, token).await.expect("worker connect");
+        let ack = w.hello(root, boot_id).await;
+        (w, ack)
+    }
+
+    pub async fn hello(&mut self, root: &str, boot_id: Uuid) -> Value {
         let id = self
             .send(
                 "hello",
                 json!({
                     "protocol_version": hqc_proto::PROTOCOL_VERSION,
                     "boot_id": boot_id,
-                    "capabilities": {"claude_code": {"version": "2.1.307"}, "acp_agents": [],
-                                     "workspace_path": workspace},
+                    "capabilities": {"claude_code": {"version": "2.1.307"}, "acp_agents": []},
                     "environments": ["default"],
                     "env_bindings": [],
-                    "allowed_roots": [workspace],
+                    "allowed_roots": [root],
                     "allow_foreign_sessions": false,
                     "share_local_models": false,
                     "local_models": []
@@ -408,7 +513,79 @@ impl FakeWorker {
         let ack = self.recv().await;
         assert_eq!(ack["type"], "hello.ack", "{ack}");
         assert_eq!(ack["id"], id);
+        self.roots = vec![root.to_string()];
+        self.worker_id = ack["payload"]["worker_id"].as_str().unwrap().to_string();
         ack
+    }
+
+    /// What this fake answers to `fs.stat` / `fs.list_dirs` (SPEC §5.3), by its `roots`:
+    /// a path containing `missing` does not exist, one ending in `.txt` is a file, a path
+    /// ending in `/link` resolves to its parent, and `fs.list_dirs` outside the roots is an
+    /// error.
+    pub fn fs_reply(&self, frame: &Value) -> (&'static str, Value) {
+        let p = &frame["payload"];
+        let rid = p["request_id"].clone();
+        let inside = |path: &str| {
+            self.roots
+                .iter()
+                .any(|r| std::path::Path::new(path).starts_with(r))
+        };
+        match frame["type"].as_str() {
+            Some("fs.stat") => {
+                let path = p["path"].as_str().unwrap().trim_end_matches('/');
+                let canonical = path.strip_suffix("/link").unwrap_or(path);
+                if !inside(canonical) {
+                    return (
+                        "result",
+                        json!({"request_id": rid, "exists": false, "is_dir": false,
+                               "inside_allowed_roots": false}),
+                    );
+                }
+                if path.contains("missing") {
+                    return (
+                        "result",
+                        json!({"request_id": rid, "exists": false, "is_dir": false,
+                               "inside_allowed_roots": true}),
+                    );
+                }
+                (
+                    "result",
+                    json!({"request_id": rid, "exists": true, "is_dir": !path.ends_with(".txt"),
+                           "canonical": canonical, "inside_allowed_roots": true}),
+                )
+            }
+            Some("fs.list_dirs") => match p["path"].as_str() {
+                None => {
+                    let entries: Vec<Value> = self
+                        .roots
+                        .iter()
+                        .map(|r| json!({"name": r.rsplit('/').next().unwrap(), "path": r}))
+                        .collect();
+                    ("result", json!({"request_id": rid, "entries": entries}))
+                }
+                Some(path) if inside(path) => (
+                    "result",
+                    json!({"request_id": rid, "entries": [
+                        {"name": "a", "path": format!("{path}/a")},
+                        {"name": "b", "path": format!("{path}/b")}
+                    ]}),
+                ),
+                Some(path) => (
+                    "error",
+                    json!({"code": "invalid_frame", "retryable": false,
+                           "message": format!("{path} is outside allowed_roots")}),
+                ),
+            },
+            _ => panic!("not an fs request: {frame}"),
+        }
+    }
+
+    /// Answer the next frame, which must be an `fs.*` request, with [`Self::fs_reply`].
+    pub async fn answer_fs(&mut self) -> Value {
+        let f = self.recv().await;
+        let (ty, payload) = self.fs_reply(&f);
+        self.reply(&f["id"], ty, payload).await;
+        f
     }
 
     pub async fn send(&mut self, ty: &str, payload: Value) -> String {

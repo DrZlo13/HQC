@@ -109,6 +109,97 @@ pub async fn project(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ProjectRow>> 
         .await
 }
 
+impl ProjectRow {
+    pub fn to_api(&self) -> hqc_proto::api::Project {
+        hqc_proto::api::Project {
+            id: self.id,
+            owner_id: self.owner_id,
+            name: self.name.clone(),
+            slug: self.slug.clone(),
+            description: self.description.clone(),
+            default_workspace_id: self.default_workspace_id,
+            is_personal: self.is_personal,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+/// A new project with a slug unique for its owner (SPEC §3 Project).
+pub async fn create_project(
+    db: &PgPool,
+    owner: Uuid,
+    name: &str,
+    description: &str,
+) -> sqlx::Result<ProjectRow> {
+    let base = slugify_or(name, "project");
+    for i in 1.. {
+        let slug = if i == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{i}")
+        };
+        let row = sqlx::query_as(
+            "INSERT INTO projects (id, owner_id, name, slug, description) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (owner_id, slug) DO NOTHING RETURNING *",
+        )
+        .bind(new_id())
+        .bind(owner)
+        .bind(name)
+        .bind(&slug)
+        .bind(description)
+        .fetch_optional(db)
+        .await?;
+        if let Some(row) = row {
+            return Ok(row);
+        }
+    }
+    unreachable!()
+}
+
+/// `PATCH /api/projects/{id}`: only the given fields change; the slug stays.
+pub async fn update_project(
+    db: &PgPool,
+    id: Uuid,
+    name: Option<&str>,
+    description: Option<&str>,
+    default_workspace_id: Option<Uuid>,
+) -> sqlx::Result<ProjectRow> {
+    sqlx::query_as(
+        "UPDATE projects SET name = coalesce($2, name), description = coalesce($3, description),
+            default_workspace_id = coalesce($4, default_workspace_id), updated_at = now()
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(description)
+    .bind(default_workspace_id)
+    .fetch_one(db)
+    .await
+}
+
+/// Deletes the project with its workspaces and sessions (their events, cursors and requests
+/// go with them, SPEC §17.4). Returns the sessions that were on a worker, for `session.kill`.
+pub async fn delete_project(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<(Uuid, Uuid)>> {
+    let mut tx = db.begin().await?;
+    let killed: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, worker_id FROM sessions WHERE project_id = $1 AND worker_id IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM sessions WHERE project_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM projects WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(killed)
+}
+
 // ---------------------------------------------------------------- workers
 
 #[derive(Debug, Clone, FromRow)]
@@ -158,20 +249,6 @@ pub async fn workers_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<WorkerRow>
     .bind(owner)
     .fetch_all(db)
     .await
-}
-
-/// Workers on which `owner` has sessions.
-pub async fn workers_with_sessions(
-    db: &PgPool,
-    owner: Uuid,
-) -> sqlx::Result<std::collections::HashSet<Uuid>> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT worker_id FROM sessions WHERE owner_id = $1 AND worker_id IS NOT NULL",
-    )
-    .bind(owner)
-    .fetch_all(db)
-    .await?;
-    Ok(ids.into_iter().collect())
 }
 
 /// Store the copy of the worker's local config from `hello` (display only, SPEC §3 Worker)
@@ -412,58 +489,182 @@ pub async fn enroll_poll(
 pub struct WorkspaceRow {
     pub id: Uuid,
     pub project_id: Uuid,
+    pub owner_id: Uuid,
     pub worker_id: Uuid,
     pub path: String,
+    pub label: String,
     pub environment: String,
+    pub ephemeral: bool,
+    pub created_by_hqc: bool,
+    pub kind: String,
+    pub mirror_enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-/// Iteration 1: the worker announces its single workspace in `hello`; it lives in the
-/// owner's personal project.
-pub async fn ensure_workspace(
-    db: &PgPool,
-    project_id: Uuid,
-    owner_id: Uuid,
-    worker_id: Uuid,
-    path: &str,
-) -> sqlx::Result<Uuid> {
-    sqlx::query_scalar(
-        "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (project_id, worker_id, path) DO UPDATE SET updated_at = now()
-         RETURNING id",
-    )
+const WORKSPACE_COLS: &str = "id, project_id, owner_id, worker_id, path, label, environment, \
+    ephemeral, created_by_hqc, kind, mirror_enabled, created_at, updated_at";
+
+impl WorkspaceRow {
+    pub fn to_api(&self) -> hqc_proto::api::Workspace {
+        hqc_proto::api::Workspace {
+            id: self.id,
+            project_id: self.project_id,
+            worker_id: self.worker_id,
+            path: self.path.clone(),
+            label: self.label.clone(),
+            environment: self.environment.clone(),
+            kind: self.kind.clone(),
+            ephemeral: self.ephemeral,
+            created_by_hqc: self.created_by_hqc,
+            mirror_enabled: self.mirror_enabled,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+pub async fn workspace(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
+/// Oldest first: the order the user added them in.
+pub async fn workspaces_of_project(db: &PgPool, project: Uuid) -> sqlx::Result<Vec<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE project_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(project)
+    .fetch_all(db)
+    .await
+}
+
+pub async fn workspaces_of_owner(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE owner_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
+/// Two folders overlap when they are the same or one lies inside the other (compared by
+/// path components, so `/a/b` and `/a/bc` do not).
+pub fn paths_overlap(a: &str, b: &str) -> bool {
+    let (a, b) = (std::path::Path::new(a), std::path::Path::new(b));
+    a.starts_with(b) || b.starts_with(a)
+}
+
+pub struct NewWorkspace<'a> {
+    pub project_id: Uuid,
+    pub owner_id: Uuid,
+    pub worker_id: Uuid,
+    /// Canonical, as the worker reported it in `fs.stat`.
+    pub path: &'a str,
+    pub label: &'a str,
+}
+
+pub enum WorkspaceInsert {
+    Created(WorkspaceRow),
+    /// The path equals, lies inside or contains this workspace of the same worker.
+    Conflict(WorkspaceRow),
+}
+
+/// Adds a workspace unless it overlaps one of the same worker (SPEC §3 Workspace: a folder
+/// belongs to one project). Additions per worker are serialized by an advisory lock, so two
+/// concurrent requests cannot both pass the check. The project's first workspace becomes
+/// its `default_workspace_id`.
+pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<WorkspaceInsert> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 14))")
+        .bind(n.worker_id)
+        .execute(&mut *tx)
+        .await?;
+    let existing: Vec<WorkspaceRow> = sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(n.worker_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if let Some(w) = existing
+        .into_iter()
+        .find(|w| paths_overlap(&w.path, n.path))
+    {
+        return Ok(WorkspaceInsert::Conflict(w));
+    }
+    let row: WorkspaceRow = sqlx::query_as(&format!(
+        "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {WORKSPACE_COLS}"
+    ))
     .bind(new_id())
-    .bind(project_id)
-    .bind(owner_id)
-    .bind(worker_id)
-    .bind(path)
+    .bind(n.project_id)
+    .bind(n.owner_id)
+    .bind(n.worker_id)
+    .bind(n.path)
+    .bind(n.label)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE projects SET default_workspace_id = $2, updated_at = now()
+         WHERE id = $1 AND default_workspace_id IS NULL",
+    )
+    .bind(n.project_id)
+    .bind(row.id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(WorkspaceInsert::Created(row))
+}
+
+pub async fn set_workspace_label(db: &PgPool, id: Uuid, label: &str) -> sqlx::Result<WorkspaceRow> {
+    sqlx::query_as(&format!(
+        "UPDATE workspaces SET label = $2, updated_at = now() WHERE id = $1 RETURNING {WORKSPACE_COLS}"
+    ))
+    .bind(id)
+    .bind(label)
     .fetch_one(db)
     .await
 }
 
-/// The most recently announced workspace of a worker in a project.
-pub async fn latest_workspace(
-    db: &PgPool,
-    project_id: Uuid,
-    worker_id: Uuid,
-) -> sqlx::Result<Option<WorkspaceRow>> {
-    sqlx::query_as(
-        "SELECT id, project_id, worker_id, path, environment FROM workspaces
-         WHERE project_id = $1 AND worker_id = $2 ORDER BY updated_at DESC LIMIT 1",
-    )
-    .bind(project_id)
-    .bind(worker_id)
-    .fetch_optional(db)
-    .await
+pub enum WorkspaceDelete {
+    Deleted,
+    /// Sessions that are not archived still run there.
+    InUse(i64),
 }
 
-pub async fn workspace(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkspaceRow>> {
-    sqlx::query_as(
-        "SELECT id, project_id, worker_id, path, environment FROM workspaces WHERE id = $1",
+/// Deletes the record only; the folder is not touched (SPEC §13.2). Refused while a
+/// session that is not archived uses it; archived ones lose their workspace. A default
+/// workspace is replaced by the project's oldest remaining one.
+pub async fn delete_workspace(db: &PgPool, ws: &WorkspaceRow) -> sqlx::Result<WorkspaceDelete> {
+    let mut tx = db.begin().await?;
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sessions WHERE workspace_id = $1 AND NOT archived",
     )
-    .bind(id)
-    .fetch_optional(db)
-    .await
+    .bind(ws.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if live > 0 {
+        return Ok(WorkspaceDelete::InUse(live));
+    }
+    sqlx::query("DELETE FROM workspaces WHERE id = $1")
+        .bind(ws.id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE projects SET default_workspace_id = (
+            SELECT id FROM workspaces WHERE project_id = $1 ORDER BY created_at, id LIMIT 1),
+            updated_at = now()
+         WHERE id = $1 AND default_workspace_id IS NULL",
+    )
+    .bind(ws.project_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(WorkspaceDelete::Deleted)
 }
 
 // ---------------------------------------------------------------- sessions
@@ -623,6 +824,12 @@ pub async fn set_runtime_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Resu
 }
 
 pub fn slugify(title: &str) -> String {
+    slugify_or(title, "session")
+}
+
+/// Lowercase ASCII letters and digits joined by `-`, at most ~48 characters; `fallback`
+/// when nothing is left (a title in Cyrillic, say).
+pub fn slugify_or(title: &str, fallback: &str) -> String {
     let mut s = String::new();
     for c in title.chars() {
         if c.is_ascii_alphanumeric() {
@@ -636,7 +843,7 @@ pub fn slugify(title: &str) -> String {
     }
     let s = s.trim_end_matches('-').to_string();
     if s.is_empty() {
-        "session".into()
+        fallback.into()
     } else {
         s
     }

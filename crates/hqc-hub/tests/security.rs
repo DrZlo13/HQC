@@ -242,7 +242,7 @@ async fn hello_of_a_revoked_worker_is_refused() {
     w.send(
         "hello",
         json!({"protocol_version": hqc_proto::PROTOCOL_VERSION, "boot_id": Uuid::new_v4(),
-               "capabilities": {"workspace_path": WS_PATH}, "environments": ["default"],
+               "capabilities": {}, "environments": ["default"],
                "env_bindings": [], "allowed_roots": [WS_PATH], "allow_foreign_sessions": false,
                "share_local_models": false, "local_models": []}),
     )
@@ -435,16 +435,18 @@ async fn enrollment_shows_who_asks_before_confirming() {
     hub.finish().await;
 }
 
+/// SPEC §6, §13.4: a session goes to the project's default workspace, so a worker enrolled
+/// later (say, through a phished code) gets nothing until the user picks a workspace on it.
 #[tokio::test]
 async fn a_fresh_worker_is_not_the_default() {
     let hub = TestHub::start().await;
     let pid = hub.personal_project().await;
-    // Enrolled but never connected: no default worker at all.
+    // Enrolled but never connected: no workspace, so no session.
     let (_, never) = hub.enroll("never-connected").await;
     let (s, v) = hub
         .post(&format!("/api/projects/{pid}/sessions"), json!({}))
         .await;
-    assert_eq!((s, v["error"].as_str()), (409, Some("no_worker")));
+    assert_eq!((s, v["error"].as_str()), (409, Some("no_workspace")));
     drop(never);
 
     let (home_id, home_token) = hub.enroll("home-mac").await;
@@ -453,11 +455,20 @@ async fn a_fresh_worker_is_not_the_default() {
     ack_start(&mut home, &sid).await;
     assert_eq!(hub.session(&sid).await["worker_id"], home_id.as_str());
 
-    // A worker enrolled later (say, through a phished code) connects and is online too:
-    // new sessions still go to the worker the user has been using.
-    let (_, fresh_token) = hub.enroll("fresh").await;
+    // A worker enrolled later connects and is online too, even with a workspace of its own:
+    // new sessions still go to the default workspace, the first one of the project.
+    let (fresh_id, fresh_token) = hub.enroll("fresh").await;
     let (_fresh, _) = FakeWorker::online(&hub, &fresh_token, "/tmp/fresh").await;
     let sid = hub.create_session("second").await;
     assert_eq!(hub.session(&sid).await["worker_id"], home_id.as_str());
+    // Only when asked for.
+    let (s, v) = hub
+        .post(
+            &format!("/api/projects/{pid}/sessions"),
+            json!({ "worker_id": fresh_id }),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["worker_id"], fresh_id.as_str());
     hub.finish().await;
 }

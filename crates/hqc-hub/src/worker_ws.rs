@@ -25,11 +25,14 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use hqc_proto::{
     event::CancelReason,
-    frame::{error_code, Ack, Envelope, Hello, HubFrame, ProcessState, WireError, WorkerFrame},
+    frame::{
+        error_code, Ack, Envelope, Hello, HubFrame, ProcessState, ResultBody, WireError,
+        WorkerFrame,
+    },
     PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use uuid::Uuid;
 
 use crate::{
@@ -95,9 +98,54 @@ pub struct WorkerConn {
     overflow: Notify,
     next_id: AtomicU64,
     pub st: tokio::sync::Mutex<ConnState>,
+    /// Requests waiting for their `result` / `error` ([`WorkerConn::request`]), by frame id.
+    /// Dropped with the connection, so a waiting request learns that the worker is gone.
+    requests: std::sync::Mutex<HashMap<String, oneshot::Sender<Result<ResultBody, WireError>>>>,
+}
+
+/// Why [`WorkerConn::request`] has no result.
+#[derive(Debug)]
+pub enum RequestError {
+    /// The connection closed before the answer.
+    Offline,
+    Timeout,
+    /// The worker answered `error`.
+    Worker(WireError),
 }
 
 impl WorkerConn {
+    /// Send a request frame whose `request_id` is its frame id (`fs.stat`, `fs.list_dirs`,
+    /// SPEC §5.3) and wait for the worker's `result`.
+    pub async fn request(
+        &self,
+        build: impl FnOnce(String) -> HubFrame,
+        timeout: std::time::Duration,
+    ) -> Result<ResultBody, RequestError> {
+        let id = self.next_frame_id();
+        let (tx, rx) = oneshot::channel();
+        self.requests.lock().unwrap().insert(id.clone(), tx);
+        self.reply(&id, build(id.clone()));
+        let r = tokio::time::timeout(timeout, rx).await;
+        self.requests.lock().unwrap().remove(&id);
+        match r {
+            Ok(Ok(Ok(body))) => Ok(body),
+            Ok(Ok(Err(e))) => Err(RequestError::Worker(e)),
+            Ok(Err(_)) => Err(RequestError::Offline),
+            Err(_) => Err(RequestError::Timeout),
+        }
+    }
+
+    /// Hand a `result` / `error` to the waiting request; `false` if none waits for `id`.
+    fn answer(&self, id: &str, r: Result<ResultBody, WireError>) -> bool {
+        match self.requests.lock().unwrap().remove(id) {
+            Some(tx) => {
+                let _ = tx.send(r);
+                true
+            }
+            None => false,
+        }
+    }
+
     fn next_frame_id(&self) -> String {
         format!("h-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -217,6 +265,7 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         overflow: Notify::new(),
         next_id: AtomicU64::new(1),
         st: Default::default(),
+        requests: Default::default(),
     });
     tracing::info!(%worker_id, "worker connected");
 
@@ -254,6 +303,8 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         }
     }
 
+    // Waiting requests learn the worker is gone instead of running into their timeout.
+    conn.requests.lock().unwrap().clear();
     if registered && app.workers.remove(worker_id, conn.conn_id) {
         let _ = db::worker_seen(&app.db, worker_id).await;
         if let Ok(ids) = db::sessions_of_worker(&app.db, worker_id).await {
@@ -389,7 +440,9 @@ async fn handle_text(
             on_session_state(app, conn, &id, st).await
         }
         WorkerFrame::Result(r) => {
-            tracing::warn!(worker_id = %conn.worker_id, request_id = %r.request_id, "result for no request");
+            if !conn.answer(&id, Ok(r.body.clone())) && !conn.answer(&r.request_id, Ok(r.body)) {
+                tracing::debug!(worker_id = %conn.worker_id, request_id = %r.request_id, "result for no waiting request");
+            }
             Ok(())
         }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
@@ -419,28 +472,6 @@ async fn on_hello(
         return Ok(None);
     };
     let restarted = previous_boot != Some(h.boot_id);
-
-    // TODO(SPEC §19, iteration 2): workspaces become hub objects created through
-    // `workspace.create`; until then the worker announces its single workspace in
-    // `capabilities.workspace_path`.
-    if let Some(path) = h.capabilities.get("workspace_path").and_then(Value::as_str) {
-        let owner = db::worker(&app.db, conn.worker_id)
-            .await?
-            .map(|w| w.owner_id);
-        let project = match owner {
-            Some(o) => sqlx::query_scalar::<_, Option<Uuid>>(
-                "SELECT personal_project_id FROM users WHERE id = $1",
-            )
-            .bind(o)
-            .fetch_one(&app.db)
-            .await?
-            .map(|p| (o, p)),
-            None => None,
-        };
-        if let Some((owner, project)) = project {
-            db::ensure_workspace(&app.db, project, owner, conn.worker_id, path).await?;
-        }
-    }
 
     if let Some(old) = app.workers.insert(conn.clone()) {
         tracing::info!(worker_id = %conn.worker_id, "replacing previous worker connection");
@@ -598,6 +629,13 @@ async fn on_error(
     id: &str,
     e: WireError,
 ) -> anyhow::Result<()> {
+    let e = match conn.requests.lock().unwrap().remove(id) {
+        Some(tx) => {
+            let _ = tx.send(Err(e));
+            return Ok(());
+        }
+        None => e,
+    };
     let reply = conn.st.lock().await.replies.remove(id);
     match reply {
         Some(Reply::Start { session_id }) => {

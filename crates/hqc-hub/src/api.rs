@@ -1,4 +1,5 @@
-//! REST API (SPEC §6), iteration 1 subset, plus the worker enrollment endpoints (SPEC §5.1).
+//! REST API (SPEC §6): iteration 1 plus projects and workspaces (T14), and the worker
+//! enrollment endpoints (SPEC §5.1).
 //!
 //! Access control: `can` stands on every request. Iteration 1 has no grants (SPEC §11,
 //! iteration 6), so a person can act only on their own projects, sessions and workers.
@@ -12,12 +13,13 @@ use axum::{
 use chrono::Utc;
 use hqc_proto::{
     api::{
-        self, EnrollConfirmRequest, EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest,
-        EnrollStarted, EventPage, InputRequest, InputResponse, PushSubscription, SessionList,
-        VapidKey,
+        self, CreateProject, CreateSessionRequest, CreateWorkspace, DirList, EnrollConfirmRequest,
+        EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest, EnrollStarted, EventPage,
+        InputRequest, InputResponse, PatchProject, PatchWorkspace, ProjectList, PushSubscription,
+        SessionList, VapidKey, WorkspaceList,
     },
     event::CancelReason,
-    frame::HubFrame,
+    frame::{FsListDirs, FsStat, HubFrame, ResultBody},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -33,6 +35,7 @@ use crate::{
     requests,
     security::ClientIp,
     state,
+    worker_ws::RequestError,
 };
 
 /// SPEC §11 `can(user, action, resource)`. Iteration 1: owner only.
@@ -72,22 +75,384 @@ pub async fn me(user: CurrentUser) -> Json<Value> {
     }))
 }
 
-pub async fn projects(State(app): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        json!({ "projects": db::projects_of(&app.db, user.id).await? }),
-    ))
+/// The user's project; another user's looks like a missing one.
+async fn project_for(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<db::ProjectRow> {
+    match db::project(&app.db, id).await? {
+        Some(p) if p.owner_id == user.id => Ok(p),
+        _ => Err(ApiError::NotFound),
+    }
+}
+
+pub async fn projects(
+    State(app): State<AppState>,
+    user: CurrentUser,
+) -> ApiResult<Json<ProjectList>> {
+    let rows = db::projects_of(&app.db, user.id).await?;
+    Ok(Json(ProjectList {
+        projects: rows.iter().map(db::ProjectRow::to_api).collect(),
+    }))
 }
 
 pub async fn project(
     State(app): State<AppState>,
     user: CurrentUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
-    match db::project(&app.db, id).await? {
-        Some(p) if p.owner_id == user.id => {
-            Ok(Json(serde_json::to_value(p).map_err(anyhow::Error::from)?))
+) -> ApiResult<Json<api::Project>> {
+    Ok(Json(project_for(&app, &user, id).await?.to_api()))
+}
+
+const MAX_PROJECT_NAME: usize = 100;
+const MAX_DESCRIPTION: usize = 2000;
+const MAX_LABEL: usize = 100;
+
+fn project_name(name: &str) -> ApiResult<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name must not be empty".into()));
+    }
+    if name.chars().count() > MAX_PROJECT_NAME {
+        return Err(ApiError::BadRequest(format!(
+            "name is longer than {MAX_PROJECT_NAME} characters"
+        )));
+    }
+    Ok(hqc_proto::replace_nul(name).into_owned())
+}
+
+fn description(d: &str) -> ApiResult<String> {
+    if d.chars().count() > MAX_DESCRIPTION {
+        return Err(ApiError::BadRequest(format!(
+            "description is longer than {MAX_DESCRIPTION} characters"
+        )));
+    }
+    Ok(hqc_proto::replace_nul(d.trim()).into_owned())
+}
+
+/// `POST /api/projects` (SPEC §6): `201` and the project.
+pub async fn create_project(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Json(b): Json<CreateProject>,
+) -> ApiResult<impl IntoResponse> {
+    let name = project_name(&b.name)?;
+    let desc = description(b.description.as_deref().unwrap_or(""))?;
+    let p = db::create_project(&app.db, user.id, &name, &desc).await?;
+    tracing::info!(project_id = %p.id, user = %user.id, "project created");
+    Ok((StatusCode::CREATED, Json(p.to_api())))
+}
+
+/// `PATCH /api/projects/{id}`: name, description, default workspace. The personal project
+/// keeps its name (SPEC §3 User).
+pub async fn patch_project(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<PatchProject>,
+) -> ApiResult<Json<api::Project>> {
+    let p = project_for(&app, &user, id).await?;
+    let name = b.name.as_deref().map(project_name).transpose()?;
+    if p.is_personal && name.as_ref().is_some_and(|n| *n != p.name) {
+        return Err(ApiError::Conflict(
+            "personal_project",
+            "the personal project cannot be renamed".into(),
+        ));
+    }
+    let desc = b.description.as_deref().map(description).transpose()?;
+    if let Some(ws) = b.default_workspace_id {
+        if !db::workspace(&app.db, ws)
+            .await?
+            .is_some_and(|w| w.project_id == id)
+        {
+            return Err(ApiError::BadRequest(
+                "default_workspace_id is not a workspace of this project".into(),
+            ));
         }
+    }
+    let p = db::update_project(
+        &app.db,
+        id,
+        name.as_deref(),
+        desc.as_deref(),
+        b.default_workspace_id,
+    )
+    .await?;
+    Ok(Json(p.to_api()))
+}
+
+/// `DELETE /api/projects/{id}`: the project, its workspace records and its sessions; agents
+/// of those sessions are killed, folders and transcripts on the workers stay (SPEC §13.2,
+/// §17.4). The personal project is not deleted.
+pub async fn delete_project(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    let p = project_for(&app, &user, id).await?;
+    if p.is_personal {
+        return Err(ApiError::Conflict(
+            "personal_project",
+            "the personal project cannot be deleted".into(),
+        ));
+    }
+    let killed = db::delete_project(&app.db, id).await?;
+    for (session_id, worker_id) in &killed {
+        if let Some(conn) = app.workers.get(*worker_id) {
+            conn.send(HubFrame::SessionKill {
+                session_id: *session_id,
+            });
+        }
+        app.session_changed(*session_id);
+    }
+    tracing::info!(project_id = %id, sessions = killed.len(), "project deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------- workspaces
+
+/// How long the hub waits for the worker's `result` to `fs.stat` / `fs.list_dirs`.
+const WORKER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MAX_PATH: usize = 4096;
+
+async fn workspace_for(
+    app: &AppState,
+    user: &CurrentUser,
+    id: Uuid,
+) -> ApiResult<db::WorkspaceRow> {
+    match db::workspace(&app.db, id).await? {
+        Some(w) if w.owner_id == user.id => Ok(w),
         _ => Err(ApiError::NotFound),
+    }
+}
+
+/// The user's worker, not revoked.
+async fn own_worker(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<db::WorkerRow> {
+    match db::worker(&app.db, id).await? {
+        Some(w) if w.owner_id == user.id && w.revoked_at.is_none() => Ok(w),
+        _ => Err(ApiError::BadRequest("unknown worker".into())),
+    }
+}
+
+/// Send a request frame to the online worker and wait for its result.
+async fn ask_worker(
+    app: &AppState,
+    worker_id: Uuid,
+    build: impl FnOnce(String) -> HubFrame,
+) -> ApiResult<ResultBody> {
+    let offline = || ApiError::Conflict("worker_offline", "the worker is offline".into());
+    let conn = app.workers.get(worker_id).ok_or_else(offline)?;
+    match conn.request(build, WORKER_REQUEST_TIMEOUT).await {
+        Ok(body) => Ok(body),
+        Err(RequestError::Offline) => Err(offline()),
+        Err(RequestError::Timeout) => Err(ApiError::WorkerTimeout),
+        Err(RequestError::Worker(e)) => Err(ApiError::Invalid("invalid_path", e.message)),
+    }
+}
+
+fn check_path(p: &str) -> ApiResult<&str> {
+    let p = p.trim();
+    if p.is_empty() || p.len() > MAX_PATH || p.contains('\0') {
+        return Err(ApiError::BadRequest(format!(
+            "path must be 1..{MAX_PATH} bytes without NUL"
+        )));
+    }
+    Ok(p)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspacesQuery {
+    pub project_id: Option<Uuid>,
+}
+
+/// `GET /api/workspaces?project_id=`: the project's workspaces, or all of the user's.
+pub async fn workspaces(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Query(q): Query<WorkspacesQuery>,
+) -> ApiResult<Json<WorkspaceList>> {
+    let rows = match q.project_id {
+        Some(p) => {
+            project_for(&app, &user, p).await?;
+            db::workspaces_of_project(&app.db, p).await?
+        }
+        None => db::workspaces_of_owner(&app.db, user.id).await?,
+    };
+    Ok(Json(WorkspaceList {
+        workspaces: rows.iter().map(db::WorkspaceRow::to_api).collect(),
+    }))
+}
+
+/// `POST /api/workspaces` (SPEC §6, §13.1, `kind: dir`): the worker checks the folder with
+/// `fs.stat` and the hub stores the canonical path it reports. The worker must be online;
+/// a path that equals, lies inside or contains a workspace of the same worker is
+/// `409 workspace_conflict` (a folder belongs to one project, SPEC §3 Workspace).
+pub async fn create_workspace(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Json(b): Json<CreateWorkspace>,
+) -> ApiResult<impl IntoResponse> {
+    let project = project_for(&app, &user, b.project_id).await?;
+    let worker = own_worker(&app, &user, b.worker_id).await?;
+    let path = check_path(&b.path)?;
+    let label = b.label.as_deref().unwrap_or("").trim();
+    if label.chars().count() > MAX_LABEL {
+        return Err(ApiError::BadRequest(format!(
+            "label is longer than {MAX_LABEL} characters"
+        )));
+    }
+    let request = path.to_string();
+    let st = match ask_worker(&app, worker.id, |request_id| {
+        HubFrame::FsStat(FsStat {
+            request_id,
+            path: request,
+        })
+    })
+    .await?
+    {
+        ResultBody::FsStat(st) => st,
+        other => {
+            return Err(anyhow::anyhow!("fs.stat answered with {other:?}").into());
+        }
+    };
+    if !st.inside_allowed_roots {
+        return Err(ApiError::Invalid(
+            "outside_allowed_roots",
+            format!("{path} is outside the worker's allowed_roots"),
+        ));
+    }
+    if !st.exists {
+        return Err(ApiError::Invalid(
+            "path_not_found",
+            format!("{path} does not exist on the worker"),
+        ));
+    }
+    if !st.is_dir {
+        return Err(ApiError::Invalid(
+            "not_a_directory",
+            format!("{path} is not a directory"),
+        ));
+    }
+    let canonical = st
+        .canonical
+        .ok_or_else(|| anyhow::anyhow!("fs.stat without canonical for an existing path"))?;
+    let canonical = check_path(&canonical)?;
+    // The overlap check compares components: they must be resolved already.
+    if std::path::Path::new(canonical).components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return Err(ApiError::Invalid(
+            "invalid_path",
+            format!("the worker reported {canonical}, which is not a canonical path"),
+        ));
+    }
+    let r = db::create_workspace(
+        &app.db,
+        db::NewWorkspace {
+            project_id: project.id,
+            owner_id: user.id,
+            worker_id: worker.id,
+            path: canonical,
+            label: &hqc_proto::replace_nul(label),
+        },
+    )
+    .await?;
+    let ws = match r {
+        db::WorkspaceInsert::Created(ws) => ws,
+        db::WorkspaceInsert::Conflict(x) => {
+            let name = db::project(&app.db, x.project_id)
+                .await?
+                .map(|p| p.name)
+                .unwrap_or_default();
+            let how = if x.path == canonical {
+                "is already"
+            } else if std::path::Path::new(canonical).starts_with(&x.path) {
+                "is inside"
+            } else {
+                "contains"
+            };
+            let mut extra = serde_json::Map::new();
+            extra.insert("existing_workspace_id".into(), json!(x.id));
+            extra.insert("existing_project_id".into(), json!(x.project_id));
+            extra.insert("existing_path".into(), json!(x.path));
+            return Err(ApiError::ConflictWith(
+                "workspace_conflict",
+                format!("{canonical} {how} workspace {} of project {name}", x.path),
+                extra,
+            ));
+        }
+    };
+    tracing::info!(workspace_id = %ws.id, project_id = %ws.project_id, worker_id = %ws.worker_id, path = %ws.path, "workspace added");
+    Ok((StatusCode::CREATED, Json(ws.to_api())))
+}
+
+pub async fn patch_workspace(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<PatchWorkspace>,
+) -> ApiResult<Json<api::Workspace>> {
+    let ws = workspace_for(&app, &user, id).await?;
+    let Some(label) = b.label.as_deref().map(str::trim) else {
+        return Ok(Json(ws.to_api()));
+    };
+    if label.chars().count() > MAX_LABEL {
+        return Err(ApiError::BadRequest(format!(
+            "label is longer than {MAX_LABEL} characters"
+        )));
+    }
+    let ws = db::set_workspace_label(&app.db, id, &hqc_proto::replace_nul(label)).await?;
+    Ok(Json(ws.to_api()))
+}
+
+/// `DELETE /api/workspaces/{id}`: only the record (`kind: dir`, SPEC §13.2), the folder
+/// stays. `409 workspace_in_use` while a session that is not archived runs there.
+pub async fn delete_workspace(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    let ws = workspace_for(&app, &user, id).await?;
+    match db::delete_workspace(&app.db, &ws).await? {
+        db::WorkspaceDelete::Deleted => {
+            tracing::info!(workspace_id = %id, path = %ws.path, "workspace removed");
+            Ok(StatusCode::NO_CONTENT)
+        }
+        db::WorkspaceDelete::InUse(n) => Err(ApiError::Conflict(
+            "workspace_in_use",
+            format!("{n} session(s) still work in this workspace; archive them first"),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DirsQuery {
+    pub path: Option<String>,
+}
+
+/// `GET /api/workers/{id}/dirs?path=`: the worker's `fs.list_dirs` (SPEC §5.3, §6); no
+/// `path` lists its `allowed_roots`.
+pub async fn worker_dirs(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Query(q): Query<DirsQuery>,
+) -> ApiResult<Json<DirList>> {
+    let worker = match db::worker(&app.db, id).await? {
+        Some(w) if w.owner_id == user.id && w.revoked_at.is_none() => w,
+        _ => return Err(ApiError::NotFound),
+    };
+    let path = match q.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => Some(check_path(p)?.to_string()),
+        None => None,
+    };
+    match ask_worker(&app, worker.id, |request_id| {
+        HubFrame::FsListDirs(FsListDirs { request_id, path })
+    })
+    .await?
+    {
+        ResultBody::FsListDirs(l) => Ok(Json(l)),
+        other => Err(anyhow::anyhow!("fs.list_dirs answered with {other:?}").into()),
     }
 }
 
@@ -106,16 +471,6 @@ pub async fn project_sessions(
     Ok(Json(SessionList {
         sessions: state::views(&app, user.id, rows).await?,
     }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateSession {
-    pub title: Option<String>,
-    pub worker_id: Option<Uuid>,
-    pub model: Option<String>,
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub auto_approve: bool,
 }
 
 /// `cwd` is relative to the workspace (SPEC §3 Session); the worker checks it again
@@ -145,46 +500,57 @@ fn check_title(t: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// The default worker of a new session (SPEC §6): never one that has not connected yet;
-/// online before offline; among those, one the user already has sessions on before a fresh
-/// one (a worker enrolled through a phished code must not take over); then the most recently
-/// seen.
-async fn default_worker(app: &AppState, user: Uuid) -> ApiResult<Option<db::WorkerRow>> {
-    let used = db::workers_with_sessions(&app.db, user).await?;
-    let mut ws: Vec<_> = db::workers_of(&app.db, user)
-        .await?
-        .into_iter()
-        .filter(|w| w.last_seen.is_some())
-        .collect();
-    ws.sort_by_key(|w| {
-        (
-            app.workers.is_online(w.id),
-            used.contains(&w.id),
-            w.last_seen,
+/// The workspace of a new session (SPEC §6, §13.4): the one asked for; with only
+/// `worker_id`, the project's workspace on that worker (the default one if it is there,
+/// else the oldest); otherwise the project's `default_workspace_id`.
+async fn session_workspace(
+    app: &AppState,
+    project: &db::ProjectRow,
+    b: &CreateSessionRequest,
+) -> ApiResult<db::WorkspaceRow> {
+    let none = || {
+        ApiError::Conflict(
+            "no_workspace",
+            "the project has no workspace; add one first".into(),
         )
-    });
-    Ok(ws.pop())
+    };
+    if let Some(id) = b.workspace_id {
+        return match db::workspace(&app.db, id).await? {
+            Some(w)
+                if w.project_id == project.id
+                    && b.worker_id.is_none_or(|wid| wid == w.worker_id) =>
+            {
+                Ok(w)
+            }
+            _ => Err(ApiError::BadRequest(
+                "workspace_id is not a workspace of this project on this worker".into(),
+            )),
+        };
+    }
+    let all = db::workspaces_of_project(&app.db, project.id).await?;
+    let mut on: Vec<_> = all
+        .into_iter()
+        .filter(|w| b.worker_id.is_none_or(|wid| wid == w.worker_id))
+        .collect();
+    if let Some(i) = on
+        .iter()
+        .position(|w| Some(w.id) == project.default_workspace_id)
+    {
+        return Ok(on.swap_remove(i));
+    }
+    if b.worker_id.is_some() {
+        return on.into_iter().next().ok_or_else(none);
+    }
+    Err(none())
 }
 
 pub async fn create_session(
     State(app): State<AppState>,
     user: CurrentUser,
     Path(project_id): Path<Uuid>,
-    Json(b): Json<CreateSession>,
+    Json(b): Json<CreateSessionRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    match db::project(&app.db, project_id).await? {
-        Some(p) if p.owner_id == user.id => {}
-        _ => return Err(ApiError::NotFound),
-    }
-    let worker = match b.worker_id {
-        Some(id) => match db::worker(&app.db, id).await? {
-            Some(w) if w.owner_id == user.id && w.revoked_at.is_none() => w,
-            _ => return Err(ApiError::BadRequest("unknown worker".into())),
-        },
-        None => default_worker(&app, user.id)
-            .await?
-            .ok_or_else(|| ApiError::Conflict("no_worker", "no worker has connected yet".into()))?,
-    };
+    let project = project_for(&app, &user, project_id).await?;
     if let Some(m) = &b.model {
         if !valid_model(m) {
             return Err(ApiError::BadRequest(
@@ -192,15 +558,8 @@ pub async fn create_session(
             ));
         }
     }
-    // Iteration 1: the session runs in the workspace the worker announced in `hello`.
-    let ws = db::latest_workspace(&app.db, project_id, worker.id)
-        .await?
-        .ok_or_else(|| {
-            ApiError::Conflict(
-                "no_workspace",
-                "the worker has not announced a workspace".into(),
-            )
-        })?;
+    let ws = session_workspace(&app, &project, &b).await?;
+    let worker = own_worker(&app, &user, ws.worker_id).await?;
     let cwd = b
         .cwd
         .as_deref()
@@ -464,7 +823,14 @@ pub async fn unarchive(
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    session_for(&app, &user, id, Action::Manage).await?;
+    let s = session_for(&app, &user, id, Action::Manage).await?;
+    if s.workspace_id.is_none() {
+        // Its workspace record was removed while it was archived (SPEC §13.2).
+        return Err(ApiError::Conflict(
+            "no_workspace",
+            "the session's workspace was removed".into(),
+        ));
+    }
     sqlx::query("UPDATE sessions SET archived = false, updated_at = now() WHERE id = $1")
         .bind(id)
         .execute(&app.db)
@@ -794,6 +1160,17 @@ mod tests {
         for bad in ["", "-x y", "a b", "a;b", "--resume", &"x".repeat(65), "мод"] {
             assert!(!valid_model(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn overlap_is_by_components() {
+        use crate::db::paths_overlap;
+        assert!(paths_overlap("/w/hqc", "/w/hqc"));
+        assert!(paths_overlap("/w/hqc", "/w/hqc/crates"));
+        assert!(paths_overlap("/w", "/w/hqc"));
+        assert!(paths_overlap("/", "/w"));
+        assert!(!paths_overlap("/w/hqc", "/w/hqc2"));
+        assert!(!paths_overlap("/w/a", "/w/b"));
     }
 
     #[test]

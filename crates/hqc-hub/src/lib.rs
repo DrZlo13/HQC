@@ -36,8 +36,24 @@ pub fn router(app: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/api/me", get(api::me))
-        .route("/api/projects", get(api::projects))
-        .route("/api/projects/{id}", get(api::project))
+        .route(
+            "/api/projects",
+            get(api::projects).post(api::create_project),
+        )
+        .route(
+            "/api/projects/{id}",
+            get(api::project)
+                .patch(api::patch_project)
+                .delete(api::delete_project),
+        )
+        .route(
+            "/api/workspaces",
+            get(api::workspaces).post(api::create_workspace),
+        )
+        .route(
+            "/api/workspaces/{id}",
+            axum::routing::patch(api::patch_workspace).delete(api::delete_workspace),
+        )
         .route(
             "/api/projects/{id}/sessions",
             get(api::project_sessions).post(api::create_session),
@@ -66,6 +82,7 @@ pub fn router(app: AppState) -> Router {
             "/api/workers/{id}",
             axum::routing::delete(api::delete_worker),
         )
+        .route("/api/workers/{id}/dirs", get(api::worker_dirs))
         .route("/api/push/vapid", get(api::vapid))
         .route(
             "/api/push/subscribe",

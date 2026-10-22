@@ -1,0 +1,5 @@
+{
+  "id": "h-9",
+  "type": "fs.list_dirs",
+  "payload": { "request_id": "h-9", "path": null }
+}

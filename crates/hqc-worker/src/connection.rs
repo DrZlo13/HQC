@@ -519,6 +519,8 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::SessionKill { .. } => "session.kill",
         HubFrame::ApprovalResponse { .. } => "approval.response",
         HubFrame::ClarifyResponse { .. } => "clarify.response",
+        HubFrame::FsStat(_) => "fs.stat",
+        HubFrame::FsListDirs(_) => "fs.list_dirs",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

@@ -1,0 +1,5 @@
+{
+  "id": "h-7",
+  "type": "fs.stat",
+  "payload": { "request_id": "h-7", "path": "/Users/home-mac/work/hqc" }
+}

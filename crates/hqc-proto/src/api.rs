@@ -85,6 +85,129 @@ pub struct SessionList {
     pub sessions: Vec<Session>,
 }
 
+/// `POST /api/projects/{id}/sessions`. Without `workspace_id` the project's
+/// `default_workspace_id`; with only `worker_id` a workspace of the project on that worker
+/// (SPEC §6, §13.4). `cwd` is relative to the workspace, `.` by default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreateSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
+/// A project (SPEC §3 Project, §6): `GET /api/projects/{id}`, an element of the list, the
+/// reply to `POST` and `PATCH`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub name: String,
+    /// Unique per owner, kept on rename.
+    pub slug: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_workspace_id: Option<Uuid>,
+    /// The user's implicit project: neither deleted nor renamed.
+    pub is_personal: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `GET /api/projects`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectList {
+    pub projects: Vec<Project>,
+}
+
+/// `POST /api/projects`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateProject {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// `PATCH /api/projects/{id}`: only the fields present change. `default_workspace_id` must
+/// be a workspace of this project.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PatchProject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_workspace_id: Option<Uuid>,
+}
+
+/// A workspace (SPEC §3 Workspace): a folder on a worker that belongs to one project.
+/// `path` is the canonical path the worker reported in `fs.stat`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub worker_id: Uuid,
+    pub path: String,
+    #[serde(default)]
+    pub label: String,
+    pub environment: String,
+    /// `dir` | `clone` | `worktree`; only `dir` for now.
+    pub kind: String,
+    pub ephemeral: bool,
+    pub created_by_hqc: bool,
+    pub mirror_enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `GET /api/workspaces?project_id=`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceList {
+    pub workspaces: Vec<Workspace>,
+}
+
+/// `POST /api/workspaces`: an existing folder (`kind: dir`). The hub checks it with
+/// `fs.stat` on the worker, which must be online (`409 worker_offline`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateWorkspace {
+    pub project_id: Uuid,
+    pub worker_id: Uuid,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// `PATCH /api/workspaces/{id}`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PatchWorkspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// `409 workspace_conflict`: on one worker a folder belongs to one project, so the new path
+/// may not equal, lie inside or contain an existing workspace (SPEC §3 Workspace).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceConflict {
+    /// `workspace_conflict`.
+    pub error: String,
+    pub message: String,
+    pub existing_workspace_id: Uuid,
+    pub existing_project_id: Uuid,
+    pub existing_path: String,
+}
+
+/// `GET /api/workers/{id}/dirs?path=`: the worker's `fs.list_dirs` (SPEC §5.3, §6).
+pub type DirList = crate::frame::FsListDirsResult;
+
 /// `GET /api/sessions/{id}/events`: stored events as raw JSON, oldest first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventPage {
@@ -288,6 +411,46 @@ mod tests {
         ));
         roundtrip::<EnrollConfirmed>(include_str!("../examples/wire/api.enroll.confirm.json"));
         roundtrip::<EnrollInfo>(include_str!("../examples/wire/api.enroll.info.json"));
+    }
+
+    #[test]
+    fn project_and_workspace_examples_roundtrip() {
+        let p: Project = roundtrip(include_str!("../examples/wire/api.project.json"));
+        let l: ProjectList = roundtrip(include_str!("../examples/wire/api.projects.json"));
+        assert_eq!(l.projects[1], p);
+        assert!(l.projects[0].is_personal && !p.is_personal);
+        roundtrip::<CreateProject>(include_str!("../examples/wire/api.project.request.json"));
+        roundtrip::<PatchProject>(include_str!(
+            "../examples/wire/api.project.patch.request.json"
+        ));
+        let w: Workspace = roundtrip(include_str!("../examples/wire/api.workspace.json"));
+        assert_eq!(p.default_workspace_id, Some(w.id));
+        assert_eq!(w.project_id, p.id);
+        let wl: WorkspaceList = roundtrip(include_str!("../examples/wire/api.workspaces.json"));
+        assert_eq!(wl.workspaces, std::slice::from_ref(&w));
+        let c: CreateWorkspace =
+            roundtrip(include_str!("../examples/wire/api.workspace.request.json"));
+        assert_eq!((c.project_id, c.worker_id), (w.project_id, w.worker_id));
+        roundtrip::<PatchWorkspace>(include_str!(
+            "../examples/wire/api.workspace.patch.request.json"
+        ));
+        let conflict: WorkspaceConflict =
+            roundtrip(include_str!("../examples/wire/api.workspace.conflict.json"));
+        assert_eq!(conflict.error, "workspace_conflict");
+        assert_eq!(conflict.existing_workspace_id, w.id);
+        // The conflict is also a plain error body.
+        let plain: ApiError =
+            serde_json::from_str(include_str!("../examples/wire/api.workspace.conflict.json"))
+                .unwrap();
+        assert_eq!(plain.error, "workspace_conflict");
+        roundtrip::<DirList>(include_str!("../examples/wire/api.dirs.json"));
+        let s: CreateSessionRequest =
+            roundtrip(include_str!("../examples/wire/api.session.request.json"));
+        assert_eq!(s.workspace_id, Some(w.id));
+        assert_eq!(
+            serde_json::from_str::<CreateSessionRequest>("{}").unwrap(),
+            CreateSessionRequest::default()
+        );
     }
 
     #[test]

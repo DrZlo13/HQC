@@ -388,6 +388,10 @@ async fn handle_text(
             };
             on_session_state(app, conn, &id, st).await
         }
+        WorkerFrame::Result(r) => {
+            tracing::warn!(worker_id = %conn.worker_id, request_id = %r.request_id, "result for no request");
+            Ok(())
+        }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
     };

@@ -1,0 +1,7 @@
+{
+  "error": "workspace_conflict",
+  "message": "/Users/home-mac/work/hqc/crates is inside workspace /Users/home-mac/work/hqc of project hqc",
+  "existing_workspace_id": "0199f3a2-7c10-7000-8000-0000000000e1",
+  "existing_project_id": "0199f3a2-7c10-7000-8000-0000000000d2",
+  "existing_path": "/Users/home-mac/work/hqc"
+}

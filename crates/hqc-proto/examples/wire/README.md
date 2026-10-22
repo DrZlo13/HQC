@@ -18,7 +18,11 @@ Rust tests require that each file deserializes and serializes back to exactly th
   (the session object; its summary is `client.session.summary.json`), `api.events.json`,
   `api.input.request.json` / `api.input.json`, `api.error.json`, `api.vapid.json`,
   `api.push.subscribe.json` (`PushSubscription.toJSON()`), `api.push.json` (Web Push body,
-  read by `client/public/sw.js`), `api.enroll*.json` (worker enrollment).
+  read by `client/public/sw.js`), `api.enroll*.json` (worker enrollment),
+  `api.session.request.json` (creating a session in a workspace), `api.project*.json` and
+  `api.projects.json` (projects), `api.workspace*.json` and `api.workspaces.json`
+  (workspaces; `api.workspace.conflict.json` — the `409 workspace_conflict` body),
+  `api.dirs.json` (`GET /api/workers/{id}/dirs`).
 
 Optional fields are omitted when absent; readers must accept `null` for them as well.
 
@@ -27,3 +31,7 @@ Replies reuse the request `id`: `hub.hello.ack.json` and `hub.error.json` answer
 `worker.ack.json` answers `hub.session.input.json` (`f-3`). `hub.ack.unknown-session.json`
 is the ack for an event dropped because the hub does not know its session (no `seq`).
 `hub.clarify.response.cancel.json` — empty `answers`: the hub cancelled the clarify request.
+`worker.result.fs.stat.json` answers `hub.fs.stat.json` (`h-7`),
+`worker.result.fs.list_dirs.json` answers `hub.fs.list_dirs.json` (`h-8`); in hub requests
+`request_id` equals the frame `id`. `hub.fs.list_dirs.roots.json` (`path: null`) asks for
+`allowed_roots`.

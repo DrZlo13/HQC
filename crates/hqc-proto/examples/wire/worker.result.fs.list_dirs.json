@@ -1,0 +1,11 @@
+{
+  "id": "h-8",
+  "type": "result",
+  "payload": {
+    "request_id": "h-8",
+    "entries": [
+      { "name": "cad", "path": "/Users/home-mac/work/cad" },
+      { "name": "hqc", "path": "/Users/home-mac/work/hqc" }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "title": "hqc: run the tests",
+  "workspace_id": "0199f3a2-7c10-7000-8000-0000000000e1",
+  "cwd": "crates/hqc-hub",
+  "auto_approve": false
+}

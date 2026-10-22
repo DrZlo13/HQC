@@ -1,0 +1,11 @@
+{
+  "id": "h-7",
+  "type": "result",
+  "payload": {
+    "request_id": "h-7",
+    "exists": true,
+    "is_dir": true,
+    "canonical": "/Users/home-mac/work/hqc",
+    "inside_allowed_roots": true
+  }
+}

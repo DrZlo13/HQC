@@ -1,0 +1,5 @@
+{
+  "id": "h-8",
+  "type": "fs.list_dirs",
+  "payload": { "request_id": "h-8", "path": "/Users/home-mac/work" }
+}

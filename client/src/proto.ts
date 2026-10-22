@@ -471,7 +471,16 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'message');
     bool(p, 'retryable');
   },
-  result: () => {},
+  result: (p) => void str(p, 'request_id'),
+  'fs.stat': (p) => {
+    str(p, 'request_id');
+    str(p, 'path');
+  },
+  'fs.list_dirs': (p) => {
+    str(p, 'request_id');
+    // `null`: the worker's allowed_roots.
+    optStr(p, 'path');
+  },
   'session.start': (p) => {
     str(p, 'session_id');
     strictEnum(p, 'mode', START_MODES);

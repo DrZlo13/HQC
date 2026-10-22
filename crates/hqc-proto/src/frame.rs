@@ -4,10 +4,11 @@
 //! Frames are strict (SPEC §5.2): the protocol version is agreed in `hello`, and a frame
 //! that does not parse is answered with `error` [`error_code::INVALID_FRAME`].
 //!
-//! Only the frames of iteration 1 are typed here (docs/ITERATION-1.md, T1). Later iterations:
-//! hub -> worker `session.steer`, `workspace.*`, `mirror.set`, `model.proxy`,
-//! `worker.approval.response`, `mcp.result`; worker -> hub `mirror.event`,
-//! `worker.approval.request`, `mcp.call`, `mcp.cancel`, `result`.
+//! Typed here: the frames of iteration 1 (docs/ITERATION-1.md, T1) and the folder requests
+//! `fs.stat` / `fs.list_dirs` with their `result` (T14). Later iterations: hub -> worker
+//! `session.steer`, `workspace.*`, `mirror.set`, `model.proxy`, `worker.approval.response`,
+//! `mcp.result`; worker -> hub `mirror.event`, `worker.approval.request`, `mcp.call`,
+//! `mcp.cancel`.
 
 use std::collections::BTreeMap;
 
@@ -99,6 +100,9 @@ pub enum WorkerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
+    /// Reply to a hub request (`fs.stat`, `fs.list_dirs`): same `id` as the request.
+    #[serde(rename = "result")]
+    Result(RequestResult),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -146,11 +150,80 @@ pub enum HubFrame {
         request_id: String,
         answers: BTreeMap<String, ClarifyAnswer>,
     },
+    /// Check a folder before it becomes a workspace (SPEC §5.3, §13.1).
+    #[serde(rename = "fs.stat")]
+    FsStat(FsStat),
+    /// Subfolders for the folder picker (SPEC §5.3).
+    #[serde(rename = "fs.list_dirs")]
+    FsListDirs(FsListDirs),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
     Error(WireError),
 }
+
+/// `fs.stat {request_id, path}` -> `result` [`FsStatResult`]. `request_id` equals the frame
+/// `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsStat {
+    pub request_id: String,
+    /// Absolute path on the worker.
+    pub path: String,
+}
+
+/// `fs.list_dirs {request_id, path | null}` -> `result` [`FsListDirsResult`]: `null` lists
+/// `allowed_roots`, a path its subfolders. A path outside `allowed_roots` is answered with
+/// `error {invalid_frame}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsListDirs {
+    pub request_id: String,
+    pub path: Option<String>,
+}
+
+/// `result {request_id, ...}`: the body depends on the request it answers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestResult {
+    pub request_id: String,
+    #[serde(flatten)]
+    pub body: ResultBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResultBody {
+    FsStat(FsStatResult),
+    FsListDirs(FsListDirsResult),
+}
+
+/// Result of `fs.stat`. `canonical` is the path with symlinks resolved, present when it
+/// exists; the hub stores it as the workspace path. Outside `allowed_roots` the worker does
+/// not tell whether the path exists: `{exists: false, is_dir: false,
+/// inside_allowed_roots: false}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsStatResult {
+    pub exists: bool,
+    pub is_dir: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
+    pub inside_allowed_roots: bool,
+}
+
+/// Result of `fs.list_dirs`: folders only, no hidden ones, sorted by name, at most
+/// [`MAX_DIR_ENTRIES`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsListDirsResult {
+    pub entries: Vec<DirEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    /// Absolute path, to pass back as `fs.list_dirs.path` or as a workspace path.
+    pub path: String,
+}
+
+/// Most entries one `fs.list_dirs` returns.
+pub const MAX_DIR_ENTRIES: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
@@ -158,8 +231,8 @@ pub struct Hello {
     /// A fresh uuid per worker process (SPEC §5.4, §17.3). The hub treats only a change of
     /// `boot_id` as a worker restart; the same `boot_id` again is a reconnect.
     pub boot_id: Uuid,
-    /// `{claude_code?: {version}, acp_agents: [], workspace_path?}`; `workspace_path` is the
-    /// single workspace of iteration 1 (TODO SPEC §19: `workspace.create` in iteration 2).
+    /// `{claude_code?: {version}, acp_agents: []}`. Workspaces are hub objects (SPEC §3);
+    /// the worker only checks them against `allowed_roots`.
     pub capabilities: serde_json::Value,
     #[serde(default)]
     pub environments: Vec<String>,
@@ -296,10 +369,13 @@ mod tests {
         "session.kill",
         "approval.response",
         "clarify.response",
+        "fs.stat",
+        "fs.list_dirs",
         "ack",
         "error",
     ];
-    const SPEC_WORKER_TYPES: &[&str] = &["hello", "event", "session.state", "ack", "error"];
+    const SPEC_WORKER_TYPES: &[&str] =
+        &["hello", "event", "session.state", "result", "ack", "error"];
 
     /// Wire examples shared with the TS client (`examples/wire/{hub,worker}.<type>[.<case>].json`).
     const HUB_EXAMPLES: &[(&str, &str)] = &[
@@ -335,6 +411,15 @@ mod tests {
             "clarify.response",
             include_str!("../examples/wire/hub.clarify.response.cancel.json"),
         ),
+        ("fs.stat", include_str!("../examples/wire/hub.fs.stat.json")),
+        (
+            "fs.list_dirs",
+            include_str!("../examples/wire/hub.fs.list_dirs.json"),
+        ),
+        (
+            "fs.list_dirs",
+            include_str!("../examples/wire/hub.fs.list_dirs.roots.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -348,6 +433,14 @@ mod tests {
         (
             "session.state",
             include_str!("../examples/wire/worker.session.state.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.fs.stat.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.fs.list_dirs.json"),
         ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         ("error", include_str!("../examples/wire/worker.error.json")),
@@ -363,6 +456,8 @@ mod tests {
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::ApprovalResponse { .. } => "approval.response",
             HubFrame::ClarifyResponse { .. } => "clarify.response",
+            HubFrame::FsStat(_) => "fs.stat",
+            HubFrame::FsListDirs(_) => "fs.list_dirs",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -373,6 +468,7 @@ mod tests {
             WorkerFrame::Hello(_) => "hello",
             WorkerFrame::Event { .. } => "event",
             WorkerFrame::SessionState { .. } => "session.state",
+            WorkerFrame::Result(_) => "result",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }
@@ -462,6 +558,43 @@ mod tests {
         };
         assert_eq!(a.event_id, Some(event.event_id));
         assert!(a.seq.is_some());
+    }
+
+    #[test]
+    fn results_answer_their_requests() {
+        let pairs = [
+            (
+                include_str!("../examples/wire/hub.fs.stat.json"),
+                include_str!("../examples/wire/worker.result.fs.stat.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.fs.list_dirs.json"),
+                include_str!("../examples/wire/worker.result.fs.list_dirs.json"),
+            ),
+        ];
+        for (req, res) in pairs {
+            let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
+            let res: Envelope<WorkerFrame> = serde_json::from_str(res).unwrap();
+            let (request_id, is_stat) = match &req.body {
+                HubFrame::FsStat(r) => (&r.request_id, true),
+                HubFrame::FsListDirs(r) => (&r.request_id, false),
+                other => panic!("not a request: {other:?}"),
+            };
+            assert_eq!(&req.id, request_id, "request_id is the frame id");
+            let WorkerFrame::Result(r) = &res.body else {
+                panic!("not a result");
+            };
+            assert_eq!((&res.id, &r.request_id), (&req.id, &req.id));
+            assert_eq!(matches!(r.body, ResultBody::FsStat(_)), is_stat);
+        }
+        // The roots are asked for with an explicit `null`.
+        let roots = serde_json::to_value(HubFrame::FsListDirs(FsListDirs {
+            request_id: "h-1".into(),
+            path: None,
+        }))
+        .unwrap();
+        assert!(roots["payload"].as_object().unwrap().contains_key("path"));
+        assert_eq!(roots["payload"]["path"], Value::Null);
     }
 
     #[test]

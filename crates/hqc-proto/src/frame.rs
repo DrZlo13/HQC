@@ -93,6 +93,11 @@ pub enum WorkerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runtime_session_id: Option<String>,
         locked_by: LockedBy,
+        /// A title the runtime gave the session (Claude Code: the `ai-title` record of the
+        /// transcript, SPEC §8.1). The hub applies it only while the user has not renamed
+        /// the session (`title_source`, SPEC §3 Session).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     #[serde(rename = "ack")]
     Ack(Ack),
@@ -185,6 +190,28 @@ pub enum ProcessState {
     Starting,
     Running,
     Stopping,
+}
+
+/// Who set the session title (SPEC §3 Session): `default` — the hub at creation
+/// («Сессия N»), `runtime` — the agent (`session.state.title`), `user` — `PATCH`. The hub
+/// replaces a `default` or `runtime` title with the runtime's, never a `user` one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    #[default]
+    Default,
+    Runtime,
+    User,
+}
+
+impl TitleSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Runtime => "runtime",
+            Self::User => "user",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

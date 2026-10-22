@@ -693,6 +693,37 @@ async fn failed_start_is_retryable() {
     w.stop().await;
 }
 
+// T13 (SPEC §5.4): the runtime's title goes to the hub in `session.state` and stays in the
+// later ones.
+#[tokio::test]
+async fn runtime_title_goes_in_session_state() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    adapters
+        .emit(sid, AdapterEvent::Title("Fix the build".into()))
+        .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["title"] == "Fix the build" {
+            break;
+        }
+    }
+    w.shutdown.cancel();
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["process_state"] == "stopped" {
+            assert_eq!(st["payload"]["title"], "Fix the build");
+            break;
+        }
+    }
+}
+
 // Graceful shutdown: agents are killed, `session.state stopped` is sent, the outbox is
 // flushed while the hub acks.
 #[tokio::test]

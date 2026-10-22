@@ -279,6 +279,7 @@ impl Supervisor {
             slot: None,
             state: ProcessState::Stopped,
             runtime_session_id: None,
+            title: None,
             started_once: false,
             resume_requested: false,
             queue: VecDeque::new(),
@@ -331,6 +332,8 @@ struct Session {
     slot: Option<OwnedSemaphorePermit>,
     state: ProcessState,
     runtime_session_id: Option<String>,
+    /// The runtime's title of the session, repeated in every `session.state`.
+    title: Option<String>,
     started_once: bool,
     /// The last `session.start` had `mode: resume` (SPEC §5.3).
     resume_requested: bool,
@@ -542,6 +545,12 @@ impl Session {
                 self.runtime_session_id = Some(r);
                 self.send_state();
             }
+            AdapterEvent::Title(t) => {
+                if self.title.as_deref() != Some(t.as_str()) {
+                    self.title = Some(t);
+                    self.send_state();
+                }
+            }
             AdapterEvent::Exited { error } => {
                 if self.state == ProcessState::Stopped {
                     return;
@@ -658,6 +667,7 @@ impl Session {
             } else {
                 LockedBy::Hqc
             },
+            title: self.title.clone(),
         });
     }
 

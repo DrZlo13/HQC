@@ -6,6 +6,7 @@
   "worker_id": "0199f3a2-7c10-7000-8000-0000000000b1",
   "cwd": ".",
   "title": "hqc: run the tests",
+  "title_source": "user",
   "slug": "hqc-run-the-tests",
   "agent": {
     "runtime": "claude_code",

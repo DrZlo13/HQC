@@ -124,7 +124,7 @@ fn valid_cwd(cwd: &str) -> bool {
     !cwd.starts_with('/') && !cwd.contains('\\') && !cwd.split('/').any(|c| c == "..")
 }
 
-const MAX_TITLE: usize = 200;
+pub const MAX_TITLE: usize = 200;
 const MAX_CLIENT_OP_ID: usize = 128;
 
 /// `^[A-Za-z0-9._:-]{1,64}$`, not starting with `-`: the model goes to the agent's command
@@ -212,14 +212,12 @@ pub async fn create_session(
             "cwd must be a relative path inside the workspace".into(),
         ));
     }
-    let title = b
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .unwrap_or("New session");
-    check_title(title)?;
-    let title = &*hqc_proto::replace_nul(title);
+    // No title: «Сессия N» (SPEC §3 Session), which the runtime's title may replace.
+    let title = b.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    if let Some(t) = title {
+        check_title(t)?;
+    }
+    let title = title.map(hqc_proto::replace_nul);
     let id = db::create_session(
         &app.db,
         db::NewSession {
@@ -228,7 +226,7 @@ pub async fn create_session(
             workspace_id: Some(ws.id),
             worker_id: Some(worker.id),
             cwd,
-            title,
+            title: title.as_deref(),
             model: b.model.as_deref(),
             // Only the worker owner may enable it (SPEC §10.1); here that is the creator.
             auto_approve: b.auto_approve && worker.owner_id == user.id,
@@ -271,11 +269,7 @@ pub async fn patch_session(
         }
         check_title(t)?;
         // The slug stays: it is the session's address (SPEC §7).
-        sqlx::query("UPDATE sessions SET title = $2, updated_at = now() WHERE id = $1")
-            .bind(id)
-            .bind(hqc_proto::replace_nul(t).as_ref())
-            .execute(&app.db)
-            .await?;
+        db::set_user_title(&app.db, id, &hqc_proto::replace_nul(t)).await?;
     }
     if let Some(a) = b.auto_approve {
         let owner = match s.worker_id {

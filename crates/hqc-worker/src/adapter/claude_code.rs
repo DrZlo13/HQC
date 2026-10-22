@@ -212,12 +212,20 @@ struct Io {
     stdin: tokio::sync::Mutex<Pin<Box<dyn AsyncWrite + Send>>>,
     events: EventSink,
     signal: SignalFn,
+    /// The session's transcript, where the CLI writes `ai-title` (SPEC §8.1).
+    transcript: Option<PathBuf>,
+    /// The last title reported by this process.
+    title: Mutex<Option<String>>,
 }
 
 impl Io {
     async fn run(&self, actions: Vec<Action>) -> anyhow::Result<()> {
         for a in actions {
             match a {
+                Action::Emit(AdapterEvent::TurnEnded) => {
+                    self.report_title().await;
+                    let _ = self.events.send(AdapterEvent::TurnEnded).await;
+                }
                 Action::Emit(ev) => {
                     // The session task is gone only when the session is being torn down.
                     let _ = self.events.send(ev).await;
@@ -236,6 +244,33 @@ impl Io {
         Ok(())
     }
 
+    /// After a turn: the last `ai-title` of the transcript, if there is one and it is new.
+    /// The CLI writes it after the first prompt; a missing file or title is not an error.
+    async fn report_title(&self) {
+        let Some(path) = &self.transcript else {
+            return;
+        };
+        let text = match tokio::fs::read_to_string(path).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(session_id = %self.session_id, "no transcript for ai-title: {e}");
+                return;
+            }
+        };
+        let Some(title) = hqc_claude_jsonl::last_ai_title(&text) else {
+            return;
+        };
+        let title = hqc_proto::replace_nul(&title).into_owned();
+        {
+            let mut last = lock(&self.title);
+            if last.as_deref() == Some(title.as_str()) {
+                return;
+            }
+            *last = Some(title.clone());
+        }
+        let _ = self.events.send(AdapterEvent::Title(title)).await;
+    }
+
     fn signal(&self, s: Sig) {
         if let Err(e) = (self.signal)(s) {
             tracing::warn!(session_id = %self.session_id, ?s, "signalling claude failed: {e}");
@@ -243,8 +278,8 @@ impl Io {
     }
 }
 
-fn lock(core: &Mutex<Core>) -> std::sync::MutexGuard<'_, Core> {
-    core.lock().unwrap_or_else(|e| e.into_inner())
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl ClaudeCodeAdapter {
@@ -373,6 +408,8 @@ impl ClaudeCodeAdapter {
             stdin: tokio::sync::Mutex::new(spawned.stdin),
             events: self.events.clone(),
             signal: spawned.signal,
+            transcript,
+            title: Mutex::new(None),
         });
         let killing = Arc::new(AtomicBool::new(false));
         let (exit_tx, exited) = watch::channel(None);

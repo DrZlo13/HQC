@@ -10,12 +10,13 @@ export function SessionList({ app, current }: { app: AppState; current?: string 
   const list = app.sortedSessions();
 
   const create = async () => {
-    const title = prompt('Название сессии', 'Новая сессия');
+    // Empty: the hub names it «Сессия N» and the agent may rename it later (SPEC §3).
+    const title = prompt('Название сессии (можно оставить пустым)', '');
     if (title === null) return;
     setCreating(true);
     setError(null);
     try {
-      const s = await app.createSession(title.trim() || 'Новая сессия');
+      const s = await app.createSession(title.trim() || undefined);
       location.hash = `#/s/${s.id}`;
     } catch (e) {
       setError((e as Error).message);

@@ -90,7 +90,7 @@ export class AppState {
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
-  async createSession(title: string): Promise<SessionInfo> {
+  async createSession(title?: string): Promise<SessionInfo> {
     if (!this.me) throw new Error('not signed in');
     const s = await this.api.createSession(this.me.personal_project_id, title);
     this.sessions.set(s.id, s);

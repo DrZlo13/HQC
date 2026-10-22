@@ -377,17 +377,16 @@ async fn handle_text(
             process_state,
             runtime_session_id,
             locked_by,
+            title,
         } => {
-            on_session_state(
-                app,
-                conn,
-                &id,
+            let st = StateFrame {
                 session_id,
                 process_state,
                 runtime_session_id,
                 locked_by,
-            )
-            .await
+                title,
+            };
+            on_session_state(app, conn, &id, st).await
         }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
@@ -492,15 +491,28 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
     }
 }
 
-async fn on_session_state(
-    app: &AppState,
-    conn: &Arc<WorkerConn>,
-    id: &str,
+/// The fields of `session.state` (SPEC §5.4).
+struct StateFrame {
     session_id: Uuid,
     process_state: ProcessState,
     runtime_session_id: Option<String>,
     locked_by: hqc_proto::frame::LockedBy,
+    title: Option<String>,
+}
+
+async fn on_session_state(
+    app: &AppState,
+    conn: &Arc<WorkerConn>,
+    id: &str,
+    st: StateFrame,
 ) -> anyhow::Result<()> {
+    let StateFrame {
+        session_id,
+        process_state,
+        runtime_session_id,
+        locked_by,
+        title,
+    } = st;
     let Some(s) = db::session(&app.db, session_id).await? else {
         conn.error(id, error_code::UNKNOWN_SESSION, "unknown session", false);
         return Ok(());
@@ -513,6 +525,10 @@ async fn on_session_state(
     let ps = name(serde_json::to_value(process_state)?);
     let lb = name(serde_json::to_value(locked_by)?);
     db::set_process_state(&app.db, session_id, &ps, runtime_session_id.as_deref(), &lb).await?;
+    // Unless the user renamed the session (SPEC §3 Session).
+    if let Some(t) = title.as_deref().and_then(runtime_title) {
+        db::set_runtime_title(&app.db, session_id, &t).await?;
+    }
     conn.reply(id, HubFrame::Ack(Ack::default()));
 
     if process_state == ProcessState::Stopped {
@@ -539,6 +555,19 @@ async fn on_session_state(
     }
     app.session_changed(session_id);
     Ok(())
+}
+
+/// A runtime title as stored: one line, at most `MAX_TITLE` characters (SPEC §6), U+0000
+/// replaced (SPEC §5.2); `None` if nothing is left.
+fn runtime_title(t: &str) -> Option<String> {
+    let t: String = t
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(crate::api::MAX_TITLE)
+        .collect();
+    (!t.is_empty()).then(|| hqc_proto::replace_nul(&t).into_owned())
 }
 
 async fn on_ack(app: &AppState, conn: &Arc<WorkerConn>, id: &str, a: Ack) -> anyhow::Result<()> {

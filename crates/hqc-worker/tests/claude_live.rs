@@ -44,6 +44,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::TurnEnded => "turn_ended".into(),
         AdapterEvent::Exited { error } => format!("exited:{error:?}"),
         AdapterEvent::RuntimeSessionId(s) => format!("runtime_session_id:{s}"),
+        AdapterEvent::Title(t) => format!("title:{t}"),
     }
 }
 
@@ -514,6 +515,109 @@ async fn live_permission_policy() {
             .iter()
             .any(|(c, t)| c == "policy_denied" && t.contains("hqc-denied")),
         "{system:?}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// T13 (SPEC §8.1): the adapter reports the transcript's last `ai-title` as
+/// [`AdapterEvent::Title`] before `TurnEnded`, and nothing if there is none. No tools, one
+/// model call. Found on 2.1.308 (2026-10-23): with `--input-format stream-json` the CLI
+/// writes no `ai-title` at all, not even 5 s after the turn; only a prompt given as an
+/// argument got one (fixture `tool-call-2.1.307`).
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_ai_title -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_ai_title() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    let work = root.join(format!("live-title-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&work).unwrap();
+    let work = work.canonicalize().unwrap();
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let config_dir = opts.config_dir.clone().expect("claude config dir");
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(Recording::default()));
+    let session_id = Uuid::now_v7();
+    let claude_session = Uuid::new_v4();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: work.clone(),
+        workdir: work.clone(),
+        environment: "default".into(),
+        runtime_session_id: Some(claude_session.to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: false,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+    adapter
+        .input(&SessionInput {
+            session_id,
+            event_id: Uuid::now_v7(),
+            text: "What is the boiling point of water at sea level in Celsius? Answer in one \
+                   short sentence, without tools."
+                .into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+        })
+        .await
+        .unwrap();
+    let mut labels = Vec::new();
+    let mut title = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("turn did not end in 180 s")
+            .expect("channel closed");
+        let l = label(&ev);
+        if l != "agent.delta" {
+            labels.push(l);
+        }
+        match ev {
+            AdapterEvent::Title(t) => title = Some(t),
+            AdapterEvent::TurnEnded => break,
+            AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+            _ => {}
+        }
+    }
+    let transcript = paths::transcript_path(&config_dir, &work, &claude_session);
+    let types = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .map(|r| r["type"].as_str().unwrap_or("?").to_string())
+            .collect()
+    };
+    println!("events: {}", labels.join(" -> "));
+    let at_end = std::fs::read_to_string(&transcript).unwrap_or_default();
+    println!("transcript at turn end: {:?}", types(&at_end));
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let later = std::fs::read_to_string(&transcript).unwrap_or_default();
+    println!("transcript 5 s later:   {:?}", types(&later));
+    for l in later.lines().filter(|l| l.contains("\"ai-title\"")) {
+        println!("  {l}");
+    }
+    adapter.kill().await.unwrap();
+    println!("title: {title:?}");
+    assert_eq!(
+        title,
+        hqc_claude_jsonl::last_ai_title(&at_end),
+        "the last ai-title of the transcript"
     );
     let _ = std::fs::remove_dir_all(&work);
 }

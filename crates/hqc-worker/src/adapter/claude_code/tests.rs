@@ -232,6 +232,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::TurnEnded => "turn_ended".into(),
             AdapterEvent::Exited { .. } => "exited".into(),
             AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
+            AdapterEvent::Title(_) => "title".into(),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -314,6 +315,32 @@ fn approval_options(evs: &[AdapterEvent]) -> Vec<(String, ApprovalCanonical)> {
             _ => None,
         })
         .expect("approval.request")
+}
+
+/// T13 (SPEC §8.1): when the turn ends the adapter reads the transcript and reports its
+/// last `ai-title` before `TurnEnded`.
+#[tokio::test]
+async fn ai_title_is_reported_at_turn_end() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    let (work, config) = &h._dirs;
+    let transcript = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let title = r#"{"type":"ai-title","aiTitle":"Touch a file","sessionId":"x"}"#;
+    std::fs::write(&transcript, format!("{}{title}\n", fx.transcript)).unwrap();
+
+    let evs = h
+        .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    assert_eq!(shape(&evs[evs.len() - 2..]), ["title", "turn_ended"]);
+    assert_eq!(
+        evs[evs.len() - 2],
+        AdapterEvent::Title("Touch a file".into())
+    );
 }
 
 #[tokio::test]

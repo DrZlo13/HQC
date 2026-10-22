@@ -92,8 +92,10 @@ export class Api {
     return parseSessionList(await this.req('GET', `/api/projects/${enc(projectId)}/sessions`));
   }
 
-  async createSession(projectId: string, title: string): Promise<SessionInfo> {
-    const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, { title });
+  /** No `title`: the hub's default «Сессия N», which the runtime's title may replace. */
+  async createSession(projectId: string, title?: string): Promise<SessionInfo> {
+    const body = title ? { title } : {};
+    const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, body);
     return parseSessionInfo(data);
   }
 

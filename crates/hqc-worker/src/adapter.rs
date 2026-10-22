@@ -37,6 +37,9 @@ pub enum AdapterEvent {
     TurnEnded,
     /// The runtime reported its own session id (ACP); sent in `session.state`.
     RuntimeSessionId(String),
+    /// The runtime named the session (Claude Code: `ai-title` in the transcript, read when
+    /// a turn ends, SPEC §8.1); sent as `session.state.title`. Reported when it changes.
+    Title(String),
     /// The process ended by itself. Not required after `kill`.
     Exited { error: Option<String> },
 }

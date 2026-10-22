@@ -1042,3 +1042,56 @@ async fn archive_cancels_and_fails() {
     assert_eq!((s, v["state"].as_str()), (200, Some("idle")));
     hub.finish().await;
 }
+
+/// T13: a session without a title is «Сессия N»; the runtime's title (`session.state.title`)
+/// replaces a default or runtime title, never one the user set (SPEC §3 Session).
+#[tokio::test]
+async fn runtime_title_does_not_override_the_user() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let pid = hub.personal_project().await;
+    let mut ids = vec![];
+    for n in 1..=2 {
+        let (s, v) = hub
+            .post(&format!("/api/projects/{pid}/sessions"), json!({}))
+            .await;
+        assert_eq!(s, 201, "{v}");
+        assert_eq!(v["title"], format!("Сессия {n}"));
+        assert_eq!(v["title_source"], "default");
+        assert_eq!(v["slug"], format!("session-{n}"));
+        ack_start(&mut w, v["id"].as_str().unwrap()).await;
+        ids.push(v["id"].as_str().unwrap().to_string());
+    }
+    let (a, b) = (&ids[0], &ids[1]);
+    let state = |sid: &str, title: &str| json!({"session_id": sid, "process_state": "running", "locked_by": "hqc", "title": title});
+
+    w.send("session.state", state(a, "  Fix the\nflaky test "))
+        .await;
+    w.expect("ack").await;
+    let v = hub.session(a).await;
+    assert_eq!(v["title"], "Fix the flaky test");
+    assert_eq!(v["title_source"], "runtime");
+    assert_eq!(v["slug"], "session-1", "the slug stays");
+    w.send("session.state", state(a, "Second title")).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(a).await["title"], "Second title");
+
+    let (s, v) = hub
+        .patch(&format!("/api/sessions/{b}"), json!({"title": "Mine"}))
+        .await;
+    assert_eq!((s, v["title_source"].as_str()), (200, Some("user")), "{v}");
+    w.send("session.state", state(b, "Runtime title")).await;
+    w.expect("ack").await;
+    let v = hub.session(b).await;
+    assert_eq!(v["title"], "Mine");
+    assert_eq!(v["title_source"], "user");
+
+    // A title given at creation is the user's too.
+    let sid = hub.create_session("Named").await;
+    ack_start(&mut w, &sid).await;
+    w.send("session.state", state(&sid, "Runtime title")).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["title"], "Named");
+    hub.finish().await;
+}

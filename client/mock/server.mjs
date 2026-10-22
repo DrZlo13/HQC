@@ -405,7 +405,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/projects', () => ({ projects: [project] }));
   route('GET', '/api/projects/:pid/sessions', () => ({ sessions: [...sessions.values()].map(info) }));
   route('POST', '/api/projects/:pid/sessions', (_, body) =>
-    withStatus(201, info(newSession(String(body?.title || 'Новая сессия')))));
+    withStatus(201, info(newSession(String(body?.title || `Сессия ${sessions.size + 1}`)))));
   route('GET', '/api/sessions/:id', (p) => info(sessionOr404(p.id)));
   route('GET', '/api/sessions/:id/events', (p, _, q) => {
     const s = sessionOr404(p.id);

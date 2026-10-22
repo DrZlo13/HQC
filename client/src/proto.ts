@@ -523,6 +523,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     strictEnum(p, 'process_state', PROCESS_STATES);
     optStr(p, 'runtime_session_id');
     strictEnum(p, 'locked_by', LOCKED_BY);
+    optStr(p, 'title');
   },
 };
 

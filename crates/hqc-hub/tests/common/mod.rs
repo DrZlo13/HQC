@@ -206,6 +206,18 @@ impl TestHub {
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
+    pub async fn patch(&self, path: &str, body: Value) -> (u16, Value) {
+        let r = self
+            .http
+            .patch(format!("{}{path}", self.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let s = r.status().as_u16();
+        (s, r.json().await.unwrap_or(Value::Null))
+    }
+
     pub async fn delete(&self, path: &str) -> u16 {
         self.http
             .delete(format!("{}{path}", self.base))

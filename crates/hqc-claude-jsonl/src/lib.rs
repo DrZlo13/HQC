@@ -13,8 +13,10 @@ use uuid::Uuid;
 pub enum Record {
     User(Message),
     Assistant(Message),
+    /// The session title Claude Code generates after the first prompt (SPEC §8.1, §9).
+    AiTitle(AiTitle),
     /// Everything else: attachment, file-history-snapshot, system, queue-operation,
-    /// last-prompt, ai-title, cost-state, atis-latch, summary, ... (SPEC §9).
+    /// last-prompt, cost-state, atis-latch, summary, ... (SPEC §9).
     #[serde(other)]
     Other,
 }
@@ -34,6 +36,32 @@ pub struct Message {
     #[serde(default)]
     pub timestamp: Option<String>,
     pub message: serde_json::Value,
+}
+
+/// `{"type": "ai-title", "aiTitle": "...", "sessionId": "..."}` (2.1.307). The CLI may write
+/// it more than once per session; the last one wins.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTitle {
+    #[serde(default)]
+    pub ai_title: String,
+    /// Kept as text: a malformed id must not cost the title.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// The last non-empty `ai-title` of a transcript, trimmed. Lines that do not mention
+/// `ai-title` are not parsed, so this is cheap on long transcripts.
+pub fn last_ai_title(s: &str) -> Option<String> {
+    s.lines()
+        .rev()
+        .filter(|l| l.contains("\"ai-title\""))
+        .find_map(|l| match parse_line(l) {
+            Ok(Record::AiTitle(t)) if !t.ai_title.trim().is_empty() => {
+                Some(t.ai_title.trim().to_string())
+            }
+            _ => None,
+        })
 }
 
 /// One line of a transcript. Lines that are not valid JSON objects are reported as
@@ -79,6 +107,42 @@ mod tests {
         // user prompt, assistant tool_use, user tool_result, assistant text
         assert_eq!(main.len(), 4);
         assert!(records.iter().any(|r| matches!(r, Record::Other)));
+    }
+
+    /// SPEC §8.1: the `ai-title` record, written twice in this run.
+    #[test]
+    fn ai_title_from_fixture() {
+        let (records, _) = parse_str(FIXTURE);
+        let titles: Vec<&AiTitle> = records
+            .iter()
+            .filter_map(|r| match r {
+                Record::AiTitle(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles.len(), 2);
+        assert_eq!(
+            titles[0].session_id.as_deref(),
+            Some("e47a9949-9b46-4e74-9701-525d009cf93e")
+        );
+        assert_eq!(
+            last_ai_title(FIXTURE).as_deref(),
+            Some("Hqc-uuid-test echo command")
+        );
+        let later = format!(
+            "{FIXTURE}{}\n",
+            r#"{"type":"ai-title","aiTitle":" Renamed "}"#
+        );
+        assert_eq!(last_ai_title(&later).as_deref(), Some("Renamed"));
+        let blank = format!("{FIXTURE}{}\n", r#"{"type":"ai-title","aiTitle":""}"#);
+        assert_eq!(
+            last_ai_title(&blank).as_deref(),
+            Some("Hqc-uuid-test echo command")
+        );
+        assert_eq!(
+            last_ai_title(include_str!("../fixtures/permission-allow-2.1.307.jsonl")),
+            None
+        );
     }
 
     /// T0 fixtures: (transcript, stream-json stdout) of the same run.

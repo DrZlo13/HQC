@@ -1,6 +1,7 @@
 //! Postgres access (sqlx, runtime queries). Migrations: `crates/hqc-hub/migrations`.
 
 use chrono::{DateTime, Utc};
+use hqc_proto::frame::TitleSource;
 use serde_json::{Map, Value};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use uuid::Uuid;
@@ -476,6 +477,7 @@ pub struct SessionRow {
     pub worker_id: Option<Uuid>,
     pub cwd: String,
     pub title: String,
+    pub title_source: String,
     pub slug: String,
     pub auto_approve: bool,
     pub wake_on_send: bool,
@@ -499,7 +501,7 @@ pub struct SessionRow {
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
-    s.title, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
+    s.title, s.title_source, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.created_at, s.updated_at";
@@ -519,7 +521,8 @@ pub struct NewSession<'a> {
     pub workspace_id: Option<Uuid>,
     pub worker_id: Option<Uuid>,
     pub cwd: &'a str,
-    pub title: &'a str,
+    /// `None`: the default title «Сессия N», N = the session's number in the project.
+    pub title: Option<&'a str>,
     pub model: Option<&'a str>,
     pub auto_approve: bool,
 }
@@ -527,7 +530,21 @@ pub struct NewSession<'a> {
 /// Creates the session with a slug unique in the project (SPEC §3 Session) and a
 /// hub-assigned `runtime_session_id` for Claude Code (SPEC §8.1).
 pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid> {
-    let base = slugify(n.title);
+    let (title, source, base) = match n.title {
+        Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
+        None => {
+            let num: i64 =
+                sqlx::query_scalar("SELECT count(*) + 1 FROM sessions WHERE project_id = $1")
+                    .bind(n.project_id)
+                    .fetch_one(db)
+                    .await?;
+            (
+                format!("Сессия {num}"),
+                TitleSource::Default,
+                format!("session-{num}"),
+            )
+        }
+    };
     for i in 1.. {
         let slug = if i == 1 {
             base.clone()
@@ -537,8 +554,8 @@ pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid
         let id = new_id();
         let r = sqlx::query(
             "INSERT INTO sessions (id, project_id, owner_id, workspace_id, worker_id, cwd, title, slug,
-                model, auto_approve, runtime, runtime_session_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11)
+                model, auto_approve, runtime, runtime_session_id, title_source)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11, $12)
              ON CONFLICT (project_id, slug) DO NOTHING",
         )
         .bind(id)
@@ -547,11 +564,12 @@ pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid
         .bind(n.workspace_id)
         .bind(n.worker_id)
         .bind(n.cwd)
-        .bind(n.title)
+        .bind(&title)
         .bind(&slug)
         .bind(n.model)
         .bind(n.auto_approve)
         .bind(Uuid::new_v4().to_string())
+        .bind(source.as_str())
         .execute(db)
         .await?;
         if r.rows_affected() == 1 {
@@ -577,6 +595,31 @@ pub async fn sessions_of_project(db: &PgPool, project: Uuid) -> sqlx::Result<Vec
     .bind(project)
     .fetch_all(db)
     .await
+}
+
+/// A title from the user (`PATCH`): the runtime's never replaces it.
+pub async fn set_user_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET title = $2, title_source = 'user', updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(title)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// A title from the runtime (`session.state.title`), applied unless the user set one.
+pub async fn set_runtime_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET title = $2, title_source = 'runtime', updated_at = now()
+         WHERE id = $1 AND title_source <> 'user' AND (title <> $2 OR title_source <> 'runtime')",
+    )
+    .bind(id)
+    .bind(title)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 pub fn slugify(title: &str) -> String {

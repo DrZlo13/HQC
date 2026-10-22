@@ -4,7 +4,7 @@
 use hqc_proto::{
     api::{Agent, Session},
     event::SessionState,
-    frame::{LockedBy, ProcessState, Runtime},
+    frame::{LockedBy, ProcessState, Runtime, TitleSource},
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -122,6 +122,7 @@ pub async fn views(
                 worker_id: s.worker_id,
                 cwd: s.cwd,
                 title: s.title,
+                title_source: stored_enum(&s.title_source, TitleSource::Default),
                 slug: s.slug,
                 agent: Agent {
                     runtime: stored_enum(&s.runtime, Runtime::ClaudeCode),

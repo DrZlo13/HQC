@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.14, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.15, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -124,11 +124,18 @@ Workspace — **логическая** граница: все операции h
 `project_id`, `owner_id`, `workspace_id` (nullable), `worker_id` (обязателен
 для Claude Code без workspace; для голой модели null; ACP-агенты без workspace
 не допускаются, §8.4), `cwd` (относительный путь внутри workspace, по умолчанию `.`),
-`title`, `slug` (уникален в проекте, не меняется при переименовании), `agent`,
+`title`, `title_source` (`default` | `runtime` | `user` — кто поставил заголовок), `slug`
+(уникален в проекте, не меняется при переименовании), `agent`,
 `auto_approve`, `wake_on_send` (по умолчанию false), `locked_by` (none/hqc/vscode),
 `last_seq`, `archived`. `state` и `queue_len` (§17.1) **не хранятся**, вычисляются
 хабом при отдаче. В первой версии в сессии ровно один агент; доступ людей к сессии
 определяется только Grant.
+
+Заголовок: создание без `title` даёт «Сессия N» (N — номер сессии по порядку в проекте,
+считая архивные; `slug` — `session-N`) с `title_source: default`; `title` при создании и
+`PATCH title` ставят `user`. Заголовок от рантайма (`session.state.title`, §5.4; у Claude
+Code — `ai-title`, §8.1) хаб применяет и ставит `runtime`, только если `title_source` не
+`user`: переименованную пользователем сессию рантайм не переименовывает.
 
 ### Agent (встроен в Session)
 `runtime` (claude_code / acp / bare), `acp_agent` (имя агента из локального конфига
@@ -426,7 +433,10 @@ MCP-вызовы (worker → hub → worker):
   workspace в личном проекте владельца, без него сессию не создать (`409 no_workspace`).
   Временное поле до `workspace.create` (TODO §19, итерация 2).
 - `event` {event} → `ack` (`session_id` внутри события)
-- `session.state` {session_id, process_state, runtime_session_id?, locked_by}
+- `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?}
+  — `title`: заголовок, который дал сессии рантайм (§8.1); воркер повторяет последний во
+  всех следующих `session.state`, хаб применяет его по правилу `title_source` (§3 Session),
+  приводя к одной строке до 200 символов.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event} — события из
   зеркала (§9.2); хаб создаёт сессию для неизвестного `runtime_session_id`.
 - `worker.approval.request` {request_id, kind, description, expires_at}
@@ -491,7 +501,7 @@ HTTP API итерации 1 (список не полный; остальное 
 - позже: `/api/schedules` (ScheduledMessage), `/api/projects/{id}/template`
 
 Объект сессии (`GET /api/sessions/{id}`, список, создание, `PATCH`, `archive`):
-`{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, slug, agent: {runtime,
+`{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, title_source, slug, agent: {runtime,
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, state, queue_len, last_read_seq, unread, created_at, updated_at}`.
@@ -780,6 +790,21 @@ CLI повторяет в stdout каждый `control_response`, который
 workspace в локальном конфиге воркера (§14). Авторизация — подписка, уже залогиненная
 на машине (Keychain на маке); хаб её не хранит и не видит.
 
+Заголовок сессии. Claude Code пишет в транскрипт запись
+`{"type": "ai-title", "aiTitle": "<заголовок>", "sessionId": "<uuid>"}` — заголовок,
+который модель придумала по первому промпту, иногда несколько раз за сессию (действует
+последняя; фикстура `tool-call-2.1.307`, записи идут сразу после первого промпта, до
+ответа модели). Адаптер после каждого завершённого хода читает транскрипт и, если
+последний непустой `aiTitle` отличается от уже отправленного, шлёт хабу `session.state`
+с полем `title` (§5.4); хаб применяет его по правилу `title_source` (§3 Session).
+Проверено на 2.1.308 (T13, живой прогон `live_ai_title`): с `--input-format stream-json`
+CLI `ai-title` **не пишет** ни к концу хода, ни через 5 с после него; во всех
+транскриптах T0 (2.1.307) и T12 (2.1.308), снятых в этом режиме, его тоже нет — он есть
+только в прогоне с промптом аргументом (`tool-call-2.1.307`). Поэтому в итерации 1
+сессии адаптера на практике остаются с заголовком по умолчанию, пока CLI не начнёт писать
+`ai-title` в этом режиме или его не переименует пользователь **[проверить]** на
+следующих версиях CLI.
+
 Встроенные инструменты Claude Code `ListAgents` и `SendMessage` находят другие сессии
 Claude на той же машине и вбрасывают им сообщения напрямую, минуя хаб: вторая сессия
 получает ход без входного события в истории. Воркер всегда добавляет их в
@@ -902,7 +927,8 @@ SDK) **не используется**: нативный адаптер §8.1 п
 с транскриптами субагентов и файлы, не являющиеся `<uuid>.jsonl`, игнорируются.
 Проверено на 2.1.307: кроме `user`/`assistant` в файле есть записи `attachment`,
 `file-history-snapshot`, `api-request*`, `last-prompt`, `ai-title`, `cost-state`,
-`queue-operation`, `system` и другие; парсер их пропускает.
+`queue-operation`, `system` и другие; парсер их пропускает, кроме `ai-title` — его
+разбирает отдельно (поле `aiTitle`), адаптер берёт из него заголовок сессии (§8.1).
 
 ### 9.1 Импорт
 При регистрации воркер отдаёт `workspace.list_candidates` (пути из `cwd` записей).
@@ -1368,6 +1394,15 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.14 → 0.15 (T13)
+Заголовок сессии из рантайма. §3 Session: поле `title_source` (`default` | `runtime` |
+`user`), заголовок по умолчанию «Сессия N» вместо переданного клиентом, правило «рантайм
+не переименовывает сессию, которую переименовал пользователь». §5.4: `session.state.title?`.
+§6: `title_source` в объекте сессии. §8.1, §9: запись `ai-title` транскрипта Claude Code
+(`aiTitle`), адаптер читает её после хода. Проверено на 2.1.308: в режиме адаптера
+(`--input-format stream-json`) CLI `ai-title` не пишет, пометка **[проверить]** на
+следующих версиях.
 
 ### 0.13 → 0.14 (T12, политика разрешений)
 Итерация 1 закрыта: 2026-10-22 проверены с телефона вход через Access, установка PWA

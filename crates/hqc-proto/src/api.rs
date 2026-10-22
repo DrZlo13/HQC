@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::client_frame::SessionSummary;
 use crate::event::SessionState;
-use crate::frame::{LockedBy, ProcessState, Runtime};
+use crate::frame::{LockedBy, ProcessState, Runtime, TitleSource};
 
 /// A session as `GET /api/sessions/{id}`, the session list and `POST .../sessions` return
 /// it (SPEC §3 Session, §6). `state`, `queue_len`, `last_read_seq` and `unread` are computed
@@ -25,6 +25,9 @@ pub struct Session {
     pub worker_id: Option<Uuid>,
     pub cwd: String,
     pub title: String,
+    /// Who set `title`; absent from older hubs, read as `default`.
+    #[serde(default)]
+    pub title_source: TitleSource,
     pub slug: String,
     pub agent: Agent,
     pub auto_approve: bool,

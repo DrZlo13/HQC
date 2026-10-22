@@ -1,0 +1,1 @@
+{"type": "user", "message": {"role": "user", "content": "In ONE message, make exactly these four Bash tool calls in parallel, each command verbatim as its own call: (1) cat a.txt (2) touch new.txt (3) rm -rf tmp/x (4) curl -s https://example.com -o /dev/null -w '%{http_code}'. Then reply with exactly: DONE"}}

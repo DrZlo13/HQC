@@ -12,6 +12,18 @@ Sets:
 - `ask-user-question` — `AskUserQuestion` answered through `updatedInput.answers` (T0).
 - `mcp-timeout` — a stdio MCP tool cut off by `MCP_TOOL_TIMEOUT=3000` (T0, SPEC §7.1).
 
+Claude Code 2.1.308, permission policy (T12, SPEC §8.1, §14; findings in
+`docs/notes/claude-control-protocol.md`, "Permission policy, 2.1.308"):
+
+- `auto-mode`, `auto-classifier` — `--permission-mode auto` deciding without `can_use_tool`;
+- `always-git-push` — `always` writing rules to `settings.local.json`;
+- `settings-deny` — `--settings` allow/deny over those rules; deny wins, `permission_denied`;
+- `auto-deny` — the worker's default deny list under `--permission-mode auto`;
+- `restricted-settings` — `--settings` under `--restricted`.
+
+In the stream files of these sets the `input_json_delta` fragments of a tool input whose
+path had to be rewritten are joined into the first fragment (sanitizing split paths).
+
 T0 runs used `claude -p --input-format stream-json --output-format stream-json
 --permission-prompts host --permission-prompt-tool stdio --include-partial-messages
 --replay-user-messages --verbose --model claude-haiku-5-5 --max-turns 2`; exact frames and

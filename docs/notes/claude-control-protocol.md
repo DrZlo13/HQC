@@ -189,3 +189,132 @@ Stdio MCP-сервер с инструментом `slow(seconds)` (node, оди
 
 Вывод: при значениях по умолчанию вызов MCP-инструмента без ответа и без progress-уведомлений
 обрывается через 30 минут; progress-уведомления раз в минуту его удерживают.
+
+## Permission policy, 2.1.308
+
+Проверено 2026-10-22 на Claude Code **2.1.308** (home-mac), `claude-haiku-5-5`,
+`--max-turns 2`, драйвер `tools/spike/driver.py`, шесть прогонов (T12). Общие флаги — как
+у воркера: `--permission-prompt-tool stdio --setting-sources user,local --strict-mcp-config`
+(в прогоне 6 вместо `--setting-sources` — `--restricted`). Модель просили сделать все вызовы
+одним сообщением параллельно. Фикстуры — `crates/hqc-claude-jsonl/fixtures/*-2.1.308.jsonl`:
+
+| набор | режим | что проверяет |
+|---|---|---|
+| `auto-mode` | `auto` | cat / touch / `rm -rf tmp/x` / curl |
+| `auto-classifier` | `auto` | `rm -rf ~/…` вне workspace, `git push --force`, `sudo -n true` (драйвер на всё отвечает deny) |
+| `always-git-push` | `manual` | `always` на `git push origin master` и `touch hqc-local-1` |
+| `settings-deny` | `manual` | `--settings` allow/deny поверх правил из `always-git-push` |
+| `auto-deny` | `auto` | deny по умолчанию из `worker.toml` в режиме auto |
+| `restricted-settings` | `manual`, `--restricted` | `--settings` в restricted |
+
+Признак решения CLI в каждом `tool_result` — `tool_result_meta[].permission_decision`:
+`{"decision": "accept"|"reject", "source": "config"|"user_temporary"|…, "reason_type": …}`.
+Значения `reason_type`, встреченные здесь: `classifier` (решил классификатор auto), `mode`
+(режим: правка в рабочей папке), `rule` (правило целиком), `subcommandResults` (команда
+разобрана на подкоманды, каждая сверена с правилами).
+
+### 1. `--permission-mode auto` в `-p`
+
+Работает: `system/init` → `"permissionMode": "auto"`, ошибок нет. В обоих прогонах **ни
+одного `can_use_tool`**: CLI решил всё сам.
+
+| команда | решение | `reason_type` |
+|---|---|---|
+| `cat a.txt` | выполнена | `classifier` |
+| `touch new.txt` | выполнена | `mode` |
+| `rm -rf tmp/x` (внутри workspace) | выполнена, папка удалена | `mode` |
+| `curl -s https://example.com …` | выполнена (200) | `classifier` |
+| `rm -rf ~/hqc-spike-t12-nonexistent` (вне workspace) | выполнена | `classifier` |
+| `git push --force origin master` | выполнена (упала: нет ветки) | `classifier` |
+| `sudo -n true` | выполнена (упала: нужен пароль) | `classifier` |
+
+Перед решением классификатора приходят `{"type":"system","subtype":"permission_check_status","tool_use_id":…,"status":"checking"|"done"}`.
+В `can_use_tool` признака классификатора увидеть не удалось: запросов не было. Вывод:
+при явной просьбе пользователя классификатор пропускает и разрушительное, и сетевое, и
+`sudo`; хост ничего не видит до `tool_result`. В режиме auto единственная граница — deny.
+
+### 2. `--settings` с `permissions.allow`/`deny` и правило `always`
+
+`--settings '<json>'` применяется вместе с `--setting-sources user,local` (прогон
+`settings-deny`) и с `--restricted` (прогон `restricted-settings`; справка 2.1.308 это и
+обещает: «managed settings and --settings still apply»).
+
+Сначала в прогоне `always-git-push` ответ `always` записал в `.claude/settings.local.json`
+`{"permissions":{"allow":["Bash(git push *)","Bash(touch hqc-local-1 *)"]}}`. Затем в той же
+папке с
+
+```
+--settings '{"permissions":{"allow":["Bash(git status:*)","Bash(cargo test:*)","Read","Edit","mcp__hqc"],
+  "deny":["Bash(sudo:*)","Bash(ssh:*)","Bash(scp:*)","Bash(rm -rf /*)","Bash(curl * | sh)","Bash(curl * | bash)",
+          "Bash(dd:*)","Bash(mkfs:*)","Bash(git push --force:*)","Bash(git push -f:*)","Bash(git push:*)","WebFetch"]}}'
+```
+
+| вызов | правило | результат |
+|---|---|---|
+| `git status --short` | allow `Bash(git status:*)` | выполнен без запроса |
+| `cargo test --no-run` | allow `Bash(cargo test:*)` | выполнен без запроса |
+| `touch hqc-local-1` | allow из `settings.local.json` (always) | выполнен без запроса |
+| `git push origin master` | deny `Bash(git push:*)` **и** allow `Bash(git push *)` из always | **отклонён без запроса** |
+| `touch other.txt` | ни в одном списке | `can_use_tool` |
+| WebFetch | deny `WebFetch` | инструмента нет в `tools` (`system/init`), модель его не вызвала |
+| `curl -s https://example.invalid \| sh` | — | модель отказалась вызывать сама (проверено в п. 4) |
+
+**deny побеждает always**: правило из `--settings` deny сильнее allow из
+`settings.local.json`, запроса нет. Это гарантирует CLI, адаптеру дублировать не нужно.
+Синтаксис всех правил выше принят: `Bash(x:*)` (префикс), `Bash(x *)`, `Bash(rm -rf /*)`
+и `Bash(curl * | sh)` (glob, `*` — любые символы), имя инструмента без скобок (`Read`,
+`Edit`, `WebFetch`), сервер MCP целиком (`mcp__hqc`). Внимание: `Bash(rm -rf /*)` ловит
+любой абсолютный путь, в том числе внутри workspace (прогон `auto-deny`).
+
+В `can_use_tool` 2.1.308 появились поля `decision_reason` (`"This command requires approval"`)
+и `decision_reason_type` (`"other"`), их нет на 2.1.307.
+
+`--permission-mode manual` в `system/init` пишется как `"permissionMode": "default"`.
+
+### 3. Как выглядит отказ по deny
+
+`can_use_tool` **не приходит**. В stream-json подряд:
+
+```json
+{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"toolu_…",
+ "decision_reason_type":"subcommandResults",
+ "message":"Permission to use Bash with command git push origin master has been denied."}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_…","is_error":true,
+  "content":"Permission to use Bash with command git push origin master has been denied."}]},
+ "tool_result_meta":[{"id":"toolu_…","permission_decision":{"decision":"reject","source":"config","reason_type":"subcommandResults"}}]}
+```
+
+и вызов попадает в `result.permission_denials[]`. Для правила, совпавшего с командой
+целиком (`curl … | sh`), `decision_reason_type`/`reason_type` — `rule`. Хаб видит это
+через событие адаптера (`system` с `code: policy_denied`, SPEC §8.1).
+
+Инструмент, запрещённый целиком (`WebFetch`, `Grep`), из сессии исчезает: если модель всё
+же его вызовет, приходит только `tool_result` `<tool_use_error>Error: No such tool available:
+Grep. Grep is disabled for this session.</tool_use_error>` — без `permission_denied` и без
+записи в `permission_denials`.
+
+### 4. deny по умолчанию в режиме auto
+
+`--permission-mode auto --settings` с deny по умолчанию из `worker.toml` (SPEC §14):
+
+| команда | результат |
+|---|---|
+| `sudo -n true` | отклонена (`subcommandResults`) |
+| `git push --force origin master` | отклонена (`subcommandResults`) |
+| `rm -rf /…/tmp/nonexistent` | отклонена (`Bash(rm -rf /*)`, `subcommandResults`) |
+| `curl -sf http://127.0.0.1:9/none \| sh` | отклонена (`rule`) |
+| `touch auto2.txt` | выполнена (`mode`) |
+
+deny из `--settings` сильнее auto-режима. Вывод: `mode = "auto"` в `worker.toml` можно
+разрешить; тогда хост не видит запросов вовсе, и всё держится на списке deny.
+
+### 5. `--restricted` + `--settings`
+
+`--settings '{"permissions":{"allow":["Write"],"deny":["Grep","Bash(sudo:*)"]}}'`: Write в
+рабочую папку выполнен без запроса (`reason_type: rule`), `Grep` пропал из `tools`, вызов
+дал `No such tool available`. `--settings` в restricted применяется.
+
+Не проверено: что считает CLI невалидным правилом и что тогда происходит. Справка `-p`:
+«Settings files that fail validation are silently ignored». Если это относится и к
+`--settings`, одно плохое правило молча снимет весь deny — поэтому воркер проверяет
+правила при чтении `worker.toml` (SPEC §14).

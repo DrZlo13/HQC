@@ -1,0 +1,1 @@
+{"type": "user", "message": {"role": "user", "content": "In ONE message, make exactly these two tool calls in parallel: (1) Write tool: create file r.txt in the current directory with content x (2) Grep tool: pattern hello in the current directory. Then reply with exactly: DONE"}}

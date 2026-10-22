@@ -71,6 +71,45 @@ impl TokenStore {
         }
     }
 
+    /// Checks that the store accepts a write and gives it back, without touching the saved
+    /// token: a probe entry next to it is written, read and removed. `enroll` calls this
+    /// before asking the hub for a token, which is issued only once (SPEC §5.1).
+    pub fn probe(&self) -> anyhow::Result<()> {
+        const PROBE: &[u8] = b"hqc-probe";
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::Keychain { account } => {
+                use security_framework::passwords as kc;
+                let probe = format!("{account}#probe");
+                let r = kc::set_generic_password(KEYCHAIN_SERVICE, &probe, PROBE)
+                    .and_then(|()| kc::get_generic_password(KEYCHAIN_SERVICE, &probe));
+                let _ = kc::delete_generic_password(KEYCHAIN_SERVICE, &probe);
+                match r {
+                    Ok(b) if b == PROBE => Ok::<_, anyhow::Error>(()),
+                    Ok(_) => Err(anyhow::anyhow!("the Keychain returned a different value")),
+                    Err(e) => Err(e.into()),
+                }
+                .context(
+                    "the Keychain is not usable (locked, e.g. in an ssh session). Run \
+                     `security unlock-keychain` first, or set HQC_TOKEN_STORE=file to keep the \
+                     token in $HQC_HOME/token (0600)",
+                )
+            }
+            Self::File(path) => {
+                let probe = path.with_extension("probe");
+                let r = write_private(&probe, PROBE).and_then(|()| std::fs::read(&probe));
+                let _ = std::fs::remove_file(&probe);
+                match r {
+                    Ok(b) if b == PROBE => Ok(()),
+                    Ok(_) => anyhow::bail!("{} read back a different value", probe.display()),
+                    Err(e) => Err(e).with_context(|| {
+                        format!("the token file {} is not writable", path.display())
+                    }),
+                }
+            }
+        }
+    }
+
     /// `Ok(None)`: no token yet, run `hqc-worker enroll`.
     pub fn load(&self) -> anyhow::Result<Option<Secret>> {
         match self {
@@ -136,6 +175,25 @@ mod tests {
             assert_eq!(mode(dir.path().join("sub/token")), 0o600);
             assert_eq!(mode(dir.path().join("sub")), 0o700);
         }
+    }
+
+    #[test]
+    fn file_probe_leaves_the_token_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TokenStore::File(dir.path().join("sub/token"));
+        store.probe().unwrap();
+        assert_eq!(store.load().unwrap(), None);
+        store.save(&Secret::new("wt_1")).unwrap();
+        store.probe().unwrap();
+        assert_eq!(store.load().unwrap(), Some(Secret::new("wt_1")));
+        assert!(!dir.path().join("sub/token.probe").exists());
+
+        // A regular file where the directory should be: not writable.
+        std::fs::write(dir.path().join("blocked"), "").unwrap();
+        let err = TokenStore::File(dir.path().join("blocked/token"))
+            .probe()
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not writable"), "{err:#}");
     }
 
     #[test]

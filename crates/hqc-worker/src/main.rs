@@ -28,6 +28,9 @@ enum Cmd {
         /// Allow `http://` to a non-loopback hub: the token travels unencrypted.
         #[arg(long)]
         insecure_http: bool,
+        /// Worker name shown in the web UI; the host name without its domain by default.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Run the daemon (SPEC §2).
     Run,
@@ -39,11 +42,15 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut filter =
+    use tracing_subscriber::layer::{Layer, SubscriberExt};
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     // At `trace` these crates log raw requests, including the worker token in
     // `Authorization` (tungstenite) or in enrollment responses. Capped even if RUST_LOG asks.
-    for target in [
+    // A cap, not a directive: `reqwest=debug` would raise them above the `info` default.
+    const CAPPED: [&str; 7] = [
         "tungstenite",
         "tokio_tungstenite",
         "hyper",
@@ -51,21 +58,38 @@ async fn main() -> anyhow::Result<()> {
         "reqwest",
         "h2",
         "rustls",
-    ] {
-        filter = filter.add_directive(format!("{target}=debug").parse()?);
-    }
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(filter)
+    ];
+    let cap = tracing_subscriber::filter::filter_fn(|m| {
+        *m.level() != tracing::Level::TRACE
+            || !CAPPED
+                .iter()
+                .any(|t| m.target() == *t || m.target().starts_with(&format!("{t}::")))
+    });
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(filter)
+                .with_filter(cap),
+        )
         .init();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Enroll {
             hub_url,
             insecure_http,
+            name,
         } => {
             let store = TokenStore::from_env(&hub_url)?;
-            enroll::enroll(&hub_url, insecure_http, &store, &mut std::io::stdout()).await?;
+            let name = name.unwrap_or_else(enroll::default_name);
+            enroll::enroll(
+                &hub_url,
+                &name,
+                insecure_http,
+                &store,
+                &mut std::io::stdout(),
+            )
+            .await?;
             if let Ok(path) = config::config_path() {
                 if !path.exists() {
                     println!(

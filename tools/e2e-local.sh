@@ -9,8 +9,11 @@
 # subscription. Uses its own database (hqc_e2e, dropped at the end), its own HQC_HOME and
 # workspace in tmp/e2e-<date>/ (recreated on every run) and never touches ~/.hqc.
 # Environment: E2E_PROFILE=release builds release binaries; E2E_DB (default hqc_e2e);
-# E2E_TURN_TIMEOUT (seconds, default 240); E2E_CLAUDE_BIN (claude_bin in worker.toml, e.g.
-# /usr/bin/false to rehearse everything but the live turn). Exit status 0 = PASS.
+# E2E_TURN_TIMEOUT (seconds, default 240); E2E_CLAUDE_BIN (claude_bin in worker.toml).
+# Rehearsal: if E2E_CLAUDE_BIN is not Claude Code (its `--version` does not say so, e.g.
+# /usr/bin/false), everything but the live turn is checked and the turn must fail to start:
+# `system agent_start_failed`, the input `failed`, state `error`; prints "PASS (rehearsal)".
+# Exit status 0 = PASS.
 
 set -uo pipefail
 
@@ -21,6 +24,7 @@ DB="${E2E_DB:-hqc_e2e}"
 PROFILE="${E2E_PROFILE:-dev}"
 HUB_PID="" WORKER_PID="" ENROLL_PID=""
 RESULT=FAIL
+REHEARSAL=""
 
 log() { printf '[e2e] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -53,6 +57,7 @@ cleanup() {
     echo
     echo "logs: $RUN"
     [ "$status" -eq 0 ] && RESULT=PASS
+    [ -n "$REHEARSAL" ] && RESULT="$RESULT (rehearsal)"
     echo "$RESULT"
     exit "$status"
 }
@@ -120,7 +125,13 @@ fi
 
 # 2. Worker home and config.
 CLAUDE_BIN_LINE=""
-[ -n "${E2E_CLAUDE_BIN:-}" ] && CLAUDE_BIN_LINE="claude_bin = \"$E2E_CLAUDE_BIN\""
+if [ -n "${E2E_CLAUDE_BIN:-}" ]; then
+    CLAUDE_BIN_LINE="claude_bin = \"$E2E_CLAUDE_BIN\""
+    if ! "$E2E_CLAUDE_BIN" --version 2>/dev/null | grep -q "(Claude Code)"; then
+        REHEARSAL=1
+        log "$E2E_CLAUDE_BIN is not Claude Code: rehearsal, the turn must fail to start"
+    fi
+fi
 cat >"$RUN/home/worker.toml" <<EOF
 hub_url = "$HUB"
 allowed_roots = ["$WORKSPACE"]
@@ -150,7 +161,8 @@ WORKER_PID=$!
 python3 "$HELPER" wait-online "$RUN/worker_id" || fail "worker not online, see $RUN/worker.log"
 
 # 4. Session, input, approval, final answer.
-python3 "$HELPER" scenario "$WORKSPACE" "$RUN/scenario.json" || fail "scenario checks"
+E2E_REHEARSAL="$REHEARSAL" python3 "$HELPER" scenario "$WORKSPACE" "$RUN/scenario.json" \
+    || fail "scenario checks"
 
 # 5. The worker stops on SIGTERM (kills the agent, flushes the outbox); cleanup does the rest.
 stop_pid "$WORKER_PID" "hqc-worker run"

@@ -7,7 +7,9 @@ Subcommands (hub URL from $HUB, a loopback dev-mode hub):
   client                          GET / is the web client (HQC_CLIENT_DIR)
   confirm <enroll.log>            read the code printed by `hqc-worker enroll`, confirm it
   wait-online <worker_id_file>    wait until the worker is online in GET /api/workers
-  scenario <workspace> <out.json> session, input, approval (once), final DONE, idle
+  scenario <workspace> <out.json> session, input, approval (once), final DONE, idle;
+                                  with E2E_REHEARSAL=1 (claude_bin is not Claude Code):
+                                  agent_start_failed, input failed, state error
   report <out.json>               events with seq and type, and the checks
 """
 
@@ -21,6 +23,7 @@ import urllib.request
 
 HUB = os.environ["HUB"].rstrip("/")
 MODEL = os.environ.get("E2E_MODEL", "claude-haiku-5-5")
+REHEARSAL = os.environ.get("E2E_REHEARSAL") == "1"
 PROMPT = "Run the shell command: touch hqc-e2e && echo hqc-e2e. Then reply with exactly: DONE"
 
 
@@ -146,17 +149,37 @@ def scenario(workspace, out):
                          {"option_id": opt["id"]})
                     answered.add(p["request_id"])
 
+        def rehearsed():
+            poll()
+            failed = any(e["type"] == "system" and e["payload"].get("code") == "agent_start_failed"
+                         for e in events)
+            return failed and call("GET", f"/api/sessions/{sid}")["state"] == "error"
+
         def done():
             poll()
             final = [e for e in events if e["type"] == "agent.message" and e["payload"].get("final")]
             idle = any(e["type"] == "status" and e["payload"].get("state") == "idle" for e in events)
             return final and idle and call("GET", f"/api/sessions/{sid}")["state"] == "idle"
 
-        until("final agent.message and idle", int(os.environ.get("E2E_TURN_TIMEOUT", "240")), done, 1)
+        timeout = int(os.environ.get("E2E_TURN_TIMEOUT", "240"))
+        if REHEARSAL:
+            until("agent_start_failed and state error", timeout, rehearsed, 1)
+        else:
+            until("final agent.message and idle", timeout, done, 1)
         poll()
     except SystemExit as e:
         log(str(e))
         result["error"] = str(e)
+
+    if REHEARSAL:
+        checks = result["checks"]
+        checks["system agent_start_failed"] = any(
+            e["type"] == "system" and e["payload"].get("code") == "agent_start_failed" for e in events)
+        stored = call("GET", f"/api/sessions/{sid}/events?after_seq=0&limit=500")["events"]
+        checks["input failed"] = any(e["type"] == "user.message" and e.get("delivery") == "failed"
+                                     for e in stored)
+        checks["session state error"] = call("GET", f"/api/sessions/{sid}")["state"] == "error"
+        return finish(0 if all(checks.values()) else 1)
 
     final = [e for e in events if e["type"] == "agent.message" and e["payload"].get("final")]
     checks = result["checks"]

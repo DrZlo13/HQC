@@ -452,8 +452,10 @@ impl Connection {
         };
         match f.body {
             HubFrame::Ack(a) => {
-                let by_frame = in_flight.remove(&f.id);
-                if let Some(eid) = a.event_id.or(by_frame) {
+                // Only outbox events are in flight. Acks of direct frames (`agent.delta`, never
+                // stored, SPEC §5.2) come without `seq` by design and are not drops.
+                if let Some(by_frame) = in_flight.remove(&f.id) {
+                    let eid = a.event_id.unwrap_or(by_frame);
                     if let Err(e) = self.link.outbox.remove(eid) {
                         tracing::error!(event_id = %eid, "outbox delete failed: {e:#}");
                     }

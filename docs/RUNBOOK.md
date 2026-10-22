@@ -560,6 +560,15 @@ hqc-worker enroll https://hqc.example.com
   Посмотреть: `security find-generic-password -s hqc-worker -a https://hqc.example.com`;
 - с `HQC_TOKEN_STORE=file` (и на других ОС) — `$HQC_HOME/token`, права 0600.
 
+Имя воркера в вебе — имя хоста без домена (`home-mac`, а не `home-mac.tail….ts.net`);
+другое — флагом `--name`: `hqc-worker enroll --name home-mac https://hqc.example.com`.
+
+По ssh связка ключей обычно заперта. `enroll` проверяет хранилище пробной записью до
+запроса кода и при отказе Keychain сразу выходит с подсказкой: выполнить в той же
+ssh-сессии `security unlock-keychain` и повторить, либо задать `HQC_TOKEN_STORE=file`
+(тогда и `run` должен идти с ней же). Токен хаб выдаёт один раз, так что до хаба дело
+не доходит и ничего не сгорает.
+
 `enroll` не пишет `worker.toml`: если его нет, воркер подскажет путь.
 
 ### 2.4 launchd-агент для `run`

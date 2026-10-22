@@ -509,6 +509,68 @@ async fn start_mode_selects_start_or_resume() {
     w.stop().await;
 }
 
+// T13 (deploy findings 1, 2, 4): a store that cannot keep the token stops enroll before the
+// hub is asked; `--name` names the worker; without RUST_LOG the log is `info`, no HTTP debug.
+#[tokio::test]
+async fn enroll_probes_the_store_and_takes_a_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let names = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (h, n) = (hits.clone(), names.clone());
+    let http = http_server(move |path, body| {
+        h.fetch_add(1, Ordering::SeqCst);
+        match path {
+            "/worker/enroll" => {
+                n.lock().unwrap().push(body["name"].clone());
+                (
+                    200,
+                    json!({"code": "ABCD-1234", "poll_token": "pt-1", "poll_interval_s": 0,
+                           "expires_at": chrono::Utc::now() + chrono::Duration::minutes(10)}),
+                )
+            }
+            "/worker/enroll/poll" => (
+                200,
+                json!({"status": "confirmed", "token": TOKEN, "worker_id": Uuid::nil()}),
+            ),
+            _ => (404, json!({})),
+        }
+    })
+    .await;
+    let enroll = |home: std::path::PathBuf, extra: &[&str]| {
+        let mut c = tokio::process::Command::new(binary());
+        c.arg("enroll")
+            .arg(format!("http://{http}"))
+            .args(extra)
+            .env("HQC_HOME", home)
+            .env("HQC_TOKEN_STORE", "file")
+            .env_remove("RUST_LOG")
+            .kill_on_drop(true);
+        c
+    };
+
+    let blocked = dir.path().join("blocked");
+    write(&blocked, "");
+    let out = enroll(blocked, &[]).output().await.unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("not writable"), "{stderr}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "hub not asked");
+
+    let home = dir.path().join("home");
+    let out = enroll(home.clone(), &["--name", "bench-1"])
+        .output()
+        .await
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(*names.lock().unwrap(), vec![json!("bench-1")]);
+    assert!(
+        !stderr.contains("DEBUG") && !stderr.contains("TRACE"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(home.join("token")).unwrap(), TOKEN);
+}
+
 // T9: enrollment talks https (plain http only to loopback or with --insecure-http) and does
 // not follow redirects, which would re-send the poll secret elsewhere.
 #[tokio::test]
@@ -516,7 +578,7 @@ async fn enroll_refuses_plain_http_and_redirects() {
     let dir = tempfile::tempdir().unwrap();
     let store = hqc_worker::token::TokenStore::File(dir.path().join("token"));
     let mut out = Vec::new();
-    let e = hqc_worker::enroll::enroll("http://hub.example.com", false, &store, &mut out)
+    let e = hqc_worker::enroll::enroll("http://hub.example.com", "w", false, &store, &mut out)
         .await
         .unwrap_err();
     assert!(format!("{e:#}").contains("plain http"), "{e:#}");
@@ -535,7 +597,7 @@ async fn enroll_refuses_plain_http_and_redirects() {
         )
     })
     .await;
-    let e = hqc_worker::enroll::enroll(&format!("http://{hub}"), false, &store, &mut out)
+    let e = hqc_worker::enroll::enroll(&format!("http://{hub}"), "w", false, &store, &mut out)
         .await
         .unwrap_err();
     assert!(format!("{e:#}").contains("307"), "{e:#}");

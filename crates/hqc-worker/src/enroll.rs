@@ -23,16 +23,20 @@ use crate::token::{Secret, TokenStore};
 
 const MIN_POLL: Duration = Duration::from_millis(50);
 
-/// Enrolls with `hub_url`, saves the token to `store` and returns the worker id.
-/// Human-readable progress goes to `out`. `hub_url` is https unless it is a loopback host
-/// or `insecure_http` (see [`check_hub_url`]).
+/// Enrolls with `hub_url` as `name` (see [`default_name`]), saves the token to `store` and
+/// returns the worker id. Human-readable progress goes to `out`. `hub_url` is https unless
+/// it is a loopback host or `insecure_http` (see [`check_hub_url`]). `store` is probed
+/// before the hub is asked: the hub hands the token out once, so a store that cannot keep
+/// it (a locked Keychain over ssh) would burn it.
 pub async fn enroll(
     hub_url: &str,
+    name: &str,
     insecure_http: bool,
     store: &TokenStore,
     out: &mut (impl Write + Send),
 ) -> anyhow::Result<Uuid> {
     check_hub_url(hub_url, insecure_http)?;
+    store.probe()?;
     let hub = hub_url.trim_end_matches('/');
     // A redirect would re-send the body (with `poll_token`) to another origin.
     let http = reqwest::Client::builder()
@@ -42,7 +46,7 @@ pub async fn enroll(
     let resp = http
         .post(format!("{hub}/worker/enroll"))
         .json(&EnrollRequest {
-            name: hostname(),
+            name: name.to_string(),
             os: std::env::consts::OS.into(),
             protocol_version: Some(hqc_proto::PROTOCOL_VERSION),
         })
@@ -109,15 +113,21 @@ pub fn enroll_link(hub: &str, code: &str) -> String {
     format!("{}/#/enroll?code={code}", hub.trim_end_matches('/'))
 }
 
-fn hostname() -> String {
+/// The worker name when `--name` is not given: the host name without its domain
+/// (`home-mac.tail201738.ts.net` -> `home-mac`).
+pub fn default_name() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
+        .map(|s| short_host(&s))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "worker".into())
+}
+
+fn short_host(s: &str) -> String {
+    s.trim().split('.').next().unwrap_or_default().to_string()
 }
 
 #[cfg(test)]
@@ -128,5 +138,14 @@ mod tests {
             super::enroll_link("https://hub.example/", "K7QM-3XPW"),
             "https://hub.example/#/enroll?code=K7QM-3XPW"
         );
+    }
+
+    #[test]
+    fn short_host() {
+        assert_eq!(
+            super::short_host("home-mac.tail201738.ts.net\n"),
+            "home-mac"
+        );
+        assert_eq!(super::short_host("llm-server"), "llm-server");
     }
 }

@@ -14,9 +14,10 @@
 #   ssh -N -L 8080:127.0.0.1:8080 home-mac@home-mac.ebal.uk
 # The hub listens on loopback only (HQC_DEV=1 requires it, SPEC §6).
 #
-# The worker spawns `claude`, whose login lives in the Keychain: run `up` from a session
-# where the login keychain is unlocked (the GUI session, or ssh after
-# `security unlock-keychain`), otherwise every session fails with "Not logged in".
+# The worker spawns `claude`, whose login lives in the Keychain, which is locked in plain ssh
+# sessions. So the worker is started as a launchd job in the user's GUI domain (gui/<uid>),
+# where the login keychain is unlocked; `up` can be run from any ssh session as long as the
+# user is logged in on the GUI. The hub itself runs as a plain background process.
 #
 # Environment: DEV_PORT (8080), DEV_DB (hqc_dev), DEV_USER (dev@local),
 # DEV_WORKSPACE (this repository), DEV_ROOTS (parent of the workspace), RUST_LOG (info).
@@ -48,6 +49,51 @@ stop_pidfile() { # pidfile name
 }
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+LABEL="local.hqc.dev.worker"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+start_worker_gui() { # binary: run `hqc-worker run` as a one-shot job in the GUI launchd domain
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
+    mkdir -p "$(dirname "$PLIST")"
+    cat >"$PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>$1</string><string>run</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$PATH</string>
+    <key>HQC_HOME</key><string>$RUN/home</string>
+    <key>HQC_TOKEN_STORE</key><string>file</string>
+    <key>RUST_LOG</key><string>${RUST_LOG:-info}</string>
+  </dict>
+  <key>WorkingDirectory</key><string>$ROOT</string>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><false/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>$RUN/worker.log</string>
+  <key>StandardErrorPath</key><string>$RUN/worker.log</string>
+</dict></plist>
+PL
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" || fail "launchctl bootstrap gui/$(id -u): is the user logged in on the GUI?"
+    local pid=""
+    for _ in $(seq 1 20); do
+        pid="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '$1 == "pid" && $2 == "=" {print $3}')"
+        [ -n "$pid" ] && break; sleep 0.5
+    done
+    [ -n "$pid" ] || fail "worker did not start, see $RUN/worker.log"
+    echo "$pid" >"$RUN/worker.pid"
+    log "worker started in gui/$(id -u) (pid $pid)"
+}
+
+stop_worker_gui() {
+    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+        log "stopping hqc-worker run (launchd $LABEL)"
+        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
+        for _ in $(seq 1 30); do alive "$RUN/worker.pid" || break; sleep 0.5; done
+    fi
+    rm -f "$RUN/worker.pid"
+}
 
 cmd_up() {
     alive "$RUN/hub.pid" && fail "hub already running (pid $(cat "$RUN/hub.pid")); use restart"
@@ -94,14 +140,13 @@ TOML
         python3 "$HELPER" confirm "$RUN/enroll.log" >"$RUN/worker_id" || fail "confirm"
         wait "$epid" || { cat "$RUN/enroll.log" >&2; fail "enroll"; }
     fi
-    "${WORKER[@]}" run >>"$RUN/worker.log" 2>&1 &
-    echo $! >"$RUN/worker.pid"
+    start_worker_gui "$BIN/hqc-worker"
     python3 "$HELPER" wait-online "$RUN/worker_id" || fail "worker not online, see $RUN/worker.log"
     log "up: $HUB  workspace $WORKSPACE  logs $RUN/{hub,worker}.log"
 }
 
 cmd_down() {
-    stop_pidfile "$RUN/worker.pid" "hqc-worker run"
+    stop_worker_gui
     stop_pidfile "$RUN/hub.pid" "hqc-hub"
 }
 

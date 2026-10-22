@@ -112,7 +112,7 @@ cmd_status() {
     curl -s -m 2 "$HUB/health" >/dev/null 2>&1 && echo "health: ok" || echo "health: no answer at $HUB"
     curl -s -m 2 "$HUB/api/workers" 2>/dev/null | python3 -c "import sys, json
 try:
-    for w in json.load(sys.stdin)[workers]: print(worker, w[name] + :, w[status])
+    for w in json.load(sys.stdin)[\"workers\"]: print(\"worker\", w[\"name\"] + \":\", w[\"status\"])
 except Exception: pass"
 }
 

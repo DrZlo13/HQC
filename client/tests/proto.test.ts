@@ -4,14 +4,20 @@ import { join } from 'node:path';
 import {
   isKnownType,
   parseApiError,
+  parseDirList,
   parseEvent,
   parseEventPage,
   parseFrame,
   parseInputResponse,
+  parseProject,
+  parseProjectList,
   parsePushMessage,
   parseServerFrame,
   parseSessionInfo,
   parseVapidKey,
+  parseWorkspace,
+  parseWorkspaceConflict,
+  parseWorkspaceList,
   ProtoError,
   type ClientFrame,
 } from '../src/proto';
@@ -104,6 +110,29 @@ describe('examples/wire', () => {
     expect(push.payload?.session_id).toBe(push.session_id);
     const sub = load('api.push.subscribe.json') as { endpoint: string; keys: Record<string, string> };
     expect(Object.keys(sub.keys).sort()).toEqual(['auth', 'p256dh']);
+  });
+
+  it('reads projects, workspaces, folders and the conflict body (T14)', () => {
+    const p = parseProject(load('api.project.json'));
+    expect(p).toMatchObject({ name: 'hqc', is_personal: false });
+    const list = parseProjectList(load('api.projects.json'));
+    expect(list.map((x) => x.is_personal)).toEqual([true, false]);
+    expect(list[0].default_workspace_id).toBeUndefined();
+    const w = parseWorkspace(load('api.workspace.json'));
+    expect(p.default_workspace_id).toBe(w.id);
+    expect(w).toMatchObject({ project_id: p.id, kind: 'dir', label: 'home-mac' });
+    expect(parseWorkspaceList(load('api.workspaces.json'))).toEqual([w]);
+    expect(parseDirList(load('api.dirs.json')).map((d) => d.name)).toEqual(['cad', 'hqc']);
+    expect(parseWorkspaceConflict(load('api.workspace.conflict.json'))).toEqual({
+      existing_workspace_id: w.id,
+      existing_project_id: p.id,
+      existing_path: w.path,
+    });
+    expect(parseWorkspaceConflict(load('api.error.json'))).toBeNull();
+    const s = parseSessionInfo(load('api.session.json'));
+    expect(s).toMatchObject({ workspace_id: w.id, cwd: '.' });
+    const req = load('api.session.request.json') as { workspace_id: string };
+    expect(req.workspace_id).toBe(w.id);
   });
 
   it('parses every example file', () => {

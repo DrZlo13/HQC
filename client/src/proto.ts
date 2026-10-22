@@ -666,6 +666,10 @@ export interface Me {
 export interface SessionInfo {
   id: Uuid;
   project_id: Uuid;
+  workspace_id?: Uuid;
+  worker_id?: Uuid;
+  /** Relative to the workspace, `.` by default. */
+  cwd: string;
   title: string;
   slug: string;
   state: SessionState;
@@ -692,6 +696,9 @@ export function parseSessionInfo(v: unknown): SessionInfo {
   return {
     id: str(o, 'id'),
     project_id: str(o, 'project_id'),
+    workspace_id: optStr(o, 'workspace_id'),
+    worker_id: optStr(o, 'worker_id'),
+    cwd: optStr(o, 'cwd') ?? '.',
     title: str(o, 'title'),
     slug: str(o, 'slug'),
     state: tolerantEnum(o, 'state', SESSION_STATES),
@@ -707,6 +714,97 @@ export function parseSessionInfo(v: unknown): SessionInfo {
 /** `{sessions: [...]}` of `GET /api/projects/{id}/sessions`. */
 export function parseSessionList(v: unknown): SessionInfo[] {
   return arr(obj(v, 'session list'), 'sessions').map(parseSessionInfo);
+}
+
+/** A project (SPEC §3 Project, §6). */
+export interface Project {
+  id: Uuid;
+  name: string;
+  slug: string;
+  description: string;
+  default_workspace_id?: Uuid;
+  /** The user's implicit project: neither renamed nor deleted. */
+  is_personal: boolean;
+  created_at: string;
+}
+
+export function parseProject(v: unknown): Project {
+  const o = obj(v, 'project');
+  return {
+    id: str(o, 'id'),
+    name: str(o, 'name'),
+    slug: str(o, 'slug'),
+    description: optStr(o, 'description') ?? '',
+    default_workspace_id: optStr(o, 'default_workspace_id'),
+    is_personal: bool(o, 'is_personal'),
+    created_at: str(o, 'created_at'),
+  };
+}
+
+/** `{projects: [...]}` of `GET /api/projects`. */
+export function parseProjectList(v: unknown): Project[] {
+  return arr(obj(v, 'project list'), 'projects').map(parseProject);
+}
+
+/** A workspace (SPEC §3 Workspace): a folder on a worker, in one project. */
+export interface Workspace {
+  id: Uuid;
+  project_id: Uuid;
+  worker_id: Uuid;
+  /** Canonical, as the worker reported it. */
+  path: string;
+  label: string;
+  kind: string;
+  created_at: string;
+}
+
+export function parseWorkspace(v: unknown): Workspace {
+  const o = obj(v, 'workspace');
+  return {
+    id: str(o, 'id'),
+    project_id: str(o, 'project_id'),
+    worker_id: str(o, 'worker_id'),
+    path: str(o, 'path'),
+    label: optStr(o, 'label') ?? '',
+    kind: str(o, 'kind'),
+    created_at: str(o, 'created_at'),
+  };
+}
+
+/** `{workspaces: [...]}` of `GET /api/workspaces?project_id=`. */
+export function parseWorkspaceList(v: unknown): Workspace[] {
+  return arr(obj(v, 'workspace list'), 'workspaces').map(parseWorkspace);
+}
+
+/** A folder of `GET /api/workers/{id}/dirs` (the worker's `fs.list_dirs`, SPEC §5.3). */
+export interface DirEntry {
+  name: string;
+  path: string;
+}
+
+export function parseDirList(v: unknown): DirEntry[] {
+  return arr(obj(v, 'dir list'), 'entries').map((e, i) => {
+    const o = obj(e, `entries[${i}]`);
+    return { name: str(o, 'name'), path: str(o, 'path') };
+  });
+}
+
+/** The extra fields of `409 workspace_conflict`: the workspace that holds the folder. */
+export interface WorkspaceConflict {
+  existing_workspace_id: Uuid;
+  existing_project_id: Uuid;
+  existing_path: string;
+}
+
+/** `null` unless `v` is a `workspace_conflict` body. */
+export function parseWorkspaceConflict(v: unknown): WorkspaceConflict | null {
+  if (typeof v !== 'object' || v === null || (v as Obj).error !== 'workspace_conflict') return null;
+  const o = v as Obj;
+  return {
+    existing_workspace_id: str(o, 'existing_workspace_id'),
+    existing_project_id: str(o, 'existing_project_id'),
+    existing_path: str(o, 'existing_path'),
+  };
 }
 
 /** `{events: [...], last_seq}` of `GET /api/sessions/{id}/events`; events stay raw so that

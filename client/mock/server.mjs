@@ -75,7 +75,31 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     display_name: 'Dev',
     personal_project_id: '0199f3a2-7c10-7000-8000-0000000000d1',
   };
-  const project = { id: me.personal_project_id, name: 'Личный', slug: 'personal', is_personal: true };
+  const workerId = ex['hub.hello.ack'].payload.worker_id;
+  const now = () => new Date().toISOString();
+  // Projects and workspaces (T14): the personal project with one workspace on home-mac.
+  /** @type {Map<string, any>} */
+  const projects = new Map();
+  /** @type {Map<string, any>} */
+  const workspaces = new Map();
+  const project = {
+    ...ex['api.projects'].projects[0],
+    id: me.personal_project_id,
+    owner_id: userId,
+    default_workspace_id: ex['api.workspace'].id,
+  };
+  projects.set(project.id, project);
+  workspaces.set(ex['api.workspace'].id, { ...ex['api.workspace'], project_id: project.id, worker_id: workerId });
+  // What `fs.list_dirs` shows on home-mac: allowed_roots = ['/Users/home-mac/work'].
+  const ROOT = '/Users/home-mac/work';
+  const TREE = {
+    [ROOT]: ['cad', 'hqc', 'kicad'],
+    [`${ROOT}/hqc`]: ['client', 'crates', 'docs', 'tools'],
+    [`${ROOT}/hqc/crates`]: ['hqc-hub', 'hqc-proto', 'hqc-worker'],
+    [`${ROOT}/kicad`]: ['power-board'],
+  };
+  const inRoot = (p) => p === ROOT || p.startsWith(`${ROOT}/`);
+  const overlap = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
   const vapidPublicKey = generateKeyPairSync('ec', { namedCurve: 'P-256' })
     .publicKey.export({ format: 'jwk' });
   const vapid = Buffer.concat([
@@ -149,7 +173,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   function summaryOf(s) {
     return {
       session_id: s.id,
-      project_id: project.id,
+      project_id: s.project_id,
       title: s.title,
       state: stateOf(s),
       queue_len: s.queue.length,
@@ -178,10 +202,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const sum = summaryOf(s);
     return {
       id: s.id,
-      project_id: project.id,
+      project_id: s.project_id,
       owner_id: userId,
-      worker_id: ex['hub.hello.ack'].payload.worker_id,
-      cwd: '.',
+      workspace_id: s.workspace_id,
+      worker_id: workspaces.get(s.workspace_id)?.worker_id ?? workerId,
+      cwd: s.cwd,
       title: s.title,
       slug: s.slug,
       agent: {
@@ -212,9 +237,12 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
 
   // ---- sessions ----------------------------------------------------------------------
 
-  function newSession(title, id = randomUUID()) {
+  function newSession(title, id = randomUUID(), where = {}) {
     const s = {
       id,
+      project_id: where.project_id ?? project.id,
+      workspace_id: where.workspace_id ?? project.default_workspace_id,
+      cwd: where.cwd ?? '.',
       title,
       slug: title.toLowerCase().replace(/[^a-z0-9а-я]+/gi, '-').replace(/^-|-$/g, '') || 'session',
       archived: false,
@@ -392,7 +420,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const re = new RegExp(`^${pattern.replace(/:(\w+)/g, (_, k) => (keys.push(k), '([^/]+)'))}$`);
     routes.push({ method, re, keys, fn });
   };
-  const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
+  const fail = (status, code, message, extra) => Object.assign(new Error(message), { status, code, extra });
+  const projectOr404 = (id) => {
+    const p = projects.get(id);
+    if (!p) throw fail(404, 'not_found', 'unknown project');
+    return p;
+  };
+  const workerOnline = (id) =>
+    id === workerId && !revoked.has(id);
   /** A reply with a status other than 200. */
   const withStatus = (status, body) => ({ [STATUS]: status, body });
   const sessionOr404 = (id) => {
@@ -402,10 +437,113 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   };
 
   route('GET', '/api/me', () => me);
-  route('GET', '/api/projects', () => ({ projects: [project] }));
-  route('GET', '/api/projects/:pid/sessions', () => ({ sessions: [...sessions.values()].map(info) }));
-  route('POST', '/api/projects/:pid/sessions', (_, body) =>
-    withStatus(201, info(newSession(String(body?.title || `Сессия ${sessions.size + 1}`)))));
+  route('GET', '/api/projects', () => ({ projects: [...projects.values()] }));
+  route('POST', '/api/projects', (_, body) => {
+    const name = String(body?.name ?? '').trim();
+    if (!name) throw fail(400, 'bad_request', 'name must not be empty');
+    const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
+    let slug = base;
+    for (let i = 2; [...projects.values()].some((p) => p.slug === slug); i++) slug = `${base}-${i}`;
+    const p = {
+      id: randomUUID(), owner_id: userId, name, slug, description: String(body?.description ?? ''),
+      is_personal: false, created_at: now(), updated_at: now(),
+    };
+    projects.set(p.id, p);
+    return withStatus(201, p);
+  });
+  route('GET', '/api/projects/:pid', (p) => projectOr404(p.pid));
+  route('PATCH', '/api/projects/:pid', (p, body) => {
+    const pr = projectOr404(p.pid);
+    if (body?.name !== undefined && pr.is_personal && body.name !== pr.name) {
+      throw fail(409, 'personal_project', 'the personal project cannot be renamed');
+    }
+    if (body?.default_workspace_id !== undefined && workspaces.get(body.default_workspace_id)?.project_id !== pr.id) {
+      throw fail(400, 'bad_request', 'default_workspace_id is not a workspace of this project');
+    }
+    for (const k of ['name', 'description', 'default_workspace_id']) if (body?.[k] !== undefined) pr[k] = body[k];
+    pr.updated_at = now();
+    return pr;
+  });
+  route('DELETE', '/api/projects/:pid', (p) => {
+    const pr = projectOr404(p.pid);
+    if (pr.is_personal) throw fail(409, 'personal_project', 'the personal project cannot be deleted');
+    for (const [id, s] of sessions) if (s.project_id === pr.id) sessions.delete(id);
+    for (const [id, w] of workspaces) if (w.project_id === pr.id) workspaces.delete(id);
+    projects.delete(pr.id);
+    return withStatus(204, null);
+  });
+  route('GET', '/api/projects/:pid/sessions', (p) => ({
+    sessions: [...sessions.values()].filter((s) => s.project_id === p.pid).map(info),
+  }));
+  route('POST', '/api/projects/:pid/sessions', (p, body) => {
+    const pr = projectOr404(p.pid);
+    const wsId = body?.workspace_id ?? pr.default_workspace_id;
+    const ws = workspaces.get(wsId);
+    if (!wsId) throw fail(409, 'no_workspace', 'the project has no workspace; add one first');
+    if (!ws || ws.project_id !== pr.id) throw fail(400, 'bad_request', 'workspace_id is not a workspace of this project');
+    const n = [...sessions.values()].filter((s) => s.project_id === pr.id).length + 1;
+    const s = newSession(String(body?.title || `Сессия ${n}`), randomUUID(), {
+      project_id: pr.id, workspace_id: ws.id, cwd: String(body?.cwd || '.'),
+    });
+    return withStatus(201, info(s));
+  });
+  route('GET', '/api/workspaces', (_, __, q) => ({
+    workspaces: [...workspaces.values()].filter((w) => !q.get('project_id') || w.project_id === q.get('project_id')),
+  }));
+  route('POST', '/api/workspaces', (_, body) => {
+    const pr = projectOr404(String(body?.project_id));
+    if (!workerOnline(body?.worker_id)) {
+      if (body?.worker_id === workerId || enrolled.some((w) => w.id === body?.worker_id)) {
+        throw fail(409, 'worker_offline', 'the worker is offline');
+      }
+      throw fail(400, 'bad_request', 'unknown worker');
+    }
+    const path = String(body?.path ?? '').trim().replace(/\/+$/, '');
+    if (!inRoot(path)) throw fail(400, 'outside_allowed_roots', `${path} is outside the worker's allowed_roots`);
+    const cut = path.lastIndexOf('/');
+    const known = path in TREE || (TREE[path.slice(0, cut)] ?? []).includes(path.slice(cut + 1));
+    if (!known) throw fail(400, 'path_not_found', `${path} does not exist on the worker`);
+    const x = [...workspaces.values()].find((w) => w.worker_id === body.worker_id && overlap(w.path, path));
+    if (x) {
+      const name = projects.get(x.project_id)?.name ?? '';
+      throw fail(409, 'workspace_conflict', `${path} overlaps workspace ${x.path} of project ${name}`, {
+        existing_workspace_id: x.id, existing_project_id: x.project_id, existing_path: x.path,
+      });
+    }
+    const w = {
+      ...ex['api.workspace'], id: randomUUID(), project_id: pr.id, worker_id: body.worker_id, path,
+      label: String(body?.label ?? ''), created_at: now(), updated_at: now(),
+    };
+    workspaces.set(w.id, w);
+    pr.default_workspace_id ??= w.id;
+    return withStatus(201, w);
+  });
+  route('PATCH', '/api/workspaces/:id', (p, body) => {
+    const w = workspaces.get(p.id);
+    if (!w) throw fail(404, 'not_found', 'unknown workspace');
+    if (typeof body?.label === 'string') w.label = body.label.trim();
+    return w;
+  });
+  route('DELETE', '/api/workspaces/:id', (p) => {
+    const w = workspaces.get(p.id);
+    if (!w) throw fail(404, 'not_found', 'unknown workspace');
+    const live = [...sessions.values()].filter((s) => s.workspace_id === w.id && !s.archived).length;
+    if (live) throw fail(409, 'workspace_in_use', `${live} session(s) still work in this workspace; archive them first`);
+    workspaces.delete(w.id);
+    const pr = projects.get(w.project_id);
+    if (pr?.default_workspace_id === w.id) {
+      pr.default_workspace_id = [...workspaces.values()].find((x) => x.project_id === pr.id)?.id;
+      if (!pr.default_workspace_id) delete pr.default_workspace_id;
+    }
+    return withStatus(204, null);
+  });
+  route('GET', '/api/workers/:id/dirs', (p, _, q) => {
+    if (!workerOnline(p.id)) throw fail(409, 'worker_offline', 'the worker is offline');
+    const path = q.get('path');
+    if (!path) return { entries: [{ name: 'work', path: ROOT }] };
+    if (!inRoot(path)) throw fail(400, 'invalid_path', `${path} is outside allowed_roots`);
+    return { entries: (TREE[path] ?? []).map((name) => ({ name, path: `${path}/${name}` })) };
+  });
   route('GET', '/api/sessions/:id', (p) => info(sessionOr404(p.id)));
   route('GET', '/api/sessions/:id/events', (p, _, q) => {
     const s = sessionOr404(p.id);
@@ -489,7 +627,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
   route('GET', '/api/workers', () => ({
     workers: [
-      { id: ex['hub.hello.ack'].payload.worker_id, name: 'home-mac', os: 'macos', status: 'online' },
+      { id: workerId, name: 'home-mac', os: 'macos', status: 'online' },
       ...enrolled,
     ].filter((w) => !revoked.has(w.id)),
   }));
@@ -544,7 +682,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       if (STATUS in out) reply(out[STATUS], out.body);
       else reply(200, out);
     } catch (e) {
-      reply(e.status ?? 500, { error: e.code ?? 'internal', message: e.message });
+      reply(e.status ?? 500, { ...(e.extra ?? {}), error: e.code ?? 'internal', message: e.message });
     }
   });
 

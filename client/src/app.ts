@@ -1,14 +1,20 @@
-// Application-wide state: who I am, the sessions of the personal project and their live
-// `state`/`queue_len`/unread from `subscribe_summary` (SPEC §6, §17.1).
+// Application-wide state: who I am, my projects, the sessions of all of them and their live
+// `state`/`queue_len`/unread from `subscribe_summary` (SPEC §6, §17.1), and the workspaces
+// of the projects that have been looked at.
 
-import { Api } from './api';
-import type { Me, SessionInfo, SessionSummary } from './proto';
+import { Api, type NewSessionOptions } from './api';
+import type { Me, Project, SessionInfo, SessionSummary, Workspace } from './proto';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
 export class AppState {
   me: Me | null = null;
   error: string | null = null;
+  readonly projects = new Map<string, Project>();
   readonly sessions = new Map<string, SessionInfo>();
+  /** By project id; filled by `loadWorkspaces`. */
+  readonly workspaces = new Map<string, Workspace[]>();
+  /** The project shown in the left column; the personal one until another is picked. */
+  currentProjectId: string | null = null;
   conn: ConnState = 'closed';
   private readonly listeners = new Set<() => void>();
   private refreshing: Promise<void> | null = null;
@@ -35,6 +41,7 @@ export class AppState {
   async init(): Promise<void> {
     try {
       this.me = await this.api.me();
+      this.currentProjectId ??= this.me.personal_project_id;
       await this.refreshSessions();
       this.error = null;
     } catch (e) {
@@ -45,16 +52,21 @@ export class AppState {
     this.changed();
   }
 
+  /** Projects and the sessions of every project. */
   async refreshSessions(): Promise<void> {
     if (!this.me) return;
-    this.refreshing ??= this.api
-      .sessions(this.me.personal_project_id)
-      .then((list) => {
-        this.sessions.clear();
-        for (const s of list) this.sessions.set(s.id, s);
-        this.changed();
-      })
-      .finally(() => (this.refreshing = null));
+    this.refreshing ??= (async () => {
+      const projects = await this.api.projects();
+      const lists = await Promise.all(projects.map((p) => this.api.sessions(p.id)));
+      this.projects.clear();
+      for (const p of projects) this.projects.set(p.id, p);
+      this.sessions.clear();
+      for (const s of lists.flat()) this.sessions.set(s.id, s);
+      if (!this.currentProjectId || !this.projects.has(this.currentProjectId)) {
+        this.currentProjectId = this.me!.personal_project_id;
+      }
+      this.changed();
+    })().finally(() => (this.refreshing = null));
     return this.refreshing;
   }
 
@@ -83,19 +95,86 @@ export class AppState {
     this.changed();
   }
 
-  /** Sessions newest-activity first, archived last. */
-  sortedSessions(): SessionInfo[] {
+  /** Projects in the hub's order (the personal one first, it is the oldest). */
+  sortedProjects(): Project[] {
+    return [...this.projects.values()];
+  }
+
+  currentProject(): Project | undefined {
+    return this.currentProjectId ? this.projects.get(this.currentProjectId) : undefined;
+  }
+
+  selectProject(id: string): void {
+    if (this.currentProjectId === id) return;
+    this.currentProjectId = id;
+    this.changed();
+  }
+
+  /** Sessions of the project (the current one by default), newest activity first, without
+   *  archived ones. */
+  sortedSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
-      .filter((s) => !s.archived)
+      .filter((s) => !s.archived && s.project_id === projectId)
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
-  async createSession(title?: string): Promise<SessionInfo> {
-    if (!this.me) throw new Error('not signed in');
-    const s = await this.api.createSession(this.me.personal_project_id, title);
+  /** Unread over the project's sessions, for its badge. */
+  projectUnread(projectId: string): number {
+    let n = 0;
+    for (const s of this.sessions.values()) if (s.project_id === projectId && !s.archived) n += s.unread;
+    return n;
+  }
+
+  async createSession(title?: string, opts: NewSessionOptions = {}, projectId = this.currentProjectId): Promise<SessionInfo> {
+    if (!this.me || !projectId) throw new Error('not signed in');
+    const s = await this.api.createSession(projectId, title, opts);
     this.sessions.set(s.id, s);
     this.changed();
     return s;
+  }
+
+  async createProject(name: string): Promise<Project> {
+    const p = await this.api.createProject(name);
+    this.projects.set(p.id, p);
+    this.currentProjectId = p.id;
+    this.changed();
+    return p;
+  }
+
+  async renameProject(id: string, name: string): Promise<void> {
+    const p = await this.api.patchProject(id, { name });
+    this.projects.set(p.id, p);
+    this.changed();
+  }
+
+  async deleteProject(id: string): Promise<void> {
+    await this.api.deleteProject(id);
+    this.projects.delete(id);
+    this.workspaces.delete(id);
+    for (const [sid, s] of this.sessions) if (s.project_id === id) this.sessions.delete(sid);
+    if (this.currentProjectId === id) this.currentProjectId = this.me?.personal_project_id ?? null;
+    this.changed();
+  }
+
+  async loadWorkspaces(projectId: string): Promise<Workspace[]> {
+    const list = await this.api.workspaces(projectId);
+    this.workspaces.set(projectId, list);
+    this.changed();
+    return list;
+  }
+
+  /** After a workspace was added or removed: the project's default may have changed. */
+  async workspacesChanged(projectId: string): Promise<void> {
+    const [list, projects] = await Promise.all([this.api.workspaces(projectId), this.api.projects()]);
+    this.workspaces.set(projectId, list);
+    for (const p of projects) this.projects.set(p.id, p);
+    this.changed();
+  }
+
+  async setDefaultWorkspace(projectId: string, workspaceId: string): Promise<void> {
+    const p = await this.api.patchProject(projectId, { default_workspace_id: workspaceId });
+    this.projects.set(p.id, p);
+    this.changed();
   }
 
   /** Local echo of the read cursor, so the badge clears before the summary arrives. */

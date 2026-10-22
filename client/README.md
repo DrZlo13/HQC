@@ -1,6 +1,6 @@
 # hqc client
 
-Веб-клиент hqc (PWA): список сессий личного проекта, чат сессии с карточками событий §4,
+Веб-клиент hqc (PWA): проекты и их сессии, workspace проекта (T14), чат сессии с карточками событий §4,
 кнопки разрешений, регистрация воркера, Web Push. Задача T5 в `docs/ITERATION-1.md`,
 протокол — `docs/SPEC.md` §4, §6, §10.1, §16, §17.1.
 
@@ -48,7 +48,9 @@ marked в сборку тоже попадают (пакет — один фай
   от последнего `seq`; `src/timeline.ts` — что показывает чат (события по `seq`, поток
   `agent.delta`, оптимистичные сообщения по `client_op_id`, судьба запросов);
   `src/session.ts` — открытый чат: история по REST, хвост по WS, действия.
-- `src/ui/` — экраны (`SessionList`, `Chat`, `Enroll`, `Settings`), карточки (`cards.tsx`)
+- `src/ui/` — экраны (`SessionList` — левая колонка: проекты, сессии текущего проекта и форма
+  новой сессии; `Workspaces` — workspace проекта с деревом папок воркера; `Chat`, `Enroll`,
+  `Settings`), карточки (`cards.tsx`)
   и markdown текстов сообщений (`Markdown.tsx`, кнопка «Копировать»); `src/clipboard.ts` —
   копирование через `navigator.clipboard` или скрытый textarea, если API нет (http в LAN).
 - `public/` — `manifest.webmanifest`, `sw.js`, иконки.

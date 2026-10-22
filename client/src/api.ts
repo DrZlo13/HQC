@@ -2,19 +2,27 @@
 // client sends cookies along and never handles tokens itself.
 
 import {
+  parseDirList,
   parseEnrollInfo,
   parseEvent,
   parseEventPage,
   parseInputResponse,
   parseMe,
+  parseProject,
+  parseProjectList,
   parseSessionInfo,
   parseSessionList,
   parseVapidKey,
+  parseWorkspace,
+  parseWorkspaceList,
   type ClarifyAnswer,
+  type DirEntry,
   type EnrollInfo,
   type HqcEvent,
   type Me,
+  type Project,
   type SessionInfo,
+  type Workspace,
 } from './proto';
 
 export class ApiError extends Error {
@@ -23,6 +31,8 @@ export class ApiError extends Error {
     message: string,
     /** The hub's error code (`{error, message}`, SPEC §6), e.g. `request_closed`. */
     readonly code?: string,
+    /** The whole error body, for codes with more fields (`workspace_conflict`). */
+    readonly body?: unknown,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -30,6 +40,11 @@ export class ApiError extends Error {
 }
 
 export type Fetch = typeof fetch;
+
+export interface NewSessionOptions {
+  workspace_id?: string;
+  cwd?: string;
+}
 
 /** A page of events; `invalid` are raw events that failed validation (shown, not dropped). */
 export interface EventPage {
@@ -79,7 +94,7 @@ export class Api {
             ? data
             : res.statusText;
       const code = typeof body.error === 'string' ? body.error : undefined;
-      throw new ApiError(res.status, msg || `HTTP ${res.status}`, code);
+      throw new ApiError(res.status, msg || `HTTP ${res.status}`, code, data);
     }
     return data;
   }
@@ -92,11 +107,57 @@ export class Api {
     return parseSessionList(await this.req('GET', `/api/projects/${enc(projectId)}/sessions`));
   }
 
-  /** No `title`: the hub's default «Сессия N», which the runtime's title may replace. */
-  async createSession(projectId: string, title?: string): Promise<SessionInfo> {
-    const body = title ? { title } : {};
+  /** No `title`: the hub's default «Сессия N», which the runtime's title may replace. No
+   *  `workspace_id`: the project's default workspace; `cwd` is relative to it (SPEC §13.4). */
+  async createSession(projectId: string, title?: string, opts: NewSessionOptions = {}): Promise<SessionInfo> {
+    const body: Record<string, string> = {};
+    if (title) body.title = title;
+    if (opts.workspace_id) body.workspace_id = opts.workspace_id;
+    if (opts.cwd && opts.cwd !== '.') body.cwd = opts.cwd;
     const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, body);
     return parseSessionInfo(data);
+  }
+
+  async projects(): Promise<Project[]> {
+    return parseProjectList(await this.req('GET', '/api/projects'));
+  }
+
+  async createProject(name: string, description?: string): Promise<Project> {
+    const body = description ? { name, description } : { name };
+    return parseProject(await this.req('POST', '/api/projects', body));
+  }
+
+  async patchProject(
+    id: string,
+    patch: { name?: string; description?: string; default_workspace_id?: string },
+  ): Promise<Project> {
+    return parseProject(await this.req('PATCH', `/api/projects/${enc(id)}`, patch));
+  }
+
+  /** Deletes the project with its workspace records and sessions (folders stay). */
+  async deleteProject(id: string): Promise<void> {
+    await this.req('DELETE', `/api/projects/${enc(id)}`);
+  }
+
+  async workspaces(projectId: string): Promise<Workspace[]> {
+    return parseWorkspaceList(await this.req('GET', `/api/workspaces?project_id=${enc(projectId)}`));
+  }
+
+  /** The worker checks the folder (`fs.stat`); `409 workspace_conflict` carries the
+   *  workspace that already holds it in `ApiError.body` (`parseWorkspaceConflict`). */
+  async createWorkspace(w: { project_id: string; worker_id: string; path: string; label?: string }): Promise<Workspace> {
+    return parseWorkspace(await this.req('POST', '/api/workspaces', w));
+  }
+
+  /** Removes the record only; the folder is not touched (SPEC §13.2). */
+  async deleteWorkspace(id: string): Promise<void> {
+    await this.req('DELETE', `/api/workspaces/${enc(id)}`);
+  }
+
+  /** Folders on the worker (`fs.list_dirs`): its allowed_roots without `path`. */
+  async workerDirs(workerId: string, path?: string): Promise<DirEntry[]> {
+    const q = path ? `?path=${enc(path)}` : '';
+    return parseDirList(await this.req('GET', `/api/workers/${enc(workerId)}/dirs${q}`));
   }
 
   async session(id: string): Promise<SessionInfo> {

@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.6, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.8, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -180,7 +180,7 @@ Workspace — **логическая** граница: все операции h
 | `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at` | адаптер; `options` — **реальные варианты агента**, `canonical` ∈ once/session/always/deny/deny_always для кнопок клиента |
 | `approval.response` | `request_id`, `option_id`, `by` (user id или `auto`) | клиент или хаб при `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/answered_elsewhere/worker_restart/archived) | адаптер, воркер или хаб |
-| `clarify.request` / `clarify.response` / `clarify.cancel` | `request_id`, `questions[]` / `answers` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput` **[проверить]**. У ACP-агентов источника нет |
+| `clarify.request` / `clarify.response` / `clarify.cancel` | `request_id`, `questions[]` / `answers` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput.answers` (проверено на 2.1.307 при `--permission-prompt-tool stdio`, §8.1). У ACP-агентов источника нет |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption` | клиент или агент через `hqc_attach` |
 | `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id` (для ask) | хаб по `hqc_send`/`hqc_ask` |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read`, `cache_write`, `cost_usd?`, `model` | адаптер Claude Code по `result`; у ACP-агентов необязательно и без `cost_usd` (стандартного usage в ACP v1 нет) |
@@ -245,6 +245,10 @@ MCP-вызовы (worker → hub → worker):
   Если в этот момент воркер офлайн, результат ждёт в `PendingRequest.result`
   и досылается после `hello`; воркер, у которого блокирующего вызова уже нет
   (перезапустился), отвечает `ack` и отбрасывает.
+- `mcp.cancel {request_id, reason}` — воркер сообщает, что отложенный вызов умер на его
+  стороне (§7.2). Получив его, хаб закрывает `PendingRequest` с ошибкой и пишет в
+  сессию-отправитель событие `system` с кодом `ask_cancelled`; целевой сессии ничего
+  не шлёт, её ход идёт дальше.
 
 ### 5.3 Фреймы hub → worker
 - `session.start` {session_id, runtime, acp_agent?, model, workspace_path | null, cwd,
@@ -282,6 +286,7 @@ MCP-вызовы (worker → hub → worker):
   зеркала (§9.2); хаб создаёт сессию для неизвестного `runtime_session_id`.
 - `worker.approval.request` {request_id, kind, description, expires_at}
 - `mcp.call` {request_id, session_token, tool, args}
+- `mcp.cancel` {request_id, reason} — отмена отложенного вызова (§5.2, §7.2)
 - `result` / `error` на запросы хаба.
 - Загрузка артефактов: HTTP PUT `/worker/artifacts` с токеном воркера, не по WebSocket.
   Лимит артефакта **100 МБ**, нарезки на части нет.
@@ -335,7 +340,8 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 хранит `mcpServers` из `session/new` только в памяти работающего агента, в базу
 сессий не пишет (проверено по исходникам). Ограничение: другой процесс того же
 пользователя ОС может прочитать окружение процесса; это та же мягкая граница, что
-в §14. Голая модель на хабе получает те же инструменты напрямую.
+в §14. Голая модель на хабе получает те же инструменты напрямую. Инструменты hqc
+вызываются без подтверждения: Claude Code запускается с `--allowedTools mcp__hqc` (§8.1).
 
 Инструменты действуют с правами владельца сессии; у агента своих прав нет.
 
@@ -384,7 +390,12 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 - Целевая сессия `locked_vscode` — немедленная ошибка. `worker_offline` — ожидание
   до таймаута. Таймаут по умолчанию 10 минут (`ask_timeout_s` в `session.start`).
 - Таймаут инструмента в рантайме воркер выставляет не меньше `ask_timeout_s` плюс
-  минута: Claude Code — `MCP_TOOL_TIMEOUT` в env процесса; Hermes — `mcp.tool_call`
+  минута: Claude Code — `MCP_TOOL_TIMEOUT` в env процесса, в миллисекундах; по умолчанию
+  он практически не ограничен (1e8 мс), поэтому воркер всегда выставляет его явно как
+  `(ask_timeout_s + 60) * 1000` (проверено на 2.1.307). Отдельно у stdio MCP-серверов Claude Code действует idle-таймаут
+  30 минут (`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`): вызов без ответа и без progress-уведомлений
+  обрывается через 1800 с даже при большом `MCP_TOOL_TIMEOUT`, поэтому MCP-сервер hqc
+  во время ожидания `hqc_ask` шлёт progress (§7.2; проверено на 2.1.307); Hermes — `mcp.tool_call`
   в конфиге профиля (по умолчанию 300 с, проверено по исходникам); другие
   ACP-агенты — по их документации **[проверить]**.
 - Открытые `ask` хранятся в `PendingRequest`; после перезапуска воркера-отправителя
@@ -398,6 +409,25 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 - При превышении лимита инструмент возвращает ошибку; продолжить цепочку может только
   ход человека. Взаимная блокировка (A ждёт B, B ждёт A) разрешается таймаутом.
 
+### 7.2 Требования к MCP-серверу hqc
+- Stdio-процесс `hqc-worker mcp`, который запускает сам рантайм: Claude Code — через
+  `--mcp-config` строкой JSON, ACP-агенты — через `mcpServers` в `session/new` (§7).
+- `session_token` получает только из переменной окружения; не пишет его в ответы
+  инструментов, логи рантайма и файлы (§7).
+- Каждый вызов пересылает демону воркера по локальному сокету с этим токеном; демон
+  отправляет его в хаб фреймом `mcp.call` (§5.2). Своего состояния, кроме `chain` текущего
+  хода (§7.1), не держит.
+- Имя сервера в конфиге рантайма — `hqc`, инструменты — `hqc_*`; у Claude Code они
+  разрешены заранее через `--allowedTools mcp__hqc` (§8.1).
+- Пока вызов ждёт ответа (`hqc_ask`), шлёт `notifications/progress` с `progressToken` из
+  `params._meta` вызова не реже раза в минуту. Без этого Claude Code обрывает вызов через
+  30 минут простоя (§7.1); серверу при этом `notifications/cancelled` не приходит.
+- Если рантайм отменил вызов (`notifications/cancelled`, например по `MCP_TOOL_TIMEOUT`)
+  или MCP-процесс завершился с открытым вызовом (EOF на stdio), демон воркера закрывает
+  соответствующий `PendingRequest` ask фреймом `mcp.cancel {request_id, reason}` (§5.4);
+  обрыв по простою без уведомления предотвращается progress-уведомлениями, так что
+  отдельной детекции для него нет.
+
 ## 8. Адаптеры рантаймов
 
 Два адаптера на воркере: нативный для Claude Code (§8.1) и общий ACP (§8.2) для Hermes
@@ -409,41 +439,57 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 ### 8.1 Claude Code
 Процесс `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
---strict-mcp-config --mcp-config '<json>' --session-id <uuid>` для новой сессии
+--permission-prompt-tool stdio --strict-mcp-config --mcp-config '<json>'
+--allowedTools mcp__hqc --session-id <uuid>` для новой сессии
 (uuid назначает хаб, кладёт в `runtime_session_id`) и `--resume <uuid>` для
-продолжения. Проверено на 2.1.300: `--resume` продолжает тот же uuid и дописывает тот
+продолжения. `--permission-prompt-tool stdio` обязателен: без него CLI ничего
+не спрашивает у хоста, а сразу отклоняет всё, что требует подтверждения
+(`system/permission_denied`, `permission_decision.source: config`), и `AskUserQuestion`
+не попадает в список инструментов (проверено на 2.1.307). `--allowedTools mcp__hqc`
+разрешает все инструменты MCP-сервера hqc, чтобы их вызовы не шли через `can_use_tool`
+(§7); на 2.1.307 одинаково работают формы `mcp__hqc` и `mcp__hqc__*`, без флага
+вызов MCP-инструмента приходит как `can_use_tool`. Проверено на 2.1.300: `--resume` продолжает тот же uuid и дописывает тот
 же файл jsonl. `--strict-mcp-config` отключает MCP-серверы из `~/.claude.json`
 и `.mcp.json` проекта; разрешить их можно только через окружение (§14,
-`allow_local_mcp`). В env процесса — `MCP_TOOL_TIMEOUT` (§7.1).
+`allow_local_mcp`). В env процесса — `MCP_TOOL_TIMEOUT` (§7.1): миллисекунды, по умолчанию
+1e8 мс, минимум 1000 мс (проверено на 2.1.307).
 
 Идентификаторы. Проверено на 2.1.307: `uuid` у сообщений `assistant` и `user`
 (включая `tool_result`) в stream-json **совпадает** с `uuid` соответствующих записей
 в jsonl. Поэтому адаптер выводит `event_id` как uuid v5 от этого `uuid`, как и зеркало
 (§3 Event, §9.2). Запись исходного промпта пользователя в stream-json без эха
-не приходит: её `uuid` адаптер берёт из эха `--replay-user-messages`
-**[проверить]**, запасной вариант — сопоставление по тексту в окне текущего хода.
+не приходит: её `uuid` адаптер берёт из эха `--replay-user-messages` (`isReplay: true`);
+проверено на 2.1.307: `uuid` эха равен `uuid` записи промпта в jsonl.
 
-Разрешения: при `--permission-prompts host` запрос приходит в stdout как
+Разрешения: при `--permission-prompts host --permission-prompt-tool stdio` запрос приходит в stdout как
 `control_request` с `subtype: can_use_tool` (`tool_name`, `input`,
 `permission_suggestions`); адаптер отвечает `control_response` с `behavior:
 allow|deny`. Варианты для клиента: `once`, `session`, `always`, `deny`
-(`always` только если есть `permission_suggestions`). Маппинг: `once` → allow;
-`deny` → deny; `always` → allow плюс `updatedPermissions` из
-`permission_suggestions`, Claude Code сам пишет правило в
-`.claude/settings.local.json` workspace; `session` → allow и правило в адаптере
+(`always` только если среди `permission_suggestions` есть `addRules` в `localSettings`). Маппинг: `once` → allow;
+`deny` → deny; `always` → allow плюс `updatedPermissions`, Claude Code сам пишет
+правило в `.claude/settings.local.json` workspace. Правило адаптера: в
+`updatedPermissions` идут только элементы `permission_suggestions` с `type: addRules`
+и `destination: localSettings`, остальные подсказки (`setMode`, `addDirectories`
+и т.п.) отбрасываются — иначе сессия переключается в `acceptEdits` и расширяет
+список каталогов (проверено на 2.1.307). Если таких элементов нет, `always`
+не предлагается; `session` → allow и правило в адаптере
 до конца процесса. В `--restricted` (§8.4) локальные настройки не применяются,
 `always` маппится в `session`. Хаб постоянные разрешения не хранит. Инструмент
 `AskUserQuestion` приходит тем же `can_use_tool`: адаптер превращает его
-в `clarify.request`, ответы возвращает через `updatedInput` **[проверить]**.
-**[проверить]** точный формат `control_request`/`control_response`, зафиксировать
-фикстурой.
+в `clarify.request`, ответы возвращает через `updatedInput.answers`. Формат
+`control_request`/`control_response` проверен на 2.1.307 при `--permission-prompt-tool stdio`
+: точные JSON — `docs/notes/claude-control-protocol.md`, фикстуры —
+`crates/hqc-claude-jsonl/fixtures/*-2.1.307.jsonl`.
 
 Маппинг stream-json на §4: `stream_event` text delta → `agent.delta`; `assistant`
 с текстом → `agent.message`, причём адаптер придерживает последний текст до
 следующего элемента потока: `tool_use` → `final: false`, `result` → `final: true`;
 `tool_use` → `tool.call`; `tool_result` → `tool.result`; `result` → `usage` и
-`status idle`; эхо `--replay-user-messages` → `ack` на `session.input`.
-`in_reply_to` = `event_id` ввода, который адаптер отправил последним.
+`status idle`; эхо `--replay-user-messages` — сообщение `user` с `isReplay: true` —
+→ `ack` на `session.input` (по этому полю эхо отличается от `user` с `tool_result`).
+CLI повторяет в stdout каждый `control_response`, который адаптер отправил в stdin;
+адаптер такие строки пропускает. `in_reply_to` = `event_id` ввода, который адаптер
+отправил последним.
 
 Рабочий каталог — `<workspace>/<cwd>`. Окружение процесса — из привязки пути
 workspace в локальном конфиге воркера (§14). Авторизация — подписка, уже залогиненная
@@ -595,9 +641,9 @@ SDK) **не используется**: нативный адаптер §8.1 п
   работы hqc-процесса означает, что сессию продолжили в VS Code: воркер
   останавливает своего агента после текущего хода, ставит `locked_by: vscode`, хаб
   пишет `system`. Пока hqc-процесс не запущен, любая такая запись переводит сессию
-  в `locked_by: vscode`. **[проверить]** фикстурой: один ход с вызовом инструмента,
-  сопоставить uuid из stream-json и jsonl (первичная проверка на 2.1.307 показала
-  полное совпадение для `assistant` и `user`/`tool_result`).
+  в `locked_by: vscode`. Проверено на 2.1.307 фикстурами T0 (тест
+  `t0_stream_and_transcript_share_uuids`): uuid всех записей `user`/`assistant` основной
+  цепочки, включая `tool_result` и эхо промпта, совпадают в stream-json и jsonl.
 - Одновременно сессию ведёт ровно один из двух.
 
 ### 9.4 Парсер
@@ -857,8 +903,8 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 2. Проекты и workspace, служебная сессия воркера, импорт и зеркало VS Code, подхват
    в обе стороны, артефакты, `.hqc/inbox`. Критерий: подхватить с телефона сессию,
    начатую в VS Code.
-3. MCP hqc: attach, send, ask, list, search, schedule; фреймы `mcp.call`.
-   Персональная сессия.
+3. MCP hqc: attach, send, ask, list, search, schedule; фреймы `mcp.call`;
+   MCP-сервер по §7.2. Персональная сессия.
 4. Общий ACP-адаптер (первый агент — Hermes, включая steer); голая модель
    и локальные модели через прокси.
 5. Workspace: clone, worktree, ephemeral, шаблон сессии. Окружения, привязки
@@ -924,6 +970,35 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.7 → 0.8 (выводы T0 в тексте)
+Расхождения из 0.7 закрыты в §8.1: в команде запуска `--permission-prompt-tool stdio`
+и `--allowedTools mcp__hqc` (проверено живым прогоном: работают `mcp__hqc` и
+`mcp__hqc__*`); правило адаптера для `always` — в `updatedPermissions` только `addRules`
+с `destination: localSettings`, `always` предлагается только при их наличии; эхо
+собственных `control_response` пропускается, `ack` — по `user` с `isReplay: true`.
+§7: инструменты hqc без подтверждения; новый §7.2 «Требования к MCP-серверу hqc».
+§7.1: `MCP_TOOL_TIMEOUT` в мс выставляется как `(ask_timeout_s + 60) * 1000`; idle-таймаут
+stdio MCP-серверов 30 минут (проверено: молчащий вызов обрывается через 1800 с,
+progress раз в 60 с его удерживает), отсюда обязательные progress-уведомления в §7.2.
+§19: итерация 3 — MCP-сервер по §7.2. Новый фрейм `mcp.cancel {request_id, reason}`
+(§5.4): воркер закрывает отложенный `ask`, если рантайм отменил вызов или MCP-процесс
+завершился (§7.2); хаб закрывает `PendingRequest` с ошибкой, пишет `system` с кодом
+`ask_cancelled` в сессию-отправитель, целевой сессии ничего не шлёт (§5.2).
+
+### 0.6 → 0.7 (T0)
+Проверено на Claude Code 2.1.307 (`docs/notes/claude-control-protocol.md`, фикстуры
+`*-2.1.307.jsonl`): формы `can_use_tool` и ответов allow/deny/`updatedPermissions`, `always`
+пишет правило в `.claude/settings.local.json` рабочей папки (§8.1); эхо
+`--replay-user-messages` несёт `uuid` промпта из jsonl (§8.1, §9.3); `AskUserQuestion` приходит
+как `can_use_tool`, ответы — `updatedInput.answers` (§4, §8.1); `MCP_TOOL_TIMEOUT` в мс,
+по умолчанию 1e8 мс (§8.1). **Расхождения, текст §8.1 пока не менялся:**
+(1) одного `--permission-prompts host` мало — без `--permission-prompt-tool stdio` запросы
+отклоняются сразу (`permission_denied`, `source: config`), а `AskUserQuestion` нет в `tools`;
+(2) `updatedPermissions` из всех `permission_suggestions` включает и `setMode acceptEdits`,
+и `addDirectories` на сессию — для `always` надо передавать только `addRules` с
+`destination: localSettings`; (3) вызовы MCP-инструментов тоже идут через `can_use_tool`,
+инструменты hqc (итерация 3) придётся разрешать заранее.
 
 ### 0.5 → 0.6 (сверка со скелетом кода)
 Фрейм `event` без дублирующего `session_id`: он берётся из события (§5.4);

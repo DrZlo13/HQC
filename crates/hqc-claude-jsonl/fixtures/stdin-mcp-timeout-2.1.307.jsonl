@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": "Call the tool mcp__slow__slow with seconds=8 exactly once. Then reply with exactly: DONE"}}
+{"type": "control_response", "response": {"subtype": "success", "request_id": "ba23dfa3-dc4d-476e-a8fd-266bfbb520d6", "response": {"behavior": "allow", "updatedInput": {"seconds": 8}}}}

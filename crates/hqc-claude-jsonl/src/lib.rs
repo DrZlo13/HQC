@@ -80,4 +80,69 @@ mod tests {
         assert_eq!(main.len(), 4);
         assert!(records.iter().any(|r| matches!(r, Record::Other)));
     }
+
+    /// T0 fixtures: (transcript, stream-json stdout) of the same run.
+    const T0_PAIRS: &[(&str, &str, &str)] = &[
+        (
+            "permission-allow",
+            include_str!("../fixtures/permission-allow-2.1.307.jsonl"),
+            include_str!("../fixtures/stream-permission-allow-2.1.307.jsonl"),
+        ),
+        (
+            "permission-deny",
+            include_str!("../fixtures/permission-deny-2.1.307.jsonl"),
+            include_str!("../fixtures/stream-permission-deny-2.1.307.jsonl"),
+        ),
+        (
+            "permission-always",
+            include_str!("../fixtures/permission-always-2.1.307.jsonl"),
+            include_str!("../fixtures/stream-permission-always-2.1.307.jsonl"),
+        ),
+        (
+            "ask-user-question",
+            include_str!("../fixtures/ask-user-question-2.1.307.jsonl"),
+            include_str!("../fixtures/stream-ask-user-question-2.1.307.jsonl"),
+        ),
+        (
+            "mcp-timeout",
+            include_str!("../fixtures/mcp-timeout-2.1.307.jsonl"),
+            include_str!("../fixtures/stream-mcp-timeout-2.1.307.jsonl"),
+        ),
+    ];
+
+    fn main_chain_uuids(records: &[Record]) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = records
+            .iter()
+            .filter_map(|r| match r {
+                Record::User(m) | Record::Assistant(m) if !m.is_sidechain => Some(m.uuid),
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// SPEC §8.1, §9.3: stream-json and the transcript share message uuids, and the
+    /// `--replay-user-messages` echo carries the uuid of the transcript's prompt record.
+    #[test]
+    fn t0_stream_and_transcript_share_uuids() {
+        for (name, transcript, stream) in T0_PAIRS {
+            let (tr, bad_tr) = parse_str(transcript);
+            let (st, bad_st) = parse_str(stream);
+            assert_eq!((bad_tr, bad_st), (0, 0), "{name}: unparseable lines");
+            assert_eq!(main_chain_uuids(&tr), main_chain_uuids(&st), "{name}");
+
+            let echo: Vec<String> = stream
+                .lines()
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+                .filter(|v| v["isReplay"] == true)
+                .map(|v| v["uuid"].as_str().unwrap().to_owned())
+                .collect();
+            let prompt = tr.iter().find_map(|r| match r {
+                Record::User(m) if m.message["content"].is_string() => Some(m.uuid.to_string()),
+                _ => None,
+            });
+            assert_eq!(echo, vec![prompt.unwrap()], "{name}: replay echo uuid");
+        }
+    }
 }

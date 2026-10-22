@@ -12,7 +12,8 @@
 
 Разделы: §8.1, §9.3. Результат: фикстуры в `crates/hqc-claude-jsonl/fixtures/` и заметка
 `docs/notes/claude-control-protocol.md` с точными JSON-формами. Прогоны `claude -p` только
-с `--model claude-haiku-5-5 --max-turns 1`.
+с `--model claude-haiku-5-5` и `--max-turns` не больше 2 (прогоны с MCP требуют двух ходов:
+первый уходит на ToolSearch).
 
 1. `control_request` / `control_response` для `can_use_tool` при `--permission-prompts host`
    и `--input-format stream-json`: поля запроса (`tool_name`, `input`,
@@ -77,12 +78,18 @@ JSON-примером из спеки. Приёмка: `cargo test -p hqc-proto`
 ## T4. Адаптер Claude Code (зависит от T0, T1; интегрируется в T3)
 
 Разделы: §8.1, §4, §10.1.
-- Запуск `claude -p` с флагами из §8.1, `--session-id` от хаба, `--resume` для продолжения.
+- Запуск `claude -p` с флагами из §8.1 (включая `--permission-prompt-tool stdio`),
+  `--session-id` от хаба, `--resume` для продолжения.
+- `--allowedTools mcp__hqc` при запуске, чтобы инструменты MCP-сервера hqc не шли через
+  `can_use_tool` (§7, §8.1); в итерации 1 сервера hqc ещё нет, флаг закладывается сразу.
 - Маппинг stream-json → события §4, правило `final` по следующему элементу потока,
   `event_id` = uuid v5 от `uuid` сообщения, `in_reply_to`.
 - `can_use_tool` → `approval.request` с `options` (once/session/always/deny), ответ
-  `control_response`; `session` — правило в адаптере; `always` — `updatedPermissions`.
-- `AskUserQuestion` → `clarify.request`, если T0 подтвердил.
+  `control_response`; `session` — правило в адаптере; `always` — `updatedPermissions`
+  только из `addRules` с `destination: localSettings`, остальные подсказки отбрасываются.
+- Эхо собственных `control_response` в stdout пропускается; `ack` на `session.input` —
+  по `user` с `isReplay: true`.
+- `AskUserQuestion` → `clarify.request`, ответ — `updatedInput.answers` (T0 подтвердил).
 - `usage` по `result`, `status idle`.
 - Ввод во время хода не отправляется в процесс: очередь ведёт супервизор (§17.2).
 Приёмка: тесты на фикстурах stream-json без запуска `claude`; один живой тест за

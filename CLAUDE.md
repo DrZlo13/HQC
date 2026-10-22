@@ -27,7 +27,8 @@ Hub / worker / client system for driving LLM agents on many machines from one ch
   `allow_foreign_sessions` (SPEC §2.1, §14). Keep that invariant in every worker change.
 - Events are append-only; `seq` is assigned by the hub only (SPEC §5.2).
 - Anything that spawns `claude -p` costs the subscription: keep such tests behind
-  `HQC_LIVE_CLAUDE=1` and use `--model claude-haiku-5-5 --max-turns 1`. Prefer fixtures.
+  `HQC_LIVE_CLAUDE=1` and use `--model claude-haiku-5-5` with `--max-turns` no more than 2
+  (runs that call an MCP tool need two turns: the first goes to ToolSearch). Prefer fixtures.
 - Never commit `api-request-blob` records, `.credentials.json`, worker tokens or `.env`.
 - Postgres for tests: `HQC_TEST_DATABASE_URL` (local `postgresql://localhost/hqc_test`);
   migrations live in `crates/hqc-hub/migrations`.

@@ -1,0 +1,32 @@
+{
+  "name": "hqc-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "hqc web client (PWA), SPEC §6, iteration 1 task T5",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "node mock/dev.mjs",
+    "mock": "node mock/server.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:scenario": "vitest run tests/scenario.test.ts tests/e2e.test.tsx",
+    "icons": "node scripts/icons.mjs"
+  },
+  "dependencies": {
+    "preact": "^11.0.1"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.6",
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "happy-dom": "^21.0.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "ws": "^8.22.0"
+  }
+}

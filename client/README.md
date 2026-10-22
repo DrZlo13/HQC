@@ -1,4 +1,82 @@
 # hqc client
 
-TypeScript web client (PWA), SPEC §6 and §19 iteration 1. Not scaffolded yet: task T5 in
-docs/ITERATION-1.md decides the framework and creates the project here.
+Веб-клиент hqc (PWA): список сессий личного проекта, чат сессии с карточками событий §4,
+кнопки разрешений, регистрация воркера, Web Push. Задача T5 в `docs/ITERATION-1.md`,
+протокол — `docs/SPEC.md` §4, §6, §10.1, §16, §17.1.
+
+## Стек
+
+TypeScript + Vite + Preact (без UI-библиотек, стили свои в `src/styles.css`), тесты на
+vitest и happy-dom. Preact выбран как самый маленький компонентный рендерер с привычной
+моделью JSX и хуков: весь клиент — около 18 КБ gzip, что важно для первого открытия с
+телефона через туннель, а компоненты и хуки позволяют держать карточки событий
+независимыми и тестировать их рендером в DOM. Чистый TypeScript без фреймворка потребовал
+бы своего механизма перерисовки потока дельт и состояния кнопок, а React/Solid/Svelte не
+дают здесь ничего нужного сверх Preact при большем весе или собственном компиляторе.
+Сервис-воркер (`public/sw.js`) написан на чистом JS без сборки: он маленький и отвечает
+только за push.
+
+## Скрипты
+
+| команда | что делает |
+|---|---|
+| `npm run dev` | Vite dev-сервер на :5173, `/api` (REST и WebSocket) проксируется на `HQC_HUB_URL` (по умолчанию `http://127.0.0.1:8080`) |
+| `npm run dev:mock` | мок-хаб (`mock/server.mjs`, :8787) и Vite dev-сервер с прокси на него, одним процессом |
+| `npm run mock` | только мок-хаб, без Vite |
+| `npm test` | все тесты: парсер по всем `examples/wire`, рендер карточек, сценарий на моке через транспорт клиента и через UI, прокси dev-сервера |
+| `npm run test:scenario` | только сценарные тесты на моке |
+| `npm run build` | `tsc --noEmit` и сборка в `dist/` |
+| `npm run typecheck` | только проверка типов |
+| `npm run icons` | перегенерировать PNG-иконки в `public/` |
+
+## Структура
+
+- `src/proto.ts` — типы и разбор событий §4, фреймов §5 и сообщений `/api/ws`; терпимость
+  по §4 (неизвестный `type` → `UnknownEvent`, неизвестное значение перечисления →
+  `"unknown"`, неверный payload известного типа → `ProtoError`).
+- `src/api.ts` — REST §6; `src/ws.ts` — `/api/ws` с реконнектом и повтором `subscribe`
+  от последнего `seq`; `src/timeline.ts` — что показывает чат (события по `seq`, поток
+  `agent.delta`, оптимистичные сообщения по `client_op_id`, судьба запросов);
+  `src/session.ts` — открытый чат: история по REST, хвост по WS, действия.
+- `src/ui/` — экраны (`SessionList`, `Chat`, `Enroll`, `Settings`) и карточки (`cards.tsx`).
+- `public/` — `manifest.webmanifest`, `sw.js`, иконки.
+- `mock/` — мок-хаб для разработки и тестов.
+
+Маршруты в hash, чтобы хаб мог раздавать клиент как статику: `#/` — список, `#/s/<id>` —
+чат, `#/settings`, `#/enroll?code=ABCD-1234`.
+
+## Мок
+
+`npm run dev:mock` и открыть `http://localhost:5173`. Мок отдаёт REST и `/api/ws` из §6
+(формы, которых нет в спеке, — в `docs/notes/t5-questions.md`) и строит события из
+`crates/hqc-proto/examples/wire/*.json`. В нём три сессии: с историей, где есть все виды
+карточек (включая неизвестное событие); с недоставленным вводом (кнопка «Повторить»);
+пустая. Сценарий хода на любое сообщение: `status running` → `agent.delta` →
+`agent.message` (не финальный) → `tool.call`/`tool.result` (Read) → `tool.call` (Bash) →
+`approval.request` → ждёт кнопку → `approval.response` → `tool.result` → дельты →
+финальный `agent.message` → `usage` → `status idle`. Сообщение со словом «вопрос» или
+«clarify» вместо разрешения задаёт `clarify.request`. «Стоп» во время хода даёт
+`approval.cancel {stopped}`. Код регистрации воркера мок принимает в виде `ABCD-1234`.
+`MOCK_SPEED=0.3 npm run dev:mock` ускоряет сценарий, `MOCK_PORT` меняет порт мока.
+
+## Проверка на телефоне в локальной сети
+
+1. `npm run dev:mock` (или `npm run dev` с реальным хабом). Vite слушает все интерфейсы
+   и печатает адрес `Network: http://192.168.x.x:5173/`. При первом запуске macOS может
+   спросить, разрешить ли `node` входящие соединения, — разрешить.
+2. Телефон в той же Wi-Fi сети, открыть этот адрес. Список, чат, кнопки разрешений,
+   стоп/повтор и регистрация воркера работают по обычному HTTP.
+3. Push и сервис-воркер по HTTP на IP-адресе **не работают**: браузеры дают их только в
+   secure context (HTTPS или `localhost`). Экран «Настройки» в этом случае так и пишет.
+   Чтобы проверить push с телефона, нужен HTTPS, например туннель:
+   `cloudflared tunnel --url http://localhost:5173` и
+   `HQC_DEV_ALLOWED_HOSTS=<имя>.trycloudflare.com npm run dev:mock`. На iPhone push работает
+   только из приложения, добавленного на экран «Домой» (Поделиться → На экран «Домой»).
+4. Мок принимает подписку (`POST /api/push/subscribe`, пишет её в лог), но сам push не
+   отправляет: шифрование Web Push — задача хаба (T2). Показ уведомления и переход в
+   сессию по клику можно проверить в Chrome на компьютере: DevTools → Application →
+   Service workers → Push, с телом вида
+   `{"session_id":"0199f3a2-7c10-7000-8000-000000000001","type":"approval.request","payload":{"tool":"Bash","description":"cargo test"}}`.
+
+В проде клиент раздаёт хаб за Cloudflare Access; авторизацию клиент не делает и только
+читает `GET /api/me`.

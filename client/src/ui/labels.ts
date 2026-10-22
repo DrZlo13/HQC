@@ -1,4 +1,4 @@
-import type { ApprovalCanonical, ApprovalOption, CancelReason, SessionState } from '../proto';
+import type { ApprovalCanonical, ApprovalOption, CancelReason, PolicyHint, SessionState } from '../proto';
 
 /** Button captions by `canonical` (SPEC §10.1); an unknown canonical keeps the agent's label. */
 export const CANONICAL_LABELS: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
@@ -27,6 +27,18 @@ export const STATE_LABELS: Record<SessionState, string> = {
   queued: 'в очереди',
   idle: 'свободна',
   unknown: 'неизвестно',
+};
+
+/** `approval.request.policy_hint` (SPEC §8.1, §14). */
+export const POLICY_HINT_LABELS: Record<PolicyHint, string> = {
+  allow: 'разрешено политикой воркера',
+  deny: 'запрещено политикой воркера',
+  unknown: 'есть правило в политике воркера',
+};
+
+/** `system.code` → caption before the text; other codes show the text alone (SPEC §4). */
+export const SYSTEM_CODE_LABELS: Record<string, string> = {
+  policy_denied: 'Запрещено политикой воркера',
 };
 
 export const CANCEL_LABELS: Record<CancelReason, string> = {

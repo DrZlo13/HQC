@@ -562,6 +562,21 @@ pre {
   color: var(--ok);
 }
 
+.line-system-policy_denied {
+  color: var(--deny);
+}
+
+.policy-hint {
+  font-size: 0.8rem;
+  font-weight: normal;
+}
+.policy-allow {
+  color: var(--ok);
+}
+.policy-deny {
+  color: var(--deny);
+}
+
 .muted {
   color: var(--muted);
 }

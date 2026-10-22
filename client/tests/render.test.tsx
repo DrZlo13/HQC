@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { parseEvent, parseServerFrame, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
-import { CANONICAL_LABELS } from '../src/ui/labels';
+import { CANONICAL_LABELS, POLICY_HINT_LABELS } from '../src/ui/labels';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const raw = (name: string): any => JSON.parse(readFileSync(join(WIRE, `${name}.json`), 'utf8'));
@@ -104,6 +104,34 @@ describe('approval.request', () => {
     expect(buttons.map((b) => b.textContent)).toEqual(
       options.map((o: any) => CANONICAL_LABELS[o.canonical as keyof typeof CANONICAL_LABELS]),
     );
+  });
+
+  it('captions the card with policy_hint, and nothing without it', () => {
+    const t = new Timeline();
+    t.apply(ev('event.approval.request', withSeq(1)));
+    t.apply(
+      ev('event.approval.request', (e) => {
+        e.seq = 2;
+        e.event_id = '0199f3a2-7c10-7000-8000-0000000001a1';
+        e.payload.request_id = 'req-2';
+        e.payload.policy_hint = 'deny';
+      }),
+    );
+    t.apply(
+      ev('event.approval.request', (e) => {
+        e.seq = 3;
+        e.event_id = '0199f3a2-7c10-7000-8000-0000000001a2';
+        e.payload.request_id = 'req-3';
+        delete e.payload.policy_hint;
+      }),
+    );
+    show(t);
+    const titles = [...root.querySelectorAll('.card-approval .card-title')].map((c) => c.textContent);
+    expect(titles).toEqual([
+      `Разрешение · Bash · ${POLICY_HINT_LABELS.allow}`,
+      `Разрешение · Bash · ${POLICY_HINT_LABELS.deny}`,
+      'Разрешение · Bash',
+    ]);
   });
 
   it("uses the agent's label for an unknown canonical and keeps the agent's option set", () => {
@@ -282,5 +310,22 @@ describe('messages', () => {
     show(t);
     const lines = [...root.querySelectorAll('.line')].map((l) => l.textContent);
     expect(lines).toEqual(['ждёт ответа · approval requested', 'Session created']);
+  });
+
+  it('marks a call denied by the worker policy', () => {
+    const t = new Timeline();
+    t.apply(
+      ev('event.system', (e) => {
+        e.seq = 1;
+        e.payload = {
+          code: 'policy_denied',
+          text: "Denied by the worker's permission policy: Permission to use Bash with command git push has been denied.",
+        };
+      }),
+    );
+    show(t);
+    const line = root.querySelector('.line-system-policy_denied')!;
+    expect(line.textContent).toContain('Запрещено политикой воркера');
+    expect(line.textContent).toContain('git push');
   });
 });

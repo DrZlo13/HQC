@@ -33,6 +33,9 @@ export type SessionState = (typeof SESSION_STATES)[number] | Unknown;
 export const CANONICALS = ['once', 'session', 'always', 'deny', 'deny_always'] as const;
 export type ApprovalCanonical = (typeof CANONICALS)[number] | Unknown;
 
+export const POLICY_HINTS = ['allow', 'deny'] as const;
+export type PolicyHint = (typeof POLICY_HINTS)[number] | Unknown;
+
 export const CANCEL_REASONS = ['timeout', 'stopped', 'worker_restart', 'archived'] as const;
 export type CancelReason = (typeof CANCEL_REASONS)[number] | Unknown;
 
@@ -121,6 +124,8 @@ export interface ApprovalRequest {
   description: string;
   options: ApprovalOption[];
   expires_at?: string;
+  /** A rule of the worker's `[permissions]` matches the call (SPEC §8.1, §14). */
+  policy_hint?: PolicyHint;
 }
 export interface ApprovalResponse {
   request_id: string;
@@ -328,6 +333,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
       };
     }),
     expires_at: optStr(p, 'expires_at'),
+    policy_hint: present(p, 'policy_hint') ? tolerantEnum(p, 'policy_hint', POLICY_HINTS) : undefined,
   }),
   'approval.response': (p) => ({
     request_id: str(p, 'request_id'),

@@ -6,7 +6,9 @@ import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent } from '../proto
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import {
   CANCEL_LABELS,
+  POLICY_HINT_LABELS,
   STATE_LABELS,
+  SYSTEM_CODE_LABELS,
   formatDuration,
   formatTime,
   isDeny,
@@ -136,12 +138,15 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
           {event.payload.detail ? ` · ${event.payload.detail}` : ''}
         </Line>
       );
-    case 'system':
+    case 'system': {
+      const caption = SYSTEM_CODE_LABELS[event.payload.code];
       return (
-        <Line kind="system">
+        <Line kind={caption ? `system line-system-${event.payload.code}` : 'system'}>
+          {caption && <b>{caption}</b>}
           <Markdown text={event.payload.text} />
         </Line>
       );
+    }
     case 'unknown':
       return (
         <details class="card card-unknown">
@@ -289,6 +294,7 @@ export function ApprovalCard({ event, actions }: { event: EventOf<'approval.requ
     <div class={`card card-approval ${open ? 'is-open' : 'is-closed'}`}>
       <div class="card-title">
         Разрешение · <b>{p.tool}</b>
+        {p.policy_hint && <span class={`policy-hint policy-${p.policy_hint}`}> · {POLICY_HINT_LABELS[p.policy_hint]}</span>}
       </div>
       <pre class="pre">{p.description}</pre>
       {open && !expired && (

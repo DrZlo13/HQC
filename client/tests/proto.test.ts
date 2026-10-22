@@ -123,6 +123,14 @@ describe('tolerance (SPEC §4)', () => {
     const ev = parseEvent(e);
     expect(ev.type === 'approval.request' && ev.payload.options[0].canonical).toBe('unknown');
 
+    const h = structuredClone(approval);
+    h.payload.policy_hint = 'audit';
+    const hev = parseEvent(h);
+    expect(hev.type === 'approval.request' && hev.payload.policy_hint).toBe('unknown');
+    h.payload.policy_hint = null;
+    const nev = parseEvent(h);
+    expect(nev.type === 'approval.request' && nev.payload.policy_hint).toBeUndefined();
+
     const s = structuredClone(load('event.status.json')) as any;
     s.payload.state = 'hibernating';
     const st = parseEvent(s);

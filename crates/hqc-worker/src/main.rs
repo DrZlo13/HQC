@@ -1,4 +1,4 @@
-//! hqc worker. See docs/ITERATION-1.md, task T3; the Claude Code adapter is T4.
+//! hqc worker. See docs/ITERATION-1.md, tasks T3 (core) and T4 (Claude Code adapter).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,10 +80,11 @@ async fn run() -> anyhow::Result<()> {
         .context("no worker token; run `hqc-worker enroll <hub_url>` first")?;
     let capabilities = capabilities::detect(config.claude_bin.as_deref()).await;
     tracing::info!(hub = %config.hub_url, workspace = %config.workspace.display(), %capabilities, "starting worker");
+    let adapters = Arc::new(BuiltinAdapters::from_config(&config));
     let worker = Worker {
         config,
         token,
-        adapters: Arc::new(BuiltinAdapters),
+        adapters,
         capabilities,
         outbox_dir: config::hqc_home()?.join("outbox"),
         conn: ConnOptions::default(),

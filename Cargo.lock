@@ -1198,6 +1198,7 @@ dependencies = [
  "futures-util",
  "hqc-claude-jsonl",
  "hqc-proto",
+ "libc",
  "reqwest",
  "rusqlite",
  "security-framework",

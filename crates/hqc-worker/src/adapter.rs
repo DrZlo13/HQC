@@ -14,9 +14,12 @@ use hqc_proto::frame::{Runtime, SessionInput};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::config::StartSpec;
+use crate::config::{Config, StartSpec};
 
+pub mod claude_code;
 pub mod fake;
+
+use claude_code::ClaudeCodeAdapters;
 
 /// What an adapter reports to the supervisor.
 // Almost every value is an `Event`; boxing it would only add an allocation.
@@ -87,47 +90,25 @@ pub trait AdapterFactory: Send + Sync + 'static {
     fn create(&self, spec: &StartSpec, events: EventSink) -> Box<dyn Adapter>;
 }
 
-/// The runtimes of this build. Claude Code is T4; until it lands every start fails with
-/// `agent_start_failed`, which is what the hub expects from a worker without the runtime.
-pub struct BuiltinAdapters;
+/// The runtimes of this build: Claude Code (T4).
+pub struct BuiltinAdapters {
+    claude: ClaudeCodeAdapters,
+}
 
-impl AdapterFactory for BuiltinAdapters {
-    fn supports(&self, runtime: Runtime) -> bool {
-        runtime == Runtime::ClaudeCode
-    }
-
-    fn create(&self, _spec: &StartSpec, _events: EventSink) -> Box<dyn Adapter> {
-        Box::new(Unavailable)
+impl BuiltinAdapters {
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            claude: ClaudeCodeAdapters::from_config(cfg),
+        }
     }
 }
 
-struct Unavailable;
+impl AdapterFactory for BuiltinAdapters {
+    fn supports(&self, runtime: Runtime) -> bool {
+        self.claude.supports(runtime)
+    }
 
-#[async_trait]
-impl Adapter for Unavailable {
-    async fn start(&mut self, _: &StartSpec) -> anyhow::Result<()> {
-        anyhow::bail!("the Claude Code adapter is not built into this worker yet")
-    }
-    async fn resume(&mut self, s: &StartSpec) -> anyhow::Result<()> {
-        self.start(s).await
-    }
-    async fn input(&mut self, _: &SessionInput) -> anyhow::Result<()> {
-        anyhow::bail!("not running")
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn kill(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn answer_approval(&mut self, _: &str, _: &str) -> anyhow::Result<()> {
-        anyhow::bail!("not running")
-    }
-    async fn answer_clarify(
-        &mut self,
-        _: &str,
-        _: &BTreeMap<String, ClarifyAnswer>,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("not running")
+    fn create(&self, spec: &StartSpec, events: EventSink) -> Box<dyn Adapter> {
+        self.claude.create(spec, events)
     }
 }

@@ -19,3 +19,14 @@
    отдельным признаком.
 4. **Имя воркера** берётся из hostname и получается `home-mac.tail201738.ts.net`; в
    `enroll` нужен флаг `--name`.
+
+5. **Keychain и headless-запуски.** После первого запуска Claude Code из сессии с
+   разблокированной связкой он переносит учётные данные из `~/.claude/.credentials.json`
+   в Keychain и удаляет файл. В обычной ssh-сессии связка заперта, и любой headless
+   `claude -p` (в том числе воркер, запущенный по ssh без `security unlock-keychain`)
+   отвечает «Not logged in». Решение: запускать воркер и прочие headless-процессы в
+   gui-домене launchd пользователя (RUNBOOK §2.4) или после `security unlock-keychain`
+   в той же ssh-сессии. Записать в RUNBOOK §2.3/§2.4.
+6. **`tools/e2e-local.sh` с `E2E_CLAUDE_BIN=/usr/bin/false`** доходит до живого хода и
+   заканчивается FAIL по таймауту (три `agent_start_failed`, ввод `failed`). Это
+   ожидаемо, но скрипту нужен явный режим репетиции, который на этом месте печатает PASS.

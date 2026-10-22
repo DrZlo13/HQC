@@ -77,6 +77,14 @@ async fn live_repo_settings_ignored() {
     let work = root.join(format!("live-settings-{}", Uuid::now_v7()));
     std::fs::create_dir_all(work.join(".claude")).unwrap();
     let work = work.canonicalize().unwrap();
+    // Claude Code keeps settings.local.json at the git root of cwd, not at cwd: make this
+    // workspace its own repository, otherwise `always` writes into the hqc checkout.
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&work)
+        .status()
+        .unwrap()
+        .success());
     std::fs::write(
         work.join(".claude/settings.json"),
         serde_json::json!({

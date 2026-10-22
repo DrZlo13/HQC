@@ -690,7 +690,8 @@ WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; с�
 allow|deny`. Варианты для клиента: `once`, `session`, `always`, `deny`
 (`always` только если среди `permission_suggestions` есть `addRules` в `localSettings`). Маппинг: `once` → allow;
 `deny` → deny; `always` → allow плюс `updatedPermissions`, Claude Code сам пишет
-правило в `.claude/settings.local.json` workspace. Правило адаптера: в
+правило в `.claude/settings.local.json` **корня git-репозитория, содержащего cwd**
+(или самого cwd, если репозитория нет; проверено на 2.1.308). Правило адаптера: в
 `updatedPermissions` идут только элементы `permission_suggestions` с `type: addRules`
 и `destination: localSettings`, остальные подсказки (`setMode`, `addDirectories`
 и т.п.) отбрасываются — иначе сессия переключается в `acceptEdits` и расширяет
@@ -1284,6 +1285,8 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 ## 23. История изменений
 
 ### 0.11 → 0.12 (T9, защита перед использованием)
+Уточнение после живого теста: правило `always` пишется в `.claude/settings.local.json`
+корня git-репозитория cwd, а не workspace как такового (§8.1).
 По двум аудитам безопасности. §2.1: точная формулировка, в чём воркер не доверяет хабу
 (`allowed_roots`, окружения, привязки, `allow_foreign_sessions`), а в чём доверяет
 (идентичность, ответы на разрешения), и последствия компрометации хаба **[решение]**.

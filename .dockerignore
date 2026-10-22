@@ -1,0 +1,17 @@
+# Build context for Dockerfile: only Cargo.toml/Cargo.lock, crates/ and client/ are used.
+.git
+.github
+**/target
+**/node_modules
+client/dist
+node_modules
+tmp
+tools
+docs
+.env
+.env.*
+*.local.json
+**/.DS_Store
+rust-toolchain.toml
+Dockerfile
+.dockerignore

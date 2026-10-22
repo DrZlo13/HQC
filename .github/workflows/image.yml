@@ -1,0 +1,135 @@
+# hqc-hub image -> ghcr.io/drzlo13/hqc-hub (docs/RUNBOOK.md §1.8).
+#
+# master: after a green `ci` run of a push (workflow_run), tags sha-<short> and master.
+# v* tags and manual runs: wait for a green `ci` run on the same commit first, then
+# sha-<short> (+ X.Y.Z, X.Y and latest for a release tag vX.Y.Z).
+name: image
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [master]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  actions: read
+
+concurrency:
+  group: image-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/drzlo13/hqc-hub
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    # workflow_run fires for every finished `ci` run whose head branch is called master,
+    # including pull requests from a fork's master: only our own green pushes count.
+    if: >-
+      github.event_name != 'workflow_run' || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository)
+    steps:
+      - name: Source commit
+        id: src
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          IS_MASTER: ${{ github.event_name == 'workflow_run' || github.ref == 'refs/heads/master' }}
+        run: |
+          {
+            echo "sha=$SHA"
+            echo "short=${SHA::7}"
+            echo "is_master=$IS_MASTER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Wait for a green ci run on this commit
+        if: github.event_name != 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.src.outputs.sha }}
+        run: |
+          for _ in $(seq 1 60); do
+            runs=$(gh run list -R "$GITHUB_REPOSITORY" -w ci.yml -c "$SHA" --json status,conclusion)
+            if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              echo "ci is green on $SHA"; exit 0
+            fi
+            if jq -e 'length > 0 and all(.[]; .status == "completed")' <<<"$runs" >/dev/null; then
+              echo "::error::no successful ci run on $SHA: $runs"; exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::timed out waiting for ci on $SHA"; exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.src.outputs.sha }}
+
+      - name: Version
+        id: ver
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag=${GITHUB_REF#refs/tags/v}
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::tag v$tag does not match workspace.package.version $version"; exit 1
+            fi
+            # latest only for a release, not for vX.Y.Z-rc.1
+            if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "release=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags from our own outputs: under workflow_run the action's context is the default
+      # branch head, not the commit that passed ci.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=sha-${{ steps.src.outputs.short }}
+            type=raw,value=master,enable=${{ steps.src.outputs.is_master }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ steps.ver.outputs.release == 'true' }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.src.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            REVISION=${{ steps.src.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        env:
+          REF: ${{ env.IMAGE }}:sha-${{ steps.src.outputs.short }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          out=$(docker run --rm "$REF" --version)
+          echo "$out"
+          test "$out" = "hqc-hub $VERSION"

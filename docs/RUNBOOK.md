@@ -233,6 +233,22 @@ ingress:
 2. `hqc-worker` — домен `hqc.example.com`, путь `worker`. Политика **Bypass**, Include:
    Everyone. Более конкретный путь побеждает, поэтому `/worker/*` идёт мимо Access.
 
+**Cookie приложения `hqc`** (Applications → `hqc` → Configure → Settings → Cookie
+settings): **SameSite = Lax**, **HttpOnly** включён, **Binding Cookie** включён. По
+умолчанию cookie `CF_Authorization` уходит с `SameSite=None`, и чужая страница в браузере
+того, кто вошёл в hqc, может открыть `wss://hqc.example.com/api/ws` с этой cookie. Хаб
+сам отклоняет WebSocket и запросы на запись с чужим `Origin` (SPEC §20), Lax — второй
+рубеж. После смены проверить, что установленное на телефон PWA открывается без
+повторного входа.
+
+**Rate limiting на `/worker/*`** (Security → WAF → Rate limiting rules, на зону домена):
+правило «URI Path starts with `/worker/`», характеристика — IP, например 60 запросов за
+10 секунд → Block на 1 минуту; отдельное, строже, для `/worker/enroll` (например, 10 в
+минуту). Хаб и сам ограничивает `/worker/*` по `CF-Connecting-IP` (§20 SPEC), правило
+Cloudflare отсекает флуд раньше, чем он дойдёт до туннеля и базы. Нормализацию URL
+(Rules → Settings → Normalize incoming URLs) оставить включённой: Bypass для `/worker/`
+не должен обходиться путями вида `/worker/../api/me`.
+
 Откуда взять значения для хаба:
 - `HQC_ACCESS_AUD` — Applications → `hqc` → Configure (Overview) → **Application Audience
   (AUD) Tag**. Это тег именно приложения `hqc` (не `hqc-worker`).
@@ -357,6 +373,11 @@ HQC_VAPID_PUBLIC=<base64url>
 HQC_VAPID_SUBJECT=mailto:<you>@<domain>
 ```
 
+**Проверьте, что у `hqc-hub` и `hqc-db` в `compose.yml` нет `ports:`** (или только
+`127.0.0.1:…`, см. выше). Хаб доверяет `CF-Connecting-IP` и `Cf-Access-Jwt-Assertion`
+только потому, что до него можно дойти лишь через туннель: открытый наружу порт даёт
+`/worker/*` и статику без Cloudflare, а лимиты по адресу — подделываемыми.
+
 База — в той же compose-сети и без опубликованного порта, поэтому подключение без TLS
 (§1.1) здесь допустимо. `POSTGRES_*` действуют только при первом запуске на пустом volume:
 сменить пароль потом — `ALTER ROLE hqc PASSWORD …` в базе и правка обоих файлов.
@@ -431,8 +452,16 @@ claude --version      # CLI установлен и залогинен подп�
 
 ```toml
 # URL хаба, ровно тот же, что в `hqc-worker enroll` (без завершающего /): по нему токен
-# ищется в Keychain. Схема http:// или https://.
+# ищется в Keychain. Только https://; http:// — для localhost / 127.0.0.0/8 / [::1].
 hub_url = "https://hqc.example.com"
+
+# Разрешить http:// к хабу не на loopback (токен воркера пойдёт открытым текстом). Только
+# для отладки в изолированной сети; для `enroll` то же самое — флаг --insecure-http.
+# insecure_http = false
+
+# Сколько процессов агентов может работать одновременно; следующий старт хаб получит как
+# `agent_start_failed` (retryable) и повторит позже. По умолчанию 8.
+# max_sessions = 8
 
 # Корни, за пределы которых сессии не выходят. Абсолютные пути; симлинки раскрываются.
 # Непустой список, workspace обязан лежать внутри.
@@ -466,7 +495,9 @@ hqc-worker enroll https://hqc.example.com
 
 Открыть ссылку (с телефона или ноутбука, войдя через Access) и подтвердить код — либо
 в клиенте «Настройки» → «Подтвердить код воркера» и ввести код руками (регистр и дефис
-не важны). Код живёт 10 минут. После подтверждения воркер печатает
+не важны). Перед кнопкой «Подтвердить» клиент показывает имя машины, ОС, время запроса и
+страну (по Cloudflare): если это не ваша машина и не только что запущенный `enroll` — не
+подтверждайте, ссылку могли прислать. Код живёт 10 минут. После подтверждения воркер печатает
 `Enrolled as worker <id>.` и сохраняет токен:
 
 - на macOS — Keychain, generic password, service `hqc-worker`, account = `hub_url`.
@@ -622,10 +653,15 @@ run hqc-worker enroll again`. На самой
 - **Нет артефактов**: вложения в сообщения не передаются агенту (воркер пишет warn).
 - **Окружения**: только `default`; `environments`, `env_bindings`, `ssh_keys`,
   `allow_local_mcp` не реализованы (`hqc-worker env` — «not implemented»). Процесс агента
-  наследует окружение воркера.
+  получает только `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`,
+  `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`, `ANTHROPIC_*` из окружения воркера; `HQC_*` и
+  остальное — нет.
 - **Один пользователь**: шаринга и грантов нет, `allow_foreign_sessions` держите `false`.
-- **Адаптер Claude Code**: `system_prompt`, `disallowed_tools`, `MCP_TOOL_TIMEOUT` в CLI не
-  передаются; ограничения числа ходов (`--max-turns`) нет. Команды только для чтения
+- **Адаптер Claude Code**: `system_prompt` и `disallowed_tools` передаются
+  (`--append-system-prompt`, `--disallowedTools`), `restricted` — `--restricted`;
+  `.claude/settings.json` репозитория не применяется (`--setting-sources user,local`), но
+  `.claude/settings.local.json` — применяется (туда пишет `always`). `MCP_TOOL_TIMEOUT` не
+  передаётся; ограничения числа ходов (`--max-turns`) нет. Команды только для чтения
   (например, `echo`) CLI разрешает сам, без запроса (§8.1). Формат ответа на вопрос с
   множественным выбором (`AskUserQuestion`) не проверен на живой сборке.
 - **Состояние хода**: ход, закончившийся без финального текста, при позднем `ack` ввода
@@ -634,8 +670,10 @@ run hqc-worker enroll again`. На самой
   следующего переподключения воркера (T3, п. 10).
 - **Токен воркера**: Keychain только на macOS; на других ОС — файл 0600. Трея и
   `hqc-worker update` нет: о несовместимой версии сообщает только лог.
-- **Хаб**: Postgres без TLS (база на том же хосте); rate limit `/worker/enroll` — на процесс
-  хаба (10 в минуту, не больше 100 активных кодов); мастер-ключа и `api_keys` нет.
+- **Хаб**: Postgres без TLS (база на том же хосте); лимиты `/worker/*` — в памяти процесса
+  хаба, по адресу из `CF-Connecting-IP` (enroll 10/мин и 10 живых кодов на адрес, 1000
+  всего; poll 60/мин; 20 неверных токенов `/worker/ws` в минуту; 16 проверок токена
+  одновременно), после перезапуска счётчики обнуляются; мастер-ключа и `api_keys` нет.
 - **Клиент**: проверен тестами и сборкой; ручной прогон на телефоне через Access и
   настоящий push на iOS/Android в рамках T6 не выполнялись (нет устройства в автономном
   прогоне) — это первое, что нужно сделать после установки (§4). История сессии

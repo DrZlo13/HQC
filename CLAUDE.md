@@ -23,8 +23,11 @@ Hub / worker / client system for driving LLM agents on many machines from one ch
 ## Rules
 - Rust stable, `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` must pass before a commit. CI runs the same.
-- The worker never trusts the hub for `allowed_roots`, environments, bindings or
-  `allow_foreign_sessions` (SPEC §2.1, §14). Keep that invariant in every worker change.
+- The worker does not trust the hub for `allowed_roots`, environments, bindings and
+  `allow_foreign_sessions`; the user's identity and answers to permission requests come
+  from the hub and are trusted (SPEC §2.1, §14). A compromised hub can therefore run code
+  on every connected worker within its owner's policy. Keep that invariant in every worker
+  change.
 - Events are append-only; `seq` is assigned by the hub only (SPEC §5.2).
 - Anything that spawns `claude -p` costs the subscription: keep such tests behind
   `HQC_LIVE_CLAUDE=1` and use `--model claude-haiku-5-5` with `--max-turns` no more than 2

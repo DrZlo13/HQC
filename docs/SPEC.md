@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.11, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.12, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -57,8 +57,18 @@ Access (SSO), воркеры — через отдельный маршрут с
 
 ### 2.1 Модель угроз
 
-- Хаб — корень доверия для переписки и разрешений: кто контролирует хаб, может ответить
-  `allow` на любой `approval.request` и писать в любые сессии.
+- Воркер не доверяет хабу в части `allowed_roots`, окружений, привязок и
+  `allow_foreign_sessions`; идентичность пользователя и ответы на разрешения приходят от
+  хаба и ему доверяются **[решение]**. Хаб — корень доверия для переписки и разрешений:
+  кто контролирует хаб, может ответить `allow` на любой `approval.request`, писать в любые
+  сессии и выдать любую сессию за сессию владельца воркера (`owner_is_worker_owner`).
+- Последствия компрометации хаба: удалённое выполнение кода на каждом подключённом
+  воркере от имени его владельца в пределах `allowed_roots` и того, что разрешают
+  инструменты агента (Bash может выйти за пределы workspace), — хаб стартует сессию, шлёт
+  ввод и сам отвечает `once` на запрос разрешения; плюс чтение всей переписки, транскриптов
+  в событиях и push-подписок. Защита — сам хаб: Access, только туннель, без открытых
+  портов (§20). Подпись ввода и ответов ключами устройств, зарегистрированными на воркере
+  локально, — итерация 3+.
 - Хаб **не** может: выйти за `allowed_roots` воркера, выбрать окружение или профиль
   Hermes для пути, которые владелец воркера не привязал локально, включить
   MCP-серверы с машины. Это задаётся только локальным конфигом воркера (§14); воркер
@@ -238,6 +248,12 @@ heartbeat 20 с, переподключение с экспоненциальн�
   список открытый; неизвестный код обрабатывается как `internal`.
 
 ### 5.1 Регистрация и версия
+URL хаба у воркера (`hub_url` в `worker.toml` и аргумент `enroll`) — только `https://`;
+`http://` допускается для loopback-хостов (`localhost`, `127.0.0.0/8`, `[::1]`) или при
+явном `insecure_http = true` в `worker.toml` (у `enroll` — флаг `--insecure-http`), иначе
+воркер не стартует: токен и `poll_token` иначе шли бы открытым текстом. HTTP-клиент
+`enroll` не следует редиректам (тело с `poll_token` не уходит на другой адрес).
+
 `hqc-worker enroll <hub-url>` печатает код и готовую ссылку
 `<hub-url>/#/enroll?code=XXXX-XXXX` (экран подтверждения клиента с подставленным кодом),
 пользователь подтверждает код в вебе под своим логином, воркер получает долгоживущий
@@ -258,13 +274,19 @@ account = URL хаба); на других ОС в первой версии —
   poll_interval_s}`; `protocol_version` справочный (решает `hello`), неизвестные поля
   тела хаб игнорирует; `code` — 8 символов `XXXX-XXXX` без похожих букв, живёт 10 минут;
   `poll_token` — секрет воркера, передаётся только в теле (не в URL), в базе только хэш.
-- Пользователь вводит код в вебе: `POST /api/workers/enroll/confirm {code, name?}` →
-  `{worker_id, name}`; регистр и дефис в коде не важны.
+  Хаб сохраняет при коде `CF-IPCountry` и адрес запроса (лимиты, §20).
+- Пользователь вводит код в вебе. Сначала `GET /api/workers/enroll/{code}` →
+  `{name, os, created_at, country?}` (404 — нет такого живого кода): клиент показывает имя,
+  ОС, время и страну, и кнопка подтверждения активна только после их загрузки — ссылку с
+  кодом мог прислать кто-то другой. Затем `POST /api/workers/enroll/confirm {code, name?}`
+  → `{worker_id, name}`; регистр и дефис в коде не важны. Поиск кода (оба запроса) — не
+  больше 30 в минуту на пользователя.
 - Воркер опрашивает `POST /worker/enroll/poll {poll_token}` → `{status: pending}`,
   `{status: confirmed, worker_id, token}` (токен выдаётся ровно один раз, в базе только
   хэш) или `{status: expired}`.
 - `/worker/ws` — заголовок `Authorization: Bearer <token>`; неизвестный или отозванный
-  токен — 401 до апгрейда. `DELETE /api/workers/{id}` отзывает токен и рвёт соединение.
+  токен — 401 до апгрейда, отзыв между апгрейдом и `hello` — `error {unauthorized}` на
+  `hello` и закрытие. `DELETE /api/workers/{id}` отзывает токен и рвёт соединение.
 
 ### 5.2 Гарантии доставки
 Worker → hub:
@@ -437,7 +459,9 @@ HTTP API итерации 1 (список не полный; остальное 
 - `POST /api/artifacts` (multipart) → `{id}`; `GET /api/artifacts/{id}/url` →
   подписанная ссылка (§12)
 - `PUT /api/sessions/{id}/read_cursor` {last_read_seq}
-- `GET /api/workers` → `{workers[]}`, `POST /api/workers/enroll/confirm` {code, name?} →
+- `GET /api/workers` → `{workers[]}`, `GET /api/workers/enroll/{code}` →
+  `{name, os, created_at, country?}` (`EnrollInfo`; `country` — `CF-IPCountry` запроса
+  `enroll`), `POST /api/workers/enroll/confirm` {code, name?} →
   `{worker_id, name}` (клиент открывает экран и по ссылке `#/enroll?code=XXXX-XXXX`, §5.1),
   `DELETE /api/workers/{id}`, `GET /api/workers/{id}/candidates`
 - `GET/POST /api/workspaces`, `PATCH /api/workspaces/{id}` (зеркало, метка),
@@ -448,7 +472,9 @@ HTTP API итерации 1 (список не полный; остальное 
   expirationTime?, keys: {p256dh, auth}}`), `DELETE /api/push/subscribe {endpoint}`,
   `GET /api/push/vapid` → `{public_key}` (base64url несжатой точки P-256; `null`, если
   push не настроен — клиент показывает «уведомления на хабе выключены»). Тело самого
-  push — §16.
+  push — §16. `endpoint` — только `https://` на хостах push-сервисов (§20), иначе `400`;
+  не больше 10 подписок на пользователя (`409 push_limit`); чужой `endpoint` — `409
+  conflict`, а не перехват; свою подписку повторный запрос обновляет.
 - позже: `/api/schedules` (ScheduledMessage), `/api/projects/{id}/template`
 
 Объект сессии (`GET /api/sessions/{id}`, список, создание, `PATCH`, `archive`):
@@ -459,7 +485,7 @@ last_seq, archived, state, queue_len, last_read_seq, unread, created_at, updated
 `state`, `queue_len` (§17.1), `last_read_seq` и `unread` вычисляются для запросившего
 пользователя.
 
-WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` и получает
+WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; сообщения до 1 МиБ): клиент шлёт `subscribe {session_id, after_seq}` и получает
 события с `seq > after_seq`, затем живой поток; `agent.delta` без `seq`. Событие,
 сохранённое из ввода клиента, несёт его `client_op_id`, чтобы клиент показывал
 сообщение сразу и сверял с эхом (приём из Agent Host Protocol, §22). Отдельная
@@ -484,8 +510,19 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
   Промежуточные `agent.message` (`final: false`), `status`, `usage`, вызовы инструментов
   и вводы непрочитанным не считаются.
 
+Создание сессии без `worker_id` выбирает воркер по умолчанию: никогда не тот, что ещё ни
+разу не подключался (`last_seen` пуст); онлайн раньше офлайн; среди них — воркер, на
+котором у пользователя уже есть сессии, раньше нового; затем самый недавно виденный. Так
+только что зарегистрированный (возможно, по присланной ссылке, §5.1) воркер не перехватывает
+новые сессии, пока есть привычный онлайн-воркер. Нет подходящего — `409 no_worker`.
+
+Ограничения полей: `title` — до 200 символов; `model` — `^[A-Za-z0-9._:-]{1,64}$` и не с
+`-` (уходит в командную строку агента); `client_op_id` — до 128 байт; иначе `400`.
+
 Ошибки REST: `{error: <code>, message}` с HTTP-статусом; `409` с кодами `archived`,
-`locked_vscode`, `request_closed`, `no_worker`, `no_workspace`. `GET .../events`
+`locked_vscode`, `request_closed`, `no_worker`, `no_workspace`, `push_limit`, `conflict`;
+`403` — чужой `Origin` (§20); `429` и `503` — лимиты (§20). Ошибка проверки JWT Access
+отдаётся общим текстом, причина — в лог хаба. `GET .../events`
 дополнительно принимает `before_seq` (последние `limit` событий до него).
 
 ## 7. MCP-инструменты для агентов
@@ -600,7 +637,9 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 Процесс `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
 --permission-prompt-tool stdio --strict-mcp-config --mcp-config '<json>'
---allowedTools mcp__hqc --session-id <uuid>` для новой сессии
+--allowedTools mcp__hqc [--disallowedTools <правила…>] (--setting-sources user,local |
+--restricted) --permission-mode <режим "спрашивать"> [--append-system-prompt <текст>]
+--session-id <uuid>` для новой сессии
 (uuid назначает хаб, кладёт в `runtime_session_id`) и `--resume <uuid>` для
 продолжения. Выбор между ними делает наличие транскрипта
 `<config>/projects/<encoded cwd>/<uuid>.jsonl` (§9), а не `mode` из `session.start`:
@@ -616,6 +655,27 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 и `.mcp.json` проекта; разрешить их можно только через окружение (§14,
 `allow_local_mcp`). В env процесса — `MCP_TOOL_TIMEOUT` (§7.1): миллисекунды, по умолчанию
 1e8 мс, минимум 1000 мс (проверено на 2.1.307).
+
+Ограничения сессии не теряются молча **[решение]**: `disallowed_tools` → `--disallowedTools`
+(каждое правило отдельным аргументом), `system_prompt` → `--append-system-prompt`,
+`restricted` → `--restricted` (§8.4). Воркер отклоняет `session.start` (`invalid_frame`),
+если `model` не `^[A-Za-z0-9._:-]{1,64}$` или начинается с `-`, или правило
+`disallowed_tools` пустое, начинается с `-` или содержит управляющие символы.
+Настройки чужого репозитория: в `-p` диалога доверия к папке нет, поэтому
+`.claude/settings.json` из workspace (hooks, `defaultMode: bypassPermissions`) применился бы
+без вопроса. Адаптер передаёт `--setting-sources user,local` (проектный файл не читается,
+`settings.local.json` — читается: туда пишет `always`) и явный `--permission-mode` с
+режимом «спрашивать»: в справке CLI 2.1.308 это `manual` (`default` в списке вариантов нет),
+до этого — `default`; воркер при старте читает `claude --help` и выбирает имеющийся
+**[проверить]** живым прогоном (`tests/claude_live.rs`, `live_repo_settings_ignored`), что
+`always` с `--setting-sources user,local` по-прежнему предлагается и пишет правило.
+Окружение процесса очищается: из окружения воркера проходят только `PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`,
+`ANTHROPIC_*`, затем переменные окружения workspace (§14); `HQC_*` — никогда. Рабочий
+каталог воркер хранит каноническим, требует его существования и перепроверяет перед
+каждым запуском процесса (символическая ссылка могла смениться). Не больше `max_sessions`
+(локальный конфиг, по умолчанию 8) процессов агентов одновременно; следующий старт —
+`error {agent_start_failed, retryable: true}`.
 
 Идентификаторы. Проверено на 2.1.307: `uuid` у сообщений `assistant` и `user`
 (включая `tool_result`) в stream-json **совпадает** с `uuid` соответствующих записей
@@ -636,7 +696,9 @@ allow|deny`. Варианты для клиента: `once`, `session`, `always`
 и т.п.) отбрасываются — иначе сессия переключается в `acceptEdits` и расширяет
 список каталогов (проверено на 2.1.307). Если таких элементов нет, `always`
 не предлагается; `session` → allow и правило в адаптере
-до конца процесса. В `--restricted` (§8.4) локальные настройки не применяются,
+до конца процесса; для `Bash` и других инструментов, выполняющих команды, подсказка без
+`ruleContent` («весь инструмент») в правило сессии не превращается — запоминается только
+точный ввод. В `--restricted` (§8.4) локальные настройки не применяются,
 `always` маппится в `session`. Хаб постоянные разрешения не хранит. Инструмент
 `AskUserQuestion` приходит тем же `can_use_tool`: адаптер превращает его
 в `clarify.request`, присваивая вопросам свои `id`, ответы возвращает через
@@ -757,7 +819,8 @@ SDK) **не используется**: нативный адаптер §8.1 п
 ### 8.4 Сессия без workspace
 Для архитектурных обсуждений. Варианты: голая модель (§8.3) или Claude Code
 на воркере `worker_id` во временной пустой папке `<worker-data>/scratch/<session_id>`
-с флагом `--restricted` (убирает инструменты, запускающие команды, и ограничивает
+(`$HQC_HOME/scratch/<session_id>`, 0700; `session.start` с `workspace_path: null` и
+`restricted: true`, без `restricted` — `invalid_frame`) с флагом `--restricted` (убирает инструменты, запускающие команды, и ограничивает
 файловые инструменты рабочим каталогом). Работает на подписке. Воркер выбирает
 пользователь при создании; по умолчанию — последний использованный онлайн-воркер
 с Claude Code. ACP-агенты здесь не допускаются.
@@ -971,7 +1034,9 @@ HTML рендерится в iframe с этого домена, `sandbox="allow-
   совпадающая, иначе `default`. `environment` из `session.start` только сверяется;
 - `acp_agents{}` — `{name: {command: <абсолютный путь>, args[], isolation:
   verified|none}}`;
-- `allow_foreign_sessions`, `share_local_models`.
+- `allow_foreign_sessions`, `share_local_models`;
+- `max_sessions` (процессов агентов одновременно, по умолчанию 8) и `insecure_http`
+  (`http://` к хабу не на loopback, §5.1).
 
 Хаб получает копию в `hello` и показывает её; менять может только владелец воркера
 на машине (`hqc-worker env ...`).
@@ -1138,6 +1203,33 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 - Dev-режим хаба (`HQC_DEV=1`, без Access) допускается только на loopback-адресе
   `HQC_HUB_LISTEN` и без `HQC_ACCESS_*`; иначе хаб не стартует (§6).
 - Токены воркеров — случайные 256 бит, в базе только хэш; отзыв из UI.
+- `Origin` **[решение]**: WebSocket-апгрейд `/api/ws` без `Origin` или с `Origin`, не
+  совпадающим с `Host` запроса, — `403`; не-GET запросы `/api/*` с чужим `Origin` — `403`
+  (без `Origin` — пропускаются: так ходят не-браузерные клиенты). Совпадение — схема
+  `https`, либо `http` для loopback-хоста (dev), хост и порт равны `Host`. Защита от
+  cross-site WebSocket hijacking и CSRF при cookie Access с `SameSite=None`; в Access
+  дополнительно SameSite Lax (RUNBOOK §1.6).
+- Заголовки на всех ответах хаба: `Content-Security-Policy: default-src 'self';
+  connect-src 'self' wss: https:; img-src 'self' data:; style-src 'self' 'unsafe-inline';
+  object-src 'none'; base-uri 'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. Сборка клиента
+  без inline-скриптов (проверяет тест клиента). HSTS ставит Cloudflare.
+- Лимиты (в памяти процесса хаба; адрес — `CF-Connecting-IP`, иначе адрес соединения):
+  `POST /worker/enroll` — 10 в минуту и 10 живых неподтверждённых кодов на адрес, 1000
+  всего; `POST /worker/enroll/poll` — 60 в минуту на адрес; `/worker/ws` — 20 неверных
+  токенов в минуту на адрес (дальше `429` без запроса в базу), токен не той формы в базу
+  не идёт, не больше 16 проверок токена одновременно (`503`); сообщения WebSocket клиента и
+  воркера — до 1 МиБ, очередь отправки воркеру ограничена (переполнение рвёт соединение,
+  состояние досылается из базы после `hello`). Поверх — правило Rate Limiting Cloudflare
+  WAF на `/worker/*` (RUNBOOK §1.6).
+- Push: хаб шлёт POST на `endpoint` подписки, поэтому принимаются только `https://` без
+  userinfo и нестандартного порта на хостах push-сервисов: `fcm.googleapis.com`,
+  `updates.push.services.mozilla.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
+  `*.notify.windows.com`; редиректы при отправке не выполняются.
+- JWKS Access: ключи обновляются вне блокировки кэша, при ошибке обновления остаётся
+  прежний набор, повторные попытки с нарастающей паузой (5 с … 5 мин).
+- Воркер: `hub_url` только `https` (§5.1), окружение агента — белый список (§8.1), outbox —
+  каталог 0700, файлы 0600.
 - `api_keys` пользователей шифруются мастер-ключом из env хаба.
 - Cloudflare Tunnel: лимит тела запроса ~100 МБ (совпадает с лимитом артефакта),
   долгие соединения — heartbeat и переподключение.
@@ -1190,6 +1282,24 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.11 → 0.12 (T9, защита перед использованием)
+По двум аудитам безопасности. §2.1: точная формулировка, в чём воркер не доверяет хабу
+(`allowed_roots`, окружения, привязки, `allow_foreign_sessions`), а в чём доверяет
+(идентичность, ответы на разрешения), и последствия компрометации хаба **[решение]**.
+§5.1: `hub_url` и `enroll` только `https` (кроме loopback и `insecure_http`), без
+редиректов; `GET /api/workers/enroll/{code}` и показ воркера перед подтверждением;
+`CF-IPCountry`; отказ `hello` отозванного воркера. §6: новый маршрут, правило воркера по
+умолчанию, ограничения `title`/`model`/`client_op_id`, ошибки push (`400`, `409
+push_limit`, `409 conflict`), общий текст ошибки JWT. §8.1: `--disallowedTools`,
+`--append-system-prompt`, `--restricted`, `--setting-sources user,local`, явный
+`--permission-mode` (`manual`/`default` по `claude --help`, **[проверить]**), проверка
+`model` и правил на воркере, белый список окружения, канонический `cwd` с перепроверкой,
+`max_sessions`; нет правила сессии «на весь инструмент» для Bash. §8.4: папка scratch.
+§14: `max_sessions`, `insecure_http`. §20: `Origin`, заголовки безопасности, лимиты
+`/worker/*` и WebSocket, белый список push-сервисов, JWKS при недоступности Cloudflare.
+Миграция хаба `0003` (`enroll_codes.country`, `client_ip`). Вопросы и отложенное —
+`docs/notes/t9-questions.md`.
 
 ### 0.10 → 0.11 (T7, сведение протокола хаба, воркера и клиента)
 Ветки T2–T5 разошлись в деталях провода; победила форма 0.10 (T2), воркер и клиент

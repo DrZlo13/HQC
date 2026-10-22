@@ -159,20 +159,35 @@ pub async fn workers_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<WorkerRow>
     .await
 }
 
+/// Workers on which `owner` has sessions.
+pub async fn workers_with_sessions(
+    db: &PgPool,
+    owner: Uuid,
+) -> sqlx::Result<std::collections::HashSet<Uuid>> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT worker_id FROM sessions WHERE owner_id = $1 AND worker_id IS NOT NULL",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await?;
+    Ok(ids.into_iter().collect())
+}
+
 /// Store the copy of the worker's local config from `hello` (display only, SPEC §3 Worker)
 /// and its `boot_id`; returns the `boot_id` of the previous `hello` (SPEC §5.2, §17.3).
+/// `None`: the worker was revoked after its token was checked.
 pub async fn worker_hello(
     db: &PgPool,
     id: Uuid,
     h: &hqc_proto::frame::Hello,
-) -> sqlx::Result<Option<Uuid>> {
+) -> sqlx::Result<Option<Option<Uuid>>> {
     sqlx::query_scalar(
         "WITH old AS (SELECT boot_id FROM workers WHERE id = $1)
          UPDATE workers SET protocol_version = $2, capabilities = $3, environments = $4,
             env_bindings = $5, allowed_roots = $6, allow_foreign_sessions = $7,
             share_local_models = $8, local_models = $9, boot_id = $10, last_seen = now(),
             updated_at = now()
-         WHERE id = $1
+         WHERE id = $1 AND revoked_at IS NULL
          RETURNING (SELECT boot_id FROM old)",
     )
     .bind(id)
@@ -185,7 +200,7 @@ pub async fn worker_hello(
     .bind(h.share_local_models)
     .bind(serde_json::to_value(&h.local_models).unwrap_or_default())
     .bind(h.boot_id)
-    .fetch_one(db)
+    .fetch_optional(db)
     .await
 }
 
@@ -236,38 +251,68 @@ pub struct EnrollRow {
     pub worker_id: Option<Uuid>,
 }
 
-pub async fn enroll_create(
-    db: &PgPool,
-    code: &str,
-    poll_token_hash: &str,
-    name: &str,
-    os: &str,
-    expires_at: DateTime<Utc>,
-) -> sqlx::Result<()> {
+pub struct NewEnroll<'a> {
+    pub code: &'a str,
+    pub poll_token_hash: &'a str,
+    pub name: &'a str,
+    pub os: &'a str,
+    pub expires_at: DateTime<Utc>,
+    pub country: Option<&'a str>,
+    pub client_ip: &'a str,
+}
+
+pub async fn enroll_create(db: &PgPool, e: NewEnroll<'_>) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM enroll_codes WHERE expires_at < now()")
         .execute(db)
         .await?;
     sqlx::query(
-        "INSERT INTO enroll_codes (id, code, poll_token_hash, name, os, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO enroll_codes (id, code, poll_token_hash, name, os, expires_at, country, client_ip)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(new_id())
-    .bind(code)
-    .bind(poll_token_hash)
-    .bind(name)
-    .bind(os)
-    .bind(expires_at)
+    .bind(e.code)
+    .bind(e.poll_token_hash)
+    .bind(e.name)
+    .bind(e.os)
+    .bind(e.expires_at)
+    .bind(e.country)
+    .bind(e.client_ip)
     .execute(db)
     .await?;
     Ok(())
 }
 
-pub async fn enroll_active_count(db: &PgPool) -> sqlx::Result<i64> {
-    sqlx::query_scalar(
-        "SELECT count(*) FROM enroll_codes WHERE expires_at > now() AND confirmed_by IS NULL",
+/// Unconfirmed live codes: `(in total, from client_ip)`.
+pub async fn enroll_active_count(db: &PgPool, client_ip: &str) -> sqlx::Result<(i64, i64)> {
+    sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE client_ip = $1) FROM enroll_codes
+         WHERE expires_at > now() AND confirmed_by IS NULL",
     )
+    .bind(client_ip)
     .fetch_one(db)
     .await
+}
+
+/// A live unconfirmed code, for the confirmation screen (SPEC §6).
+pub async fn enroll_info(
+    db: &PgPool,
+    code: &str,
+) -> sqlx::Result<Option<hqc_proto::api::EnrollInfo>> {
+    let row: Option<(String, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
+        "SELECT name, os, created_at, country FROM enroll_codes
+         WHERE code = $1 AND expires_at > now() AND confirmed_by IS NULL",
+    )
+    .bind(code)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(
+        |(name, os, created_at, country)| hqc_proto::api::EnrollInfo {
+            name,
+            os,
+            created_at,
+            country,
+        },
+    ))
 }
 
 /// Confirm a code: creates the worker row (without a token yet) owned by `user`.
@@ -1125,17 +1170,45 @@ pub struct PushSubRow {
     pub auth: String,
 }
 
+pub enum PushUpsert {
+    Stored(Uuid),
+    /// The endpoint belongs to another user.
+    Foreign,
+    /// The user already has `max` other subscriptions.
+    Limit,
+}
+
+/// Store a subscription, or refresh the keys of the user's own one. Another user's endpoint
+/// is never taken over (SPEC §20).
 pub async fn upsert_push_sub(
     db: &PgPool,
     user: Uuid,
     endpoint: &str,
     p256dh: &str,
     auth: &str,
-) -> sqlx::Result<Uuid> {
-    sqlx::query_scalar(
+    max: i64,
+) -> sqlx::Result<PushUpsert> {
+    let mut tx = db.begin().await?;
+    // Serializes subscribing of one user, so the limit holds under concurrent requests.
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
+        .bind(user)
+        .execute(&mut *tx)
+        .await?;
+    let others: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM push_subscriptions WHERE user_id = $1 AND endpoint <> $2",
+    )
+    .bind(user)
+    .bind(endpoint)
+    .fetch_one(&mut *tx)
+    .await?;
+    if others >= max {
+        return Ok(PushUpsert::Limit);
+    }
+    let id: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (endpoint) DO UPDATE
-           SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, updated_at = now()
+           SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, updated_at = now()
+           WHERE push_subscriptions.user_id = EXCLUDED.user_id
          RETURNING id",
     )
     .bind(new_id())
@@ -1143,8 +1216,10 @@ pub async fn upsert_push_sub(
     .bind(endpoint)
     .bind(p256dh)
     .bind(auth)
-    .fetch_one(db)
-    .await
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id.map_or(PushUpsert::Foreign, PushUpsert::Stored))
 }
 
 pub async fn delete_push_sub(

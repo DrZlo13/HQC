@@ -3,18 +3,16 @@
 //! Access control: `can` stands on every request. Iteration 1 has no grants (SPEC §11,
 //! iteration 6), so a person can act only on their own projects, sessions and workers.
 
-use std::time::{Duration, Instant};
-
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use chrono::Utc;
 use hqc_proto::{
     api::{
-        self, EnrollConfirmRequest, EnrollConfirmed, EnrollPollRequest, EnrollRequest,
+        self, EnrollConfirmRequest, EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest,
         EnrollStarted, EventPage, InputRequest, InputResponse, PushSubscription, SessionList,
         VapidKey,
     },
@@ -32,7 +30,9 @@ use crate::{
     delivery,
     error::{ApiError, ApiResult},
     events::{self, user_author},
-    requests, state,
+    requests,
+    security::ClientIp,
+    state,
 };
 
 /// SPEC §11 `can(user, action, resource)`. Iteration 1: owner only.
@@ -124,6 +124,48 @@ fn valid_cwd(cwd: &str) -> bool {
     !cwd.starts_with('/') && !cwd.contains('\\') && !cwd.split('/').any(|c| c == "..")
 }
 
+const MAX_TITLE: usize = 200;
+const MAX_CLIENT_OP_ID: usize = 128;
+
+/// `^[A-Za-z0-9._:-]{1,64}$`, not starting with `-`: the model goes to the agent's command
+/// line (SPEC §20).
+pub fn valid_model(m: &str) -> bool {
+    (1..=64).contains(&m.len())
+        && !m.starts_with('-')
+        && m.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-'))
+}
+
+fn check_title(t: &str) -> ApiResult<()> {
+    if t.chars().count() > MAX_TITLE {
+        return Err(ApiError::BadRequest(format!(
+            "title is longer than {MAX_TITLE} characters"
+        )));
+    }
+    Ok(())
+}
+
+/// The default worker of a new session (SPEC §6): never one that has not connected yet;
+/// online before offline; among those, one the user already has sessions on before a fresh
+/// one (a worker enrolled through a phished code must not take over); then the most recently
+/// seen.
+async fn default_worker(app: &AppState, user: Uuid) -> ApiResult<Option<db::WorkerRow>> {
+    let used = db::workers_with_sessions(&app.db, user).await?;
+    let mut ws: Vec<_> = db::workers_of(&app.db, user)
+        .await?
+        .into_iter()
+        .filter(|w| w.last_seen.is_some())
+        .collect();
+    ws.sort_by_key(|w| {
+        (
+            app.workers.is_online(w.id),
+            used.contains(&w.id),
+            w.last_seen,
+        )
+    });
+    Ok(ws.pop())
+}
+
 pub async fn create_session(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -139,14 +181,17 @@ pub async fn create_session(
             Some(w) if w.owner_id == user.id && w.revoked_at.is_none() => w,
             _ => return Err(ApiError::BadRequest("unknown worker".into())),
         },
-        None => {
-            // Default: an online worker of the user, else the most recently seen one.
-            let mut ws = db::workers_of(&app.db, user.id).await?;
-            ws.sort_by_key(|w| (app.workers.is_online(w.id), w.last_seen));
-            ws.pop()
-                .ok_or_else(|| ApiError::Conflict("no_worker", "no worker is enrolled".into()))?
-        }
+        None => default_worker(&app, user.id)
+            .await?
+            .ok_or_else(|| ApiError::Conflict("no_worker", "no worker has connected yet".into()))?,
     };
+    if let Some(m) = &b.model {
+        if !valid_model(m) {
+            return Err(ApiError::BadRequest(
+                "model must be 1..64 characters of A-Z a-z 0-9 . _ : -".into(),
+            ));
+        }
+    }
     // Iteration 1: the session runs in the workspace the worker announced in `hello`.
     let ws = db::latest_workspace(&app.db, project_id, worker.id)
         .await?
@@ -173,6 +218,7 @@ pub async fn create_session(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .unwrap_or("New session");
+    check_title(title)?;
     let id = db::create_session(
         &app.db,
         db::NewSession {
@@ -222,6 +268,7 @@ pub async fn patch_session(
         if t.is_empty() {
             return Err(ApiError::BadRequest("title must not be empty".into()));
         }
+        check_title(t)?;
         // The slug stays: it is the session's address (SPEC §7).
         sqlx::query("UPDATE sessions SET title = $2, updated_at = now() WHERE id = $1")
             .bind(id)
@@ -334,6 +381,11 @@ pub async fn input(
         ));
     }
     let op = b.client_op_id.filter(|c| !c.is_empty());
+    if op.as_ref().is_some_and(|o| o.len() > MAX_CLIENT_OP_ID) {
+        return Err(ApiError::BadRequest(format!(
+            "client_op_id is longer than {MAX_CLIENT_OP_ID} bytes"
+        )));
+    }
     if let Some(op) = &op {
         if let Some(r) = db::event_by_client_op(&app.db, id, op).await? {
             return Ok(reply(StatusCode::OK, &r));
@@ -482,11 +534,42 @@ pub async fn workers(State(app): State<AppState>, user: CurrentUser) -> ApiResul
     Ok(Json(json!({ "workers": ws })))
 }
 
+/// Lookups of enrollment codes per user and minute (info and confirm together): codes are
+/// short, guessing them must stay slow.
+const ENROLL_LOOKUPS_PER_MIN: usize = 30;
+
+fn limit_enroll_lookups(app: &AppState, user: &CurrentUser) -> ApiResult<()> {
+    if app.limiter.allow(
+        "enroll_lookup",
+        &user.id.to_string(),
+        ENROLL_LOOKUPS_PER_MIN,
+    ) {
+        Ok(())
+    } else {
+        Err(ApiError::TooManyRequests)
+    }
+}
+
+/// `GET /api/workers/enroll/{code}`: who is asking to be enrolled, shown before the user
+/// confirms (SPEC §5.1, §6).
+pub async fn enroll_info(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(code): Path<String>,
+) -> ApiResult<Json<EnrollInfo>> {
+    limit_enroll_lookups(&app, &user)?;
+    let info = db::enroll_info(&app.db, &normalize_enroll_code(&code))
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(info))
+}
+
 pub async fn enroll_confirm(
     State(app): State<AppState>,
     user: CurrentUser,
     Json(b): Json<EnrollConfirmRequest>,
 ) -> ApiResult<Json<EnrollConfirmed>> {
+    limit_enroll_lookups(&app, &user)?;
     let code = normalize_enroll_code(&b.code);
     let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let (worker_id, name) = db::enroll_confirm(&app.db, &code, user.id, name)
@@ -512,27 +595,30 @@ pub async fn delete_worker(
     Ok(StatusCode::NO_CONTENT)
 }
 
-const ENROLL_PER_MINUTE: usize = 10;
-const ENROLL_MAX_ACTIVE: i64 = 100;
-
 /// `POST /worker/enroll` (no auth): a code for the user to confirm and a secret to poll
-/// with. Rate-limited (SPEC §20). `protocol_version` in the body is informational; unknown
-/// fields are ignored (SPEC §5.1).
+/// with. Limited per client address and in total (SPEC §20). `protocol_version` in the body
+/// is informational; unknown fields are ignored (SPEC §5.1). `CF-IPCountry` is kept for the
+/// confirmation screen.
 pub async fn worker_enroll(
     State(app): State<AppState>,
+    ClientIp(ip): ClientIp,
+    headers: HeaderMap,
     Json(b): Json<EnrollRequest>,
 ) -> ApiResult<Json<EnrollStarted>> {
-    {
-        let mut calls = app.enroll_calls.lock().unwrap();
-        calls.retain(|t| t.elapsed() < Duration::from_secs(60));
-        if calls.len() >= ENROLL_PER_MINUTE {
-            return Err(ApiError::TooManyRequests);
-        }
-        calls.push(Instant::now());
-    }
-    if db::enroll_active_count(&app.db).await? >= ENROLL_MAX_ACTIVE {
+    let limits = &app.config.limits;
+    if !app.limiter.allow("enroll", &ip, limits.enroll_per_min) {
         return Err(ApiError::TooManyRequests);
     }
+    let (total, from_ip) = db::enroll_active_count(&app.db, &ip).await?;
+    if total >= limits.enroll_active_total || from_ip >= limits.enroll_active_per_ip {
+        return Err(ApiError::TooManyRequests);
+    }
+    let country = headers
+        .get("cf-ipcountry")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(str::to_ascii_uppercase);
     let name: String = b.name.trim().chars().take(64).collect();
     if name.is_empty() {
         return Err(ApiError::BadRequest("name is required".into()));
@@ -548,11 +634,15 @@ pub async fn worker_enroll(
     let expires_at = Utc::now() + app.config.timing.enroll_ttl;
     db::enroll_create(
         &app.db,
-        &code,
-        &hash_secret(&poll_token),
-        &name,
-        &os,
-        expires_at,
+        db::NewEnroll {
+            code: &code,
+            poll_token_hash: &hash_secret(&poll_token),
+            name: &name,
+            os: &os,
+            expires_at,
+            country: country.as_deref(),
+            client_ip: &ip,
+        },
     )
     .await?;
     Ok(Json(EnrollStarted {
@@ -567,8 +657,15 @@ pub async fn worker_enroll(
 /// or `expired`.
 pub async fn worker_enroll_poll(
     State(app): State<AppState>,
+    ClientIp(ip): ClientIp,
     Json(b): Json<EnrollPollRequest>,
 ) -> ApiResult<Json<api::EnrollPoll>> {
+    if !app
+        .limiter
+        .allow("enroll_poll", &ip, app.config.limits.poll_per_min)
+    {
+        return Err(ApiError::TooManyRequests);
+    }
     let token = new_secret("hqcw_");
     match db::enroll_poll(&app.db, &hash_secret(&b.poll_token), &hash_secret(&token)).await? {
         EnrollPoll::Pending => Ok(Json(api::EnrollPoll::Pending)),
@@ -594,12 +691,59 @@ pub async fn push_subscribe(
     user: CurrentUser,
     Json(b): Json<PushSubscription>,
 ) -> ApiResult<impl IntoResponse> {
-    if !b.endpoint.starts_with("https://") {
-        return Err(ApiError::BadRequest("endpoint must be https".into()));
+    if !push_endpoint_allowed(&b.endpoint) {
+        return Err(ApiError::BadRequest(
+            "endpoint is not a known push service".into(),
+        ));
     }
-    let id =
-        db::upsert_push_sub(&app.db, user.id, &b.endpoint, &b.keys.p256dh, &b.keys.auth).await?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+    let r = db::upsert_push_sub(
+        &app.db,
+        user.id,
+        &b.endpoint,
+        &b.keys.p256dh,
+        &b.keys.auth,
+        app.config.limits.push_subs_per_user,
+    )
+    .await?;
+    match r {
+        db::PushUpsert::Stored(id) => Ok((StatusCode::CREATED, Json(json!({ "id": id })))),
+        db::PushUpsert::Foreign => Err(ApiError::Conflict(
+            "conflict",
+            "this push endpoint belongs to another user".into(),
+        )),
+        db::PushUpsert::Limit => Err(ApiError::Conflict(
+            "push_limit",
+            format!(
+                "at most {} push subscriptions per user; remove one first",
+                app.config.limits.push_subs_per_user
+            ),
+        )),
+    }
+}
+
+/// Push services of the browsers (SPEC §20): the hub POSTs to the endpoint, so anything else
+/// would let a user point it into the hub's network.
+const PUSH_HOSTS: &[&str] = &["fcm.googleapis.com", "updates.push.services.mozilla.com"];
+const PUSH_HOST_SUFFIXES: &[&str] = &[
+    ".push.apple.com",
+    ".notify.windows.com",
+    ".push.services.mozilla.com",
+];
+
+pub fn push_endpoint_allowed(endpoint: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = u.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    u.scheme() == "https"
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.port().is_none()
+        && (PUSH_HOSTS.contains(&host.as_str())
+            || PUSH_HOST_SUFFIXES.iter().any(|s| host.ends_with(s)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -618,7 +762,42 @@ pub async fn push_unsubscribe(
 
 #[cfg(test)]
 mod tests {
-    use super::valid_cwd;
+    use super::{push_endpoint_allowed, valid_cwd, valid_model};
+
+    #[test]
+    fn push_endpoints() {
+        for ok in [
+            "https://fcm.googleapis.com/fcm/send/abc",
+            "https://web.push.apple.com/QGx",
+            "https://updates.push.services.mozilla.com/wpush/v2/x",
+            "https://wns2-db5p.notify.windows.com/w/?token=x",
+        ] {
+            assert!(push_endpoint_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "http://fcm.googleapis.com/fcm/send/abc",
+            "https://evil.example/fcm.googleapis.com",
+            "https://fcm.googleapis.com.evil.example/x",
+            "https://push.apple.com.evil/x",
+            "https://fcm.googleapis.com:8443/x",
+            "https://user@fcm.googleapis.com/x",
+            "https://169.254.169.254/latest",
+            "https://hqc-db:5432/",
+            "not a url",
+        ] {
+            assert!(!push_endpoint_allowed(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn models() {
+        for ok in ["claude-haiku-5-5", "opus", "qwen3.8-27b:q4_K", "a.b_c"] {
+            assert!(valid_model(ok), "{ok}");
+        }
+        for bad in ["", "-x y", "a b", "a;b", "--resume", &"x".repeat(65), "мод"] {
+            assert!(!valid_model(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn cwd_must_stay_inside() {

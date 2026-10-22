@@ -25,6 +25,6 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     tracing::info!(addr = %config.listen, protocol = hqc_proto::PROTOCOL_VERSION, "hqc-hub listening");
     let app = hqc_hub::start(pool, config, push);
-    axum::serve(listener, hqc_hub::router(app)).await?;
+    axum::serve(listener, hqc_hub::service(app)).await?;
     Ok(())
 }

@@ -28,7 +28,9 @@ use uuid::Uuid;
 use crate::{
     app::{AppState, Notice},
     auth::CurrentUser,
-    db, delivery, state,
+    db, delivery,
+    security::MAX_WS_MESSAGE,
+    state,
 };
 
 const BACKFILL_PAGE: i64 = 500;
@@ -38,7 +40,10 @@ pub async fn handler(
     user: CurrentUser,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| run(app, user, socket))
+    // Origin was checked by `security::guard` (SPEC §20).
+    ws.max_message_size(MAX_WS_MESSAGE)
+        .max_frame_size(MAX_WS_MESSAGE)
+        .on_upgrade(move |socket| run(app, user, socket))
 }
 
 struct Client {

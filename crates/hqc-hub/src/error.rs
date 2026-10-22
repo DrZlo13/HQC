@@ -21,6 +21,9 @@ pub enum ApiError {
     Conflict(&'static str, String),
     #[error("too many requests")]
     TooManyRequests,
+    /// Too many requests of this kind in flight; retry later.
+    #[error("busy, retry later")]
+    Busy,
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -40,6 +43,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Conflict(code, _) => (StatusCode::CONFLICT, *code),
             ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
+            ApiError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy"),
             ApiError::Internal(e) => {
                 tracing::error!(error = %e, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal")

@@ -14,7 +14,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use hqc_hub::{
-    config::{AuthConfig, Timing},
+    config::{AuthConfig, Limits, Timing},
     db::{PushSubRow, MIGRATOR},
     push::{BoxFuture, PushError, PushSender},
     AppState, Config,
@@ -98,6 +98,23 @@ impl TestHub {
     }
 
     pub async fn start_with(auth: AuthConfig, email: String) -> Self {
+        Self::start_full(auth, email, Limits::default()).await
+    }
+
+    /// Dev auth with a fresh user and the given limits.
+    pub async fn start_limited(limits: Limits) -> Self {
+        let email = format!("user-{}@example.com", Uuid::new_v4().simple());
+        Self::start_full(
+            AuthConfig::Dev {
+                email: email.clone(),
+            },
+            email,
+            limits,
+        )
+        .await
+    }
+
+    pub async fn start_full(auth: AuthConfig, email: String, limits: Limits) -> Self {
         let url = db_url();
         let admin = PgPoolOptions::new()
             .max_connections(1)
@@ -126,13 +143,14 @@ impl TestHub {
             vapid: None,
             client_dir: None,
             timing: test_timing(),
+            limits,
         };
         let push = Arc::new(RecordingPush::default());
         let app = hqc_hub::start(pool, config, push.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let router = hqc_hub::router(app.clone());
-        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let service = hqc_hub::service(app.clone());
+        tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
         TestHub {
             app,
             base: format!("http://{addr}"),
@@ -450,13 +468,25 @@ impl FakeClient {
         Self::connect_with(hub, None).await.expect("client connect")
     }
 
+    /// With the hub's own `Origin`, as a browser on the hub's page sends it (SPEC §20).
     pub async fn connect_with(hub: &TestHub, jwt: Option<&str>) -> Result<Self, String> {
+        Self::connect_origin(hub, jwt, Some(&hub.base)).await
+    }
+
+    pub async fn connect_origin(
+        hub: &TestHub,
+        jwt: Option<&str>,
+        origin: Option<&str>,
+    ) -> Result<Self, String> {
         let mut req = format!("{}/api/ws", hub.ws_base)
             .into_client_request()
             .unwrap();
         if let Some(t) = jwt {
             req.headers_mut()
                 .insert("Cf-Access-Jwt-Assertion", t.parse().unwrap());
+        }
+        if let Some(o) = origin {
+            req.headers_mut().insert("Origin", o.parse().unwrap());
         }
         match tokio_tungstenite::connect_async(req).await {
             Ok((ws, _)) => Ok(Self { ws }),
@@ -505,6 +535,18 @@ impl FakeClient {
     pub async fn expect_silence(&mut self, d: Duration) {
         if let Some(f) = recv_json(&mut self.ws, d).await {
             panic!("client: unexpected frame {f}");
+        }
+    }
+
+    /// Wait until the hub closes the connection.
+    pub async fn expect_closed(&mut self) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, self.ws.next()).await {
+                Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => return,
+                Ok(Some(Ok(_))) => continue,
+                Err(_) => panic!("client connection not closed"),
+            }
         }
     }
 }

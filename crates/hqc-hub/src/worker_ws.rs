@@ -29,7 +29,7 @@ use hqc_proto::{
     PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 
 use crate::{
@@ -38,6 +38,7 @@ use crate::{
     db, delivery,
     error::ApiError,
     events, requests,
+    security::{ClientIp, MAX_WS_MESSAGE},
 };
 
 /// What a hub -> worker request frame was, so its `ack` / `error` can be routed.
@@ -81,11 +82,17 @@ pub struct ConnState {
     pub sessions: HashMap<Uuid, SessConn>,
 }
 
+/// Frames queued for one worker's socket. A worker that does not read them in time is
+/// disconnected ([`WorkerConn::overflow`]).
+const SEND_QUEUE: usize = 4096;
+
 pub struct WorkerConn {
     pub worker_id: Uuid,
     pub owner_id: Uuid,
     pub conn_id: Uuid,
-    tx: mpsc::UnboundedSender<Message>,
+    tx: mpsc::Sender<Message>,
+    /// The send queue overflowed: the connection loop drops the worker.
+    overflow: Notify,
     next_id: AtomicU64,
     pub st: tokio::sync::Mutex<ConnState>,
 }
@@ -95,10 +102,17 @@ impl WorkerConn {
         format!("h-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// A closed channel means the connection is going away; a full one drops the
+    /// connection. Either way the frame is re-sent from the database state after the next
+    /// `hello`.
+    fn push(&self, m: Message) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.tx.try_send(m) {
+            self.overflow.notify_one();
+        }
+    }
+
     fn send_text(&self, s: String) {
-        // A closed channel means the connection is going away; the frame is re-sent from the
-        // database state after the next `hello`.
-        let _ = self.tx.send(Message::Text(s.into()));
+        self.push(Message::Text(s.into()));
     }
 
     /// Send a hub -> worker request frame, returning its `id`.
@@ -136,26 +150,57 @@ impl WorkerConn {
     }
 
     pub fn close(&self) {
-        let _ = self.tx.send(Message::Close(None));
+        self.push(Message::Close(None));
     }
 }
 
+const AUTH_FAILURES: &str = "worker_ws_auth_failures";
+
+/// Before the upgrade: the bearer token (SPEC §5.1). Unauthenticated attempts are limited
+/// (SPEC §20): an address with too many bad tokens in the last minute gets 429 without a
+/// database lookup, a malformed token never reaches the database, and at most
+/// `ws_auth_concurrency` lookups run at once (503 above that).
 pub async fn handler(
     State(app): State<AppState>,
+    ClientIp(ip): ClientIp,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    let token =
-        bearer(&headers).ok_or_else(|| ApiError::Unauthorized("missing worker token".into()))?;
-    let w = db::worker_by_token_hash(&app.db, &hash_secret(token))
-        .await?
-        .ok_or_else(|| ApiError::Unauthorized("unknown worker token".into()))?;
-    Ok(ws.on_upgrade(move |socket| run(app, w.id, w.owner_id, socket)))
+    let max_failures = app.config.limits.ws_auth_failures_per_min;
+    if app.limiter.exhausted(AUTH_FAILURES, &ip, max_failures) {
+        return Err(ApiError::TooManyRequests);
+    }
+    let refuse = |why: &str| {
+        app.limiter.allow(AUTH_FAILURES, &ip, max_failures);
+        ApiError::Unauthorized(why.into())
+    };
+    let token = bearer(&headers).ok_or_else(|| refuse("missing worker token"))?;
+    if !is_worker_token(token) {
+        return Err(refuse("unknown worker token"));
+    }
+    let w = {
+        let _permit = app.ws_auth.try_acquire().map_err(|_| ApiError::Busy)?;
+        db::worker_by_token_hash(&app.db, &hash_secret(token)).await?
+    };
+    let w = w.ok_or_else(|| refuse("unknown worker token"))?;
+    Ok(ws
+        .max_message_size(MAX_WS_MESSAGE)
+        .max_frame_size(MAX_WS_MESSAGE)
+        .on_upgrade(move |socket| run(app, w.id, w.owner_id, socket)))
+}
+
+/// The shape [`crate::auth::new_secret`] gives worker tokens: `hqcw_` + 43 base64url chars.
+fn is_worker_token(t: &str) -> bool {
+    t.strip_prefix("hqcw_").is_some_and(|b| {
+        b.len() == 43
+            && b.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    })
 }
 
 async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let (tx, mut rx) = mpsc::channel::<Message>(SEND_QUEUE);
     let writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
             let close = matches!(m, Message::Close(_));
@@ -169,6 +214,7 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         owner_id,
         conn_id: Uuid::now_v7(),
         tx,
+        overflow: Notify::new(),
         next_id: AtomicU64::new(1),
         st: Default::default(),
     });
@@ -185,7 +231,11 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
                     tracing::warn!(%worker_id, "worker connection idle, dropping");
                     break;
                 }
-                let _ = conn.tx.send(Message::Ping(Default::default()));
+                conn.push(Message::Ping(Default::default()));
+            }
+            _ = conn.overflow.notified() => {
+                tracing::warn!(%worker_id, "worker does not read its frames, dropping");
+                break;
             }
             m = stream.next() => {
                 let Some(Ok(m)) = m else { break };
@@ -345,7 +395,12 @@ async fn on_hello(
     // Only the exact version is accepted until there is a second one to negotiate with;
     // other versions are refused in `handle_text` before parsing.
     debug_assert_eq!(h.protocol_version, PROTOCOL_VERSION);
-    let previous_boot = db::worker_hello(&app.db, conn.worker_id, &h).await?;
+    let Some(previous_boot) = db::worker_hello(&app.db, conn.worker_id, &h).await? else {
+        // Revoked between the token check and `hello` (SPEC §5.1).
+        tracing::info!(worker_id = %conn.worker_id, "hello from a revoked worker refused");
+        conn.error(id, error_code::UNAUTHORIZED, "worker token revoked", false);
+        return Ok(None);
+    };
     let restarted = previous_boot != Some(h.boot_id);
 
     // TODO(SPEC §19, iteration 2): workspaces become hub objects created through

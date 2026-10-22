@@ -13,6 +13,42 @@ pub struct Config {
     /// The built web client (`client/dist`) served on `/`; `None`: the hub serves only the APIs.
     pub client_dir: Option<PathBuf>,
     pub timing: Timing,
+    pub limits: Limits,
+}
+
+/// Limits of the unauthenticated `/worker/*` routes and of push subscriptions (SPEC §20).
+/// Per-address limits use [`crate::security::ClientIp`].
+#[derive(Clone, Debug)]
+pub struct Limits {
+    /// `POST /worker/enroll` per address and minute.
+    pub enroll_per_min: usize,
+    /// Unconfirmed enrollment codes per address.
+    pub enroll_active_per_ip: i64,
+    /// Unconfirmed enrollment codes in total.
+    pub enroll_active_total: i64,
+    /// `POST /worker/enroll/poll` per address and minute.
+    pub poll_per_min: usize,
+    /// `/worker/ws` attempts with a bad token per address and minute; then 429 without a
+    /// database lookup.
+    pub ws_auth_failures_per_min: usize,
+    /// `/worker/ws` token lookups in flight at once; more get 503.
+    pub ws_auth_concurrency: usize,
+    /// Push subscriptions per user.
+    pub push_subs_per_user: i64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            enroll_per_min: 10,
+            enroll_active_per_ip: 10,
+            enroll_active_total: 1000,
+            poll_per_min: 60,
+            ws_auth_failures_per_min: 20,
+            ws_auth_concurrency: 16,
+            push_subs_per_user: 10,
+        }
+    }
 }
 
 /// How people are authenticated on `/api/*` (SPEC §6, §20).
@@ -143,6 +179,7 @@ impl Config {
             vapid,
             client_dir,
             timing: Timing::default(),
+            limits: Limits::default(),
         })
     }
 }

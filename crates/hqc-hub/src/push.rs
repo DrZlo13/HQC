@@ -65,8 +65,11 @@ impl WebPush {
             vapid,
             public_key: c.public_key.trim().to_string(),
             subject: c.subject.clone(),
+            // Endpoints are checked against the push services when subscribing
+            // (`api::push_endpoint_allowed`); a redirect must not lead elsewhere (SPEC §20).
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
     }

@@ -5,15 +5,16 @@ use std::{
     collections::HashMap,
     ops::Deref,
     sync::{Arc, Mutex},
-    time::Instant,
 };
 
 use serde_json::Value;
 use sqlx::PgPool;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Semaphore};
 use uuid::Uuid;
 
-use crate::{auth::Auth, config::Config, push::PushSender, worker_ws::WorkerConn};
+use crate::{
+    auth::Auth, config::Config, push::PushSender, security::RateLimiter, worker_ws::WorkerConn,
+};
 
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
@@ -28,8 +29,10 @@ pub struct Inner {
     /// `(user_id, session_id)` -> number of client WebSockets subscribed (SPEC §16: no push
     /// while the user is watching the session).
     pub watchers: Mutex<HashMap<(Uuid, Uuid), usize>>,
-    /// Timestamps of recent `/worker/enroll` calls (SPEC §20: rate limit on enroll).
-    pub enroll_calls: Mutex<Vec<Instant>>,
+    /// Per-address limits of `/worker/*` (SPEC §20).
+    pub limiter: RateLimiter,
+    /// Token lookups of `/worker/ws` in flight (SPEC §20).
+    pub ws_auth: Arc<Semaphore>,
 }
 
 impl Deref for AppState {
@@ -66,13 +69,14 @@ impl AppState {
         let (bus, _) = broadcast::channel(1024);
         AppState(Arc::new(Inner {
             db,
-            config,
             auth,
             workers: WorkerRegistry::default(),
             bus,
             push,
             watchers: Mutex::new(HashMap::new()),
-            enroll_calls: Mutex::new(Vec::new()),
+            limiter: RateLimiter::default(),
+            ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),
+            config,
         }))
     }
 

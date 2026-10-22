@@ -24,6 +24,7 @@ pub mod error;
 pub mod events;
 pub mod push;
 pub mod requests;
+pub mod security;
 pub mod state;
 pub mod worker_ws;
 
@@ -59,6 +60,7 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/read_cursor", put(api::read_cursor))
         .route("/api/workers", get(api::workers))
         .route("/api/workers/enroll/confirm", post(api::enroll_confirm))
+        .route("/api/workers/enroll/{code}", get(api::enroll_info))
         .route(
             "/api/workers/{id}",
             axum::routing::delete(api::delete_worker),
@@ -73,7 +75,15 @@ pub fn router(app: AppState) -> Router {
         .route("/worker/enroll/poll", post(api::worker_enroll_poll))
         .route("/worker/ws", get(worker_ws::handler))
         .fallback(client_files::handler)
+        .layer(axum::middleware::from_fn(security::guard))
         .with_state(app)
+}
+
+/// The router as a service that records the peer address for [`security::ClientIp`].
+pub fn service(
+    app: AppState,
+) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, std::net::SocketAddr> {
+    router(app).into_make_service_with_connect_info::<std::net::SocketAddr>()
 }
 
 /// Build the hub state over a migrated pool and start its background tasks.

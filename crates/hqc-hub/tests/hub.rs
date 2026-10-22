@@ -742,7 +742,7 @@ async fn push_only_without_live_subscription() {
     let (s, _) = hub
         .post(
             "/api/push/subscribe",
-            json!({"endpoint": "https://push.example/sub-1", "expirationTime": null,
+            json!({"endpoint": "https://fcm.googleapis.com/fcm/send/sub-1", "expirationTime": null,
                    "keys": {"p256dh": "k", "auth": "a"}}),
         )
         .await;
@@ -768,7 +768,7 @@ async fn push_only_without_live_subscription() {
     }
     {
         let sent = hub.push.sent.lock().unwrap();
-        assert_eq!(sent[0].0, "https://push.example/sub-1");
+        assert_eq!(sent[0].0, "https://fcm.googleapis.com/fcm/send/sub-1");
         // SPEC §16: {session_id, type, title?, body?, tag?, payload?}, payload = the event.
         let m: hqc_proto::api::PushMessage = serde_json::from_value(sent[0].1.clone()).unwrap();
         assert_eq!(m.kind, "approval.request");

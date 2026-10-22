@@ -168,6 +168,18 @@ pub struct EnrollConfirmRequest {
     pub name: Option<String>,
 }
 
+/// `GET /api/workers/enroll/{code}`: what the worker that printed an unconfirmed code said
+/// about itself, shown before the user confirms (SPEC §5.1, §6). `country` is Cloudflare's
+/// `CF-IPCountry` of the enrolling request, when there was one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnrollInfo {
+    pub name: String,
+    pub os: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
 /// Reply to `POST /api/workers/enroll/confirm`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnrollConfirmed {
@@ -272,6 +284,7 @@ mod tests {
             "../examples/wire/api.enroll.confirm.request.json"
         ));
         roundtrip::<EnrollConfirmed>(include_str!("../examples/wire/api.enroll.confirm.json"));
+        roundtrip::<EnrollInfo>(include_str!("../examples/wire/api.enroll.info.json"));
     }
 
     #[test]

@@ -23,6 +23,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Claude Code's built-in cross-session tools: they find other local Claude sessions and
+/// inject messages into them directly, so the hub never sees that input (SPEC §7 routes
+/// agent-to-agent traffic through `hqc_send`/`hqc_ask` instead).
+pub const NATIVE_MESSAGING_TOOLS: &[&str] = &["ListAgents", "SendMessage"];
+
 use anyhow::Context;
 use async_trait::async_trait;
 use hqc_proto::event::ClarifyAnswer;
@@ -88,6 +93,10 @@ pub struct ClaudeOptions {
     /// (`bypassPermissions`, `acceptEdits`) does not apply: the CLI's "ask" mode, `default`
     /// or `manual` by version ([`crate::capabilities::claude_permission_mode`]).
     pub permission_mode: String,
+    /// Tools disallowed in every session on top of `session.start.disallowed_tools`. By
+    /// default Claude Code's own cross-session messaging, which bypasses the hub
+    /// (`allow_native_messaging` in the worker config keeps it).
+    pub always_disallowed: Vec<String>,
     /// Interrupt → SIGINT fallback delay.
     pub stop_grace: Duration,
     /// A process that dies this soon after spawning fails `start` instead of being
@@ -103,6 +112,10 @@ impl Default for ClaudeOptions {
             mcp_config: None,
             extra_args: vec![],
             permission_mode: "default".into(),
+            always_disallowed: NATIVE_MESSAGING_TOOLS
+                .iter()
+                .map(|t| t.to_string())
+                .collect(),
             stop_grace: Duration::from_secs(10),
             early_exit: Duration::from_millis(500),
         }
@@ -129,6 +142,14 @@ impl ClaudeCodeAdapters {
             ClaudeOptions {
                 claude_bin: cfg.claude_bin.clone(),
                 permission_mode,
+                always_disallowed: if cfg.allow_native_messaging {
+                    vec![]
+                } else {
+                    NATIVE_MESSAGING_TOOLS
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect()
+                },
                 ..ClaudeOptions::default()
             },
             Arc::new(OsSpawner),
@@ -254,10 +275,16 @@ impl ClaudeCodeAdapter {
             args.extend(["--mcp-config".into(), m.clone()]);
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);
-        if !spec.disallowed_tools.is_empty() {
+        let mut disallowed: Vec<String> = spec.disallowed_tools.clone();
+        for t in &self.opts.always_disallowed {
+            if !disallowed.contains(t) {
+                disallowed.push(t.clone());
+            }
+        }
+        if !disallowed.is_empty() {
             // Variadic: the entries run up to the next flag.
             args.push("--disallowedTools".into());
-            args.extend(spec.disallowed_tools.iter().cloned());
+            args.extend(disallowed);
         }
         if spec.restricted {
             args.push("--restricted".into());

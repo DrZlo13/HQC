@@ -545,6 +545,9 @@ async fn command_line_new_then_resume() {
             "--strict-mcp-config",
             "--allowedTools",
             "mcp__hqc",
+            "--disallowedTools",
+            "ListAgents",
+            "SendMessage",
             "--setting-sources",
             "user,local",
             "--permission-mode",
@@ -605,7 +608,12 @@ async fn command_line_carries_session_restrictions() {
             .cloned()
             .collect()
     };
-    assert_eq!(after("--disallowedTools"), ["WebFetch", "Bash(git push:*)"]);
+    // The session's own restrictions first, then Claude Code's cross-session tools, which
+    // bypass the hub (NATIVE_MESSAGING_TOOLS).
+    assert_eq!(
+        after("--disallowedTools"),
+        ["WebFetch", "Bash(git push:*)", "ListAgents", "SendMessage"]
+    );
     assert_eq!(after("--append-system-prompt"), ["Answer in Russian."]);
     assert_eq!(after("--setting-sources"), ["user,local"]);
     assert_eq!(after("--permission-mode"), ["default"]);
@@ -619,13 +627,12 @@ async fn command_line_carries_session_restrictions() {
     a.start(&s).await.unwrap();
     let args = claude.commands()[1].args.clone();
     assert!(args.contains(&"--restricted".to_string()), "{args:?}");
-    for absent in [
-        "--setting-sources",
-        "--disallowedTools",
-        "--append-system-prompt",
-    ] {
+    for absent in ["--setting-sources", "--append-system-prompt"] {
         assert!(!args.contains(&absent.to_string()), "{absent}: {args:?}");
     }
+    // Restricted or not, the native messaging tools stay off.
+    let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    assert_eq!(args[i + 1..i + 3], ["ListAgents", "SendMessage"]);
     assert!(args
         .windows(2)
         .any(|w| w == ["--permission-mode", "default"]));
@@ -1066,4 +1073,22 @@ fn nul_never_reaches_an_event() {
         seen += 1;
     }
     assert_eq!(seen, 3, "{kinds:?}");
+}
+
+/// `allow_native_messaging` in the worker config keeps Claude Code's ListAgents/SendMessage.
+#[tokio::test]
+async fn native_messaging_tools_can_be_kept() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let mut opts = options(config.path());
+    opts.always_disallowed.clear();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+    let s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let args = claude.commands()[0].args.clone();
+    assert!(!args.contains(&"--disallowedTools".to_string()), "{args:?}");
+    a.kill().await.unwrap();
 }

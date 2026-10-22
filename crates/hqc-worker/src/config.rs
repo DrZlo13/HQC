@@ -12,6 +12,7 @@
 //! # claude_bin = "/opt/homebrew/bin/claude"   # default: `claude` from PATH
 //! # max_sessions = 8             # agent processes at once
 //! # insecure_http = false        # allow http:// to a non-loopback hub (never in production)
+//! # allow_native_messaging = false  # keep Claude Code's ListAgents/SendMessage (bypass the hub)
 //!
 //! [workspace]
 //! path = "/Users/me/work/hqc"
@@ -63,6 +64,8 @@ struct RawConfig {
     insecure_http: bool,
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
+    #[serde(default)]
+    allow_native_messaging: bool,
 }
 
 fn default_max_sessions() -> usize {
@@ -121,6 +124,10 @@ pub struct Config {
     pub insecure_http: bool,
     /// Agent processes running at once; more are refused with `agent_start_failed`.
     pub max_sessions: usize,
+    /// Keep Claude Code's own cross-session tools (`ListAgents`, `SendMessage`). Off by
+    /// default: they bypass the hub, so the other session's history misses the input that
+    /// started its turn. Agent-to-agent traffic goes through `hqc_send`/`hqc_ask` (SPEC §7).
+    pub allow_native_messaging: bool,
     /// Where sessions without a workspace get their empty folder (SPEC §8.4):
     /// `$HQC_HOME/scratch/<session_id>`.
     pub scratch_root: PathBuf,
@@ -206,6 +213,7 @@ impl Config {
             allow_foreign_sessions: raw.allow_foreign_sessions,
             claude_bin: raw.claude_bin,
             insecure_http: raw.insecure_http,
+            allow_native_messaging: raw.allow_native_messaging,
             max_sessions: raw.max_sessions,
             scratch_root: hqc_home()
                 .unwrap_or_else(|_| std::env::temp_dir().join("hqc"))

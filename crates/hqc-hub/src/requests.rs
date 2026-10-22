@@ -1,0 +1,286 @@
+//! Open `approval` / `clarify` requests (SPEC §3 PendingRequest, §10.1).
+//!
+//! An answer closes the request (first answer wins), is stored as an event, and its frame
+//! is kept in `pending_requests.result` until the worker acknowledges it, so an answer given
+//! while the worker is offline reaches it after `hello`.
+//!
+//! A cancellation by the hub (timeout, stop, archive, worker restart) writes
+//! `approval.cancel` and sends `approval.response` with the `canonical: deny` option; for
+//! clarify it writes `clarify.cancel` and sends `clarify.response` with empty `answers`
+//! (SPEC §5.3).
+
+use std::collections::BTreeMap;
+
+use hqc_proto::event::{ApprovalOption, CancelReason, ClarifyAnswer};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::{
+    app::AppState,
+    auth::CurrentUser,
+    db::{self, PendingRow, SessionRow},
+    error::{ApiError, ApiResult},
+    events::{self, user_author},
+    worker_ws::Reply,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct AnswerBody {
+    pub option_id: Option<String>,
+    pub answers: Option<BTreeMap<String, ClarifyAnswer>>,
+}
+
+fn options(payload: &Value) -> Vec<ApprovalOption> {
+    payload
+        .get("options")
+        .and_then(|o| serde_json::from_value(o.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The option that closes the request in the runtime when the hub cancels it.
+fn deny_option(payload: &Value) -> Option<String> {
+    use hqc_proto::event::ApprovalCanonical::{Deny, DenyAlways};
+    let opts = options(payload);
+    opts.iter()
+        .find(|o| o.canonical == Deny)
+        .or_else(|| opts.iter().find(|o| o.canonical == DenyAlways))
+        .map(|o| o.id.clone())
+}
+
+/// `POST /api/sessions/{id}/requests/{request_id}`.
+pub async fn answer(
+    app: &AppState,
+    user: &CurrentUser,
+    s: &SessionRow,
+    request_id: &str,
+    body: AnswerBody,
+) -> ApiResult<EventRowOut> {
+    let Some(p) = db::find_open_request(&app.db, s.id, request_id).await? else {
+        return Err(if db::request_exists(&app.db, s.id, request_id).await? {
+            ApiError::Conflict("request_closed", "the request is already closed".into())
+        } else {
+            ApiError::NotFound
+        });
+    };
+    let (frame, ev_type, ev_payload) = match p.kind.as_str() {
+        "approval" => {
+            // Approvals go to the worker owner only (SPEC §10.1, §11).
+            let owner = match s.worker_id {
+                Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
+                None => None,
+            };
+            if owner != Some(user.id) {
+                return Err(ApiError::Forbidden(
+                    "only the worker owner answers approvals".into(),
+                ));
+            }
+            let option_id = body
+                .option_id
+                .ok_or_else(|| ApiError::BadRequest("option_id is required".into()))?;
+            if !options(&p.payload).iter().any(|o| o.id == option_id) {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown option `{option_id}`"
+                )));
+            }
+            (
+                json!({"type": "approval.response",
+                       "payload": {"session_id": s.id, "request_id": request_id, "option_id": option_id}}),
+                "approval.response",
+                json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
+            )
+        }
+        "clarify" => {
+            let answers = body
+                .answers
+                .ok_or_else(|| ApiError::BadRequest("answers is required".into()))?;
+            // Empty answers mean "cancelled by the hub" on the wire (SPEC §5.3).
+            if answers.is_empty() {
+                return Err(ApiError::BadRequest("answers must not be empty".into()));
+            }
+            let answers = serde_json::to_value(answers).map_err(anyhow::Error::from)?;
+            (
+                json!({"type": "clarify.response",
+                       "payload": {"session_id": s.id, "request_id": request_id, "answers": answers}}),
+                "clarify.response",
+                json!({"request_id": request_id, "answers": answers}),
+            )
+        }
+        _ => return Err(ApiError::NotFound),
+    };
+    if !db::close_request(&app.db, p.id, Some(&frame)).await? {
+        return Err(ApiError::Conflict(
+            "request_closed",
+            "the request is already closed".into(),
+        ));
+    }
+    let row = events::store_hub_event(
+        app,
+        s,
+        user_author(user.id),
+        ev_type,
+        ev_payload,
+        None,
+        None,
+    )
+    .await?;
+    deliver_result(
+        app,
+        &PendingRow {
+            result: Some(frame),
+            ..p
+        },
+    )
+    .await;
+    Ok(EventRowOut {
+        event_id: row.event_id,
+        seq: row.seq,
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct EventRowOut {
+    pub event_id: Uuid,
+    pub seq: i64,
+}
+
+/// Close an open request on the hub's initiative.
+pub async fn cancel(app: &AppState, p: &PendingRow, reason: CancelReason) -> anyhow::Result<()> {
+    let Some(s) = db::session(&app.db, p.session_id).await? else {
+        return Ok(());
+    };
+    let (frame, ev_type) = match p.kind.as_str() {
+        "approval" => (
+            deny_option(&p.payload).map(|option_id| {
+                json!({"type": "approval.response",
+                       "payload": {"session_id": s.id, "request_id": p.request_id, "option_id": option_id}})
+            }),
+            "approval.cancel",
+        ),
+        "clarify" => (
+            Some(json!({"type": "clarify.response",
+                        "payload": {"session_id": s.id, "request_id": p.request_id, "answers": {}}})),
+            "clarify.cancel",
+        ),
+        _ => return Ok(()),
+    };
+    if frame.is_none() {
+        tracing::warn!(session_id = %s.id, request_id = %p.request_id, "approval without a deny option: cancelled without a frame");
+    }
+    if !db::close_request(&app.db, p.id, frame.as_ref()).await? {
+        return Ok(());
+    }
+    events::store_hub_event(
+        app,
+        &s,
+        json!({"kind": "system"}),
+        ev_type,
+        json!({"request_id": p.request_id, "reason": reason}),
+        None,
+        None,
+    )
+    .await?;
+    if frame.is_some() {
+        deliver_result(
+            app,
+            &PendingRow {
+                result: frame,
+                ..p.clone()
+            },
+        )
+        .await;
+    }
+    Ok(())
+}
+
+pub async fn cancel_open_of_session(
+    app: &AppState,
+    session_id: Uuid,
+    reason: CancelReason,
+) -> anyhow::Result<()> {
+    for p in db::open_requests_of_session(&app.db, session_id).await? {
+        cancel(app, &p, reason).await?;
+    }
+    Ok(())
+}
+
+/// `auto_approve`: answer with the first `canonical: once` option, `by: auto` (SPEC §10.1).
+pub async fn auto_approve(app: &AppState, s: &SessionRow, request_id: &str) -> anyhow::Result<()> {
+    let Some(p) = db::find_open_request(&app.db, s.id, request_id).await? else {
+        return Ok(());
+    };
+    let Some(opt) = options(&p.payload)
+        .into_iter()
+        .find(|o| o.canonical == hqc_proto::event::ApprovalCanonical::Once)
+    else {
+        return Ok(());
+    };
+    let frame = json!({"type": "approval.response",
+                       "payload": {"session_id": s.id, "request_id": request_id, "option_id": opt.id}});
+    if !db::close_request(&app.db, p.id, Some(&frame)).await? {
+        return Ok(());
+    }
+    events::store_hub_event(
+        app,
+        s,
+        json!({"kind": "system"}),
+        "approval.response",
+        json!({"request_id": request_id, "option_id": opt.id, "by": "auto"}),
+        None,
+        None,
+    )
+    .await?;
+    deliver_result(
+        app,
+        &PendingRow {
+            result: Some(frame),
+            ..p
+        },
+    )
+    .await;
+    Ok(())
+}
+
+/// Send the stored result frame if the worker is connected; it stays undelivered until
+/// the worker's `ack`.
+pub async fn deliver_result(app: &AppState, p: &PendingRow) {
+    let Some(frame) = &p.result else { return };
+    let worker = match p.worker_id {
+        Some(w) => Some(w),
+        None => db::session(&app.db, p.session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.worker_id),
+    };
+    let Some(conn) = worker.and_then(|w| app.workers.get(w)) else {
+        return;
+    };
+    let (Some(t), Some(payload)) = (
+        frame.get("type").and_then(Value::as_str),
+        frame.get("payload"),
+    ) else {
+        return;
+    };
+    let mut st = conn.st.lock().await;
+    let id = conn.send_raw(t, payload);
+    st.replies.insert(id, Reply::Result { pending_id: p.id });
+}
+
+/// Cancel requests whose `expires_at` has passed (SPEC §10.1), every `expiry_interval`.
+pub async fn expiry_loop(app: AppState) {
+    let mut tick = tokio::time::interval(app.config.timing.expiry_interval);
+    loop {
+        tick.tick().await;
+        match db::expired_requests(&app.db).await {
+            Ok(rows) => {
+                for p in rows {
+                    if let Err(e) = cancel(&app, &p, CancelReason::Timeout).await {
+                        tracing::error!(request_id = %p.request_id, error = %e, "cancel expired request");
+                    }
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "expired requests query"),
+        }
+    }
+}

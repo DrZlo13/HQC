@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.9, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.10, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -232,6 +232,18 @@ Keychain, libsecret, DPAPI). Токен отзывается из UI. В `hello`
 несовместимости воркер пишет в лог и в трей «нужно обновление», повторяет попытку
 раз в час и не делает ничего другого; обновление — руками или `hqc-worker update`.
 
+Регистрация по HTTP (маршрут `/worker/*`, без Access, с rate limit):
+- `POST /worker/enroll {name, os}` → `{code, poll_token, expires_at, poll_interval_s}`;
+  `code` — 8 символов `XXXX-XXXX` без похожих букв, живёт 10 минут; `poll_token` —
+  секрет воркера, в базе только хэш.
+- Пользователь вводит код в вебе: `POST /api/workers/enroll/confirm {code, name?}` →
+  `{worker_id, name}`; регистр и дефис в коде не важны.
+- Воркер опрашивает `POST /worker/enroll/poll {poll_token}` → `{status: pending}`,
+  `{status: confirmed, worker_id, token}` (токен выдаётся ровно один раз, в базе только
+  хэш) или `{status: expired}`.
+- `/worker/ws` — заголовок `Authorization: Bearer <token>`; неизвестный или отозванный
+  токен — 401 до апгрейда. `DELETE /api/workers/{id}` отзывает токен и рвёт соединение.
+
 ### 5.2 Гарантии доставки
 Worker → hub:
 - Воркер ведёт **outbox** на диске: событие сначала пишется в outbox, потом отправляется.
@@ -249,7 +261,9 @@ Worker → hub:
   в хранилище из типов ничего не сериализуется, поэтому значения от более нового
   воркера не теряются.
 - `seq` назначает хаб; клиенты видят только события с `seq`.
-- `agent.delta` в outbox не пишется и при обрыве теряется, это допустимо.
+- `agent.delta` в outbox не пишется и при обрыве теряется, это допустимо. Идёт тем же
+  фреймом `event`; хаб отвечает `ack {event_id}` без `seq` и не сохраняет его.
+- Событие для сессии чужого воркера обрабатывается как для неизвестной: `ack` без `seq`.
 
 Hub → worker:
 - `user.message` и `peer.message` хаб хранит с `delivery: pending` и шлёт как
@@ -260,8 +274,21 @@ Hub → worker:
   отвечает `error {retryable: true}`; после **3 неудачных стартов** подряд хаб ставит
   вводу `delivery: failed`, пишет `system` с причиной, сессия переходит в `error`;
   кнопка «повторить» сбрасывает счётчик и возвращает ввод в `pending`.
+- На каждом соединении хаб шлёт `session.start` до первого `session.input` сессии
+  и досылает вводы только после `ack` на него; `session.state {process_state: stopped}`
+  сбрасывает это, и следующий ввод снова начинается с `session.start`. Ответ `error`
+  на `session.input` с `retryable: true` или кодом `agent_start_failed` считается
+  неудачным стартом; иная ошибка помечает этот ввод `failed` (`system` с кодом
+  `input_rejected`). Неудачный старт повторяется через паузу, пока есть `pending`
+  вводы. После третьего подряд все `pending` вводы сессии становятся `failed`,
+  пишется `system` с кодом `agent_start_failed`. Новый ввод после этого получает одну
+  попытку старта; «повторить» (`POST /retry`) обнуляет счётчик.
 - Очередь ввода воркера (§17.2) в памяти; источник истины — `pending` события
   в хабе, перезапуск воркера их не теряет.
+- `hello` хаб считает перезапуском воркера (§17.3): открытые `approval`/`clarify`
+  его сессий отменяются с `worker_restart` (событие плюс фрейм с `deny`), незакрытый
+  ход — `system` с кодом `turn_lost`. Отличить обрыв связи от перезапуска хаб пока
+  не может **[решение]**.
 - Смещения зеркала по каждому файлу jsonl и кэш «файл → cwd» воркер хранит на диске.
 
 MCP-вызовы (worker → hub → worker):
@@ -355,7 +382,9 @@ HTTP API итерации 1 (список не полный; остальное 
   `DELETE /api/workspaces/{id}`
 - `GET /api/search?q=&project=&fuzzy=`
 - `GET/POST/DELETE /api/grants`
-- `POST /api/push/subscribe`
+- `POST /api/push/subscribe` (тело — `PushSubscription.toJSON()`: `{endpoint, keys:
+  {p256dh, auth}}`), `DELETE /api/push/subscribe {endpoint}`, `GET /api/push/vapid` →
+  `{public_key}` (`null`, если push не настроен)
 - позже: `/api/schedules` (ScheduledMessage), `/api/projects/{id}/template`
 
 WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` и получает
@@ -364,6 +393,25 @@ WebSocket `/api/ws`: клиент шлёт `subscribe {session_id, after_seq}` �
 сообщение сразу и сверял с эхом (приём из Agent Host Protocol, §22). Отдельная
 подписка `subscribe_summary {}` даёт `state`, `queue_len` и непрочитанное по сессиям.
 После переподключения клиент повторяет `subscribe` с последним виденным `seq`.
+
+Фреймы `/api/ws` — JSON без `id`:
+- клиент → хаб: `{type: subscribe, session_id, after_seq?}`, `{type: unsubscribe,
+  session_id}`, `{type: subscribe_summary}`, `{type: ping}`;
+- хаб → клиент: `{type: event, event}` — событие как хранится (§3), у `agent.delta` без
+  `seq`; `{type: subscribed, session_id, last_seq}` — история после `after_seq` отдана,
+  дальше живой поток; `{type: delivery, session_id, event_id, seq, delivery,
+  delivered_at}` — изменилась доставка ввода; `{type: summary, sessions[]}` и
+  `{type: session.summary, session}` с `{session_id, project_id, title, state,
+  queue_len, unread, last_seq, last_read_seq}`; `{type: pong}`; `{type: error, code,
+  message, session_id?}`.
+- `unread` — число событий `agent.message`, `approval.request`, `clarify.request`,
+  `peer.message`, `system` с `seq > last_read_seq`.
+
+Ошибки REST: `{error: <code>, message}` с HTTP-статусом; `409` с кодами `archived`,
+`locked_vscode`, `request_closed`, `no_worker`, `no_workspace`. `GET .../events`
+дополнительно принимает `before_seq` (последние `limit` событий до него), ответ
+`{events[], last_seq}`. Повторный `POST /input` с тем же `client_op_id` возвращает
+уже сохранённое событие.
 
 ## 7. MCP-инструменты для агентов
 
@@ -897,6 +945,11 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 
 Событие `status.state` использует тот же набор.
 
+«Идёт ход» хаб ведёт сам: ход открывается `ack` воркера на `session.input` (воркер
+передаёт ввод рантайму по одному на ход, §17.2) и закрывается `agent.message` с
+`final: true`, `status` с `idle` или `error` (последний даёт «ход завершился ошибкой»),
+остановкой процесса. `worker_offline` — у сессии есть воркер и он не подключён сейчас.
+
 ### 17.2 Ввод во время хода **[решение]**
 Ввод из очереди ввода (§7.1), пришедший во время хода, ждёт финального ответа
 и запускает следующий ход; один ход на каждый элемент, в порядке `seq`. Кнопка
@@ -1014,6 +1067,18 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.9 → 0.10 (T2)
+Записано поведение хаба, которое спека не фиксировала. §5.1: HTTP-регистрация воркера
+(`/worker/enroll`, `/worker/enroll/poll`, `/api/workers/enroll/confirm`), токен в
+`Authorization: Bearer`. §5.2: `agent.delta` подтверждается `ack` без `seq`; событие
+для сессии чужого воркера — как для неизвестной; `session.start` перед вводами на каждом
+соединении, ошибки на `session.input`, одна попытка старта для нового ввода после
+`failed`; `hello` считается перезапуском воркера (отмена запросов `worker_restart`,
+`system turn_lost`) **[решение]**. §6: фреймы `/api/ws`, формат ошибок REST,
+`before_seq`, идемпотентность по `client_op_id`, `GET /api/push/vapid` и
+`DELETE /api/push/subscribe`, определение `unread`. §17.1: как хаб определяет «идёт ход».
+Вопросы и принятые решения — `docs/notes/t2-questions.md`.
 
 ### 0.8 → 0.9 (T1)
 Схема `hqc-proto` сверена со спекой, закрыты вопросы T1. §3: `author` с `kind: system`

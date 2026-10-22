@@ -1,0 +1,81 @@
+//! hqc hub core (SPEC §2, §5, §6, §10.1, §16, §17, §20; docs/ITERATION-1.md T2).
+//!
+//! - `/api/*` — people, authenticated by Cloudflare Access (or `HQC_DEV=1`);
+//! - `/worker/*` — workers: enrollment and the `/worker/ws` WebSocket with a bearer token.
+
+use std::sync::Arc;
+
+use axum::{
+    routing::{get, post, put},
+    Router,
+};
+use sqlx::PgPool;
+
+pub mod api;
+pub mod app;
+pub mod auth;
+pub mod client_ws;
+pub mod config;
+pub mod db;
+pub mod delivery;
+pub mod error;
+pub mod events;
+pub mod push;
+pub mod requests;
+pub mod state;
+pub mod worker_ws;
+
+pub use app::AppState;
+pub use config::Config;
+
+pub fn router(app: AppState) -> Router {
+    Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/api/me", get(api::me))
+        .route("/api/projects", get(api::projects))
+        .route("/api/projects/{id}", get(api::project))
+        .route(
+            "/api/projects/{id}/sessions",
+            get(api::project_sessions).post(api::create_session),
+        )
+        .route(
+            "/api/sessions/{id}",
+            get(api::get_session)
+                .patch(api::patch_session)
+                .delete(api::delete_session),
+        )
+        .route("/api/sessions/{id}/events", get(api::session_events))
+        .route("/api/sessions/{id}/input", post(api::input))
+        .route("/api/sessions/{id}/stop", post(api::stop))
+        .route("/api/sessions/{id}/retry", post(api::retry))
+        .route("/api/sessions/{id}/archive", post(api::archive))
+        .route("/api/sessions/{id}/unarchive", post(api::unarchive))
+        .route(
+            "/api/sessions/{id}/requests/{request_id}",
+            post(api::answer_request),
+        )
+        .route("/api/sessions/{id}/read_cursor", put(api::read_cursor))
+        .route("/api/workers", get(api::workers))
+        .route("/api/workers/enroll/confirm", post(api::enroll_confirm))
+        .route(
+            "/api/workers/{id}",
+            axum::routing::delete(api::delete_worker),
+        )
+        .route("/api/push/vapid", get(api::vapid))
+        .route(
+            "/api/push/subscribe",
+            post(api::push_subscribe).delete(api::push_unsubscribe),
+        )
+        .route("/api/ws", get(client_ws::handler))
+        .route("/worker/enroll", post(api::worker_enroll))
+        .route("/worker/enroll/poll", post(api::worker_enroll_poll))
+        .route("/worker/ws", get(worker_ws::handler))
+        .with_state(app)
+}
+
+/// Build the hub state over a migrated pool and start its background tasks.
+pub fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> AppState {
+    let app = AppState::new(db, config, push);
+    tokio::spawn(requests::expiry_loop(app.clone()));
+    app
+}

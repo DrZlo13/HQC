@@ -1,6 +1,6 @@
-//! hqc hub. Skeleton: `/health` only. See docs/ITERATION-1.md task T2 for what goes here.
+//! hqc hub binary: configuration from the environment, see `hqc_hub::Config::from_env`.
 
-use axum::{routing::get, Router};
+use hqc_hub::{config::AuthConfig, db, push, Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -9,10 +9,15 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
         )
         .init();
-    let app = Router::new().route("/health", get(|| async { "ok" }));
-    let addr = std::env::var("HQC_HUB_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".into());
-    tracing::info!(%addr, protocol = hqc_proto::PROTOCOL_VERSION, "hqc-hub listening");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    let config = Config::from_env()?;
+    if let AuthConfig::Dev { email } = &config.auth {
+        tracing::warn!(%email, "HQC_DEV=1: Cloudflare Access is OFF, every request is this user");
+    }
+    let pool = db::connect(&config.database_url).await?;
+    let push = push::from_config(config.vapid.as_ref())?;
+    let listener = tokio::net::TcpListener::bind(&config.listen).await?;
+    tracing::info!(addr = %config.listen, protocol = hqc_proto::PROTOCOL_VERSION, "hqc-hub listening");
+    let app = hqc_hub::start(pool, config, push);
+    axum::serve(listener, hqc_hub::router(app)).await?;
     Ok(())
 }

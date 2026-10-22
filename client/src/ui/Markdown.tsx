@@ -211,7 +211,9 @@ export function CopyButton({ text, label = 'Копировать' }: { text: str
   return (
     <button
       type="button"
-      class="btn-copy"
+      class={`btn-copy ${state === 'idle' ? 'btn-copy-idle' : ''}`}
+      aria-label={label}
+      title={label}
       onClick={(e) =>
         copyText(text, (e.currentTarget as HTMLElement).ownerDocument).then(
           () => setState('done'),
@@ -219,7 +221,16 @@ export function CopyButton({ text, label = 'Копировать' }: { text: str
         )
       }
     >
-      {state === 'done' ? 'Скопировано' : state === 'failed' ? 'Не скопировалось' : label}
+      {state === 'done' ? (
+        'Скопировано'
+      ) : state === 'failed' ? (
+        'Не скопировалось'
+      ) : (
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+        </svg>
+      )}
     </button>
   );
 }

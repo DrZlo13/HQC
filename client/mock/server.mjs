@@ -1,6 +1,8 @@
 // Mock hub for client development: REST and WebSocket /api/ws as in SPEC §6, events built
-// from crates/hqc-proto/examples/wire/*.json. Not a reference implementation of the hub;
-// docs/notes/t5-questions.md lists the shapes it assumes where the spec is silent.
+// from crates/hqc-proto/examples/wire/*.json. Not a reference implementation of the hub,
+// but it speaks the hub's shapes (hqc_proto::client_frame and hqc_proto::api): flat /api/ws
+// frames, `delivery` frames for delivery changes, `{error, message}` errors, the session
+// object of SPEC §6 and the hub's unread rule.
 //
 //   node mock/server.mjs            # listens on MOCK_PORT (default 8787)
 //   MOCK_SPEED=0.2 node mock/...    # scales all scenario delays
@@ -19,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
 const WIRE = join(dirname(fileURLToPath(import.meta.url)), '../../crates/hqc-proto/examples/wire');
+const STATUS = Symbol('status');
 
 export function loadExamples(dir = WIRE) {
   const out = {};
@@ -80,9 +83,16 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return ev;
   }
 
-  /** Re-sends a stored event after a change of `delivery` (same seq and event_id). */
-  function restate(s, ev) {
-    sendTo(s.id, ev);
+  /** A change of `delivery` of a stored input: a `delivery` frame, the event is not re-sent. */
+  function setDelivery(s, ev, delivery) {
+    ev.delivery = delivery;
+    if (delivery === 'delivered') ev.delivered_at = new Date().toISOString();
+    else delete ev.delivered_at;
+    const frame = { type: 'delivery', session_id: s.id, event_id: ev.event_id, seq: ev.seq, delivery };
+    if (ev.delivered_at) frame.delivered_at = ev.delivered_at;
+    const data = JSON.stringify(frame);
+    for (const c of clients) if (c.subs.has(s.id)) c.ws.send(data);
+    pushSummary(s);
   }
 
   function delta(s, text) {
@@ -90,22 +100,31 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   }
 
   function sendTo(sessionId, event) {
-    const data = JSON.stringify({ type: 'event', payload: { event } });
+    const data = JSON.stringify({ type: 'event', event });
     for (const c of clients) if (c.subs.has(sessionId)) c.ws.send(data);
+  }
+
+  /** SPEC §6: the final agent.message, requests, peer messages and system after the cursor. */
+  function isUnread(e) {
+    if (e.type === 'agent.message') return e.payload.final === true;
+    return ['approval.request', 'clarify.request', 'peer.message', 'system'].includes(e.type);
   }
 
   function summaryOf(s) {
     return {
       session_id: s.id,
+      project_id: project.id,
+      title: s.title,
       state: stateOf(s),
       queue_len: s.queue.length,
-      unread: Math.max(0, s.last_seq - s.read_seq),
+      unread: s.events.filter((e) => e.seq > s.read_seq && isUnread(e)).length,
       last_seq: s.last_seq,
+      last_read_seq: s.read_seq,
     };
   }
 
   function pushSummary(s) {
-    const data = JSON.stringify({ type: 'summary', payload: { sessions: [summaryOf(s)] } });
+    const data = JSON.stringify({ type: 'session.summary', session: summaryOf(s) });
     for (const c of clients) if (c.summary) c.ws.send(data);
   }
 
@@ -118,17 +137,36 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return 'idle';
   }
 
+  /** The session object of SPEC §6 (hqc_proto::api::Session, examples/wire/api.session.json). */
   function info(s) {
+    const sum = summaryOf(s);
     return {
       id: s.id,
       project_id: project.id,
+      owner_id: userId,
+      worker_id: ex['hub.hello.ack'].payload.worker_id,
+      cwd: '.',
       title: s.title,
       slug: s.slug,
-      archived: s.archived,
+      agent: {
+        runtime: 'claude_code',
+        runtime_session_id: s.id,
+        process_state: s.turn ? 'running' : 'stopped',
+        disallowed_tools: [],
+        restricted: false,
+        start_failures: 0,
+      },
+      auto_approve: false,
+      wake_on_send: false,
+      locked_by: s.turn ? 'hqc' : 'none',
       last_seq: s.last_seq,
+      archived: s.archived,
+      state: sum.state,
+      queue_len: sum.queue_len,
       last_read_seq: s.read_seq,
-      updated_at: s.events.at(-1)?.ts,
-      ...summaryOf(s),
+      unread: sum.unread,
+      created_at: s.created_at,
+      updated_at: s.events.at(-1)?.ts ?? s.created_at,
     };
   }
 
@@ -144,6 +182,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       title,
       slug: title.toLowerCase().replace(/[^a-z0-9а-я]+/gi, '-').replace(/^-|-$/g, '') || 'session',
       archived: false,
+      created_at: new Date().toISOString(),
       last_seq: 0,
       read_seq: 0,
       events: [],
@@ -178,7 +217,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     store(s, mk(s, 'event.user.message', { text: 'Собери релиз', artifact_ids: [] }, {
       client_op_id: randomUUID(), delivery: 'failed',
     }));
-    store(s, mk(s, 'event.system', { text: 'Ввод не доставлен: агент не стартовал 3 раза', code: 'input_failed' }));
+    store(s, mk(s, 'event.system', {
+      text: 'The agent did not start, input was not delivered: claude: command not found',
+      code: 'agent_start_failed',
+    }));
   }
   newSession('Пустая сессия');
 
@@ -193,10 +235,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   async function runQueue(s) {
     while (s.queue.length && !s.turn) {
       const input = s.queue.shift();
-      input.delivery = 'delivered';
-      input.delivered_at = new Date().toISOString();
-      restate(s, input);
       s.turn = { aborted: false };
+      setDelivery(s, input, 'delivered');
       pushSummary(s);
       try {
         await turn(s, input, s.turn);
@@ -310,6 +350,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     routes.push({ method, re, keys, fn });
   };
   const fail = (status, code, message) => Object.assign(new Error(message), { status, code });
+  /** A reply with a status other than 200. */
+  const withStatus = (status, body) => ({ [STATUS]: status, body });
   const sessionOr404 = (id) => {
     const s = sessions.get(id);
     if (!s) throw fail(404, 'not_found', 'unknown session');
@@ -317,23 +359,23 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   };
 
   route('GET', '/api/me', () => me);
-  route('GET', '/api/projects', () => [project]);
-  route('GET', '/api/projects/:pid/sessions', () => [...sessions.values()].map(info));
+  route('GET', '/api/projects', () => ({ projects: [project] }));
+  route('GET', '/api/projects/:pid/sessions', () => ({ sessions: [...sessions.values()].map(info) }));
   route('POST', '/api/projects/:pid/sessions', (_, body) =>
-    info(newSession(String(body?.title || 'Новая сессия'))));
+    withStatus(201, info(newSession(String(body?.title || 'Новая сессия')))));
   route('GET', '/api/sessions/:id', (p) => info(sessionOr404(p.id)));
   route('GET', '/api/sessions/:id/events', (p, _, q) => {
     const s = sessionOr404(p.id);
     const after = Number(q.get('after_seq') ?? 0);
     const limit = Math.min(1000, Number(q.get('limit') ?? 200));
-    return s.events.filter((e) => e.seq > after).slice(0, limit);
+    return { events: s.events.filter((e) => e.seq > after).slice(0, limit), last_seq: s.last_seq };
   });
   route('POST', '/api/sessions/:id/input', (p, body) => {
     const s = sessionOr404(p.id);
-    if (typeof body?.text !== 'string' || !body.text.trim()) throw fail(400, 'invalid', 'text required');
-    // A resend with the same client_op_id is the same input (t5-questions.md).
+    if (typeof body?.text !== 'string' || !body.text.trim()) throw fail(400, 'bad_request', 'text required');
+    // A resend with the same client_op_id is the same input: the stored event, 200 (SPEC §6).
     const dup = body.client_op_id && s.events.find((e) => e.client_op_id === String(body.client_op_id));
-    if (dup) return { event_id: dup.event_id, seq: dup.seq };
+    if (dup) return { event: dup };
     const ev = store(s, mk(s, 'event.user.message', {
       text: body.text, artifact_ids: body.artifact_ids ?? [],
     }, {
@@ -342,74 +384,87 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       delivery: 'pending',
     }));
     enqueue(s, ev);
-    return { event_id: ev.event_id, seq: ev.seq };
+    return withStatus(201, { event: ev });
   });
+  // Like the hub: open requests are cancelled with `stopped`, the turn ends without a
+  // system event (the runtime reports the interrupted turn as `status idle`).
   route('POST', '/api/sessions/:id/stop', (p) => {
     const s = sessionOr404(p.id);
     if (s.turn) {
       s.turn.aborted = true;
       cancelOpen(s, 'stopped');
       s.turn.onAbort?.();
-      store(s, mk(s, 'event.system', { text: 'Ход прерван', code: 'turn_stopped' }));
     }
-    return {};
+    return { sent: true };
   });
   route('POST', '/api/sessions/:id/retry', (p) => {
     const s = sessionOr404(p.id);
+    let requeued = 0;
     for (const ev of s.events) {
       if (ev.type === 'user.message' && ev.delivery === 'failed') {
-        ev.delivery = 'pending';
-        restate(s, ev);
         s.queue.push(ev);
+        setDelivery(s, ev, 'pending');
+        requeued++;
       }
     }
-    pushSummary(s);
     if (!s.turn) void runQueue(s);
-    return {};
+    return { requeued };
   });
+  // First answer wins; a second one gets 409 request_closed and no event (SPEC §10.1).
   route('POST', '/api/sessions/:id/requests/:rid', (p, body) => {
     const s = sessionOr404(p.id);
     const o = s.open;
-    if (!o || o.request_id !== p.rid) throw fail(409, 'request_closed', 'request is not open');
+    if (!o || o.request_id !== p.rid) {
+      const known = s.events.some((e) => e.payload?.request_id === p.rid && e.type.endsWith('.request'));
+      throw known ? fail(409, 'request_closed', 'the request is already closed') : fail(404, 'not_found', 'not found');
+    }
+    let ev;
     if (o.kind === 'approval') {
       const ok = o.event.payload.options.some((x) => x.id === body?.option_id);
-      if (!ok) throw fail(400, 'invalid', 'unknown option_id');
+      if (!ok) throw fail(400, 'bad_request', `unknown option \`${body?.option_id}\``);
       s.open = null;
-      store(s, mk(s, 'event.approval.response', { request_id: o.request_id, option_id: body.option_id, by: userId }));
+      ev = store(s, mk(s, 'event.approval.response', { request_id: o.request_id, option_id: body.option_id, by: userId }));
       o.resolve({ option_id: body.option_id });
     } else {
-      if (typeof body?.answers !== 'object' || body.answers === null) throw fail(400, 'invalid', 'answers required');
+      const answers = body?.answers;
+      if (typeof answers !== 'object' || answers === null || !Object.keys(answers).length) {
+        throw fail(400, 'bad_request', 'answers must not be empty');
+      }
       s.open = null;
-      store(s, mk(s, 'event.clarify.response', { request_id: o.request_id, answers: body.answers }));
-      o.resolve({ answers: body.answers });
+      ev = store(s, mk(s, 'event.clarify.response', { request_id: o.request_id, answers }));
+      o.resolve({ answers });
     }
-    return {};
+    return { event_id: ev.event_id, seq: ev.seq };
   });
   route('PUT', '/api/sessions/:id/read_cursor', (p, body) => {
     const s = sessionOr404(p.id);
     s.read_seq = Math.min(s.last_seq, Math.max(s.read_seq, Number(body?.last_read_seq) || 0));
     pushSummary(s);
-    return {};
+    return { last_read_seq: s.read_seq };
   });
   route('GET', '/api/artifacts/:id/url', (p) => ({ url: `/api/mock/artifacts/${p.id}` }));
   route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
-  route('GET', '/api/workers', () => [
-    { id: ex['hub.hello.ack'].payload.worker_id, name: 'home-mac', os: 'macos', status: 'online' },
-    ...enrolled,
-  ]);
+  route('GET', '/api/workers', () => ({
+    workers: [
+      { id: ex['hub.hello.ack'].payload.worker_id, name: 'home-mac', os: 'macos', status: 'online' },
+      ...enrolled,
+    ],
+  }));
   route('POST', '/api/workers/enroll/confirm', (_, body) => {
     const code = String(body?.code ?? '').trim().toUpperCase();
-    if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(code)) throw fail(404, 'unknown_code', 'Код не найден или истёк');
+    if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(code)) throw fail(404, 'not_found', 'not found');
     const w = { id: randomUUID(), name: `worker-${code.slice(0, 4).toLowerCase()}`, status: 'offline' };
     enrolled.push(w);
     return { worker_id: w.id, name: w.name };
   });
   route('GET', '/api/push/vapid', () => ({ public_key: vapid }));
   route('POST', '/api/push/subscribe', (_, body) => {
-    if (typeof body?.endpoint !== 'string') throw fail(400, 'invalid', 'endpoint required');
+    if (typeof body?.endpoint !== 'string' || typeof body?.keys?.p256dh !== 'string') {
+      throw fail(400, 'bad_request', 'PushSubscription.toJSON() expected');
+    }
     pushSubscriptions.push(body);
     log(`push subscription stored: ${body.endpoint.slice(0, 60)}...`);
-    return {};
+    return withStatus(201, { id: randomUUID() });
   });
 
   const server = createServer(async (req, res) => {
@@ -419,7 +474,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(data));
     };
-    if (!r) return reply(404, { code: 'not_found', message: `${req.method} ${url.pathname}` });
+    if (!r) return reply(404, { error: 'not_found', message: `${req.method} ${url.pathname}` });
     let body;
     try {
       const chunks = [];
@@ -428,9 +483,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       const m = url.pathname.match(r.re);
       const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
       log(`${req.method} ${url.pathname}`);
-      reply(200, (await r.fn(params, body, url.searchParams)) ?? {});
+      const out = (await r.fn(params, body, url.searchParams)) ?? {};
+      if (STATUS in out) reply(out[STATUS], out.body);
+      else reply(200, out);
     } catch (e) {
-      reply(e.status ?? 500, { code: e.code ?? 'internal', message: e.message });
+      reply(e.status ?? 500, { error: e.code ?? 'internal', message: e.message });
     }
   });
 
@@ -450,28 +507,32 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
         } catch {
           return;
         }
-        const p = f.payload ?? {};
-        const err = (code, message) => ws.send(JSON.stringify({ id: f.id, type: 'error', payload: { code, message } }));
+        // Flat frames (hqc_proto::client_frame), like the hub.
+        const send = (frame) => ws.send(JSON.stringify(frame));
+        const err = (code, message, session_id) =>
+          send(session_id ? { type: 'error', code, message, session_id } : { type: 'error', code, message });
         switch (f.type) {
           case 'subscribe': {
-            const s = sessions.get(p.session_id);
-            if (!s) return err('unknown_session', 'unknown session');
+            const s = sessions.get(f.session_id);
+            if (!s) return err('not_found', 'unknown session', f.session_id);
             c.subs.add(s.id);
-            const after = Number(p.after_seq) || 0;
-            for (const ev of s.events) {
-              if (ev.seq > after) ws.send(JSON.stringify({ type: 'event', payload: { event: ev } }));
-            }
+            const after = Number(f.after_seq) || 0;
+            for (const ev of s.events) if (ev.seq > after) send({ type: 'event', event: ev });
+            send({ type: 'subscribed', session_id: s.id, last_seq: s.last_seq });
             break;
           }
           case 'unsubscribe':
-            c.subs.delete(p.session_id);
+            c.subs.delete(f.session_id);
             break;
           case 'subscribe_summary':
             c.summary = true;
-            ws.send(JSON.stringify({ type: 'summary', payload: { sessions: [...sessions.values()].map(summaryOf) } }));
+            send({ type: 'summary', sessions: [...sessions.values()].map(summaryOf) });
+            break;
+          case 'ping':
+            send({ type: 'pong' });
             break;
           default:
-            err('invalid_frame', `unknown type ${f.type}`);
+            err('invalid_frame', `unknown variant \`${f.type}\``);
         }
       });
     });

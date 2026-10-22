@@ -5,7 +5,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -50,7 +49,14 @@ impl IntoResponse for ApiError {
             ApiError::Internal(_) => "internal error".to_string(),
             other => other.to_string(),
         };
-        (status, Json(json!({"error": code, "message": message}))).into_response()
+        (
+            status,
+            Json(hqc_proto::api::ApiError {
+                error: code.into(),
+                message,
+            }),
+        )
+            .into_response()
     }
 }
 

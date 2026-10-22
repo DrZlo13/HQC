@@ -533,66 +533,103 @@ export function parseFrame(json: unknown): Frame {
 }
 
 // ---- client <-> hub WebSocket /api/ws (SPEC §6) ----------------------------------------
-// The spec names the messages but not their envelope; the client uses the §5 envelope
-// without `id` requirements. See docs/notes/t5-questions.md.
+// Flat JSON objects `{type, ...}` without `id` or `payload`, typed in
+// crates/hqc-proto/src/client_frame.rs; contract examples: examples/wire/client.*.json.
 
 export type ClientFrame =
-  | { id?: string; type: 'subscribe'; payload: { session_id: Uuid; after_seq: number } }
-  | { id?: string; type: 'unsubscribe'; payload: { session_id: Uuid } }
-  | { id?: string; type: 'subscribe_summary'; payload: Record<string, never> };
+  | { type: 'subscribe'; session_id: Uuid; after_seq?: number }
+  | { type: 'unsubscribe'; session_id: Uuid }
+  | { type: 'subscribe_summary' }
+  | { type: 'ping' };
 
-/** Per-session line of `subscribe_summary` (SPEC §6, §17.1). */
+/** Session line of `summary` / `session.summary` (SPEC §6, §17.1). */
 export interface SessionSummary {
   session_id: Uuid;
+  project_id: Uuid;
+  title: string;
   state: SessionState;
   queue_len: number;
   unread: number;
-  last_seq?: number;
+  last_seq: number;
+  last_read_seq: number;
+}
+
+/** A change of `delivery` of a stored input (SPEC §6); the event is not sent again. */
+export interface DeliveryChange {
+  session_id: Uuid;
+  event_id: Uuid;
+  seq: number;
+  delivery: Delivery;
+  delivered_at?: string;
 }
 
 export type ServerFrame =
   | { type: 'event'; event: HqcEvent }
   | { type: 'event.invalid'; error: string; raw: unknown }
+  | { type: 'subscribed'; session_id: Uuid; last_seq: number }
+  | ({ type: 'delivery' } & DeliveryChange)
   | { type: 'summary'; sessions: SessionSummary[] }
-  | { type: 'error'; code: string; message: string }
+  | { type: 'session.summary'; session: SessionSummary }
+  | { type: 'pong' }
+  | { type: 'error'; code: string; message: string; session_id?: Uuid }
   | { type: 'other'; wire_type: string };
 
 export function parseSummary(v: unknown): SessionSummary {
   const s = obj(v, 'summary');
-  const sessionId = optStr(s, 'session_id') ?? str(s, 'id');
   return {
-    session_id: sessionId,
+    session_id: str(s, 'session_id'),
+    project_id: str(s, 'project_id'),
+    title: str(s, 'title'),
     state: tolerantEnum(s, 'state', SESSION_STATES),
-    queue_len: optNum(s, 'queue_len') ?? 0,
-    unread: optNum(s, 'unread') ?? 0,
-    last_seq: optNum(s, 'last_seq'),
+    queue_len: num(s, 'queue_len'),
+    unread: num(s, 'unread'),
+    last_seq: num(s, 'last_seq'),
+    last_read_seq: num(s, 'last_read_seq'),
   };
 }
 
-/** Parses a hub -> client WebSocket message. Tolerant: never throws on unknown types;
- *  an event that fails validation comes back as `event.invalid` so the chat can show it. */
+export function parseDelivery(v: unknown): DeliveryChange {
+  const d = obj(v, 'delivery');
+  return {
+    session_id: str(d, 'session_id'),
+    event_id: str(d, 'event_id'),
+    seq: num(d, 'seq'),
+    delivery: strictEnum(d, 'delivery', DELIVERIES),
+    delivered_at: optStr(d, 'delivered_at'),
+  };
+}
+
+/** Parses a hub -> client WebSocket message. Unknown `type` comes back as `other`; an
+ *  event that fails validation comes back as `event.invalid` so the chat can show it.
+ *  Throws `ProtoError` on a known frame with a wrong shape. */
 export function parseServerFrame(json: unknown): ServerFrame {
   const f = obj(json, 'frame');
   const type = str(f, 'type');
-  const payload = isObj(f.payload) ? f.payload : {};
   switch (type) {
     case 'event': {
-      const raw = isObj(payload.event) ? payload.event : payload;
+      const raw = f.event;
       try {
         return { type, event: parseEvent(raw) };
       } catch (e) {
         return { type: 'event.invalid', error: String((e as Error).message), raw };
       }
     }
-    case 'summary': {
-      const list = Array.isArray(payload.sessions) ? payload.sessions : [payload];
-      return { type, sessions: list.map(parseSummary) };
-    }
+    case 'subscribed':
+      return { type, session_id: str(f, 'session_id'), last_seq: num(f, 'last_seq') };
+    case 'delivery':
+      return { type, ...parseDelivery(f) };
+    case 'summary':
+      return { type, sessions: arr(f, 'sessions').map(parseSummary) };
+    case 'session.summary':
+      return { type, session: parseSummary(f.session) };
+    case 'pong':
+      return { type };
     case 'error':
       return {
         type,
-        code: typeof payload.code === 'string' ? payload.code : 'internal',
-        message: typeof payload.message === 'string' ? payload.message : '',
+        code: str(f, 'code'),
+        message: str(f, 'message'),
+        session_id: optStr(f, 'session_id'),
       };
     default:
       return { type: 'other', wire_type: type };
@@ -600,6 +637,7 @@ export function parseServerFrame(json: unknown): ServerFrame {
 }
 
 // ---- REST shapes (SPEC §3, §6) --------------------------------------------------------
+// Typed in crates/hqc-proto/src/api.rs; contract examples: examples/wire/api.*.json.
 
 export interface Me {
   id: Uuid;
@@ -608,17 +646,19 @@ export interface Me {
   personal_project_id: Uuid;
 }
 
+/** The fields of the hub's session object (SPEC §6) the client uses. */
 export interface SessionInfo {
   id: Uuid;
-  project_id?: Uuid;
+  project_id: Uuid;
   title: string;
-  slug?: string;
+  slug: string;
   state: SessionState;
   queue_len: number;
   unread: number;
   last_seq: number;
+  last_read_seq: number;
   archived: boolean;
-  updated_at?: string;
+  updated_at: string;
 }
 
 export function parseMe(v: unknown): Me {
@@ -633,25 +673,68 @@ export function parseMe(v: unknown): Me {
 
 export function parseSessionInfo(v: unknown): SessionInfo {
   const o = obj(v, 'session');
-  const lastSeq = optNum(o, 'last_seq') ?? 0;
-  const lastRead = optNum(o, 'last_read_seq');
   return {
     id: str(o, 'id'),
-    project_id: optStr(o, 'project_id'),
-    title: optStr(o, 'title') ?? optStr(o, 'slug') ?? '',
-    slug: optStr(o, 'slug'),
-    state: present(o, 'state') ? tolerantEnum(o, 'state', SESSION_STATES) : 'unknown',
-    queue_len: optNum(o, 'queue_len') ?? 0,
-    unread: optNum(o, 'unread') ?? (lastRead !== undefined ? Math.max(0, lastSeq - lastRead) : 0),
-    last_seq: lastSeq,
-    archived: optBool(o, 'archived') ?? false,
-    updated_at: optStr(o, 'updated_at'),
+    project_id: str(o, 'project_id'),
+    title: str(o, 'title'),
+    slug: str(o, 'slug'),
+    state: tolerantEnum(o, 'state', SESSION_STATES),
+    queue_len: num(o, 'queue_len'),
+    unread: num(o, 'unread'),
+    last_seq: num(o, 'last_seq'),
+    last_read_seq: num(o, 'last_read_seq'),
+    archived: bool(o, 'archived'),
+    updated_at: str(o, 'updated_at'),
   };
 }
 
-/** Accepts either a bare array or `{<key>: [...]}`; the hub's list envelope is not fixed yet. */
-export function listOf(v: unknown, key: string): unknown[] {
-  if (Array.isArray(v)) return v;
-  if (isObj(v) && Array.isArray(v[key])) return v[key] as unknown[];
-  throw new ProtoError(`${key}: expected a list`);
+/** `{sessions: [...]}` of `GET /api/projects/{id}/sessions`. */
+export function parseSessionList(v: unknown): SessionInfo[] {
+  return arr(obj(v, 'session list'), 'sessions').map(parseSessionInfo);
+}
+
+/** `{events: [...], last_seq}` of `GET /api/sessions/{id}/events`; events stay raw so that
+ *  one bad event does not hide the page. */
+export function parseEventPage(v: unknown): { events: unknown[]; last_seq: number } {
+  const o = obj(v, 'event page');
+  return { events: arr(o, 'events'), last_seq: num(o, 'last_seq') };
+}
+
+/** `{event}` of `POST /api/sessions/{id}/input`: the stored `user.message`. */
+export function parseInputResponse(v: unknown): HqcEvent {
+  return parseEvent(obj(v, 'input response').event);
+}
+
+/** `{error, message}` of a failed REST call. */
+export function parseApiError(v: unknown): { error: string; message: string } {
+  const o = obj(v, 'error');
+  return { error: str(o, 'error'), message: str(o, 'message') };
+}
+
+/** `{public_key}` of `GET /api/push/vapid`; `null` when the hub has no push. */
+export function parseVapidKey(v: unknown): string | null {
+  const o = obj(v, 'vapid');
+  return o.public_key === null ? null : str(o, 'public_key');
+}
+
+/** Web Push body (SPEC §16), read by public/sw.js; `payload` is the event of SPEC §4. */
+export interface PushMessage {
+  session_id: Uuid;
+  type: string;
+  title?: string;
+  body?: string;
+  tag?: string;
+  payload?: HqcEvent;
+}
+
+export function parsePushMessage(v: unknown): PushMessage {
+  const o = obj(v, 'push');
+  return {
+    session_id: str(o, 'session_id'),
+    type: str(o, 'type'),
+    title: optStr(o, 'title'),
+    body: optStr(o, 'body'),
+    tag: optStr(o, 'tag'),
+    payload: present(o, 'payload') ? parseEvent(o.payload) : undefined,
+  };
 }

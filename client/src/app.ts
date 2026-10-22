@@ -68,10 +68,14 @@ export class AppState {
       }
       this.sessions.set(s.session_id, {
         ...known,
+        title: s.title,
         state: s.state,
         queue_len: s.queue_len,
         unread: s.unread,
-        last_seq: s.last_seq ?? known.last_seq,
+        last_seq: s.last_seq,
+        last_read_seq: s.last_read_seq,
+        // `archived` is the top state of SPEC §17.1, so the summary carries it.
+        archived: s.state === 'archived',
       });
     }
     // A session created elsewhere: fetch the list again for its title.
@@ -83,7 +87,7 @@ export class AppState {
   sortedSessions(): SessionInfo[] {
     return [...this.sessions.values()]
       .filter((s) => !s.archived)
-      .sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? '') || b.last_seq - a.last_seq);
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
   async createSession(title: string): Promise<SessionInfo> {

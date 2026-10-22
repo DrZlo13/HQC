@@ -640,7 +640,8 @@ async fn push_only_without_live_subscription() {
     let (s, _) = hub
         .post(
             "/api/push/subscribe",
-            json!({"endpoint": "https://push.example/sub-1", "keys": {"p256dh": "k", "auth": "a"}}),
+            json!({"endpoint": "https://push.example/sub-1", "expirationTime": null,
+                   "keys": {"p256dh": "k", "auth": "a"}}),
         )
         .await;
     assert_eq!(s, 201);
@@ -666,8 +667,15 @@ async fn push_only_without_live_subscription() {
     {
         let sent = hub.push.sent.lock().unwrap();
         assert_eq!(sent[0].0, "https://push.example/sub-1");
-        assert_eq!(sent[0].1["type"], "approval.request");
-        assert_eq!(sent[0].1["session_id"], sid.as_str());
+        // SPEC §16: {session_id, type, title?, body?, tag?, payload?}, payload = the event.
+        let m: hqc_proto::api::PushMessage = serde_json::from_value(sent[0].1.clone()).unwrap();
+        assert_eq!(m.kind, "approval.request");
+        assert_eq!(m.session_id.to_string(), sid);
+        assert_eq!(m.tag.as_deref(), Some(format!("{sid}:req-1").as_str()));
+        let ev = m.payload.expect("the event fits");
+        assert_eq!(ev["type"], "approval.request");
+        assert_eq!(ev["payload"]["request_id"], "req-1");
+        assert!(ev["seq"].is_u64());
     }
 
     let mut c = FakeClient::connect(&hub).await;
@@ -681,6 +689,94 @@ async fn push_only_without_live_subscription() {
     c.until("event").await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(hub.push.sent.lock().unwrap().len(), 1);
+    hub.finish().await;
+}
+
+/// SPEC §6: a delivery change reaches the subscriber as a `delivery` frame (the event is not
+/// re-sent); unread counts the final agent.message but not the intermediate one; REST and
+/// summary shapes are the hqc-proto types.
+#[tokio::test]
+async fn delivery_frame_unread_and_shapes() {
+    use hqc_proto::{
+        api::{EventPage, InputResponse, Session, SessionList},
+        client_frame::ServerFrame,
+    };
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("shapes").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "hi", "client_op_id": "op-shapes"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let r: InputResponse = serde_json::from_value(r).unwrap();
+    let input_id = r.event["event_id"].clone();
+    let echo = c.until("event").await;
+    assert_eq!(echo["event"], r.event, "the echo is the stored event");
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": input_id}))
+        .await;
+    let d = c.until("delivery").await;
+    match serde_json::from_value::<ServerFrame>(d.clone()).unwrap() {
+        ServerFrame::Delivery {
+            event_id,
+            seq,
+            delivery,
+            delivered_at,
+            ..
+        } => {
+            assert_eq!(event_id.to_string(), input_id.as_str().unwrap());
+            assert_eq!(Some(seq), r.event["seq"].as_u64());
+            assert_eq!(delivery, hqc_proto::event::Delivery::Delivered);
+            assert!(delivered_at.is_some());
+        }
+        other => panic!("not a delivery frame: {other:?}"),
+    }
+
+    let read = hub.session(&sid).await["last_seq"].as_i64().unwrap();
+    hub.put(
+        &format!("/api/sessions/{sid}/read_cursor"),
+        json!({"last_read_seq": read}),
+    )
+    .await;
+    for fin in [false, true] {
+        w.event(agent_event(
+            &sid,
+            "agent.message",
+            json!({"text": "x", "final": fin, "in_reply_to": input_id}),
+        ))
+        .await;
+    }
+    let v: Session = serde_json::from_value(
+        hub.wait_session(&sid, "idle", |v| v["state"] == "idle")
+            .await,
+    )
+    .unwrap();
+    assert_eq!(v.unread, 1, "only the final agent.message is unread");
+
+    let pid = hub.personal_project().await;
+    let (_, list) = hub.get(&format!("/api/projects/{pid}/sessions")).await;
+    let list: SessionList = serde_json::from_value(list).unwrap();
+    assert_eq!(list.sessions[0].summary(), v.summary());
+    let (_, page) = hub.get(&format!("/api/sessions/{sid}/events")).await;
+    let page: EventPage = serde_json::from_value(page).unwrap();
+    assert_eq!(page.last_seq, v.last_seq);
+    let (s, err) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/nope"),
+            json!({"option_id": "x"}),
+        )
+        .await;
+    assert_eq!(s, 404);
+    let err: hqc_proto::api::ApiError = serde_json::from_value(err).unwrap();
+    assert_eq!(err.error, "not_found");
     hub.finish().await;
 }
 

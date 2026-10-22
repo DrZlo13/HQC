@@ -1,0 +1,14 @@
+{
+  "events": [
+    {
+      "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+      "event_id": "0199f3a2-7c10-7000-8000-00000000010f",
+      "seq": 1,
+      "ts": "2026-10-22T09:00:00Z",
+      "author": { "kind": "system" },
+      "type": "system",
+      "payload": { "text": "Session created", "code": "session_created" }
+    }
+  ],
+  "last_seq": 43
+}

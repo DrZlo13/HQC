@@ -5,6 +5,7 @@
 import type {
   ApprovalResponse,
   ClarifyResponse,
+  DeliveryChange,
   EventOf,
   HqcEvent,
   RequestCancel,
@@ -71,20 +72,30 @@ export class Timeline {
     this.changed();
   }
 
-  private applyQuiet(ev: HqcEvent): void {
+  /** The stored input from the reply to `POST /input`. Shown at once, but `lastSeq` stays:
+   *  events before it may still be on their way, and `subscribe` resumes from `lastSeq`. */
+  applyReply(ev: HqcEvent): void {
+    this.applyQuiet(ev, false);
+    this.changed();
+  }
+
+  private applyQuiet(ev: HqcEvent, advance = true): void {
     if (ev.type === 'agent.delta') {
       this.streaming += ev.payload.text;
       return;
     }
     // Clients see only stored events (SPEC §5.2); anything else without seq is dropped.
     if (ev.seq === undefined) return;
-    const known = this.bySeq.get(ev.seq);
-    // The same seq again replaces the stored copy (e.g. a later `delivery`); an older copy
-    // never overrides a newer one.
-    if (known && known.event_id !== ev.event_id) return;
+    // Events are append-only: a seq seen before (REST page and subscribe backlog overlap,
+    // the POST /input reply and its echo) is the same event. Delivery changes come as
+    // separate `delivery` frames, see `applyDelivery`.
+    if (this.bySeq.has(ev.seq)) {
+      if (advance) this.lastSeq = Math.max(this.lastSeq, ev.seq);
+      return;
+    }
     this.bySeq.set(ev.seq, ev);
     this.sorted = null;
-    this.lastSeq = Math.max(this.lastSeq, ev.seq);
+    if (advance) this.lastSeq = Math.max(this.lastSeq, ev.seq);
 
     switch (ev.type) {
       case 'user.message':
@@ -118,6 +129,16 @@ export class Timeline {
         this.fate(ev.payload.request_id).cancel = ev.payload;
         break;
     }
+  }
+
+  /** A `delivery` frame (SPEC §6): new `delivery` / `delivered_at` of a stored input. A
+   *  change for an event not loaded yet is dropped: the event arrives with current fields. */
+  applyDelivery(d: DeliveryChange): void {
+    const ev = this.bySeq.get(d.seq);
+    if (!ev || ev.event_id !== d.event_id) return;
+    this.bySeq.set(d.seq, { ...ev, delivery: d.delivery, delivered_at: d.delivered_at });
+    this.sorted = null;
+    this.changed();
   }
 
   addInvalid(raw: unknown, error: string): void {

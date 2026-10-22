@@ -1,8 +1,15 @@
 // WebSocket /api/ws (SPEC §6): `subscribe {session_id, after_seq}` per open chat,
-// `subscribe_summary {}` for the session list. On every (re)connect the client repeats
-// each subscription from the last `seq` it has seen.
+// `subscribe_summary` for the session list. Frames are flat JSON (crates/hqc-proto
+// client_frame). On every (re)connect the client repeats each subscription from the last
+// `seq` it has seen.
 
-import { parseServerFrame, type ClientFrame, type HqcEvent, type SessionSummary } from './proto';
+import {
+  parseServerFrame,
+  type ClientFrame,
+  type DeliveryChange,
+  type HqcEvent,
+  type SessionSummary,
+} from './proto';
 
 export type ConnState = 'connecting' | 'open' | 'closed';
 
@@ -10,6 +17,8 @@ export interface SessionSubscriber {
   /** Last `seq` applied; read at each (re)subscribe. */
   afterSeq(): number;
   onEvent(ev: HqcEvent): void;
+  /** `delivery` of a stored input changed (the event itself is not sent again). */
+  onDelivery(d: DeliveryChange): void;
   onInvalid(raw: unknown, error: string): void;
   /** The socket dropped: transport-only state (agent.delta) is gone. */
   onReset(): void;
@@ -62,17 +71,18 @@ export class HubSocket {
 
   subscribe(sessionId: string, sub: SessionSubscriber): () => void {
     this.subs.set(sessionId, sub);
-    this.send({ type: 'subscribe', payload: { session_id: sessionId, after_seq: sub.afterSeq() } });
+    this.send({ type: 'subscribe', session_id: sessionId, after_seq: sub.afterSeq() });
     return () => {
       if (this.subs.get(sessionId) !== sub) return;
       this.subs.delete(sessionId);
-      this.send({ type: 'unsubscribe', payload: { session_id: sessionId } });
+      this.send({ type: 'unsubscribe', session_id: sessionId });
     };
   }
 
+  /** `summary` (every session) and `session.summary` (one changed) both come as a list. */
   onSummary(fn: (s: SessionSummary[]) => void): () => void {
     this.summaryListeners.add(fn);
-    if (this.summaryListeners.size === 1) this.send({ type: 'subscribe_summary', payload: {} });
+    if (this.summaryListeners.size === 1) this.send({ type: 'subscribe_summary' });
     return () => this.summaryListeners.delete(fn);
   }
 
@@ -100,9 +110,9 @@ export class HubSocket {
       if (this.ws !== ws) return;
       this.attempt = 0;
       this.setState('open');
-      if (this.summaryListeners.size) this.send({ type: 'subscribe_summary', payload: {} });
+      if (this.summaryListeners.size) this.send({ type: 'subscribe_summary' });
       for (const [id, sub] of this.subs) {
-        this.send({ type: 'subscribe', payload: { session_id: id, after_seq: sub.afterSeq() } });
+        this.send({ type: 'subscribe', session_id: id, after_seq: sub.afterSeq() });
       }
     };
     ws.onmessage = (m) => {
@@ -153,12 +163,19 @@ export class HubSocket {
         if (typeof sid === 'string') this.subs.get(sid)?.onInvalid(frame.raw, frame.error);
         break;
       }
+      case 'delivery':
+        this.subs.get(frame.session_id)?.onDelivery(frame);
+        break;
       case 'summary':
         for (const fn of this.summaryListeners) fn(frame.sessions);
         break;
-      case 'error':
-        console.warn('hub ws error', frame.code, frame.message);
+      case 'session.summary':
+        for (const fn of this.summaryListeners) fn([frame.session]);
         break;
+      case 'error':
+        console.warn('hub ws error', frame.code, frame.message, frame.session_id ?? '');
+        break;
+      // `subscribed`, `pong` and unknown frames need no action.
     }
   }
 }

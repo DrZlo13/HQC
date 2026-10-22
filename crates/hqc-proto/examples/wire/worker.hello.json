@@ -3,7 +3,7 @@
   "type": "hello",
   "payload": {
     "protocol_version": 1,
-    "boot_id": "0199f3a2-7c10-7000-8000-0000000000b1",
+    "boot_id": "0199f3a2-7c10-7000-8000-0000000000c1",
     "capabilities": {
       "claude_code": { "version": "2.1.307" },
       "acp_agents": [],

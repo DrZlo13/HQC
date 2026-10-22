@@ -6,7 +6,7 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseEvent, type HqcEvent } from '../src/proto';
+import { parseEvent, parseServerFrame, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { CANONICAL_LABELS } from '../src/ui/labels';
@@ -247,12 +247,32 @@ describe('messages', () => {
     expect(t.hasFailedDelivery()).toBe(true);
   });
 
-  it('updates delivery when the same event comes again', () => {
+  it('updates delivery from a delivery frame, not from the same event again', () => {
     const t = new Timeline();
-    t.apply(ev('event.user.message', (e) => (e.delivery = 'pending')));
+    t.apply(ev('event.user.message', (e) => ((e.delivery = 'pending'), delete e.delivered_at)));
+    // The same seq again (REST page and backlog overlap) changes nothing.
     t.apply(ev('event.user.message'));
     expect(t.events()).toHaveLength(1);
+    expect(t.events()[0].delivery).toBe('pending');
+    const d = parseServerFrame(JSON.parse(readFileSync(join(WIRE, 'client.delivery.json'), 'utf8')));
+    if (d.type !== 'delivery') throw new Error('not a delivery frame');
+    t.applyDelivery(d);
+    expect(t.events()[0]).toMatchObject({ delivery: 'delivered', delivered_at: d.delivered_at });
+    // A change for another event of the same seq is ignored.
+    t.applyDelivery({ ...d, event_id: 'other', delivery: 'failed' });
     expect(t.events()[0].delivery).toBe('delivered');
+  });
+
+  it('shows the POST /input reply without moving lastSeq', () => {
+    const t = new Timeline();
+    t.apply(ev('event.system', withSeq(1)));
+    t.addPending('op-1', 'Run the tests');
+    t.applyReply(ev('event.user.message', withSeq(5)));
+    expect(t.items().some((i) => i.kind === 'pending')).toBe(false);
+    expect(t.lastSeq).toBe(1);
+    t.apply(ev('event.user.message', withSeq(5)));
+    expect(t.lastSeq).toBe(5);
+    expect(t.events()).toHaveLength(2);
   });
 
   it('renders status and system as lines', () => {

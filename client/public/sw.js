@@ -1,15 +1,16 @@
 // Service worker: Web Push only (SPEC §16). No offline cache: the client is useless without
 // the hub, and a stale cached build talking to a newer hub is worse than a network error.
 //
-// Push payload (JSON) the client expects from the hub; see docs/notes/t5-questions.md:
-//   { session_id, title?, body?, type?, tag? }
-// A raw event of SPEC §4 is accepted too; title and body are then derived from it.
+// Push body (SPEC §16, hqc_proto::api::PushMessage, examples/wire/api.push.json):
+//   { session_id, type, title?, body?, tag?, payload? }
+// `payload` is the event of SPEC §4 (absent if it would not fit a push); without
+// title/body they are derived from `type` and the event's payload.
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
 function describe(d) {
-  const p = d.payload || {};
+  const p = (d.payload && d.payload.payload) || {};
   switch (d.type) {
     case 'approval.request':
       return { title: `Разрешение: ${p.tool || 'инструмент'}`, body: p.description || '' };

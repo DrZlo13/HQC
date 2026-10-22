@@ -11,10 +11,13 @@
 
 use std::sync::Arc;
 
-use hqc_proto::frame::{
-    error_code, HubFrame, PeerPrefix, Runtime, SessionInput, SessionStart, StartMode, WireError,
+use hqc_proto::{
+    client_frame::ServerFrame,
+    frame::{
+        error_code, HubFrame, PeerPrefix, Runtime, SessionInput, SessionStart, StartMode, WireError,
+    },
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
@@ -285,7 +288,7 @@ pub fn notify_delivery(app: &AppState, row: &EventRow) {
 }
 
 /// Client frame for a delivery change (SPEC §6).
-pub fn delivery_frame(n: &Notice) -> Option<Value> {
+pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
     match n {
         Notice::Delivery {
             session_id,
@@ -293,14 +296,13 @@ pub fn delivery_frame(n: &Notice) -> Option<Value> {
             seq,
             delivery,
             delivered_at,
-        } => Some(json!({
-            "type": "delivery",
-            "session_id": session_id,
-            "event_id": event_id,
-            "seq": seq,
-            "delivery": delivery,
-            "delivered_at": delivered_at,
-        })),
+        } => Some(ServerFrame::Delivery {
+            session_id: *session_id,
+            event_id: *event_id,
+            seq: (*seq).max(0) as u64,
+            delivery: serde_json::from_value(Value::String(delivery.clone())).ok()?,
+            delivered_at: *delivered_at,
+        }),
         _ => None,
     }
 }

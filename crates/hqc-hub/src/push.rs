@@ -1,11 +1,12 @@
 //! Web Push (SPEC §16): VAPID-signed, aes128gcm-encrypted notifications on
 //! `approval.request`, `clarify.request`, the final `agent.message` and undelivered input,
-//! unless the user has a live WebSocket subscription to that session.
+//! unless the user has a live WebSocket subscription to that session. The body is
+//! [`PushMessage`]; `client/public/sw.js` shows it.
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use hqc_proto::event::EventKind;
-use serde_json::{json, Value};
+use hqc_proto::{api::PushMessage, event::EventKind};
+use serde_json::Value;
 use uuid::Uuid;
 use web_push::{
     ContentEncoding, PartialVapidSignatureBuilder, SubscriptionInfo, VapidSignatureBuilder,
@@ -149,18 +150,13 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
         }
         _ => return,
     };
-    let approval_like = matches!(
-        kind,
-        EventKind::ApprovalRequest { .. } | EventKind::ClarifyRequest { .. }
-    );
-    let payload = json!({
-        "session_id": s.id,
-        "project_id": s.project_id,
-        "seq": row.seq,
-        "type": row.kind,
-        "title": s.title,
-        "body": body,
-    });
+    let request_id = match kind {
+        EventKind::ApprovalRequest { request_id, .. }
+        | EventKind::ClarifyRequest { request_id, .. } => Some(request_id),
+        _ => None,
+    };
+    let approval_like = request_id.is_some();
+    let payload = message(s, row, request_id.map(String::as_str), body);
     let app = app.clone();
     let session_owner = s.owner_id;
     let session_id = s.id;
@@ -184,6 +180,31 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
             send_to_user(&app, u, &payload).await;
         }
     });
+}
+
+/// Web Push carries at most 4096 bytes after encryption; keep the plaintext under this.
+const MAX_PUSH_BYTES: usize = 3800;
+
+/// The push body (SPEC §16): `{session_id, type, title, body, tag, payload}` with the
+/// stored event as `payload`, left out if the message would not fit a push.
+pub fn message(s: &SessionRow, row: &EventRow, request_id: Option<&str>, body: String) -> Value {
+    let mut m = PushMessage {
+        session_id: s.id,
+        kind: row.kind.clone(),
+        title: Some(s.title.clone()),
+        body: Some(body),
+        // One notification per request; messages of a session replace each other.
+        tag: Some(match request_id {
+            Some(r) => format!("{}:{r}", s.id),
+            None => format!("{}:{}", s.id, row.kind),
+        }),
+        payload: Some(row.to_json()),
+    };
+    let size = |m: &PushMessage| serde_json::to_vec(m).map(|v| v.len()).unwrap_or(usize::MAX);
+    if size(&m) > MAX_PUSH_BYTES {
+        m.payload = None;
+    }
+    serde_json::to_value(m).unwrap_or_default()
 }
 
 async fn send_to_user(app: &AppState, user: Uuid, payload: &Value) {

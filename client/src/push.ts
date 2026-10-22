@@ -7,6 +7,7 @@ export type PushStatus =
   | 'unsupported' // no service worker / PushManager (e.g. iOS outside an installed PWA)
   | 'insecure' // not a secure context: plain HTTP on a LAN address
   | 'denied'
+  | 'hub_off' // the hub has no VAPID keys (`public_key: null`)
   | 'subscribed'
   | 'available';
 
@@ -43,6 +44,7 @@ export async function subscribePush(api: Api): Promise<PushStatus> {
   let sub = await reg.pushManager.getSubscription();
   if (!sub) {
     const key = await api.vapidKey();
+    if (key === null) return 'hub_off';
     sub = await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: base64UrlToBytes(key),

@@ -2,10 +2,13 @@
 // client sends cookies along and never handles tokens itself.
 
 import {
-  listOf,
   parseEvent,
+  parseEventPage,
+  parseInputResponse,
   parseMe,
   parseSessionInfo,
+  parseSessionList,
+  parseVapidKey,
   type ClarifyAnswer,
   type HqcEvent,
   type Me,
@@ -16,6 +19,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** The hub's error code (`{error, message}`, SPEC §6), e.g. `request_closed`. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -64,13 +69,15 @@ export class Api {
       }
     }
     if (!res.ok) {
+      const body = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {};
       const msg =
-        typeof data === 'object' && data !== null && 'message' in data
-          ? String((data as { message: unknown }).message)
+        typeof body.message === 'string'
+          ? body.message
           : typeof data === 'string' && data
             ? data
             : res.statusText;
-      throw new ApiError(res.status, msg || `HTTP ${res.status}`);
+      const code = typeof body.error === 'string' ? body.error : undefined;
+      throw new ApiError(res.status, msg || `HTTP ${res.status}`, code);
     }
     return data;
   }
@@ -80,8 +87,7 @@ export class Api {
   }
 
   async sessions(projectId: string): Promise<SessionInfo[]> {
-    const data = await this.req('GET', `/api/projects/${enc(projectId)}/sessions`);
-    return listOf(data, 'sessions').map(parseSessionInfo);
+    return parseSessionList(await this.req('GET', `/api/projects/${enc(projectId)}/sessions`));
   }
 
   async createSession(projectId: string, title: string): Promise<SessionInfo> {
@@ -97,7 +103,7 @@ export class Api {
     const q = `after_seq=${afterSeq}&limit=${limit}`;
     const data = await this.req('GET', `/api/sessions/${enc(id)}/events?${q}`);
     const page: EventPage = { events: [], invalid: [], maxSeq: afterSeq, count: 0 };
-    for (const raw of listOf(data, 'events')) {
+    for (const raw of parseEventPage(data).events) {
       page.count++;
       const seq = (raw as { seq?: unknown })?.seq;
       if (typeof seq === 'number') page.maxSeq = Math.max(page.maxSeq, seq);
@@ -110,12 +116,14 @@ export class Api {
     return page;
   }
 
-  async input(id: string, text: string, clientOpId: string): Promise<void> {
-    await this.req('POST', `/api/sessions/${enc(id)}/input`, {
+  /** Returns the stored `user.message`; a repeated `client_op_id` returns the same event. */
+  async input(id: string, text: string, clientOpId: string): Promise<HqcEvent> {
+    const data = await this.req('POST', `/api/sessions/${enc(id)}/input`, {
       text,
       artifact_ids: [],
       client_op_id: clientOpId,
     });
+    return parseInputResponse(data);
   }
 
   async stop(id: string): Promise<void> {
@@ -147,18 +155,18 @@ export class Api {
   }
 
   async workers(): Promise<WorkerInfo[]> {
-    return listOf(await this.req('GET', '/api/workers'), 'workers') as WorkerInfo[];
+    const data = (await this.req('GET', '/api/workers')) as { workers?: unknown };
+    if (!Array.isArray(data?.workers)) throw new ApiError(500, 'workers: expected a list');
+    return data.workers as WorkerInfo[];
   }
 
   async enrollConfirm(code: string): Promise<unknown> {
     return this.req('POST', '/api/workers/enroll/confirm', { code });
   }
 
-  async vapidKey(): Promise<string> {
-    const data = (await this.req('GET', '/api/push/vapid')) as { public_key?: string; key?: string };
-    const key = data?.public_key ?? data?.key;
-    if (typeof key !== 'string') throw new ApiError(500, 'VAPID key missing');
-    return key;
+  /** `null`: the hub has no VAPID keys, push is off. */
+  async vapidKey(): Promise<string | null> {
+    return parseVapidKey(await this.req('GET', '/api/push/vapid'));
   }
 
   async pushSubscribe(sub: PushSubscriptionJSON): Promise<void> {

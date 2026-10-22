@@ -44,11 +44,11 @@ it('serves the app and proxies REST', async () => {
 it('proxies the WebSocket', async () => {
   const ws = new WebSocket(`ws://${base}/api/ws`);
   const frame = await new Promise<any>((resolve, reject) => {
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe_summary', payload: {} }));
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe_summary' }));
     ws.onmessage = (m) => resolve(JSON.parse(String(m.data)));
     ws.onerror = () => reject(new Error('ws error'));
   });
   ws.close();
   expect(frame.type).toBe('summary');
-  expect(frame.payload.sessions.length).toBeGreaterThan(0);
+  expect(frame.sessions.length).toBeGreaterThan(0);
 });

@@ -39,6 +39,7 @@ export class ChatSession {
     this.unsubscribe = this.socket.subscribe(this.id, {
       afterSeq: () => t.lastSeq,
       onEvent: (ev) => t.apply(ev),
+      onDelivery: (d) => t.applyDelivery(d),
       onInvalid: (raw, err) => t.addInvalid(raw, err),
       onReset: () => t.reset(),
     });
@@ -71,8 +72,14 @@ export class ChatSession {
     this.timeline.dropPending(clientOpId);
   }
 
+  /** The reply carries the stored event (also for a repeated `client_op_id`), so the
+   *  message is reconciled even if the socket is down; the echo with the same `seq` is a
+   *  no-op. */
   private post(op: string, text: string): void {
-    this.api.input(this.id, text, op).catch((e: Error) => this.timeline.failPending(op, e.message));
+    this.api.input(this.id, text, op).then(
+      (ev) => this.timeline.applyReply(ev),
+      (e: Error) => this.timeline.failPending(op, e.message),
+    );
   }
 
   approve(requestId: string, optionId: string): Promise<void> {

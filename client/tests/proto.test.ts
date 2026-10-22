@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseEvent, parseFrame, parseServerFrame, ProtoError, isKnownType } from '../src/proto';
+import {
+  isKnownType,
+  parseApiError,
+  parseEvent,
+  parseEventPage,
+  parseFrame,
+  parseInputResponse,
+  parsePushMessage,
+  parseServerFrame,
+  parseSessionInfo,
+  parseVapidKey,
+  ProtoError,
+  type ClientFrame,
+} from '../src/proto';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const files = readdirSync(WIRE).filter((f) => f.endsWith('.json'));
@@ -36,13 +49,66 @@ describe('examples/wire', () => {
     });
   }
 
+  // /api/ws frames (hqc_proto::client_frame): what the client sends must be exactly the
+  // example, what the hub sends must parse into the matching frame.
+  const CLIENT_TO_HUB: Record<string, ClientFrame> = {
+    'client.subscribe.json': {
+      type: 'subscribe',
+      session_id: '0199f3a2-7c10-7000-8000-000000000001',
+      after_seq: 41,
+    },
+    'client.unsubscribe.json': { type: 'unsubscribe', session_id: '0199f3a2-7c10-7000-8000-000000000001' },
+    'client.subscribe_summary.json': { type: 'subscribe_summary' },
+    'client.ping.json': { type: 'ping' },
+  };
+  for (const [f, frame] of Object.entries(CLIENT_TO_HUB)) {
+    it(`sends ${f}`, () => expect(frame).toEqual(load(f)));
+  }
+
+  for (const f of files.filter((f) => f.startsWith('client.') && !(f in CLIENT_TO_HUB))) {
+    it(`parses hub frame ${f}`, () => {
+      const raw = load(f) as { type: string };
+      const frame = parseServerFrame(raw);
+      expect(frame.type).toBe(raw.type);
+    });
+  }
+
+  it('reads summary, session.summary and delivery as the hub sends them', () => {
+    const s = parseServerFrame(load('client.summary.json'));
+    expect(s.type === 'summary' && s.sessions[0]).toMatchObject({ state: 'waiting', unread: 2, last_read_seq: 40 });
+    const one = parseServerFrame(load('client.session.summary.json'));
+    expect(one.type === 'session.summary' && one.session.title).toBe('hqc: run the tests');
+    const d = parseServerFrame(load('client.delivery.json'));
+    expect(d).toMatchObject({ type: 'delivery', seq: 42, delivery: 'delivered' });
+  });
+
+  // REST bodies (hqc_proto::api).
+  it('reads the session object', () => {
+    const s = parseSessionInfo(load('api.session.json'));
+    expect(s).toMatchObject({ title: 'hqc: run the tests', state: 'running', unread: 1, archived: false });
+    const sum = (load('client.session.summary.json') as { session: Record<string, unknown> }).session;
+    for (const k of ['project_id', 'title', 'state', 'queue_len', 'unread', 'last_seq', 'last_read_seq']) {
+      expect((s as unknown as Record<string, unknown>)[k], k).toEqual(sum[k]);
+    }
+  });
+
+  it('reads the other REST bodies', () => {
+    expect(parseEventPage(load('api.events.json')).last_seq).toBe(43);
+    const input = parseInputResponse(load('api.input.json'));
+    expect(input.client_op_id).toBe((load('api.input.request.json') as { client_op_id: string }).client_op_id);
+    expect(parseApiError(load('api.error.json')).error).toBe('request_closed');
+    expect(parseVapidKey(load('api.vapid.json'))).toMatch(/^B/);
+    expect(parseVapidKey({ public_key: null })).toBeNull();
+    const push = parsePushMessage(load('api.push.json'));
+    expect(push.payload?.type).toBe(push.type);
+    expect(push.payload?.session_id).toBe(push.session_id);
+    const sub = load('api.push.subscribe.json') as { endpoint: string; keys: Record<string, string> };
+    expect(Object.keys(sub.keys).sort()).toEqual(['auth', 'p256dh']);
+  });
+
   it('parses every example file', () => {
     const unhandled = files.filter(
-      (f) =>
-        !f.startsWith('event.') &&
-        !f.startsWith('hub.') &&
-        !f.startsWith('worker.') &&
-        !f.startsWith('api.enroll.'),
+      (f) => !['event.', 'hub.', 'worker.', 'client.', 'api.'].some((p) => f.startsWith(p)),
     );
     expect(unhandled).toEqual([]);
   });
@@ -80,12 +146,12 @@ describe('tolerance (SPEC §4)', () => {
   it('turns a bad event on the client socket into event.invalid, not an exception', () => {
     const e = structuredClone(approval);
     e.payload.tool = 5;
-    const f = parseServerFrame({ type: 'event', payload: { event: e } });
+    const f = parseServerFrame({ type: 'event', event: e });
     expect(f.type).toBe('event.invalid');
   });
 
   it('ignores unknown server frames', () => {
-    expect(parseServerFrame({ type: 'presence', payload: {} }).type).toBe('other');
+    expect(parseServerFrame({ type: 'presence' }).type).toBe('other');
   });
 
   it('rejects unknown worker frames (frames are strict)', () => {

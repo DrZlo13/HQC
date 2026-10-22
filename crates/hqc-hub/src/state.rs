@@ -1,10 +1,13 @@
 //! Computed session state and queue length (SPEC §17.1). Neither is stored: both are derived
 //! on every read from the session row, its events, open requests and worker presence.
 
-use chrono::{DateTime, Utc};
-use hqc_proto::event::SessionState;
-use serde::Serialize;
-use serde_json::{json, Value};
+use hqc_proto::{
+    api::{Agent, Session},
+    event::SessionState,
+    frame::{LockedBy, ProcessState, Runtime},
+};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
@@ -61,45 +64,9 @@ struct Aggregates {
     unread: i64,
 }
 
-/// A session as the API returns it.
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionView {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub owner_id: Uuid,
-    pub workspace_id: Option<Uuid>,
-    pub worker_id: Option<Uuid>,
-    pub cwd: String,
-    pub title: String,
-    pub slug: String,
-    pub agent: Value,
-    pub auto_approve: bool,
-    pub wake_on_send: bool,
-    pub locked_by: String,
-    pub last_seq: i64,
-    pub archived: bool,
-    pub state: SessionState,
-    pub queue_len: i64,
-    pub last_read_seq: i64,
-    pub unread: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl SessionView {
-    /// The compact form of `subscribe_summary` (SPEC §6).
-    pub fn summary(&self) -> Value {
-        json!({
-            "session_id": self.id,
-            "project_id": self.project_id,
-            "title": self.title,
-            "state": self.state,
-            "queue_len": self.queue_len,
-            "unread": self.unread,
-            "last_seq": self.last_seq,
-            "last_read_seq": self.last_read_seq,
-        })
-    }
+/// A stored enum name (`runtime`, `process_state`, `locked_by`) as its proto type.
+fn stored_enum<T: DeserializeOwned>(name: &str, fallback: T) -> T {
+    serde_json::from_value(Value::String(name.to_string())).unwrap_or(fallback)
 }
 
 async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<Aggregates>> {
@@ -122,12 +89,13 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
     .await
 }
 
-/// Views of the given sessions for `user` (unread is per user), in the order given.
+/// The session objects (SPEC §6) of the given rows for `user` (unread is per user), in the
+/// order given.
 pub async fn views(
     app: &AppState,
     user: Uuid,
     rows: Vec<SessionRow>,
-) -> sqlx::Result<Vec<SessionView>> {
+) -> sqlx::Result<Vec<Session>> {
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let aggs = aggregates(&app.db, user, &ids).await?;
     Ok(rows
@@ -145,7 +113,8 @@ pub async fn views(
                 turn_open: s.turn_open,
                 queue_len: a.queue_len,
             });
-            Some(SessionView {
+            let count = |n: i64| n.max(0) as u64;
+            Some(Session {
                 id: s.id,
                 project_id: s.project_id,
                 owner_id: s.owner_id,
@@ -154,26 +123,27 @@ pub async fn views(
                 cwd: s.cwd,
                 title: s.title,
                 slug: s.slug,
-                agent: json!({
-                    "runtime": s.runtime,
-                    "acp_agent": s.acp_agent,
-                    "model": s.model,
-                    "runtime_session_id": s.runtime_session_id,
-                    "process_state": s.process_state,
-                    "system_prompt": s.system_prompt,
-                    "disallowed_tools": s.disallowed_tools,
-                    "restricted": s.restricted,
-                    "start_failures": s.start_failures,
-                }),
+                agent: Agent {
+                    runtime: stored_enum(&s.runtime, Runtime::ClaudeCode),
+                    acp_agent: s.acp_agent,
+                    model: s.model,
+                    runtime_session_id: s.runtime_session_id,
+                    process_state: stored_enum(&s.process_state, ProcessState::Stopped),
+                    system_prompt: s.system_prompt,
+                    disallowed_tools: serde_json::from_value(s.disallowed_tools)
+                        .unwrap_or_default(),
+                    restricted: s.restricted,
+                    start_failures: s.start_failures.max(0) as u32,
+                },
                 auto_approve: s.auto_approve,
                 wake_on_send: s.wake_on_send,
-                locked_by: s.locked_by,
-                last_seq: s.last_seq,
+                locked_by: stored_enum(&s.locked_by, LockedBy::None),
+                last_seq: count(s.last_seq),
                 archived: s.archived,
                 state,
-                queue_len: a.queue_len,
-                last_read_seq: a.last_read_seq,
-                unread: a.unread,
+                queue_len: count(a.queue_len),
+                last_read_seq: count(a.last_read_seq),
+                unread: count(a.unread),
                 created_at: s.created_at,
                 updated_at: s.updated_at,
             })
@@ -181,11 +151,7 @@ pub async fn views(
         .collect())
 }
 
-pub async fn view(
-    app: &AppState,
-    user: Uuid,
-    row: SessionRow,
-) -> sqlx::Result<Option<SessionView>> {
+pub async fn view(app: &AppState, user: Uuid, row: SessionRow) -> sqlx::Result<Option<Session>> {
     Ok(views(app, user, vec![row]).await?.pop())
 }
 

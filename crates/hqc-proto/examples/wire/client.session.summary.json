@@ -1,0 +1,13 @@
+{
+  "type": "session.summary",
+  "session": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "project_id": "0199f3a2-7c10-7000-8000-0000000000d1",
+    "title": "hqc: run the tests",
+    "state": "running",
+    "queue_len": 0,
+    "unread": 1,
+    "last_seq": 43,
+    "last_read_seq": 42
+  }
+}

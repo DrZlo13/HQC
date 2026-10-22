@@ -1,19 +1,16 @@
-//! `/api/ws` (SPEC §6): live events for clients.
+//! `/api/ws` (SPEC §6): live events for clients. Frames are flat JSON objects, typed in
+//! [`hqc_proto::client_frame`].
 //!
-//! Client -> hub (JSON text frames):
-//! - `{"type": "subscribe", "session_id", "after_seq"?}` — stored events with
-//!   `seq > after_seq` (default 0), then `{"type": "subscribed", "session_id", "last_seq"}`,
-//!   then the live stream: stored events, `agent.delta` (no `seq`), delivery changes;
-//! - `{"type": "unsubscribe", "session_id"}`;
-//! - `{"type": "subscribe_summary"}` — `{"type": "summary", "sessions": [...]}` with `state`,
-//!   `queue_len` and unread of every session of the user, then `{"type": "session.summary",
-//!   "session": {...}}` whenever one of them changes;
-//! - `{"type": "ping"}` -> `{"type": "pong"}`.
+//! - `subscribe {session_id, after_seq?}` — stored events with `seq > after_seq` (default 0),
+//!   then `subscribed {session_id, last_seq}`, then the live stream: stored events,
+//!   `agent.delta` (no `seq`), `delivery` changes of inputs;
+//! - `unsubscribe {session_id}`;
+//! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
+//!   `session.summary {session}` whenever one of them changes;
+//! - `ping` -> `pong`.
 //!
-//! Hub -> client: `{"type": "event", "event": {...}}` (the event exactly as stored, see
-//! SPEC §3 Event; `client_op_id` echoes the input that created it),
-//! `{"type": "delivery", "session_id", "event_id", "seq", "delivery", "delivered_at"}`,
-//! `{"type": "error", "code", "message", "session_id"?}`.
+//! An `event` frame carries the event exactly as stored (SPEC §3 Event); `client_op_id`
+//! echoes the input that created it. Errors: `error {code, message, session_id?}`.
 
 use std::collections::HashMap;
 
@@ -24,8 +21,7 @@ use axum::{
     },
     response::Response,
 };
-use serde::Deserialize;
-use serde_json::{json, Value};
+use hqc_proto::client_frame::{ClientFrame, ServerFrame};
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
@@ -34,23 +30,6 @@ use crate::{
     auth::CurrentUser,
     db, delivery, state,
 };
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum ClientFrame {
-    #[serde(rename = "subscribe")]
-    Subscribe {
-        session_id: Uuid,
-        #[serde(default)]
-        after_seq: Option<i64>,
-    },
-    #[serde(rename = "unsubscribe")]
-    Unsubscribe { session_id: Uuid },
-    #[serde(rename = "subscribe_summary")]
-    SubscribeSummary {},
-    #[serde(rename = "ping")]
-    Ping {},
-}
 
 const BACKFILL_PAGE: i64 = 500;
 
@@ -106,17 +85,23 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket) {
 }
 
 impl Client {
-    async fn send(&mut self, v: Value) -> bool {
-        self.socket
-            .send(Message::Text(v.to_string().into()))
-            .await
-            .is_ok()
+    async fn send(&mut self, f: ServerFrame) -> bool {
+        let text = match serde_json::to_string(&f) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(error = %e, "serialize client frame");
+                return true;
+            }
+        };
+        self.socket.send(Message::Text(text.into())).await.is_ok()
     }
 
     async fn error(&mut self, code: &str, message: &str, session_id: Option<Uuid>) -> bool {
-        self.send(
-            json!({"type": "error", "code": code, "message": message, "session_id": session_id}),
-        )
+        self.send(ServerFrame::Error {
+            code: code.into(),
+            message: message.into(),
+            session_id,
+        })
         .await
     }
 
@@ -126,7 +111,7 @@ impl Client {
             Err(e) => return self.error("invalid_frame", &e.to_string(), None).await,
         };
         match f {
-            ClientFrame::Ping {} => self.send(json!({"type": "pong"})).await,
+            ClientFrame::Ping {} => self.send(ServerFrame::Pong {}).await,
             ClientFrame::Subscribe {
                 session_id,
                 after_seq,
@@ -147,7 +132,10 @@ impl Client {
                 }
                 if self
                     .subs
-                    .insert(session_id, after_seq.unwrap_or(0).max(0))
+                    .insert(
+                        session_id,
+                        i64::try_from(after_seq.unwrap_or(0)).unwrap_or(i64::MAX),
+                    )
                     .is_none()
                 {
                     self.app.watch(self.user.id, session_id, true);
@@ -155,9 +143,12 @@ impl Client {
                 if !self.backfill(session_id).await {
                     return false;
                 }
-                let last = self.subs[&session_id];
-                self.send(json!({"type": "subscribed", "session_id": session_id, "last_seq": last}))
-                    .await
+                let last_seq = self.subs[&session_id].max(0) as u64;
+                self.send(ServerFrame::Subscribed {
+                    session_id,
+                    last_seq,
+                })
+                .await
             }
             ClientFrame::Unsubscribe { session_id } => {
                 if self.subs.remove(&session_id).is_some() {
@@ -190,10 +181,7 @@ impl Client {
             };
             let n = rows.len() as i64;
             for r in rows {
-                if !self
-                    .send(json!({"type": "event", "event": r.to_json()}))
-                    .await
-                {
+                if !self.send(ServerFrame::Event { event: r.to_json() }).await {
                     return false;
                 }
                 self.subs.insert(session_id, r.seq);
@@ -214,12 +202,15 @@ impl Client {
                 let Some(&last) = self.subs.get(session_id) else {
                     return true;
                 };
+                let frame = || ServerFrame::Event {
+                    event: event.clone(),
+                };
                 match seq {
-                    None => self.send(json!({"type": "event", "event": event})).await,
+                    None => self.send(frame()).await,
                     Some(seq) if *seq <= last => true,
                     Some(seq) if *seq == last + 1 => {
                         self.subs.insert(*session_id, *seq);
-                        self.send(json!({"type": "event", "event": event})).await
+                        self.send(frame()).await
                     }
                     // A gap: notices of concurrent writers can arrive out of order.
                     Some(_) => self.backfill(*session_id).await,
@@ -244,8 +235,10 @@ impl Client {
                 };
                 match state::view(&self.app, self.user.id, row).await {
                     Ok(Some(v)) => {
-                        self.send(json!({"type": "session.summary", "session": v.summary()}))
-                            .await
+                        self.send(ServerFrame::SessionSummary {
+                            session: v.summary(),
+                        })
+                        .await
                     }
                     _ => true,
                 }
@@ -260,9 +253,8 @@ impl Client {
         };
         match views {
             Ok(v) => {
-                let sessions: Vec<Value> = v.iter().map(|v| v.summary()).collect();
-                self.send(json!({"type": "summary", "sessions": sessions}))
-                    .await
+                let sessions = v.iter().map(|v| v.summary()).collect();
+                self.send(ServerFrame::Summary { sessions }).await
             }
             Err(e) => {
                 tracing::error!(error = %e, "summary");

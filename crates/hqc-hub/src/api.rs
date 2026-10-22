@@ -13,7 +13,11 @@ use axum::{
 };
 use chrono::Utc;
 use hqc_proto::{
-    api::{self, EnrollPollRequest, EnrollRequest, EnrollStarted},
+    api::{
+        self, EnrollConfirmRequest, EnrollConfirmed, EnrollPollRequest, EnrollRequest,
+        EnrollStarted, EventPage, InputRequest, InputResponse, PushSubscription, SessionList,
+        VapidKey,
+    },
     event::CancelReason,
     frame::HubFrame,
 };
@@ -93,15 +97,15 @@ pub async fn project_sessions(
     State(app): State<AppState>,
     user: CurrentUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SessionList>> {
     match db::project(&app.db, id).await? {
         Some(p) if p.owner_id == user.id => {}
         _ => return Err(ApiError::NotFound),
     }
     let rows = db::sessions_of_project(&app.db, id).await?;
-    Ok(Json(
-        json!({ "sessions": state::views(&app, user.id, rows).await? }),
-    ))
+    Ok(Json(SessionList {
+        sessions: state::views(&app, user.id, rows).await?,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,35 +292,29 @@ pub async fn session_events(
     user: CurrentUser,
     Path(id): Path<Uuid>,
     Query(q): Query<EventsQuery>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<EventPage>> {
     let s = session_for(&app, &user, id, Action::Read).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let rows = match q.before_seq {
         Some(b) => db::events_before(&app.db, id, b, limit).await?,
         None => db::events_after(&app.db, id, q.after_seq.unwrap_or(0), limit).await?,
     };
-    let events: Vec<Value> = rows.iter().map(|r| r.to_json()).collect();
-    Ok(Json(json!({ "events": events, "last_seq": s.last_seq })))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct InputBody {
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub artifact_ids: Vec<Uuid>,
-    pub client_op_id: Option<String>,
+    Ok(Json(EventPage {
+        events: rows.iter().map(|r| r.to_json()).collect(),
+        last_seq: s.last_seq.max(0) as u64,
+    }))
 }
 
 /// `POST /api/sessions/{id}/input`: stored as `user.message` with `delivery: pending`
 /// and delivered when the worker is there (SPEC §5.2). A repeated `client_op_id` returns
-/// the event stored the first time.
+/// the event stored the first time, with 200 instead of 201.
 pub async fn input(
     State(app): State<AppState>,
     user: CurrentUser,
     Path(id): Path<Uuid>,
-    Json(b): Json<InputBody>,
-) -> ApiResult<impl IntoResponse> {
+    Json(b): Json<InputRequest>,
+) -> ApiResult<(StatusCode, Json<InputResponse>)> {
+    let reply = |status, r: &db::EventRow| (status, Json(InputResponse { event: r.to_json() }));
     let s = session_for(&app, &user, id, Action::Write).await?;
     if s.archived {
         return Err(ApiError::Conflict(
@@ -338,7 +336,7 @@ pub async fn input(
     let op = b.client_op_id.filter(|c| !c.is_empty());
     if let Some(op) = &op {
         if let Some(r) = db::event_by_client_op(&app.db, id, op).await? {
-            return Ok((StatusCode::OK, Json(json!({ "event": r.to_json() }))));
+            return Ok(reply(StatusCode::OK, &r));
         }
     }
     let stored = events::store_hub_event(
@@ -357,14 +355,14 @@ pub async fn input(
             // Lost a race on the same client_op_id.
             if let Some(op) = &op {
                 if let Some(r) = db::event_by_client_op(&app.db, id, op).await? {
-                    return Ok((StatusCode::OK, Json(json!({ "event": r.to_json() }))));
+                    return Ok(reply(StatusCode::OK, &r));
                 }
             }
             return Err(e.into());
         }
     };
     delivery::kick(&app, id, false).await;
-    Ok((StatusCode::CREATED, Json(json!({ "event": row.to_json() }))))
+    Ok(reply(StatusCode::CREATED, &row))
 }
 
 /// Abort the current turn; open requests are cancelled with `stopped`.
@@ -484,24 +482,18 @@ pub async fn workers(State(app): State<AppState>, user: CurrentUser) -> ApiResul
     Ok(Json(json!({ "workers": ws })))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct EnrollConfirm {
-    pub code: String,
-    pub name: Option<String>,
-}
-
 pub async fn enroll_confirm(
     State(app): State<AppState>,
     user: CurrentUser,
-    Json(b): Json<EnrollConfirm>,
-) -> ApiResult<Json<Value>> {
+    Json(b): Json<EnrollConfirmRequest>,
+) -> ApiResult<Json<EnrollConfirmed>> {
     let code = normalize_enroll_code(&b.code);
     let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let (worker_id, name) = db::enroll_confirm(&app.db, &code, user.id, name)
         .await?
         .ok_or(ApiError::NotFound)?;
     tracing::info!(%worker_id, user = %user.id, "worker enrollment confirmed");
-    Ok(Json(json!({ "worker_id": worker_id, "name": name })))
+    Ok(Json(EnrollConfirmed { worker_id, name }))
 }
 
 /// Revoke the worker's token and drop its connection (SPEC §5.1).
@@ -590,27 +582,17 @@ pub async fn worker_enroll_poll(
 
 // ---------------------------------------------------------------- push
 
-pub async fn vapid(State(app): State<AppState>, _user: CurrentUser) -> Json<Value> {
-    Json(json!({ "public_key": app.push.public_key() }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PushKeys {
-    pub p256dh: String,
-    pub auth: String,
+pub async fn vapid(State(app): State<AppState>, _user: CurrentUser) -> Json<VapidKey> {
+    Json(VapidKey {
+        public_key: app.push.public_key(),
+    })
 }
 
 /// The browser's `PushSubscription.toJSON()`.
-#[derive(Debug, Deserialize)]
-pub struct PushSubscribe {
-    pub endpoint: String,
-    pub keys: PushKeys,
-}
-
 pub async fn push_subscribe(
     State(app): State<AppState>,
     user: CurrentUser,
-    Json(b): Json<PushSubscribe>,
+    Json(b): Json<PushSubscription>,
 ) -> ApiResult<impl IntoResponse> {
     if !b.endpoint.starts_with("https://") {
         return Err(ApiError::BadRequest("endpoint must be https".into()));

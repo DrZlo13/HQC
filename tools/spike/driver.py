@@ -14,7 +14,7 @@ cmd = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stre
        "--permission-prompts", "host", "--include-partial-messages",
        "--replay-user-messages", "--verbose", "--model", "claude-haiku-5-5",
        "--max-turns", "2", "--session-id", sid] + extra
-json.dump({"cmd": cmd, "cwd": cwd, "session_id": sid, "policy": policy,
+json.dump({"cmd": cmd, "cwd": os.path.abspath(cwd), "session_id": sid, "policy": policy,
            "env": {k: v for k, v in os.environ.items() if k.startswith("MCP_")}},
           open(f"{out}/run.json", "w"), indent=1)
 

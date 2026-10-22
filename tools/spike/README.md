@@ -50,5 +50,30 @@ MCP_TOOL_TIMEOUT=3000 tools/spike/driver.py OUT . none \
   -- --permission-prompt-tool stdio --strict-mcp-config --mcp-config "$CFG" --allowedTools mcp__hqc
 ```
 
-Before turning a run into a fixture, scrub it as described in
-`crates/hqc-claude-jsonl/fixtures/README.md`.
+## sanitize.py
+
+Turns driver runs into fixtures following `crates/hqc-claude-jsonl/fixtures/README.md`. All
+paths come from arguments; nothing is tied to a machine.
+
+```
+tools/spike/sanitize.py --runs RUNS_DIR --out crates/hqc-claude-jsonl/fixtures \
+  --cli-version 2.1.307 [--projects ~/.claude/projects] [--replace OLD=NEW ...] \
+  NAME=RUN [NAME=RUN ...]
+```
+
+For each `NAME=RUN` (`RUN` is a driver `OUT_DIR` under `RUNS_DIR`) it finds the transcript by
+the session id in `run.json` and writes `<NAME>-<ver>.jsonl`, `stream-<NAME>-<ver>.jsonl`
+and `stdin-<NAME>-<ver>.jsonl`. On the way it:
+
+- drops `api-request*` records;
+- replaces `attachment` and `rendered` of attachment records and the file-history snapshot
+  with `{"stripped":true}`;
+- drops every key containing `hook` (`hookInfos` and the like) and `system` hook events;
+- trims `system/init` to a few fields;
+- rewrites the run's cwd (and its `/private` and folder-name forms) to
+  `/tmp/hqc-fixture/<NAME>`, then applies `--replace`, then `/Users/<name>` and
+  `/home/<name>` to `/Users/user`, `/home/user`, and emails to `user@example.com`.
+
+Finally it re-reads the written files and checks for each of those signs; if anything is left
+it prints `LEFT file:line: reason` lines and exits with code 1. Review the diff before
+committing anyway: the check knows only these patterns.

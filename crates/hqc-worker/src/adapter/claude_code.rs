@@ -41,6 +41,7 @@ use self::engine::{Action, Core};
 use self::process::{CommandSpec, ExitInfo, OsSpawner, Sig, SignalFn, Spawner};
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
 use crate::config::{Config, StartSpec};
+use crate::permissions::{PermissionMode, Permissions, Policy};
 
 const KILL_GRACE: Duration = Duration::from_secs(5);
 /// How long the output of an exited process is still read when its stdout stays open
@@ -91,12 +92,16 @@ pub struct ClaudeOptions {
     pub extra_args: Vec<String>,
     /// `--permission-mode`, always passed so that a `defaultMode` from settings
     /// (`bypassPermissions`, `acceptEdits`) does not apply: the CLI's "ask" mode, `default`
-    /// or `manual` by version ([`crate::capabilities::claude_permission_mode`]).
+    /// or `manual` by version ([`crate::capabilities::claude_permission_mode`]), or `auto`
+    /// with `[permissions] mode = "auto"`.
     pub permission_mode: String,
     /// Tools disallowed in every session on top of `session.start.disallowed_tools`. By
     /// default Claude Code's own cross-session messaging, which bypasses the hub
     /// (`allow_native_messaging` in the worker config keeps it).
     pub always_disallowed: Vec<String>,
+    /// `[permissions]` of the worker config: the lists go to `--settings`, the adapter
+    /// reads them for `policy_hint` ([`Policy`]).
+    pub permissions: Permissions,
     /// Interrupt → SIGINT fallback delay.
     pub stop_grace: Duration,
     /// A process that dies this soon after spawning fails `start` instead of being
@@ -116,6 +121,7 @@ impl Default for ClaudeOptions {
                 .iter()
                 .map(|t| t.to_string())
                 .collect(),
+            permissions: Permissions::default(),
             stop_grace: Duration::from_secs(10),
             early_exit: Duration::from_millis(500),
         }
@@ -126,22 +132,29 @@ impl Default for ClaudeOptions {
 #[derive(Clone)]
 pub struct ClaudeCodeAdapters {
     opts: Arc<ClaudeOptions>,
+    policy: Arc<Policy>,
     spawner: Arc<dyn Spawner>,
 }
 
 impl ClaudeCodeAdapters {
     pub fn new(opts: ClaudeOptions, spawner: Arc<dyn Spawner>) -> Self {
         Self {
+            policy: Arc::new(Policy::new(&opts.permissions)),
             opts: Arc::new(opts),
             spawner,
         }
     }
 
+    /// `permission_mode`: the CLI's "ask" mode, used unless `[permissions] mode = "auto"`.
     pub fn from_config(cfg: &Config, permission_mode: String) -> Self {
         Self::new(
             ClaudeOptions {
                 claude_bin: cfg.claude_bin.clone(),
-                permission_mode,
+                permission_mode: match cfg.permissions.mode {
+                    PermissionMode::Ask => permission_mode,
+                    PermissionMode::Auto => "auto".into(),
+                },
+                permissions: cfg.permissions.clone(),
                 always_disallowed: if cfg.allow_native_messaging {
                     vec![]
                 } else {
@@ -166,6 +179,7 @@ impl AdapterFactory for ClaudeCodeAdapters {
         Box::new(ClaudeCodeAdapter {
             session_id: spec.session_id,
             opts: self.opts.clone(),
+            policy: self.policy.clone(),
             spawner: self.spawner.clone(),
             events,
             proc: None,
@@ -176,6 +190,7 @@ impl AdapterFactory for ClaudeCodeAdapters {
 pub struct ClaudeCodeAdapter {
     session_id: Uuid,
     opts: Arc<ClaudeOptions>,
+    policy: Arc<Policy>,
     spawner: Arc<dyn Spawner>,
     events: EventSink,
     proc: Option<Proc>,
@@ -252,6 +267,8 @@ impl ClaudeCodeAdapter {
     ///   rules `always` writes;
     /// - `restricted` → `--restricted` (no command-running tools, file tools confined to the
     ///   working directory, no settings files; SPEC §8.4);
+    /// - `[permissions]` allow/deny → `--settings`, in restricted mode too (the CLI applies
+    ///   `--settings` there, checked on 2.1.308);
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(&self, spec: &StartSpec, uuid: &Uuid, resume: bool) -> CommandSpec {
@@ -285,6 +302,9 @@ impl ClaudeCodeAdapter {
             // Variadic: the entries run up to the next flag.
             args.push("--disallowedTools".into());
             args.extend(disallowed);
+        }
+        if let Some(settings) = self.opts.permissions.settings_json() {
+            args.extend(["--settings".into(), settings]);
         }
         if spec.restricted {
             args.push("--restricted".into());
@@ -345,7 +365,9 @@ impl ClaudeCodeAdapter {
             "claude started"
         );
 
-        let core = Arc::new(Mutex::new(Core::new(self.session_id, spec.restricted)));
+        let core = Arc::new(Mutex::new(
+            Core::new(self.session_id, spec.restricted).with_policy(self.policy.clone()),
+        ));
         let io = Arc::new(Io {
             session_id: self.session_id,
             stdin: tokio::sync::Mutex::new(spawned.stdin),

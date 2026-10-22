@@ -384,3 +384,136 @@ async fn live_bash_turn_with_approval() {
     println!("resume: process stayed up, killed");
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// T12 (SPEC §8.1, §14): `[permissions]` through `--settings`. One turn, three `touch`
+/// calls: the one in `deny` neither runs nor asks (`system policy_denied`), the one in
+/// `allow` runs without `approval.request`, the one in neither list asks.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_permission_policy -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_permission_policy() {
+    use hqc_worker::permissions::{PermissionMode, Permissions};
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    let work = root.join(format!("spike-t12-live-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&work).unwrap();
+    let work = work.canonicalize().unwrap();
+    // Its own repository, so that nothing reads or writes the hqc checkout's settings.
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&work)
+        .status()
+        .unwrap()
+        .success());
+
+    let mut deny = Permissions::default().deny;
+    deny.push("Bash(touch hqc-denied:*)".into());
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        permissions: Permissions {
+            mode: PermissionMode::Ask,
+            allow: vec!["Bash(touch hqc-allowed:*)".into()],
+            deny,
+        },
+        ..ClaudeOptions::default()
+    };
+    let spawner = Arc::new(Recording::default());
+    let factory = ClaudeCodeAdapters::new(opts, spawner.clone());
+    let session_id = Uuid::now_v7();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: work.clone(),
+        workdir: work.clone(),
+        environment: "default".into(),
+        runtime_session_id: Some(Uuid::new_v4().to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: false,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+    adapter
+        .input(&SessionInput {
+            session_id,
+            event_id: Uuid::now_v7(),
+            text: "In ONE message, make exactly these three Bash tool calls in parallel, each \
+                   command verbatim as its own call: (1) touch hqc-allowed (2) touch hqc-denied \
+                   (3) touch hqc-asked. Then reply with exactly: DONE"
+                .into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+        })
+        .await
+        .unwrap();
+
+    let mut asked = Vec::new();
+    let mut system = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("turn did not end in 180 s")
+            .expect("channel closed");
+        match &ev {
+            AdapterEvent::Event(e) => match &e.kind {
+                EventKind::ApprovalRequest {
+                    request_id,
+                    description,
+                    policy_hint,
+                    ..
+                } => {
+                    println!("approval.request {description:?} hint {policy_hint:?} -> once");
+                    asked.push(description.clone());
+                    adapter.answer_approval(request_id, "once").await.unwrap();
+                }
+                EventKind::System { code, text } => {
+                    println!("system {code}: {text}");
+                    system.push((code.clone(), text.clone()));
+                }
+                EventKind::ToolCall { args_preview, .. } => println!("tool.call {args_preview}"),
+                EventKind::ToolResult { result_preview, .. } => {
+                    println!("tool.result {result_preview}")
+                }
+                _ => {}
+            },
+            AdapterEvent::TurnEnded => break,
+            AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+            _ => {}
+        }
+    }
+    adapter.kill().await.unwrap();
+    let cmd = spawner.0.lock().unwrap()[0].clone();
+    println!("claude {}", cmd.args.join(" "));
+
+    assert!(work.join("hqc-allowed").exists(), "the allowed command ran");
+    assert!(!work.join("hqc-denied").exists(), "the denied command ran");
+    assert!(
+        work.join("hqc-asked").exists(),
+        "the asked command ran after once"
+    );
+    assert_eq!(
+        asked.len(),
+        1,
+        "only the command outside both lists asks: {asked:?}"
+    );
+    assert!(asked[0].contains("hqc-asked"), "{asked:?}");
+    assert!(
+        system
+            .iter()
+            .any(|(c, t)| c == "policy_denied" && t.contains("hqc-denied")),
+        "{system:?}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}

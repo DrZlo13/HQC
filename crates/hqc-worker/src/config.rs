@@ -16,6 +16,11 @@
 //!
 //! [workspace]
 //! path = "/Users/me/work/hqc"
+//!
+//! [permissions]                  # optional, see crate::permissions
+//! mode = "ask"                   # "ask" | "auto"
+//! allow = ["Bash(cargo test:*)"]
+//! # deny: default crate::permissions::DEFAULT_DENY (sudo, ssh, scp, rm -rf /*, ...)
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -26,6 +31,7 @@ use hqc_proto::frame::{Runtime, SessionStart};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::permissions::{Permissions, RawPermissions};
 use crate::token::Secret;
 
 /// The only environment in iteration 1 (SPEC §14: no `environments{}` / `env_bindings[]` yet).
@@ -66,6 +72,8 @@ struct RawConfig {
     max_sessions: usize,
     #[serde(default)]
     allow_native_messaging: bool,
+    #[serde(default)]
+    permissions: Option<RawPermissions>,
 }
 
 fn default_max_sessions() -> usize {
@@ -128,6 +136,8 @@ pub struct Config {
     /// default: they bypass the hub, so the other session's history misses the input that
     /// started its turn. Agent-to-agent traffic goes through `hqc_send`/`hqc_ask` (SPEC §7).
     pub allow_native_messaging: bool,
+    /// `[permissions]`: allow/deny rules for `--settings` and the ask/auto mode (SPEC §14).
+    pub permissions: Permissions,
     /// Where sessions without a workspace get their empty folder (SPEC §8.4):
     /// `$HQC_HOME/scratch/<session_id>`.
     pub scratch_root: PathBuf,
@@ -214,6 +224,7 @@ impl Config {
             claude_bin: raw.claude_bin,
             insecure_http: raw.insecure_http,
             allow_native_messaging: raw.allow_native_messaging,
+            permissions: Permissions::from_raw(raw.permissions)?,
             max_sessions: raw.max_sessions,
             scratch_root: hqc_home()
                 .unwrap_or_else(|_| std::env::temp_dir().join("hqc"))
@@ -553,6 +564,53 @@ mod tests {
             "hub_url = \"https://h\"\nmax_sessions = 0\n{roots}"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn permissions_block() {
+        use crate::permissions::{PermissionMode, DEFAULT_DENY};
+        let base =
+            "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n[workspace]\npath = \"/a\"\n";
+
+        let c = Config::parse(base).unwrap();
+        assert_eq!(c.permissions, Permissions::default());
+        assert_eq!(c.permissions.mode, PermissionMode::Ask);
+        assert!(c.permissions.allow.is_empty());
+        assert_eq!(c.permissions.deny, DEFAULT_DENY);
+
+        // Only `allow`: `deny` keeps its default.
+        let c = Config::parse(&format!(
+            "{base}[permissions]\nallow = [\"Bash(cargo test:*)\", \"Read\", \"mcp__hqc\"]\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            c.permissions.allow,
+            ["Bash(cargo test:*)", "Read", "mcp__hqc"]
+        );
+        assert_eq!(c.permissions.deny, DEFAULT_DENY);
+
+        let c = Config::parse(&format!(
+            "{base}[permissions]\nmode = \"auto\"\ndeny = []\n"
+        ))
+        .unwrap();
+        assert_eq!(c.permissions.mode, PermissionMode::Auto);
+        assert!(
+            c.permissions.deny.is_empty(),
+            "deny = [] turns the default off"
+        );
+
+        for bad in [
+            "[permissions]\nmode = \"bypass\"\n",
+            "[permissions]\nallow = [\"Bash(git push\"]\n",
+            "[permissions]\ndeny = [\"\"]\n",
+            "[permissions]\ndeny = [\"--dangerously-skip-permissions\"]\n",
+            "[permissions]\nask = [\"Bash\"]\n",
+            "[permissions]\nallow = \"Read\"\n",
+        ] {
+            assert!(Config::parse(&format!("{base}{bad}")).is_err(), "{bad}");
+        }
+        let e = Config::parse(&format!("{base}[permissions]\ndeny = [\"Bash()\"]\n")).unwrap_err();
+        assert!(format!("{e:#}").contains("permissions.deny"), "{e:#}");
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod connection;
 pub mod enroll;
 pub mod link;
 pub mod outbox;
+pub mod permissions;
 pub mod supervisor;
 pub mod token;
 

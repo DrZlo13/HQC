@@ -29,21 +29,30 @@ struct Fixture {
 
 macro_rules! fixture {
     ($name:literal) => {
+        fixture!($name, "2.1.307")
+    };
+    ($name:literal, $ver:literal) => {
         Fixture {
             transcript: include_str!(concat!(
                 "../../../../hqc-claude-jsonl/fixtures/",
                 $name,
-                "-2.1.307.jsonl"
+                "-",
+                $ver,
+                ".jsonl"
             )),
             stream: include_str!(concat!(
                 "../../../../hqc-claude-jsonl/fixtures/stream-",
                 $name,
-                "-2.1.307.jsonl"
+                "-",
+                $ver,
+                ".jsonl"
             )),
             stdin: include_str!(concat!(
                 "../../../../hqc-claude-jsonl/fixtures/stdin-",
                 $name,
-                "-2.1.307.jsonl"
+                "-",
+                $ver,
+                ".jsonl"
             )),
         }
     };
@@ -529,6 +538,9 @@ async fn command_line_new_then_resume() {
     let cmd = &claude.commands()[0];
     assert_eq!(cmd.program, std::path::PathBuf::from("/opt/test/claude"));
     assert_eq!(cmd.cwd, s.workdir);
+    let settings = crate::permissions::Permissions::default()
+        .settings_json()
+        .unwrap();
     let expect = |mode: &str| -> Vec<String> {
         [
             "-p",
@@ -548,6 +560,8 @@ async fn command_line_new_then_resume() {
             "--disallowedTools",
             "ListAgents",
             "SendMessage",
+            "--settings",
+            &settings,
             "--setting-sources",
             "user,local",
             "--permission-mode",
@@ -637,6 +651,71 @@ async fn command_line_carries_session_restrictions() {
         .windows(2)
         .any(|w| w == ["--permission-mode", "default"]));
     a.kill().await.unwrap();
+}
+
+/// T12 (SPEC §8.1, §14): `[permissions]` reach the CLI as `--settings` on every start,
+/// restricted included; `mode = "auto"` becomes `--permission-mode auto`.
+#[tokio::test]
+async fn command_line_carries_permissions() {
+    use crate::permissions::{PermissionMode, Permissions};
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let mut opts = options(config.path());
+    opts.permissions = Permissions {
+        mode: PermissionMode::Ask,
+        allow: vec!["Bash(cargo test:*)".into(), "Read".into()],
+        deny: vec!["Bash(git push:*)".into()],
+    };
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    let settings = |n: usize| -> Value {
+        let args = claude.commands()[n].args.clone();
+        let i = args
+            .iter()
+            .position(|a| a == "--settings")
+            .unwrap_or_else(|| panic!("--settings missing: {args:?}"));
+        serde_json::from_str(&args[i + 1]).unwrap()
+    };
+    let want = json!({"permissions": {
+        "allow": ["Bash(cargo test:*)", "Read"],
+        "deny": ["Bash(git push:*)"],
+    }});
+    a.start(&s).await.unwrap();
+    assert_eq!(settings(0), want);
+    a.kill().await.unwrap();
+    s.restricted = true;
+    a.start(&s).await.unwrap();
+    assert_eq!(settings(1), want, "restricted keeps --settings");
+    a.kill().await.unwrap();
+
+    // Both lists empty: no flag.
+    let mut opts = options(config.path());
+    opts.permissions.deny.clear();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    assert!(!claude.commands()[2]
+        .args
+        .contains(&"--settings".to_string()));
+    a.kill().await.unwrap();
+
+    // The worker config: the CLI's ask mode unless `mode = "auto"`.
+    let base = format!(
+        "hub_url = \"https://h\"\nallowed_roots = [{0:?}]\n[workspace]\npath = {0:?}\n",
+        work.path().display().to_string()
+    );
+    let cfg = crate::config::Config::parse(&base).unwrap();
+    let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
+    assert_eq!(f.opts.permission_mode, "manual");
+    assert_eq!(f.opts.permissions, Permissions::default());
+    let cfg =
+        crate::config::Config::parse(&format!("{base}[permissions]\nmode = \"auto\"\n")).unwrap();
+    let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
+    assert_eq!(f.opts.permission_mode, "auto");
 }
 
 /// The agent gets a cleared environment with only the allowed variables (SPEC §14).
@@ -917,6 +996,144 @@ fn approval_errors_and_restricted_always() {
     assert_eq!(core.session_rules(), 2);
     // Answered: a second answer is an error.
     assert!(core.answer_approval("r1", "once").is_err());
+}
+
+fn policy(allow: &[&str], deny: &[&str]) -> Arc<crate::permissions::Policy> {
+    Arc::new(crate::permissions::Policy::new(
+        &crate::permissions::Permissions {
+            mode: crate::permissions::PermissionMode::Ask,
+            allow: allow.iter().map(|r| r.to_string()).collect(),
+            deny: deny.iter().map(|r| r.to_string()).collect(),
+        },
+    ))
+}
+
+fn system_events(actions: &[Action]) -> Vec<(String, String)> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::System { code, text } => {
+                    assert_eq!(e.author, Author::System);
+                    Some((code.clone(), text.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn approval_of(actions: &[Action]) -> (Vec<String>, Option<hqc_proto::event::PolicyHint>) {
+    actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::ApprovalRequest {
+                    options,
+                    policy_hint,
+                    ..
+                } => Some((options.iter().map(|o| o.id.clone()).collect(), *policy_hint)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("approval.request")
+}
+
+/// T12: a `can_use_tool` that a deny rule of `[permissions]` matches never becomes a card
+/// with `always` (or any option): the adapter denies it and says so with `system
+/// policy_denied`. The CLI itself does not ask about such calls (2.1.308), this is the
+/// second line.
+#[test]
+fn always_is_not_offered_for_denied_calls() {
+    let fx = fixture!("always-git-push", "2.1.308");
+    let line = can_use_tool_line(&fx, "r1", None);
+    assert!(line.contains("git push origin master"), "{line}");
+
+    // Without a policy the same request offers `always`.
+    let mut plain = Core::new(Uuid::now_v7(), false);
+    let (ids, hint) = approval_of(&plain.on_line(&line));
+    assert_eq!(ids, ["once", "session", "always", "deny"]);
+    assert_eq!(hint, None);
+
+    let mut core = Core::new(Uuid::now_v7(), false).with_policy(policy(&[], &["Bash(git push:*)"]));
+    let a = core.on_line(&line);
+    assert_eq!(approvals(&a), 0);
+    let w = writes(&a);
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0]["response"]["request_id"], "r1");
+    assert_eq!(w[0]["response"]["response"]["behavior"], "deny");
+    let msg = w[0]["response"]["response"]["message"].as_str().unwrap();
+    assert!(msg.contains("Bash(git push:*)"), "{msg}");
+    let sys = system_events(&a);
+    assert_eq!(sys.len(), 1);
+    assert_eq!(sys[0].0, "policy_denied");
+    assert!(sys[0].1.contains("git push origin master"), "{}", sys[0].1);
+    // Nothing is left open to answer with `always` later.
+    assert!(core.answer_approval("r1", "always").is_err());
+
+    // A chained command with a denied part is denied too.
+    let a = core.on_line(&can_use_tool_line(&fx, "r2", Some("git add . && git push")));
+    assert_eq!((approvals(&a), writes(&a).len()), (0, 1));
+}
+
+/// T12: `approval.request.policy_hint` is `allow` when an allow rule matches a call the CLI
+/// still asked about, absent otherwise.
+#[test]
+fn approval_carries_policy_hint() {
+    let fx = fixture!("always-git-push", "2.1.308");
+    let mut core = Core::new(Uuid::now_v7(), false)
+        .with_policy(policy(&["Bash(cargo test:*)"], &["Bash(sudo:*)"]));
+    let a = core.on_line(&can_use_tool_line(&fx, "r1", Some("cargo test -p x")));
+    assert_eq!(approval_of(&a).1, Some(hqc_proto::event::PolicyHint::Allow));
+    let a = core.on_line(&can_use_tool_line(&fx, "r2", Some("touch x")));
+    let (ids, hint) = approval_of(&a);
+    assert_eq!(hint, None);
+    assert!(ids.contains(&"always".to_string()));
+    let ev = a
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => Some(serde_json::to_value(e).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(ev["payload"].get("policy_hint").is_none(), "{ev}");
+}
+
+/// T12 fixture `settings-deny` (2.1.308): the CLI refused `git push` by a `--settings` deny
+/// rule without `can_use_tool`; the adapter turns `system/permission_denied` into `system
+/// policy_denied`, and the call outside both lists is asked as usual.
+#[test]
+fn cli_denial_becomes_a_system_event() {
+    let fx = fixture!("settings-deny", "2.1.308");
+    let mut core = Core::new(Uuid::now_v7(), false)
+        .with_policy(policy(&["Bash(git status:*)"], &["Bash(git push:*)"]));
+    let mut all = Vec::new();
+    for l in fx.stream.lines() {
+        all.extend(core.on_line(l));
+    }
+    let sys = system_events(&all);
+    assert_eq!(sys.len(), 1, "{sys:?}");
+    assert_eq!(sys[0].0, "policy_denied");
+    assert!(sys[0].1.contains("git push origin master"), "{}", sys[0].1);
+    let (_, hint) = approval_of(&all);
+    assert_eq!(hint, None, "touch other.txt is in neither list");
+    assert_eq!(approvals(&all), 1);
+    // The denied call still gets its `tool.result` with the CLI's message.
+    assert!(all.iter().any(|a| matches!(a,
+        Action::Emit(AdapterEvent::Event(e)) if matches!(&e.kind,
+            EventKind::ToolResult { error: true, result_preview, .. } if result_preview.contains("has been denied")))));
+
+    // A classifier refusal (mode auto) is reported, but not as the worker's policy.
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let a = core.on_line(
+        r#"{"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"t","decision_reason_type":"classifier","message":"Blocked."}"#,
+    );
+    assert_eq!(
+        system_events(&a),
+        [("permission_denied".into(), "Blocked.".into())]
+    );
 }
 
 #[test]

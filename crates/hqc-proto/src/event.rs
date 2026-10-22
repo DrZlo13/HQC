@@ -85,6 +85,17 @@ pub struct ApprovalOption {
     pub canonical: ApprovalCanonical,
 }
 
+/// `approval.request.policy_hint`: a rule of the worker's `[permissions]` matches the call
+/// (SPEC §8.1, §14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyHint {
+    Allow,
+    Deny,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Why an open approval or clarify request was closed without an answer (SPEC §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,6 +198,10 @@ pub enum EventKind {
         options: Vec<ApprovalOption>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<DateTime<Utc>>,
+        /// What the worker's `[permissions]` say about this call (SPEC §8.1, §14); absent
+        /// when no rule matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy_hint: Option<PolicyHint>,
     },
     #[serde(rename = "approval.response")]
     ApprovalResponse {

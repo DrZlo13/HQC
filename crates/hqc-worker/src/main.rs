@@ -89,7 +89,11 @@ async fn run() -> anyhow::Result<()> {
         .context("no worker token; run `hqc-worker enroll <hub_url>` first")?;
     let capabilities = capabilities::detect(config.claude_bin.as_deref()).await;
     let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
-    tracing::info!(hub = %config.hub_url, workspace = %config.workspace.display(), %capabilities, %permission_mode, "starting worker");
+    let p = &config.permissions;
+    tracing::info!(hub = %config.hub_url, workspace = %config.workspace.display(), %capabilities, %permission_mode, permissions = ?p.mode, allow = p.allow.len(), deny = p.deny.len(), "starting worker");
+    if p.mode == hqc_worker::permissions::PermissionMode::Auto {
+        tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call");
+    }
     let adapters = Arc::new(BuiltinAdapters::from_config(&config, permission_mode));
     let worker = Worker {
         config,

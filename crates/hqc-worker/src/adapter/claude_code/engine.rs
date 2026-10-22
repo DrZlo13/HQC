@@ -9,8 +9,11 @@
 //! - `assistant` `tool_use` → `tool.call`; non-empty `thinking` → `agent.thinking`;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //! - `result` → `usage`, `status idle`, end of turn;
-//! - `control_request` `can_use_tool` → `approval.request` / `clarify.request`, or an
-//!   immediate allow by a `session` rule;
+//! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint`) /
+//!   `clarify.request`, an immediate allow by a `session` rule, or an immediate deny plus
+//!   `system policy_denied` when a deny rule of `[permissions]` matches;
+//! - `system` `permission_denied` (the CLI refused a call by its rules, no request) →
+//!   `system policy_denied`;
 //! - `control_response` lines are the CLI's echo of ours and are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
@@ -20,6 +23,7 @@
 //! separate sidechain files, not in the session transcript.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use hqc_proto::event::{
@@ -32,6 +36,7 @@ use uuid::Uuid;
 
 use super::rules::SessionRules;
 use crate::adapter::{new_event, AdapterEvent};
+use crate::permissions::Policy;
 
 /// `*_preview` limit (SPEC §4).
 pub const PREVIEW_LIMIT: usize = 4096;
@@ -39,6 +44,9 @@ const ERROR_TEXT_LIMIT: usize = 300;
 
 pub const DENY_MESSAGE: &str = "The user denied this tool call.";
 pub const CLARIFY_CANCEL_MESSAGE: &str = "The user did not answer the questions.";
+pub const POLICY_DENY_MESSAGE: &str = "Denied by the worker's permission policy";
+/// `system.code` of a tool call refused by a deny rule of `[permissions]` (SPEC §4).
+pub const POLICY_DENIED: &str = "policy_denied";
 
 // Mostly `Emit`, like `AdapterEvent` itself; boxing would only add an allocation.
 #[allow(clippy::large_enum_variant)]
@@ -79,6 +87,9 @@ pub struct Core {
     turn: u64,
     pending: HashMap<String, Pending>,
     rules: SessionRules,
+    /// `[permissions]` of the worker config, for `policy_hint` and denying what a deny
+    /// rule matches.
+    policy: Arc<Policy>,
     model: Option<String>,
 }
 
@@ -94,8 +105,14 @@ impl Core {
             turn: 0,
             pending: HashMap::new(),
             rules: SessionRules::default(),
+            policy: Arc::default(),
             model: None,
         }
+    }
+
+    pub fn with_policy(mut self, policy: Arc<Policy>) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Whether turn number `turn` (from [`Core::interrupt`]) is still running.
@@ -274,12 +291,18 @@ impl Core {
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
             "control_response" => vec![],
-            "system" => {
-                if v["subtype"] == "init" {
+            "system" => match v["subtype"].as_str() {
+                Some("init") => {
                     self.model = v["model"].as_str().map(str::to_owned);
+                    vec![]
                 }
-                vec![]
-            }
+                Some("permission_denied") => {
+                    let mut out: Vec<Action> = self.flush(false).into_iter().collect();
+                    out.extend(self.on_permission_denied(&v));
+                    out
+                }
+                _ => vec![],
+            },
             _ => vec![],
         }
     }
@@ -452,10 +475,32 @@ impl Core {
             tracing::warn!(session_id = %self.session_id, "AskUserQuestion without questions; asking as an approval");
         }
 
+        // The CLI never asks about a call its `--settings` deny rules match (2.1.308); one
+        // that the adapter's reading of the same rules matches is denied here, so no
+        // `always`, `session` or hub `auto_approve` can let it through.
+        if let Some(rule) = self.policy.denied_by(&tool, &input) {
+            tracing::warn!(session_id = %self.session_id, %tool, rule, "denied by the permission policy");
+            let what = describe(req, &input, &tool);
+            return vec![
+                Action::Write(deny(
+                    &request_id,
+                    &format!("{POLICY_DENY_MESSAGE} ({rule})."),
+                )),
+                self.emit_system(
+                    POLICY_DENIED,
+                    preview(
+                        &format!("{POLICY_DENY_MESSAGE} ({rule}): {tool}: {what}"),
+                        ERROR_TEXT_LIMIT,
+                    ),
+                ),
+            ];
+        }
+
         if self.rules.matches(&tool, &input) {
             tracing::info!(session_id = %self.session_id, %tool, "allowed by a session rule");
             return vec![Action::Write(allow(&request_id, &input, None))];
         }
+        let policy_hint = self.policy.hint(&tool, &input);
 
         let suggestions = req["permission_suggestions"]
             .as_array()
@@ -503,7 +548,24 @@ impl Core {
             description,
             options,
             expires_at: None,
+            policy_hint,
         })]
+    }
+
+    /// `system/permission_denied`: the CLI refused a call without asking. In this adapter's
+    /// setup (`--permission-prompt-tool stdio`) that is a deny rule (`reason_type` `rule` or
+    /// `subcommandResults`) or, with `mode = "auto"`, the CLI's classifier.
+    fn on_permission_denied(&self, v: &Value) -> Vec<Action> {
+        let message = v["message"].as_str().unwrap_or("Permission denied.");
+        let reason = v["decision_reason_type"].as_str().unwrap_or("");
+        tracing::info!(session_id = %self.session_id, tool = ?v["tool_name"].as_str(), reason, "the CLI denied a tool call");
+        let (code, text) = match reason {
+            "rule" | "subcommandResults" => {
+                (POLICY_DENIED, format!("{POLICY_DENY_MESSAGE}: {message}"))
+            }
+            _ => ("permission_denied", message.to_owned()),
+        };
+        vec![self.emit_system(code, preview(&text, ERROR_TEXT_LIMIT))]
     }
 
     // ---- helpers -----------------------------------------------------------------------
@@ -529,6 +591,18 @@ impl Core {
     /// An event with no record behind it: fresh v7 id.
     fn emit_new(&self, kind: EventKind) -> Action {
         Action::Emit(AdapterEvent::Event(self.emit_event(kind)))
+    }
+
+    /// `system {code, text}` authored by the worker (SPEC §4), fresh v7 id.
+    fn emit_system(&self, code: &str, text: String) -> Action {
+        Action::Emit(AdapterEvent::Event(new_event(
+            self.session_id,
+            Author::System,
+            EventKind::System {
+                text,
+                code: code.into(),
+            },
+        )))
     }
 
     fn emit_event(&self, kind: EventKind) -> Event {

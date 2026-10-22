@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
-    error_code, Ack, Envelope, HubFrame, LockedBy, ProcessState, SessionInput, StartMode,
-    WireError, WorkerFrame,
+    error_code, Ack, Envelope, HubFrame, LockedBy, ProcessState, RequestResult, ResultBody,
+    SessionInput, StartMode, WireError, WorkerFrame,
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -237,6 +237,20 @@ impl Supervisor {
                     answers,
                 },
             ),
+            HubFrame::FsStat(r) => {
+                let cfg = self.cfg.clone();
+                self.fs_request(id, r.request_id, move || {
+                    crate::fs::stat(&cfg, &r.path).map(ResultBody::FsStat)
+                });
+                return;
+            }
+            HubFrame::FsListDirs(r) => {
+                let cfg = self.cfg.clone();
+                self.fs_request(id, r.request_id, move || {
+                    crate::fs::list_dirs(&cfg, r.path.as_deref()).map(ResultBody::FsListDirs)
+                });
+                return;
+            }
             other => {
                 tracing::debug!(?other, "frame not for the supervisor");
                 return;
@@ -260,6 +274,30 @@ impl Supervisor {
                 );
             }
         }
+    }
+
+    /// Answer an `fs.*` request off the supervisor loop (a big folder takes a while to read):
+    /// `result {request_id, ...}`, or `error {invalid_frame}` with the reason.
+    fn fs_request(
+        &self,
+        id: String,
+        request_id: String,
+        f: impl FnOnce() -> Result<ResultBody, String> + Send + 'static,
+    ) {
+        let link = self.link.clone();
+        tokio::spawn(async move {
+            let r = tokio::task::spawn_blocking(f)
+                .await
+                .unwrap_or_else(|e| Err(format!("fs request failed: {e}")));
+            let frame = match r {
+                Ok(body) => WorkerFrame::Result(RequestResult { request_id, body }),
+                Err(msg) => {
+                    tracing::info!(%request_id, "fs request refused: {msg}");
+                    wire_error(error_code::INVALID_FRAME, msg, false)
+                }
+            };
+            link.reply(&id, frame);
+        });
     }
 
     fn spawn_session(&self, spec: &StartSpec) -> SessionHandle {

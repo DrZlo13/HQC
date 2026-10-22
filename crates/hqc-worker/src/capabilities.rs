@@ -1,5 +1,4 @@
-//! `hello.capabilities` (SPEC §3 Worker, §5.4): `{claude_code?: {version}, acp_agents: []}`;
-//! [`crate::Worker::hello`] adds `workspace_path` from the config.
+//! `hello.capabilities` (SPEC §3 Worker, §5.4): `{claude_code?: {version}, acp_agents: []}`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

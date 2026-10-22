@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
             if let Ok(path) = config::config_path() {
                 if !path.exists() {
                     println!(
-                        "Next: write {} (hub_url, allowed_roots, [workspace] path), then run `hqc-worker run`.",
+                        "Next: write {} (hub_url, allowed_roots), run `hqc-worker run`, then add workspaces inside allowed_roots in the web client.",
                         path.display()
                     );
                 }
@@ -114,7 +114,10 @@ async fn run() -> anyhow::Result<()> {
     let capabilities = capabilities::detect(config.claude_bin.as_deref()).await;
     let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
     let p = &config.permissions;
-    tracing::info!(hub = %config.hub_url, workspace = %config.workspace.display(), %capabilities, %permission_mode, permissions = ?p.mode, allow = p.allow.len(), deny = p.deny.len(), "starting worker");
+    tracing::info!(hub = %config.hub_url, allowed_roots = ?config.allowed_roots, %capabilities, %permission_mode, permissions = ?p.mode, allow = p.allow.len(), deny = p.deny.len(), "starting worker");
+    if config.legacy_workspace {
+        tracing::warn!("worker.toml has an iteration 1 [workspace] block, which is ignored: add workspaces in the web client and remove the block");
+    }
     if p.mode == hqc_worker::permissions::PermissionMode::Auto {
         tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call");
     }

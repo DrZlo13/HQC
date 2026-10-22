@@ -144,10 +144,8 @@ async fn enroll_then_run_says_hello() {
         p["capabilities"].get("claude_code").is_none(),
         "no claude binary configured: {p}"
     );
-    assert_eq!(
-        p["capabilities"]["workspace_path"],
-        env.workspace().display().to_string()
-    );
+    // Workspaces are hub objects since T14: the worker announces only allowed_roots.
+    assert!(p["capabilities"].get("workspace_path").is_none(), "{p}");
     assert!(p["boot_id"].as_str().unwrap().parse::<Uuid>().is_ok());
     // Give the worker a moment to log the ack, then stop it like launchd would.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -448,7 +446,11 @@ async fn start_outside_config_is_rejected() {
             "workspace_path",
             json!(outside.path().display().to_string()),
         ),
-        ("workspace_path", json!(env.root().display().to_string())),
+        (
+            "workspace_path",
+            json!(env.root().join("missing").display().to_string()),
+        ),
+        ("workspace_path", json!("root/ws")),
         ("workspace_path", Value::Null),
         ("cwd", json!("../..")),
         ("environment", json!("infra")),
@@ -805,5 +807,61 @@ async fn idle_agent_is_stopped_and_resumed_by_input() {
     c.frame("session.input", input(sid, b, "B")).await;
     let calls = adapters.wait_for("input B", has_input(b)).await;
     assert_eq!(calls[calls.len() - 2], FakeCall::Resume(sid), "{calls:?}");
+    w.stop().await;
+}
+
+// T14: the hub asks the worker about folders (SPEC §5.3): `fs.stat` before a workspace is
+// added, `fs.list_dirs` for the folder picker; answers stay inside allowed_roots.
+#[tokio::test]
+async fn fs_requests_answer_inside_allowed_roots() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let root = env.root().display().to_string();
+    let ws = env.workspace().display().to_string();
+
+    let path = format!("{root}/ws/sub/..");
+    let id = c
+        .frame("fs.stat", json!({"request_id": "rq-1", "path": path}))
+        .await;
+    let r = c.expect("result").await;
+    assert_eq!(r["id"], id.as_str());
+    assert_eq!(
+        r["payload"],
+        json!({"request_id": "rq-1", "exists": true, "is_dir": true, "canonical": ws,
+               "inside_allowed_roots": true})
+    );
+    let outside = tempfile::tempdir().unwrap();
+    let outside = outside.path().display().to_string();
+    c.frame("fs.stat", json!({"request_id": "rq-2", "path": outside}))
+        .await;
+    let r = c.expect("result").await;
+    assert_eq!(r["payload"]["inside_allowed_roots"], false);
+    assert_eq!(r["payload"]["exists"], false, "nothing about paths outside");
+
+    c.frame("fs.list_dirs", json!({"request_id": "rq-3", "path": null}))
+        .await;
+    let r = c.expect("result").await;
+    assert_eq!(
+        r["payload"]["entries"],
+        json!([{"name": "root", "path": root}])
+    );
+    c.frame("fs.list_dirs", json!({"request_id": "rq-4", "path": root}))
+        .await;
+    let r = c.expect("result").await;
+    assert_eq!(r["payload"]["entries"], json!([{"name": "ws", "path": ws}]));
+    let id = c
+        .frame(
+            "fs.list_dirs",
+            json!({"request_id": "rq-5", "path": outside}),
+        )
+        .await;
+    let e = c.expect("error").await;
+    assert_eq!(e["id"], id.as_str());
+    assert_eq!(e["payload"]["code"], "invalid_frame");
+    assert!(adapters.calls().is_empty(), "no agent involved");
     w.stop().await;
 }

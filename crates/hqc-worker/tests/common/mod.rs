@@ -192,7 +192,7 @@ pub fn event_id(frame: &Value) -> Uuid {
         .unwrap()
 }
 
-/// A temp dir with `root/ws` as the only workspace.
+/// A temp dir with `root` as `allowed_roots` and `root/ws` as the workspace of its sessions.
 pub struct Env {
     pub dir: tempfile::TempDir,
 }
@@ -219,10 +219,9 @@ impl Env {
     pub fn config_toml(&self, hub_url: &str) -> String {
         format!(
             "hub_url = {:?}\nallowed_roots = [{:?}]\nidle_timeout = 0\nallow_foreign_sessions = false\n\
-             claude_bin = \"/nonexistent/claude\"\n\n[workspace]\npath = {:?}\n",
+             claude_bin = \"/nonexistent/claude\"\n",
             hub_url,
             self.root().display().to_string(),
-            self.workspace().display().to_string(),
         )
     }
 
@@ -230,7 +229,7 @@ impl Env {
         Config::parse(&self.config_toml(hub_url)).unwrap()
     }
 
-    /// `session.start` payload for the configured workspace.
+    /// `session.start` payload for the workspace `root/ws`.
     pub fn start_payload(&self, session_id: Uuid) -> Value {
         json!({
             "session_id": session_id,

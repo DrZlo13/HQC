@@ -1,8 +1,10 @@
 //! Local worker config, SPEC §14 (iteration 1 subset).
 //!
-//! The file is the only source of truth for `allowed_roots`, the workspace, environments
-//! and `allow_foreign_sessions` (SPEC §2.1): `session.start` values are checked against it
-//! and a mismatch is rejected before anything is spawned ([`Config::check_start`]).
+//! The file is the only source of truth for `allowed_roots`, environments and
+//! `allow_foreign_sessions` (SPEC §2.1): `session.start` values are checked against it and a
+//! mismatch is rejected before anything is spawned ([`Config::check_start`]). Workspaces are
+//! hub objects (SPEC §3); the worker only requires their paths to lie inside
+//! `allowed_roots`.
 //!
 //! ```toml
 //! hub_url = "https://hub.example.net"  # https; http only for loopback or with insecure_http
@@ -13,9 +15,6 @@
 //! # max_sessions = 8             # agent processes at once
 //! # insecure_http = false        # allow http:// to a non-loopback hub (never in production)
 //! # allow_native_messaging = false  # keep Claude Code's ListAgents/SendMessage (bypass the hub)
-//!
-//! [workspace]
-//! path = "/Users/me/work/hqc"
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto"
@@ -59,7 +58,10 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
 struct RawConfig {
     hub_url: String,
     allowed_roots: Vec<PathBuf>,
-    workspace: RawWorkspace,
+    /// Iteration 1's single workspace, ignored since T14 (workspaces are added in the
+    /// client); kept readable so an old file still starts, with a warning.
+    #[serde(default)]
+    workspace: Option<toml::Table>,
     #[serde(default)]
     idle_timeout: u64,
     #[serde(default)]
@@ -112,18 +114,13 @@ fn is_loopback(u: &reqwest::Url) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawWorkspace {
-    path: PathBuf,
-}
-
 /// Validated config. Paths are absolute and normalized (canonical when they exist).
 #[derive(Debug, Clone)]
 pub struct Config {
     pub hub_url: String,
     pub allowed_roots: Vec<PathBuf>,
-    pub workspace: PathBuf,
+    /// The file still has iteration 1's `[workspace]` block, which is ignored.
+    pub legacy_workspace: bool,
     /// `None`: idle agents are never stopped.
     pub idle_timeout: Option<Duration>,
     pub allow_foreign_sessions: bool,
@@ -149,8 +146,8 @@ pub struct StartSpec {
     pub session_id: Uuid,
     pub runtime: Runtime,
     pub model: Option<String>,
-    /// The configured workspace (canonical), not the hub's string; for a session without
-    /// workspace its scratch folder.
+    /// The workspace (canonical, inside `allowed_roots`), not the hub's string; for a
+    /// session without workspace its scratch folder.
     pub workspace: PathBuf,
     /// Canonical `<workspace>/<cwd>`, the process working directory (SPEC §8.1); checked
     /// again before every spawn ([`StartSpec::recheck_workdir`]).
@@ -208,17 +205,10 @@ impl Config {
             .iter()
             .map(|p| absolute(p).context("allowed_roots"))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let workspace = absolute(&raw.workspace.path).context("workspace.path")?;
-        if !allowed_roots.iter().any(|r| workspace.starts_with(r)) {
-            bail!(
-                "workspace.path {} is outside allowed_roots",
-                workspace.display()
-            );
-        }
         Ok(Self {
             hub_url: raw.hub_url.trim_end_matches('/').to_string(),
             allowed_roots,
-            workspace,
+            legacy_workspace: raw.workspace.is_some(),
             idle_timeout: (raw.idle_timeout > 0).then(|| Duration::from_secs(raw.idle_timeout)),
             allow_foreign_sessions: raw.allow_foreign_sessions,
             claude_bin: raw.claude_bin,
@@ -283,25 +273,26 @@ impl Config {
         })
     }
 
-    /// The configured workspace and the canonical working directory `<workspace>/<cwd>`,
-    /// which must exist and resolve inside the workspace (no `..`, no symlink out).
+    /// The canonical workspace, which must lie inside `allowed_roots` (symlinks resolved),
+    /// and the canonical working directory `<workspace>/<cwd>`, which must exist and resolve
+    /// inside the workspace (no `..`, no symlink out).
     fn check_workdir(&self, ws: &str, cwd: &str) -> Result<(PathBuf, PathBuf), String> {
-        let ws = absolute(Path::new(ws)).map_err(|e| format!("workspace_path: {e}"))?;
-        if ws != self.workspace {
-            return Err(format!(
-                "workspace_path {} is not a workspace of this worker",
-                ws.display()
-            ));
+        let ws = Path::new(ws);
+        if !ws.is_absolute() {
+            return Err(format!("workspace_path {} is not absolute", ws.display()));
         }
-        if !self.allowed_roots.iter().any(|r| ws.starts_with(r)) {
+        let ws = ws
+            .canonicalize()
+            .map_err(|e| format!("workspace {}: {e}", ws.display()))?;
+        if !self.inside_roots(&ws) {
             return Err(format!(
                 "workspace_path {} is outside allowed_roots",
                 ws.display()
             ));
         }
-        let ws = ws
-            .canonicalize()
-            .map_err(|e| format!("workspace {}: {e}", ws.display()))?;
+        if !ws.is_dir() {
+            return Err(format!("workspace {} is not a directory", ws.display()));
+        }
         let rel = Path::new(cwd);
         if !rel
             .components()
@@ -335,6 +326,11 @@ impl Config {
         b.create(&dir)
             .and_then(|_| dir.canonicalize())
             .map_err(|e| format!("scratch folder {}: {e}", dir.display()))
+    }
+
+    /// `path` (canonical) lies inside one of `allowed_roots`, by components.
+    pub fn inside_roots(&self, path: &Path) -> bool {
+        self.allowed_roots.iter().any(|r| path.starts_with(r))
     }
 
     pub fn path_strings(paths: &[PathBuf]) -> Vec<String> {
@@ -386,12 +382,15 @@ mod tests {
         let ws = dir.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         Config::parse(&format!(
-            "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\nidle_timeout = 5\n\
-             [workspace]\npath = {:?}\n",
+            "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\nidle_timeout = 5\n",
             dir.display().to_string(),
-            ws.display().to_string()
         ))
         .unwrap()
+    }
+
+    /// The workspace [`cfg`] made: `<root>/ws`.
+    fn ws(c: &Config) -> PathBuf {
+        c.allowed_roots[0].join("ws")
     }
 
     fn start(ws: &Path) -> SessionStart {
@@ -412,21 +411,39 @@ mod tests {
         let c = cfg(dir.path());
         assert_eq!(c.idle_timeout, Some(Duration::from_secs(5)));
         assert!(!c.hub_url.ends_with('/'));
-        let spec = c.check_start(&start(&c.workspace)).unwrap();
-        assert_eq!(spec.workdir, c.workspace);
+        let spec = c.check_start(&start(&ws(&c))).unwrap();
+        assert_eq!(spec.workdir, ws(&c));
     }
 
     #[test]
     fn rejects_mismatches() {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path());
-        let ok = start(&c.workspace);
+        let ok = start(&ws(&c));
 
+        // Any folder inside allowed_roots is a workspace; nothing outside is.
         let mut s = ok.clone();
-        s.workspace_path = Some(dir.path().display().to_string());
-        assert!(c.check_start(&s).is_err());
-        s.workspace_path = Some(format!("{}/../ws", c.workspace.display()));
+        std::fs::create_dir(dir.path().join("other")).unwrap();
+        s.workspace_path = Some(dir.path().join("other").display().to_string());
+        assert_eq!(
+            c.check_start(&s).unwrap().workspace,
+            c.allowed_roots[0].join("other")
+        );
+        s.workspace_path = Some(format!("{}/../ws", ws(&c).display()));
         assert!(c.check_start(&s).is_ok(), "same workspace via ..");
+        let outside = tempfile::tempdir().unwrap();
+        for bad in [
+            outside.path().display().to_string(),
+            format!("{}/..", dir.path().display()),
+            dir.path().join("missing").display().to_string(),
+            "ws".into(),
+        ] {
+            s.workspace_path = Some(bad.clone());
+            assert!(c.check_start(&s).is_err(), "{bad}");
+        }
+        std::fs::write(dir.path().join("file"), "").unwrap();
+        s.workspace_path = Some(dir.path().join("file").display().to_string());
+        assert!(c.check_start(&s).is_err(), "a file");
         s.workspace_path = None;
         assert!(c.check_start(&s).is_err());
 
@@ -438,12 +455,9 @@ mod tests {
         let mut s = ok.clone();
         s.cwd = "sub/dir".into();
         assert!(c.check_start(&s).is_err(), "cwd must exist");
-        std::fs::create_dir_all(c.workspace.join("sub/dir")).unwrap();
-        assert_eq!(
-            c.check_start(&s).unwrap().workdir,
-            c.workspace.join("sub/dir")
-        );
-        std::fs::write(c.workspace.join("file"), "").unwrap();
+        std::fs::create_dir_all(ws(&c).join("sub/dir")).unwrap();
+        assert_eq!(c.check_start(&s).unwrap().workdir, ws(&c).join("sub/dir"));
+        std::fs::write(ws(&c).join("file"), "").unwrap();
         s.cwd = "file".into();
         assert!(c.check_start(&s).is_err(), "cwd must be a directory");
 
@@ -472,21 +486,28 @@ mod tests {
     fn rejects_symlink_escape() {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path());
-        std::os::unix::fs::symlink(dir.path(), c.workspace.join("out")).unwrap();
-        let mut s = start(&c.workspace);
+        std::os::unix::fs::symlink(dir.path(), ws(&c).join("out")).unwrap();
+        let mut s = start(&ws(&c));
         s.cwd = "out".into();
         assert!(c.check_start(&s).is_err());
 
         // A link inside the workspace is stored resolved, and checked again before a spawn.
-        std::fs::create_dir(c.workspace.join("real")).unwrap();
-        std::os::unix::fs::symlink(c.workspace.join("real"), c.workspace.join("link")).unwrap();
+        std::fs::create_dir(ws(&c).join("real")).unwrap();
+        std::os::unix::fs::symlink(ws(&c).join("real"), ws(&c).join("link")).unwrap();
         s.cwd = "link".into();
         let spec = c.check_start(&s).unwrap();
-        assert_eq!(spec.workdir, c.workspace.join("real"));
+        assert_eq!(spec.workdir, ws(&c).join("real"));
         spec.recheck_workdir().unwrap();
-        std::fs::remove_dir(c.workspace.join("real")).unwrap();
-        std::os::unix::fs::symlink(dir.path(), c.workspace.join("real")).unwrap();
+        std::fs::remove_dir(ws(&c).join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path(), ws(&c).join("real")).unwrap();
         assert!(spec.recheck_workdir().is_err(), "swapped for a link out");
+
+        // A workspace path that is a link out of allowed_roots.
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        s.workspace_path = Some(dir.path().join("escape").display().to_string());
+        s.cwd = ".".into();
+        assert!(c.check_start(&s).is_err());
     }
 
     #[test]
@@ -494,7 +515,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut c = cfg(dir.path());
         c.scratch_root = dir.path().join("home/scratch");
-        let mut s = start(&c.workspace);
+        let mut s = start(&ws(&c));
         s.workspace_path = None;
         assert!(c.check_start(&s).is_err(), "only restricted");
         s.restricted = true;
@@ -519,7 +540,7 @@ mod tests {
     fn session_token_is_not_printed() {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path());
-        let mut s = start(&c.workspace);
+        let mut s = start(&ws(&c));
         s.session_token = "hqcs_very_secret".into();
         let spec = c.check_start(&s).unwrap();
         assert_eq!(spec.session_token.expose(), "hqcs_very_secret");
@@ -547,7 +568,7 @@ mod tests {
             assert!(check_hub_url(bad, false).is_err(), "{bad}");
         }
         check_hub_url("http://hub.lan:8080", true).unwrap();
-        let roots = "allowed_roots = [\"/a\"]\n[workspace]\npath = \"/a\"\n";
+        let roots = "allowed_roots = [\"/a\"]\n";
         assert!(Config::parse(&format!("hub_url = \"http://hub.lan\"\n{roots}")).is_err());
         let c = Config::parse(&format!(
             "hub_url = \"http://hub.lan\"\ninsecure_http = true\n{roots}"
@@ -569,8 +590,7 @@ mod tests {
     #[test]
     fn permissions_block() {
         use crate::permissions::{PermissionMode, DEFAULT_DENY};
-        let base =
-            "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n[workspace]\npath = \"/a\"\n";
+        let base = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n";
 
         let c = Config::parse(base).unwrap();
         assert_eq!(c.permissions, Permissions::default());
@@ -616,9 +636,16 @@ mod tests {
     #[test]
     fn rejects_bad_files() {
         assert!(Config::parse("hub_url = \"x\"").is_err());
-        let bad = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n[workspace]\npath = \"/b\"\n";
-        assert!(Config::parse(bad).is_err(), "workspace outside roots");
-        let typo = "hub_url = \"https://h\"\nallowed_root = [\"/a\"]\n[workspace]\npath = \"/a\"\n";
+        let typo = "hub_url = \"https://h\"\nallowed_root = [\"/a\"]\n";
         assert!(Config::parse(typo).is_err(), "unknown field");
+        assert!(Config::parse("hub_url = \"https://h\"\nallowed_roots = []\n").is_err());
+    }
+
+    #[test]
+    fn iteration1_workspace_block_is_ignored() {
+        let old = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n[workspace]\npath = \"/b\"\n";
+        assert!(Config::parse(old).unwrap().legacy_workspace);
+        let new = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n";
+        assert!(!Config::parse(new).unwrap().legacy_workspace);
     }
 }

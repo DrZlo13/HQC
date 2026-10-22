@@ -732,7 +732,7 @@ async fn command_line_carries_permissions() {
 
     // The worker config: the CLI's ask mode unless `mode = "auto"`.
     let base = format!(
-        "hub_url = \"https://h\"\nallowed_roots = [{0:?}]\n[workspace]\npath = {0:?}\n",
+        "hub_url = \"https://h\"\nallowed_roots = [{0:?}]\n",
         work.path().display().to_string()
     );
     let cfg = crate::config::Config::parse(&base).unwrap();

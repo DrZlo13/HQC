@@ -9,6 +9,7 @@ pub mod capabilities;
 pub mod config;
 pub mod connection;
 pub mod enroll;
+pub mod fs;
 pub mod link;
 pub mod outbox;
 pub mod permissions;
@@ -50,14 +51,11 @@ pub struct Worker {
 
 impl Worker {
     pub fn hello(&self) -> Hello {
-        let mut capabilities = self.capabilities.clone();
-        // TODO(SPEC §19, iteration 2): workspaces come with `workspace.create`; until then
-        // the hub learns the single configured workspace from here.
-        capabilities["workspace_path"] = self.config.workspace.display().to_string().into();
+        // Workspaces are hub objects (SPEC §3); only `allowed_roots` bounds them here.
         Hello {
             protocol_version: hqc_proto::PROTOCOL_VERSION,
             boot_id: self.boot_id,
-            capabilities,
+            capabilities: self.capabilities.clone(),
             environments: vec![DEFAULT_ENVIRONMENT.into()],
             env_bindings: vec![],
             allowed_roots: Config::path_strings(&self.config.allowed_roots),

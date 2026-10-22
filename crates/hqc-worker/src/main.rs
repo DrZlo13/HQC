@@ -84,6 +84,7 @@ async fn run() -> anyhow::Result<()> {
     let worker = Worker {
         config,
         token,
+        boot_id: uuid::Uuid::new_v4(),
         adapters,
         capabilities,
         outbox_dir: config::hqc_home()?.join("outbox"),

@@ -63,11 +63,12 @@ async fn enroll_then_run_says_hello() {
             assert!(body["name"].is_string());
             (
                 200,
-                json!({"enroll_id": "e-1", "code": "ABCD-1234", "poll_interval_s": 0.05}),
+                json!({"code": "ABCD-1234", "poll_token": "pt-1", "poll_interval_s": 0,
+                       "expires_at": chrono::Utc::now() + chrono::Duration::minutes(10)}),
             )
         }
         "/worker/enroll/poll" => {
-            assert_eq!(body["enroll_id"], "e-1");
+            assert_eq!(body, json!({"poll_token": "pt-1"}));
             if p.fetch_add(1, Ordering::SeqCst) == 0 {
                 (200, json!({"status": "pending"}))
             } else {
@@ -102,6 +103,10 @@ async fn enroll_then_run_says_hello() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "enroll failed: {stdout}\n{stderr}");
     assert!(stdout.contains("ABCD-1234"), "code is printed: {stdout}");
+    assert!(
+        stdout.contains(&format!("http://{http}/#/enroll?code=ABCD-1234")),
+        "link to the enroll screen is printed: {stdout}"
+    );
     assert!(
         !stdout.contains(TOKEN) && !stderr.contains(TOKEN),
         "token leaked"
@@ -139,6 +144,11 @@ async fn enroll_then_run_says_hello() {
         p["capabilities"].get("claude_code").is_none(),
         "no claude binary configured: {p}"
     );
+    assert_eq!(
+        p["capabilities"]["workspace_path"],
+        env.workspace().display().to_string()
+    );
+    assert!(p["boot_id"].as_str().unwrap().parse::<Uuid>().is_ok());
     // Give the worker a moment to log the ack, then stop it like launchd would.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let pid = child.id().unwrap().to_string();
@@ -218,7 +228,7 @@ async fn outbox_survives_reconnect_and_restart() {
     let sid = Uuid::now_v7();
 
     let mut c = hub.accept().await;
-    c.handshake().await;
+    let boot = c.handshake().await["payload"]["boot_id"].clone();
     start_session(&mut c, &env, sid).await;
 
     let evs: Vec<_> = (0..4)
@@ -260,7 +270,11 @@ async fn outbox_survives_reconnect_and_restart() {
     );
 
     let mut c2 = hub.accept().await;
-    c2.handshake().await;
+    let hello = c2.handshake().await;
+    assert_eq!(
+        hello["payload"]["boot_id"], boot,
+        "a reconnect keeps boot_id"
+    );
     let want: Vec<Uuid> = evs[1..].iter().map(|e| e.event_id).collect();
     let mut got = vec![];
     for _ in 0..3 {
@@ -274,7 +288,11 @@ async fn outbox_survives_reconnect_and_restart() {
     let adapters2 = FakeAdapters::new();
     let w2 = start_worker(&env, &hub.url(), &adapters2);
     let mut c3 = hub.accept().await;
-    c3.handshake().await;
+    let hello = c3.handshake().await;
+    assert_ne!(
+        hello["payload"]["boot_id"], boot,
+        "a restart has a new boot_id"
+    );
     let mut got = vec![];
     for i in 0..3 {
         let f = stored_event(&mut c3).await;
@@ -414,6 +432,33 @@ async fn start_outside_config_is_rejected() {
     let err = c.expect("error").await;
     assert_eq!(err["id"], "x-1");
     assert_eq!(err["payload"]["code"], "invalid_frame");
+    w.stop().await;
+}
+
+// SPEC §5.3: `mode: new` starts the adapter, `mode: resume` resumes it; `session.start` for
+// a live process is acked without a new spawn.
+#[tokio::test]
+async fn start_mode_selects_start_or_resume() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+
+    let new = Uuid::now_v7();
+    start_session(&mut c, &env, new).await;
+    let resumed = Uuid::now_v7();
+    let mut p = env.start_payload(resumed);
+    p["mode"] = json!("resume");
+    let id = c.frame("session.start", p.clone()).await;
+    assert_eq!(c.expect("ack").await["id"], id.as_str());
+    let id = c.frame("session.start", p).await;
+    assert_eq!(c.expect("ack").await["id"], id.as_str());
+    assert_eq!(
+        adapters.calls(),
+        vec![FakeCall::Start(new), FakeCall::Resume(resumed)]
+    );
     w.stop().await;
 }
 

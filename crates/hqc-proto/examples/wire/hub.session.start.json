@@ -3,6 +3,7 @@
   "type": "session.start",
   "payload": {
     "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "mode": "new",
     "runtime": "claude_code",
     "model": "claude-sonnet-5-5",
     "workspace_path": "/Users/home-mac/work/hqc",

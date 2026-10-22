@@ -63,10 +63,10 @@ pub fn new_event(session_id: Uuid, author: Author, kind: EventKind) -> Event {
 /// the rest as `internal`.
 #[async_trait]
 pub trait Adapter: Send {
-    /// Spawn the runtime for a session this worker has not run before.
+    /// Spawn the runtime for a new session (`session.start` with `mode: new`, SPEC §5.3).
     async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()>;
-    /// Spawn the runtime again for a session it has run before (after `kill`, idle timeout
-    /// or a crash), continuing `spec.runtime_session_id`.
+    /// Spawn the runtime again for a session that ran before (`mode: resume`, or after
+    /// `kill`, idle timeout or a crash in this process), continuing `spec.runtime_session_id`.
     async fn resume(&mut self, spec: &StartSpec) -> anyhow::Result<()>;
     /// Hand one input to the runtime. Returns once written; acceptance comes later as
     /// [`AdapterEvent::InputAccepted`].

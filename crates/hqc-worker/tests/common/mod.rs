@@ -234,6 +234,7 @@ impl Env {
     pub fn start_payload(&self, session_id: Uuid) -> Value {
         json!({
             "session_id": session_id,
+            "mode": "new",
             "runtime": "claude_code",
             "workspace_path": self.workspace().display().to_string(),
             "cwd": ".",
@@ -302,6 +303,7 @@ pub fn start_worker_factory(
     let w = Worker {
         config,
         token: Secret::new(TOKEN),
+        boot_id: Uuid::new_v4(),
         adapters,
         capabilities: hqc_worker::capabilities::build(Some("2.1.307")),
         outbox_dir: env.outbox(),

@@ -21,6 +21,7 @@ use std::time::Duration;
 use hqc_proto::frame::Hello;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::adapter::AdapterFactory;
 use crate::config::{Config, DEFAULT_ENVIRONMENT};
@@ -33,6 +34,9 @@ use crate::token::Secret;
 pub struct Worker {
     pub config: Config,
     pub token: Secret,
+    /// A fresh uuid per process, sent in every `hello` (SPEC §5.4): the hub treats a new
+    /// value as a worker restart and the same value as a reconnect (SPEC §17.3).
+    pub boot_id: Uuid,
     pub adapters: Arc<dyn AdapterFactory>,
     /// `hello.capabilities`, see [`capabilities::detect`].
     pub capabilities: serde_json::Value,
@@ -45,9 +49,14 @@ pub struct Worker {
 
 impl Worker {
     pub fn hello(&self) -> Hello {
+        let mut capabilities = self.capabilities.clone();
+        // TODO(SPEC §19, iteration 2): workspaces come with `workspace.create`; until then
+        // the hub learns the single configured workspace from here.
+        capabilities["workspace_path"] = self.config.workspace.display().to_string().into();
         Hello {
             protocol_version: hqc_proto::PROTOCOL_VERSION,
-            capabilities: self.capabilities.clone(),
+            boot_id: self.boot_id,
+            capabilities,
             environments: vec![DEFAULT_ENVIRONMENT.into()],
             env_bindings: vec![],
             allowed_roots: Config::path_strings(&self.config.allowed_roots),

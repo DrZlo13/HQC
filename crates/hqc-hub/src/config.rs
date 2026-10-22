@@ -96,6 +96,10 @@ impl Config {
                 bail!("HQC_DEV=1 together with HQC_ACCESS_*: refusing to start in an ambiguous auth mode");
             }
             let email = var("HQC_DEV_USER").context("HQC_DEV=1 requires HQC_DEV_USER=<email>")?;
+            // Without Access every request is HQC_DEV_USER: never reachable from outside.
+            if !is_loopback_listen(&listen) {
+                bail!("HQC_DEV=1 requires a loopback HQC_HUB_LISTEN (127.0.0.1, [::1] or localhost), got {listen}");
+            }
             AuthConfig::Dev { email }
         } else {
             if var("HQC_DEV_USER").is_some() {
@@ -130,6 +134,16 @@ impl Config {
     }
 }
 
+/// `HQC_HUB_LISTEN` binds a loopback address only: `127.0.0.0/8`, `[::1]` or `localhost`.
+pub fn is_loopback_listen(listen: &str) -> bool {
+    if let Ok(addr) = listen.parse::<std::net::SocketAddr>() {
+        return addr.ip().is_loopback();
+    }
+    listen
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| host == "localhost" && port.parse::<u16>().is_ok())
+}
+
 /// `https://team.cloudflareaccess.com/` -> `team.cloudflareaccess.com`.
 pub fn normalize_team_domain(s: &str) -> String {
     s.trim()
@@ -142,6 +156,27 @@ pub fn normalize_team_domain(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_mode_listens_on_loopback_only() {
+        for ok in [
+            "127.0.0.1:8080",
+            "127.0.0.2:1",
+            "[::1]:8080",
+            "localhost:8080",
+        ] {
+            assert!(is_loopback_listen(ok), "{ok}");
+        }
+        for bad in [
+            "0.0.0.0:8080",
+            "[::]:8080",
+            "192.168.1.5:8080",
+            "hub.lan:8080",
+            "localhost",
+        ] {
+            assert!(!is_loopback_listen(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn team_domain_is_normalized() {

@@ -142,7 +142,7 @@ describe('approval.request', () => {
     t.apply(ev('event.approval.cancel', withSeq(2)));
     show(t);
     expect(root.querySelectorAll('.card-approval button').length).toBe(0);
-    expect(root.querySelector('.card-approval .outcome')!.textContent).toContain('другом устройстве');
+    expect(root.querySelector('.card-approval .outcome')!.textContent).toContain('воркер перезапущен');
   });
 
   it('shows the error if the hub refuses the answer', async () => {

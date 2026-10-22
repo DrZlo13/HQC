@@ -3,6 +3,8 @@
 //! One task per session owns its adapter, its input queue and its `process_state`.
 //! - `session.start` is checked against the local config first; a mismatch is answered
 //!   with `error {invalid_frame}` and nothing is created or spawned (SPEC §2.1, §14).
+//!   `mode: new` calls [`Adapter::start`], `mode: resume` [`Adapter::resume`] (SPEC §5.3).
+//!   `session.start` for a live process is acked without touching it.
 //!   A failed spawn is `error {agent_start_failed, retryable: true}` (SPEC §5.2).
 //! - `session.input` is queued; one input per turn, the next one waits for
 //!   [`AdapterEvent::TurnEnded`] (SPEC §17.2). Its `ack {event_id}` is sent only when the
@@ -19,8 +21,8 @@ use std::time::Duration;
 
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
-    error_code, Ack, Envelope, HubFrame, LockedBy, ProcessState, SessionInput, WireError,
-    WorkerFrame,
+    error_code, Ack, Envelope, HubFrame, LockedBy, ProcessState, SessionInput, StartMode,
+    WireError, WorkerFrame,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -80,6 +82,7 @@ enum Cmd {
     Start {
         id: String,
         spec: Box<StartSpec>,
+        mode: StartMode,
     },
     Input {
         id: String,
@@ -191,6 +194,7 @@ impl Supervisor {
                     Cmd::Start {
                         id,
                         spec: Box::new(spec),
+                        mode: s.mode,
                     },
                 )
             }
@@ -268,6 +272,7 @@ impl Supervisor {
             state: ProcessState::Stopped,
             runtime_session_id: None,
             started_once: false,
+            resume_requested: false,
             queue: VecDeque::new(),
             turn: None,
             delivered: VecDeque::new(),
@@ -315,6 +320,8 @@ struct Session {
     state: ProcessState,
     runtime_session_id: Option<String>,
     started_once: bool,
+    /// The last `session.start` had `mode: resume` (SPEC §5.3).
+    resume_requested: bool,
     queue: VecDeque<Queued>,
     turn: Option<Turn>,
     delivered: VecDeque<Uuid>,
@@ -363,7 +370,7 @@ impl Session {
 
     async fn on_cmd(&mut self, c: Cmd) {
         match c {
-            Cmd::Start { id, spec } => {
+            Cmd::Start { id, spec, mode } => {
                 if self.state != ProcessState::Stopped {
                     if *spec != self.spec {
                         tracing::warn!(session_id = %self.id, "session.start for a running agent; keeping the running one");
@@ -372,6 +379,7 @@ impl Session {
                     return;
                 }
                 self.spec = *spec;
+                self.resume_requested = mode == StartMode::Resume;
                 match self.ensure_running().await {
                     Ok(()) => {
                         self.link.reply(&id, ack(None));
@@ -563,7 +571,9 @@ impl Session {
 
     async fn ensure_running(&mut self) -> anyhow::Result<()> {
         self.set_state(ProcessState::Starting);
-        let r = if self.started_once {
+        // `mode: resume` from the hub, or this process ran the agent before (kill, idle
+        // timeout, crash). The Claude Code adapter checks for the transcript either way.
+        let r = if self.started_once || self.resume_requested {
             self.adapter.resume(&self.spec).await
         } else {
             self.adapter.start(&self.spec).await

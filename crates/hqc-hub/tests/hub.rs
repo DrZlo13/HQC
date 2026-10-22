@@ -455,11 +455,125 @@ async fn answer_while_offline_is_delivered_after_hello() {
         .await;
     assert_eq!(s, 200);
 
+    // Same boot_id: the worker still holds the request; session.start comes first.
     let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let st = ack_start(&mut w, &sid).await;
+    assert_eq!(st["payload"]["mode"], "resume");
     let f = w.expect("approval.response").await;
     assert_eq!(f["payload"]["option_id"], "allow");
     w.reply(&f["id"], "ack", json!({})).await;
     w.expect_silence(Duration::from_millis(200)).await;
+    hub.finish().await;
+}
+
+/// SPEC §5.2, §17.3: a reconnect with the same boot_id keeps an open approval; a new
+/// boot_id (worker restart) cancels it with `worker_restart`, without a frame, and loses the
+/// turn.
+#[tokio::test]
+async fn boot_id_tells_restart_from_reconnect() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("boot").await;
+    let st = ack_start(&mut w, &sid).await;
+    assert_eq!(st["payload"]["mode"], "new");
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "go"}))
+        .await;
+    assert_eq!(s, 201);
+    let eid = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": eid})).await;
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-b", "2099-01-01T00:00:00Z"),
+    ))
+    .await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+
+    // Connection drop, same process: nothing is cancelled, the session is restarted.
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let st = ack_start(&mut w, &sid).await;
+    assert_eq!(st["payload"]["mode"], "resume");
+    w.expect_silence(Duration::from_millis(300)).await;
+    hub.wait_session(&sid, "still waiting", |v| v["state"] == "waiting")
+        .await;
+    let events = hub.events(&sid).await;
+    assert!(
+        !events.iter().any(|e| e["type"] == "approval.cancel"
+            || e["type"] == "system" && e["payload"]["code"] == "turn_lost"),
+        "reconnect must not cancel: {events:?}"
+    );
+
+    // A new boot_id: the worker restarted.
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    // No pending input and no open request left: no session.start, no deny frame.
+    w.expect_silence(Duration::from_millis(300)).await;
+    let v = hub
+        .wait_session(&sid, "idle after restart", |v| v["state"] == "idle")
+        .await;
+    assert_eq!(v["agent"]["process_state"], "stopped");
+    let events = hub.events(&sid).await;
+    let cancel = events
+        .iter()
+        .find(|e| e["type"] == "approval.cancel")
+        .expect("approval.cancel");
+    assert_eq!(
+        cancel["payload"],
+        json!({"request_id": "req-b", "reason": "worker_restart"})
+    );
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == "system" && e["payload"]["code"] == "turn_lost"));
+    let (s, _) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/req-b"),
+            json!({"option_id": "allow"}),
+        )
+        .await;
+    assert_eq!(s, 409, "the cancelled request is closed");
+    hub.finish().await;
+}
+
+/// SPEC §5.2: after hello the hub sends session.start (mode resume) and only after its ack
+/// the pending input, in seq order.
+#[tokio::test]
+async fn session_start_precedes_input_after_hello() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("order").await;
+    ack_start(&mut w, &sid).await;
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let mut ids = vec![];
+    for text in ["one", "two"] {
+        let (s, r) = hub
+            .post(&format!("/api/sessions/{sid}/input"), json!({"text": text}))
+            .await;
+        assert_eq!(s, 201);
+        ids.push(r["event"]["event_id"].clone());
+    }
+
+    // A restarted worker (new boot_id) still gets its pending input, after session.start.
+    let (mut w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    let st = w.expect("session.start").await;
+    assert_eq!(st["payload"]["mode"], "resume");
+    w.expect_silence(Duration::from_millis(200)).await;
+    w.reply(&st["id"], "ack", json!({})).await;
+    for id in &ids {
+        let si = w.expect("session.input").await;
+        assert_eq!(&si["payload"]["event_id"], id);
+    }
     hub.finish().await;
 }
 

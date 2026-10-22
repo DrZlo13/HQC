@@ -12,7 +12,11 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use hqc_proto::{event::CancelReason, frame::HubFrame};
+use hqc_proto::{
+    api::{self, EnrollPollRequest, EnrollRequest, EnrollStarted},
+    event::CancelReason,
+    frame::HubFrame,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -516,22 +520,16 @@ pub async fn delete_worker(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WorkerEnroll {
-    pub name: String,
-    #[serde(default)]
-    pub os: String,
-}
-
 const ENROLL_PER_MINUTE: usize = 10;
 const ENROLL_MAX_ACTIVE: i64 = 100;
 
 /// `POST /worker/enroll` (no auth): a code for the user to confirm and a secret to poll
-/// with. Rate-limited (SPEC §20).
+/// with. Rate-limited (SPEC §20). `protocol_version` in the body is informational; unknown
+/// fields are ignored (SPEC §5.1).
 pub async fn worker_enroll(
     State(app): State<AppState>,
-    Json(b): Json<WorkerEnroll>,
-) -> ApiResult<Json<Value>> {
+    Json(b): Json<EnrollRequest>,
+) -> ApiResult<Json<EnrollStarted>> {
     {
         let mut calls = app.enroll_calls.lock().unwrap();
         calls.retain(|t| t.elapsed() < Duration::from_secs(60));
@@ -548,6 +546,11 @@ pub async fn worker_enroll(
         return Err(ApiError::BadRequest("name is required".into()));
     }
     let os: String = b.os.trim().chars().take(32).collect();
+    if b.protocol_version
+        .is_some_and(|v| v != hqc_proto::PROTOCOL_VERSION)
+    {
+        tracing::warn!(worker_protocol = ?b.protocol_version, "enrolling a worker with another protocol version; its hello will be refused");
+    }
     let code = new_enroll_code();
     let poll_token = new_secret("hqce_");
     let expires_at = Utc::now() + app.config.timing.enroll_ttl;
@@ -560,35 +563,28 @@ pub async fn worker_enroll(
         expires_at,
     )
     .await?;
-    Ok(Json(json!({
-        "code": code,
-        "poll_token": poll_token,
-        "expires_at": expires_at,
-        "poll_interval_s": 3,
-    })))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WorkerEnrollPoll {
-    pub poll_token: String,
+    Ok(Json(EnrollStarted {
+        code,
+        poll_token,
+        expires_at,
+        poll_interval_s: 3,
+    }))
 }
 
 /// `POST /worker/enroll/poll`: `pending`, `confirmed` with the worker token (exactly once),
 /// or `expired`.
 pub async fn worker_enroll_poll(
     State(app): State<AppState>,
-    Json(b): Json<WorkerEnrollPoll>,
-) -> ApiResult<Json<Value>> {
+    Json(b): Json<EnrollPollRequest>,
+) -> ApiResult<Json<api::EnrollPoll>> {
     let token = new_secret("hqcw_");
     match db::enroll_poll(&app.db, &hash_secret(&b.poll_token), &hash_secret(&token)).await? {
-        EnrollPoll::Pending => Ok(Json(json!({ "status": "pending" }))),
+        EnrollPoll::Pending => Ok(Json(api::EnrollPoll::Pending)),
         EnrollPoll::Confirmed { worker_id } => {
             tracing::info!(%worker_id, "worker token issued");
-            Ok(Json(
-                json!({ "status": "confirmed", "worker_id": worker_id, "token": token }),
-            ))
+            Ok(Json(api::EnrollPoll::Confirmed { worker_id, token }))
         }
-        EnrollPoll::Gone => Ok(Json(json!({ "status": "expired" }))),
+        EnrollPoll::Gone => Ok(Json(api::EnrollPoll::Expired)),
     }
 }
 

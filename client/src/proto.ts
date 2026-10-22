@@ -33,13 +33,7 @@ export type SessionState = (typeof SESSION_STATES)[number] | Unknown;
 export const CANONICALS = ['once', 'session', 'always', 'deny', 'deny_always'] as const;
 export type ApprovalCanonical = (typeof CANONICALS)[number] | Unknown;
 
-export const CANCEL_REASONS = [
-  'timeout',
-  'stopped',
-  'answered_elsewhere',
-  'worker_restart',
-  'archived',
-] as const;
+export const CANCEL_REASONS = ['timeout', 'stopped', 'worker_restart', 'archived'] as const;
 export type CancelReason = (typeof CANCEL_REASONS)[number] | Unknown;
 
 export const PEER_MODES = ['send', 'ask'] as const;
@@ -56,6 +50,9 @@ export type ProcessState = (typeof PROCESS_STATES)[number];
 
 export const LOCKED_BY = ['none', 'hqc', 'vscode'] as const;
 export type LockedBy = (typeof LOCKED_BY)[number];
+
+export const START_MODES = ['new', 'resume'] as const;
+export type StartMode = (typeof START_MODES)[number];
 
 // ---- event envelope -------------------------------------------------------------------
 
@@ -441,6 +438,7 @@ export interface Frame<T extends string = string, P = Obj> {
 const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   hello: (p) => {
     num(p, 'protocol_version');
+    str(p, 'boot_id');
     obj(p.capabilities, 'capabilities');
     strArr(p, 'environments');
     arr(p, 'env_bindings');
@@ -470,6 +468,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   result: () => {},
   'session.start': (p) => {
     str(p, 'session_id');
+    strictEnum(p, 'mode', START_MODES);
     str(p, 'runtime');
     optStr(p, 'acp_agent');
     optStr(p, 'model');

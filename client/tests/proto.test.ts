@@ -38,7 +38,11 @@ describe('examples/wire', () => {
 
   it('parses every example file', () => {
     const unhandled = files.filter(
-      (f) => !f.startsWith('event.') && !f.startsWith('hub.') && !f.startsWith('worker.'),
+      (f) =>
+        !f.startsWith('event.') &&
+        !f.startsWith('hub.') &&
+        !f.startsWith('worker.') &&
+        !f.startsWith('api.enroll.'),
     );
     expect(unhandled).toEqual([]);
   });

@@ -1,8 +1,10 @@
 //! Hub -> worker delivery of input (SPEC §5.2).
 //!
 //! `user.message` / `peer.message` are stored with `delivery: pending`. While the session's
-//! worker is connected, the hub sends `session.start` (once per connection), and after its
-//! `ack` every pending input as `session.input` in `seq` order; the worker's `ack {event_id}`
+//! worker is connected, the hub sends `session.start` (once per connection; `mode: new` the
+//! very first time for the session, `resume` after that), and after its `ack` the answers the
+//! worker has not acknowledged, then every pending input as `session.input` in `seq` order.
+//! The worker's `ack {event_id}`
 //! makes the input `delivered`. A retryable `error` on start is retried; after
 //! `max_start_failures` in a row the pending input becomes `failed`, a `system` event is
 //! written and the session shows `error` until `POST /retry`.
@@ -10,7 +12,7 @@
 use std::sync::Arc;
 
 use hqc_proto::frame::{
-    error_code, HubFrame, PeerPrefix, Runtime, SessionInput, SessionStart, WireError,
+    error_code, HubFrame, PeerPrefix, Runtime, SessionInput, SessionStart, StartMode, WireError,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -19,7 +21,7 @@ use crate::{
     app::{AppState, Notice},
     auth::{hash_secret, new_secret},
     db::{self, EventRow, SessionRow},
-    events,
+    events, requests,
     worker_ws::{ConnState, Reply, StartState, WorkerConn},
 };
 
@@ -106,8 +108,14 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
     // A fresh token per start: only the current agent process holds a valid one.
     let token = new_secret("hqcs_");
     db::set_session_token_hash(&app.db, s.id, &hash_secret(&token)).await?;
+    let mode = if db::mark_start_sent(&app.db, s.id).await? {
+        StartMode::Resume
+    } else {
+        StartMode::New
+    };
     Ok(SessionStart {
         session_id: s.id,
+        mode,
         runtime: serde_json::from_value(Value::String(s.runtime.clone()))
             .unwrap_or(Runtime::ClaudeCode),
         acp_agent: s.acp_agent.clone(),
@@ -138,6 +146,12 @@ pub async fn on_start_ok(
         st.sessions.entry(session_id).or_default().start = StartState::Started;
     }
     db::reset_start_failures(&app.db, session_id).await?;
+    // Answers the worker has not acknowledged go first, then pending input (SPEC §5.2).
+    for p in db::undelivered_results(&app.db, conn.worker_id).await? {
+        if p.session_id == session_id {
+            requests::deliver_result(app, &p).await;
+        }
+    }
     kick(app, session_id, false).await;
     app.session_changed(session_id);
     Ok(())

@@ -66,6 +66,8 @@ pub struct TestHub {
     pub http: reqwest::Client,
     pub push: Arc<RecordingPush>,
     pub email: String,
+    /// `boot_id` of [`FakeWorker::online`].
+    pub boot_id: Uuid,
     schema: String,
     admin: PgPool,
 }
@@ -137,6 +139,7 @@ impl TestHub {
             http: reqwest::Client::new(),
             push,
             email,
+            boot_id: Uuid::new_v4(),
             schema,
             admin,
         }
@@ -203,7 +206,12 @@ impl TestHub {
     /// Full enrollment (SPEC §5.1): code from the worker, confirmation by the user, token by poll.
     pub async fn enroll(&self, name: &str) -> (String, String) {
         let (s, e) = self
-            .post("/worker/enroll", json!({"name": name, "os": "macos"}))
+            .post(
+                "/worker/enroll",
+                // Unknown fields are ignored (SPEC §5.1).
+                json!({"name": name, "os": "macos", "protocol_version": hqc_proto::PROTOCOL_VERSION,
+                       "arch": "arm64"}),
+            )
             .await;
         assert_eq!(s, 200, "{e}");
         let (s, p) = self
@@ -305,19 +313,32 @@ impl FakeWorker {
         }
     }
 
-    /// Connect and complete `hello` announcing `workspace_path`; returns `hello.ack`.
+    /// Connect and complete `hello` announcing `workspace_path`, with the hub's
+    /// [`TestHub::boot_id`]: every `online` of a test is the same worker process
+    /// reconnecting. Returns `hello.ack`.
     pub async fn online(hub: &TestHub, token: &str, workspace: &str) -> (Self, Value) {
+        Self::online_boot(hub, token, workspace, hub.boot_id).await
+    }
+
+    /// `online` as a worker process with its own `boot_id` (a new value = a restart).
+    pub async fn online_boot(
+        hub: &TestHub,
+        token: &str,
+        workspace: &str,
+        boot_id: Uuid,
+    ) -> (Self, Value) {
         let mut w = Self::connect(hub, token).await.expect("worker connect");
-        let ack = w.hello(workspace).await;
+        let ack = w.hello(workspace, boot_id).await;
         (w, ack)
     }
 
-    pub async fn hello(&mut self, workspace: &str) -> Value {
+    pub async fn hello(&mut self, workspace: &str, boot_id: Uuid) -> Value {
         let id = self
             .send(
                 "hello",
                 json!({
                     "protocol_version": hqc_proto::PROTOCOL_VERSION,
+                    "boot_id": boot_id,
                     "capabilities": {"claude_code": {"version": "2.1.307"}, "acp_agents": [],
                                      "workspace_path": workspace},
                     "environments": ["default"],

@@ -159,13 +159,21 @@ pub async fn workers_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<WorkerRow>
     .await
 }
 
-/// Store the copy of the worker's local config from `hello` (display only, SPEC §3 Worker).
-pub async fn worker_hello(db: &PgPool, id: Uuid, h: &hqc_proto::frame::Hello) -> sqlx::Result<()> {
-    sqlx::query(
-        "UPDATE workers SET protocol_version = $2, capabilities = $3, environments = $4,
+/// Store the copy of the worker's local config from `hello` (display only, SPEC §3 Worker)
+/// and its `boot_id`; returns the `boot_id` of the previous `hello` (SPEC §5.2, §17.3).
+pub async fn worker_hello(
+    db: &PgPool,
+    id: Uuid,
+    h: &hqc_proto::frame::Hello,
+) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar(
+        "WITH old AS (SELECT boot_id FROM workers WHERE id = $1)
+         UPDATE workers SET protocol_version = $2, capabilities = $3, environments = $4,
             env_bindings = $5, allowed_roots = $6, allow_foreign_sessions = $7,
-            share_local_models = $8, local_models = $9, last_seen = now(), updated_at = now()
-         WHERE id = $1",
+            share_local_models = $8, local_models = $9, boot_id = $10, last_seen = now(),
+            updated_at = now()
+         WHERE id = $1
+         RETURNING (SELECT boot_id FROM old)",
     )
     .bind(id)
     .bind(h.protocol_version as i32)
@@ -176,6 +184,19 @@ pub async fn worker_hello(db: &PgPool, id: Uuid, h: &hqc_proto::frame::Hello) ->
     .bind(h.allow_foreign_sessions)
     .bind(h.share_local_models)
     .bind(serde_json::to_value(&h.local_models).unwrap_or_default())
+    .bind(h.boot_id)
+    .fetch_one(db)
+    .await
+}
+
+/// The worker restarted: none of its agents runs any more (SPEC §17.3).
+pub async fn worker_restarted(db: &PgPool, worker_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET process_state = 'stopped',
+            locked_by = CASE WHEN locked_by = 'hqc' THEN 'none' ELSE locked_by END
+         WHERE worker_id = $1",
+    )
+    .bind(worker_id)
     .execute(db)
     .await?;
     Ok(())
@@ -427,6 +448,7 @@ pub struct SessionRow {
     pub start_failures: i32,
     pub turn_open: bool,
     pub last_turn_error: bool,
+    pub start_sent: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -435,7 +457,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.title, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
-    s.created_at, s.updated_at";
+    s.start_sent, s.created_at, s.updated_at";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -548,6 +570,36 @@ pub async fn sessions_with_pending_input(db: &PgPool, worker_id: Uuid) -> sqlx::
     )
     .bind(worker_id)
     .fetch_all(db)
+    .await
+}
+
+/// Sessions that get `session.start` (`mode: resume`) after a reconnect: pending input, an
+/// open approval / clarify, or an answer the worker has not acknowledged (SPEC §5.2).
+pub async fn sessions_to_restart(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT s.id FROM sessions s WHERE s.worker_id = $1 AND NOT s.archived
+           AND s.locked_by <> 'vscode'
+           AND (EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'pending')
+             OR EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
+                          AND p.kind IN ('approval', 'clarify')
+                          AND (p.closed_at IS NULL
+                               OR (p.result IS NOT NULL AND p.result_delivered_at IS NULL))))
+         ORDER BY s.id",
+    )
+    .bind(worker_id)
+    .fetch_all(db)
+    .await
+}
+
+/// Marks that `session.start` was sent; returns whether one had been sent before (SPEC §5.3).
+pub async fn mark_start_sent(db: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "WITH old AS (SELECT start_sent FROM sessions WHERE id = $1)
+         UPDATE sessions SET start_sent = true WHERE id = $1
+         RETURNING (SELECT start_sent FROM old)",
+    )
+    .bind(id)
+    .fetch_one(db)
     .await
 }
 
@@ -1006,6 +1058,19 @@ pub async fn result_delivered(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// The worker restarted: answers it never acknowledged went to a process that is gone.
+pub async fn drop_undelivered_results(db: &PgPool, worker_id: Uuid) -> sqlx::Result<u64> {
+    let r = sqlx::query(
+        "UPDATE pending_requests SET result_delivered_at = now()
+         WHERE result IS NOT NULL AND result_delivered_at IS NULL
+           AND session_id IN (SELECT id FROM sessions WHERE worker_id = $1)",
+    )
+    .bind(worker_id)
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected())
 }
 
 pub async fn pending_by_id(db: &PgPool, id: Uuid) -> sqlx::Result<Option<PendingRow>> {

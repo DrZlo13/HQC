@@ -240,6 +240,26 @@ async fn handle_text(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // The version is checked before the strict parse: a `hello` of another protocol version
+    // may have another shape, and must still learn which version the hub needs (SPEC §5.1).
+    if !*registered && raw.get("type").and_then(Value::as_str) == Some("hello") {
+        if let Some(v) = raw["payload"]["protocol_version"].as_u64() {
+            if v != u64::from(PROTOCOL_VERSION) {
+                conn.reply(
+                    &id,
+                    HubFrame::Error(WireError {
+                        code: error_code::PROTOCOL_VERSION_UNSUPPORTED.into(),
+                        message: format!(
+                            "worker protocol {v} is not supported, hub speaks {PROTOCOL_VERSION}"
+                        ),
+                        retryable: false,
+                        details: Some(json!({"min_version": PROTOCOL_VERSION})),
+                    }),
+                );
+                return ControlFlow::Break(());
+            }
+        }
+    }
     let frame: Envelope<WorkerFrame> = match serde_json::from_value(raw.clone()) {
         Ok(f) => f,
         Err(e) => {
@@ -251,12 +271,12 @@ async fn handle_text(
     if !*registered {
         return match frame.body {
             WorkerFrame::Hello(h) => match on_hello(app, conn, &id, h).await {
-                Ok(true) => {
+                Ok(Some(restarted)) => {
                     *registered = true;
-                    after_hello(app, conn).await;
+                    after_hello(app, conn, restarted).await;
                     ControlFlow::Continue(())
                 }
-                Ok(false) => ControlFlow::Break(()),
+                Ok(None) => ControlFlow::Break(()),
                 Err(e) => {
                     tracing::error!(error = %e, "hello failed");
                     conn.error(&id, error_code::INTERNAL, "internal error", true);
@@ -314,33 +334,23 @@ async fn handle_text(
     ControlFlow::Continue(())
 }
 
-/// `Ok(false)`: rejected, close the connection.
+/// `Ok(None)`: rejected, close the connection. `Ok(Some(restarted))`: accepted;
+/// `restarted` when `boot_id` differs from the previous `hello` (SPEC §5.2, §17.3).
 async fn on_hello(
     app: &AppState,
     conn: &Arc<WorkerConn>,
     id: &str,
     h: Hello,
-) -> anyhow::Result<bool> {
-    // Only the exact version is accepted until there is a second one to negotiate with.
-    if h.protocol_version != PROTOCOL_VERSION {
-        conn.reply(
-            id,
-            HubFrame::Error(WireError {
-                code: error_code::PROTOCOL_VERSION_UNSUPPORTED.into(),
-                message: format!(
-                    "worker protocol {} is not supported, hub speaks {PROTOCOL_VERSION}",
-                    h.protocol_version
-                ),
-                retryable: false,
-                details: Some(json!({"min_version": PROTOCOL_VERSION})),
-            }),
-        );
-        return Ok(false);
-    }
-    db::worker_hello(&app.db, conn.worker_id, &h).await?;
+) -> anyhow::Result<Option<bool>> {
+    // Only the exact version is accepted until there is a second one to negotiate with;
+    // other versions are refused in `handle_text` before parsing.
+    debug_assert_eq!(h.protocol_version, PROTOCOL_VERSION);
+    let previous_boot = db::worker_hello(&app.db, conn.worker_id, &h).await?;
+    let restarted = previous_boot != Some(h.boot_id);
 
     // TODO(SPEC §19, iteration 2): workspaces become hub objects created through
-    // `workspace.create`; until then the worker announces its single workspace here.
+    // `workspace.create`; until then the worker announces its single workspace in
+    // `capabilities.workspace_path`.
     if let Some(path) = h.capabilities.get("workspace_path").and_then(Value::as_str) {
         let owner = db::worker(&app.db, conn.worker_id)
             .await?
@@ -372,26 +382,38 @@ async fn on_hello(
             server_time: chrono::Utc::now(),
         },
     );
-    tracing::info!(worker_id = %conn.worker_id, "worker hello");
-    Ok(true)
+    tracing::info!(worker_id = %conn.worker_id, boot_id = %h.boot_id, restarted, "worker hello");
+    Ok(Some(restarted))
 }
 
-/// After `hello`: deliver stored answers, close requests the restarted worker no longer
-/// holds, re-send `pending` input in `seq` order (SPEC §5.2, §17.3).
-async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>) {
+/// After `hello` (SPEC §5.2, §17.3).
+///
+/// A new `boot_id` means the worker restarted: its agents are gone, so open approval /
+/// clarify requests are cancelled with `worker_restart` (event only: no process holds them),
+/// unacknowledged answers are dropped and an open turn gets `system turn_lost`.
+/// The same `boot_id` is a reconnect: nothing is cancelled.
+///
+/// Then every session with pending input, an open request or an unacknowledged answer gets
+/// `session.start` (`mode: resume`); its answers and inputs follow the `ack` on it
+/// ([`delivery::on_start_ok`]).
+async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
     let r: anyhow::Result<()> = async {
-        for p in db::undelivered_results(&app.db, conn.worker_id).await? {
-            requests::deliver_result(app, &p).await;
+        if restarted {
+            let dropped = db::drop_undelivered_results(&app.db, conn.worker_id).await?;
+            if dropped > 0 {
+                tracing::info!(worker_id = %conn.worker_id, dropped, "worker restarted: unacknowledged answers dropped");
+            }
+            for p in db::open_requests_of_worker(&app.db, conn.worker_id).await? {
+                requests::cancel_without_frame(app, &p, CancelReason::WorkerRestart).await?;
+            }
+            db::worker_restarted(&app.db, conn.worker_id).await?;
+            for sid in db::sessions_of_worker(&app.db, conn.worker_id).await? {
+                events::turn_lost(app, sid).await?;
+                app.session_changed(sid);
+            }
         }
-        for p in db::open_requests_of_worker(&app.db, conn.worker_id).await? {
-            requests::cancel(app, &p, CancelReason::WorkerRestart).await?;
-        }
-        for sid in db::sessions_of_worker(&app.db, conn.worker_id).await? {
-            events::turn_lost(app, sid).await?;
-            app.session_changed(sid);
-        }
-        for sid in db::sessions_with_pending_input(&app.db, conn.worker_id).await? {
-            delivery::kick(app, sid, false).await;
+        for sid in db::sessions_to_restart(&app.db, conn.worker_id).await? {
+            delivery::kick(app, sid, true).await;
         }
         Ok(())
     }

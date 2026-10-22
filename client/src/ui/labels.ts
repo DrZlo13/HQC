@@ -32,7 +32,6 @@ export const STATE_LABELS: Record<SessionState, string> = {
 export const CANCEL_LABELS: Record<CancelReason, string> = {
   timeout: 'истёк срок',
   stopped: 'ход остановлен',
-  answered_elsewhere: 'ответ дан на другом устройстве',
   worker_restart: 'воркер перезапущен',
   archived: 'сессия в архиве',
   unknown: 'отменён',

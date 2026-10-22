@@ -5,5 +5,5 @@
   "ts": "2026-10-22T10:00:00Z",
   "author": { "kind": "system" },
   "type": "approval.cancel",
-  "payload": { "request_id": "req-1", "reason": "answered_elsewhere" }
+  "payload": { "request_id": "req-1", "reason": "worker_restart" }
 }

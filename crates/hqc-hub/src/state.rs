@@ -45,9 +45,11 @@ pub fn compute_state(i: StateInputs) -> SessionState {
     }
 }
 
-/// Event types that count as unread.
-const UNREAD_TYPES: &str =
-    "('agent.message', 'approval.request', 'clarify.request', 'peer.message', 'system')";
+/// Events that count as unread (SPEC §6): the final `agent.message`, requests, peer
+/// messages and `system`.
+const UNREAD_FILTER: &str =
+    "(e.type IN ('approval.request', 'clarify.request', 'peer.message', 'system')
+    OR (e.type = 'agent.message' AND e.payload->>'final' = 'true'))";
 
 #[derive(Debug, FromRow)]
 struct Aggregates {
@@ -109,7 +111,7 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
                     AND p.kind IN ('approval', 'clarify')) AS has_open_request,
             COALESCE(r.last_read_seq, 0) AS last_read_seq,
             (SELECT count(*) FROM events e WHERE e.session_id = s.id
-                AND e.seq > COALESCE(r.last_read_seq, 0) AND e.type IN {UNREAD_TYPES}) AS unread
+                AND e.seq > COALESCE(r.last_read_seq, 0) AND {UNREAD_FILTER}) AS unread
          FROM sessions s
          LEFT JOIN read_cursors r ON r.session_id = s.id AND r.user_id = $1
          WHERE s.id = ANY($2)"

@@ -22,7 +22,7 @@ use crate::{
     db::{self, PendingRow, SessionRow},
     error::{ApiError, ApiResult},
     events::{self, user_author},
-    worker_ws::Reply,
+    worker_ws::{Reply, StartState},
 };
 
 #[derive(Debug, Deserialize)]
@@ -146,23 +146,56 @@ pub struct EventRowOut {
 
 /// Close an open request on the hub's initiative.
 pub async fn cancel(app: &AppState, p: &PendingRow, reason: CancelReason) -> anyhow::Result<()> {
+    cancel_inner(app, p, reason, true).await
+}
+
+/// Close an open request that no runtime holds any more (the worker restarted): the
+/// cancel event is written, no frame goes to the worker.
+pub async fn cancel_without_frame(
+    app: &AppState,
+    p: &PendingRow,
+    reason: CancelReason,
+) -> anyhow::Result<()> {
+    cancel_inner(app, p, reason, false).await
+}
+
+async fn cancel_inner(
+    app: &AppState,
+    p: &PendingRow,
+    reason: CancelReason,
+    with_frame: bool,
+) -> anyhow::Result<()> {
     let Some(s) = db::session(&app.db, p.session_id).await? else {
         return Ok(());
     };
-    let (frame, ev_type) = match p.kind.as_str() {
-        "approval" => (
-            deny_option(&p.payload).map(|option_id| {
-                json!({"type": "approval.response",
-                       "payload": {"session_id": s.id, "request_id": p.request_id, "option_id": option_id}})
-            }),
-            "approval.cancel",
-        ),
-        "clarify" => (
-            Some(json!({"type": "clarify.response",
-                        "payload": {"session_id": s.id, "request_id": p.request_id, "answers": {}}})),
-            "clarify.cancel",
-        ),
+    let ev_type = match p.kind.as_str() {
+        "approval" => "approval.cancel",
+        "clarify" => "clarify.cancel",
         _ => return Ok(()),
+    };
+    if !with_frame {
+        if !db::close_request(&app.db, p.id, None).await? {
+            return Ok(());
+        }
+        events::store_hub_event(
+            app,
+            &s,
+            json!({"kind": "system"}),
+            ev_type,
+            json!({"request_id": p.request_id, "reason": reason}),
+            None,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+    let frame = match p.kind.as_str() {
+        "approval" => deny_option(&p.payload).map(|option_id| {
+            json!({"type": "approval.response",
+                   "payload": {"session_id": s.id, "request_id": p.request_id, "option_id": option_id}})
+        }),
+        _ => Some(json!({"type": "clarify.response",
+                         "payload": {"session_id": s.id, "request_id": p.request_id, "answers": {}}})),
     };
     if frame.is_none() {
         tracing::warn!(session_id = %s.id, request_id = %p.request_id, "approval without a deny option: cancelled without a frame");
@@ -242,7 +275,8 @@ pub async fn auto_approve(app: &AppState, s: &SessionRow, request_id: &str) -> a
 }
 
 /// Send the stored result frame if the worker is connected; it stays undelivered until
-/// the worker's `ack`.
+/// the worker's `ack`. While `session.start` of the session awaits its `ack` on this
+/// connection, the frame waits too: [`crate::delivery::on_start_ok`] sends it.
 pub async fn deliver_result(app: &AppState, p: &PendingRow) {
     let Some(frame) = &p.result else { return };
     let worker = match p.worker_id {
@@ -263,6 +297,13 @@ pub async fn deliver_result(app: &AppState, p: &PendingRow) {
         return;
     };
     let mut st = conn.st.lock().await;
+    if st
+        .sessions
+        .get(&p.session_id)
+        .is_some_and(|sc| sc.start == StartState::Starting)
+    {
+        return;
+    }
     let id = conn.send_raw(t, payload);
     st.replies.insert(id, Reply::Result { pending_id: p.id });
 }

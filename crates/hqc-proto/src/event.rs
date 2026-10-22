@@ -91,7 +91,6 @@ pub struct ApprovalOption {
 pub enum CancelReason {
     Timeout,
     Stopped,
-    AnsweredElsewhere,
     WorkerRestart,
     Archived,
     #[serde(other)]
@@ -537,7 +536,6 @@ mod tests {
         let reasons = [
             (CancelReason::Timeout, "timeout"),
             (CancelReason::Stopped, "stopped"),
-            (CancelReason::AnsweredElsewhere, "answered_elsewhere"),
             (CancelReason::WorkerRestart, "worker_restart"),
             (CancelReason::Archived, "archived"),
         ];

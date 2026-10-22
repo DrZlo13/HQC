@@ -150,6 +150,11 @@ pub enum HubFrame {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
     pub protocol_version: u32,
+    /// A fresh uuid per worker process (SPEC §5.4, §17.3). The hub treats only a change of
+    /// `boot_id` as a worker restart; the same `boot_id` again is a reconnect.
+    pub boot_id: Uuid,
+    /// `{claude_code?: {version}, acp_agents: [], workspace_path?}`; `workspace_path` is the
+    /// single workspace of iteration 1 (TODO SPEC §19: `workspace.create` in iteration 2).
     pub capabilities: serde_json::Value,
     #[serde(default)]
     pub environments: Vec<String>,
@@ -190,11 +195,21 @@ pub enum LockedBy {
     Vscode,
 }
 
+/// `session.start.mode` (SPEC §5.3): `new` if the hub has never sent `session.start` for the
+/// session, else `resume`. The worker calls `start` or `resume` of the adapter accordingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartMode {
+    New,
+    Resume,
+}
+
 /// `session.start` (SPEC §5.3). Optional fields are omitted when absent;
 /// `workspace_path` is explicitly `null` for a session without workspace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStart {
     pub session_id: Uuid,
+    pub mode: StartMode,
     pub runtime: Runtime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent: Option<String>,

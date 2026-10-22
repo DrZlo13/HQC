@@ -2,6 +2,7 @@
 //! §5 (worker <-> hub frames). Keep this crate dependency-light: it is linked into the
 //! hub, the worker and (via generated TS types later) the client.
 
+pub mod api;
 pub mod event;
 pub mod frame;
 

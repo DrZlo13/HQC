@@ -493,7 +493,52 @@ claude_bin = "/Users/me/.local/bin/claude"
 # хабу в `hello`; без него хаб отвечает на создание сессии 409 no_workspace.
 [workspace]
 path = "/Users/me/work/hqc"
+
+# Политика разрешений Claude Code (SPEC §8.1, §14). Блок можно не писать: тогда mode = "ask",
+# allow пуст, deny — набор по умолчанию (sudo, ssh, scp, rm -rf /*, curl | sh, dd, mkfs,
+# git push --force / -f).
+[permissions]
+mode = "ask"
+allow = [
+  # Edit/Write без скобок — правка любого файла, куда может писать пользователь, не только
+  # workspace; уберите их, если хотите подтверждать каждую правку.
+  "Read", "Glob", "Grep", "Edit", "Write",
+  "Bash(cargo build:*)", "Bash(cargo check:*)", "Bash(cargo test:*)",
+  "Bash(cargo clippy:*)", "Bash(cargo fmt:*)", "Bash(cargo run:*)",
+  "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+  "Bash(git add:*)", "Bash(git commit:*)",
+  "Bash(ls:*)", "Bash(mkdir:*)", "Bash(touch:*)",
+  "mcp__hqc",
+]
+deny = [
+  "Bash(sudo:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(rm -rf /*)",
+  "Bash(curl * | sh)", "Bash(curl * | bash)", "Bash(dd:*)", "Bash(mkfs:*)",
+  "Bash(git push:*)", "Bash(cargo publish:*)", "Bash(git reset --hard:*)",
+  "WebFetch",
+]
 ```
+
+Три уровня `[permissions]`, от сильного к слабому:
+
+1. **`deny`** — не выполняется и не спрашивается. Его не отменяют ни «Разрешать всегда»,
+   ни `mode = "auto"`, ни `auto_approve` хаба; в чате вместо карточки появляется строка
+   «Запрещено политикой воркера». Инструмент без скобок (`WebFetch`) пропадает из сессии
+   целиком. Свой `deny` **заменяет** набор по умолчанию, поэтому перенесите в него те
+   правила по умолчанию, которые нужны; `deny = []` отключает запреты совсем.
+2. **`allow`** и правила «Разрешать всегда» (CLI пишет их в
+   `<корень git-репозитория>/.claude/settings.local.json`) — выполняется без вопроса.
+3. **Остальное** — при `mode = "ask"` приходит карточка разрешения; при `mode = "auto"`
+   решает классификатор Claude Code, ничего не спрашивая (проверено: он пропускает и
+   `rm -rf` вне папки, и `git push --force`, если пользователь об этом попросил), так что в
+   этом режиме граница — только `deny`.
+
+Синтаксис правил: `Bash(cargo test:*)` — команда `cargo test` с любыми аргументами (префикс
+до границы слова: `Bash(mkfs:*)` не ловит `mkfs.ext4`), `Bash(curl * | sh)` — `*` любые
+символы, `Bash(git status)` — ровно эта команда; составные команды (`a && b`, `a | b`) CLI
+проверяет по каждой части. `Read`, `Edit`, `WebFetch` — инструмент целиком,
+`mcp__hqc` — все инструменты MCP-сервера. Неверное правило — ошибка запуска воркера: CLI
+молча выбросил бы весь файл настроек вместе с `deny`. `Bash(rm -rf /*)` ловит любой
+абсолютный путь, в том числе внутри workspace — относительные (`rm -rf target`) проходят.
 
 ### 2.3 Регистрация (`enroll`)
 

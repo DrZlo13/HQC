@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.13, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.14, 2026-10-22. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -191,7 +191,7 @@ Workspace — **логическая** граница: все операции h
 | `agent.thinking` | `text` | адаптер, если рантайм отдаёт |
 | `tool.call` | `call_id`, `tool`, `args_preview` | адаптер |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (краткий текст ошибки), `duration_ms?`, `artifact_id?` (дифф или большой результат, §12) | адаптер |
-| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?` | адаптер; `options` — **реальные варианты агента**, `canonical` ∈ once/session/always/deny/deny_always для кнопок клиента |
+| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny) | адаптер; `options` — **реальные варианты агента**, `canonical` ∈ once/session/always/deny/deny_always для кнопок клиента; `policy_hint` — вызов подходит под правило `allow` или `deny` блока `[permissions]` воркера (§14), нет поля — не подходит ни под одно; клиент подписывает им карточку |
 | `approval.response` | `request_id`, `option_id`, `by` (user id или `auto`) | клиент или хаб при `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived) | адаптер, воркер или хаб. Ответ с другого устройства отменой не считается: первый ответ закрывает запрос, второй получает `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, options?: [string], multi?: bool}]` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput.answers` (проверено на 2.1.307 при `--permission-prompt-tool stdio`, §8.1). У ACP-агентов источника нет |
@@ -210,6 +210,7 @@ Workspace — **логическая** граница: все операции h
 | `session_created` | хаб | сессия создана |
 | `turn_lost` | хаб | ход потерян: процесс агента остановился посреди хода или воркер перезапустился (§17.3) |
 | `agent_exited` | воркер | процесс агента завершился сам с ошибкой или посреди хода (§17.3) |
+| `policy_denied` | воркер | вызов инструмента отклонён правилом `deny` из `[permissions]` воркера, без запроса владельцу (§8.1, §14); клиент показывает «запрещено политикой воркера» |
 | `agent_start_failed` | хаб | агент не стартовал 3 раза подряд (или неретраибельно), `pending` вводы стали `failed` (§5.2) |
 | `input_rejected` | хаб | воркер отклонил ввод не как неудачный старт, ввод стал `failed` (§5.2) |
 | `ask_cancelled` | хаб | отложенный `hqc_ask` закрыт `mcp.cancel` от воркера (§5.2), итерация 3 |
@@ -220,7 +221,7 @@ Workspace — **логическая** граница: все операции h
 - События терпимые: неизвестные поля в `payload` игнорируются; событие неизвестного
   `type` разбирается как «неизвестное» и хранится и пересылается как есть, клиенты его
   не рендерят, но не падают; неизвестное значение перечисления внутри события
-  (`state`, `canonical`, `mode`, `kind`, `reason`) читается как «неизвестное». Событие
+  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`) читается как «неизвестное». Событие
   известного `type` с неверным `payload` — ошибка.
 
 - `artifact_ids[]` в `user.message` — вложения к сообщению; отдельное событие
@@ -649,9 +650,9 @@ WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; с�
 Процесс `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
 --permission-prompt-tool stdio --strict-mcp-config --mcp-config '<json>'
---allowedTools mcp__hqc [--disallowedTools <правила…>] (--setting-sources user,local |
---restricted) --permission-mode <режим "спрашивать"> [--append-system-prompt <текст>]
---session-id <uuid>` для новой сессии
+--allowedTools mcp__hqc [--disallowedTools <правила…>] [--settings '<json [permissions]>']
+(--setting-sources user,local | --restricted) --permission-mode <режим "спрашивать" | auto>
+[--append-system-prompt <текст>] --session-id <uuid>` для новой сессии
 (uuid назначает хаб, кладёт в `runtime_session_id`) и `--resume <uuid>` для
 продолжения. Выбор между ними делает наличие транскрипта
 `<config>/projects/<encoded cwd>/<uuid>.jsonl` (§9), а не `mode` из `session.start`:
@@ -679,8 +680,10 @@ WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; с�
 `settings.local.json` — читается: туда пишет `always`) и явный `--permission-mode` с
 режимом «спрашивать»: в справке CLI 2.1.308 это `manual` (`default` в списке вариантов нет),
 до этого — `default`; воркер при старте читает `claude --help` и выбирает имеющийся
-**[проверить]** живым прогоном (`tests/claude_live.rs`, `live_repo_settings_ignored`), что
-`always` с `--setting-sources user,local` по-прежнему предлагается и пишет правило.
+(`[permissions] mode = "auto"` заменяет его на `auto`, §14). Проверено на 2.1.308 (T12,
+фикстура `always-git-push`): с `--setting-sources user,local --permission-mode manual`
+`always` по-прежнему предлагается и пишет правило в `settings.local.json`; `manual` в
+`system/init` отображается как `"permissionMode": "default"`.
 Окружение процесса очищается: из окружения воркера проходят только `PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`,
 `ANTHROPIC_*`, затем переменные окружения workspace (§14); `HQC_*` — никогда. Рабочий
@@ -734,6 +737,38 @@ CLI повторяет в stdout каждый `control_response`, который
 Не каждый вызов инструмента спрашивает разрешение: команды только для чтения (например,
 `echo`) CLI разрешает сам, без `can_use_tool`, поэтому `approval.request` приходит не на
 каждый `Bash` (проверено на 2.1.308 живым прогоном T4).
+
+Политика разрешений воркера (`[permissions]`, §14). Списки `allow` и `deny` уходят в CLI
+при каждом запуске процесса как `--settings '{"permissions":{"allow":[…],"deny":[…]}}'`,
+в том числе с `--restricted` (CLI применяет `--settings` и там). Проверено на 2.1.308
+(T12, `docs/notes/claude-control-protocol.md`, «Permission policy, 2.1.308»):
+
+- вызов под `allow` выполняется без `can_use_tool`; вне обоих списков — спрашивается, как
+  обычно;
+- вызов под `deny` не выполняется и **не спрашивается**: `can_use_tool` нет, в stream-json
+  приходят `system` `permission_denied` (`tool_name`, `tool_use_id`, `message`,
+  `decision_reason_type` `rule`/`subcommandResults`), `tool_result` с `is_error: true` и
+  запись в `result.permission_denials`. Адаптер превращает `permission_denied` в событие
+  `system` с кодом `policy_denied` (§4), `tool.result` с ошибкой приходит как обычно;
+- deny из `--settings` сильнее allow, которое `always` записал в `settings.local.json`, и
+  сильнее режима `auto`; это гарантирует CLI;
+- инструмент, запрещённый целиком (`WebFetch`), пропадает из списка инструментов сессии;
+- правила Bash: `Bash(x:*)` — префикс до границы слова, `*` внутри — любая
+  последовательность символов (`Bash(curl * | sh)`), команда с `&&`, `;`, `|` сверяется по
+  каждой подкоманде.
+
+Адаптер читает те же правила сам (вторая линия): `can_use_tool`, подходящий под `deny`,
+он отклоняет без карточки (на него не может ответить ни `always`, ни `auto_approve` хаба) и
+пишет `system policy_denied`; в остальных `approval.request` кладёт `policy_hint`: `allow`,
+если вызов подходит под правило `allow` целиком (CLI всё же спросил), иначе поля нет.
+Адаптер понимает имя инструмента, сервер MCP (`mcp__hqc`) и правила `Bash` (префикс, `*`,
+точная команда); прочие (`Read(./x/**)`, `WebFetch(domain:…)`) оставляет CLI.
+
+Режим `auto` (`--permission-mode auto`, проверено на 2.1.308): CLI решает сам и **никогда
+не спрашивает** — классификатор пропустил и `rm -rf` вне workspace, и `git push --force`,
+и `sudo`, если об этом просил пользователь; признак решения есть только в
+`tool_result_meta[].permission_decision.reason_type` (`classifier`, `mode`). Единственная
+граница в этом режиме — `deny`.
 
 Прерывание хода (`session.stop`): адаптер шлёт в stdin `control_request {subtype:
 "interrupt"}`; CLI завершает ход записью `result` с `subtype: error_during_execution`,
@@ -936,7 +971,8 @@ once / session / always / deny, у ACP-агентов — то, что пред�
 открытые к концу прерванного хода, адаптер Claude Code молча забывает). Открытый `clarify`
 хаб отменяет так же: событие `clarify.cancel` и фрейм `clarify.response` с
 `answers: {}`; адаптер отвечает рантайму `deny`, ход продолжается без ответов.
-При `auto_approve` хаб отвечает первым вариантом с `canonical: once`, `by: auto`;
+При `auto_approve` хаб отвечает первым вариантом с `canonical: once`, `by: auto`
+(вызовы под `deny` из `[permissions]` воркера до хаба не доходят, §8.1, §14);
 режим включает только владелец воркера, в UI подсвечен; на расшаренном проекте он
 означает выполнение кода коллегами без подтверждений, UI предупреждает об этом при
 включении режима и при выдаче гранта `write`. Push-уведомление на каждый запрос
@@ -1055,10 +1091,41 @@ HTML рендерится в iframe с этого домена, `sandbox="allow-
   verified|none}}`;
 - `allow_foreign_sessions`, `share_local_models`;
 - `max_sessions` (процессов агентов одновременно, по умолчанию 8) и `insecure_http`
-  (`http://` к хабу не на loopback, §5.1).
+  (`http://` к хабу не на loopback, §5.1);
+- `[permissions]` — политика разрешений Claude Code (ниже; в `hello` пока не
+  передаётся).
 
 Хаб получает копию в `hello` и показывает её; менять может только владелец воркера
 на машине (`hqc-worker env ...`).
+
+Политика разрешений `[permissions]` (действует с 0.14 для всех сессий Claude Code воркера;
+окружения итерации 5 смогут её дополнять через `settings`):
+
+```toml
+[permissions]
+mode = "ask"     # "ask" | "auto"
+allow = ["Bash(cargo test:*)", "Read"]   # выполнять без вопроса
+deny = ["Bash(sudo:*)", "Bash(git push:*)"]  # никогда не выполнять и не спрашивать
+```
+
+- `mode = "ask"` (по умолчанию): вызовы вне обоих списков спрашиваются (`approval.request`);
+  `mode = "auto"`: `--permission-mode auto`, CLI решает сам и не спрашивает никогда (§8.1),
+  граница — только `deny`; воркер пишет предупреждение в лог при старте;
+- `allow` по умолчанию пуст;
+- `deny`, если поля (или блока) нет: `Bash(sudo:*)`, `Bash(ssh:*)`, `Bash(scp:*)`,
+  `Bash(rm -rf /*)`, `Bash(curl * | sh)`, `Bash(curl * | bash)`, `Bash(dd:*)`, `Bash(mkfs:*)`,
+  `Bash(git push --force:*)`, `Bash(git push -f:*)`; `deny = []` его отключает
+  **[решение]**;
+- правило — `Инструмент` или `Инструмент(содержимое)`: имя из латиницы, цифр и `_`
+  (`mcp__hqc`, допустим `*` в конце), непустое содержимое в одной паре скобок в конце
+  правила, не длиннее 256 байт, без управляющих символов. Неверное правило или неизвестное
+  поле — ошибка чтения конфига: CLI в `-p` молча игнорирует настройки, которые не прошли
+  его проверку, и одно плохое правило сняло бы весь `deny`.
+
+Три уровня, от сильного к слабому: `deny` воркера (не выполняется, не спрашивается, `always`
+и `auto` его не отменяют) → `allow` воркера и правила `always` из `settings.local.json`
+(выполняется без вопроса) → всё остальное (спрашивается владельца в `ask`, решает
+классификатор CLI в `auto`).
 
 Окружение определяет, с чем запускается процесс агента (Claude Code или ACP-процесс —
 оба запускаются воркером):
@@ -1078,8 +1145,8 @@ HTML рендерится в iframe с этого домена, `sandbox="allow-
 - `launch`: `process` (единственное значение в первой версии; `os-user` и `container`
   зарезервированы).
 
-Окружение `default`: нет ключей, нет токенов, `permissions.deny` на ssh/scp,
-локальные MCP выключены. Ключи одного проекта (например `infra`) выносятся из
+Окружение `default`: нет ключей, нет токенов, `deny` из `[permissions]` (по умолчанию в
+нём и ssh/scp), локальные MCP выключены. Ключи одного проекта (например `infra`) выносятся из
 `~/.ssh` в хранилище воркера (Keychain на маке) и доступны только сессиям путей
 с этим окружением.
 
@@ -1301,6 +1368,19 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.13 → 0.14 (T12, политика разрешений)
+По спайку на Claude Code 2.1.308 (`docs/notes/claude-control-protocol.md`, «Permission
+policy, 2.1.308», фикстуры `*-2.1.308.jsonl`). §14: блок `[permissions]` локального конфига
+(`mode` ask/auto, `allow`, `deny` с набором по умолчанию **[решение]**, проверка правил)
+переехал из окружений итерации 5 в текущую версию, три уровня разрешений. §8.1:
+`--settings` с этими списками при каждом запуске, в том числе с `--restricted`;
+`--permission-mode auto` при `mode = "auto"`; как CLI применяет allow/deny, что deny
+сильнее `always` и `auto`, как отказ выглядит в stream-json; адаптер сам отклоняет
+`can_use_tool` под `deny`; снята пометка **[проверить]** про `always` с
+`--setting-sources user,local`. §4: `approval.request.policy_hint?`, код `system`
+`policy_denied`. §10.1: `auto_approve` не видит вызовов под `deny`. Вопросы и то, что не
+подтвердилось, — `docs/notes/t12-questions.md`.
 
 ### 0.12 → 0.13 (T10, U+0000 в событиях)
 Дополнение: воркер отключает ListAgents и SendMessage Claude Code по умолчанию,

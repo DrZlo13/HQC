@@ -234,6 +234,7 @@ impl TestHub {
             timing,
             limits,
             artifacts: art,
+            public_origins: vec![],
         };
         let push = Arc::new(RecordingPush::default());
         let app = hqc_hub::start(pool, config, push.clone());

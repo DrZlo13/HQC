@@ -15,6 +15,11 @@ pub struct Config {
     pub timing: Timing,
     pub limits: Limits,
     pub artifacts: ArtifactConfig,
+    /// `HQC_PUBLIC_ORIGINS`: the origins browsers reach the hub at (`https://hqc.example.com`),
+    /// comma-separated. When set, `Origin` on `/api/*` is checked against this list instead of
+    /// the request's `Host`, which a reverse proxy may rewrite (SPEC §20). Empty: the `Host`
+    /// or `X-Forwarded-Host` of the request.
+    pub public_origins: Vec<String>,
 }
 
 /// The artifact store and its signed links (SPEC §12).
@@ -197,7 +202,7 @@ impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`,
     /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`,
-    /// `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`.
+    /// `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`, `HQC_PUBLIC_ORIGINS`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -282,8 +287,25 @@ impl Config {
             },
             limits: Limits::default(),
             artifacts,
+            public_origins: public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?,
         })
     }
+}
+
+/// `HQC_PUBLIC_ORIGINS`: comma-separated `https://host[:port]` (or `http://` on loopback),
+/// no path; lowercase, default ports dropped.
+pub fn public_origins(v: Option<&str>) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for raw in v.unwrap_or("").split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let o =
+            artifact_public_base(raw).map_err(|e| anyhow::anyhow!("HQC_PUBLIC_ORIGINS: {e}"))?;
+        out.push(crate::security::normalize_origin(&o).unwrap_or(o));
+    }
+    Ok(out)
 }
 
 /// `HQC_HUB_LISTEN` binds a loopback address only: `127.0.0.0/8`, `[::1]` or `localhost`.

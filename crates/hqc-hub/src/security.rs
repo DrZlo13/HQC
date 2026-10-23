@@ -73,10 +73,23 @@ pub async fn guard(State(app): State<AppState>, req: Request, next: Next) -> Res
         );
         return r;
     }
-    let mut resp = match check_origin(&req) {
+    let mut resp = match check_origin(&req, &app.config.public_origins) {
         Ok(()) => next.run(req).await,
         Err(why) => {
-            tracing::warn!(path = %req.uri().path(), "{why}");
+            let h = req.headers();
+            let hdr = |k: &str| {
+                h.get(k)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("-")
+                    .to_string()
+            };
+            tracing::warn!(
+                path = %req.uri().path(),
+                origin = %hdr("origin"),
+                host = %hdr("host"),
+                forwarded_host = %hdr("x-forwarded-host"),
+                "{why}"
+            );
             ApiError::Forbidden("cross-origin request refused".into()).into_response()
         }
     };
@@ -100,11 +113,20 @@ pub async fn guard(State(app): State<AppState>, req: Request, next: Next) -> Res
     resp
 }
 
-fn check_origin(req: &Request) -> Result<(), &'static str> {
+fn check_origin(req: &Request, public_origins: &[String]) -> Result<(), &'static str> {
     let headers = req.headers();
     if !req.uri().path().starts_with("/api/") {
         return Ok(());
     }
+    // A reverse proxy (Caddy, cloudflared with `httpHostHeader`) may rewrite `Host` to the
+    // upstream name; it then says where the request came from in `X-Forwarded-Host`. A
+    // browser cannot set that header cross-site, so trusting it loses nothing here.
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
     let upgrade = headers
         .get(header::UPGRADE)
         .and_then(|v| v.to_str().ok())
@@ -124,11 +146,39 @@ fn check_origin(req: &Request) -> Result<(), &'static str> {
         {
             Ok(())
         }
-        Some(o) => match host {
-            Some(h) if same_origin(o, h) => Ok(()),
-            _ => Err("Origin does not match the hub's host"),
+        Some(o) if !public_origins.is_empty() => match normalize_origin(o) {
+            Some(n) if public_origins.contains(&n) => Ok(()),
+            _ => Err("Origin is not in HQC_PUBLIC_ORIGINS"),
         },
+        Some(o) => {
+            let ok = forwarded_host
+                .into_iter()
+                .chain(host)
+                .any(|h| same_origin(o, h));
+            if ok {
+                Ok(())
+            } else {
+                Err("Origin does not match the hub's host")
+            }
+        }
     }
+}
+
+/// `scheme://host[:port]` lowercased, default port dropped; `None` for anything else.
+pub fn normalize_origin(origin: &str) -> Option<String> {
+    let (scheme, rest) = origin.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "https" => ":443",
+        "http" => ":80",
+        _ => return None,
+    };
+    if rest.is_empty() || rest.contains(['/', '?', '#', '@', ' ']) {
+        return None;
+    }
+    let host = rest.trim().to_ascii_lowercase();
+    let host = host.strip_suffix(default_port).unwrap_or(&host);
+    Some(format!("{scheme}://{host}"))
 }
 
 /// `origin` (`scheme://host[:port]`) names the host the request was sent to: `https`, or
@@ -235,6 +285,95 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ws_request(headers: &[(&str, &str)]) -> Request {
+        let mut b = Request::builder()
+            .method(Method::GET)
+            .uri("/api/ws")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(axum::body::Body::empty()).unwrap()
+    }
+
+    /// Behind a proxy that rewrites `Host`, `X-Forwarded-Host` or `HQC_PUBLIC_ORIGINS` carries
+    /// the public name (SPEC §20).
+    #[test]
+    fn origin_behind_a_proxy() {
+        let public = "https://hqc.example.com";
+        assert!(check_origin(
+            &ws_request(&[("host", "hqc.example.com"), ("origin", public)]),
+            &[]
+        )
+        .is_ok());
+        assert!(check_origin(
+            &ws_request(&[("host", "hqc-hub:8080"), ("origin", public)]),
+            &[]
+        )
+        .is_err());
+        assert!(check_origin(
+            &ws_request(&[
+                ("host", "hqc-hub:8080"),
+                ("x-forwarded-host", "hqc.example.com"),
+                ("origin", public)
+            ]),
+            &[]
+        )
+        .is_ok());
+        assert!(check_origin(
+            &ws_request(&[
+                ("host", "hqc-hub:8080"),
+                ("x-forwarded-host", "evil.example"),
+                ("origin", public)
+            ]),
+            &[]
+        )
+        .is_err());
+        let list = vec!["https://hqc.example.com".to_string()];
+        assert!(check_origin(
+            &ws_request(&[("host", "hqc-hub:8080"), ("origin", public)]),
+            &list
+        )
+        .is_ok());
+        assert!(check_origin(
+            &ws_request(&[
+                ("host", "hqc-hub:8080"),
+                ("origin", "https://HQC.example.com:443")
+            ]),
+            &list
+        )
+        .is_ok());
+        assert!(check_origin(
+            &ws_request(&[
+                ("host", "hqc.example.com"),
+                ("origin", "https://evil.example")
+            ]),
+            &list
+        )
+        .is_err());
+        // With a list, the request's own host no longer counts.
+        assert!(check_origin(
+            &ws_request(&[
+                ("host", "other.example"),
+                ("origin", "https://other.example")
+            ]),
+            &list
+        )
+        .is_err());
+        assert_eq!(
+            normalize_origin("https://HQC.example.com:443").as_deref(),
+            Some("https://hqc.example.com")
+        );
+        assert_eq!(normalize_origin("https://hqc.example.com/x"), None);
+        assert_eq!(
+            crate::config::public_origins(Some(" https://a.example , https://b.example:8443 "))
+                .unwrap(),
+            ["https://a.example", "https://b.example:8443"]
+        );
+        assert!(crate::config::public_origins(Some("http://a.example")).is_err());
+    }
 
     #[test]
     fn origins() {

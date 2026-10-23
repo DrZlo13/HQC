@@ -521,6 +521,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::ClarifyResponse { .. } => "clarify.response",
         HubFrame::FsStat(_) => "fs.stat",
         HubFrame::FsListDirs(_) => "fs.list_dirs",
+        HubFrame::WorkerApprovalResponse { .. } => "worker.approval.response",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

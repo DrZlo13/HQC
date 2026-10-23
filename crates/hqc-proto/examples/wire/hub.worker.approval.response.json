@@ -1,0 +1,8 @@
+{
+  "id": "h-12",
+  "type": "worker.approval.response",
+  "payload": {
+    "request_id": "wa-0199f3a2-7c10-7000-8000-0000000000e1",
+    "option_id": "once"
+  }
+}

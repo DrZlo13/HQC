@@ -178,6 +178,8 @@ export interface Status {
 export interface SystemNote {
   text: string;
   code: string;
+  /** `warn` | `error` for `code: worker_log`, a log line of the worker (SPEC §10.2). */
+  level?: string;
 }
 
 export interface PayloadByType {
@@ -379,7 +381,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     model: optStr(p, 'model'),
   }),
   status: (p) => ({ state: tolerantEnum(p, 'state', SESSION_STATES), detail: optStr(p, 'detail') }),
-  system: (p) => ({ text: str(p, 'text'), code: str(p, 'code') }),
+  system: (p) => ({ text: str(p, 'text'), code: str(p, 'code'), level: optStr(p, 'level') }),
 };
 
 function parseAnswers(p: Obj): Record<string, ClarifyAnswer> {
@@ -457,6 +459,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     num(p, 'protocol_version');
     str(p, 'worker_id');
     str(p, 'server_time');
+    optStr(p, 'system_session_id');
   },
   event: (p) => {
     const ev = parseEvent(p.event);
@@ -498,6 +501,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_token');
     bool(p, 'owner_is_worker_owner');
     num(p, 'ask_timeout_s');
+    optBool(p, 'requested_by_owner');
   },
   'session.input': (p) => {
     str(p, 'session_id');
@@ -526,6 +530,16 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'request_id');
     parseAnswers(p);
+  },
+  'worker.approval.request': (p) => {
+    str(p, 'request_id');
+    str(p, 'kind');
+    str(p, 'description');
+    str(p, 'expires_at');
+  },
+  'worker.approval.response': (p) => {
+    str(p, 'request_id');
+    str(p, 'option_id');
   },
   'session.state': (p) => {
     str(p, 'session_id');
@@ -679,6 +693,9 @@ export interface SessionInfo {
   last_read_seq: number;
   archived: boolean;
   updated_at: string;
+  /** The service session of worker `worker_id` (SPEC §10.2): no input, listed under
+   *  «Воркеры», titled with the worker's name. */
+  system: boolean;
 }
 
 export function parseMe(v: unknown): Me {
@@ -708,6 +725,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     last_read_seq: num(o, 'last_read_seq'),
     archived: bool(o, 'archived'),
     updated_at: str(o, 'updated_at'),
+    system: optBool(o, 'system') ?? false,
   };
 }
 

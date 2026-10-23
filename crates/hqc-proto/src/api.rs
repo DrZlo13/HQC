@@ -42,6 +42,10 @@ pub struct Session {
     pub unread: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The service session of worker `worker_id` (SPEC §10.2): no agent (`runtime: none`),
+    /// no input, not archived; the client lists it under «Воркеры». Sent only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
 }
 
 impl Session {
@@ -411,6 +415,10 @@ mod tests {
         ));
         roundtrip::<EnrollConfirmed>(include_str!("../examples/wire/api.enroll.confirm.json"));
         roundtrip::<EnrollInfo>(include_str!("../examples/wire/api.enroll.info.json"));
+        assert!(!s.system);
+        let sys: Session = roundtrip(include_str!("../examples/wire/api.session.system.json"));
+        assert!(sys.system && sys.workspace_id.is_none());
+        assert_eq!(sys.agent.runtime, Runtime::None);
     }
 
     #[test]

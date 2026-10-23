@@ -1,0 +1,10 @@
+{
+  "id": "w-9",
+  "type": "worker.approval.request",
+  "payload": {
+    "request_id": "wa-0199f3a2-7c10-7000-8000-0000000000e1",
+    "kind": "workspace.use",
+    "description": "The hub wants to run sessions in /Users/home-mac/work/cad (session of another user)",
+    "expires_at": "2026-10-22T10:10:00Z"
+  }
+}

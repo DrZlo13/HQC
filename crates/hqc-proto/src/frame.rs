@@ -5,10 +5,10 @@
 //! that does not parse is answered with `error` [`error_code::INVALID_FRAME`].
 //!
 //! Typed here: the frames of iteration 1 (docs/ITERATION-1.md, T1) and the folder requests
-//! `fs.stat` / `fs.list_dirs` with their `result` (T14). Later iterations: hub -> worker
-//! `session.steer`, `workspace.*`, `mirror.set`, `model.proxy`, `worker.approval.response`,
-//! `mcp.result`; worker -> hub `mirror.event`, `worker.approval.request`, `mcp.call`,
-//! `mcp.cancel`.
+//! `fs.stat` / `fs.list_dirs` with their `result` (T14), confirmations outside a session
+//! `worker.approval.request` / `worker.approval.response` (T17). Later iterations: hub ->
+//! worker `session.steer`, `workspace.*`, `mirror.set`, `model.proxy`, `mcp.result`; worker ->
+//! hub `mirror.event`, `mcp.call`, `mcp.cancel`.
 
 use std::collections::BTreeMap;
 
@@ -103,10 +103,40 @@ pub enum WorkerFrame {
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`): same `id` as the request.
     #[serde(rename = "result")]
     Result(RequestResult),
+    /// A confirmation the worker needs from its owner outside any session (SPEC §10.2); the
+    /// hub acks it and answers later with `worker.approval.response`.
+    #[serde(rename = "worker.approval.request")]
+    WorkerApprovalRequest(WorkerApprovalRequest),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
     Error(WireError),
+}
+
+/// `worker.approval.request {request_id, kind, description, expires_at}` (SPEC §5.4, §10.2).
+/// The hub writes it into the worker's service session as `approval.request` with the
+/// options [`worker_approval::ONCE`] / [`worker_approval::DENY`]. Sent again with the same
+/// `request_id` after a reconnect while the worker still waits; the hub stores it once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerApprovalRequest {
+    pub request_id: String,
+    /// One of [`worker_approval`]'s kinds; the list is open.
+    pub kind: String,
+    pub description: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Kinds and options of `worker.approval.*` (SPEC §10.2).
+pub mod worker_approval {
+    /// `session.start` in a folder the worker has not run sessions in yet, for a session
+    /// the worker owner did not start (SPEC §10.2).
+    pub const WORKSPACE_USE: &str = "workspace.use";
+    /// Iteration 5 (SPEC §13.1, §13.2).
+    pub const WORKSPACE_CREATE: &str = "workspace.create";
+    pub const WORKSPACE_DELETE: &str = "workspace.delete";
+    /// Option ids of the `approval.request` the hub writes, and of the answer.
+    pub const ONCE: &str = "once";
+    pub const DENY: &str = "deny";
 }
 
 /// Frames sent by the hub (SPEC §5.3).
@@ -125,6 +155,10 @@ pub enum HubFrame {
         protocol_version: u32,
         worker_id: Uuid,
         server_time: DateTime<Utc>,
+        /// The worker's service session (SPEC §10.2): its log lines go there as `system`
+        /// events. Absent from hubs before T17.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_session_id: Option<Uuid>,
     },
     #[serde(rename = "session.start")]
     SessionStart(SessionStart),
@@ -156,6 +190,13 @@ pub enum HubFrame {
     /// Subfolders for the folder picker (SPEC §5.3).
     #[serde(rename = "fs.list_dirs")]
     FsListDirs(FsListDirs),
+    /// The owner's answer to `worker.approval.request`, or `deny` when the hub cancelled it
+    /// (timeout). The worker acks it, also when nothing waits for it any more.
+    #[serde(rename = "worker.approval.response")]
+    WorkerApprovalResponse {
+        request_id: String,
+        option_id: String,
+    },
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -254,6 +295,8 @@ pub enum Runtime {
     ClaudeCode,
     Acp,
     Bare,
+    /// No agent: the worker's service session (SPEC §10.2); never started.
+    None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +373,10 @@ pub struct SessionStart {
     pub session_token: String,
     pub owner_is_worker_owner: bool,
     pub ask_timeout_s: u32,
+    /// The workspace was added by the worker owner: starting a session in it needs no
+    /// confirmation of a new folder (SPEC §10.2). Sent only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requested_by_owner: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -371,11 +418,19 @@ mod tests {
         "clarify.response",
         "fs.stat",
         "fs.list_dirs",
+        "worker.approval.response",
         "ack",
         "error",
     ];
-    const SPEC_WORKER_TYPES: &[&str] =
-        &["hello", "event", "session.state", "result", "ack", "error"];
+    const SPEC_WORKER_TYPES: &[&str] = &[
+        "hello",
+        "event",
+        "session.state",
+        "result",
+        "worker.approval.request",
+        "ack",
+        "error",
+    ];
 
     /// Wire examples shared with the TS client (`examples/wire/{hub,worker}.<type>[.<case>].json`).
     const HUB_EXAMPLES: &[(&str, &str)] = &[
@@ -420,6 +475,10 @@ mod tests {
             "fs.list_dirs",
             include_str!("../examples/wire/hub.fs.list_dirs.roots.json"),
         ),
+        (
+            "worker.approval.response",
+            include_str!("../examples/wire/hub.worker.approval.response.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -442,6 +501,10 @@ mod tests {
             "result",
             include_str!("../examples/wire/worker.result.fs.list_dirs.json"),
         ),
+        (
+            "worker.approval.request",
+            include_str!("../examples/wire/worker.worker.approval.request.json"),
+        ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         ("error", include_str!("../examples/wire/worker.error.json")),
     ];
@@ -458,6 +521,7 @@ mod tests {
             HubFrame::ClarifyResponse { .. } => "clarify.response",
             HubFrame::FsStat(_) => "fs.stat",
             HubFrame::FsListDirs(_) => "fs.list_dirs",
+            HubFrame::WorkerApprovalResponse { .. } => "worker.approval.response",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -469,6 +533,7 @@ mod tests {
             WorkerFrame::Event { .. } => "event",
             WorkerFrame::SessionState { .. } => "session.state",
             WorkerFrame::Result(_) => "result",
+            WorkerFrame::WorkerApprovalRequest(_) => "worker.approval.request",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }
@@ -595,6 +660,56 @@ mod tests {
         .unwrap();
         assert!(roots["payload"].as_object().unwrap().contains_key("path"));
         assert_eq!(roots["payload"]["path"], Value::Null);
+    }
+
+    #[test]
+    fn worker_approval_round_trip() {
+        let req: Envelope<WorkerFrame> = serde_json::from_str(include_str!(
+            "../examples/wire/worker.worker.approval.request.json"
+        ))
+        .unwrap();
+        let res: Envelope<HubFrame> = serde_json::from_str(include_str!(
+            "../examples/wire/hub.worker.approval.response.json"
+        ))
+        .unwrap();
+        let WorkerFrame::WorkerApprovalRequest(r) = &req.body else {
+            panic!("not worker.approval.request");
+        };
+        let HubFrame::WorkerApprovalResponse {
+            request_id,
+            option_id,
+        } = &res.body
+        else {
+            panic!("not worker.approval.response");
+        };
+        assert_eq!(request_id, &r.request_id);
+        assert!([worker_approval::ONCE, worker_approval::DENY].contains(&option_id.as_str()));
+        assert_eq!(r.kind, worker_approval::WORKSPACE_USE);
+    }
+
+    #[test]
+    fn t17_fields_are_optional() {
+        // A hub before T17 sends no `system_session_id`; `requested_by_owner` is sent only
+        // when true.
+        let ack: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.hello.ack.json")).unwrap();
+        assert!(matches!(
+            ack.body,
+            HubFrame::HelloAck {
+                system_session_id: None,
+                ..
+            }
+        ));
+        let start: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.session.start.json")).unwrap();
+        let HubFrame::SessionStart(mut s) = start.body else {
+            panic!("not session.start");
+        };
+        assert!(!s.requested_by_owner);
+        s.requested_by_owner = true;
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["requested_by_owner"], true);
+        assert_eq!(serde_json::to_value(Runtime::None).unwrap(), "none");
     }
 
     #[test]

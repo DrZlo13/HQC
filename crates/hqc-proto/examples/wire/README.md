@@ -34,4 +34,6 @@ is the ack for an event dropped because the hub does not know its session (no `s
 `worker.result.fs.stat.json` answers `hub.fs.stat.json` (`h-7`),
 `worker.result.fs.list_dirs.json` answers `hub.fs.list_dirs.json` (`h-8`); in hub requests
 `request_id` equals the frame `id`. `hub.fs.list_dirs.roots.json` (`path: null`) asks for
-`allowed_roots`.
+`allowed_roots`. `worker.worker.approval.request.json` (`w-9`) is a confirmation the worker
+asks its owner for outside a session (SPEC §10.2); the owner's answer comes later as
+`hub.worker.approval.response.json` (a new frame `h-12` with the same `request_id`).

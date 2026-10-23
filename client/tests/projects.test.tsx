@@ -12,7 +12,7 @@ import { AppState } from '../src/app';
 import { App } from '../src/ui/App';
 import { HubSocket } from '../src/ws';
 
-let mock: { url: string; close(): Promise<void> };
+let mock: { url: string; close(): Promise<void>; closeVsCode(id: string): void };
 let win: Window;
 let app: AppState;
 let root: HTMLElement;
@@ -257,6 +257,49 @@ it('imports from Claude Code and takes a session over', async () => {
   button('Подхватить')!.click();
   await until('taken over', () => !$('.locked-banner'));
   await until('system line', () => $('.chat')?.textContent?.includes('Подхвачена из VS Code'));
+  expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
+});
+
+// T20 (SPEC §9.3): the import brought a session that is open in VS Code right now and whose
+// transcript forked. No «Подхватить» until it is closed there; a takeover the hub refuses
+// (`409 vscode_open`) shows its text; closed in VS Code, it is free at once.
+it('does not take over a session open in VS Code', async () => {
+  const link = await until('open session', () =>
+    $$('.session-row').find((r) => r.textContent?.includes('Открыта в VS Code: power-board')),
+  );
+  location.hash = link.getAttribute('href')!;
+  const sid = location.hash.split('/').pop()!;
+  const banner = await until('open banner', () => $('.locked-banner.locked-open'));
+  expect(banner.textContent).toContain('Сессия открыта в VS Code');
+  expect(banner.textContent).toContain('закройте её там');
+  expect(button('Подхватить')).toBeUndefined();
+  expect($<HTMLTextAreaElement>('.chat textarea')!.placeholder).toBe('Открыта в VS Code');
+  const fork = await until('fork line', () => $('.line-system-session_forked'));
+  expect(fork.querySelector('.warn-icon')).not.toBeNull();
+  expect(fork.textContent).toContain('не попал в его контекст');
+
+  // The client has not heard of the holder yet: «Подхватить», refused with the hub's text.
+  const s = app.sessions.get(sid)!;
+  app.mergeSummary([
+    {
+      session_id: sid,
+      project_id: s.project_id,
+      title: s.title,
+      state: s.state,
+      queue_len: s.queue_len,
+      unread: s.unread,
+      last_seq: s.last_seq,
+      last_read_seq: s.last_read_seq,
+    },
+  ]);
+  await until('plain banner', () => $('.locked-banner') && !$('.locked-open'));
+  button('Подхватить')!.click();
+  const notice = await until('notice', () => $('.notice'));
+  expect(notice.textContent).toBe('сессия открыта в VS Code: закройте её там и подхватите снова');
+  await until('open banner again', () => $('.locked-banner.locked-open'));
+
+  mock.closeVsCode(sid);
+  await until('free', () => !$('.locked-banner'));
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
 

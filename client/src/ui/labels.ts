@@ -56,7 +56,11 @@ export const SYSTEM_CODE_LABELS: Record<string, string> = {
   policy_denied: 'Запрещено политикой воркера',
   session_taken_over: 'Подхвачена из VS Code',
   session_released: 'Возвращена в VS Code',
+  session_forked: 'Развилка',
 };
+
+/** `system.code`s drawn as a warning, with an icon (SPEC §9.3). */
+export const SYSTEM_WARNING_CODES = new Set(['session_forked']);
 
 /** `level` of a worker log line (`system {code: worker_log}`, SPEC §10.2). */
 export const LOG_LEVEL_LABELS: Record<string, string> = {

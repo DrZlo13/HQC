@@ -478,3 +478,28 @@ describe("worker's service session (T17, SPEC §10.2)", () => {
     expect(items[0].kind === 'event' && items[0].event.type).toBe('approval.request');
   });
 });
+
+describe('fork of a transcript (T20, SPEC §9.3)', () => {
+  it('draws session_forked as a warning line with an icon', () => {
+    const forked = raw('worker.mirror.event.forked').payload.event;
+    const t = new Timeline();
+    t.apply(
+      ev('event.system', (e) => {
+        e.seq = 1;
+        e.payload = forked.payload;
+      }),
+    );
+    show(t);
+    const line = root.querySelector('.line-system-session_forked')!;
+    expect(line.classList.contains('line-warning')).toBe(true);
+    expect(line.querySelector('.warn-icon')!.getAttribute('aria-label')).toBe('Внимание');
+    expect(line.querySelector('b')!.textContent).toBe('Развилка');
+    expect(line.textContent).toContain('1 ход из hqc не попал в его контекст');
+    // Other system lines stay plain.
+    render(null, root);
+    const t2 = new Timeline();
+    t2.apply(ev('event.system', withSeq(1)));
+    show(t2);
+    expect(root.querySelector('.line-warning')).toBeNull();
+  });
+});

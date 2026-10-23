@@ -585,6 +585,14 @@ export type ClientFrame =
   | { type: 'subscribe_summary' }
   | { type: 'ping' };
 
+/** A live Claude Code process outside hqc holding the session's transcript open
+ *  (SPEC §9.3): `entrypoint` is `claude-vscode` for the VS Code extension, `cli`, `sdk-cli`
+ *  and others; `status` is `idle` | `busy`. Both lists are open. */
+export interface HeldBy {
+  entrypoint: string;
+  status: string;
+}
+
 /** Session line of `summary` / `session.summary` (SPEC §6, §17.1). */
 export interface SessionSummary {
   session_id: Uuid;
@@ -595,6 +603,7 @@ export interface SessionSummary {
   unread: number;
   last_seq: number;
   last_read_seq: number;
+  held_by?: HeldBy;
 }
 
 /** A change of `delivery` of a stored input (SPEC §6); the event is not sent again. */
@@ -628,7 +637,15 @@ export function parseSummary(v: unknown): SessionSummary {
     unread: num(s, 'unread'),
     last_seq: num(s, 'last_seq'),
     last_read_seq: num(s, 'last_read_seq'),
+    held_by: optHeldBy(s),
   };
+}
+
+/** `held_by` of a session or its summary; absent or `null` is nobody. */
+export function optHeldBy(o: Obj): HeldBy | undefined {
+  if (!present(o, 'held_by')) return undefined;
+  const h = obj(o.held_by, 'held_by');
+  return { entrypoint: str(h, 'entrypoint'), status: str(h, 'status') };
 }
 
 export function parseDelivery(v: unknown): DeliveryChange {
@@ -709,6 +726,8 @@ export interface SessionInfo {
   /** The service session of worker `worker_id` (SPEC §10.2): no input, listed under
    *  «Воркеры», titled with the worker's name. */
   system: boolean;
+  /** Open in VS Code (or another Claude Code outside hqc) right now (SPEC §9.3). */
+  held_by?: HeldBy;
 }
 
 export function parseMe(v: unknown): Me {
@@ -739,6 +758,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     archived: bool(o, 'archived'),
     updated_at: str(o, 'updated_at'),
     system: optBool(o, 'system') ?? false,
+    held_by: optHeldBy(o),
   };
 }
 

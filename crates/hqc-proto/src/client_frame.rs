@@ -85,6 +85,9 @@ pub struct SessionSummary {
     pub unread: u64,
     pub last_seq: u64,
     pub last_read_seq: u64,
+    /// As in the session object: who outside hqc holds the transcript open (SPEC §9.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<crate::frame::HeldBy>,
 }
 
 #[cfg(test)]

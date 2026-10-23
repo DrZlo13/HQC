@@ -71,20 +71,28 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
   const showRetry = !system && (state === 'error' || t.hasFailedDelivery());
   const items = requestsOnly ? onlyRequests(t.items()) : t.items();
   const locked = state === 'locked_vscode';
-  // SPEC §9.3: read-only while VS Code drives it; the hub refuses takeover until VS Code has
-  // been quiet for 30 s (`409 vscode_active`).
+  // SPEC §9.3: read-only while VS Code has it. Open there right now (`held_by`): it has to be
+  // closed there first, the hub refuses takeover (`409 vscode_open`). Written from there
+  // recently but not held (or a worker without the registry): «Подхватить», which the hub
+  // may refuse until 30 s of silence (`409 vscode_active`).
+  const open = locked && info?.held_by !== undefined;
   const takeover = () =>
     app.api.takeover(sessionId).then(
       () => {
         setNotice(null);
         return app.refreshSessions();
       },
-      (e: unknown) =>
+      (e: unknown) => {
+        if (e instanceof ApiError && e.code === 'vscode_open') {
+          setNotice(e.message);
+          return app.refreshSessions();
+        }
         setNotice(
           e instanceof ApiError && e.code === 'vscode_active'
             ? 'В VS Code ещё пишут в эту сессию; подхватить можно через 30 с тишины.'
             : `Не подхвачено: ${(e as Error).message}`,
-        ),
+        );
+      },
     );
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -204,7 +212,16 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
           {notice}
         </div>
       )}
-      {locked && (
+      {open && (
+        <div class="locked-banner locked-open">
+          <span>
+            Сессия открыта в {info?.held_by?.entrypoint === 'claude-vscode' ? 'VS Code' : 'Claude Code вне hqc'}
+            {info?.held_by?.status === 'busy' ? ' и работает' : ''}. Чтобы писать отсюда, закройте её там — подхватить
+            можно будет сразу.
+          </span>
+        </div>
+      )}
+      {locked && !open && (
         <div class="locked-banner">
           <span>Сессия ведётся в VS Code. Чтобы писать отсюда, подхватите её.</span>
           <button type="button" class="btn btn-primary btn-small btn-takeover" onClick={() => void takeover()}>
@@ -215,7 +232,7 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
       {!system && (
         <Composer
           disabled={disabled}
-          placeholder={locked ? 'Ведётся в VS Code' : undefined}
+          placeholder={open ? 'Открыта в VS Code' : locked ? 'Ведётся в VS Code' : undefined}
           files={files}
           onFiles={addFiles}
           onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}

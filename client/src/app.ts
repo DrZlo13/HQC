@@ -88,6 +88,7 @@ export class AppState {
         last_read_seq: s.last_read_seq,
         // `archived` is the top state of SPEC §17.1, so the summary carries it.
         archived: s.state === 'archived',
+        held_by: s.held_by,
       });
     }
     // A session created elsewhere: fetch the list again for its title.

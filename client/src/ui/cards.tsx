@@ -12,6 +12,7 @@ import {
   activityLabel,
   STATE_LABELS,
   SYSTEM_CODE_LABELS,
+  SYSTEM_WARNING_CODES,
   formatClock,
   formatDuration,
   formatTime,
@@ -176,8 +177,14 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
     case 'system': {
       if (event.payload.code === 'worker_log') return <WorkerLogLine event={event} />;
       const caption = SYSTEM_CODE_LABELS[event.payload.code];
+      const warning = SYSTEM_WARNING_CODES.has(event.payload.code);
       return (
-        <Line kind={caption ? `system line-system-${event.payload.code}` : 'system'}>
+        <Line kind={caption ? `system line-system-${event.payload.code}${warning ? ' line-warning' : ''}` : 'system'}>
+          {warning && (
+            <span class="warn-icon" role="img" aria-label="Внимание">
+              ⚠
+            </span>
+          )}
           {caption && <b>{caption}</b>}
           <Markdown text={event.payload.text} />
         </Line>

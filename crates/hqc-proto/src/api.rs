@@ -64,6 +64,7 @@ impl Session {
             unread: self.unread,
             last_seq: self.last_seq,
             last_read_seq: self.last_read_seq,
+            held_by: self.held_by.clone(),
         }
     }
 }
@@ -491,6 +492,7 @@ mod tests {
             "summary is the session's compact form"
         );
         let held: Session = roundtrip(include_str!("../examples/wire/api.session.vscode.json"));
+        assert_eq!(held.summary().held_by, held.held_by);
         assert_eq!(held.held_by.unwrap().entrypoint, "claude-vscode");
         assert!(s.held_by.is_none());
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));

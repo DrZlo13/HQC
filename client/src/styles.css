@@ -823,6 +823,15 @@ pre {
   color: var(--deny);
 }
 
+/* SPEC §9.3: a transcript forked, turns of one writer are missing from the other's context. */
+.line-warning {
+  color: var(--warn);
+}
+
+.warn-icon {
+  margin-right: 0.35em;
+}
+
 .policy-hint {
   font-size: 0.8rem;
   font-weight: normal;
@@ -859,6 +868,11 @@ pre {
   padding: 8px 12px;
   background: color-mix(in srgb, var(--accent, #4c8bf5) 15%, var(--panel));
   font-size: 0.9rem;
+}
+
+/* Open in VS Code right now: no takeover until it is closed there. */
+.locked-banner.locked-open {
+  background: color-mix(in srgb, var(--warn) 15%, var(--panel));
 }
 
 .composer {

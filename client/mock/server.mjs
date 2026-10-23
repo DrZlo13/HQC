@@ -186,6 +186,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       unread: s.events.filter((e) => e.seq > s.read_seq && isUnread(e)).length,
       last_seq: s.last_seq,
       last_read_seq: s.read_seq,
+      ...(s.held_by ? { held_by: s.held_by } : {}),
     };
   }
 
@@ -239,6 +240,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       unread: sum.unread,
       created_at: s.created_at,
       updated_at: s.events.at(-1)?.ts ?? s.created_at,
+      ...(s.held_by ? { held_by: s.held_by } : {}),
     };
   }
 
@@ -583,6 +585,35 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     s.locked = 'vscode';
     s.vscode_active_at = Date.now() - 60_000;
     pushSummary(s);
+    // T20 (SPEC §9.3): one more, open in VS Code right now, whose transcript forked: VS Code
+    // continued from its own last record after hqc's turn.
+    const o = newSession(`Открыта в VS Code: ${w.path.split('/').at(-1)}`, randomUUID(), {
+      project_id: w.project_id, workspace_id: w.id,
+    });
+    const p = store(o, mk(o, 'event.user.message', { text: 'Reply with exactly: ONE', artifact_ids: [] }, {
+      delivery: 'delivered', delivered_at: now(),
+    }));
+    store(o, mk(o, 'event.agent.message', { text: 'ONE', final: true, in_reply_to: p.event_id }));
+    store(o, mk(o, 'event.system', {
+      code: 'session_forked',
+      text: 'VS Code продолжил с более ранней точки: 1 ход из hqc не попал в его контекст',
+      at_uuid: randomUUID(), branch_from: 'vscode', orphaned_turns: 1,
+    }));
+    store(o, mk(o, 'event.user.message', { text: 'Reply with exactly: VSCODE-TURN', artifact_ids: [] }, {
+      delivery: 'delivered', delivered_at: now(),
+    }));
+    o.locked = 'vscode';
+    o.held_by = { entrypoint: 'claude-vscode', status: 'idle' };
+    o.vscode_active_at = Date.now() - 60_000;
+    pushSummary(o);
+  }
+  /** The user closed session `id` in VS Code: nobody holds it, it is free at once. */
+  function closeVsCode(id) {
+    const s = sessions.get(id);
+    if (!s?.held_by) return;
+    s.held_by = undefined;
+    s.locked = undefined;
+    pushSummary(s);
   }
   // Folders with Claude Code sessions on home-mac (`workspace.list_candidates`).
   route('GET', '/api/workers/:id/candidates', (p) => {
@@ -594,9 +625,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       ],
     };
   });
-  // SPEC §9.3: after 30 s without writes from VS Code.
+  // SPEC §9.3: not while VS Code holds it open; else after 30 s without writes from VS Code.
   route('POST', '/api/sessions/:id/takeover', (p) => {
     const s = sessionOr404(p.id);
+    if (s.held_by) {
+      throw fail(409, 'vscode_open', 'сессия открыта в VS Code: закройте её там и подхватите снова', {
+        held_by: s.held_by,
+      });
+    }
     if (s.locked === 'vscode' && Date.now() - (s.vscode_active_at ?? 0) < 30_000) {
       throw fail(409, 'vscode_active', 'VS Code wrote to the session recently');
     }
@@ -646,6 +682,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (s.locked === 'vscode') {
       throw fail(409, 'locked_vscode', 'the session is being driven from VS Code; take it over first', {
         hint: 'takeover',
+        ...(s.held_by ? { held_by: s.held_by } : {}),
       });
     }
     if (typeof body?.text !== 'string' || !body.text.trim()) throw fail(400, 'bad_request', 'text required');
@@ -897,6 +934,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     url: `http://127.0.0.1:${actual}`,
     sessions,
     pushSubscriptions,
+    closeVsCode,
     /** Drops every client socket, to exercise reconnect. */
     dropClients() {
       for (const c of clients) c.ws.terminate();

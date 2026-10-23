@@ -10,6 +10,7 @@ pub mod config;
 pub mod connection;
 pub mod enroll;
 pub mod fs;
+pub mod inbox;
 pub mod link;
 pub mod outbox;
 pub mod permissions;
@@ -91,10 +92,12 @@ impl Worker {
         let conn_stop = CancellationToken::new();
         let conn_task = tokio::spawn(conn.run(conn_stop.clone()));
 
+        let artifacts = inbox::ArtifactClient::new(&self.config.hub_url, self.token.clone());
         let sup = Supervisor::new(
             Arc::new(self.config),
             self.adapters,
             link,
+            artifacts,
             self.shutdown_timeout,
         );
         sup.run(inbound_rx, shutdown).await;

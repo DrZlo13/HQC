@@ -865,3 +865,162 @@ async fn fs_requests_answer_inside_allowed_roots() {
     assert!(adapters.calls().is_empty(), "no agent involved");
     w.stop().await;
 }
+
+// T16 (SPEC §5.3, §12): the artifacts of an input are downloaded with the worker token into
+// `.hqc/inbox/<event_id>/` under sanitized, unique names, `.hqc/` goes to the git exclude,
+// and the adapter gets the text with the block of paths (fixtures/inbox).
+#[tokio::test]
+async fn inbox_scenario() {
+    let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/inbox");
+    let read = |n: &str| std::fs::read_to_string(fx.join(n)).unwrap();
+    let env = Env::new();
+    std::fs::create_dir_all(env.workspace().join(".git/info")).unwrap();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let arts: Vec<Value> = serde_json::from_str(&read("artifacts.json")).unwrap();
+    for a in &arts {
+        hub.artifacts.insert(
+            a["id"].as_str().unwrap().parse().unwrap(),
+            FakeArtifact {
+                name: a["name"].as_str().unwrap().into(),
+                kind: a["kind"].as_str().unwrap().into(),
+                mime: a["mime"].as_str().unwrap().into(),
+                bytes: std::fs::read(fx.join("artifacts").join(a["file"].as_str().unwrap()))
+                    .unwrap(),
+            },
+        );
+    }
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    start_session(&mut c, &env, sid).await;
+
+    let mut payload: Value = serde_json::from_str(&read("session.input.json")).unwrap();
+    payload["session_id"] = json!(sid);
+    let eid: Uuid = payload["event_id"].as_str().unwrap().parse().unwrap();
+    c.frame("session.input", payload).await;
+    adapters
+        .wait_for("the input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: eid,
+            })
+        })
+        .await;
+
+    let (got, files) = adapters.inputs().pop().unwrap();
+    assert_eq!(got.text, read("expected-text.txt"));
+    assert_eq!(got.artifact_ids.len(), 4);
+    let inbox = env.workspace().join(".hqc/inbox").join(eid.to_string());
+    let names: Vec<_> = files.iter().map(|f| f.rel.clone()).collect();
+    assert_eq!(
+        names,
+        ["screen.png", "fix_1.patch", "notes.txt", "notes-2.txt"]
+            .map(|n| format!(".hqc/inbox/{eid}/{n}"))
+    );
+    for (f, a) in files.iter().zip(&arts) {
+        assert_eq!(f.path, inbox.join(f.path.file_name().unwrap()));
+        let want = std::fs::read(fx.join("artifacts").join(a["file"].as_str().unwrap())).unwrap();
+        assert_eq!(std::fs::read(&f.path).unwrap(), want, "{}", f.rel);
+        assert_eq!(f.size, want.len() as u64);
+    }
+    assert_eq!(files[0].kind, hqc_proto::event::ArtifactKind::Image);
+    assert_eq!(files[0].mime, "image/png");
+    // Only the files: no temporary leftovers.
+    assert_eq!(std::fs::read_dir(&inbox).unwrap().count(), 4);
+    let exclude = std::fs::read_to_string(env.workspace().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|l| l == ".hqc/"), "{exclude}");
+    // Every download carried the worker token.
+    let reqs = hub.artifacts.requests.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 4);
+    let bearer = format!("Bearer {TOKEN}");
+    assert!(reqs
+        .iter()
+        .all(|(p, a)| p.starts_with("/worker/artifacts/") && a.as_deref() == Some(&bearer[..])));
+
+    // Without artifacts nothing is touched and the text is as sent.
+    adapters.accept_input(sid, eid).await;
+    adapters.end_turn(sid).await;
+    let plain = Uuid::now_v7();
+    c.frame("session.input", input(sid, plain, "just text"))
+        .await;
+    adapters
+        .wait_for("plain input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: plain,
+            })
+        })
+        .await;
+    let (got, files) = adapters.inputs().pop().unwrap();
+    assert_eq!((got.text.as_str(), files.len()), ("just text", 0));
+    assert!(!env
+        .workspace()
+        .join(".hqc/inbox")
+        .join(plain.to_string())
+        .exists());
+    w.stop().await;
+}
+
+// An artifact the hub does not give fails the input without retry; a `.hqc` that points
+// outside the workspace is refused and nothing is written there.
+#[tokio::test]
+async fn inbox_refusals() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    start_session(&mut c, &env, sid).await;
+
+    let missing = Uuid::now_v7();
+    let mut p = input(sid, Uuid::now_v7(), "see");
+    p["artifact_ids"] = json!([missing]);
+    let id = c.frame("session.input", p).await;
+    let err = c.expect("error").await;
+    assert_eq!(err["id"], id.as_str());
+    assert_eq!(err["payload"]["retryable"], false, "{err}");
+    assert!(err["payload"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&missing.to_string()));
+
+    let aid = Uuid::now_v7();
+    hub.artifacts.insert(
+        aid,
+        FakeArtifact {
+            name: "x.txt".into(),
+            kind: "text".into(),
+            mime: "text/plain".into(),
+            bytes: b"x".to_vec(),
+        },
+    );
+    let outside = env.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    // The failed input left no files behind.
+    let ws_hqc = env.workspace().join(".hqc");
+    assert_eq!(std::fs::read_dir(ws_hqc.join("inbox")).unwrap().count(), 0);
+    std::fs::remove_dir_all(&ws_hqc).unwrap();
+    std::os::unix::fs::symlink(&outside, env.workspace().join(".hqc")).unwrap();
+    let mut p = input(sid, Uuid::now_v7(), "see");
+    p["artifact_ids"] = json!([aid]);
+    let id = c.frame("session.input", p).await;
+    let err = c.expect("error").await;
+    assert_eq!(err["id"], id.as_str());
+    assert!(
+        err["payload"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is a symlink"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert!(!adapters
+        .calls()
+        .iter()
+        .any(|c| matches!(c, FakeCall::Input { .. })));
+    w.stop().await;
+}

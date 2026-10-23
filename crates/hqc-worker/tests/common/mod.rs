@@ -32,6 +32,95 @@ pub const WAIT: Duration = Duration::from_secs(10);
 pub struct FakeHub {
     pub addr: SocketAddr,
     conns: mpsc::Receiver<HubConn>,
+    /// Served on `GET /worker/artifacts/{id}` on the same address (SPEC §5.3).
+    pub artifacts: Artifacts,
+}
+
+/// An artifact of the fake hub: name, kind, `Content-Type`, content.
+#[derive(Clone, Debug)]
+pub struct FakeArtifact {
+    pub name: String,
+    pub kind: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Path and `Authorization` of an artifact request.
+pub type ArtifactRequest = (String, Option<String>);
+
+#[derive(Clone, Default)]
+pub struct Artifacts {
+    pub files: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, FakeArtifact>>>,
+    /// Path and `Authorization` of every artifact request.
+    pub requests: Arc<std::sync::Mutex<Vec<ArtifactRequest>>>,
+}
+
+impl Artifacts {
+    pub fn insert(&self, id: Uuid, a: FakeArtifact) {
+        self.files.lock().unwrap().insert(id, a);
+    }
+
+    /// Answers one plain HTTP request on `stream` if it is `GET /worker/artifacts/...`;
+    /// gives the stream back otherwise (a WebSocket upgrade).
+    async fn serve(&self, mut stream: TcpStream) -> Option<TcpStream> {
+        let mut peek = [0u8; 64];
+        let n = stream.peek(&mut peek).await.ok()?;
+        if !peek[..n].starts_with(b"GET /worker/artifacts/") {
+            return Some(stream);
+        }
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        while find(&buf, b"\r\n\r\n").is_none() {
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        let head = String::from_utf8_lossy(&buf).to_string();
+        let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+        let auth = head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("authorization")
+                .then(|| v.trim().to_string())
+        });
+        self.requests.lock().unwrap().push((path.clone(), auth));
+        let id: Option<Uuid> = path.rsplit('/').next().and_then(|s| s.parse().ok());
+        let found = id.and_then(|id| self.files.lock().unwrap().get(&id).cloned());
+        let out = match found {
+            Some(a) => {
+                let mut h = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nx-hqc-artifact-name: {}\r\n\
+                     x-hqc-artifact-kind: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    a.mime,
+                    pct(&a.name),
+                    a.kind,
+                    a.bytes.len()
+                )
+                .into_bytes();
+                h.extend_from_slice(&a.bytes);
+                h
+            }
+            None => {
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+            }
+        };
+        let _ = stream.write_all(&out).await;
+        let _ = stream.shutdown().await;
+        None
+    }
+}
+
+fn pct(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 pub struct HubConn {
@@ -52,10 +141,16 @@ impl FakeHub {
         let l = TcpListener::bind(addr).await.unwrap();
         let addr = l.local_addr().unwrap();
         let (tx, conns) = mpsc::channel(8);
+        let artifacts = Artifacts::default();
+        let served = artifacts.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = l.accept().await {
                 let tx = tx.clone();
+                let served = served.clone();
                 tokio::spawn(async move {
+                    let Some(stream) = served.serve(stream).await else {
+                        return;
+                    };
                     let mut auth = None;
                     let mut path = String::new();
                     // The error type is fixed by tungstenite's `Callback`.
@@ -82,7 +177,11 @@ impl FakeHub {
                 });
             }
         });
-        Self { addr, conns }
+        Self {
+            addr,
+            conns,
+            artifacts,
+        }
     }
 
     pub fn url(&self) -> String {

@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
 use crate::config::{Config, StartSpec};
+use crate::inbox::{self, ArtifactClient};
 use crate::link::HubLink;
 
 /// From the connection to the supervisor.
@@ -70,6 +71,7 @@ pub struct Supervisor {
     cfg: Arc<Config>,
     factory: Arc<dyn AdapterFactory>,
     link: HubLink,
+    artifacts: ArtifactClient,
     sessions: HashMap<Uuid, SessionHandle>,
     shutdown_timeout: Duration,
     /// One permit per running agent process (`max_sessions`).
@@ -117,9 +119,11 @@ impl Supervisor {
         cfg: Arc<Config>,
         factory: Arc<dyn AdapterFactory>,
         link: HubLink,
+        artifacts: ArtifactClient,
         shutdown_timeout: Duration,
     ) -> Self {
         Self {
+            artifacts,
             slots: Arc::new(Semaphore::new(cfg.max_sessions)),
             cfg,
             factory,
@@ -311,6 +315,7 @@ impl Supervisor {
             events: ev_rx,
             events_open: true,
             link: self.link.clone(),
+            artifacts: self.artifacts.clone(),
             idle_timeout: self.cfg.idle_timeout,
             slots: self.slots.clone(),
             max_sessions: self.cfg.max_sessions,
@@ -363,6 +368,7 @@ struct Session {
     events: mpsc::Receiver<AdapterEvent>,
     events_open: bool,
     link: HubLink,
+    artifacts: ArtifactClient,
     idle_timeout: Option<Duration>,
     slots: Arc<Semaphore>,
     max_sessions: usize,
@@ -532,7 +538,23 @@ impl Session {
             let Some(q) = self.queue.pop_front() else {
                 return;
             };
-            match self.adapter.input(&q.input).await {
+            // Attachments go to `.hqc/inbox` first and their paths into the text (SPEC §12).
+            let (input, files) = match inbox::prepare(&self.artifacts, &self.spec, &q.input).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "attachments: {e:#}");
+                    self.link.reply(
+                        &q.frame_id,
+                        wire_error(
+                            error_code::INTERNAL,
+                            format!("attachments: {e:#}"),
+                            e.retryable(),
+                        ),
+                    );
+                    continue;
+                }
+            };
+            match self.adapter.input_with(&input, &files).await {
                 Ok(()) => {
                     self.turn = Some(Turn {
                         frame_id: q.frame_id,

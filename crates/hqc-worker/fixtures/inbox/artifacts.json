@@ -1,0 +1,30 @@
+[
+  {
+    "id": "0199f3a2-7c10-7000-8000-0000000002f1",
+    "name": "screen.png",
+    "kind": "image",
+    "mime": "image/png",
+    "file": "screen.png"
+  },
+  {
+    "id": "0199f3a2-7c10-7000-8000-0000000002f2",
+    "name": "../fix:1.patch",
+    "kind": "diff",
+    "mime": "text/plain",
+    "file": "fix.patch"
+  },
+  {
+    "id": "0199f3a2-7c10-7000-8000-0000000002f3",
+    "name": "notes.txt",
+    "kind": "text",
+    "mime": "text/plain",
+    "file": "notes-a.txt"
+  },
+  {
+    "id": "0199f3a2-7c10-7000-8000-0000000002f4",
+    "name": "notes.txt",
+    "kind": "text",
+    "mime": "text/plain",
+    "file": "notes-b.txt"
+  }
+]

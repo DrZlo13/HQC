@@ -553,6 +553,7 @@ impl Supervisor {
             events_open: true,
             link: self.link.clone(),
             artifacts: self.artifacts.clone(),
+            roots: self.cfg.allowed_roots.clone(),
             idle_timeout: self.cfg.idle_timeout,
             slots: self.slots.clone(),
             max_sessions: self.cfg.max_sessions,
@@ -609,6 +610,9 @@ struct Session {
     events_open: bool,
     link: HubLink,
     artifacts: ArtifactClient,
+    /// `allowed_roots` of the worker config: `.hqc/` is added to a git exclude file only
+    /// inside them (SPEC §14).
+    roots: Vec<std::path::PathBuf>,
     idle_timeout: Option<Duration>,
     slots: Arc<Semaphore>,
     max_sessions: usize,
@@ -808,7 +812,14 @@ impl Session {
                 return;
             };
             // Attachments go to `.hqc/inbox` first and their paths into the text (SPEC §12).
-            let (input, files) = match inbox::prepare(&self.artifacts, &self.spec, &q.input).await {
+            let (input, files) = match inbox::prepare(
+                &self.artifacts,
+                &self.spec,
+                &q.input,
+                &self.roots,
+            )
+            .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "attachments: {e:#}");

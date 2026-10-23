@@ -157,6 +157,7 @@ pub async fn prepare(
     client: &ArtifactClient,
     spec: &StartSpec,
     input: &SessionInput,
+    allowed_roots: &[PathBuf],
 ) -> Result<(SessionInput, Vec<InboxFile>), InboxError> {
     let mut ids: Vec<Uuid> = Vec::new();
     for id in &input.artifact_ids {
@@ -168,7 +169,7 @@ pub async fn prepare(
         return Ok((input.clone(), vec![]));
     }
     let dir = inbox_dir(spec, input.event_id)?;
-    if let Err(e) = exclude_hqc(&spec.workspace) {
+    if let Err(e) = exclude_hqc(&spec.workspace, allowed_roots) {
         tracing::warn!(workspace = %spec.workspace.display(), "cannot add .hqc/ to .git/info/exclude: {e:#}");
     }
     match fetch_all(client, &dir, input.event_id, ids).await {
@@ -321,7 +322,9 @@ fn unique(name: &str, taken: &[String]) -> String {
 
 /// Adds `.hqc/` to the git exclude file of the workspace, if it is a git checkout (a `.git`
 /// folder, or a `.git` file of a worktree pointing at its git dir). Nothing else is created.
-pub fn exclude_hqc(workspace: &Path) -> anyhow::Result<()> {
+/// The git dir a `.git` file points at is followed only inside `allowed_roots`: the worker
+/// never writes outside its roots (SPEC §2.1, §14), whatever a checkout's `gitdir:` says.
+pub fn exclude_hqc(workspace: &Path, allowed_roots: &[PathBuf]) -> anyhow::Result<()> {
     let dot_git = workspace.join(".git");
     let git_dir = if dot_git.is_dir() {
         dot_git
@@ -339,10 +342,23 @@ pub fn exclude_hqc(workspace: &Path) -> anyhow::Result<()> {
     } else {
         return Ok(());
     };
-    let info = git_dir.join("info");
     if !git_dir.is_dir() {
         bail!("{}: not a directory", git_dir.display());
     }
+    let canonical = std::fs::canonicalize(&git_dir)?;
+    let inside = allowed_roots.iter().any(|r| {
+        std::fs::canonicalize(r)
+            .map(|r| canonical.starts_with(r))
+            .unwrap_or(false)
+    });
+    if !inside {
+        bail!(
+            "{}: git dir outside allowed_roots, .hqc/ not added to info/exclude",
+            canonical.display()
+        );
+    }
+    let git_dir = canonical;
+    let info = git_dir.join("info");
     std::fs::create_dir_all(&info)?;
     let exclude = info.join("exclude");
     let current = std::fs::read_to_string(&exclude).unwrap_or_default();
@@ -450,12 +466,13 @@ mod tests {
     fn exclude() {
         let d = tempfile::tempdir().unwrap();
         // Not a git checkout: nothing is created.
-        exclude_hqc(d.path()).unwrap();
+        let roots = vec![d.path().to_path_buf()];
+        exclude_hqc(d.path(), &roots).unwrap();
         assert!(!d.path().join(".git").exists());
 
         std::fs::create_dir_all(d.path().join(".git")).unwrap();
-        exclude_hqc(d.path()).unwrap();
-        exclude_hqc(d.path()).unwrap();
+        exclude_hqc(d.path(), &roots).unwrap();
+        exclude_hqc(d.path(), &roots).unwrap();
         let e = std::fs::read_to_string(d.path().join(".git/info/exclude")).unwrap();
         assert_eq!(e.matches(".hqc/").count(), 1, "{e}");
 
@@ -468,8 +485,33 @@ mod tests {
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
         let common = d.path().join(".git/info/exclude");
         std::fs::write(&common, "target/").unwrap();
-        exclude_hqc(&wt).unwrap();
+        exclude_hqc(&wt, &roots).unwrap();
         let e = std::fs::read_to_string(&common).unwrap();
         assert!(e.starts_with("target/\n") && e.ends_with(".hqc/\n"), "{e}");
+    }
+
+    /// A `.git` file whose `gitdir:` points outside `allowed_roots` is not followed: the
+    /// worker must not write anywhere outside its roots (SPEC §2.1, §14).
+    #[test]
+    fn exclude_does_not_follow_gitdir_outside_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let gd = outside.path().join("repo.git");
+        std::fs::create_dir_all(gd.join("info")).unwrap();
+        let wt = root.path().join("ws");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gd.display())).unwrap();
+        let err = exclude_hqc(&wt, &[root.path().to_path_buf()]).unwrap_err();
+        assert!(err.to_string().contains("outside allowed_roots"), "{err}");
+        assert!(!gd.join("info/exclude").exists());
+        // Inside the roots it is followed as before.
+        exclude_hqc(
+            &wt,
+            &[root.path().to_path_buf(), outside.path().to_path_buf()],
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(gd.join("info/exclude"))
+            .unwrap()
+            .contains(".hqc/"));
     }
 }

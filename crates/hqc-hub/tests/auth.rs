@@ -250,3 +250,50 @@ async fn enroll_is_rate_limited() {
     assert!(limited);
     hub.finish().await;
 }
+
+/// `/worker/*` is outside Cloudflare Access by design (SPEC §20). No path under that prefix
+/// may reach `/api/*` data without a JWT, however it is spelled: dot segments, encoded
+/// slashes, mixed case. The guarantee is the JWT check on `/api/*`, not router details, and
+/// this test keeps it that way across axum versions.
+#[tokio::test]
+async fn worker_prefix_never_reaches_api_without_jwt() {
+    let auth = AuthConfig::Access {
+        team_domain: TEAM.into(),
+        aud: AUD.into(),
+        jwks_url: Some(jwks_server().await),
+    };
+    let hub = TestHub::start_with(auth, String::new()).await;
+    for path in [
+        "/worker/../api/me",
+        "/worker/..%2fapi/me",
+        "/worker/..%2Fapi/me",
+        "/worker/%2e%2e/api/me",
+        "/worker/%2E%2E%2Fapi/me",
+        "/worker/./../api/me",
+        "/worker//../api/me",
+        "/worker/enroll/../../api/me",
+        "/WORKER/../api/me",
+        "/worker%2f..%2fapi%2fme",
+        "/api/me%00",
+        "/api//me",
+        "/./api/me",
+    ] {
+        let r = hub
+            .http
+            .get(format!("{}{path}", hub.base))
+            .send()
+            .await
+            .unwrap();
+        let status = r.status().as_u16();
+        let body = r.text().await.unwrap_or_default();
+        assert!(
+            matches!(status, 401 | 403 | 404 | 405 | 400),
+            "{path}: HTTP {status} {body}"
+        );
+        assert!(
+            !body.contains("\"email\"") && !body.contains("personal_project_id"),
+            "{path}: leaked user data: {body}"
+        );
+    }
+    hub.finish().await;
+}

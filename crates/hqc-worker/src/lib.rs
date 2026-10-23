@@ -10,11 +10,13 @@ pub mod config;
 pub mod connection;
 pub mod enroll;
 pub mod fs;
+pub mod known_paths;
 pub mod link;
 pub mod outbox;
 pub mod permissions;
 pub mod supervisor;
 pub mod token;
+pub mod worker_log;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +30,7 @@ use uuid::Uuid;
 use crate::adapter::AdapterFactory;
 use crate::config::{Config, DEFAULT_ENVIRONMENT};
 use crate::connection::{ConnOptions, Connection, Status};
+use crate::known_paths::KnownPaths;
 use crate::link::HubLink;
 use crate::outbox::Outbox;
 use crate::supervisor::Supervisor;
@@ -44,6 +47,12 @@ pub struct Worker {
     pub capabilities: serde_json::Value,
     /// Directory of the outbox database (`$HQC_HOME/outbox`).
     pub outbox_dir: PathBuf,
+    /// Folders the worker runs sessions in without asking (`$HQC_HOME/known_workspaces.json`,
+    /// SPEC §10.2).
+    pub known_paths_file: PathBuf,
+    /// Warn/error lines of the worker's own log, for its service session (SPEC §10.2);
+    /// `None`: not forwarded.
+    pub logs: Option<worker_log::LogReceiver>,
     pub conn: ConnOptions,
     /// How long shutdown waits for agents to be killed.
     pub shutdown_timeout: Duration,
@@ -67,7 +76,7 @@ impl Worker {
 
     /// Runs until `shutdown`: then kills every agent, flushes the outbox and returns.
     pub async fn run(
-        self,
+        mut self,
         shutdown: CancellationToken,
         status: watch::Sender<Status>,
     ) -> anyhow::Result<()> {
@@ -76,7 +85,13 @@ impl Worker {
         if pending > 0 {
             tracing::info!(pending, "outbox has events from a previous run");
         }
+        let known = Arc::new(KnownPaths::load(&self.known_paths_file)?);
         let (link, direct) = HubLink::new(outbox);
+        let log_stop = CancellationToken::new();
+        let log_task = self
+            .logs
+            .take()
+            .map(|rx| tokio::spawn(worker_log::forward(rx, link.clone(), log_stop.clone())));
         let (inbound_tx, inbound_rx) = mpsc::channel(256);
         let conn = Connection::new(
             self.config.hub_url.clone(),
@@ -96,8 +111,13 @@ impl Worker {
             self.adapters,
             link,
             self.shutdown_timeout,
+            known,
         );
         sup.run(inbound_rx, shutdown).await;
+        log_stop.cancel();
+        if let Some(t) = log_task {
+            let _ = t.await;
+        }
 
         // Agents are down and their last events are in the outbox: flush and close.
         conn_stop.cancel();

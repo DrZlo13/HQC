@@ -9,7 +9,7 @@ use hqc_worker::adapter::BuiltinAdapters;
 use hqc_worker::config::{self, Config};
 use hqc_worker::connection::{ConnOptions, Status};
 use hqc_worker::token::TokenStore;
-use hqc_worker::{capabilities, enroll, Worker};
+use hqc_worker::{capabilities, enroll, worker_log, Worker};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
@@ -65,6 +65,8 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .any(|t| m.target() == *t || m.target().starts_with(&format!("{t}::")))
     });
+    // Warn and error lines also go to the worker's service session (SPEC §10.2).
+    let (log_layer, logs) = worker_log::layer();
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -72,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_filter(filter)
                 .with_filter(cap),
         )
+        .with(log_layer)
         .init();
     let cli = Cli::parse();
     match cli.cmd {
@@ -100,13 +103,13 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Cmd::Run => run().await,
+        Cmd::Run => run(logs).await,
         Cmd::Mcp => anyhow::bail!("mcp: not implemented (iteration 3)"),
         Cmd::Env => anyhow::bail!("env: not implemented (iteration 5)"),
     }
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     let config = Config::load(&config::config_path()?)?;
     let token = TokenStore::from_env(&config.hub_url)?
         .load()?
@@ -129,6 +132,8 @@ async fn run() -> anyhow::Result<()> {
         adapters,
         capabilities,
         outbox_dir: config::hqc_home()?.join("outbox"),
+        known_paths_file: config::hqc_home()?.join("known_workspaces.json"),
+        logs: Some(logs),
         conn: ConnOptions::default(),
         shutdown_timeout: Duration::from_secs(10),
     };

@@ -284,8 +284,12 @@ impl Connection {
                 HubFrame::HelloAck {
                     protocol_version,
                     worker_id,
+                    system_session_id,
                     ..
                 } if f.id == hello_id => {
+                    if let Some(sid) = system_session_id {
+                        self.link.set_system_session(sid);
+                    }
                     if protocol_version != hqc_proto::PROTOCOL_VERSION {
                         tracing::warn!(
                             protocol_version,

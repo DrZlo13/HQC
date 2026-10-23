@@ -171,6 +171,20 @@ impl HubConn {
         hello
     }
 
+    /// `handshake` of a hub that names the worker's service session (SPEC §10.2).
+    pub async fn handshake_system(&mut self, system_session_id: Uuid) -> Value {
+        let hello = self.recv().await;
+        assert_eq!(hello["type"], "hello", "first frame must be hello: {hello}");
+        self.send(json!({
+            "id": hello["id"], "type": "hello.ack",
+            "payload": {"protocol_version": 1, "worker_id": Uuid::nil(),
+                        "server_time": "2026-10-22T10:00:00Z",
+                        "system_session_id": system_session_id}
+        }))
+        .await;
+        hello
+    }
+
     pub async fn ack_event(&mut self, frame: &Value, seq: u64) {
         self.send(json!({
             "id": frame["id"], "type": "ack",
@@ -214,6 +228,10 @@ impl Env {
 
     pub fn outbox(&self) -> PathBuf {
         self.dir.path().join("outbox")
+    }
+
+    pub fn known_paths(&self) -> PathBuf {
+        self.dir.path().join("known_workspaces.json")
     }
 
     pub fn config_toml(&self, hub_url: &str) -> String {
@@ -299,6 +317,16 @@ pub fn start_worker_factory(
     config: Config,
     adapters: Arc<dyn AdapterFactory>,
 ) -> RunningWorker {
+    start_worker_logs(env, config, adapters, None)
+}
+
+/// A worker that forwards the lines of `logs` to its service session (SPEC §10.2).
+pub fn start_worker_logs(
+    env: &Env,
+    config: Config,
+    adapters: Arc<dyn AdapterFactory>,
+    logs: Option<hqc_worker::worker_log::LogReceiver>,
+) -> RunningWorker {
     let w = Worker {
         config,
         token: Secret::new(TOKEN),
@@ -306,6 +334,8 @@ pub fn start_worker_factory(
         adapters,
         capabilities: hqc_worker::capabilities::build(Some("2.1.307")),
         outbox_dir: env.outbox(),
+        known_paths_file: env.known_paths(),
+        logs,
         conn: fast_conn(),
         shutdown_timeout: Duration::from_secs(5),
     };

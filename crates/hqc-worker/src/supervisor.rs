@@ -6,6 +6,13 @@
 //!   `mode: new` calls [`Adapter::start`], `mode: resume` [`Adapter::resume`] (SPEC §5.3).
 //!   `session.start` for a live process is acked without touching it.
 //!   A failed spawn is `error {agent_start_failed, retryable: true}` (SPEC §5.2).
+//! - A folder the worker has not run sessions in ([`KnownPaths`]), for a session that is
+//!   neither the worker owner's (`owner_is_worker_owner`) nor in a workspace the owner
+//!   added (`requested_by_owner`), needs the owner's consent first (SPEC §10.2): the start
+//!   waits for `worker.approval.request` -> `worker.approval.response`. `once` remembers
+//!   the folder and goes on; `deny`, the hub's timeout or ours answers the start with
+//!   `error {invalid_frame}`. Starts for the same folder wait for the same request, which is
+//!   sent again on every connect while unanswered.
 //! - `session.input` is queued; one input per turn, the next one waits for
 //!   [`AdapterEvent::TurnEnded`] (SPEC §17.2). Its `ack {event_id}` is sent only when the
 //!   adapter reports [`AdapterEvent::InputAccepted`] (SPEC §5.2). The queue lives in memory:
@@ -21,10 +28,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::path::{Path, PathBuf};
+
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
-    error_code, Ack, Envelope, HubFrame, LockedBy, ProcessState, RequestResult, ResultBody,
-    SessionInput, StartMode, WireError, WorkerFrame,
+    error_code, worker_approval, Ack, Envelope, HubFrame, LockedBy, ProcessState, RequestResult,
+    ResultBody, SessionInput, SessionStart, StartMode, WireError, WorkerApprovalRequest,
+    WorkerFrame,
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -34,6 +44,7 @@ use uuid::Uuid;
 
 use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
 use crate::config::{Config, StartSpec};
+use crate::known_paths::KnownPaths;
 use crate::link::HubLink;
 
 /// From the connection to the supervisor.
@@ -49,6 +60,10 @@ pub enum Inbound {
 /// How many delivered input ids a session remembers to re-ack resent inputs.
 const DELIVERED_MEMORY: usize = 256;
 const ADAPTER_EVENT_BUFFER: usize = 1024;
+/// How long the owner has to answer a confirmation (`expires_at` of the request).
+pub const APPROVAL_TTL: Duration = Duration::from_secs(600);
+/// After `expires_at`, the start gives up even if the hub never answered.
+const APPROVAL_GRACE: Duration = Duration::from_secs(30);
 
 pub fn wire_error(code: &str, message: impl Into<String>, retryable: bool) -> WorkerFrame {
     WorkerFrame::Error(WireError {
@@ -74,6 +89,26 @@ pub struct Supervisor {
     shutdown_timeout: Duration,
     /// One permit per running agent process (`max_sessions`).
     slots: Arc<Semaphore>,
+    known: Arc<KnownPaths>,
+    /// Starts waiting for the owner's consent, by folder.
+    waiting: HashMap<PathBuf, Waiting>,
+    /// `request_id` -> its folder in `waiting`.
+    asked: HashMap<String, PathBuf>,
+    /// Our own timeouts of `waiting` (`option_id: None`).
+    outcomes_tx: mpsc::UnboundedSender<Outcome>,
+    outcomes_rx: Option<mpsc::UnboundedReceiver<Outcome>>,
+}
+
+/// A confirmation asked for and the `session.start` frames that wait for it.
+struct Waiting {
+    request: WorkerApprovalRequest,
+    starts: Vec<(String, SessionStart)>,
+}
+
+#[derive(Debug)]
+struct Outcome {
+    request_id: String,
+    option_id: Option<String>,
 }
 
 struct SessionHandle {
@@ -118,7 +153,9 @@ impl Supervisor {
         factory: Arc<dyn AdapterFactory>,
         link: HubLink,
         shutdown_timeout: Duration,
+        known: Arc<KnownPaths>,
     ) -> Self {
+        let (outcomes_tx, outcomes_rx) = mpsc::unbounded_channel();
         Self {
             slots: Arc::new(Semaphore::new(cfg.max_sessions)),
             cfg,
@@ -126,12 +163,18 @@ impl Supervisor {
             link,
             sessions: HashMap::new(),
             shutdown_timeout,
+            known,
+            waiting: HashMap::new(),
+            asked: HashMap::new(),
+            outcomes_tx,
+            outcomes_rx: Some(outcomes_rx),
         }
     }
 
     /// Runs until `shutdown`, then kills every agent (SPEC §17.3: on worker restart all
     /// agents are `stopped`) and returns once their final events are in the outbox.
     pub async fn run(mut self, mut rx: mpsc::Receiver<Inbound>, shutdown: CancellationToken) {
+        let mut outcomes = self.outcomes_rx.take().expect("run once");
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
@@ -139,6 +182,7 @@ impl Supervisor {
                     Some(m) => self.handle(m),
                     None => break,
                 },
+                Some(o) = outcomes.recv() => self.resolve(&o.request_id, o.option_id.as_deref()),
             }
         }
         tracing::info!(sessions = self.sessions.len(), "stopping all agents");
@@ -165,6 +209,11 @@ impl Supervisor {
                 for h in self.sessions.values() {
                     let _ = h.tx.send(Cmd::Resync);
                 }
+                // A request sent while disconnected was lost; the hub stores it once.
+                for w in self.waiting.values() {
+                    self.link
+                        .send(WorkerFrame::WorkerApprovalRequest(w.request.clone()));
+                }
                 return;
             }
             Inbound::Frame(env) => env,
@@ -190,6 +239,15 @@ impl Supervisor {
                     }
                 };
                 let sid = spec.session_id;
+                if s.workspace_path.is_some() && !self.sessions.contains_key(&sid) {
+                    if s.owner_is_worker_owner || s.requested_by_owner {
+                        self.remember(&spec.workspace);
+                    } else if !self.known.contains(&spec.workspace) {
+                        let folder = spec.workspace.clone();
+                        self.wait_for_owner(id, s, folder);
+                        return;
+                    }
+                }
                 if !self.sessions.contains_key(&sid) {
                     let h = self.spawn_session(&spec);
                     self.sessions.insert(sid, h);
@@ -237,6 +295,15 @@ impl Supervisor {
                     answers,
                 },
             ),
+            HubFrame::WorkerApprovalResponse {
+                request_id,
+                option_id,
+            } => {
+                // Acked also when nothing waits any more (SPEC §10.2).
+                self.link.reply(&id, ack(None));
+                self.resolve(&request_id, Some(&option_id));
+                return;
+            }
             HubFrame::FsStat(r) => {
                 let cfg = self.cfg.clone();
                 self.fs_request(id, r.request_id, move || {
@@ -273,6 +340,93 @@ impl Supervisor {
                     ),
                 );
             }
+        }
+    }
+
+    fn remember(&self, folder: &Path) {
+        if self.known.contains(folder) {
+            return;
+        }
+        if let Err(e) = self.known.insert(folder) {
+            tracing::error!(folder = %folder.display(), "known folders not saved: {e:#}");
+        }
+    }
+
+    /// Ask the owner before the first session of someone else in `folder` (SPEC §10.2).
+    fn wait_for_owner(&mut self, id: String, s: SessionStart, folder: PathBuf) {
+        tracing::info!(session_id = %s.session_id, folder = %folder.display(), "new folder: asking the worker owner");
+        if let Some(w) = self.waiting.get_mut(&folder) {
+            w.starts.push((id, s));
+            return;
+        }
+        let request = WorkerApprovalRequest {
+            request_id: format!("wa-{}", Uuid::now_v7()),
+            kind: worker_approval::WORKSPACE_USE.into(),
+            description: format!(
+                "The hub wants to run sessions in {} for a session of another user; allowing it remembers the folder",
+                folder.display()
+            ),
+            expires_at: chrono::Utc::now()
+                + chrono::TimeDelta::from_std(APPROVAL_TTL).expect("small duration"),
+        };
+        self.link
+            .send(WorkerFrame::WorkerApprovalRequest(request.clone()));
+        let tx = self.outcomes_tx.clone();
+        let request_id = request.request_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(APPROVAL_TTL + APPROVAL_GRACE).await;
+            let _ = tx.send(Outcome {
+                request_id,
+                option_id: None,
+            });
+        });
+        self.asked
+            .insert(request.request_id.clone(), folder.clone());
+        self.waiting.insert(
+            folder,
+            Waiting {
+                request,
+                starts: vec![(id, s)],
+            },
+        );
+    }
+
+    /// The owner's answer (`None`: our own timeout). `once` lets the waiting starts go on,
+    /// anything else refuses them.
+    fn resolve(&mut self, request_id: &str, option_id: Option<&str>) {
+        let Some(folder) = self.asked.remove(request_id) else {
+            tracing::debug!(%request_id, "answer for no waiting request");
+            return;
+        };
+        let Some(w) = self.waiting.remove(&folder) else {
+            return;
+        };
+        if option_id == Some(worker_approval::ONCE) {
+            tracing::info!(folder = %folder.display(), "the worker owner allowed the folder");
+            self.remember(&folder);
+            for (id, s) in w.starts {
+                self.handle(Inbound::Frame(Envelope::new(id, HubFrame::SessionStart(s))));
+            }
+            return;
+        }
+        let why = match option_id {
+            None => "no answer in time",
+            Some(_) => "refused",
+        };
+        tracing::warn!(folder = %folder.display(), "session start in a new folder: {why}");
+        for (id, s) in w.starts {
+            self.link.reply(
+                &id,
+                wire_error(
+                    error_code::INVALID_FRAME,
+                    format!(
+                        "the worker owner did not allow sessions in {} ({why}; session {})",
+                        folder.display(),
+                        s.session_id
+                    ),
+                    false,
+                ),
+            );
         }
     }
 

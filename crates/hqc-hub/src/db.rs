@@ -956,6 +956,10 @@ pub struct SessionRow {
     pub system: bool,
     /// The last mirrored event written while VS Code was active (SPEC §9.3).
     pub vscode_active_at: Option<DateTime<Utc>>,
+    /// `{entrypoint, status}` of a live process outside hqc holding the transcript open
+    /// (SPEC §9.3), and since when.
+    pub held_by: Option<Value>,
+    pub vscode_held_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -964,7 +968,8 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.title, s.title_source, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
-    s.start_sent, s.system, s.vscode_active_at, s.created_at, s.updated_at";
+    s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.created_at, \
+    s.updated_at";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1333,6 +1338,48 @@ pub async fn set_locked_by(db: &PgPool, id: Uuid, locked_by: &str) -> sqlx::Resu
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// The holder of the session's transcript (SPEC §9.3); `vscode_held_at` keeps the time the
+/// transcript was first held.
+pub async fn set_holder(db: &PgPool, id: Uuid, held_by: Option<&Value>) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET held_by = $2,
+            vscode_held_at = CASE WHEN $2::jsonb IS NULL THEN NULL
+                                  ELSE COALESCE(vscode_held_at, now()) END,
+            updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(held_by)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// On `hello` the worker reports its holders again; what it reported before is forgotten
+/// (the lock stays). Returns the sessions that had a holder.
+pub async fn forget_holders(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "UPDATE sessions SET held_by = NULL, vscode_held_at = NULL
+         WHERE worker_id = $1 AND held_by IS NOT NULL RETURNING id",
+    )
+    .bind(worker_id)
+    .fetch_all(db)
+    .await
+}
+
+/// The worker reads Claude Code's registry of live sessions
+/// (`capabilities.claude_code.sessions_registry`, SPEC §5.4, §9.3).
+pub async fn worker_has_registry(db: &PgPool, worker_id: Uuid) -> sqlx::Result<bool> {
+    let v: Option<bool> = sqlx::query_scalar(
+        "SELECT COALESCE((capabilities->'claude_code'->>'sessions_registry')::boolean, false)
+         FROM workers WHERE id = $1",
+    )
+    .bind(worker_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(v.unwrap_or(false))
 }
 
 pub async fn touch_vscode(db: &PgPool, id: Uuid) -> sqlx::Result<()> {

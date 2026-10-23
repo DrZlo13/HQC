@@ -5,11 +5,18 @@
 //!   workspace's project with `cwd` from the record, the `ai-title` as title, and
 //!   `locked_by: vscode` if the worker saw the file written within 30 s, else `none`
 //!   (SPEC §9.1). A new event marked `recent` makes the session `locked_by: vscode`; if hqc
-//!   had it, that is a release ([`released`]).
+//!   had it, that is a release ([`released`]). With registry data (`held_by` in the frame,
+//!   T20) the holder decides instead of `recent`.
 //! - `locked_by` from the worker's `session.state` ([`next_lock`]): `vscode` wins, and a
 //!   stopped process does not end a VS Code lock.
-//! - `POST /takeover` ([`takeover`]): after 30 s of silence the session becomes
-//!   `locked_by: hqc` and the worker gets `session.start` with `mode: resume`.
+//! - Holders ([`holder`], T20): a live process outside hqc that holds the transcript open
+//!   (the worker reads Claude Code's registry of live sessions) makes the session
+//!   `locked_by: vscode` whatever is written to the file; from hqc that is a release with
+//!   reason `vscode_open`. When it goes away the session is `none` at once, unless a process
+//!   of hqc still runs it.
+//! - `POST /takeover` ([`takeover`]): refused while a holder lives (`409 vscode_open`);
+//!   without registry data, after 30 s of silence. The session becomes `locked_by: hqc` and
+//!   the worker gets `session.start` with `mode: resume`.
 //! - After `hello` the worker gets `mirror.set` for every mirrored workspace of its own.
 
 use std::path::Path;
@@ -17,7 +24,7 @@ use std::path::Path;
 use chrono::Utc;
 use hqc_proto::{
     event::EventKind,
-    frame::{Ack, HubFrame, MirrorEvent, MirrorSet, MIRROR_RECENT_S},
+    frame::{Ack, HeldBy, HubFrame, MirrorEvent, MirrorSet, MIRROR_RECENT_S},
 };
 use serde_json::{json, Value};
 
@@ -39,6 +46,23 @@ const TAKEN_OVER_TEXT: &str = "Сессию подхватил hqc. Если о�
     там устарел: после возврата переоткройте сессию в VS Code.";
 const RELEASED_TEXT: &str = "Сессию продолжили в VS Code: hqc остановил агента после хода. \
     Чтобы вести её отсюда, подхватите её снова.";
+const RELEASED_OPEN_TEXT: &str = "Сессию открыли в VS Code: hqc остановил агента после хода. \
+    Чтобы вести её отсюда, закройте её в VS Code и подхватите снова.";
+
+/// `reason` of `session_released` and `error` of the takeover refusal: a live process
+/// outside hqc holds the transcript (SPEC §4, §9.3).
+pub const VSCODE_OPEN: &str = "vscode_open";
+/// `reason` of `session_released`: someone else wrote to the transcript (SPEC §4, §9.3).
+pub const FOREIGN_WRITE: &str = "foreign_write";
+
+/// Why the session went to VS Code: its transcript is held, or was written from outside.
+pub fn release_reason(s: &SessionRow) -> &'static str {
+    if s.held_by.is_some() {
+        VSCODE_OPEN
+    } else {
+        FOREIGN_WRITE
+    }
+}
 
 /// `cwd` of the record relative to the workspace, `.` for the workspace itself; `None`
 /// when it lies outside.
@@ -79,8 +103,15 @@ pub async fn ingest(
         return Ok(dropped);
     }
     let title = m.title.as_deref().and_then(crate::worker_ws::runtime_title);
+    let held = m.held_by.as_ref().and_then(|h| h.as_ref());
     let s = match db::session_by_runtime(&app.db, conn.worker_id, &m.runtime_session_id).await? {
-        Some(s) => s,
+        Some(s) => match &m.held_by {
+            Some(h) => {
+                holder(app, &s, h.clone()).await?;
+                db::session(&app.db, s.id).await?.unwrap_or(s)
+            }
+            None => s,
+        },
         None => {
             let id = db::create_session(
                 &app.db,
@@ -96,8 +127,16 @@ pub async fn ingest(
                 },
             )
             .await?;
-            let lock = if m.recent { "vscode" } else { "none" };
+            // With registry data only a holder makes it VS Code's (SPEC §9.3).
+            let lock = match &m.held_by {
+                Some(h) if h.is_some() => "vscode",
+                None if m.recent => "vscode",
+                _ => "none",
+            };
             db::adopt_transcript(&app.db, id, &m.runtime_session_id, lock).await?;
+            if let Some(h) = held {
+                db::set_holder(&app.db, id, Some(&serde_json::to_value(h)?)).await?;
+            }
             if let Some(t) = &title {
                 db::set_runtime_title(&app.db, id, t).await?;
             }
@@ -121,10 +160,11 @@ pub async fn ingest(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let author = if matches!(m.event.kind, EventKind::UserMessage { .. }) {
-        events::user_author(s.owner_id)
-    } else {
-        json!({"kind": "agent", "id": s.id})
+    let author = match m.event.kind {
+        EventKind::UserMessage { .. } => events::user_author(s.owner_id),
+        // `session_forked` (SPEC §9.3).
+        EventKind::System { .. } => json!({"kind": "system"}),
+        _ => json!({"kind": "agent", "id": s.id}),
     };
     let new = NewEvent {
         event_id,
@@ -146,10 +186,12 @@ pub async fn ingest(
             events::after_mirror_store(app, &s, &row, &m.event.kind).await?;
             if m.recent && !s.archived {
                 db::touch_vscode(&app.db, s.id).await?;
-                if s.locked_by != "vscode" {
+                // With registry data the holder decides ([`holder`]): a write without one
+                // came from a process that has ended (SPEC §9.3).
+                if s.locked_by != "vscode" && m.held_by.is_none() {
                     db::set_locked_by(&app.db, s.id, "vscode").await?;
                     if s.locked_by == "hqc" {
-                        released(app, s.id).await?;
+                        released(app, s.id, release_reason(&s)).await?;
                     }
                 }
             }
@@ -182,18 +224,56 @@ pub fn next_lock<'a>(prev: &'a str, reported: &'a str) -> &'a str {
     }
 }
 
-/// The session went from hqc to VS Code: `system session_released`, pending input fails
-/// (it would otherwise wait for a takeover nobody asked for).
-pub async fn released(app: &AppState, session_id: uuid::Uuid) -> anyhow::Result<()> {
+/// The session went from hqc to VS Code: `system session_released` with `reason`
+/// ([`VSCODE_OPEN`] or [`FOREIGN_WRITE`]), pending input fails (it would otherwise wait for
+/// a takeover nobody asked for).
+pub async fn released(app: &AppState, session_id: uuid::Uuid, reason: &str) -> anyhow::Result<()> {
     let Some(s) = db::session(&app.db, session_id).await? else {
         return Ok(());
     };
-    tracing::info!(%session_id, "session continued in VS Code");
+    tracing::info!(%session_id, reason, "session continued in VS Code");
     for row in db::move_inputs(&app.db, session_id, "pending", "failed").await? {
         delivery::notify_delivery(app, &row);
     }
-    events::system(app, &s, RELEASED, RELEASED_TEXT).await?;
+    let text = if reason == VSCODE_OPEN {
+        RELEASED_OPEN_TEXT
+    } else {
+        RELEASED_TEXT
+    };
+    events::system_with(
+        app,
+        &s,
+        json!({"text": text, "code": RELEASED, "reason": reason}),
+    )
+    .await?;
     app.session_changed(session_id);
+    Ok(())
+}
+
+/// A holder report for session `s` (SPEC §9.3): `Some` — a live process outside hqc holds
+/// the transcript, the session is VS Code's (from hqc: a release, reason `vscode_open`);
+/// `None` — nobody holds it, a VS Code lock ends at once unless a process of hqc still runs
+/// the session.
+pub async fn holder(app: &AppState, s: &SessionRow, held_by: Option<HeldBy>) -> anyhow::Result<()> {
+    let new = held_by.as_ref().map(serde_json::to_value).transpose()?;
+    if s.held_by == new {
+        return Ok(());
+    }
+    tracing::info!(session_id = %s.id, held_by = ?held_by, locked_by = %s.locked_by, "holder of the session changed");
+    db::set_holder(&app.db, s.id, new.as_ref()).await?;
+    match held_by {
+        Some(_) if !s.archived && s.locked_by != "vscode" => {
+            db::set_locked_by(&app.db, s.id, "vscode").await?;
+            if s.locked_by == "hqc" {
+                released(app, s.id, VSCODE_OPEN).await?;
+            }
+        }
+        None if s.locked_by == "vscode" && s.process_state == "stopped" => {
+            db::set_locked_by(&app.db, s.id, "none").await?;
+        }
+        _ => {}
+    }
+    app.session_changed(s.id);
     Ok(())
 }
 
@@ -208,7 +288,22 @@ pub async fn takeover(app: &AppState, s: &SessionRow) -> ApiResult<()> {
     if s.locked_by == "hqc" {
         return Ok(());
     }
-    if let Some(at) = s.vscode_active_at {
+    if let Some(h) = &s.held_by {
+        let mut extra = serde_json::Map::new();
+        extra.insert("held_by".into(), h.clone());
+        return Err(ApiError::ConflictWith(
+            VSCODE_OPEN,
+            "сессия открыта в VS Code: закройте её там и подхватите снова".into(),
+            extra,
+        ));
+    }
+    // With the registry, nobody holding the transcript is enough; the 30 s of silence are
+    // for workers that cannot tell (SPEC §9.3).
+    let registry = match s.worker_id {
+        Some(w) => db::worker_has_registry(&app.db, w).await?,
+        None => false,
+    };
+    if let (Some(at), false) = (s.vscode_active_at, registry) {
         let quiet = (Utc::now() - at).num_seconds();
         if s.locked_by == "vscode" && quiet < MIRROR_RECENT_S as i64 {
             return Err(ApiError::Conflict(

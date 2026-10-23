@@ -631,6 +631,7 @@ impl Core {
             EventKind::System {
                 text,
                 code: code.into(),
+                fork: None,
             },
         )))
     }

@@ -66,6 +66,9 @@ pub struct Worker {
 pub struct MirrorOptions {
     /// `<claude config>/projects`.
     pub projects_dir: PathBuf,
+    /// `<claude config>/sessions`, Claude Code's registry of live sessions (SPEC §9.3);
+    /// `None`: holders are not looked at.
+    pub sessions_dir: Option<PathBuf>,
     /// Where the mirror keeps offsets and the "file → cwd" cache (`$HQC_HOME/mirror`).
     pub state_dir: PathBuf,
     /// Shared with the Claude Code adapter ([`adapter::BuiltinAdapters::own_records`]).
@@ -139,6 +142,9 @@ impl Worker {
             let (cmds, cmd_rx) = mpsc::unbounded_channel();
             let mut core =
                 mirror::Mirror::new(m.projects_dir.clone(), store.clone(), m.own_records);
+            if let Some(d) = m.sessions_dir {
+                core = core.with_registry(d, Box::new(mirror::holders::System));
+            }
             core.grace = m.grace;
             sup = sup.with_mirror(mirror::MirrorHandle {
                 cmds,

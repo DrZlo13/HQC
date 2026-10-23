@@ -452,6 +452,7 @@ pub fn start_worker_logs(
             .mirror
             .clone()
             .map(|(projects, own)| hqc_worker::MirrorOptions {
+                sessions_dir: Some(projects.with_file_name("sessions")),
                 projects_dir: projects,
                 state_dir: env.outbox().with_file_name("mirror"),
                 own_records: own,

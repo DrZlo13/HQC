@@ -32,13 +32,16 @@ pub struct Entry {
     pub event_id: Uuid,
     /// The event as JSON, sent as `event {event}`; for a `mirror.event` its whole payload.
     pub event: serde_json::Value,
-    /// [`FRAME_EVENT`] or [`FRAME_MIRROR_EVENT`].
+    /// [`FRAME_EVENT`], [`FRAME_MIRROR_EVENT`] or [`FRAME_SESSION_STATE`].
     pub frame: String,
 }
 
 pub const FRAME_EVENT: &str = "event";
 /// `mirror.event` (SPEC §5.4): through the outbox like `event`, keyed by the event's id.
 pub const FRAME_MIRROR_EVENT: &str = "mirror.event";
+/// A holder report, `session.state` with the nil `session_id` (SPEC §5.4, §9.3): through the
+/// outbox so that it reaches the hub in order with the `mirror.event`s, keyed by a fresh id.
+pub const FRAME_SESSION_STATE: &str = "session.state";
 
 impl Outbox {
     /// Opens (creating if needed) `<dir>/outbox.sqlite3`. The directory is 0700 and the

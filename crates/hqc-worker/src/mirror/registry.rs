@@ -23,19 +23,36 @@ struct Entry {
     /// Processes of the session alive now (a new one may start before the old one's
     /// monitor has finished).
     live: u32,
+    /// Their pids, when known: their entries in Claude Code's session registry are not
+    /// another holder (SPEC §9.3).
+    pids: Vec<u32>,
 }
 
 impl OwnRecords {
     /// A process for transcript `session` was spawned.
-    pub fn begin(&self, session: Uuid) {
-        self.lock().entry(session).or_default().live += 1;
+    pub fn begin(&self, session: Uuid, pid: Option<u32>) {
+        let mut m = self.lock();
+        let e = m.entry(session).or_default();
+        e.live += 1;
+        e.pids.extend(pid);
     }
 
     /// That process is gone.
-    pub fn end(&self, session: Uuid) {
+    pub fn end(&self, session: Uuid, pid: Option<u32>) {
         if let Some(e) = self.lock().get_mut(&session) {
             e.live = e.live.saturating_sub(1);
+            if let Some(p) = pid {
+                e.pids.retain(|x| *x != p);
+            }
         }
+    }
+
+    /// Pids of the worker's live agent processes.
+    pub fn pids(&self) -> std::collections::HashSet<u32> {
+        self.lock()
+            .values()
+            .flat_map(|e| e.pids.iter().copied())
+            .collect()
     }
 
     /// The adapter saw record `uuid` of transcript `session` in stream-json.
@@ -68,14 +85,17 @@ mod tests {
         let r = OwnRecords::default();
         let (s, u) = (Uuid::new_v4(), Uuid::new_v4());
         assert!(!r.is_live(s) && !r.is_own(s, u));
-        r.begin(s);
-        r.begin(s);
+        r.begin(s, Some(10));
+        r.begin(s, Some(11));
         r.add(s, u);
-        r.end(s);
+        assert_eq!(r.pids(), [10, 11].into());
+        r.end(s, Some(10));
         assert!(r.is_live(s), "the second process still runs");
-        r.end(s);
-        r.end(s);
+        assert_eq!(r.pids(), [11].into());
+        r.end(s, Some(11));
+        r.end(s, None);
         assert!(!r.is_live(s));
+        assert!(r.pids().is_empty());
         assert!(r.is_own(s, u), "own uuids outlive the process");
     }
 }

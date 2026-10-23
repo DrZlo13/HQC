@@ -467,7 +467,8 @@ impl Connection {
                     if let Err(e) = self.link.outbox.remove(eid) {
                         tracing::error!(event_id = %eid, "outbox delete failed: {e:#}");
                     }
-                    if a.seq.is_none() {
+                    // Holder reports are acked with `{}`; a dropped event names itself.
+                    if a.seq.is_none() && a.event_id.is_some() {
                         tracing::info!(event_id = %eid, "hub dropped the event: unknown session");
                     }
                 }

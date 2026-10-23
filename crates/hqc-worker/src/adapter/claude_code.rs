@@ -47,18 +47,18 @@ use crate::permissions::{PermissionMode, Permissions, Policy};
 
 /// A live process of transcript `uuid` in [`OwnRecords`]; ends with the monitor, even an
 /// aborted one.
-struct Live(Arc<OwnRecords>, Uuid);
+struct Live(Arc<OwnRecords>, Uuid, Option<u32>);
 
 impl Live {
-    fn new(own: Arc<OwnRecords>, uuid: Uuid) -> Self {
-        own.begin(uuid);
-        Self(own, uuid)
+    fn new(own: Arc<OwnRecords>, uuid: Uuid, pid: Option<u32>) -> Self {
+        own.begin(uuid, pid);
+        Self(own, uuid, pid)
     }
 }
 
 impl Drop for Live {
     fn drop(&mut self) {
-        self.0.end(self.1);
+        self.0.end(self.1, self.2);
     }
 }
 
@@ -444,7 +444,7 @@ impl ClaudeCodeAdapter {
             runtime: uuid,
             own: self.opts.own_records.clone(),
         });
-        let live = Live::new(self.opts.own_records.clone(), uuid);
+        let live = Live::new(self.opts.own_records.clone(), uuid, spawned.pid);
         let killing = Arc::new(AtomicBool::new(false));
         let (exit_tx, exited) = watch::channel(None);
         let stderr_tail = Arc::new(Mutex::new(String::new()));

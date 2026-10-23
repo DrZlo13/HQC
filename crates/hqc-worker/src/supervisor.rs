@@ -23,6 +23,12 @@
 //! - `idle_timeout` (SPEC §17.3): an idle process is killed, the next input resumes it.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
+//! - Holders (SPEC §9.3): the mirror tells the hub (a holder report through the outbox:
+//!   `session.state` with the nil `session_id`, the transcript's `runtime_session_id` and
+//!   `held_by`) and the supervisor when a live Claude Code process outside the worker opens
+//!   a transcript or lets it go. The supervisor reports all current holders again on every
+//!   connect; a session whose agent runs that transcript stops after its turn, as for
+//!   another writer.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -32,9 +38,9 @@ use std::path::{Path, PathBuf};
 
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
-    error_code, worker_approval, Ack, Envelope, HubFrame, LockedBy, ProcessState, RequestResult,
-    ResultBody, SessionInput, SessionStart, StartMode, WireError, WorkerApprovalRequest,
-    WorkerFrame,
+    error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, ProcessState,
+    RequestResult, ResultBody, SessionInput, SessionStart, StartMode, WireError,
+    WorkerApprovalRequest, WorkerFrame,
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -64,6 +70,12 @@ pub enum Inbound {
     /// process of this worker runs it (SPEC §9.3).
     ForeignWriter {
         runtime_session_id: Uuid,
+    },
+    /// A live process outside the worker holds transcript `runtime_session_id` open, or
+    /// (`None`) no longer does (SPEC §9.3).
+    Holder {
+        runtime_session_id: Uuid,
+        held_by: Option<HeldBy>,
     },
 }
 
@@ -110,6 +122,8 @@ pub struct Supervisor {
     outcomes_rx: Option<mpsc::UnboundedReceiver<Outcome>>,
     /// The mirror of Claude Code sessions (SPEC §9); `None` when not configured.
     mirror: Option<MirrorHandle>,
+    /// Current holders by transcript, reported again on every connect (SPEC §9.3).
+    holders: HashMap<Uuid, HeldBy>,
 }
 
 /// A confirmation asked for and the `session.start` frames that wait for it.
@@ -161,6 +175,11 @@ enum Cmd {
     Resync,
     /// Another writer continues the transcript: stop after the current turn (SPEC §9.3).
     Release,
+    /// A process outside the worker opened transcript `runtime_session_id`: if it is this
+    /// session's, stop after the current turn (SPEC §9.3).
+    Held {
+        runtime_session_id: Uuid,
+    },
     Shutdown,
 }
 
@@ -188,6 +207,7 @@ impl Supervisor {
             outcomes_tx,
             outcomes_rx: Some(outcomes_rx),
             mirror: None,
+            holders: HashMap::new(),
         }
     }
 
@@ -239,6 +259,30 @@ impl Supervisor {
                 for w in self.waiting.values() {
                     self.link
                         .send(WorkerFrame::WorkerApprovalRequest(w.request.clone()));
+                }
+                // The hub forgets holders on `hello` (SPEC §9.3).
+                for (rid, h) in &self.holders {
+                    if let Err(e) = self.link.holder_report(*rid, Some(h.clone())) {
+                        tracing::error!("outbox write failed, holder report lost: {e:#}");
+                    }
+                }
+                return;
+            }
+            Inbound::Holder {
+                runtime_session_id,
+                held_by,
+            } => {
+                // The mirror has reported it to the hub.
+                match &held_by {
+                    Some(h) => self.holders.insert(runtime_session_id, h.clone()),
+                    None => self.holders.remove(&runtime_session_id),
+                };
+                if held_by.is_some() {
+                    // The session's own task knows its transcript best (a new session learns
+                    // it from the runtime).
+                    for h in self.sessions.values() {
+                        let _ = h.tx.send(Cmd::Held { runtime_session_id });
+                    }
                 }
                 return;
             }
@@ -586,7 +630,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Kill { id }
         | Cmd::Approval { id, .. }
         | Cmd::Clarify { id, .. } => id.clone(),
-        Cmd::Resync | Cmd::Release | Cmd::Shutdown => String::new(),
+        Cmd::Resync | Cmd::Release | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
     }
 }
 
@@ -738,16 +782,31 @@ impl Session {
                 self.reply_result(&id, r);
             }
             Cmd::Resync => self.send_state(),
-            Cmd::Release => {
-                if self.state == ProcessState::Stopped {
-                    return;
-                }
-                self.release_pending = true;
-                if self.turn.is_none() {
-                    self.release().await;
+            Cmd::Release => self.release_after_turn().await,
+            Cmd::Held { runtime_session_id } => {
+                let rid = runtime_session_id.to_string();
+                let mine = self
+                    .runtime_session_id
+                    .as_deref()
+                    .or(self.spec.runtime_session_id.as_deref())
+                    == Some(rid.as_str());
+                if mine && self.state != ProcessState::Stopped {
+                    tracing::info!(session_id = %self.id, runtime_session_id = %rid, "the session was opened outside hqc; releasing it after the turn");
+                    self.release_after_turn().await;
                 }
             }
             Cmd::Shutdown => unreachable!("handled in run"),
+        }
+    }
+
+    /// Stop for another writer or holder after the current turn, at once without one.
+    async fn release_after_turn(&mut self) {
+        if self.state == ProcessState::Stopped {
+            return;
+        }
+        self.release_pending = true;
+        if self.turn.is_none() {
+            self.release().await;
         }
     }
 
@@ -1028,6 +1087,7 @@ impl Session {
                 LockedBy::Hqc
             },
             title: self.title.clone(),
+            held_by: None,
         });
     }
 
@@ -1038,6 +1098,7 @@ impl Session {
             EventKind::System {
                 text: text.into(),
                 code: code.into(),
+                fork: None,
             },
         );
         if let Err(e) = self.link.event(ev) {

@@ -268,7 +268,13 @@ pub enum EventKind {
         detail: Option<String>,
     },
     #[serde(rename = "system")]
-    System { text: String, code: String },
+    System {
+        text: String,
+        code: String,
+        /// Only with [`SESSION_FORKED`]: its fields sit next to `text` and `code`.
+        #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+        fork: Option<SessionForked>,
+    },
     /// An event type this build does not know; stored and passed on as is, not rendered.
     /// Never matches a known type: a known type with a bad payload is an error.
     #[serde(untagged)]
@@ -341,7 +347,28 @@ pub struct Event {
     pub delivered_at: Option<DateTime<Utc>>,
 }
 
+/// `system.code` of a fork in a Claude Code transcript (SPEC §4, §9.3). The payload carries,
+/// besides `text` and `code`, the fields of [`SessionForked`].
+pub const SESSION_FORKED: &str = "session_forked";
+
+/// Extra payload of `system session_forked` (SPEC §4, §9.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionForked {
+    /// The record that got a second line of turns.
+    pub at_uuid: Uuid,
+    /// Who started the later line: `vscode` (anyone outside hqc) or `hqc`.
+    pub branch_from: String,
+    /// Turns (prompts) of the other line, missing from the context of the new one.
+    pub orphaned_turns: u32,
+}
+
 impl Event {
+    /// Id of `system session_forked` at record `at_uuid`: one event per fork point, whoever
+    /// reports it and however often (SPEC §9.3).
+    pub fn id_of_fork(at_uuid: &Uuid) -> Uuid {
+        Uuid::new_v5(&CLAUDE_RECORD_NS, format!("{at_uuid}/fork").as_bytes())
+    }
+
     /// Deterministic event id for an event derived from a Claude Code jsonl record (SPEC §3).
     pub fn id_from_claude_record(record_uuid: &Uuid) -> Uuid {
         Uuid::new_v5(&CLAUDE_RECORD_NS, record_uuid.as_bytes())
@@ -619,7 +646,8 @@ mod tests {
             e.kind,
             EventKind::System {
                 text: "t".into(),
-                code: "c".into()
+                code: "c".into(),
+                fork: None
             }
         );
     }

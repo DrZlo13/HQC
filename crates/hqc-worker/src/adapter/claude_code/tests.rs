@@ -1040,7 +1040,7 @@ fn system_events(actions: &[Action]) -> Vec<(String, String)> {
         .iter()
         .filter_map(|a| match a {
             Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
-                EventKind::System { code, text } => {
+                EventKind::System { code, text, .. } => {
                     assert_eq!(e.author, Author::System);
                     Some((code.clone(), text.clone()))
                 }

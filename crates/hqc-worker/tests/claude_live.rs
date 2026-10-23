@@ -479,7 +479,7 @@ async fn live_permission_policy() {
                     asked.push(description.clone());
                     adapter.answer_approval(request_id, "once").await.unwrap();
                 }
-                EventKind::System { code, text } => {
+                EventKind::System { code, text, .. } => {
                     println!("system {code}: {text}");
                     system.push((code.clone(), text.clone()));
                 }

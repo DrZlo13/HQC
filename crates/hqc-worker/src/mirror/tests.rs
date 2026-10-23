@@ -1,6 +1,6 @@
 //! The mirror on the T15 fixtures (2.1.308): records of the worker's own process are never
 //! another writer's (`vscode-takeover`), the outside turn after an adapter session is
-//! (`adapter-then-outside`).
+//! (`adapter-then-outside`); T20: forks (`fork`) and holders from the registry of live sessions.
 
 use std::io::Write;
 
@@ -94,6 +94,7 @@ fn labels(out: &[Output]) -> Vec<String> {
                 other => format!("{other:?}"),
             },
             Output::ForeignWriter { .. } => "foreign".into(),
+            Output::Holder { .. } => "holder".into(),
         })
         .collect()
 }
@@ -126,7 +127,7 @@ fn own_records_are_not_foreign() {
     assert!(first.recent, "just written");
 
     // Takeover: the adapter's process runs and reads its stream.
-    s.own.begin(s.runtime);
+    s.own.begin(s.runtime, None);
     for u in stream_uuids(VSCODE_STREAM) {
         s.own.add(s.runtime, u);
     }
@@ -138,7 +139,7 @@ fn own_records_are_not_foreign() {
         assert!(out.is_empty(), "{later} s: {:?}", labels(&out));
     }
     // The process ends: nothing left to send either.
-    s.own.end(s.runtime);
+    s.own.end(s.runtime, None);
     assert!(s.mirror.poll(t0, SystemTime::now()).is_empty());
     let row = s.mirror.store.get(&s.file).unwrap().unwrap();
     assert_eq!(row.offset, VSCODE.len() as u64);
@@ -150,7 +151,7 @@ fn own_records_are_not_foreign() {
 #[test]
 fn outside_writer_is_detected() {
     let mut s = setup("adapter-then-outside", OUTSIDE);
-    s.own.begin(s.runtime);
+    s.own.begin(s.runtime, None);
     for u in stream_uuids(OUTSIDE_STREAM) {
         s.own.add(s.runtime, u);
     }
@@ -177,7 +178,7 @@ fn outside_writer_is_detected() {
     );
     // The supervisor stopped the agent: the held records go out, answers point at the
     // outside prompt, the empty thinking is skipped.
-    s.own.end(s.runtime);
+    s.own.end(s.runtime, None);
     let out = s
         .mirror
         .poll(t0 + Duration::from_secs(10), SystemTime::now());
@@ -249,4 +250,158 @@ fn candidates_group_by_cwd() {
     );
     // The cwd is cached.
     assert!(store.get(&other).unwrap().unwrap().cwd.is_some());
+}
+
+const FORK: &str = include_str!("../../../hqc-claude-jsonl/fixtures/fork-2.1.308.jsonl");
+const FORK_STREAM: &str =
+    include_str!("../../../hqc-claude-jsonl/fixtures/stream-fork-2.1.308.jsonl");
+/// The `ONE` answer both later prompts hang off.
+const FORK_AT: &str = "d6e6a091-03a1-463f-bfbf-d19775f04f96";
+
+fn forks(out: &[Output]) -> Vec<(Uuid, String, u32, String)> {
+    out.iter()
+        .filter_map(|o| match o {
+            Output::Event(e) => match &e.event.kind {
+                EventKind::System {
+                    text,
+                    code,
+                    fork: Some(f),
+                } if code == hqc_proto::event::SESSION_FORKED => Some((
+                    f.at_uuid,
+                    f.branch_from.clone(),
+                    f.orphaned_turns,
+                    text.clone(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// T20, fixture `fork` (2.1.308): the adapter's turn, then a prompt resumed from the earlier
+/// `ONE` answer. The mirror reports the fork once, before the later prompt, with the
+/// adapter's turn as orphaned; reading the file again in a new process reports nothing.
+#[test]
+fn fork_is_reported_once() {
+    let mut s = setup("fork", FORK);
+    for u in stream_uuids(FORK_STREAM) {
+        s.own.add(s.runtime, u);
+    }
+    append(&s.file, FORK);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    let at: Uuid = FORK_AT.parse().unwrap();
+    assert_eq!(
+        forks(&out),
+        [(
+            at,
+            "vscode".to_string(),
+            1,
+            "VS Code продолжил с более ранней точки: 1 ход из hqc не попал в его контекст"
+                .to_string()
+        )]
+    );
+    let l = labels(&out);
+    let i = l
+        .iter()
+        .position(|x| x.contains("session_forked") || x.starts_with("System"))
+        .unwrap();
+    assert_eq!(l[i + 1], "user:Reply with exactly: VSCODE-TURN", "{l:?}");
+    let Output::Event(e) = &out[i] else {
+        unreachable!()
+    };
+    assert_eq!(e.event.event_id, Event::id_of_fork(&at));
+    assert_eq!(e.event.author, Author::System);
+    assert_eq!(e.held_by, None, "no registry configured");
+
+    // A new worker process: the tree is rebuilt from what was read, nothing is reported
+    // again, and a later prompt on the new line is no fork.
+    let mut again = Mirror::new(
+        s.file.parent().unwrap().parent().unwrap().to_path_buf(),
+        s.mirror.store.clone(),
+        s.own.clone(),
+    );
+    again.set(PathBuf::from("/tmp/hqc-fixture"), true);
+    let answer = "120fb1ee-3831-484d-aef2-a9505079a043";
+    append(
+        &s.file,
+        &(serde_json::json!({
+            "parentUuid": answer, "isSidechain": false, "type": "user",
+            "message": {"role": "user", "content": "Reply with exactly: MORE"},
+            "uuid": Uuid::new_v4(), "timestamp": "2026-10-23T19:00:00.000Z",
+            "cwd": "/tmp/hqc-fixture/fork", "sessionId": s.runtime
+        })
+        .to_string()
+            + "\n"),
+    );
+    let out = again.poll(Instant::now(), SystemTime::now());
+    assert_eq!(labels(&out), ["user:Reply with exactly: MORE"]);
+}
+
+/// With the registry, a live process holding the transcript is reported once, rides on
+/// every `mirror.event`, and its going away is reported as `None` (not sooner than a poll
+/// period after the last report).
+#[test]
+fn holder_in_registry() {
+    let mut s = setup("vscode-takeover", VSCODE);
+    let config = s.file.parent().unwrap().parent().unwrap().parent().unwrap();
+    let sessions = config.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let pid = std::process::id();
+    let entry = sessions.join(format!("{pid}.json"));
+    std::fs::write(
+        &entry,
+        serde_json::json!({"pid": pid, "sessionId": s.runtime, "entrypoint": "claude-vscode",
+            "status": "busy", "updatedAt": 1792779848554u64})
+        .to_string(),
+    )
+    .unwrap();
+    s.mirror = Mirror::new(
+        config.join("projects"),
+        Arc::new(Store::memory()),
+        s.own.clone(),
+    )
+    .with_registry(sessions.clone(), Box::new(holders::System));
+    s.mirror.set(PathBuf::from("/tmp/hqc-fixture"), true);
+    append(&s.file, VSCODE);
+    let held = HeldBy {
+        entrypoint: "claude-vscode".into(),
+        status: "busy".into(),
+    };
+    let t0 = Instant::now();
+    let out = s.mirror.poll(t0, SystemTime::now());
+    assert_eq!(
+        out[0],
+        Output::Holder {
+            runtime_session_id: s.runtime,
+            held_by: Some(held.clone())
+        }
+    );
+    assert!(out[1..]
+        .iter()
+        .all(|o| matches!(o, Output::Event(e) if e.held_by == Some(Some(held.clone())))));
+    assert!(s.mirror.poll(t0, SystemTime::now()).is_empty(), "no change");
+
+    // Our own process of the same transcript is not a holder.
+    s.own.begin(s.runtime, Some(pid));
+    assert!(
+        s.mirror.poll(t0, SystemTime::now()).is_empty(),
+        "too soon after the last report"
+    );
+    let out = s
+        .mirror
+        .poll(t0 + Duration::from_secs(3), SystemTime::now());
+    assert_eq!(
+        out,
+        [Output::Holder {
+            runtime_session_id: s.runtime,
+            held_by: None
+        }]
+    );
+    s.own.end(s.runtime, Some(pid));
+    std::fs::remove_file(&entry).unwrap();
+    assert!(s
+        .mirror
+        .poll(t0 + Duration::from_secs(6), SystemTime::now())
+        .is_empty());
 }

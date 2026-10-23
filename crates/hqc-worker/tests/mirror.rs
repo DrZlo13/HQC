@@ -69,7 +69,7 @@ async fn foreign_writer_releases_the_session() {
     write_transcript(&env);
     let runtime: Uuid = RUNTIME.parse().unwrap();
     // What the Claude Code adapter would record while it runs the session.
-    own.begin(runtime);
+    own.begin(runtime, None);
     for u in stream_uuids() {
         own.add(runtime, u);
     }
@@ -123,7 +123,7 @@ async fn foreign_writer_releases_the_session() {
         }
     }
     // The fake adapter does not end the registry entry: what the real one does on kill.
-    own.end(runtime);
+    own.end(runtime, None);
 
     let mut texts = vec![];
     for _ in 0..2 {
@@ -216,5 +216,104 @@ async fn mirror_set_imports_the_history() {
         .maybe("mirror.event", Duration::from_millis(400))
         .await
         .is_none());
+    w.stop().await;
+}
+
+/// A Claude Code registry entry `<config>/sessions/<pid>.json` for `RUNTIME`, held by a live
+/// process that is not the worker's (the test process itself).
+fn write_holder(env: &Env, status: &str) -> std::path::PathBuf {
+    let (projects, _) = env.mirror.clone().unwrap();
+    let dir = projects.with_file_name("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let pid = std::process::id();
+    let file = dir.join(format!("{pid}.json"));
+    std::fs::write(
+        &file,
+        json!({"pid": pid, "sessionId": RUNTIME, "cwd": env.workspace(), "entrypoint": "claude-vscode",
+            "kind": "interactive", "status": status, "updatedAt": 1792779848554u64})
+        .to_string(),
+    )
+    .unwrap();
+    file
+}
+
+/// The next holder report (`session.state` with the nil session id) for `RUNTIME`, acked:
+/// it comes through the outbox.
+async fn holder_report(c: &mut HubConn) -> Value {
+    loop {
+        let f = c.expect("session.state").await;
+        if f["payload"]["session_id"] == Uuid::nil().to_string() {
+            assert_eq!(f["payload"]["runtime_session_id"], RUNTIME, "{f}");
+            c.send(json!({"id": f["id"], "type": "ack", "payload": {}}))
+                .await;
+            return f["payload"]["held_by"].clone();
+        }
+    }
+}
+
+/// T20 (SPEC §9.3): VS Code opens the transcript the worker's agent runs. The worker reports
+/// the holder, stops the agent after its turn and says `locked_by: vscode`; the holder is
+/// reported again after a reconnect and as `null` once the process has gone. Mirroring is
+/// not needed for any of it.
+#[tokio::test]
+async fn holder_releases_the_session() {
+    let env = Env::with_mirror();
+    let mut hub = FakeHub::start().await;
+    let adapters = FakeAdapters::new();
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+
+    let sid = Uuid::now_v7();
+    let mut start = env.start_payload(sid);
+    start["runtime_session_id"] = json!(RUNTIME);
+    let id = c.frame("session.start", start).await;
+    assert_eq!(c.expect("ack").await["id"], id.as_str());
+    let eid = Uuid::now_v7();
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": eid, "text": "go", "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    adapters
+        .wait_for("input", |c| {
+            c.iter().any(|x| matches!(x, FakeCall::Input { .. }))
+        })
+        .await;
+    adapters.accept_input(sid, eid).await;
+
+    let entry = write_holder(&env, "idle");
+    assert_eq!(
+        holder_report(&mut c).await,
+        json!({"entrypoint": "claude-vscode", "status": "idle"})
+    );
+    // The turn runs on; then the agent stops and the session is VS Code's.
+    assert!(!adapters.calls().contains(&FakeCall::Kill(sid)));
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("kill after the turn", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["session_id"] == sid.to_string()
+            && st["payload"]["process_state"] == "stopped"
+        {
+            assert_eq!(st["payload"]["locked_by"], "vscode", "{st}");
+            assert!(st["payload"].get("held_by").is_none(), "{st}");
+            break;
+        }
+    }
+
+    // A new status is a change; a reconnect repeats the holder.
+    write_holder(&env, "busy");
+    assert_eq!(holder_report(&mut c).await["status"], "busy");
+    c.close().await;
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    assert_eq!(holder_report(&mut c).await["status"], "busy");
+
+    // VS Code closed the session.
+    std::fs::remove_file(entry).unwrap();
+    assert_eq!(holder_report(&mut c).await, Value::Null);
     w.stop().await;
 }

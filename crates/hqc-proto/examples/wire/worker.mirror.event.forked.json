@@ -1,0 +1,25 @@
+{
+  "id": "w-9",
+  "type": "mirror.event",
+  "payload": {
+    "workspace_path": "/Users/home-mac/work/cad",
+    "runtime_session_id": "8dd26c03-4e07-4685-b0d2-b99924e96975",
+    "cwd": "/Users/home-mac/work/cad/bracket",
+    "event": {
+      "session_id": "00000000-0000-0000-0000-000000000000",
+      "event_id": "4b0f7f7e-6a3c-5d1e-8f2a-9c0d1e2f3a4b",
+      "ts": "2026-10-23T18:20:41.112Z",
+      "author": { "kind": "system" },
+      "type": "system",
+      "payload": {
+        "text": "VS Code продолжил с более ранней точки: 1 ход из hqc не попал в его контекст",
+        "code": "session_forked",
+        "at_uuid": "d6e6a091-03a1-463f-bfbf-d19775f04f96",
+        "branch_from": "vscode",
+        "orphaned_turns": 1
+      }
+    },
+    "recent": true,
+    "held_by": { "entrypoint": "claude-vscode", "status": "busy" }
+  }
+}

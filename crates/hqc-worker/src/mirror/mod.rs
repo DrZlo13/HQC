@@ -24,7 +24,19 @@
 //!   held records go out;
 //! - otherwise it is emitted at once with `recent` set when the file was written within the
 //!   last 30 s; the hub turns such a session into `locked_by: vscode`.
+//!
+//! Who holds a transcript open (SPEC §9.3, T20). Every poll also reads Claude Code's registry
+//! of live sessions ([`holders`], `<config>/sessions`): a live process outside the worker
+//! that has the transcript open is its holder. A change (appeared, gone, other status) is
+//! reported to the supervisor ([`Output::Holder`]), at most once per [`POLL`] per transcript,
+//! and every `mirror.event` carries the current holder (`held_by`).
+//!
+//! Forks (SPEC §9.3, T20). The mirror keeps the tree of each transcript's records
+//! ([`fork::Tree`]); a prompt that starts a second line of turns from an earlier record
+//! gives `system session_forked` through `mirror.event`.
 
+pub mod fork;
+pub mod holders;
 pub mod map;
 pub mod registry;
 pub mod store;
@@ -36,8 +48,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
-use hqc_claude_jsonl::{parse_line, Record};
-use hqc_proto::frame::{Candidate, CandidatesResult, MirrorEvent, MIRROR_RECENT_S};
+use hqc_claude_jsonl::{parse_line, Link, Record};
+use hqc_proto::event::{Author, Event, EventKind, SessionForked, SESSION_FORKED};
+use hqc_proto::frame::{Candidate, CandidatesResult, HeldBy, MirrorEvent, MIRROR_RECENT_S};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -63,6 +76,12 @@ pub enum Output {
     ForeignWriter {
         runtime_session_id: Uuid,
     },
+    /// The holder of transcript `runtime_session_id` changed: a live process outside the
+    /// worker opened it (or changed status), or `None`: no such process any more.
+    Holder {
+        runtime_session_id: Uuid,
+        held_by: Option<HeldBy>,
+    },
 }
 
 pub struct Mirror {
@@ -76,6 +95,19 @@ pub struct Mirror {
     /// Transcripts whose foreign writer was reported during the current process.
     signalled: HashSet<Uuid>,
     pub grace: Duration,
+    /// `<claude config>/sessions`, Claude Code's registry of live sessions; `None`: holders
+    /// are not looked at.
+    sessions: Option<PathBuf>,
+    procs: Box<dyn holders::Processes + Send>,
+    /// The registry folder existed at the last poll: `held_by` is known.
+    registry: bool,
+    /// Holders found at the last poll.
+    current: HashMap<Uuid, HeldBy>,
+    /// Holders last reported, and when.
+    reported: HashMap<Uuid, HeldBy>,
+    reported_at: HashMap<Uuid, Instant>,
+    /// Record trees of the transcripts read in this process, for forks.
+    trees: HashMap<PathBuf, fork::Tree>,
 }
 
 impl Mirror {
@@ -90,7 +122,26 @@ impl Mirror {
             held: HashMap::new(),
             signalled: HashSet::new(),
             grace: GRACE,
+            sessions: None,
+            procs: Box::new(holders::System),
+            registry: false,
+            current: HashMap::new(),
+            reported: HashMap::new(),
+            reported_at: HashMap::new(),
+            trees: HashMap::new(),
         }
+    }
+
+    /// Read holders from `sessions` (`<claude config>/sessions`), checking processes with
+    /// `procs`.
+    pub fn with_registry(
+        mut self,
+        sessions: PathBuf,
+        procs: Box<dyn holders::Processes + Send>,
+    ) -> Self {
+        self.sessions = Some(sessions);
+        self.procs = procs;
+        self
     }
 
     /// `mirror.set`: `path` is canonical and inside `allowed_roots` (the supervisor checked).
@@ -107,9 +158,10 @@ impl Mirror {
         self.workspaces.iter()
     }
 
-    /// One pass over every transcript.
+    /// One pass over the registry of live sessions and every transcript.
     pub fn poll(&mut self, now: Instant, wall: SystemTime) -> Vec<Output> {
         let mut out = Vec::new();
+        self.poll_holders(now, &mut out);
         if self.workspaces.is_empty() {
             return out;
         }
@@ -119,6 +171,97 @@ impl Mirror {
             }
         }
         out
+    }
+
+    /// Holders of all transcripts, mirrored or not: a session hqc started may be opened in
+    /// VS Code too. Changes go out at most once per [`POLL`] per transcript; one that comes
+    /// sooner waits for a later poll.
+    fn poll_holders(&mut self, now: Instant, out: &mut Vec<Output>) {
+        let Some(dir) = &self.sessions else {
+            return;
+        };
+        self.registry = dir.is_dir();
+        if !self.registry {
+            self.current.clear();
+            return;
+        }
+        let own = self.own.clone();
+        self.current = holders::read(dir, &own.pids(), |s| own.is_live(s), &*self.procs)
+            .into_iter()
+            .map(|(k, h)| (k, h.held_by()))
+            .collect();
+        self.reported_at
+            .retain(|_, t| now.saturating_duration_since(*t) < POLL);
+        let keys: BTreeSet<Uuid> = self
+            .current
+            .keys()
+            .chain(self.reported.keys())
+            .copied()
+            .collect();
+        for k in keys {
+            let new = self.current.get(&k);
+            if new == self.reported.get(&k) || self.reported_at.contains_key(&k) {
+                continue;
+            }
+            tracing::info!(runtime_session_id = %k, held_by = ?new, "holder of a transcript changed");
+            self.reported_at.insert(k, now);
+            match new {
+                Some(h) => self.reported.insert(k, h.clone()),
+                None => self.reported.remove(&k),
+            };
+            out.push(Output::Holder {
+                runtime_session_id: k,
+                held_by: new.cloned(),
+            });
+        }
+    }
+
+    /// `held_by` of a `mirror.event` for transcript `runtime`: absent without the registry.
+    fn held_by(&self, runtime: Uuid) -> Option<Option<HeldBy>> {
+        self.registry.then(|| self.current.get(&runtime).cloned())
+    }
+
+    /// Add a consumed record to the transcript's tree; the `session_forked` event if it
+    /// starts a second line of turns (SPEC §9.3).
+    fn track(
+        &mut self,
+        path: &Path,
+        runtime: Uuid,
+        link: Option<Link>,
+        rec: &Record,
+    ) -> Option<Event> {
+        let link = link?;
+        let f = self.trees.entry(path.to_path_buf()).or_default().add(
+            link.uuid,
+            link.parent_uuid,
+            is_prompt(rec),
+        )?;
+        let hqc = self.own.is_own(runtime, link.uuid);
+        let ts = match rec {
+            Record::User(m) | Record::Assistant(m) => map::ts(m),
+            _ => Utc::now(),
+        };
+        tracing::warn!(runtime_session_id = %runtime, at = %f.at, orphaned_turns = f.orphaned_turns, from_hqc = hqc, "transcript forked");
+        Some(Event {
+            session_id: Uuid::nil(),
+            event_id: Event::id_of_fork(&f.at),
+            seq: None,
+            ts,
+            author: Author::System,
+            kind: EventKind::System {
+                text: fork::fork_text(hqc, f.orphaned_turns),
+                code: SESSION_FORKED.into(),
+                fork: Some(SessionForked {
+                    at_uuid: f.at,
+                    branch_from: if hqc { "hqc" } else { "vscode" }.into(),
+                    orphaned_turns: f.orphaned_turns,
+                }),
+            },
+            chain: None,
+            client_op_id: None,
+            delivery: None,
+            delivered_at: None,
+        })
     }
 
     fn row(&mut self, path: &Path) -> anyhow::Result<FileRow> {
@@ -175,6 +318,12 @@ impl Mirror {
         if size == row.offset {
             return Ok(());
         }
+        if !self.trees.contains_key(path) {
+            // First read in this process: the records already handled shape the tree, and
+            // forks among them were reported before.
+            self.trees
+                .insert(path.to_path_buf(), read_tree(path, row.offset)?);
+        }
         let live = self.own.is_live(runtime);
         if !live {
             self.signalled.remove(&runtime);
@@ -190,6 +339,18 @@ impl Mirror {
         let mut buf = Vec::new();
         f.take(size - row.offset).read_to_end(&mut buf)?;
 
+        let held_by = self.held_by(runtime);
+        let wrap = |event: Event, title: Option<String>| {
+            Output::Event(Box::new(MirrorEvent {
+                workspace_path: ws.display().to_string(),
+                runtime_session_id: runtime.to_string(),
+                cwd: cwd.clone(),
+                event,
+                title,
+                recent,
+                held_by: held_by.clone(),
+            }))
+        };
         let mut pos = row.offset;
         for chunk in buf.split_inclusive(|b| *b == b'\n') {
             if chunk.last() != Some(&b'\n') {
@@ -216,11 +377,19 @@ impl Mirror {
                 pos = end;
                 continue;
             }
+            // A record joins the tree once consumed: a held one may still turn out ours.
+            let link = hqc_claude_jsonl::link(line).filter(|l| !l.is_sidechain);
             let Some(uuid) = map::counted_uuid(&rec) else {
+                if let Some(f) = self.track(path, runtime, link, &rec) {
+                    out.push(wrap(f, row.title.clone()));
+                }
                 pos = end;
                 continue;
             };
             if self.own.is_own(runtime, uuid) {
+                if let Some(f) = self.track(path, runtime, link, &rec) {
+                    out.push(wrap(f, row.title.clone()));
+                }
                 row.last_prompt =
                     map::prompt_id(&map::record_events(&rec, None)).or(row.last_prompt);
                 self.held.remove(&uuid);
@@ -237,17 +406,13 @@ impl Mirror {
                 }
                 break;
             }
+            if let Some(f) = self.track(path, runtime, link, &rec) {
+                out.push(wrap(f, row.title.clone()));
+            }
             let events = map::record_events(&rec, row.last_prompt);
             row.last_prompt = map::prompt_id(&events).or(row.last_prompt);
             for event in events {
-                out.push(Output::Event(Box::new(MirrorEvent {
-                    workspace_path: ws.display().to_string(),
-                    runtime_session_id: runtime.to_string(),
-                    cwd: cwd.clone(),
-                    event,
-                    title: row.title.clone(),
-                    recent,
-                })));
+                out.push(wrap(event, row.title.clone()));
             }
             self.held.remove(&uuid);
             pos = end;
@@ -285,6 +450,34 @@ pub fn transcripts(projects: &Path) -> Vec<(PathBuf, Uuid)> {
     }
     out.sort();
     out
+}
+
+/// A prompt a person typed: what counts as a turn in a line of the tree.
+fn is_prompt(rec: &Record) -> bool {
+    matches!(rec, Record::User(m) if m.is_main())
+        && map::prompt_id(&map::record_events(rec, None)).is_some()
+}
+
+/// The record tree of the first `upto` bytes of a transcript (whole lines only).
+fn read_tree(path: &Path, upto: u64) -> anyhow::Result<fork::Tree> {
+    let mut tree = fork::Tree::default();
+    let f = std::fs::File::open(path)?;
+    let mut read = 0u64;
+    for line in std::io::BufReader::new(f).split(b'\n') {
+        let line = line?;
+        read += line.len() as u64 + 1;
+        if read > upto {
+            break;
+        }
+        let line = String::from_utf8_lossy(&line);
+        let Some(link) = hqc_claude_jsonl::link(&line).filter(|l| !l.is_sidechain) else {
+            continue;
+        };
+        let prompt = parse_line(&line).is_ok_and(|r| is_prompt(&r));
+        // Forks in there were reported when the lines were first read.
+        let _ = tree.add(link.uuid, link.parent_uuid, prompt);
+    }
+    Ok(tree)
 }
 
 /// `cwd` of the first record that has one, reading at most [`CWD_LINES`] lines.
@@ -359,7 +552,7 @@ pub struct MirrorHandle {
 }
 
 /// The mirror task: a poll every `every` and right after `mirror.set`; events go to the
-/// outbox, foreign writers to the supervisor.
+/// outbox, foreign writers and holders to the supervisor.
 pub async fn run(
     mut mirror: Mirror,
     mut cmds: mpsc::UnboundedReceiver<MirrorCmd>,
@@ -402,6 +595,22 @@ pub async fn run(
                 Output::ForeignWriter { runtime_session_id } => {
                     let _ = supervisor
                         .send(Inbound::ForeignWriter { runtime_session_id })
+                        .await;
+                }
+                Output::Holder {
+                    runtime_session_id,
+                    held_by,
+                } => {
+                    // To the hub behind the events of earlier polls, which carry the
+                    // holder they saw; to the supervisor to release a session it runs.
+                    if let Err(err) = link.holder_report(runtime_session_id, held_by.clone()) {
+                        tracing::error!("outbox write failed, holder report lost: {err:#}");
+                    }
+                    let _ = supervisor
+                        .send(Inbound::Holder {
+                            runtime_session_id,
+                            held_by,
+                        })
                         .await;
                 }
             }

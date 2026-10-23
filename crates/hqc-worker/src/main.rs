@@ -114,7 +114,10 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     let token = TokenStore::from_env(&config.hub_url)?
         .load()?
         .context("no worker token; run `hqc-worker enroll <hub_url>` first")?;
-    let capabilities = capabilities::detect(config.claude_bin.as_deref()).await;
+    let mut capabilities = capabilities::detect(config.claude_bin.as_deref()).await;
+    if let Some(d) = hqc_worker::adapter::claude_code::paths::default_config_dir() {
+        capabilities::with_sessions_registry(&mut capabilities, &d.join("sessions"));
+    }
     let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
     let p = &config.permissions;
     tracing::info!(hub = %config.hub_url, allowed_roots = ?config.allowed_roots, %capabilities, %permission_mode, permissions = ?p.mode, allow = p.allow.len(), deny = p.deny.len(), "starting worker");
@@ -129,6 +132,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     let mirror = hqc_worker::adapter::claude_code::paths::default_config_dir().map(|d| {
         hqc_worker::MirrorOptions {
             projects_dir: d.join("projects"),
+            sessions_dir: Some(d.join("sessions")),
             state_dir: config::hqc_home().unwrap_or_default().join("mirror"),
             own_records: adapters.own_records(),
             poll: hqc_worker::mirror::POLL,

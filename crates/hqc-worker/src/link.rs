@@ -77,6 +77,27 @@ impl HubLink {
         Ok(())
     }
 
+    /// Queue a holder report (SPEC §5.4, §9.3) behind the `mirror.event`s already queued.
+    pub fn holder_report(
+        &self,
+        runtime_session_id: Uuid,
+        held_by: Option<hqc_proto::frame::HeldBy>,
+    ) -> anyhow::Result<()> {
+        let frame = WorkerFrame::SessionState {
+            session_id: Uuid::nil(),
+            process_state: hqc_proto::frame::ProcessState::Stopped,
+            runtime_session_id: Some(runtime_session_id.to_string()),
+            locked_by: hqc_proto::frame::LockedBy::None,
+            title: None,
+            held_by: Some(held_by),
+        };
+        let payload = serde_json::to_value(&frame)?["payload"].take();
+        self.outbox
+            .push_frame(Uuid::now_v7(), crate::outbox::FRAME_SESSION_STATE, &payload)?;
+        self.outbox_ready.notify_one();
+        Ok(())
+    }
+
     pub fn set_system_session(&self, id: Uuid) {
         self.system_session.send_if_modified(|v| {
             let changed = *v != Some(id);

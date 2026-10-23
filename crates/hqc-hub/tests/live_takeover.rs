@@ -131,6 +131,8 @@ async fn live_vscode_import_takeover_release() {
         logs: None,
         mirror: Some(MirrorOptions {
             projects_dir: claude_dir.join("projects"),
+            // T15's scenario: the registry of live sessions is the T20 test's.
+            sessions_dir: None,
             state_dir: run.join("home/mirror"),
             own_records: own,
             poll: hqc_worker::mirror::POLL,

@@ -99,6 +99,12 @@ pub enum WorkerFrame {
         /// the session (`title_source`, SPEC §3 Session).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// Who outside hqc holds the transcript open (SPEC §9.3): absent — the worker has
+        /// no registry data, `null` — nobody, an object — a live process. With the nil
+        /// `session_id` the frame is only a holder report: the hub finds the session by
+        /// `runtime_session_id` and ignores `process_state` and `locked_by`.
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "maybe_null")]
+        held_by: Option<Option<HeldBy>>,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`): same `id` as the request.
     #[serde(rename = "result")]
@@ -165,10 +171,47 @@ pub struct MirrorEvent {
     /// comes with `false`.
     #[serde(default)]
     pub recent: bool,
+    /// As in `session.state`: absent without registry data, `null` when no process
+    /// outside hqc holds the transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "maybe_null")]
+    pub held_by: Option<Option<HeldBy>>,
 }
 
 /// The quiet period of SPEC §9.1/§9.3: a transcript written within it is live in VS Code.
 pub const MIRROR_RECENT_S: u64 = 30;
+
+/// A live Claude Code process outside hqc that holds a transcript open (SPEC §9.3): an entry
+/// of `<claude config>/sessions/<pid>.json` whose process exists and is not the worker's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldBy {
+    /// `entrypoint` of the entry: `claude-vscode` for the VS Code extension, `cli`,
+    /// `sdk-cli` and others; the list is open.
+    pub entrypoint: String,
+    /// `idle` | `busy`; the list is open.
+    pub status: String,
+}
+
+/// `Option<Option<T>>` for a field that may be absent (`None`), `null` (`Some(None)`) or a
+/// value: serde alone reads `null` as absent.
+mod maybe_null {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer, T: Serialize>(
+        v: &Option<Option<T>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(inner) => inner.serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+        d: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(d).map(Some)
+    }
+}
 
 /// `workspace.list_candidates {request_id}` -> `result` [`CandidatesResult`] (SPEC §5.3,
 /// §9.1). `request_id` equals the frame `id`.
@@ -574,6 +617,14 @@ mod tests {
             include_str!("../examples/wire/worker.session.state.json"),
         ),
         (
+            "session.state",
+            include_str!("../examples/wire/worker.session.state.held.json"),
+        ),
+        (
+            "session.state",
+            include_str!("../examples/wire/worker.session.state.released.json"),
+        ),
+        (
             "result",
             include_str!("../examples/wire/worker.result.fs.stat.json"),
         ),
@@ -592,6 +643,10 @@ mod tests {
         (
             "mirror.event",
             include_str!("../examples/wire/worker.mirror.event.json"),
+        ),
+        (
+            "mirror.event",
+            include_str!("../examples/wire/worker.mirror.event.forked.json"),
         ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         ("error", include_str!("../examples/wire/worker.error.json")),
@@ -817,5 +872,54 @@ mod tests {
     fn null_seq_reads_as_absent() {
         let a: Ack = serde_json::from_value(json!({"event_id": Uuid::nil(), "seq": null})).unwrap();
         assert_eq!(a.seq, None);
+    }
+
+    /// `held_by` (T20): absent (no registry data), `null` (nobody) and a holder are three
+    /// different things, and a frame of an older worker still parses.
+    #[test]
+    fn held_by_is_absent_null_or_a_holder() {
+        let old: Envelope<WorkerFrame> =
+            serde_json::from_str(include_str!("../examples/wire/worker.session.state.json"))
+                .unwrap();
+        let held: Envelope<WorkerFrame> = serde_json::from_str(include_str!(
+            "../examples/wire/worker.session.state.held.json"
+        ))
+        .unwrap();
+        let gone: Envelope<WorkerFrame> = serde_json::from_str(include_str!(
+            "../examples/wire/worker.session.state.released.json"
+        ))
+        .unwrap();
+        let of = |f: &Envelope<WorkerFrame>| match &f.body {
+            WorkerFrame::SessionState { held_by, .. } => held_by.clone(),
+            other => panic!("not session.state: {other:?}"),
+        };
+        assert_eq!(of(&old), None);
+        assert_eq!(of(&gone), Some(None));
+        assert_eq!(
+            of(&held),
+            Some(Some(HeldBy {
+                entrypoint: "claude-vscode".into(),
+                status: "idle".into()
+            }))
+        );
+        let m: Envelope<WorkerFrame> =
+            serde_json::from_str(include_str!("../examples/wire/worker.mirror.event.json"))
+                .unwrap();
+        let WorkerFrame::MirrorEvent(m) = m.body else {
+            panic!("not mirror.event");
+        };
+        assert_eq!(m.held_by, None);
+        let f: Envelope<WorkerFrame> = serde_json::from_str(include_str!(
+            "../examples/wire/worker.mirror.event.forked.json"
+        ))
+        .unwrap();
+        let WorkerFrame::MirrorEvent(f) = f.body else {
+            panic!("not mirror.event");
+        };
+        let crate::event::EventKind::System { code, fork, .. } = &f.event.kind else {
+            panic!("not system");
+        };
+        assert_eq!(code, crate::event::SESSION_FORKED);
+        assert_eq!(fork.as_ref().unwrap().orphaned_turns, 1);
     }
 }

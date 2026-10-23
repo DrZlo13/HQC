@@ -41,7 +41,7 @@ pub fn prompt_id(events: &[Event]) -> Option<Uuid> {
         .map(|e| e.event_id)
 }
 
-fn ts(m: &Message) -> DateTime<Utc> {
+pub(crate) fn ts(m: &Message) -> DateTime<Utc> {
     m.timestamp
         .as_deref()
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())

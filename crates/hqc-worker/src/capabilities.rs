@@ -26,6 +26,15 @@ pub fn build(claude_version: Option<&str>) -> Value {
     caps
 }
 
+/// `claude_code.sessions_registry: true` when Claude Code's registry of live sessions
+/// (`<config>/sessions`) exists: the worker reports holders and the hub lets a takeover
+/// through without waiting 30 s once nobody holds the session (SPEC §9.3).
+pub fn with_sessions_registry(caps: &mut Value, sessions: &Path) {
+    if caps.get("claude_code").is_some() && sessions.is_dir() {
+        caps["claude_code"]["sessions_registry"] = json!(true);
+    }
+}
+
 async fn claude_version(bin: &Path) -> Option<String> {
     let out = tokio::time::timeout(
         Duration::from_secs(10),
@@ -130,6 +139,15 @@ mod tests {
         assert_eq!(parse_version("nope"), None);
         assert_eq!(build(None), json!({"acp_agents": []}));
         assert_eq!(build(Some("1.2"))["claude_code"]["version"], "1.2");
+        let dir = tempfile::tempdir().unwrap();
+        let mut none = build(None);
+        with_sessions_registry(&mut none, dir.path());
+        assert!(none.get("claude_code").is_none());
+        let mut caps = build(Some("2.1.308"));
+        with_sessions_registry(&mut caps, &dir.path().join("sessions"));
+        assert!(caps["claude_code"].get("sessions_registry").is_none());
+        with_sessions_registry(&mut caps, dir.path());
+        assert_eq!(caps["claude_code"]["sessions_registry"], true);
     }
 
     #[test]

@@ -137,6 +137,7 @@ impl Spawner for ScriptedClaude {
             })
         });
         Ok(Spawned {
+            pid: None,
             stdin: Box::pin(stdin),
             stdout: Box::pin(stdout),
             stderr: None,

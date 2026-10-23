@@ -354,3 +354,286 @@ async fn quiet_import_and_live_release() {
     assert!(ack["payload"]["seq"].is_null(), "{ack}");
     hub.finish().await;
 }
+
+const VSCODE_IDLE: &str = r#"{"entrypoint": "claude-vscode", "status": "idle"}"#;
+
+fn vscode_idle() -> Value {
+    serde_json::from_str(VSCODE_IDLE).unwrap()
+}
+
+/// A holder report: `session.state` with the nil session id (SPEC §5.4, §9.3).
+async fn holder_report(w: &mut FakeWorker, runtime: &str, held_by: Value) {
+    let id = w
+        .send(
+            "session.state",
+            json!({"session_id": Uuid::nil(), "process_state": "stopped",
+                   "runtime_session_id": runtime, "locked_by": "none", "held_by": held_by}),
+        )
+        .await;
+    let ack = w.expect("ack").await;
+    assert_eq!(ack["id"], id);
+}
+
+/// The worker reads Claude Code's registry (`hello.capabilities`, SPEC §9.3).
+async fn with_registry(hub: &TestHub, w: &FakeWorker) {
+    sqlx::query(
+        "UPDATE workers SET capabilities = jsonb_set(capabilities, '{claude_code,sessions_registry}', 'true')
+         WHERE id = $1::uuid",
+    )
+    .bind(&w.worker_id)
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+}
+
+/// T20: a session open in VS Code is `locked_vscode` even with no recent write, takeover is
+/// `409 vscode_open` while it is held, and allowed at once (no 30 s) when it is closed.
+#[tokio::test]
+async fn holder_blocks_takeover_until_closed() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    with_registry(&hub, &w).await;
+    let pid = project(&hub, "cad").await;
+    import_workspace(&hub, &mut w, &pid).await;
+    let runtime = Uuid::new_v4().to_string();
+
+    // An old record of a session that is open, idle, in VS Code.
+    let mut p = json!({"workspace_path": WS, "runtime_session_id": runtime, "cwd": WS,
+        "recent": false, "held_by": vscode_idle(),
+        "event": record_event("user.message", json!({"text": "old", "artifact_ids": []}), true)});
+    w.send("mirror.event", p.clone()).await;
+    w.expect("ack").await;
+    let s = &sessions(&hub, &pid).await[0];
+    let sid = s["id"].as_str().unwrap().to_string();
+    assert_eq!(s["locked_by"], "vscode", "{s}");
+    assert_eq!(s["state"], "locked_vscode");
+    assert_eq!(s["held_by"], vscode_idle());
+    let at: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT vscode_held_at FROM sessions WHERE id = $1::uuid")
+            .bind(&sid)
+            .fetch_one(&hub.app.db)
+            .await
+            .unwrap();
+    assert!(at.is_some());
+
+    let (st, e) = hub
+        .post(&format!("/api/sessions/{sid}/takeover"), json!({}))
+        .await;
+    assert_eq!((st, e["error"].as_str()), (409, Some("vscode_open")), "{e}");
+    assert_eq!(
+        e["message"],
+        "сессия открыта в VS Code: закройте её там и подхватите снова"
+    );
+    assert_eq!(e["held_by"], vscode_idle());
+    let (st, e) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "hi", "client_op_id": "a"}),
+        )
+        .await;
+    assert_eq!((st, e["error"].as_str()), (409, Some("locked_vscode")));
+    assert_eq!(e["held_by"], vscode_idle());
+
+    // VS Code writes (recent); then the user closes the session there.
+    p["recent"] = json!(true);
+    p["event"] = record_event("agent.message", json!({"text": "ok", "final": true}), false);
+    w.send("mirror.event", p.clone()).await;
+    w.expect("ack").await;
+    holder_report(&mut w, &runtime, Value::Null).await;
+    let s = hub.session(&sid).await;
+    assert_eq!(s["locked_by"], "none", "{s}");
+    assert!(s.get("held_by").is_none(), "{s}");
+    // The last records the process wrote before it exited come after: written within 30 s,
+    // but nobody holds the transcript, so the session stays free (the live T20 run).
+    p["held_by"] = Value::Null;
+    p["event"] = record_event(
+        "agent.message",
+        json!({"text": "bye", "final": true}),
+        false,
+    );
+    w.send("mirror.event", p).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["locked_by"], "none");
+    // A new transcript written just now, nobody holding it: imported free.
+    let other = Uuid::new_v4().to_string();
+    let q = json!({"workspace_path": WS, "runtime_session_id": other, "cwd": WS,
+        "recent": true, "held_by": null,
+        "event": record_event("user.message", json!({"text": "x", "artifact_ids": []}), true)});
+    w.send("mirror.event", q).await;
+    w.expect("ack").await;
+    let fresh = sessions(&hub, &pid)
+        .await
+        .into_iter()
+        .find(|s| s["agent"]["runtime_session_id"] == other.as_str())
+        .unwrap();
+    assert_eq!(fresh["locked_by"], "none", "{fresh}");
+    // A report for a transcript the hub does not know is acked and ignored.
+    holder_report(&mut w, &Uuid::new_v4().to_string(), vscode_idle()).await;
+
+    // Written a moment ago, but nobody holds it: no 30 s wait with the registry.
+    let (st, v) = hub
+        .post(&format!("/api/sessions/{sid}/takeover"), json!({}))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["locked_by"], "hqc");
+    let start = ack_start(&mut w, &sid).await;
+    assert_eq!(start["payload"]["mode"], "resume");
+    hub.finish().await;
+}
+
+/// T20: VS Code opens a session hqc runs: it is VS Code's at once, `session_released` says
+/// `vscode_open`, pending input fails; the worker's later `vscode` does not release twice;
+/// closing it in VS Code frees it once hqc's process has stopped. A reconnect forgets the
+/// holders until the worker reports them again.
+#[tokio::test]
+async fn holder_releases_hqc() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    let pid = project(&hub, "cad").await;
+    import_workspace(&hub, &mut w, &pid).await;
+    let runtime = Uuid::new_v4().to_string();
+    let prompt = record_event(
+        "user.message",
+        json!({"text": "old", "artifact_ids": []}),
+        true,
+    );
+    mirror_event(&mut w, &runtime, prompt, None, false).await;
+    let sid = sessions(&hub, &pid).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, _) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "go", "client_op_id": "a"}),
+        )
+        .await;
+    assert_eq!(st, 201);
+    ack_start(&mut w, &sid).await;
+    let input = w.expect("session.input").await;
+    w.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": input["payload"]["event_id"]}),
+    )
+    .await;
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "runtime_session_id": runtime,
+               "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    hub.wait_session(&sid, "running", |s| s["state"] == "running")
+        .await;
+    let (_, queued) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "queued", "client_op_id": "b"}),
+        )
+        .await;
+    w.expect("session.input").await;
+
+    holder_report(&mut w, &runtime, vscode_idle()).await;
+    let s = hub.session(&sid).await;
+    assert_eq!(s["locked_by"], "vscode", "{s}");
+    assert_eq!(s["held_by"], vscode_idle());
+    let evs = hub.events(&sid).await;
+    let rel: Vec<&Value> = evs
+        .iter()
+        .filter(|e| e["payload"]["code"] == "session_released")
+        .collect();
+    assert_eq!(rel.len(), 1, "{evs:?}");
+    assert_eq!(rel[0]["payload"]["reason"], "vscode_open");
+    assert!(rel[0]["payload"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("закройте её в VS Code"));
+    let q = evs
+        .iter()
+        .find(|e| e["event_id"] == queued["event"]["event_id"])
+        .unwrap();
+    assert_eq!(q["delivery"], "failed");
+
+    // Closed in VS Code while hqc's process still finishes its turn: still VS Code's.
+    holder_report(&mut w, &runtime, Value::Null).await;
+    assert_eq!(hub.session(&sid).await["locked_by"], "vscode");
+    // The worker stopped its agent.
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "runtime_session_id": runtime,
+               "locked_by": "vscode"}),
+    )
+    .await;
+    w.expect("ack").await;
+    let evs = hub.events(&sid).await;
+    assert_eq!(
+        evs.iter()
+            .filter(|e| e["payload"]["code"] == "session_released")
+            .count(),
+        1
+    );
+    // Opened and closed again: free at once.
+    holder_report(&mut w, &runtime, vscode_idle()).await;
+    holder_report(&mut w, &runtime, Value::Null).await;
+    assert_eq!(hub.session(&sid).await["locked_by"], "none");
+
+    // Held across a reconnect: the hub forgets the holder, the lock stays.
+    holder_report(&mut w, &runtime, vscode_idle()).await;
+    w.close().await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.expect("mirror.set").await;
+    let s = hub.session(&sid).await;
+    assert_eq!(s["locked_by"], "vscode");
+    assert!(s.get("held_by").is_none(), "{s}");
+    holder_report(&mut w, &runtime, vscode_idle()).await;
+    assert_eq!(hub.session(&sid).await["held_by"], vscode_idle());
+    hub.finish().await;
+}
+
+/// T20: `system session_forked` from the mirror is stored as a system event with its
+/// fields, once per fork point.
+#[tokio::test]
+async fn forked_event_is_stored() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    let pid = project(&hub, "cad").await;
+    import_workspace(&hub, &mut w, &pid).await;
+    let runtime = Uuid::new_v4().to_string();
+    let prompt = record_event(
+        "user.message",
+        json!({"text": "old", "artifact_ids": []}),
+        true,
+    );
+    mirror_event(&mut w, &runtime, prompt, None, false).await;
+    let at = Uuid::new_v4();
+    let forked = json!({
+        "session_id": Uuid::nil(), "event_id": Uuid::new_v4(), "ts": "2026-10-23T18:20:41Z",
+        "author": {"kind": "system"}, "type": "system",
+        "payload": {"text": "VS Code продолжил с более ранней точки: 37 ходов из hqc не попали в его контекст",
+                    "code": "session_forked", "at_uuid": at, "branch_from": "vscode",
+                    "orphaned_turns": 37}
+    });
+    let ack = mirror_event(&mut w, &runtime, forked.clone(), None, true).await;
+    assert!(ack["seq"].as_u64().is_some(), "{ack}");
+    let dup = mirror_event(&mut w, &runtime, forked, None, true).await;
+    assert_eq!(dup["seq"], ack["seq"]);
+    let sid = sessions(&hub, &pid).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let evs = hub.events(&sid).await;
+    let f: Vec<&Value> = evs
+        .iter()
+        .filter(|e| e["payload"]["code"] == "session_forked")
+        .collect();
+    assert_eq!(f.len(), 1, "{evs:?}");
+    assert_eq!(f[0]["author"], json!({"kind": "system"}));
+    assert_eq!(f[0]["payload"]["orphaned_turns"], 37);
+    assert_eq!(f[0]["payload"]["branch_from"], "vscode");
+    assert_eq!(f[0]["payload"]["at_uuid"], at.to_string());
+    hub.finish().await;
+}

@@ -164,6 +164,24 @@ pub async fn system(
     .await
 }
 
+/// A `system` event with more payload than `text` and `code` (`reason`, SPEC §4).
+pub async fn system_with(
+    app: &AppState,
+    s: &SessionRow,
+    payload: Value,
+) -> anyhow::Result<EventRow> {
+    store_hub_event(
+        app,
+        s,
+        json!({"kind": "system"}),
+        "system",
+        payload,
+        None,
+        None,
+    )
+    .await
+}
+
 pub fn user_author(id: Uuid) -> Value {
     json!({"kind": "user", "id": id})
 }

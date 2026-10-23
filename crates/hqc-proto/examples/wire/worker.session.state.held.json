@@ -1,0 +1,5 @@
+{
+  "id": "w-7",
+  "type": "session.state",
+  "payload": { "session_id": "00000000-0000-0000-0000-000000000000", "process_state": "stopped", "runtime_session_id": "8dd26c03-4e07-4685-b0d2-b99924e96975", "locked_by": "none", "held_by": { "entrypoint": "claude-vscode", "status": "idle" } }
+}

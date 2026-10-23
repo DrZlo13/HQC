@@ -429,6 +429,7 @@ async fn handle_text(
             runtime_session_id,
             locked_by,
             title,
+            held_by,
         } => {
             let st = StateFrame {
                 session_id,
@@ -436,6 +437,7 @@ async fn handle_text(
                 runtime_session_id,
                 locked_by,
                 title,
+                held_by,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -511,6 +513,10 @@ async fn on_hello(
         return Ok(None);
     };
     let restarted = previous_boot != Some(h.boot_id);
+    // The worker reports its holders again after `hello.ack` (SPEC §9.3).
+    for sid in db::forget_holders(&app.db, conn.worker_id).await? {
+        app.session_changed(sid);
+    }
     // Its log lines and requests go there (SPEC §10.2).
     let system_session_id = db::ensure_system_session(&app.db, conn.worker_id).await?;
 
@@ -580,6 +586,7 @@ struct StateFrame {
     runtime_session_id: Option<String>,
     locked_by: hqc_proto::frame::LockedBy,
     title: Option<String>,
+    held_by: Option<Option<hqc_proto::frame::HeldBy>>,
 }
 
 async fn on_session_state(
@@ -594,7 +601,22 @@ async fn on_session_state(
         runtime_session_id,
         locked_by,
         title,
+        held_by,
     } = st;
+    if session_id.is_nil() {
+        // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
+        let s = match (&runtime_session_id, held_by) {
+            (Some(r), Some(h)) => db::session_by_runtime(&app.db, conn.worker_id, r)
+                .await?
+                .map(|s| (s, h)),
+            _ => None,
+        };
+        if let Some((s, h)) = s {
+            crate::mirror::holder(app, &s, h).await?;
+        }
+        conn.reply(id, HubFrame::Ack(Ack::default()));
+        return Ok(());
+    }
     let Some(s) = db::session(&app.db, session_id).await? else {
         conn.error(id, error_code::UNKNOWN_SESSION, "unknown session", false);
         return Ok(());
@@ -609,8 +631,13 @@ async fn on_session_state(
     let lb = crate::mirror::next_lock(&s.locked_by, &reported).to_string();
     db::set_process_state(&app.db, session_id, &ps, runtime_session_id.as_deref(), &lb).await?;
     if s.locked_by == "hqc" && lb == "vscode" {
-        // The worker stopped its agent for another writer (SPEC §9.3).
-        crate::mirror::released(app, session_id).await?;
+        // The worker stopped its agent for another writer or holder (SPEC §9.3).
+        crate::mirror::released(app, session_id, crate::mirror::release_reason(&s)).await?;
+    }
+    if let Some(h) = held_by {
+        if let Some(s) = db::session(&app.db, session_id).await? {
+            crate::mirror::holder(app, &s, h).await?;
+        }
     }
     // Unless the user renamed the session (SPEC §3 Session).
     if let Some(t) = title.as_deref().and_then(runtime_title) {

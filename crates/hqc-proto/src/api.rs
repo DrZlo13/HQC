@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::client_frame::SessionSummary;
 use crate::event::SessionState;
-use crate::frame::{LockedBy, ProcessState, Runtime, TitleSource};
+use crate::frame::{HeldBy, LockedBy, ProcessState, Runtime, TitleSource};
 
 /// A session as `GET /api/sessions/{id}`, the session list and `POST .../sessions` return
 /// it (SPEC §3 Session, §6). `state`, `queue_len`, `last_read_seq` and `unread` are computed
@@ -46,6 +46,10 @@ pub struct Session {
     /// no input, not archived; the client lists it under «Воркеры». Sent only when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub system: bool,
+    /// A live process outside hqc holds the transcript open (SPEC §9.3): the session is
+    /// `locked_vscode` and cannot be taken over until it is closed there. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<HeldBy>,
 }
 
 impl Session {
@@ -486,6 +490,9 @@ mod tests {
             summary,
             "summary is the session's compact form"
         );
+        let held: Session = roundtrip(include_str!("../examples/wire/api.session.vscode.json"));
+        assert_eq!(held.held_by.unwrap().entrypoint, "claude-vscode");
+        assert!(s.held_by.is_none());
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));
         roundtrip::<InputRequest>(include_str!("../examples/wire/api.input.request.json"));
         let r: InputResponse = roundtrip(include_str!("../examples/wire/api.input.json"));

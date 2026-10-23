@@ -507,7 +507,8 @@ pub async fn worker_candidates(
 }
 
 /// `POST /api/sessions/{id}/takeover` (SPEC §9.3): continue a session VS Code drove.
-/// `409 vscode_active` while VS Code wrote within 30 s, `409 worker_offline`,
+/// `409 vscode_open` while a process outside hqc holds it open, `409 vscode_active` while
+/// VS Code wrote within 30 s (only without registry data), `409 worker_offline`,
 /// `409 system_session` for the worker's service session.
 pub async fn takeover(
     State(app): State<AppState>,
@@ -791,9 +792,13 @@ pub async fn input(
         ));
     }
     if s.locked_by == "vscode" {
-        // No silent queue (SPEC §9.3): the client offers «Подхватить».
+        // No silent queue (SPEC §9.3): the client offers «Подхватить», or asks to close the
+        // session in VS Code first while it holds it.
         let mut extra = serde_json::Map::new();
         extra.insert("hint".into(), json!("takeover"));
+        if let Some(h) = &s.held_by {
+            extra.insert("held_by".into(), h.clone());
+        }
         return Err(ApiError::ConflictWith(
             "locked_vscode",
             "the session is being driven from VS Code; take it over first (POST /takeover)".into(),

@@ -1,0 +1,31 @@
+{
+  "id": "0199f3a2-7c10-7000-8000-000000000002",
+  "project_id": "0199f3a2-7c10-7000-8000-0000000000d1",
+  "owner_id": "0199f3a2-7c10-7000-8000-0000000000aa",
+  "workspace_id": "0199f3a2-7c10-7000-8000-0000000000e1",
+  "worker_id": "0199f3a2-7c10-7000-8000-0000000000b1",
+  "cwd": "bracket",
+  "title": "Сессия 3",
+  "title_source": "default",
+  "slug": "session-3",
+  "agent": {
+    "runtime": "claude_code",
+    "runtime_session_id": "8dd26c03-4e07-4685-b0d2-b99924e96975",
+    "process_state": "stopped",
+    "disallowed_tools": [],
+    "restricted": false,
+    "start_failures": 0
+  },
+  "auto_approve": false,
+  "wake_on_send": false,
+  "locked_by": "vscode",
+  "last_seq": 12,
+  "archived": false,
+  "state": "locked_vscode",
+  "queue_len": 0,
+  "last_read_seq": 12,
+  "unread": 0,
+  "created_at": "2026-10-23T18:00:00Z",
+  "updated_at": "2026-10-23T18:20:41Z",
+  "held_by": { "entrypoint": "claude-vscode", "status": "idle" }
+}

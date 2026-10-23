@@ -54,6 +54,9 @@ impl fmt::Display for ExitInfo {
 pub type SignalFn = Box<dyn Fn(Sig) -> io::Result<()> + Send + Sync>;
 
 pub struct Spawned {
+    /// The process id, when there is a real process (its entry in Claude Code's session
+    /// registry is the worker's own, SPEC §9.3).
+    pub pid: Option<u32>,
     pub stdin: Pin<Box<dyn AsyncWrite + Send>>,
     pub stdout: Pin<Box<dyn AsyncRead + Send>>,
     pub stderr: Option<Pin<Box<dyn AsyncRead + Send>>>,
@@ -115,6 +118,7 @@ impl Spawner for OsSpawner {
             }
         });
         Ok(Spawned {
+            pid,
             stdin: Box::pin(stdin),
             stdout: Box::pin(stdout),
             stderr: Some(Box::pin(stderr)),

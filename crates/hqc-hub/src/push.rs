@@ -146,7 +146,7 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
             r#final: true,
             ..
         } => clip(text, 160),
-        EventKind::System { code, text }
+        EventKind::System { code, text, .. }
             if code == "agent_start_failed" || code == "input_rejected" =>
         {
             clip(text, 160)

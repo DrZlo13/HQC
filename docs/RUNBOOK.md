@@ -288,6 +288,18 @@ HTML только скачивается.
 Запрос к `/api/me` мимо Access (без заголовка `Cf-Access-Jwt-Assertion`) хаб отклоняет
 сам. Лимит тела запроса через туннель ~100 МБ (§20).
 
+**HTTP/3 в зоне выключить** (Network → HTTP/3 with QUIC → Off). Проверено 2026-10-23:
+Chrome, открыв сайт по HTTP/3, поднимает WebSocket внутри той же QUIC-сессии (extended
+CONNECT, RFC 9220), а край Cloudflare такой поток до origin не доносит и сбрасывает без
+ответа. Симптомы: в консоли `WebSocket connection to wss://…/api/ws failed:` без кода, в
+Network у `ws` пустой Protocol и статус «Finished», в журнале Caddy и хаба запросов к
+`/api/ws` нет вовсе, при этом Safari и телефон работают, а воркер по `/worker/ws`
+подключён. Воспроизведение из консоли Chrome: `new WebSocket('wss://<хаб>/worker/ws')`
+должен дать «Unexpected response code: 401» от хаба; по HTTP/3 он тоже падает без кода,
+значит Access ни при чём. Временная проверка на одном компьютере:
+`chrome://flags/#enable-quic` → Disabled. После выключения HTTP/3 в зоне Chrome может ещё
+несколько минут ходить по QUIC из кэша Alt-Svc.
+
 ### 1.7 Раздача клиента
 
 Клиент — статические файлы `client/dist` после `npm run build`. Он обращается к `/api`

@@ -60,3 +60,11 @@
    бинарника; неподписанная сборка после пересборки вызывает диалог `SecurityAgent`, процесс
    воркера блокируется до ответа на экране. Боевой воркер на home-mac переведён на
    `HQC_TOKEN_STORE=file` и перерегистрирован (`--name home-mac`). RUNBOOK §2.4 исправлен.
+
+9. **WebSocket и HTTP/3 (Chrome).** Полдня диагностики 2026-10-23: клиент в Chrome на маке
+   не поднимал `/api/ws`, при этом REST, push, Safari, телефон и воркер работали. Не Origin
+   (T9), не Binding Cookie, не расширения, не Caddy и не туннель: Chrome по HTTP/3 делает
+   WebSocket через extended CONNECT в QUIC-сессии, а край Cloudflare его до origin не
+   доносит, даже мимо Access (`/worker/ws` из консоли падает так же, без 401). Решение:
+   HTTP/3 в зоне выключен. Заодно отменён совет T9 про Binding Cookie: с ней WebSocket
+   через Access не проходит. RUNBOOK §1.6.

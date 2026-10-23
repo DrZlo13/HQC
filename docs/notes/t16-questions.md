@@ -1,6 +1,6 @@
 # T16: артефакты — решения и открытые вопросы
 
-Код: хаб `crates/hqc-hub/src/artifacts.rs` (+ `security.rs`, миграция `0006_artifacts.sql`),
+Код: хаб `crates/hqc-hub/src/artifacts.rs` (+ `security.rs`, миграция `0007_artifacts.sql`),
 воркер `crates/hqc-worker/src/inbox.rs` (+ `supervisor.rs`, `adapter/claude_code.rs`,
 `engine.rs`), клиент `client/src/artifacts.ts`, `client/src/ui/attachments.tsx`,
 `Chat.tsx`, `Markdown.tsx`. Тесты — `crates/hqc-hub/tests/artifacts.rs`,

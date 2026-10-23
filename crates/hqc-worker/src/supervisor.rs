@@ -44,8 +44,8 @@ use uuid::Uuid;
 
 use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
 use crate::config::{Config, StartSpec};
-use crate::known_paths::KnownPaths;
 use crate::inbox::{self, ArtifactClient};
+use crate::known_paths::KnownPaths;
 use crate::link::HubLink;
 
 /// From the connection to the supervisor.

@@ -13,8 +13,14 @@ Starts `claude -p` in stream-json mode with `--permission-prompts host
 policy and closes stdin after `result`.
 
 ```
-tools/spike/driver.py OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+tools/spike/driver.py [--resume UUID] [--arg-prompt] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 ```
+
+- `--resume UUID` (or `SPIKE_RESUME`): continue that session with `--resume` instead of a new
+  `--session-id` (T15: a takeover with the adapter's flags);
+- `--arg-prompt` (or `SPIKE_ARG_PROMPT=1`): plain `claude -p PROMPT --model claude-haiku-5-5
+  --max-turns 2`, the prompt as an argument and text output in `stdout.txt`, the way a person
+  runs it in a terminal (T15: the "VS Code" side); `POLICY` is ignored.
 
 - `POLICY`: `once` (allow), `deny`, `always` (allow + every `permission_suggestions` entry
   as `updatedPermissions`), `ask_answer` (answer `AskUserQuestion` with the first option of

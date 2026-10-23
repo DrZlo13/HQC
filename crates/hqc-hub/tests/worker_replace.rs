@@ -324,6 +324,45 @@ async fn purge_deletes_a_revoked_worker_without_live_sessions() {
     hub.finish().await;
 }
 
+// Migration 0009: the service session of a worker revoked before T19 is archived, an
+// active worker's stays.
+#[tokio::test]
+async fn migration_archives_service_sessions_of_revoked_workers() {
+    const SEED: &str = r#"
+        INSERT INTO users (id, email, display_name) VALUES
+            ('0199f3a2-7c10-7000-8000-0000000000aa', '{email}', 'me');
+        INSERT INTO projects (id, owner_id, name, slug, is_personal) VALUES
+            ('0199f3a2-7c10-7000-8000-0000000000d1', '0199f3a2-7c10-7000-8000-0000000000aa',
+             'Personal', 'personal', true);
+        UPDATE users SET personal_project_id = '0199f3a2-7c10-7000-8000-0000000000d1';
+        INSERT INTO workers (id, owner_id, name, revoked_at) VALUES
+            ('0199f3a2-7c10-7000-8000-0000000000b1', '0199f3a2-7c10-7000-8000-0000000000aa',
+             'old-mac', now()),
+            ('0199f3a2-7c10-7000-8000-0000000000b2', '0199f3a2-7c10-7000-8000-0000000000aa',
+             'home-mac', NULL);
+        INSERT INTO sessions (id, project_id, owner_id, worker_id, title, title_source, slug,
+                              runtime, system) VALUES
+            ('0199f3a2-7c10-7000-8000-0000000000c1', '0199f3a2-7c10-7000-8000-0000000000d1',
+             '0199f3a2-7c10-7000-8000-0000000000aa', '0199f3a2-7c10-7000-8000-0000000000b1',
+             'old-mac', 'user', 'worker-b1', 'none', true),
+            ('0199f3a2-7c10-7000-8000-0000000000c2', '0199f3a2-7c10-7000-8000-0000000000d1',
+             '0199f3a2-7c10-7000-8000-0000000000aa', '0199f3a2-7c10-7000-8000-0000000000b2',
+             'home-mac', 'user', 'worker-b2', 'none', true);
+        UPDATE workers SET system_session_id = '0199f3a2-7c10-7000-8000-0000000000c1'
+            WHERE name = 'old-mac';
+        UPDATE workers SET system_session_id = '0199f3a2-7c10-7000-8000-0000000000c2'
+            WHERE name = 'home-mac';
+    "#;
+    let hub = TestHub::start_upgrading(9, SEED).await;
+    let revoked = hub.session("0199f3a2-7c10-7000-8000-0000000000c1").await;
+    let active = hub.session("0199f3a2-7c10-7000-8000-0000000000c2").await;
+    assert_eq!(
+        (revoked["archived"].as_bool(), active["archived"].as_bool()),
+        (Some(true), Some(false))
+    );
+    hub.finish().await;
+}
+
 // Another user's worker is neither revoked nor deleted.
 #[tokio::test]
 async fn foreign_workers_are_not_deleted() {

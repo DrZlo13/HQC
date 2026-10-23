@@ -195,13 +195,24 @@ pub fn event_id(frame: &Value) -> Uuid {
 /// A temp dir with `root` as `allowed_roots` and `root/ws` as the workspace of its sessions.
 pub struct Env {
     pub dir: tempfile::TempDir,
+    /// `Some((projects dir, registry))`: the worker runs the mirror over that folder.
+    pub mirror: Option<(PathBuf, Arc<hqc_worker::mirror::OwnRecords>)>,
 }
 
 impl Env {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("root/ws/sub")).unwrap();
-        Self { dir }
+        Self { dir, mirror: None }
+    }
+
+    /// With the mirror over `<tmp>/claude/projects`.
+    pub fn with_mirror() -> Self {
+        let mut e = Self::new();
+        let projects = e.dir.path().join("claude/projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        e.mirror = Some((projects, Arc::default()));
+        e
     }
 
     pub fn root(&self) -> PathBuf {
@@ -308,6 +319,16 @@ pub fn start_worker_factory(
         outbox_dir: env.outbox(),
         conn: fast_conn(),
         shutdown_timeout: Duration::from_secs(5),
+        mirror: env
+            .mirror
+            .clone()
+            .map(|(projects, own)| hqc_worker::MirrorOptions {
+                projects_dir: projects,
+                state_dir: env.outbox().with_file_name("mirror"),
+                own_records: own,
+                poll: Duration::from_millis(100),
+                grace: Duration::from_millis(300),
+            }),
     };
     let shutdown = CancellationToken::new();
     let (tx, status) = watch::channel(Status::Connecting);

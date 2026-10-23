@@ -11,6 +11,7 @@ pub mod connection;
 pub mod enroll;
 pub mod fs;
 pub mod link;
+pub mod mirror;
 pub mod outbox;
 pub mod permissions;
 pub mod supervisor;
@@ -47,6 +48,20 @@ pub struct Worker {
     pub conn: ConnOptions,
     /// How long shutdown waits for agents to be killed.
     pub shutdown_timeout: Duration,
+    /// The mirror of Claude Code sessions (SPEC §9); `None` leaves it off (`mirror.set` and
+    /// `workspace.list_candidates` are refused).
+    pub mirror: Option<MirrorOptions>,
+}
+
+pub struct MirrorOptions {
+    /// `<claude config>/projects`.
+    pub projects_dir: PathBuf,
+    /// Where the mirror keeps offsets and the "file → cwd" cache (`$HQC_HOME/mirror`).
+    pub state_dir: PathBuf,
+    /// Shared with the Claude Code adapter ([`adapter::BuiltinAdapters::own_records`]).
+    pub own_records: Arc<mirror::OwnRecords>,
+    pub poll: Duration,
+    pub grace: Duration,
 }
 
 impl Worker {
@@ -78,6 +93,7 @@ impl Worker {
         }
         let (link, direct) = HubLink::new(outbox);
         let (inbound_tx, inbound_rx) = mpsc::channel(256);
+        let inbound_tx_mirror = inbound_tx.clone();
         let conn = Connection::new(
             self.config.hub_url.clone(),
             self.token.clone(),
@@ -91,15 +107,41 @@ impl Worker {
         let conn_stop = CancellationToken::new();
         let conn_task = tokio::spawn(conn.run(conn_stop.clone()));
 
-        let sup = Supervisor::new(
+        let mut sup = Supervisor::new(
             Arc::new(self.config),
             self.adapters,
-            link,
+            link.clone(),
             self.shutdown_timeout,
         );
+        let mirror_stop = CancellationToken::new();
+        let mut mirror_task = None;
+        if let Some(m) = self.mirror {
+            let store = Arc::new(mirror::store::Store::open(&m.state_dir)?);
+            let (cmds, cmd_rx) = mpsc::unbounded_channel();
+            let mut core =
+                mirror::Mirror::new(m.projects_dir.clone(), store.clone(), m.own_records);
+            core.grace = m.grace;
+            sup = sup.with_mirror(mirror::MirrorHandle {
+                cmds,
+                store,
+                projects: m.projects_dir,
+            });
+            mirror_task = Some(tokio::spawn(mirror::run(
+                core,
+                cmd_rx,
+                link,
+                inbound_tx_mirror,
+                m.poll,
+                mirror_stop.clone(),
+            )));
+        }
         sup.run(inbound_rx, shutdown).await;
 
         // Agents are down and their last events are in the outbox: flush and close.
+        mirror_stop.cancel();
+        if let Some(t) = mirror_task {
+            let _ = t.await;
+        }
         conn_stop.cancel();
         conn_task.await?;
         Ok(())

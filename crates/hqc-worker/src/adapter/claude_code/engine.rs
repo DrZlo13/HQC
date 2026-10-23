@@ -28,7 +28,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail};
 use hqc_proto::event::{
     ApprovalCanonical, ApprovalOption, Author, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
-    SessionState, CLAUDE_RECORD_NS,
+    SessionState,
 };
 use hqc_proto::frame::SessionInput;
 use serde_json::{json, Value};
@@ -40,7 +40,7 @@ use crate::permissions::Policy;
 
 /// `*_preview` limit (SPEC §4).
 pub const PREVIEW_LIMIT: usize = 4096;
-const ERROR_TEXT_LIMIT: usize = 300;
+pub const ERROR_TEXT_LIMIT: usize = 300;
 
 pub const DENY_MESSAGE: &str = "The user denied this tool call.";
 pub const CLARIFY_CANCEL_MESSAGE: &str = "The user did not answer the questions.";
@@ -91,9 +91,17 @@ pub struct Core {
     /// rule matches.
     policy: Arc<Policy>,
     model: Option<String>,
+    /// Message uuids read since the last [`Core::take_seen`].
+    seen: Vec<Uuid>,
 }
 
 impl Core {
+    /// Uuids of the main-chain `user`/`assistant` messages (with the prompt echoes) read
+    /// from stdout since the last call, for [`crate::mirror::OwnRecords`].
+    pub fn take_seen(&mut self) -> Vec<Uuid> {
+        std::mem::take(&mut self.seen)
+    }
+
     pub fn new(session_id: Uuid, restricted: bool) -> Self {
         Self {
             session_id,
@@ -107,6 +115,7 @@ impl Core {
             rules: SessionRules::default(),
             policy: Arc::default(),
             model: None,
+            seen: Vec::new(),
         }
     }
 
@@ -283,6 +292,13 @@ impl Core {
         let ty = v["type"].as_str().unwrap_or("");
         tracing::trace!(session_id = %self.session_id, ty, "claude line");
         let sub = !v["parent_tool_use_id"].is_null();
+        // The transcript records this process wrote, its prompts' echoes included: the
+        // mirror must not take them for another writer (SPEC §9.3).
+        if matches!(ty, "user" | "assistant") && !sub {
+            if let Some(u) = record_uuid(&v) {
+                self.seen.push(u);
+            }
+        }
         match ty {
             "stream_event" if !sub => self.on_stream_event(&v),
             "assistant" if !sub => self.on_assistant(&v),
@@ -620,11 +636,7 @@ impl Core {
 /// record, so this is `Event::id_from_claude_record(uuid)`; a further block of the same
 /// record (not seen on 2.1.307/2.1.308) gets v5 of `"<uuid>/<index>"`.
 pub fn record_event_id(uuid: &Uuid, index: usize) -> Uuid {
-    if index == 0 {
-        Event::id_from_claude_record(uuid)
-    } else {
-        Uuid::new_v5(&CLAUDE_RECORD_NS, format!("{uuid}/{index}").as_bytes())
-    }
+    Event::id_from_claude_block(uuid, index)
 }
 
 fn record_uuid(v: &Value) -> Option<Uuid> {
@@ -709,7 +721,8 @@ fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Vec<String>)>
     Some((questions, texts))
 }
 
-fn result_text(content: &Value) -> String {
+/// The text of a `tool_result` block's `content` (a string or text parts).
+pub fn result_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
         Value::Array(parts) => parts

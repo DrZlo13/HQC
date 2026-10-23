@@ -105,6 +105,11 @@ impl BuiltinAdapters {
             claude: ClaudeCodeAdapters::from_config(cfg, permission_mode),
         }
     }
+
+    /// What the Claude Code processes wrote, for the mirror (SPEC §9.3).
+    pub fn own_records(&self) -> std::sync::Arc<crate::mirror::OwnRecords> {
+        self.claude.own_records()
+    }
 }
 
 impl AdapterFactory for BuiltinAdapters {

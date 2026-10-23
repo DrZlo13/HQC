@@ -35,6 +35,10 @@ use uuid::Uuid;
 use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
 use crate::config::{Config, StartSpec};
 use crate::link::HubLink;
+use crate::mirror::{MirrorCmd, MirrorHandle};
+
+/// `error.code` for input to a session another writer continues (SPEC §9.3).
+pub const LOCKED_VSCODE: &str = "locked_vscode";
 
 /// From the connection to the supervisor.
 // Almost every value is a `Frame`; boxing it would only add an allocation.
@@ -44,6 +48,11 @@ pub enum Inbound {
     Frame(Envelope<HubFrame>),
     /// `hello.ack` received: resend every `session.state`.
     Connected,
+    /// The mirror saw another writer continue transcript `runtime_session_id` while a
+    /// process of this worker runs it (SPEC §9.3).
+    ForeignWriter {
+        runtime_session_id: Uuid,
+    },
 }
 
 /// How many delivered input ids a session remembers to re-ack resent inputs.
@@ -74,11 +83,15 @@ pub struct Supervisor {
     shutdown_timeout: Duration,
     /// One permit per running agent process (`max_sessions`).
     slots: Arc<Semaphore>,
+    /// The mirror of Claude Code sessions (SPEC §9); `None` when not configured.
+    mirror: Option<MirrorHandle>,
 }
 
 struct SessionHandle {
     tx: mpsc::UnboundedSender<Cmd>,
     task: JoinHandle<()>,
+    /// `runtime_session_id` of the last `session.start`: the transcript the session runs.
+    runtime_session_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -109,6 +122,8 @@ enum Cmd {
         answers: std::collections::BTreeMap<String, hqc_proto::event::ClarifyAnswer>,
     },
     Resync,
+    /// Another writer continues the transcript: stop after the current turn (SPEC §9.3).
+    Release,
     Shutdown,
 }
 
@@ -126,7 +141,14 @@ impl Supervisor {
             link,
             sessions: HashMap::new(),
             shutdown_timeout,
+            mirror: None,
         }
+    }
+
+    /// Serve `mirror.set` and `workspace.list_candidates` with this mirror.
+    pub fn with_mirror(mut self, m: MirrorHandle) -> Self {
+        self.mirror = Some(m);
+        self
     }
 
     /// Runs until `shutdown`, then kills every agent (SPEC §17.3: on worker restart all
@@ -167,6 +189,23 @@ impl Supervisor {
                 }
                 return;
             }
+            Inbound::ForeignWriter { runtime_session_id } => {
+                let rid = runtime_session_id.to_string();
+                match self
+                    .sessions
+                    .iter()
+                    .find(|(_, h)| h.runtime_session_id.as_deref() == Some(rid.as_str()))
+                {
+                    Some((sid, h)) => {
+                        tracing::info!(session_id = %sid, runtime_session_id = %rid, "session continued elsewhere; releasing it after the turn");
+                        let _ = h.tx.send(Cmd::Release);
+                    }
+                    None => {
+                        tracing::debug!(runtime_session_id = %rid, "foreign writer for a session not run here")
+                    }
+                }
+                return;
+            }
             Inbound::Frame(env) => env,
         };
         let id = env.id;
@@ -193,6 +232,9 @@ impl Supervisor {
                 if !self.sessions.contains_key(&sid) {
                     let h = self.spawn_session(&spec);
                     self.sessions.insert(sid, h);
+                }
+                if let Some(h) = self.sessions.get_mut(&sid) {
+                    h.runtime_session_id = spec.runtime_session_id.clone();
                 }
                 (
                     sid,
@@ -251,6 +293,22 @@ impl Supervisor {
                 });
                 return;
             }
+            HubFrame::WorkspaceListCandidates(r) => {
+                let (cfg, mirror) = (self.cfg.clone(), self.mirror.clone());
+                self.fs_request(id, r.request_id, move || {
+                    let m = mirror.ok_or("the mirror is not configured on this worker")?;
+                    Ok(ResultBody::Candidates(crate::mirror::candidates(
+                        &m.projects,
+                        &m.store,
+                        |p| cfg.inside_roots(p),
+                    )))
+                });
+                return;
+            }
+            HubFrame::MirrorSet(m) => {
+                self.mirror_set(&id, m);
+                return;
+            }
             other => {
                 tracing::debug!(?other, "frame not for the supervisor");
                 return;
@@ -300,6 +358,31 @@ impl Supervisor {
         });
     }
 
+    /// `mirror.set` (SPEC §9.2): only a folder inside `allowed_roots`; the hub is not
+    /// trusted with paths (SPEC §2.1).
+    fn mirror_set(&self, id: &str, m: hqc_proto::frame::MirrorSet) {
+        let refuse = |msg: &str| {
+            tracing::warn!(path = %m.workspace_path, "mirror.set refused: {msg}");
+            self.link
+                .reply(id, wire_error(error_code::INVALID_FRAME, msg, false));
+        };
+        let Some(mirror) = &self.mirror else {
+            return refuse("the mirror is not configured on this worker");
+        };
+        let path = std::path::Path::new(&m.workspace_path);
+        let canonical = match path.canonicalize() {
+            Ok(p) if path.is_absolute() && p.is_dir() && self.cfg.inside_roots(&p) => p,
+            // Stopping needs no check: the folder may be gone already.
+            _ if !m.enabled => path.to_path_buf(),
+            _ => return refuse("workspace_path is not a folder inside allowed_roots"),
+        };
+        let _ = mirror.cmds.send(MirrorCmd::Set {
+            path: canonical,
+            enabled: m.enabled,
+        });
+        self.link.reply(id, ack(None));
+    }
+
     fn spawn_session(&self, spec: &StartSpec) -> SessionHandle {
         let (ev_tx, ev_rx) = mpsc::channel(ADAPTER_EVENT_BUFFER);
         let adapter = self.factory.create(spec, ev_tx);
@@ -318,6 +401,8 @@ impl Supervisor {
             state: ProcessState::Stopped,
             runtime_session_id: None,
             title: None,
+            release_pending: false,
+            released: false,
             started_once: false,
             resume_requested: false,
             queue: VecDeque::new(),
@@ -328,6 +413,7 @@ impl Supervisor {
         SessionHandle {
             tx,
             task: tokio::spawn(s.run(rx)),
+            runtime_session_id: spec.runtime_session_id.clone(),
         }
     }
 }
@@ -340,7 +426,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Kill { id }
         | Cmd::Approval { id, .. }
         | Cmd::Clarify { id, .. } => id.clone(),
-        Cmd::Resync | Cmd::Shutdown => String::new(),
+        Cmd::Resync | Cmd::Release | Cmd::Shutdown => String::new(),
     }
 }
 
@@ -372,6 +458,10 @@ struct Session {
     runtime_session_id: Option<String>,
     /// The runtime's title of the session, repeated in every `session.state`.
     title: Option<String>,
+    /// Another writer continues the transcript: stop when the turn ends (SPEC §9.3).
+    release_pending: bool,
+    /// Stopped for that writer: `locked_by: vscode` until the next `session.start`.
+    released: bool,
     started_once: bool,
     /// The last `session.start` had `mode: resume` (SPEC §5.3).
     resume_requested: bool,
@@ -433,6 +523,9 @@ impl Session {
                 }
                 self.spec = *spec;
                 self.resume_requested = mode == StartMode::Resume;
+                // A takeover (SPEC §9.3): the hub decided this worker runs the session again.
+                self.released = false;
+                self.release_pending = false;
                 match self.ensure_running().await {
                     Ok(()) => {
                         self.link.reply(&id, ack(None));
@@ -481,6 +574,15 @@ impl Session {
                 self.reply_result(&id, r);
             }
             Cmd::Resync => self.send_state(),
+            Cmd::Release => {
+                if self.state == ProcessState::Stopped {
+                    return;
+                }
+                self.release_pending = true;
+                if self.turn.is_none() {
+                    self.release().await;
+                }
+            }
             Cmd::Shutdown => unreachable!("handled in run"),
         }
     }
@@ -500,6 +602,19 @@ impl Session {
 
     async fn on_input(&mut self, id: String, input: SessionInput) {
         let eid = input.event_id;
+        if self.released {
+            // The hub refuses input while VS Code drives the session; input sent anyway
+            // must not take the session back silently (SPEC §9.3).
+            self.link.reply(
+                &id,
+                wire_error(
+                    LOCKED_VSCODE,
+                    "the session continues in VS Code; take it over first",
+                    false,
+                ),
+            );
+            return;
+        }
         if self.delivered.contains(&eid) {
             self.link.reply(&id, ack(Some(eid)));
             return;
@@ -577,7 +692,11 @@ impl Session {
             },
             AdapterEvent::TurnEnded => {
                 self.end_turn();
-                self.pump().await;
+                if self.release_pending {
+                    self.release().await;
+                } else {
+                    self.pump().await;
+                }
             }
             AdapterEvent::RuntimeSessionId(r) => {
                 self.runtime_session_id = Some(r);
@@ -661,6 +780,20 @@ impl Session {
         }
     }
 
+    /// Hands the session to the other writer (SPEC §9.3): the process stops, queued input
+    /// stays `pending` in the hub, `session.state` says `locked_by: vscode`.
+    async fn release(&mut self) {
+        self.release_pending = false;
+        self.released = true;
+        self.queue.clear();
+        tracing::info!(session_id = %self.id, "the session continues elsewhere (VS Code); stopping the agent");
+        if self.state == ProcessState::Stopped {
+            self.send_state();
+        } else {
+            self.kill_process("continued in VS Code").await;
+        }
+    }
+
     async fn kill_process(&mut self, why: &str) {
         if self.state == ProcessState::Stopped {
             return;
@@ -700,7 +833,9 @@ impl Session {
                 .runtime_session_id
                 .clone()
                 .or_else(|| self.spec.runtime_session_id.clone()),
-            locked_by: if self.state == ProcessState::Stopped {
+            locked_by: if self.released {
+                LockedBy::Vscode
+            } else if self.state == ProcessState::Stopped {
                 LockedBy::None
             } else {
                 LockedBy::Hqc

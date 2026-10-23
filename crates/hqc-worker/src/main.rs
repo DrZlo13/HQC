@@ -122,7 +122,18 @@ async fn run() -> anyhow::Result<()> {
         tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call");
     }
     let adapters = Arc::new(BuiltinAdapters::from_config(&config, permission_mode));
+    // The mirror reads the same config dir as the adapter (SPEC §9).
+    let mirror = hqc_worker::adapter::claude_code::paths::default_config_dir().map(|d| {
+        hqc_worker::MirrorOptions {
+            projects_dir: d.join("projects"),
+            state_dir: config::hqc_home().unwrap_or_default().join("mirror"),
+            own_records: adapters.own_records(),
+            poll: hqc_worker::mirror::POLL,
+            grace: hqc_worker::mirror::GRACE,
+        }
+    });
     let worker = Worker {
+        mirror,
         config,
         token,
         boot_id: uuid::Uuid::new_v4(),

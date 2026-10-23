@@ -408,7 +408,11 @@ impl Connection {
             .map_err(|e| format!("reading outbox: {e:#}"))?;
         for e in entries {
             let id = self.frame_id();
-            let frame = json!({"id": id, "type": "event", "payload": {"event": e.event}});
+            let frame = if e.frame == crate::outbox::FRAME_EVENT {
+                json!({"id": id, "type": "event", "payload": {"event": e.event}})
+            } else {
+                json!({"id": id, "type": e.frame, "payload": e.event})
+            };
             ws.send(Message::text(frame.to_string()))
                 .await
                 .map_err(|e| format!("send: {e}"))?;

@@ -41,7 +41,25 @@ use self::engine::{Action, Core};
 use self::process::{CommandSpec, ExitInfo, OsSpawner, Sig, SignalFn, Spawner};
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
 use crate::config::{Config, StartSpec};
+use crate::mirror::OwnRecords;
 use crate::permissions::{PermissionMode, Permissions, Policy};
+
+/// A live process of transcript `uuid` in [`OwnRecords`]; ends with the monitor, even an
+/// aborted one.
+struct Live(Arc<OwnRecords>, Uuid);
+
+impl Live {
+    fn new(own: Arc<OwnRecords>, uuid: Uuid) -> Self {
+        own.begin(uuid);
+        Self(own, uuid)
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.end(self.1);
+    }
+}
 
 const KILL_GRACE: Duration = Duration::from_secs(5);
 /// How long the output of an exited process is still read when its stdout stays open
@@ -107,6 +125,9 @@ pub struct ClaudeOptions {
     /// A process that dies this soon after spawning fails `start` instead of being
     /// reported as `Exited` (bad flags, unknown `--resume` id, not logged in).
     pub early_exit: Duration,
+    /// Shared with the mirror: which transcripts a process of this worker writes now and
+    /// which records it wrote (SPEC §9.3).
+    pub own_records: Arc<OwnRecords>,
 }
 
 impl Default for ClaudeOptions {
@@ -124,6 +145,7 @@ impl Default for ClaudeOptions {
             permissions: Permissions::default(),
             stop_grace: Duration::from_secs(10),
             early_exit: Duration::from_millis(500),
+            own_records: Arc::default(),
         }
     }
 }
@@ -143,6 +165,11 @@ impl ClaudeCodeAdapters {
             opts: Arc::new(opts),
             spawner,
         }
+    }
+
+    /// The registry of own transcript records, for the mirror.
+    pub fn own_records(&self) -> Arc<OwnRecords> {
+        self.opts.own_records.clone()
     }
 
     /// `permission_mode`: the CLI's "ask" mode, used unless `[permissions] mode = "auto"`.
@@ -216,6 +243,9 @@ struct Io {
     transcript: Option<PathBuf>,
     /// The last title reported by this process.
     title: Mutex<Option<String>>,
+    /// The transcript's uuid and the registry its records go to (SPEC §9.3).
+    runtime: Uuid,
+    own: Arc<OwnRecords>,
 }
 
 impl Io {
@@ -410,7 +440,10 @@ impl ClaudeCodeAdapter {
             signal: spawned.signal,
             transcript,
             title: Mutex::new(None),
+            runtime: uuid,
+            own: self.opts.own_records.clone(),
         });
+        let live = Live::new(self.opts.own_records.clone(), uuid);
         let killing = Arc::new(AtomicBool::new(false));
         let (exit_tx, exited) = watch::channel(None);
         let stderr_tail = Arc::new(Mutex::new(String::new()));
@@ -440,6 +473,7 @@ impl ClaudeCodeAdapter {
             exited.clone(),
             gate,
             stderr_tail.clone(),
+            live,
         ));
         let mut proc = Proc {
             core,
@@ -577,6 +611,7 @@ async fn wait_exit(rx: &mut watch::Receiver<Option<ExitInfo>>, d: Duration) -> b
 }
 
 /// Reads stdout until EOF (or shortly after the process exited), then reports the exit.
+#[allow(clippy::too_many_arguments)]
 async fn monitor(
     stdout: Pin<Box<dyn AsyncRead + Send>>,
     core: Arc<Mutex<Core>>,
@@ -585,6 +620,7 @@ async fn monitor(
     mut exited: watch::Receiver<Option<ExitInfo>>,
     mut gate: watch::Receiver<bool>,
     stderr_tail: Arc<Mutex<String>>,
+    live: Live,
 ) {
     let mut rd = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -601,7 +637,14 @@ async fn monitor(
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf).into_owned();
                     buf.clear();
-                    let actions = lock(&core).on_line(&line);
+                    let (actions, seen) = {
+                        let mut c = lock(&core);
+                        let a = c.on_line(&line);
+                        (a, c.take_seen())
+                    };
+                    for u in seen {
+                        io.own.add(io.runtime, u);
+                    }
                     if let Err(e) = io.run(actions).await {
                         tracing::warn!(session_id = %io.session_id, "{e:#}");
                     }
@@ -615,6 +658,9 @@ async fn monitor(
         }
     }
     let info = exited.wait_for(Option::is_some).await.ok().and_then(|i| *i);
+    // The process wrote its last record: the mirror may treat what follows as another
+    // writer's.
+    drop(live);
     let actions = lock(&core).on_exit();
     let _ = io.run(actions).await;
     let _ = gate.wait_for(|started| *started).await;

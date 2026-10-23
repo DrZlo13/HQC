@@ -118,6 +118,18 @@ export class AppState {
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
+  /** Archived sessions of the project, newest first: the «Архив» view of the list. */
+  archivedSessions(projectId = this.currentProjectId): SessionInfo[] {
+    return [...this.sessions.values()]
+      .filter((s) => s.archived && !s.system && s.project_id === projectId)
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
+  }
+
+  /** Forgets a session the hub has deleted. */
+  removeSession(id: string): void {
+    if (this.sessions.delete(id)) this.changed();
+  }
+
   /** The workers' service sessions (SPEC §10.2), by worker name: the «Воркеры» group.
    *  Revoking a worker archives its service session, so revoked workers are not listed. */
   workerSessions(): SessionInfo[] {

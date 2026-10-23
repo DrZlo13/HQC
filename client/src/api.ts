@@ -249,6 +249,19 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/retry`);
   }
 
+  async archive(id: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/archive`);
+  }
+
+  async unarchive(id: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/unarchive`);
+  }
+
+  /** Deletes an archived session with its history (SPEC §17.4). */
+  async deleteSession(id: string): Promise<void> {
+    await this.req('DELETE', `/api/sessions/${enc(id)}`);
+  }
+
   async approve(id: string, requestId: string, optionId: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/requests/${enc(requestId)}`, {
       option_id: optionId,

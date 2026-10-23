@@ -259,3 +259,34 @@ it('imports from Claude Code and takes a session over', async () => {
   await until('system line', () => $('.chat')?.textContent?.includes('Подхвачена из VS Code'));
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
+
+// Archive from the chat header, find the session under «Архив», bring it back, delete it.
+it('archives, restores and deletes a session', async () => {
+  const personal = $$('.project-row').find((r) => r.textContent?.includes('Личный'))!;
+  location.hash = personal.getAttribute('href')!;
+  const row = await until('a session', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
+  const href = row.getAttribute('href')!;
+  const sid = href.split('/').pop()!;
+  const pid = app.sessions.get(sid)!.project_id;
+  location.hash = href;
+  await until('chat with archive button', () => $('.chat') && $('.btn-archive'));
+
+  $<HTMLButtonElement>('.btn-archive')!.click();
+  await until('archived', () => $('.chat .state')?.textContent?.includes('в архиве'));
+  await until('gone from the list', () => !$$('.session-row').some((r) => r.getAttribute('href') === href));
+  expect($('.btn-archive')).toBeNull();
+
+  $<HTMLButtonElement>('.btn-archive-toggle')!.click();
+  await until('listed under Архив', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
+
+  $<HTMLButtonElement>('.btn-unarchive')!.click();
+  await until('restored', () => $('.btn-archive'));
+  $<HTMLButtonElement>('.btn-archive-toggle')!.click();
+  await until('back in the list', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
+
+  $<HTMLButtonElement>('.btn-archive')!.click();
+  await until('archived again', () => $('.btn-delete'));
+  $<HTMLButtonElement>('.btn-delete')!.click(); // confirm() is stubbed to true
+  await until('deleted', () => !app.sessions.has(sid));
+  expect(location.hash).toBe(`#/p/${pid}`);
+});

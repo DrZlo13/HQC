@@ -664,6 +664,32 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   });
   // Like the hub: open requests are cancelled with `stopped`, the turn ends without a
   // system event (the runtime reports the interrupted turn as `status idle`).
+  // Archiving stops the agent and closes open requests; the session stays as history
+  // (SPEC §17.4). Deleting is only for archived sessions.
+  route('POST', '/api/sessions/:id/archive', (p) => {
+    const s = sessionOr404(p.id);
+    if (s.system) throw fail(409, 'system_session', "the worker's service session cannot be archived");
+    if (s.turn) {
+      s.turn.aborted = true;
+      cancelOpen(s, 'archived');
+      s.turn.onAbort?.();
+    }
+    s.archived = true;
+    pushSummary(s);
+    return { archived: true };
+  });
+  route('POST', '/api/sessions/:id/unarchive', (p) => {
+    const s = sessionOr404(p.id);
+    s.archived = false;
+    pushSummary(s);
+    return { archived: false };
+  });
+  route('DELETE', '/api/sessions/:id', (p) => {
+    const s = sessionOr404(p.id);
+    if (!s.archived) throw fail(409, 'not_archived', 'archive the session first');
+    sessions.delete(p.id);
+    return { deleted: true };
+  });
   route('POST', '/api/sessions/:id/stop', (p) => {
     const s = sessionOr404(p.id);
     if (s.turn) {

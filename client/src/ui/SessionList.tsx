@@ -12,7 +12,9 @@ export function SessionList({ app, current }: { app: AppState; current?: string 
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = app.currentProject();
-  const list = app.sortedSessions();
+  const [showArchived, setShowArchived] = useState(false);
+  const archived = app.archivedSessions();
+  const list = showArchived ? archived : app.sortedSessions();
 
   const newProject = async () => {
     const name = prompt('Название проекта', '');
@@ -71,6 +73,17 @@ export function SessionList({ app, current }: { app: AppState; current?: string 
           <a class="btn btn-small" href={`#/p/${project.id}/workspaces`}>
             Workspaces
           </a>
+          {(archived.length > 0 || showArchived) && (
+            <button
+              type="button"
+              class={`btn btn-small btn-ghost btn-archive-toggle ${showArchived ? 'is-on' : ''}`}
+              aria-pressed={showArchived}
+              title="Показать архивные сессии"
+              onClick={() => setShowArchived(!showArchived)}
+            >
+              Архив {archived.length}
+            </button>
+          )}
           <button
             type="button"
             class="btn btn-small btn-primary btn-new-session"
@@ -102,7 +115,7 @@ export function SessionList({ app, current }: { app: AppState; current?: string 
             </a>
           </li>
         ))}
-        {app.me && list.length === 0 && <li class="empty">Сессий пока нет</li>}
+        {app.me && list.length === 0 && <li class="empty">{showArchived ? 'Архив пуст' : 'Сессий пока нет'}</li>}
       </ul>
     </section>
   );

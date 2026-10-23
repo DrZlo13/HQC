@@ -146,6 +146,45 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
             Повторить
           </button>
         )}
+        {!system && info && state !== 'archived' && (
+          <button
+            type="button"
+            class="btn btn-small btn-ghost btn-archive"
+            title="Убрать сессию в архив; агент останавливается"
+            onClick={() => act(() => app.api.archive(sessionId).then(() => app.refreshSessions()), 'Не заархивировано')}
+          >
+            В архив
+          </button>
+        )}
+        {!system && info && state === 'archived' && (
+          <>
+            <button
+              type="button"
+              class="btn btn-small btn-unarchive"
+              onClick={() => act(() => app.api.unarchive(sessionId).then(() => app.refreshSessions()), 'Не возвращено')}
+            >
+              Вернуть
+            </button>
+            <button
+              type="button"
+              class="btn btn-deny btn-small btn-delete"
+              onClick={() => {
+                if (!confirm('Удалить сессию вместе с историей? Это нельзя отменить.')) return;
+                const projectId = info.project_id;
+                void act(
+                  () =>
+                    app.api.deleteSession(sessionId).then(() => {
+                      app.removeSession(sessionId);
+                      location.hash = `#/p/${projectId}`;
+                    }),
+                  'Не удалено',
+                );
+              }}
+            >
+              Удалить
+            </button>
+          </>
+        )}
       </header>
       <div
         class="timeline"

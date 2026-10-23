@@ -8,10 +8,18 @@
 //! `approval.cancel` and sends `approval.response` with the `canonical: deny` option; for
 //! clarify it writes `clarify.cancel` and sends `clarify.response` with empty `answers`
 //! (SPEC §5.3).
+//!
+//! A worker's own request (`worker.approval.request`, kind `worker_approval`, SPEC §10.2)
+//! lives in its service session: `approval.request` with the options `once` / `deny`, the
+//! answer or the hub's cancellation goes back as `worker.approval.response`.
 
 use std::collections::BTreeMap;
 
-use hqc_proto::event::{ApprovalOption, CancelReason, ClarifyAnswer};
+use chrono::Utc;
+use hqc_proto::{
+    event::{ApprovalOption, CancelReason, ClarifyAnswer},
+    frame::{worker_approval, WorkerApprovalRequest},
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -86,6 +94,31 @@ pub async fn answer(
             (
                 json!({"type": "approval.response",
                        "payload": {"session_id": s.id, "request_id": request_id, "option_id": option_id}}),
+                "approval.response",
+                json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
+            )
+        }
+        "worker_approval" => {
+            // Only the owner of the worker that asks (SPEC §10.2).
+            let owner = match p.worker_id {
+                Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
+                None => None,
+            };
+            if owner != Some(user.id) {
+                return Err(ApiError::Forbidden(
+                    "only the worker owner answers its requests".into(),
+                ));
+            }
+            let option_id = body
+                .option_id
+                .ok_or_else(|| ApiError::BadRequest("option_id is required".into()))?;
+            if !options(&p.payload).iter().any(|o| o.id == option_id) {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown option `{option_id}`"
+                )));
+            }
+            (
+                worker_response(request_id, &option_id),
                 "approval.response",
                 json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
             )
@@ -170,7 +203,7 @@ async fn cancel_inner(
         return Ok(());
     };
     let ev_type = match p.kind.as_str() {
-        "approval" => "approval.cancel",
+        "approval" | "worker_approval" => "approval.cancel",
         "clarify" => "clarify.cancel",
         _ => return Ok(()),
     };
@@ -195,6 +228,7 @@ async fn cancel_inner(
             json!({"type": "approval.response",
                    "payload": {"session_id": s.id, "request_id": p.request_id, "option_id": option_id}})
         }),
+        "worker_approval" => Some(worker_response(&p.request_id, worker_approval::DENY)),
         _ => Some(json!({"type": "clarify.response",
                          "payload": {"session_id": s.id, "request_id": p.request_id, "answers": {}}})),
     };
@@ -273,6 +307,77 @@ pub async fn auto_approve(app: &AppState, s: &SessionRow, request_id: &str) -> a
     )
     .await;
     Ok(())
+}
+
+fn worker_response(request_id: &str, option_id: &str) -> Value {
+    json!({"type": "worker.approval.response",
+           "payload": {"request_id": request_id, "option_id": option_id}})
+}
+
+/// Longest `description` of a worker request kept, in characters.
+const MAX_WORKER_DESCRIPTION: usize = 2000;
+/// A worker request lives at most this long, whatever `expires_at` it asks for.
+const MAX_WORKER_REQUEST_TTL: chrono::TimeDelta = chrono::TimeDelta::days(1);
+
+/// `worker.approval.request` (SPEC §5.4, §10.2): an `approval.request` in the worker's
+/// service session with the options `once` / `deny` and a `worker_approval`
+/// PendingRequest, so it is answered, expires and pushes like any approval. The worker
+/// sends it again after a reconnect while it still waits: a known `request_id` is not
+/// stored twice, and an answered one is returned, for the caller to send the answer again
+/// after its `ack`.
+pub async fn worker_approval(
+    app: &AppState,
+    worker_id: Uuid,
+    r: &WorkerApprovalRequest,
+) -> anyhow::Result<Option<PendingRow>> {
+    let Some(sid) = db::ensure_system_session(&app.db, worker_id).await? else {
+        anyhow::bail!("worker {worker_id} has no service session");
+    };
+    let Some(s) = db::session(&app.db, sid).await? else {
+        anyhow::bail!("service session {sid} is gone");
+    };
+    if let Some(p) = db::request_by_id(&app.db, s.id, "worker_approval", &r.request_id).await? {
+        return Ok(p.result.is_some().then_some(p));
+    }
+    let description: String = r.description.chars().take(MAX_WORKER_DESCRIPTION).collect();
+    let expires_at = r.expires_at.min(Utc::now() + MAX_WORKER_REQUEST_TTL);
+    let payload = json!({
+        "request_id": r.request_id,
+        "tool": r.kind,
+        "description": description,
+        "options": [
+            {"id": worker_approval::ONCE, "label": "Allow", "canonical": "once"},
+            {"id": worker_approval::DENY, "label": "Deny", "canonical": "deny"},
+        ],
+        "expires_at": expires_at,
+    });
+    let mut stored = payload.clone();
+    hqc_proto::replace_nul_json(&mut stored);
+    if !db::open_request(
+        &app.db,
+        "worker_approval",
+        s.id,
+        &r.request_id,
+        &stored,
+        Some(expires_at),
+        Some(worker_id),
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    tracing::info!(%worker_id, request_id = %r.request_id, kind = %r.kind, "worker asks its owner");
+    events::store_hub_event(
+        app,
+        &s,
+        json!({"kind": "system"}),
+        "approval.request",
+        payload,
+        None,
+        None,
+    )
+    .await?;
+    Ok(None)
 }
 
 /// Send the stored result frame if the worker is connected; it stays undelivered until

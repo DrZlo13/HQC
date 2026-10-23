@@ -49,9 +49,10 @@ pub fn compute_state(i: StateInputs) -> SessionState {
 }
 
 /// Events that count as unread (SPEC §6): the final `agent.message`, requests, peer
-/// messages and `system`.
-const UNREAD_FILTER: &str =
-    "(e.type IN ('approval.request', 'clarify.request', 'peer.message', 'system')
+/// messages and `system`, except the worker's log lines in its service session (SPEC
+/// §10.2): they would keep the badge lit.
+const UNREAD_FILTER: &str = "((e.type IN ('approval.request', 'clarify.request', 'peer.message')
+    OR (e.type = 'system' AND e.payload->>'code' IS DISTINCT FROM 'worker_log'))
     OR (e.type = 'agent.message' AND e.payload->>'final' = 'true'))";
 
 #[derive(Debug, FromRow)]
@@ -75,7 +76,7 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
             (SELECT count(*) FROM events e WHERE e.session_id = s.id AND e.delivery = 'pending') AS queue_len,
             EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed') AS has_failed,
             EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id AND p.closed_at IS NULL
-                    AND p.kind IN ('approval', 'clarify')) AS has_open_request,
+                    AND p.kind IN ('approval', 'clarify', 'worker_approval')) AS has_open_request,
             COALESCE(r.last_read_seq, 0) AS last_read_seq,
             (SELECT count(*) FROM events e WHERE e.session_id = s.id
                 AND e.seq > COALESCE(r.last_read_seq, 0) AND {UNREAD_FILTER}) AS unread
@@ -147,6 +148,7 @@ pub async fn views(
                 unread: count(a.unread),
                 created_at: s.created_at,
                 updated_at: s.updated_at,
+                system: s.system,
             })
         })
         .collect())

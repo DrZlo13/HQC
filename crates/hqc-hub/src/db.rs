@@ -218,13 +218,16 @@ pub struct WorkerRow {
     pub allow_foreign_sessions: bool,
     pub share_local_models: bool,
     pub local_models: Value,
+    /// The worker's service session (SPEC §10.2); set at enrollment, by migration 0006 for
+    /// older workers, and by [`ensure_system_session`] if still missing.
+    pub system_session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 const WORKER_COLS: &str = "id, owner_id, name, os, revoked_at, last_seen, protocol_version, \
     capabilities, environments, env_bindings, allowed_roots, allow_foreign_sessions, \
-    share_local_models, local_models, created_at, updated_at";
+    share_local_models, local_models, system_session_id, created_at, updated_at";
 
 pub async fn worker(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkerRow>> {
     sqlx::query_as(&format!("SELECT {WORKER_COLS} FROM workers WHERE id = $1"))
@@ -280,6 +283,70 @@ pub async fn worker_hello(
     .bind(h.boot_id)
     .fetch_optional(db)
     .await
+}
+
+/// Creates the service session of a worker that has none (SPEC §10.2): in the owner's
+/// personal project, titled with the worker's name, no workspace, `runtime: none`. Returns
+/// its id; `None` if the owner has no personal project (cannot happen after login).
+async fn create_system_session(
+    tx: &mut sqlx::PgConnection,
+    worker_id: Uuid,
+) -> sqlx::Result<Option<Uuid>> {
+    let row: Option<(Option<Uuid>, Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT w.system_session_id, w.owner_id, w.name, u.personal_project_id
+         FROM workers w JOIN users u ON u.id = w.owner_id WHERE w.id = $1 FOR UPDATE OF w",
+    )
+    .bind(worker_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((existing, owner, name, project)) = row else {
+        return Ok(None);
+    };
+    if existing.is_some() {
+        return Ok(existing);
+    }
+    let Some(project) = project else {
+        return Ok(None);
+    };
+    let id = new_id();
+    sqlx::query(
+        "INSERT INTO sessions (id, project_id, owner_id, worker_id, title, title_source, slug,
+            runtime, system)
+         VALUES ($1, $2, $3, $4, $5, 'user', $6, 'none', true)",
+    )
+    .bind(id)
+    .bind(project)
+    .bind(owner)
+    .bind(worker_id)
+    .bind(&name)
+    .bind(format!("worker-{worker_id}"))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE workers SET system_session_id = $2, updated_at = now() WHERE id = $1")
+        .bind(worker_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    Ok(Some(id))
+}
+
+/// The worker's service session, created if it has none yet (SPEC §10.2).
+pub async fn ensure_system_session(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Option<Uuid>> {
+    let existing: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT system_session_id FROM workers WHERE id = $1")
+            .bind(worker_id)
+            .fetch_optional(db)
+            .await?;
+    match existing {
+        None => Ok(None),
+        Some(Some(id)) => Ok(Some(id)),
+        Some(None) => {
+            let mut tx = db.begin().await?;
+            let id = create_system_session(&mut tx, worker_id).await?;
+            tx.commit().await?;
+            Ok(id)
+        }
+    }
 }
 
 /// The worker restarted: none of its agents runs any more (SPEC §17.3).
@@ -420,6 +487,7 @@ pub async fn enroll_confirm(
         .bind(&e.os)
         .execute(&mut *tx)
         .await?;
+    create_system_session(&mut tx, wid).await?;
     sqlx::query(
         "UPDATE enroll_codes SET confirmed_by = $2, confirmed_at = now(), worker_id = $3 WHERE id = $1",
     )
@@ -697,6 +765,8 @@ pub struct SessionRow {
     pub turn_open: bool,
     pub last_turn_error: bool,
     pub start_sent: bool,
+    /// The service session of `worker_id` (SPEC §10.2).
+    pub system: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -705,7 +775,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.title, s.title_source, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
-    s.start_sent, s.created_at, s.updated_at";
+    s.start_sent, s.system, s.created_at, s.updated_at";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -722,7 +792,8 @@ pub struct NewSession<'a> {
     pub workspace_id: Option<Uuid>,
     pub worker_id: Option<Uuid>,
     pub cwd: &'a str,
-    /// `None`: the default title «Сессия N», N = the session's number in the project.
+    /// `None`: the default title «Сессия N», N = the session's number in the project (the
+    /// service sessions of workers do not count, SPEC §10.2).
     pub title: Option<&'a str>,
     pub model: Option<&'a str>,
     pub auto_approve: bool,
@@ -734,11 +805,12 @@ pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid
     let (title, source, base) = match n.title {
         Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
         None => {
-            let num: i64 =
-                sqlx::query_scalar("SELECT count(*) + 1 FROM sessions WHERE project_id = $1")
-                    .bind(n.project_id)
-                    .fetch_one(db)
-                    .await?;
+            let num: i64 = sqlx::query_scalar(
+                "SELECT count(*) + 1 FROM sessions WHERE project_id = $1 AND NOT system",
+            )
+            .bind(n.project_id)
+            .fetch_one(db)
+            .await?;
             (
                 format!("Сессия {num}"),
                 TitleSource::Default,
@@ -1263,6 +1335,7 @@ pub struct PendingRow {
 const PENDING_COLS: &str =
     "id, kind, session_id, request_id, payload, expires_at, worker_id, result, closed_at";
 
+/// Stores an open request; `false` if one with the same `(session, kind, request_id)` exists.
 pub async fn open_request(
     db: &PgPool,
     kind: &str,
@@ -1271,8 +1344,8 @@ pub async fn open_request(
     payload: &Value,
     expires_at: Option<DateTime<Utc>>,
     worker_id: Option<Uuid>,
-) -> sqlx::Result<()> {
-    sqlx::query(
+) -> sqlx::Result<bool> {
+    let r = sqlx::query(
         "INSERT INTO pending_requests (id, kind, session_id, request_id, payload, expires_at, worker_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (session_id, kind, request_id) DO NOTHING",
@@ -1286,7 +1359,7 @@ pub async fn open_request(
     .bind(worker_id)
     .execute(db)
     .await?;
-    Ok(())
+    Ok(r.rows_affected() > 0)
 }
 
 pub async fn find_open_request(
@@ -1297,11 +1370,46 @@ pub async fn find_open_request(
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
          WHERE session_id = $1 AND request_id = $2 AND closed_at IS NULL
-           AND kind IN ('approval', 'clarify')"
+           AND kind IN ('approval', 'clarify', 'worker_approval')"
     ))
     .bind(session_id)
     .bind(request_id)
     .fetch_optional(db)
+    .await
+}
+
+/// A request of `kind` with this `request_id` in the session, open or closed.
+pub async fn request_by_id(
+    db: &PgPool,
+    session_id: Uuid,
+    kind: &str,
+    request_id: &str,
+) -> sqlx::Result<Option<PendingRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {PENDING_COLS} FROM pending_requests
+         WHERE session_id = $1 AND kind = $2 AND request_id = $3"
+    ))
+    .bind(session_id)
+    .bind(kind)
+    .bind(request_id)
+    .fetch_optional(db)
+    .await
+}
+
+/// Answers to `worker.approval.request` the worker has not acknowledged (SPEC §10.2):
+/// sent again after `hello`, since no `session.start` precedes them.
+pub async fn undelivered_worker_results(
+    db: &PgPool,
+    worker_id: Uuid,
+) -> sqlx::Result<Vec<PendingRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {PENDING_COLS} FROM pending_requests
+         WHERE kind = 'worker_approval' AND worker_id = $1
+           AND result IS NOT NULL AND result_delivered_at IS NULL
+         ORDER BY closed_at"
+    ))
+    .bind(worker_id)
+    .fetch_all(db)
     .await
 }
 
@@ -1366,7 +1474,7 @@ pub async fn open_requests_of_worker(
 ) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests p
-         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify')
+         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval')
            AND p.session_id IN (SELECT id FROM sessions WHERE worker_id = $1)"
     ))
     .bind(worker_id)
@@ -1378,7 +1486,7 @@ pub async fn expired_requests(db: &PgPool) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
          WHERE closed_at IS NULL AND expires_at IS NOT NULL AND expires_at <= now()
-           AND kind IN ('approval', 'clarify')"
+           AND kind IN ('approval', 'clarify', 'worker_approval')"
     ))
     .fetch_all(db)
     .await

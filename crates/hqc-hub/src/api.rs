@@ -50,6 +50,18 @@ fn can(user: &CurrentUser, _action: Action, s: &SessionRow) -> bool {
     s.owner_id == user.id
 }
 
+/// The worker's service session takes no input and is neither stopped, archived nor
+/// deleted (SPEC §10.2): `409 system_session`.
+fn not_system(s: &SessionRow) -> ApiResult<()> {
+    if s.system {
+        return Err(ApiError::Conflict(
+            "system_session",
+            "this is the worker's service session: it takes no input and cannot be archived".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn session_for(
     app: &AppState,
     user: &CurrentUser,
@@ -635,7 +647,7 @@ pub async fn patch_session(
             Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
             None => None,
         };
-        if a && owner != Some(user.id) {
+        if a && (owner != Some(user.id) || s.system) {
             return Err(ApiError::Forbidden(
                 "only the worker owner enables auto_approve".into(),
             ));
@@ -659,6 +671,7 @@ pub async fn delete_session(
     Path(id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
+    not_system(&s)?;
     send_to_worker(&app, &s, HubFrame::SessionKill { session_id: id });
     sqlx::query("DELETE FROM sessions WHERE id = $1")
         .bind(id)
@@ -717,6 +730,7 @@ pub async fn input(
 ) -> ApiResult<(StatusCode, Json<InputResponse>)> {
     let reply = |status, r: &db::EventRow| (status, Json(InputResponse { event: r.to_json() }));
     let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
     if s.archived {
         return Err(ApiError::Conflict(
             "archived",
@@ -780,6 +794,7 @@ pub async fn stop(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
     requests::cancel_open_of_session(&app, id, CancelReason::Stopped).await?;
     let sent = send_to_worker(&app, &s, HubFrame::SessionStop { session_id: id });
     Ok(Json(json!({ "sent": sent })))
@@ -790,7 +805,7 @@ pub async fn retry(
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    session_for(&app, &user, id, Action::Write).await?;
+    not_system(&session_for(&app, &user, id, Action::Write).await?)?;
     let n = delivery::retry(&app, id).await?;
     Ok(Json(json!({ "requeued": n })))
 }
@@ -802,6 +817,7 @@ pub async fn archive(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
+    not_system(&s)?;
     sqlx::query(
         "UPDATE sessions SET archived = true, turn_open = false, updated_at = now() WHERE id = $1",
     )
@@ -890,6 +906,7 @@ pub async fn workers(State(app): State<AppState>, user: CurrentUser) -> ApiResul
                 "allow_foreign_sessions": w.allow_foreign_sessions,
                 "share_local_models": w.share_local_models,
                 "local_models": w.local_models,
+                "system_session_id": w.system_session_id,
                 "created_at": w.created_at,
             })
         })

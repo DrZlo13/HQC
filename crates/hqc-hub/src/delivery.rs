@@ -40,7 +40,8 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
     let Some(s) = db::session(&app.db, session_id).await? else {
         return Ok(());
     };
-    if s.archived || s.locked_by == "vscode" {
+    // The service session has no agent to start (SPEC §10.2).
+    if s.archived || s.system || s.locked_by == "vscode" {
         return Ok(());
     }
     let Some(conn) = s.worker_id.and_then(|w| app.workers.get(w)) else {
@@ -108,6 +109,9 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
         None => None,
     };
+    let requested_by_owner = ws
+        .as_ref()
+        .is_some_and(|w| worker_owner == Some(w.owner_id));
     // A fresh token per start: only the current agent process holds a valid one.
     let token = new_secret("hqcs_");
     db::set_session_token_hash(&app.db, s.id, &hash_secret(&token)).await?;
@@ -136,6 +140,8 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         session_token: token,
         owner_is_worker_owner: worker_owner == Some(s.owner_id),
         ask_timeout_s: app.config.timing.ask_timeout_s,
+        // The worker owner added the folder, so they agreed to sessions in it (SPEC §10.2).
+        requested_by_owner,
     })
 }
 

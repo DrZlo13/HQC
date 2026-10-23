@@ -445,6 +445,21 @@ async fn handle_text(
             }
             Ok(())
         }
+        WorkerFrame::WorkerApprovalRequest(r) => {
+            match requests::worker_approval(app, conn.worker_id, &r).await {
+                Ok(answered) => {
+                    conn.reply(&id, HubFrame::Ack(Ack::default()));
+                    if let Some(p) = answered {
+                        requests::deliver_result(app, &p).await;
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    conn.error(&id, error_code::INTERNAL, "request not stored", true);
+                    Err(e)
+                }
+            }
+        }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
     };
@@ -472,6 +487,8 @@ async fn on_hello(
         return Ok(None);
     };
     let restarted = previous_boot != Some(h.boot_id);
+    // Its log lines and requests go there (SPEC §10.2).
+    let system_session_id = db::ensure_system_session(&app.db, conn.worker_id).await?;
 
     if let Some(old) = app.workers.insert(conn.clone()) {
         tracing::info!(worker_id = %conn.worker_id, "replacing previous worker connection");
@@ -483,6 +500,7 @@ async fn on_hello(
             protocol_version: PROTOCOL_VERSION,
             worker_id: conn.worker_id,
             server_time: chrono::Utc::now(),
+            system_session_id,
         },
     );
     tracing::info!(worker_id = %conn.worker_id, boot_id = %h.boot_id, restarted, "worker hello");
@@ -517,6 +535,10 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         }
         for sid in db::sessions_to_restart(&app.db, conn.worker_id).await? {
             delivery::kick(app, sid, true).await;
+        }
+        // Answers to the worker's own requests have no `session.start` to follow (SPEC §10.2).
+        for p in db::undelivered_worker_results(&app.db, conn.worker_id).await? {
+            requests::deliver_result(app, &p).await;
         }
         Ok(())
     }

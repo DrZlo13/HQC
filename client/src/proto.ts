@@ -881,6 +881,19 @@ export interface EnrollInfo {
   created_at: string;
   /** Cloudflare's CF-IPCountry of the enrolling request. */
   country?: string;
+  /** The user's offline or revoked workers this one may replace (SPEC §5.1). */
+  replaceable: ReplaceableWorker[];
+}
+
+export interface ReplaceableWorker {
+  id: Uuid;
+  name: string;
+  os: string;
+  /** `offline` | `revoked`. */
+  status: string;
+  last_seen?: string;
+  /** Sessions on it that are neither archived nor its service session. */
+  sessions_count: number;
 }
 
 export function parseEnrollInfo(v: unknown): EnrollInfo {
@@ -890,7 +903,33 @@ export function parseEnrollInfo(v: unknown): EnrollInfo {
     os: str(o, 'os'),
     created_at: str(o, 'created_at'),
     country: optStr(o, 'country'),
+    replaceable: o.replaceable == null
+      ? []
+      : arr(o, 'replaceable').map((x) => {
+          const w = obj(x, 'replaceable worker');
+          return {
+            id: str(w, 'id'),
+            name: str(w, 'name'),
+            os: str(w, 'os'),
+            status: str(w, 'status'),
+            last_seen: optStr(w, 'last_seen'),
+            sessions_count: num(w, 'sessions_count'),
+          };
+        }),
   };
+}
+
+/** Reply to `POST /api/workers/enroll/confirm`; `replaced` — the former name of the worker
+ *  that was replaced (SPEC §5.1). */
+export interface EnrollConfirmed {
+  worker_id: Uuid;
+  name: string;
+  replaced?: string;
+}
+
+export function parseEnrollConfirmed(v: unknown): EnrollConfirmed {
+  const o = obj(v, 'enroll confirmed');
+  return { worker_id: str(o, 'worker_id'), name: str(o, 'name'), replaced: optStr(o, 'replaced') };
 }
 
 export function parseVapidKey(v: unknown): string | null {

@@ -52,7 +52,7 @@ it('shows who asks and enables the button only after that', async () => {
   expect(enrollConfirm).not.toHaveBeenCalled();
 
   await act(async () =>
-    info.resolve({ name: 'attacker-box', os: 'linux', created_at: '2026-10-22T10:00:00Z', country: 'DE' }),
+    info.resolve({ name: 'attacker-box', os: 'linux', created_at: '2026-10-22T10:00:00Z', country: 'DE', replaceable: [] }),
   );
   expect(field('name')).toBe('attacker-box');
   expect(field('os')).toBe('linux');
@@ -61,8 +61,62 @@ it('shows who asks and enables the button only after that', async () => {
   expect(button().disabled).toBe(false);
 
   await act(async () => button().click());
-  expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234');
+  expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234', undefined);
   expect(root.querySelector('.outcome.ok')!.textContent).toContain('attacker-box');
+});
+
+it('offers to replace an offline or revoked worker and sends the choice (T19)', async () => {
+  const enrollInfo = vi.fn(async () => ({
+    name: 'home-mac',
+    os: 'macos',
+    created_at: '2026-10-22T10:00:00Z',
+    replaceable: [
+      { id: 'w-old', name: 'home-mac-old', os: 'macos', status: 'offline', sessions_count: 7 },
+      { id: 'w-gone', name: 'llm-server', os: 'linux', status: 'revoked', sessions_count: 0 },
+    ],
+  }));
+  const enrollConfirm = vi.fn(async () => ({ worker_id: 'w-old', name: 'home-mac', replaced: 'home-mac-old' }));
+  mount({ enrollInfo, enrollConfirm }, 'abcd-1234');
+  await act(async () => {});
+  const radios = [...root.querySelectorAll<HTMLInputElement>('.enroll-replace input[type=radio]')];
+  expect(radios.map((r) => r.value)).toEqual(['', 'w-old', 'w-gone']);
+  // A new worker is the default.
+  expect(radios[0].checked).toBe(true);
+  const labels = [...root.querySelectorAll('.enroll-replace label')].map((l) => l.textContent);
+  expect(labels[1]).toContain('Это та же машина, заменить «home-mac-old»');
+  expect(labels[1]).toContain('сессий: 7');
+  expect(labels[2]).toContain('отозван');
+
+  await act(async () => {
+    radios[1].click();
+  });
+  expect(button().textContent).toBe('Подтвердить замену');
+  await act(async () => button().click());
+  expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234', 'w-old');
+  expect(root.querySelector('.outcome.ok')!.textContent).toContain('заменил «home-mac-old»');
+});
+
+it('confirms a new worker when nothing is chosen', async () => {
+  const enrollInfo = vi.fn(async () => ({
+    name: 'box',
+    os: 'linux',
+    created_at: '2026-10-22T10:00:00Z',
+    replaceable: [{ id: 'w-old', name: 'old', os: 'linux', status: 'offline', sessions_count: 1 }],
+  }));
+  const enrollConfirm = vi.fn(async () => ({ worker_id: 'w-new', name: 'box' }));
+  mount({ enrollInfo, enrollConfirm }, 'abcd-1234');
+  await act(async () => {});
+  await act(async () => button().click());
+  expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234', undefined);
+  expect(root.querySelector('.outcome.ok')!.textContent).toBe('Воркер «box» подключён.');
+});
+
+it('shows no choice without replaceable workers', async () => {
+  const enrollInfo = vi.fn(async () => ({ name: 'box', os: 'linux', created_at: '2026-10-22T10:00:00Z', replaceable: [] }));
+  mount({ enrollInfo, enrollConfirm: vi.fn() }, 'abcd-1234');
+  await act(async () => {});
+  expect(root.querySelector('.enroll-replace')).toBeNull();
+  expect(button().disabled).toBe(false);
 });
 
 it('keeps the button disabled for an unknown code', async () => {

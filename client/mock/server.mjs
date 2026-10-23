@@ -720,30 +720,65 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   });
   route('GET', '/api/artifacts/:id/url', (p) => ({ url: `/api/mock/artifacts/${p.id}` }));
   route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
-  route('GET', '/api/workers', () => ({
-    workers: [
-      { id: workerId, name: 'home-mac', os: 'macos', status: 'online' },
-      ...enrolled,
-    ].filter((w) => !revoked.has(w.id)),
+  // Workers as the hub lists them (SPEC §6): `revoked` only with `include_revoked=1`.
+  const allWorkers = () =>
+    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online' }, ...enrolled].map((w) =>
+      revoked.has(w.id) ? { ...w, status: 'revoked', revoked_at: new Date().toISOString() } : w,
+    );
+  route('GET', '/api/workers', (_, __, q) => ({
+    workers: allWorkers().filter((w) => q.get('include_revoked') === '1' || w.status !== 'revoked'),
   }));
-  route('DELETE', '/api/workers/:id', (p) => {
-    revoked.add(p.id);
+  route('DELETE', '/api/workers/:id', (p, _, q) => {
+    if (q.get('purge') !== '1') {
+      revoked.add(p.id);
+      // Revoking archives the worker's service session (SPEC §10.2).
+      const sys = [...sessions.values()].find((s) => s.system && s.slug === `worker-${p.id}`);
+      if (sys) {
+        sys.archived = true;
+        pushSummary(sys);
+      }
+      return withStatus(204, null);
+    }
+    if (!revoked.has(p.id)) throw fail(409, 'worker_not_revoked', 'revoke the worker before deleting it');
+    // home-mac carries the mock's sessions; enrolled workers have none.
+    if (p.id === workerId) {
+      throw fail(409, 'worker_has_sessions', 'sessions still work on this worker', { sessions_count: 3 });
+    }
+    const i = enrolled.findIndex((w) => w.id === p.id);
+    if (i < 0) throw fail(404, 'not_found', 'unknown worker');
+    enrolled.splice(i, 1);
+    revoked.delete(p.id);
     return withStatus(204, null);
   });
   route('GET', '/api/workers/enroll/:code', (p) => {
     const code = String(p.code).trim().toUpperCase();
     if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(code)) throw fail(404, 'not_found', 'not found');
+    const replaceable = allWorkers()
+      .filter((w) => w.status !== 'online')
+      .map((w) => ({ id: w.id, name: w.name, os: w.os ?? '', status: w.status, sessions_count: w.id === workerId ? 3 : 0 }));
     return {
       name: `worker-${code.slice(0, 4).toLowerCase()}`,
       os: 'macos',
       created_at: new Date().toISOString(),
       country: 'DE',
+      ...(replaceable.length ? { replaceable } : {}),
     };
   });
   route('POST', '/api/workers/enroll/confirm', (_, body) => {
     const code = String(body?.code ?? '').trim().toUpperCase();
     if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(code)) throw fail(404, 'not_found', 'not found');
-    const w = { id: randomUUID(), name: `worker-${code.slice(0, 4).toLowerCase()}`, status: 'offline' };
+    const name = `worker-${code.slice(0, 4).toLowerCase()}`;
+    if (body?.replace_worker_id) {
+      // The same machine (SPEC §5.1): same id, new name, revocation lifted.
+      const w = allWorkers().find((x) => x.id === body.replace_worker_id);
+      if (!w) throw fail(400, 'bad_request', 'unknown worker');
+      if (w.status === 'online') throw fail(409, 'worker_online', 'the worker is online');
+      revoked.delete(w.id);
+      const e = enrolled.find((x) => x.id === w.id);
+      if (e) e.name = name;
+      return { worker_id: w.id, name, replaced: w.name };
+    }
+    const w = { id: randomUUID(), name, os: 'macos', status: 'offline' };
     enrolled.push(w);
     return { worker_id: w.id, name: w.name };
   });

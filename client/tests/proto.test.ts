@@ -8,6 +8,8 @@ import {
   parseArtifactUrl,
   parseCandidateList,
   parseDirList,
+  parseEnrollConfirmed,
+  parseEnrollInfo,
   parseEvent,
   parseEventPage,
   parseFrame,
@@ -147,6 +149,19 @@ describe('examples/wire', () => {
     expect(s).toMatchObject({ workspace_id: w.id, cwd: '.' });
     const req = load('api.session.request.json') as { workspace_id: string };
     expect(req.workspace_id).toBe(w.id);
+    // T19: enrollment that replaces a worker.
+    expect(parseEnrollInfo(load('api.enroll.info.json')).replaceable).toEqual([]);
+    const info = parseEnrollInfo(load('api.enroll.info.replace.json'));
+    expect(info.replaceable.map((r) => [r.name, r.status, r.sessions_count])).toEqual([
+      ['home-mac-old', 'offline', 7],
+      ['llm-server', 'revoked', 0],
+    ]);
+    expect(parseEnrollConfirmed(load('api.enroll.confirm.json')).replaced).toBeUndefined();
+    const c = parseEnrollConfirmed(load('api.enroll.confirm.replace.json'));
+    expect(c.replaced).toBe('home-mac-old');
+    expect((load('api.enroll.confirm.replace.request.json') as { replace_worker_id: string }).replace_worker_id).toBe(
+      c.worker_id,
+    );
   });
 
   it('parses every example file', () => {

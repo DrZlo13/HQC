@@ -6,6 +6,7 @@ import {
   parseArtifactUrl,
   parseCandidateList,
   parseDirList,
+  parseEnrollConfirmed,
   parseEnrollInfo,
   parseEvent,
   parseEventPage,
@@ -24,6 +25,7 @@ import {
   type Candidate,
   type ClarifyAnswer,
   type DirEntry,
+  type EnrollConfirmed,
   type EnrollInfo,
   type HqcEvent,
   type Me,
@@ -66,7 +68,9 @@ export interface WorkerInfo {
   id: string;
   name: string;
   os?: string;
+  /** `online` | `offline` | `revoked`. */
   status?: string;
+  revoked_at?: string | null;
   last_seen?: string;
 }
 
@@ -263,24 +267,38 @@ export class Api {
     return (await this.artifactLink(id)).url;
   }
 
-  async workers(): Promise<WorkerInfo[]> {
-    const data = (await this.req('GET', '/api/workers')) as { workers?: unknown };
+  /** Workers that are not revoked; `includeRevoked` adds revoked ones (`status: revoked`). */
+  async workers(opts: { includeRevoked?: boolean } = {}): Promise<WorkerInfo[]> {
+    const q = opts.includeRevoked ? '?include_revoked=1' : '';
+    const data = (await this.req('GET', `/api/workers${q}`)) as { workers?: unknown };
     if (!Array.isArray(data?.workers)) throw new ApiError(500, 'workers: expected a list');
     return data.workers as WorkerInfo[];
   }
 
-  /** Revokes the worker's token and drops its connection (SPEC §5.1). */
+  /** Revokes the worker's token, drops its connection and archives its service session
+   *  (SPEC §5.1, §10.2). */
   async revokeWorker(id: string): Promise<void> {
     await this.req('DELETE', `/api/workers/${enc(id)}`);
   }
 
-  /** What the worker that printed `code` said about itself; 404 for an unknown code. */
+  /** Deletes a revoked worker with its service session and workspaces (SPEC §6); `409
+   *  worker_has_sessions` (body `sessions_count`) while sessions work there. */
+  async purgeWorker(id: string): Promise<void> {
+    await this.req('DELETE', `/api/workers/${enc(id)}?purge=1`);
+  }
+
+  /** What the worker that printed `code` said about itself and which workers it may
+   *  replace; 404 for an unknown code. */
   async enrollInfo(code: string): Promise<EnrollInfo> {
     return parseEnrollInfo(await this.req('GET', `/api/workers/enroll/${enc(code)}`));
   }
 
-  async enrollConfirm(code: string): Promise<unknown> {
-    return this.req('POST', '/api/workers/enroll/confirm', { code });
+  /** `replaceWorkerId`: "the same machine" — the enrolling worker takes over that worker's
+   *  id, sessions and workspaces (SPEC §5.1). */
+  async enrollConfirm(code: string, replaceWorkerId?: string): Promise<EnrollConfirmed> {
+    const body: Record<string, string> = { code };
+    if (replaceWorkerId) body.replace_worker_id = replaceWorkerId;
+    return parseEnrollConfirmed(await this.req('POST', '/api/workers/enroll/confirm', body));
   }
 
   /** `null`: the hub has no VAPID keys, push is off. */

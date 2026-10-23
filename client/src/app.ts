@@ -118,10 +118,11 @@ export class AppState {
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
-  /** The workers' service sessions (SPEC §10.2), by worker name: the «Воркеры» group. */
+  /** The workers' service sessions (SPEC §10.2), by worker name: the «Воркеры» group.
+   *  Revoking a worker archives its service session, so revoked workers are not listed. */
   workerSessions(): SessionInfo[] {
     return [...this.sessions.values()]
-      .filter((s) => s.system)
+      .filter((s) => s.system && !s.archived)
       .sort((a, b) => a.title.localeCompare(b.title));
   }
 

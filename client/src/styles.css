@@ -917,6 +917,17 @@ pre {
   font-weight: 500;
 }
 
+.enroll-replace {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0;
+}
+
+.enroll-replace legend {
+  padding: 0 4px;
+}
+
 .field {
   display: flex;
   flex-direction: column;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { AppState } from '../app';
-import type { EnrollInfo } from '../proto';
+import type { EnrollInfo, ReplaceableWorker } from '../proto';
 
 /** `ab cd-1234` -> `ABCD-1234` once all 8 characters are there, else `null`. */
 export function normalizeCode(s: string): string | null {
@@ -10,18 +10,29 @@ export function normalizeCode(s: string): string | null {
 
 type Info = { code: string; info: EnrollInfo } | { code: string; error: string } | null;
 
+function replaceableNote(w: ReplaceableWorker): string {
+  const parts = [w.os, w.status === 'revoked' ? 'отозван' : 'офлайн'];
+  if (w.last_seen) parts.push(`был на связи ${new Date(w.last_seen).toLocaleString()}`);
+  parts.push(`сессий: ${w.sessions_count}`);
+  return parts.filter(Boolean).join(' · ');
+}
+
 /** Confirms the code `hqc-worker enroll <hub>` printed (SPEC §5.1). Before the button is
  *  enabled the screen shows what the worker said about itself (name, OS, when, country):
- *  a link with a code may come from someone else's machine. */
+ *  a link with a code may come from someone else's machine. If the user has offline or
+ *  revoked workers, the screen offers "the same machine, replace <name>": the new worker
+ *  then keeps that worker's id, sessions and workspaces. A new worker is the default. */
 export function Enroll({ app, initialCode }: { app: AppState; initialCode: string }) {
   const [code, setCode] = useState(initialCode);
   const [info, setInfo] = useState<Info>(null);
+  const [replace, setReplace] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const normalized = normalizeCode(code);
 
   useEffect(() => {
     setInfo(null);
+    setReplace('');
     if (!normalized) return;
     let live = true;
     app.api.enrollInfo(normalized).then(
@@ -46,8 +57,13 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
     setBusy(true);
     setResult(null);
     try {
-      const r = (await app.api.enrollConfirm(normalized)) as { name?: string } | undefined;
-      setResult({ ok: true, text: `Воркер${r?.name ? ` «${r.name}»` : ''} подключён.` });
+      const r = await app.api.enrollConfirm(normalized, replace || undefined);
+      setResult({
+        ok: true,
+        text: r.replaced
+          ? `Воркер «${r.name}» заменил «${r.replaced}»: сессии и workspace остались на нём.`
+          : `Воркер «${r.name}» подключён.`,
+      });
       setCode('');
     } catch (err) {
       setResult({ ok: false, text: (err as Error).message });
@@ -104,9 +120,45 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
         {info && 'error' in info && info.code === normalized && (
           <div class="error-text">{info.error}</div>
         )}
+        {loaded && loaded.replaceable.length > 0 && (
+          <fieldset class="enroll-replace">
+            <legend>Это новая машина или перерегистрация?</legend>
+            <label class="choice">
+              <input
+                type="radio"
+                name="replace"
+                value=""
+                checked={replace === ''}
+                onChange={() => setReplace('')}
+              />
+              <span>Новый воркер</span>
+            </label>
+            {loaded.replaceable.map((w) => (
+              <label class="choice" key={w.id}>
+                <input
+                  type="radio"
+                  name="replace"
+                  value={w.id}
+                  checked={replace === w.id}
+                  onChange={() => setReplace(w.id)}
+                />
+                <span>
+                  Это та же машина, заменить «{w.name}»
+                  <span class="muted small"> {replaceableNote(w)}</span>
+                </span>
+              </label>
+            ))}
+            {replace && (
+              <p class="muted small">
+                Новый воркер получит id, сессии, workspace и служебную сессию заменяемого; старый токен перестанет
+                работать.
+              </p>
+            )}
+          </fieldset>
+        )}
         {loaded && <p class="muted">Это ваша машина и вы только что запустили на ней enroll?</p>}
         <button type="submit" class="btn btn-primary" disabled={busy || !loaded}>
-          Подтвердить
+          {replace ? 'Подтвердить замену' : 'Подтвердить'}
         </button>
         {result && <div class={result.ok ? 'outcome ok' : 'error-text'}>{result.text}</div>}
       </form>

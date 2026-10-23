@@ -162,6 +162,15 @@ it('revokes a worker from the settings screen', async () => {
     $$('.plain-list li').find((li) => li.textContent?.includes('home-mac')),
   );
   row.querySelector<HTMLButtonElement>('.btn-revoke')!.click();
-  await until('worker gone', () => !$$('.plain-list li').some((li) => li.textContent?.includes('home-mac')));
+  // T19: a revoked worker stays in the settings with «Удалить»; elsewhere it is gone, and
+  // its service session leaves the «Воркеры» group.
+  const revoked = await until('worker revoked', () =>
+    $$('.plain-list li').find((li) => li.textContent?.includes('home-mac') && li.textContent.includes('отозван')),
+  );
   expect((await app.api.workers()).some((w) => w.name === 'home-mac')).toBe(false);
+  await until('workers group gone', () => !$('.worker-list'));
+  // Its sessions are still there: the hub refuses and the screen says what to do.
+  revoked.querySelector<HTMLButtonElement>('.btn-purge')!.click();
+  const err = await until('has sessions', () => $('.page-body .error-text'));
+  expect(err.textContent).toContain('ещё 3 неархивных сессий');
 });

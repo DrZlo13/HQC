@@ -37,3 +37,37 @@ warnings`, `cargo test --workspace` (интеграционные тесты х�
 воркере, миграция существующих сессий, `list_dirs` только внутри `allowed_roots`),
 `cd client && npm test && npm run build`, `E2E_CLAUDE_BIN=/usr/bin/false
 tools/e2e-local.sh` печатает `PASS (rehearsal)`. Вопросы — `docs/notes/t14-questions.md`.
+
+## T17. Служебная сессия воркера и несессионные подтверждения (сделано, SPEC 0.17)
+
+Разделы: §3 (Worker, Session, PendingRequest), §4, §5.3, §5.4, §10.2, §13.1, §13.2, §16, §17.4.
+- hqc-proto (только добавлением): кадры worker → hub `worker.approval.request {request_id,
+  kind, description, expires_at}` и hub → worker `worker.approval.response {request_id,
+  option_id}` с примерами в `examples/wire`; необязательные `hello.ack.system_session_id` и
+  `session.start.requested_by_owner`; `Runtime::None`; `Session.system`.
+- Хаб: у каждого воркера служебная сессия (`workers.system_session_id`; при регистрации,
+  миграцией `0006` для существующих, на `hello`, если нет) в личном проекте владельца, без
+  workspace, `runtime: none`; ввод, стоп, повтор, архивация, удаление — `409 system_session`.
+  `worker.approval.request` → событие `approval.request` с `once`/`deny` и `PendingRequest`
+  `worker_approval`: отвечает только владелец воркера, ответ уходит кадром
+  `worker.approval.response` (и после переподключения), истечение — `approval.cancel
+  timeout` и `deny`, новый `boot_id` — `worker_restart`; push как на обычный approval.
+  Строки `worker_log` не считаются непрочитанными.
+- Воркер: слой `tracing` пересылает warn/error в служебную сессию (`system worker_log`,
+  `level`) через outbox, одинаковый текст — не чаще раза в секунду, всего ≤ 60 в минуту,
+  остальное — строкой «пропущено N». `session.start` чужой сессии (`owner_is_worker_owner:
+  false`, без `requested_by_owner`) в папке, которой нет в `$HQC_HOME/known_workspaces.json`,
+  ждёт подтверждения владельца (`workspace.use`): `once` запоминает папку, `deny` или
+  таймаут — `error {invalid_frame}`. Закрывает A2 аудита частично.
+- Клиент: группа «Воркеры» в левой колонке, лента служебной сессии без поля ввода, карточки
+  подтверждений, строки `worker_log` со временем и уровнем, фильтр «только запросы»; мок
+  хаба со служебной сессией.
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace` (хаб: `tests/system_session.rs` — создание служебной
+сессии и миграция, запрет ввода, `worker.approval` туда и обратно, только владелец,
+истечение и перезапуск, досылка ответа после `hello`, push; воркер:
+`tests/system_session.rs` — подтверждение новой папки для чужой сессии, отказ, без
+подтверждения для владельца, повтор запроса после переподключения, логи с ограничением
+частоты; юнит-тесты `worker_log` и `known_paths`), `cd client && npm test && npm run
+build` (рендер `worker_log` и карточки, фильтр, сценарий через мок). Вопросы —
+`docs/notes/t17-questions.md`.

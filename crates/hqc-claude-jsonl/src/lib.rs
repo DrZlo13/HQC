@@ -116,6 +116,24 @@ pub fn last_ai_title(s: &str) -> Option<String> {
         })
 }
 
+/// Where a record hangs in the transcript's tree: every record with a `uuid` (messages,
+/// attachments, system records) names its `parentUuid`. Two lines of turns from one record
+/// are a fork (SPEC §9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Link {
+    pub uuid: Uuid,
+    #[serde(default)]
+    pub parent_uuid: Option<Uuid>,
+    #[serde(default)]
+    pub is_sidechain: bool,
+}
+
+/// The [`Link`] of one line; `None` for records without a `uuid` and for bad lines.
+pub fn link(line: &str) -> Option<Link> {
+    serde_json::from_str(line).ok()
+}
+
 /// One line of a transcript. Lines that are not valid JSON objects are reported as
 /// `Err` so callers can count and log them without stopping (SPEC §9.4).
 pub fn parse_line(line: &str) -> Result<Record, serde_json::Error> {
@@ -312,6 +330,46 @@ mod tests {
             assert_eq!(main.last().unwrap().stop_reason(), Some("end_turn"));
             assert_eq!(last_ai_title(transcript), None, "{name}: ai-title");
         }
+    }
+
+    /// T20, 2.1.308: `--resume --resume-session-at <uuid>` appends to the same file and hangs
+    /// its prompt off that earlier record, which so gets a second child: a fork in one file.
+    /// The adapter's turn (the stream) is the line the later prompt does not see.
+    #[test]
+    fn t20_fork_in_one_transcript() {
+        let transcript = include_str!("../fixtures/fork-2.1.308.jsonl");
+        let stream = include_str!("../fixtures/stream-fork-2.1.308.jsonl");
+        let links: Vec<Link> = transcript.lines().filter_map(link).collect();
+        assert!(links.iter().all(|l| !l.is_sidechain));
+        let mut children: std::collections::HashMap<Uuid, Vec<Uuid>> = Default::default();
+        for l in &links {
+            if let Some(p) = l.parent_uuid {
+                children.entry(p).or_default().push(l.uuid);
+            }
+        }
+        let forks: Vec<_> = children.iter().filter(|(_, c)| c.len() > 1).collect();
+        assert_eq!(forks.len(), 1, "one record with two children");
+        let (at, _) = forks[0];
+        let (tr, bad) = parse_str(transcript);
+        assert_eq!(bad, 0);
+        let at_rec = main_records(&tr)
+            .into_iter()
+            .find(|m| m.uuid == *at)
+            .unwrap();
+        assert_eq!(at_rec.blocks()[0]["text"], "ONE");
+        let own: Vec<Uuid> = main_records(&parse_str(stream).0)
+            .iter()
+            .map(|m| m.uuid)
+            .collect();
+        let prompts: Vec<&Message> = main_records(&tr)
+            .into_iter()
+            .filter(|m| matches!(m.message["content"], serde_json::Value::String(_)))
+            .collect();
+        assert_eq!(prompts.len(), 3);
+        // The adapter's prompt and the later one.
+        assert!(own.contains(&prompts[1].uuid));
+        assert!(!own.contains(&prompts[2].uuid));
+        assert_eq!(prompts[2].parent_uuid, Some(*at));
     }
 
     #[test]

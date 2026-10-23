@@ -29,6 +29,15 @@ with `--arg-prompt` and `--resume`):
 - `adapter-then-outside` — an adapter session (stream), then `claude -p --resume <uuid>
   "<prompt>"` from outside; the transcript ends with the outside turn.
 
+Claude Code 2.1.308, a fork in one transcript (T20, SPEC §9.3; `driver.py` in
+`tmp/spike-t20-a`, no VS Code):
+
+- `fork` — `claude -p "Reply with exactly: ONE"` (prompt as argument), then `--resume` with the
+  adapter's flags and the turn `HQC-TURN` (the stream is this run), then `claude -p --resume
+  <uuid> --resume-session-at <uuid of the ONE answer> "Reply with exactly: VSCODE-TURN"`: the
+  last turn hangs off the `ONE` answer, which so has two children, the way VS Code continued
+  from its own last record in the case of 2026-10-23. The stdin file is the adapter run's.
+
 In the stream files of the T12 sets the `input_json_delta` fragments of a tool input whose
 path had to be rewritten are joined into the first fragment (sanitizing split paths).
 

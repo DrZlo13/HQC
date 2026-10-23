@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
 use crate::config::StartSpec;
+use crate::inbox::InboxFile;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FakeCall {
@@ -39,6 +40,7 @@ struct State {
     created: usize,
     fail_start: bool,
     sinks: HashMap<Uuid, EventSink>,
+    inputs: Vec<(SessionInput, Vec<InboxFile>)>,
 }
 
 #[derive(Clone, Default)]
@@ -58,6 +60,11 @@ impl FakeAdapters {
 
     pub fn calls(&self) -> Vec<FakeCall> {
         self.lock().calls.clone()
+    }
+
+    /// Every input as the adapter got it (text with the attachment block) and its files.
+    pub fn inputs(&self) -> Vec<(SessionInput, Vec<InboxFile>)> {
+        self.lock().inputs.clone()
     }
 
     /// Number of adapters created, i.e. sessions the supervisor tried to run.
@@ -168,6 +175,18 @@ impl Adapter for FakeAdapter {
     }
 
     async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()> {
+        self.input_with(input, &[]).await
+    }
+
+    async fn input_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        self.shared
+            .lock()
+            .inputs
+            .push((input.clone(), files.to_vec()));
         self.record(FakeCall::Input {
             session_id: self.session_id,
             event_id: input.event_id,

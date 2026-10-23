@@ -1,0 +1,20 @@
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Посмотри скриншот и патч\n\nВложения:\n- .hqc/inbox/0199f3a2-7c10-7000-8000-000000000201/screen.png\n- .hqc/inbox/0199f3a2-7c10-7000-8000-000000000201/fix_1.patch\n- .hqc/inbox/0199f3a2-7c10-7000-8000-000000000201/notes.txt\n- .hqc/inbox/0199f3a2-7c10-7000-8000-000000000201/notes-2.txt"
+      },
+      {
+        "type": "image",
+        "source": {
+          "type": "base64",
+          "media_type": "image/png",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        }
+      }
+    ]
+  }
+}

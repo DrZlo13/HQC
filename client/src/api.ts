@@ -2,6 +2,8 @@
 // client sends cookies along and never handles tokens itself.
 
 import {
+  parseArtifact,
+  parseArtifactUrl,
   parseDirList,
   parseEnrollInfo,
   parseEvent,
@@ -15,6 +17,9 @@ import {
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceList,
+  type Artifact,
+  type ArtifactKind,
+  type ArtifactUrl,
   type ClarifyAnswer,
   type DirEntry,
   type EnrollInfo,
@@ -69,12 +74,14 @@ export class Api {
     private readonly fetchImpl: Fetch = (...a) => fetch(...a),
   ) {}
 
+  /** `body`: JSON, or `FormData` sent as multipart (the browser sets its content type). */
   private async req(method: string, path: string, body?: unknown): Promise<unknown> {
+    const form = typeof FormData !== 'undefined' && body instanceof FormData;
     const res = await this.fetchImpl(this.base + path, {
       method,
       credentials: 'include',
-      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: body === undefined || form ? undefined : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : form ? (body as FormData) : JSON.stringify(body),
     });
     const text = await res.text();
     let data: unknown = undefined;
@@ -181,14 +188,33 @@ export class Api {
     return page;
   }
 
-  /** Returns the stored `user.message`; a repeated `client_op_id` returns the same event. */
-  async input(id: string, text: string, clientOpId: string): Promise<HqcEvent> {
+  /** Returns the stored `user.message`; a repeated `client_op_id` returns the same event.
+   *  `artifactIds` come from {@link Api.uploadArtifact} (SPEC §12). */
+  async input(id: string, text: string, clientOpId: string, artifactIds: string[] = []): Promise<HqcEvent> {
     const data = await this.req('POST', `/api/sessions/${enc(id)}/input`, {
       text,
-      artifact_ids: [],
+      artifact_ids: artifactIds,
       client_op_id: clientOpId,
     });
     return parseInputResponse(data);
+  }
+
+  /** `POST /api/artifacts` (multipart `file`, `kind?`); the hub derives `kind` from the type
+   *  and extension unless given. The same file uploaded again is the same artifact. */
+  async uploadArtifact(file: Blob, name: string, kind?: ArtifactKind): Promise<Artifact> {
+    const form = new FormData();
+    form.append('file', file, name);
+    if (kind && kind !== 'unknown') form.append('kind', kind);
+    return parseArtifact(await this.req('POST', '/api/artifacts', form));
+  }
+
+  async artifact(id: string): Promise<Artifact> {
+    return parseArtifact(await this.req('GET', `/api/artifacts/${enc(id)}`));
+  }
+
+  /** A signed link, valid for 10 minutes (SPEC §12). */
+  async artifactLink(id: string): Promise<ArtifactUrl> {
+    return parseArtifactUrl(await this.req('GET', `/api/artifacts/${enc(id)}/url`));
   }
 
   async stop(id: string): Promise<void> {
@@ -214,9 +240,7 @@ export class Api {
   }
 
   async artifactUrl(id: string): Promise<string> {
-    const data = (await this.req('GET', `/api/artifacts/${enc(id)}/url`)) as { url?: string };
-    if (typeof data?.url !== 'string') throw new ApiError(500, 'artifact url missing');
-    return data.url;
+    return (await this.artifactLink(id)).url;
   }
 
   async workers(): Promise<WorkerInfo[]> {

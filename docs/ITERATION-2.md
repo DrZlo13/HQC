@@ -71,3 +71,33 @@ warnings`, `cargo test --workspace` (хаб: `tests/system_session.rs` — со�
 частоты; юнит-тесты `worker_log` и `known_paths`), `cd client && npm test && npm run
 build` (рендер `worker_log` и карточки, фильтр, сценарий через мок). Вопросы —
 `docs/notes/t17-questions.md`.
+## T16. Артефакты и `.hqc/inbox` (сделано, SPEC 0.17)
+
+Разделы: §3 Artifact, §4 (`user.message.artifact_ids`, `attachment`), §5.3 `session.input`,
+§6, §8.1, §12, §20. Без MCP: `hqc_attach` и `PUT /worker/artifacts` — итерация 3.
+- hqc-proto: тела `Artifact` и `ArtifactUrl` (`api.artifact.json`, `api.artifact.url.json`).
+- Хаб: хранилище на диске `HQC_ARTIFACT_DIR` по sha256, миграция `0006` (`artifacts`,
+  `artifact_sessions`); `POST /api/artifacts` (multipart `file`, `kind?`; 100 МБ, `413
+  too_large`; дедупликация `(owner, sha256, name)`), `GET /api/artifacts/{id}`, `GET
+  /api/artifacts/{id}/url` (HMAC, 10 минут); `GET /artifacts/{id}?exp=&sig=` (`403`/`410`,
+  sandbox CSP, HTML inline только на хосте `HQC_ARTIFACT_PUBLIC_BASE`, этот хост отдаёт
+  только артефакты, его origin — в CSP клиента); `GET /worker/artifacts/{id}` токеном
+  воркера для сессий этого воркера; ввод проверяет `artifact_ids` (`400 unknown_artifact`)
+  и связывает их с сессией.
+- Воркер: `.hqc/inbox/<event_id>/` в рабочем каталоге (санация и уникальность имён, без
+  символических ссылок на пути, временный файл и `rename`), `.hqc/` в `info/exclude`, блок
+  «Вложения:» в тексте, image content block в stream-json Claude Code **[проверить]**;
+  фикстура `crates/hqc-worker/fixtures/inbox`.
+- Клиент: скрепка, перетаскивание и вставка файлов с превью картинок; загрузка перед
+  вводом, повтор без повторной загрузки; рендер вложений (image inline, diff, html — iframe
+  только с домена артефактов, text/file — карточка); ссылки перезапрашиваются на
+  `403`/`410`; пути вида `src/main.rs:42` в inline-коде и относительные ссылки копируются
+  в буфер («путь скопирован», t11 #1).
+- `Dockerfile` (`/var/lib/hqc/artifacts`), RUNBOOK §1.2, §1.6, §1.8, `tools/dev.sh`,
+  `tools/e2e-local.sh`.
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace` (хаб: `tests/artifacts.rs` — загрузка и виды,
+лимит, дедупликация, подпись и срок ссылки, чужой артефакт, заголовки и домен артефактов,
+скачивание воркером; воркер: `inbox_scenario`, `inbox_refusals`,
+`image_attachments_are_image_blocks`, модульные тесты `inbox`), `cd client && npm test &&
+npm run build` (`tests/attachments.test.tsx`). Вопросы — `docs/notes/t16-questions.md`.

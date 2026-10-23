@@ -759,6 +759,8 @@ pub async fn input(
             return Ok(reply(StatusCode::OK, &r));
         }
     }
+    // Only the user's own artifacts; the session's worker may then download them (SPEC §12).
+    crate::artifacts::attach_to_session(&app.db, user.id, id, &b.artifact_ids).await?;
     // A failed turn shows `error` until the next input (SPEC §17.1).
     db::clear_turn_error(&app.db, id).await?;
     let stored = events::store_hub_event(

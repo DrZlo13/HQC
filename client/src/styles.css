@@ -1096,6 +1096,171 @@ pre {
   justify-content: center;
 }
 
+/* ---- diffs and paths in markdown (T16) ---- */
+
+.md-code-diff .diff-add {
+  display: inline-block;
+  min-width: 100%;
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+
+.md-code-diff .diff-del {
+  display: inline-block;
+  min-width: 100%;
+  background: color-mix(in srgb, var(--deny) 16%, transparent);
+}
+
+.md-code-diff .diff-hunk {
+  color: var(--accent);
+}
+
+.md-code-diff .diff-file {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.md-path {
+  position: relative;
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline dotted;
+  cursor: copy;
+}
+
+.md-path-note {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ---- attachments (T16) ---- */
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.attachments > .attachment {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.attachment-image {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.attachment-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+.attachment-html {
+  width: 100%;
+  height: 360px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.attachment-name {
+  word-break: break-all;
+}
+
+.attachment-caption {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.attachment-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer {
+  flex-wrap: wrap;
+}
+
+.composer-files {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.composer-file {
+  position: relative;
+  display: inline-flex;
+}
+
+.composer-file-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel);
+  color: var(--text);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.composer .input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.btn-attach {
+  padding: 0 10px;
+}
+
+.chat-dragging .composer {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
 /* The textarea copyText() selects when the Clipboard API is not available. */
 .copy-buffer {
   position: fixed;

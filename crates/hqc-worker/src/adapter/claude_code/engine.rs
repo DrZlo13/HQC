@@ -127,11 +127,18 @@ impl Core {
     // ---- from the supervisor -------------------------------------------------------
 
     pub fn input(&mut self, input: &SessionInput) -> Vec<Action> {
-        if !input.artifact_ids.is_empty() || !input.peer_prefix.is_empty() {
+        self.input_with_images(input, vec![])
+    }
+
+    /// The user message of stream-json: the text, or with images a content array of a text
+    /// block followed by `images` (image blocks of the Messages API, SPEC §8.1). The
+    /// artifacts' paths are already in `input.text` (`.hqc/inbox`, SPEC §12).
+    pub fn input_with_images(&mut self, input: &SessionInput, images: Vec<Value>) -> Vec<Action> {
+        if !input.peer_prefix.is_empty() {
             tracing::warn!(
                 session_id = %self.session_id,
                 event_id = %input.event_id,
-                "artifacts and peer_prefix are not supported in iteration 1; sending the text only"
+                "peer_prefix is not supported yet (iteration 3); sending the text only"
             );
         }
         self.last_input = Some(input.event_id);
@@ -139,9 +146,16 @@ impl Core {
         self.in_turn = true;
         self.turn += 1;
         self.held = None;
+        let content = if images.is_empty() {
+            json!(input.text)
+        } else {
+            let mut blocks = vec![json!({"type": "text", "text": input.text})];
+            blocks.extend(images);
+            Value::Array(blocks)
+        };
         vec![Action::Write(json!({
             "type": "user",
-            "message": {"role": "user", "content": input.text},
+            "message": {"role": "user", "content": content},
         }))]
     }
 

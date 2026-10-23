@@ -14,7 +14,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use hqc_hub::{
-    config::{AuthConfig, Limits, Timing},
+    config::{ArtifactConfig, AuthConfig, Limits, Timing},
     db::{PushSubRow, MIGRATOR},
     push::{BoxFuture, PushError, PushSender},
     AppState, Config,
@@ -139,7 +139,23 @@ impl TestHub {
         limits: Limits,
         timing: Timing,
     ) -> Self {
-        Self::start_upgraded(auth, email, limits, timing, None).await
+        Self::start_upgraded(auth, email, limits, timing, None, |_| {}).await
+    }
+
+    /// Dev auth with a fresh user; `f` adjusts the artifact store (in a fresh temp dir).
+    pub async fn start_artifacts(f: impl FnOnce(&mut ArtifactConfig)) -> Self {
+        let email = format!("user-{}@example.com", Uuid::new_v4().simple());
+        Self::start_upgraded(
+            AuthConfig::Dev {
+                email: email.clone(),
+            },
+            email,
+            Limits::default(),
+            test_timing(),
+            None,
+            f,
+        )
+        .await
     }
 
     /// Dev auth with a fresh user over a database that went through the migrations before
@@ -156,6 +172,7 @@ impl TestHub {
             Limits::default(),
             test_timing(),
             Some((version, seed)),
+            |_| {},
         )
         .await
     }
@@ -166,6 +183,7 @@ impl TestHub {
         limits: Limits,
         timing: Timing,
         upgrade: Option<(i64, String)>,
+        artifacts: impl FnOnce(&mut ArtifactConfig),
     ) -> Self {
         let url = db_url();
         let admin = PgPoolOptions::new()
@@ -202,6 +220,11 @@ impl TestHub {
         }
         MIGRATOR.run(&pool).await.unwrap();
 
+        let mut art = ArtifactConfig::new(
+            std::env::temp_dir().join(format!("hqc-artifacts-{}", Uuid::new_v4().simple())),
+        );
+        artifacts(&mut art);
+        std::fs::create_dir_all(&art.dir).unwrap();
         let config = Config {
             database_url: url,
             listen: "127.0.0.1:0".into(),
@@ -210,6 +233,7 @@ impl TestHub {
             client_dir: None,
             timing,
             limits,
+            artifacts: art,
         };
         let push = Arc::new(RecordingPush::default());
         let app = hqc_hub::start(pool, config, push.clone());
@@ -231,6 +255,7 @@ impl TestHub {
     }
 
     pub async fn finish(self) {
+        let _ = std::fs::remove_dir_all(&self.app.config.artifacts.dir);
         self.app.db.close().await;
         let _ = sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
             .execute(&self.admin)
@@ -292,6 +317,33 @@ impl TestHub {
             .unwrap()
             .status()
             .as_u16()
+    }
+
+    /// `POST /api/artifacts` with the field `file` (and `kind`, if given).
+    pub async fn upload(
+        &self,
+        name: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+        kind: Option<&str>,
+    ) -> (u16, Value) {
+        let mut part = reqwest::multipart::Part::bytes(bytes).file_name(name.to_string());
+        if !mime.is_empty() {
+            part = part.mime_str(mime).unwrap();
+        }
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+        if let Some(k) = kind {
+            form = form.text("kind", k.to_string());
+        }
+        let r = self
+            .http
+            .post(format!("{}/api/artifacts", self.base))
+            .multipart(form)
+            .send()
+            .await
+            .unwrap();
+        let s = r.status().as_u16();
+        (s, r.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn personal_project(&self) -> String {

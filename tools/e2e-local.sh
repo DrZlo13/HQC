@@ -110,7 +110,7 @@ CLIENT_DIR=""
 log "starting hqc-hub on $HUB"
 env -u HQC_ACCESS_TEAM_DOMAIN -u HQC_ACCESS_AUD HQC_CLIENT_DIR="$CLIENT_DIR" \
     HQC_DEV=1 HQC_DEV_USER=e2e@local HQC_HUB_LISTEN="127.0.0.1:$PORT" \
-    HQC_DATABASE_URL="postgresql://localhost/$DB" \
+    HQC_DATABASE_URL="postgresql://localhost/$DB" HQC_ARTIFACT_DIR="$RUN/artifacts" \
     HQC_VAPID_PRIVATE="$VAPID_PRIVATE" HQC_VAPID_PUBLIC="$VAPID_PUBLIC" \
     HQC_VAPID_SUBJECT=mailto:e2e@local RUST_LOG="${RUST_LOG:-info}" \
     "$BIN/hqc-hub" >"$RUN/hub.log" 2>&1 &

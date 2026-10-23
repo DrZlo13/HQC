@@ -35,6 +35,9 @@ pub enum ApiError {
     WorkerTimeout,
     #[error("too many requests")]
     TooManyRequests,
+    /// The body is over a size limit (an artifact over 100 MB, SPEC §12).
+    #[error("{0}")]
+    TooLarge(String),
     /// Too many requests of this kind in flight; retry later.
     #[error("busy, retry later")]
     Busy,
@@ -61,6 +64,7 @@ impl IntoResponse for ApiError {
             }
             ApiError::WorkerTimeout => (StatusCode::GATEWAY_TIMEOUT, "worker_timeout"),
             ApiError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
+            ApiError::TooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
             ApiError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy"),
             ApiError::Internal(e) => {
                 tracing::error!(error = %e, "internal error");

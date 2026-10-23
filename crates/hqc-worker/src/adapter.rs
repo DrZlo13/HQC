@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::config::{Config, StartSpec};
+use crate::inbox::InboxFile;
 
 pub mod claude_code;
 pub mod fake;
@@ -74,6 +75,17 @@ pub trait Adapter: Send {
     /// Hand one input to the runtime. Returns once written; acceptance comes later as
     /// [`AdapterEvent::InputAccepted`].
     async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()>;
+    /// [`Adapter::input`] with the artifacts of the input already in `.hqc/inbox` (SPEC
+    /// §12); `input.text` carries their paths. Runtimes that take images natively override
+    /// this to attach `files` of kind image as well.
+    async fn input_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        let _ = files;
+        self.input(input).await
+    }
     /// Abort the current turn; the process stays.
     async fn stop(&mut self) -> anyhow::Result<()>;
     /// Terminate the process. Returns when it is gone.

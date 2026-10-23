@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
-import { ChatSession } from '../session';
+import { ArtifactStore, formatSize } from '../artifacts';
+import { ChatSession, type OutgoingFile } from '../session';
 import { ActivityLine, BusyIndicator, ChatItems, StreamingBubble, onlyRequests, type ChatActions } from './cards';
 import { useSubscription } from './hooks';
 import { STATE_LABELS } from './labels';
@@ -11,6 +12,14 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
   const chat = useMemo(() => new ChatSession(app.api, app.socket, sessionId), [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
   const [requestsOnly, setRequestsOnly] = useState(false);
+  const artifacts = useMemo(() => new ArtifactStore(app.api), [app]);
+  const [files, setFiles] = useState<OutgoingFile[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const addFiles = (list: FileList | File[] | null | undefined) => {
+    const picked = [...(list ?? [])];
+    if (!picked.length) return;
+    void Promise.all(picked.map(toOutgoing)).then((add) => setFiles((cur) => [...cur, ...add]));
+  };
   useEffect(() => {
     void chat.open();
     return () => chat.close();
@@ -42,11 +51,11 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
     answer: (r, a) => chat.answer(r, a),
     resend: (op) => chat.resend(op),
     discard: (op) => chat.discard(op),
-    openArtifact: (id) => {
+    artifacts,
+    openArtifact: (id, download) => {
       // Open the window synchronously, or mobile browsers block it as a popup.
       const w = window.open('about:blank', '_blank');
-      app.api
-        .artifactUrl(id)
+      (download ? artifacts.downloadUrl(id) : artifacts.url(id))
         .then((url) => (w ? (w.location.href = url) : window.open(url, '_blank')))
         .catch((e: Error) => {
           w?.close();
@@ -67,8 +76,25 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
 
+  const disabled = state === 'archived';
   return (
-    <section class="chat">
+    <section
+      class={dragging ? 'chat chat-dragging' : 'chat'}
+      onDragOver={(e) => {
+        if (disabled || !e.dataTransfer?.types.includes('Files')) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragging(false);
+      }}
+      onDrop={(e) => {
+        setDragging(false);
+        if (disabled || !e.dataTransfer?.files.length) return;
+        e.preventDefault();
+        addFiles(e.dataTransfer.files);
+      }}
+    >
       <header class="bar">
         <a class="back" href="#/" aria-label="К списку">
           ‹
@@ -124,10 +150,14 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
       )}
       {!system && (
         <Composer
-          disabled={state === 'archived'}
+          disabled={disabled}
+          files={files}
+          onFiles={addFiles}
+          onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
           onSend={(text) => {
             stick.current = true;
-            chat.send(text);
+            chat.send(text, files);
+            setFiles([]);
           }}
         />
       )}
@@ -137,13 +167,43 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
 
 const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 
-function Composer({ onSend, disabled }: { onSend: (text: string) => void; disabled: boolean }) {
+/** Images up to this size get a preview before sending. */
+const PREVIEW_MAX = 10 * 1024 * 1024;
+
+/** A picked file with a `data:` preview for images (the CSP has no `blob:`). */
+export function toOutgoing(file: File): Promise<OutgoingFile> {
+  const f: OutgoingFile = { file, name: file.name || 'file' };
+  if (!file.type.startsWith('image/') || file.size > PREVIEW_MAX || typeof FileReader === 'undefined') {
+    return Promise.resolve(f);
+  }
+  return new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => resolve({ ...f, preview: typeof r.result === 'string' ? r.result : undefined });
+    r.onerror = () => resolve(f);
+    r.readAsDataURL(file);
+  });
+}
+
+export function Composer({
+  onSend,
+  disabled,
+  files = [],
+  onFiles = () => {},
+  onRemove = () => {},
+}: {
+  onSend: (text: string) => void;
+  disabled: boolean;
+  files?: OutgoingFile[];
+  onFiles?: (files: FileList | File[]) => void;
+  onRemove?: (index: number) => void;
+}) {
   const [text, setText] = useState('');
   const area = useRef<HTMLTextAreaElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const canSend = !disabled && (text.trim() !== '' || files.length > 0);
   const submit = () => {
-    const v = text.trim();
-    if (!v) return;
-    onSend(v);
+    if (!canSend) return;
+    onSend(text.trim());
     setText('');
     area.current?.focus();
   };
@@ -161,6 +221,47 @@ function Composer({ onSend, disabled }: { onSend: (text: string) => void; disabl
         submit();
       }}
     >
+      {files.length > 0 && (
+        <div class="composer-files">
+          {files.map((f, i) => (
+            <span key={i} class="composer-file">
+              {f.preview ? (
+                <img class="attachment-thumb" src={f.preview} alt={f.name} title={f.name} />
+              ) : (
+                <span class="attachment-chip">
+                  {f.name} <span class="muted">{formatSize(f.file.size)}</span>
+                </span>
+              )}
+              <button type="button" class="composer-file-remove" aria-label={`Убрать ${f.name}`} onClick={() => onRemove(i)}>
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        ref={picker}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => {
+          const el = e.currentTarget as HTMLInputElement;
+          if (el.files) onFiles(el.files);
+          el.value = '';
+        }}
+      />
+      <button
+        type="button"
+        class="btn btn-attach"
+        aria-label="Приложить файлы"
+        title="Приложить файлы"
+        disabled={disabled}
+        onClick={() => picker.current?.click()}
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9" />
+        </svg>
+      </button>
       <textarea
         ref={area}
         class="input"
@@ -169,6 +270,12 @@ function Composer({ onSend, disabled }: { onSend: (text: string) => void; disabl
         disabled={disabled}
         value={text}
         onInput={(e) => setText((e.currentTarget as HTMLTextAreaElement).value)}
+        onPaste={(e) => {
+          const pasted = [...(e.clipboardData?.files ?? [])];
+          if (pasted.length === 0) return;
+          e.preventDefault();
+          onFiles(pasted);
+        }}
         onKeyDown={(e) => {
           // On a phone Enter is a newline; on desktop Enter sends, Shift+Enter is a newline.
           if (e.key === 'Enter' && !e.shiftKey && !coarse && !e.isComposing) {
@@ -177,7 +284,7 @@ function Composer({ onSend, disabled }: { onSend: (text: string) => void; disabl
           }
         }}
       />
-      <button type="submit" class="btn btn-primary" disabled={disabled || !text.trim()}>
+      <button type="submit" class="btn btn-primary" disabled={!canSend}>
         Отправить
       </button>
     </form>

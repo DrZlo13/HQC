@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import {
   isKnownType,
   parseApiError,
+  parseArtifact,
+  parseArtifactUrl,
   parseDirList,
   parseEvent,
   parseEventPage,
@@ -134,6 +136,8 @@ describe('examples/wire', () => {
       existing_path: w.path,
     });
     expect(parseWorkspaceConflict(load('api.error.json'))).toBeNull();
+    expect(parseArtifact(load('api.artifact.json'))).toMatchObject({ kind: 'image', name: 'screen.png', size: 48213 });
+    expect(parseArtifactUrl(load('api.artifact.url.json')).url).toMatch(/^https:\/\/artifacts\./);
     const s = parseSessionInfo(load('api.session.json'));
     expect(s).toMatchObject({ workspace_id: w.id, cwd: '.' });
     const req = load('api.session.request.json') as { workspace_id: string };

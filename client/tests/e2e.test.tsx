@@ -99,8 +99,8 @@ it('runs the iteration 1 scenario through the UI', async () => {
   const area = $<HTMLTextAreaElement>('.chat textarea')!;
   area.value = 'Запусти тесты';
   area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
-  await until('send enabled', () => !$<HTMLButtonElement>('.composer button')!.disabled);
-  $<HTMLButtonElement>('.composer button')!.click();
+  await until('send enabled', () => !$<HTMLButtonElement>('.composer button[type=submit]')!.disabled);
+  $<HTMLButtonElement>('.composer button[type=submit]')!.click();
   await until('optimistic or echoed message', () =>
     $$('.bubble-user').find((b) => b.textContent?.includes('Запусти тесты')),
   );
@@ -139,8 +139,8 @@ it('renders a markdown answer, streamed and final', async () => {
   const area = $<HTMLTextAreaElement>('.chat textarea')!;
   area.value = 'Покажи markdown';
   area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
-  await until('send enabled', () => !$<HTMLButtonElement>('.composer button')!.disabled);
-  $<HTMLButtonElement>('.composer button')!.click();
+  await until('send enabled', () => !$<HTMLButtonElement>('.composer button[type=submit]')!.disabled);
+  $<HTMLButtonElement>('.composer button[type=submit]')!.click();
 
   await until('streamed heading', () => $('.bubble-streaming h2'));
   const final = await until('final markdown answer', () =>

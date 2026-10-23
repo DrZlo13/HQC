@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.17, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.18, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -184,9 +184,14 @@ Code — `ai-title`, §8.1) хаб применяет и ставит `runtime`,
 `user_id`, `session_id`, `last_read_seq`. Источник «непрочитанного» (правило — §6).
 
 ### Artifact
-`owner_id`, `session_id`, `kind` (file/image/diff/html/text), `mime`, `size`,
-`sha256`, `name`, `storage_key`. События ссылаются только на `artifact_id`;
-ссылки на скачивание выдаются при рендере (§12).
+`owner_id`, `session_id` (первая сессия, во вводе которой артефакт пришёл; null до этого),
+`kind` (file/image/diff/html/text), `mime`, `size`, `sha256`, `name` (последний компонент
+пути без управляющих символов, до 255 байт), `storage_key` (= `sha256`: содержимое на
+диске общее для всех записей с тем же хэшем). Запись уникальна по `(owner_id, sha256,
+name)`: тот же файл тем же пользователем под тем же именем — та же запись. Какие сессии
+получили артефакт во вводе, хаб помнит отдельно: их воркерам он отдаётся (§5.3, §12).
+События ссылаются только на `artifact_id`; ссылки на скачивание выдаются при рендере
+(§12). Удаления артефактов пока нет.
 
 ### Grant
 `owner_id` (кто выдал), `resource_type` (project/session), `resource_id`, `user_id`,
@@ -541,8 +546,16 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
   `/unarchive`, `/retry` (§5.2)
 - `POST /api/sessions/{id}/requests/{request_id}` {option_id | answers} → `{event_id, seq}`
   сохранённого ответа; закрытый запрос — `409 request_closed` (§10.1)
-- `POST /api/artifacts` (multipart) → `{id}`; `GET /api/artifacts/{id}/url` →
-  подписанная ссылка (§12)
+- `POST /api/artifacts` (multipart: поле `file`, необязательное `kind`) → `201` и объект
+  артефакта `{id, kind, name, mime, size, sha256, created_at}` (`api.artifact.json`); тот
+  же файл под тем же именем повторно → `200` и прежний объект; больше 100 МБ — `413
+  too_large`; неизвестный `kind` или нет `file` — `400`. `kind` без поля — по типу и
+  расширению (§12). `GET /api/artifacts/{id}` → объект артефакта; `GET
+  /api/artifacts/{id}/url` → `{url, expires_at}` (`api.artifact.url.json`), подписанная
+  ссылка на 10 минут (§12). Чужой или несуществующий артефакт — `404`. Ввод (`POST
+  .../input`) с `artifact_ids` чужих или несуществующих артефактов — `400
+  unknown_artifact`, больше 32 — `400`. Отдача по ссылке — `GET /artifacts/{id}?exp=&sig=`
+  (вне `/api`, §12), воркеру — `GET /worker/artifacts/{id}` (§5.3)
 - `PUT /api/sessions/{id}/read_cursor` {last_read_seq}
 - `GET /api/workers` → `{workers[]}`, `GET /api/workers/enroll/{code}` →
   `{name, os, created_at, country?}` (`EnrollInfo`; `country` — `CF-IPCountry` запроса
@@ -605,7 +618,7 @@ no_workspace`. Так только что зарегистрированный (
 `-` (уходит в командную строку агента); `client_op_id` — до 128 байт; иначе `400`.
 
 Ошибки REST: `{error: <code>, message}` с HTTP-статусом (у `workspace_conflict` — с
-дополнительными полями); `409` с кодами `archived`, `locked_vscode`, `request_closed`,
+дополнительными полями); `413 too_large` — артефакт больше лимита (§12); `409` с кодами `archived`, `locked_vscode`, `request_closed`,
 `no_workspace`, `worker_offline`, `workspace_conflict`, `workspace_in_use`,
 `personal_project`, `push_limit`, `conflict`; `400` — `bad_request` и коды проверки пути
 (`outside_allowed_roots`, `path_not_found`, `not_a_directory`, `invalid_path`); `504
@@ -774,6 +787,26 @@ worker_timeout` — воркер не ответил на запрос хаба;
 (§3 Event, §9.2). Запись исходного промпта пользователя в stream-json без эха
 не приходит: её `uuid` адаптер берёт из эха `--replay-user-messages` (`isReplay: true`);
 проверено на 2.1.307: `uuid` эха равен `uuid` записи промпта в jsonl.
+
+Вложения ввода (`session.input.artifact_ids`, §5.3, §12). До передачи ввода рантайму
+воркер скачивает каждый артефакт `GET /worker/artifacts/{id}` своим токеном (без
+редиректов) в `<workspace>/<cwd>/.hqc/inbox/<event_id>/<имя>`. Имя — из заголовка
+`x-hqc-artifact-name` ответа (percent-encoded UTF-8), санируется воркером: последний
+компонент пути, управляющие и `:*?"<>|` → `_`, без ведущих точек и пробелов и без
+завершающих, до 120 байт с сохранением расширения, пустое — `file`; совпадающие в одном
+вводе (без учёта регистра) получают `-2`, `-3`… перед расширением. Каталоги `.hqc`,
+`inbox`, `<event_id>` создаются по одному внутри канонического рабочего каталога, ни один
+не может быть символической ссылкой; файл пишется во временный и переименовывается на
+место. Если workspace — git-репозиторий (каталог `.git` или файл `.git` worktree, тогда
+общий git-каталог из `commondir`), в его `info/exclude` добавляется строка `.hqc/`. К
+тексту ввода добавляется блок: пустая строка, `Вложения:` и по строке `- <путь>` на файл,
+пути относительно рабочего каталога (`.hqc/inbox/<event_id>/<имя>`); пустой текст — только
+блок. Картинки (`kind: image`, `image/png|jpeg|gif|webp`, до 5 МБ) дополнительно идут в
+user message stream-json: `content` — массив из текстового блока и блоков `{type: image,
+source: {type: base64, media_type, data}}` (формат Messages API; **[проверить]** на живом
+CLI, фикстура `crates/hqc-worker/fixtures/inbox`). Артефакт, который хаб не отдаёт (`401`,
+`403`, `404`, `410`), — ввод отклоняется `error {internal, retryable: false}` (у хаба —
+`input_rejected`); сеть и диск — `retryable: true`; частично скачанное удаляется.
 
 Разрешения: при `--permission-prompts host --permission-prompt-tool stdio` запрос приходит в stdout как
 `control_request` с `subtype: can_use_tool` (`tool_name`, `input`,
@@ -1192,17 +1225,61 @@ warn|error}` с `author: {kind: system}`, через outbox, как осталь
 
 ## 12. Артефакты
 
-Хранилище: диск хаба или S3-совместимое, ключ по sha256. Типы: file, image, diff,
-html, text. Лимит артефакта 100 МБ. События хранят только `artifact_id`; клиент
-при рендере запрашивает `GET /api/artifacts/{id}/url` и получает подписанную ссылку
-с TTL 10 минут на публичный домен `artifacts.<hub-domain>` (вне Cloudflare Access).
-HTML рендерится в iframe с этого домена, `sandbox="allow-scripts"` без
-`allow-same-origin`, CSP без сетевых запросов, поэтому страница не видит cookie
-и API хаба. Воркер качает артефакты по `/worker/artifacts/{id}` своим токеном
-(§5.3), без TTL. Diff рендерится как дифф, image inline. Пользователь → агент:
-через `.hqc/inbox/`; картинки для рантаймов с vision дополнительно отдаются
-как изображение. Агент → пользователь: `hqc_attach`; диффы ACP-агентов адаптер
-сохраняет артефактом сам (§8.2).
+Хранилище: диск хаба (`HQC_ARTIFACT_DIR`, файл `<dir>/<sha256[0..2]>/<sha256>`; S3 —
+позже), ключ по sha256, содержимое одно на хэш. Типы: file, image, diff, html, text.
+Лимит артефакта 100 МБ (поток пишется во временный файл с подсчётом sha256, превышение —
+`413 too_large`, файл удаляется). Запись — §3 Artifact; повторная загрузка того же файла
+тем же пользователем под тем же именем возвращает прежнюю запись.
+
+`kind` при загрузке: явное поле `kind` клиента; иначе по типу из multipart (пустой и
+`application/octet-stream` угадываются по расширению): `image/*` → image; `.diff`,
+`.patch`, `text/x-diff`, `text/x-patch` → diff; `text/html` → html; прочие `text/*` → text;
+остальное → file.
+
+Ссылки. События хранят только `artifact_id`; клиент при рендере запрашивает
+`GET /api/artifacts/{id}/url` и получает `{url, expires_at}`: `<база>/artifacts/{id}?exp=<unix
+s>&sig=<base64url HMAC-SHA256 от "{id}.{exp}">`, TTL 10 минут. База —
+`HQC_ARTIFACT_PUBLIC_BASE` (публичный домен `artifacts.<hub-domain>` на тот же хаб, вне
+Cloudflare Access); не задана — ссылка относительная, на домен хаба (за Access). Ключ —
+`HQC_ARTIFACT_KEY` или случайный на запуск. `GET /artifacts/{id}` без подписи или с
+неверной — `403`, просроченная — `410`; клиент на `403`/`410` запрашивает ссылку заново
+(для `<img>` — один раз по `onerror`). Ссылку получает только владелец артефакта (`404`
+остальным); сама ссылка — право доступа, cookie не нужны.
+
+Заголовки отдачи (и по ссылке, и воркеру): `Content-Security-Policy: sandbox;
+default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'`,
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+`Cache-Control: private, max-age=600` (воркеру `private, no-store`), по ссылке ещё
+`Access-Control-Allow-Origin: *` и `Cross-Origin-Resource-Policy: cross-origin` (клиент
+читает дифф и текст через `fetch`). `Content-Type` по `kind`: image — `mime`, если он
+`image/*`; text и diff — `text/plain; charset=utf-8`; html — `text/html`; file —
+`application/octet-stream`. `Content-Disposition` (`filename` и `filename*=UTF-8''…`):
+image, text, diff — `inline`, file — `attachment`, `&dl=1` — всегда `attachment`. HTML
+`inline` — только если запрос пришёл на хост `HQC_ARTIFACT_PUBLIC_BASE`: тогда CSP
+`sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src
+'unsafe-inline'; img-src data:; font-src data:` без `X-Frame-Options`, и клиент
+рендерит его в iframe `sandbox="allow-scripts"` без `allow-same-origin` — страница без
+сетевых запросов, не видит cookie и API хаба. На домене хаба HTML — всегда `attachment`
+со `sandbox` CSP без скриптов, а клиент показывает ссылку «Открыть». На хосте
+`HQC_ARTIFACT_PUBLIC_BASE` хаб отдаёт только `/artifacts/*` (и `/health`), остальное —
+`404`; в CSP самого хаба (§20) этот origin добавляется в `img-src`, `frame-src` и
+`connect-src`.
+
+Воркер качает артефакты по `GET /worker/artifacts/{id}` своим токеном (§5.3), без TTL:
+только артефакты, пришедшие во вводе сессии этого воркера (остальным — `404`); имя и
+`kind` — в заголовках `x-hqc-artifact-name` (percent-encoded) и `x-hqc-artifact-kind`.
+
+Клиент. Пользователь → агент: файлы прикладываются к сообщению (скрепка, перетаскивание,
+вставка; несколько; превью картинок как `data:`-URL), сначала каждый `POST /api/artifacts`,
+потом ввод с `artifact_ids` (текст может быть пустым); повтор неудачной отправки не
+загружает уже загруженное. Воркер кладёт их в `.hqc/inbox/` и подставляет пути (§8.1);
+картинки для рантаймов с vision дополнительно отдаются как изображение. В ленте
+вложения `user.message` и события `attachment` рисуются одинаково: image — inline, diff —
+блоком кода с подсветкой добавленных и удалённых строк (до 512 КБ, больше — карточкой),
+html — iframe с домена артефактов или ссылка «Открыть», text и file — карточка с именем,
+размером и кнопками «Открыть» (кроме file) и «Скачать». Агент → пользователь:
+`hqc_attach` (итерация 3); диффы ACP-агентов адаптер сохраняет артефактом сам (§8.2).
+Загрузка воркером (`PUT /worker/artifacts`, §5.4) — вместе с `hqc_attach`.
 
 ## 13. Жизненный цикл workspace
 
@@ -1555,6 +1632,17 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 
 ## 23. История изменений
 
+### 0.17 → 0.18 (T16, артефакты; слито после T17)
+§3 Artifact: `session_id` — первая сессия ввода, `storage_key` = sha256, уникальность
+`(owner_id, sha256, name)`. §6: тела `POST /api/artifacts` (`file`, `kind?` → объект
+артефакта, `200` на повтор, `413 too_large`), новый `GET /api/artifacts/{id}`, `GET
+.../url` → `{url, expires_at}`, `400 unknown_artifact` во вводе, до 32 артефактов. §8.1:
+абзац про `.hqc/inbox` — скачивание, санация имён, `info/exclude`, блок «Вложения:», image
+content block stream-json **[проверить]**, ошибки скачивания. §12 фактами: хранилище на
+диске, правило `kind`, формат и подпись ссылки, `403`/`410`, заголовки отдачи, HTML inline
+только на `HQC_ARTIFACT_PUBLIC_BASE`, CSP хаба с origin домена артефактов, права воркера,
+поведение клиента. Миграция хаба `0007` (при слиянии переименована из `0006`, занятого T17). Вопросы и отложенное —
+`docs/notes/t16-questions.md`.
 ### 0.16 → 0.17 (T17, служебная сессия воркера и несессионные подтверждения)
 §3 Worker: `system_session_id` — когда создаётся (регистрация, миграция `0006`, `hello`), где
 виден (`hello.ack`, `GET /api/workers`). §10.2 переписан фактами: служебная сессия (личный

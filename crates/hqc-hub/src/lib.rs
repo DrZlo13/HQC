@@ -14,6 +14,7 @@ use sqlx::PgPool;
 
 pub mod api;
 pub mod app;
+pub mod artifacts;
 pub mod auth;
 pub mod client_files;
 pub mod client_ws;
@@ -88,12 +89,25 @@ pub fn router(app: AppState) -> Router {
             "/api/push/subscribe",
             post(api::push_subscribe).delete(api::push_unsubscribe),
         )
+        .route(
+            "/api/artifacts",
+            post(artifacts::upload).layer(axum::extract::DefaultBodyLimit::max(
+                artifacts::upload_body_limit(&app.config.artifacts),
+            )),
+        )
+        .route("/api/artifacts/{id}", get(artifacts::meta))
+        .route("/api/artifacts/{id}/url", get(artifacts::url))
+        .route("/artifacts/{id}", get(artifacts::signed))
+        .route("/worker/artifacts/{id}", get(artifacts::for_worker))
         .route("/api/ws", get(client_ws::handler))
         .route("/worker/enroll", post(api::worker_enroll))
         .route("/worker/enroll/poll", post(api::worker_enroll_poll))
         .route("/worker/ws", get(worker_ws::handler))
         .fallback(client_files::handler)
-        .layer(axum::middleware::from_fn(security::guard))
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            security::guard,
+        ))
         .with_state(app)
 }
 

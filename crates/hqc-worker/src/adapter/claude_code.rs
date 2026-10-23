@@ -41,6 +41,7 @@ use self::engine::{Action, Core};
 use self::process::{CommandSpec, ExitInfo, OsSpawner, Sig, SignalFn, Spawner};
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
 use crate::config::{Config, StartSpec};
+use crate::inbox::InboxFile;
 use crate::permissions::{PermissionMode, Permissions, Policy};
 
 const KILL_GRACE: Duration = Duration::from_secs(5);
@@ -488,6 +489,41 @@ impl ClaudeCodeAdapter {
     }
 }
 
+/// Image types the Messages API takes as an image block, and the largest image sent inline;
+/// bigger ones reach the agent by path only.
+const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+pub const MAX_INLINE_IMAGE: u64 = 5 * 1024 * 1024;
+
+/// Content blocks `{type: image, source: {type: base64, media_type, data}}` for the image
+/// attachments of an input (SPEC §8.1). A file that cannot be read is skipped: its path is
+/// in the text anyway.
+pub async fn image_blocks(files: &[InboxFile]) -> Vec<serde_json::Value> {
+    use base64::Engine;
+    let mut out = Vec::new();
+    for f in files {
+        if f.kind != hqc_proto::event::ArtifactKind::Image
+            || !IMAGE_TYPES.contains(&f.mime.as_str())
+            || f.size > MAX_INLINE_IMAGE
+        {
+            continue;
+        }
+        match tokio::fs::read(&f.path).await {
+            Ok(b) => out.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": f.mime,
+                    "data": base64::engine::general_purpose::STANDARD.encode(b),
+                },
+            })),
+            Err(e) => {
+                tracing::warn!(path = %f.path.display(), "image attachment not readable: {e}")
+            }
+        }
+    }
+    out
+}
+
 #[async_trait]
 impl Adapter for ClaudeCodeAdapter {
     async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
@@ -499,8 +535,17 @@ impl Adapter for ClaudeCodeAdapter {
     }
 
     async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()> {
+        self.input_with(input, &[]).await
+    }
+
+    async fn input_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<()> {
+        let images = image_blocks(files).await;
         let p = self.running()?;
-        let actions = lock(&p.core).input(input);
+        let actions = lock(&p.core).input_with_images(input, images);
         tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
         p.io.run(actions).await
     }

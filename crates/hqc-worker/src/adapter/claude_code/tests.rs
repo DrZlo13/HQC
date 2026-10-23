@@ -1210,6 +1210,59 @@ fn control_response_echo_and_unknown_requests() {
         .is_empty());
 }
 
+/// T16 (SPEC §8.1, §12, fixtures/inbox): an input with an image attachment is a content
+/// array of the text (with the block of paths) and a base64 image block; other kinds, types
+/// the API does not take and oversized images reach the agent by path only.
+#[tokio::test]
+async fn image_attachments_are_image_blocks() {
+    use crate::inbox::InboxFile;
+    use hqc_proto::event::ArtifactKind;
+    let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/inbox");
+    let text = std::fs::read_to_string(fx.join("expected-text.txt")).unwrap();
+    let want: Value =
+        serde_json::from_str(&std::fs::read_to_string(fx.join("expected-stdin.json")).unwrap())
+            .unwrap();
+    let file = |name: &str, kind, mime: &str, size| InboxFile {
+        artifact_id: Uuid::nil(),
+        path: fx.join("artifacts").join(name),
+        rel: name.into(),
+        kind,
+        mime: mime.into(),
+        size,
+    };
+    let files = [
+        file("screen.png", ArtifactKind::Image, "image/png", 69),
+        file("fix.patch", ArtifactKind::Diff, "text/plain", 93),
+        file("screen.png", ArtifactKind::Image, "image/svg+xml", 69),
+        file(
+            "screen.png",
+            ArtifactKind::Image,
+            "image/png",
+            super::MAX_INLINE_IMAGE + 1,
+        ),
+    ];
+    let images = super::image_blocks(&files).await;
+    assert_eq!(images.len(), 1);
+
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = SessionInput {
+        session_id: sid,
+        event_id: Uuid::now_v7(),
+        text: text.clone(),
+        artifact_ids: vec![Uuid::nil()],
+        peer_prefix: vec![],
+    };
+    let a = core.input_with_images(&input, images);
+    assert!(matches!(&a[..], [Action::Write(v)] if *v == want), "{a:?}");
+    // Without images the content stays a string.
+    let a = core.input(&input);
+    assert!(
+        matches!(&a[..], [Action::Write(v)] if v["message"]["content"] == json!(text)),
+        "{a:?}"
+    );
+}
+
 #[test]
 fn held_text_is_not_final_before_a_tool_call() {
     let sid = Uuid::now_v7();

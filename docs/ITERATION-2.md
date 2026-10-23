@@ -204,3 +204,52 @@ warnings`, `cargo test --workspace` (хаб: `tests/worker_replace.rs` — за�
 (`tests/enroll.test.tsx` — диалог замены; `tests/workers.test.tsx` — «Удалить», 409, группа
 «Воркеры» без отозванных; e2e через мок), `E2E_CLAUDE_BIN=/usr/bin/false
 tools/e2e-local.sh` → `PASS (rehearsal)`. Вопросы — `docs/notes/t19-questions.md`.
+
+## T20. Подхват без развилок (сделано, SPEC 0.22)
+
+Разделы: §3 (Worker, Session), §4, §5.2, §5.4, §6, §9.2, §9.3. Фон (2026-10-23, мак
+пользователя): сессия была открыта в VS Code; hqc подхватил её после 30 с тишины в файле, воркер
+дописал ходы через `--resume`; затем пользователь написал в ту же открытую сессию в VS Code, и
+плагин прицепил ход к своей последней записи в памяти, а не к хвосту файла. В jsonl у записи два
+потомка, VS Code видит только свою ветку, 37 записей hqc в его контекст не попали. Правило «30 с
+тишины» не отличает закрытую сессию от открытой и бездействующей.
+- hqc-proto (только добавление): `HeldBy {entrypoint, status}`; `held_by?` в `session.state` и
+  `mirror.event` (поля нет / `null` / объект); `held_by?` в объекте сессии и `session.summary`;
+  `system` с полями `session_forked` (`SessionForked {at_uuid, branch_from, orphaned_turns}`,
+  `Event::id_of_fork`); примеры `worker.session.state.held.json`,
+  `worker.session.state.released.json`, `worker.mirror.event.forked.json`,
+  `api.session.vscode.json`.
+- hqc-claude-jsonl: `Link` (`uuid`, `parentUuid`, `isSidechain` любой записи); фикстура
+  `fork-2.1.308` (живой прогон без VS Code: `--resume --resume-session-at`).
+- Воркер: модуль реестра (`mirror/holders.rs`) — `<config>/sessions/<pid>.json` раз в проход
+  зеркала, живые pid (`kill -0`), без своих pid и групп процессов (pid детей адаптера — в
+  `OwnRecords`), терпим к незнакомым полям и битым файлам; изменения держателя — отчёт о
+  держателе (`session.state` с nil `session_id`) через outbox, не чаще раза в 2 с на транскрипт,
+  заново после каждого `hello`; сессия, чей транскрипт открыли вне hqc, останавливается после
+  хода; `held_by` в `mirror.event`; `capabilities.claude_code.sessions_registry`. Дерево записей
+  транскрипта (`mirror/fork.rs`) и `system session_forked` через `mirror.event`.
+- Хаб: миграция `0010` (`sessions.held_by`, `vscode_held_at`); держатель → `locked_by: vscode`
+  (из `hqc` — `session_released` с `reason: vscode_open`, `pending` → `failed`), держатель исчез →
+  `none` сразу, если hqc-процесса нет; при данных реестра `recent` не запирает; `POST /takeover`
+  при держателе — `409 vscode_open` с `held_by`, без держателя у воркера с реестром — сразу,
+  30 с — запасное правило; `held_by` у `409 locked_vscode`; на `hello` держатели забываются;
+  `system` из зеркала — с автором `system`.
+- Клиент: плашки «Сессия открыта в VS Code … закройте её там» (без кнопки) и «ведётся в VS
+  Code» (кнопка «Подхватить»); `409 vscode_open` — текстом хаба; строка `session_forked` с
+  иконкой предупреждения; мок: импорт приносит открытую в VS Code сессию с развилкой,
+  `closeVsCode` для тестов.
+- Документация: SPEC 0.22 (§3, §4, §5.2, §5.4, §6, §9.2, §9.3, §19, §23);
+  `docs/notes/t15-questions.md` — вопрос про освобождение закрыт ссылкой; RUNBOOK §4 — сценарий
+  подхвата с шагом «закройте сессию в VS Code».
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (воркер: `mirror::holders` — живой/мёртвый pid, свои pid и группа,
+`sdk-cli` своего транскрипта, битые файлы; `mirror::fork` — параллельные вызовы не развилка,
+развилка один раз, цикл; `mirror::tests::fork_is_reported_once`, `holder_in_registry`;
+`tests/mirror.rs::holder_releases_the_session`; хаб: `tests/mirror.rs` —
+`holder_blocks_takeover_until_closed`, `holder_releases_hqc`, `forked_event_is_stored`; парсер:
+`t20_fork_in_one_transcript`), `cd client && npm test && npm run build` (`projects.test.tsx` —
+открытая сессия без «Подхватить», `409 vscode_open` текстом, освобождение; `render.test.tsx` —
+строка развилки), `E2E_CLAUDE_BIN=/usr/bin/false tools/e2e-local.sh` → `PASS (rehearsal)`.
+Живой `HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_holder` подтвердил держателя и `409
+vscode_open`, освобождение после выхода процесса упало и исправлено (порядок отчётов и
+`recent`), повторный живой прогон не делался. Вопросы — `docs/notes/t20-questions.md`.

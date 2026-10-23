@@ -15,7 +15,8 @@ Rust tests require that each file deserializes and serializes back to exactly th
   `agent.delta` without `seq`), `subscribed`, `delivery`, `summary`, `session.summary`, `pong`,
   `error`.
 - `api.<name>[.request].json` — REST bodies (SPEC §5.1, §6, `hqc_proto::api`): `api.session.json`
-  (the session object; its summary is `client.session.summary.json`), `api.events.json`,
+  (the session object; its summary is `client.session.summary.json`; `api.session.vscode.json` —
+  one held open in VS Code, `held_by`, T20), `api.events.json`,
   `api.input.request.json` / `api.input.json`, `api.error.json`, `api.vapid.json`,
   `api.push.subscribe.json` (`PushSubscription.toJSON()`), `api.push.json` (Web Push body,
   read by `client/public/sw.js`), `api.enroll*.json` (worker enrollment),

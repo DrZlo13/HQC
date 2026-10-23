@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.21, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.22, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -99,7 +99,7 @@ Project, Workspace, Session, Artifact, Grant, ScheduledMessage. У Event вла�
 
 ### Worker
 `owner_id`, `name`, `os`, `token_hash`, `status` (online/offline), `last_seen`,
-`protocol_version`, `boot_id` (из последнего `hello`, §5.2), `capabilities` (`claude_code: {version}`, `acp_agents[{name,
+`protocol_version`, `boot_id` (из последнего `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — результат `initialize` каждого
 агента при старте воркера), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (имена), `env_bindings[]` (путь → окружение, профиль Hermes),
@@ -155,7 +155,11 @@ Workspace — объект хаба **[решение]**: воркер о нём
 `auto_approve`, `wake_on_send` (по умолчанию false), `locked_by` (none/hqc/vscode),
 `last_seq`, `archived`, `vscode_active_at` (nullable; когда хаб последний раз получил
 событие зеркала с `recent` — запись в файл за последние 30 с; по нему считается тишина для
-подхвата, §9.3; в объект сессии API не входит), `system` (bool: служебная сессия воркера,
+подхвата без данных реестра, §9.3; в объект сессии API не входит), `held_by` (nullable
+`{entrypoint, status}`: живой процесс Claude Code вне hqc, у которого транскрипт сессии открыт,
+по реестру живых сессий на воркере, §9.3; в объекте сессии API и в `session.summary` — поле
+`held_by?`), `vscode_held_at` (nullable; с какого момента транскрипт держат; в объект сессии
+API не входит), `system` (bool: служебная сессия воркера,
 §10.2; в объекте сессии API — только `system: true`). `state` и `queue_len` (§17.1) **не хранятся**, вычисляются
 хабом при отдаче. В первой версии в сессии ровно один агент; доступ людей к сессии
 определяется только Grant.
@@ -167,8 +171,8 @@ Code — `ai-title`, §8.1) хаб применяет и ставит `runtime`,
 `user`: переименованную пользователем сессию рантайм не переименовывает.
 
 Зеркало (§9): `locked_by` — кто ведёт сессию: `hqc` — процесс воркера (с подхвата или первого
-ввода до его остановки), `vscode` — чужой писатель транскрипта (VS Code, `claude` в терминале),
-`none` — никто. Сессия, созданная зеркалом, получает `runtime_session_id` = uuid файла, `cwd`
+ввода до его остановки), `vscode` — чужой держатель или писатель транскрипта (VS Code, `claude`
+в терминале), `none` — никто. Сессия, созданная зеркалом, получает `runtime_session_id` = uuid файла, `cwd`
 из записи относительно workspace, заголовок из `ai-title` (`title_source: runtime`) или «Сессия
 N», `locked_by` по §9.1. Ищется по паре (`worker_id`, `runtime_session_id`).
 
@@ -263,7 +267,8 @@ name)`: тот же файл тем же пользователем под те�
 | `input_rejected` | хаб | воркер отклонил ввод не как неудачный старт, ввод стал `failed` (§5.2) |
 | `ask_cancelled` | хаб | отложенный `hqc_ask` закрыт `mcp.cancel` от воркера (§5.2), итерация 3 |
 | `session_taken_over` | хаб | сессию подхватили (`POST /takeover`, §9.3) |
-| `session_released` | хаб | сессию продолжили вне hqc (VS Code, `claude` в терминале): воркер остановил агента после хода, `pending` вводы стали `failed` (§9.3) |
+| `session_released` | хаб | сессию продолжили или открыли вне hqc (VS Code, `claude` в терминале): воркер остановил агента после хода, `pending` вводы стали `failed`; поле `reason`: `vscode_open` — транскрипт держит живой чужой процесс, `foreign_write` — в файл писали извне (§9.3) |
+| `session_forked` | воркер (зеркало) | в транскрипте развилка: писатель продолжил с более ранней записи, ходы другой линии не попали в его контекст; поля `at_uuid` (запись с двумя линиями), `branch_from` (`vscode` \| `hqc` — кто начал новую линию), `orphaned_turns` (ходов в другой линии). Клиент рисует строкой с предупреждением (§9.3) |
 | `worker_log` | воркер | строка лога воркера уровня warn/error в его служебной сессии, уровень — поле `level` (§10.2); не считается непрочитанной (§6), push нет (§16) |
 | `workspace_unknown` | хаб (миграция 0.16) | сессия итерации 1 без workspace, чей воркер не сообщал папку: архивирована при обновлении хаба |
 | `worker_replaced` | хаб | в служебной сессии: воркер перерегистрирован с заменой (§5.1); дополнительные поля `old_name`, `new_name` |
@@ -376,7 +381,8 @@ system_session_id?}` (служебная сессия воркера, §10.2)
 ### 5.2 Гарантии доставки
 Worker → hub:
 - Воркер ведёт **outbox** на диске: событие сначала пишется в outbox, потом отправляется.
-  Через outbox идут `event`, `mirror.event`, `mcp.call`.
+  Через outbox идут `event`, `mirror.event`, отчёты о держателе (`session.state` с nil
+  `session_id`, §5.4, §9.3), `mcp.call`.
 - Хаб отвечает `ack {event_id, seq}`; до ack воркер повторяет после переподключения.
 - Дубли отбрасываются по `event_id` (уникальный индекс) и получают `ack` с `seq` уже
   сохранённого события. События для сессий, которых хаб не знает (удалены), получают
@@ -532,22 +538,31 @@ MCP-вызовы (worker → hub → worker):
 - `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[]}
   — `boot_id`: uuid, новый на каждый запуск процесса воркера, одинаковый во всех `hello`
-  этого процесса (§5.2, §17.3). `capabilities` — `{claude_code?: {version}, acp_agents[]}`.
+  этого процесса (§5.2, §17.3). `capabilities` — `{claude_code?: {version,
+  sessions_registry?}, acp_agents[]}`; `sessions_registry: true` — воркер читает реестр живых
+  сессий Claude Code и сообщает держателей (§9.3).
   Workspace воркер не сообщает (с 0.16; поле итерации 1 `capabilities.workspace_path` хаб
   больше не читает): workspace создаются в хабе (§3, §6) и проверяются воркером по
   `allowed_roots`.
 - `event` {event} → `ack` (`session_id` внутри события)
-- `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?}
+- `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?, held_by?}
   — `title`: заголовок, который дал сессии рантайм (§8.1); воркер повторяет последний во
   всех следующих `session.state`, хаб применяет его по правилу `title_source` (§3 Session),
-  приводя к одной строке до 200 символов.
-- `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent} — события из
+  приводя к одной строке до 200 символов. `held_by` — держатель транскрипта (§9.3): поля нет —
+  у воркера нет данных реестра, `null` — никто, `{entrypoint, status}` — живой чужой процесс.
+  **Отчёт о держателе** — `session.state` с nil `session_id`, `runtime_session_id` транскрипта и
+  `held_by` (`process_state: stopped`, `locked_by: none` — хаб их не читает): хаб ищет сессию
+  по воркеру и `runtime_session_id` (нет такой — только `ack`) и применяет `held_by` по §9.3.
+  Отчёты идут через outbox в одном порядке с `mirror.event`, ответ — `ack {}`.
+- `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — события из
   зеркала (§9.1, §9.2), через outbox, ответ — `ack {event_id, seq}` как на `event` (дубль —
   `seq` сохранённого, папка не под зеркалом этого воркера или `cwd` вне неё — без `seq`).
   `workspace_path` — путь из `mirror.set`, `cwd` — абсолютный путь из записи, `title` —
   последний `ai-title` файла, `recent` — файл изменён меньше 30 с назад, когда воркер читал
-  запись. Хаб ищет сессию по воркеру и `runtime_session_id` и создаёт её для неизвестного;
-  `event.session_id` (воркер ставит nil uuid) и `author.id` игнорирует и заполняет сам.
+  запись, `held_by` — держатель транскрипта в момент чтения, как в `session.state`. Хаб ищет
+  сессию по воркеру и `runtime_session_id` и создаёт её для неизвестного; `event.session_id`
+  (воркер ставит nil uuid) и `author.id` игнорирует и заполняет сам (у `system` — `{kind:
+  system}`).
 - `worker.approval.request` {request_id, kind, description, expires_at} → `ack {}` —
   подтверждение владельца вне сессии (`kind`: `workspace.use`, позже `workspace.create`,
   `workspace.delete`; список открытый). Хаб пишет `approval.request` в служебную сессию
@@ -619,8 +634,9 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
 - `POST /api/sessions/{id}/stop`, `/steer`, `/takeover`, `/archive`, `/unarchive`, `/retry`
   (§5.2). `/takeover` (§9.3) — продолжить в hqc сессию, которую вёл VS Code: `locked_by: hqc`,
   `system session_taken_over`, воркеру `session.start` с `mode: resume`; ответ — объект
-  сессии; при `locked_by: hqc` ничего не делает. VS Code писал меньше 30 с назад — `409
-  vscode_active`, воркер офлайн — `409 worker_offline`, архив — `409 archived`, служебная
+  сессии; при `locked_by: hqc` ничего не делает. Транскрипт держит живой чужой процесс — `409
+  vscode_open` с `held_by`; без данных реестра VS Code писал меньше 30 с назад — `409
+  vscode_active`; воркер офлайн — `409 worker_offline`, архив — `409 archived`, служебная
   сессия — `409 system_session`
 - `POST /api/sessions/{id}/requests/{request_id}` {option_id | answers} → `{event_id, seq}`
   сохранённого ответа; закрытый запрос — `409 request_closed` (§10.1)
@@ -671,7 +687,9 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
 `{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, title_source, slug, agent: {runtime,
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
-last_seq, archived, system?, state, queue_len, last_read_seq, unread, created_at, updated_at}`.
+last_seq, archived, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
+updated_at}`. `held_by` (`{entrypoint, status}`) — сессию сейчас держит открытой Claude Code вне
+hqc (§9.3): `state: locked_vscode`, подхват — `409 vscode_open`, пока её не закроют там.
 `system: true` — служебная сессия воркера (§10.2): ввод, `stop`, `retry`, `takeover`,
 `archive` и `DELETE` — `409 system_session`, `PATCH auto_approve: true` — `403`.
 `state`, `queue_len` (§17.1), `last_read_seq` и `unread` вычисляются для запросившего
@@ -694,7 +712,7 @@ WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; с�
   клиент обновляет у себя `delivery`/`delivered_at` события с этим `seq`;
   `{type: summary, sessions[]}` — ответ на `subscribe_summary`, все сессии пользователя;
   `{type: session.summary, session}` — изменилась одна сессия; элемент — `{session_id,
-  project_id, title, state, queue_len, unread, last_seq, last_read_seq}` (то же, что
+  project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?}` (то же, что
   в объекте сессии); `{type: pong}`; `{type: error, code, message, session_id?}`.
   Неизвестный `type` клиент игнорирует.
 - `unread` — число событий с `seq > last_read_seq` среди: `agent.message` с
@@ -715,10 +733,13 @@ no_workspace`. Так только что зарегистрированный (
 `-` (уходит в командную строку агента); `client_op_id` — до 128 байт; иначе `400`.
 
 Ошибки REST: `{error: <code>, message}` с HTTP-статусом (у `workspace_conflict` — с
-дополнительными полями, у `locked_vscode` — `hint`); `413 too_large` — артефакт больше
-лимита (§12); `409` с кодами `archived`, `locked_vscode` (ввод в сессию, которую ведёт VS
-Code; тело `{error, message, hint: "takeover"}`, клиент предлагает «Подхватить», §9.3),
-`vscode_active` (подхват раньше 30 с тишины, §9.3), `system_session` (служебная сессия
+дополнительными полями, у `locked_vscode` — `hint` и `held_by?`, у `vscode_open` — `held_by`);
+`413 too_large` — артефакт больше лимита (§12); `409` с кодами `archived`, `locked_vscode`
+(ввод в сессию, которую ведёт VS Code; тело `{error, message, hint: "takeover", held_by?}`,
+клиент предлагает «Подхватить» или, при `held_by`, закрыть сессию в VS Code, §9.3),
+`vscode_open` (подхват сессии, которую держит живой чужой процесс; `message` — «сессия открыта в
+VS Code: закройте её там и подхватите снова», §9.3), `vscode_active` (подхват раньше 30 с
+тишины без данных реестра, §9.3), `system_session` (служебная сессия
 воркера, §10.2), `request_closed`, `no_workspace`, `worker_offline`, `workspace_conflict`,
 `workspace_in_use`, `personal_project`, `push_limit`, `conflict`, `worker_online` (замена
 воркера на связи, §5.1), `worker_not_revoked` и `worker_has_sessions` (удаление воркера, у
@@ -1214,41 +1235,104 @@ Code». Начальный `locked_by` по флагу `recent` кадра: во
   зеркала: блок `i > 0` — v5 от `"<uuid>/<i>"`. CLI до сих пор писал один блок на
   запись (все фикстуры и живые прогоны, в том числе 2.1.308), но иначе стык дал бы дубли.
 
-Сессия с `locked_by: vscode` видна в хабе read-only: `state: locked_vscode`, в клиенте подпись
-«ведётся в VS Code», поле ввода закрыто, кнопка «Подхватить».
+Сессия с `locked_by: vscode` видна в хабе read-only: `state: locked_vscode`, поле ввода закрыто.
+В клиенте две плашки: с `held_by` — «Сессия открыта в VS Code … закройте её там» без кнопки
+(подхват всё равно `409 vscode_open`); без `held_by` (свежие записи, держателя нет или нет
+данных реестра) — «ведётся в VS Code» и кнопка «Подхватить».
 
 ### 9.3 Подхват **[решение]**
-- Кнопка «подхватить» (`POST /api/sessions/{id}/takeover`) при `locked_by: vscode` и
-  отсутствии записи в файл за последние 30 с: хаб ставит `locked_by: hqc`, пишет `system` с
-  кодом `session_taken_over` («Сессию подхватил hqc. Если она открыта в VS Code, её контекст там
-  устарел: после возврата переоткройте сессию в VS Code.») и шлёт воркеру `session.start` с
-  `mode: resume` и `runtime_session_id` — uuid файла; адаптер по наличию файла делает
-  `--resume` (§8.1). «Тишина» — 30 с с момента, когда хаб получил последний `mirror.event` с
-  `recent` (поле сессии `vscode_active_at`); раньше — `409 vscode_active`, воркер офлайн —
-  `409 worker_offline`, архив — `409 archived`. Для `locked_by: none` подхват тоже проходит, для
-  `hqc` — ничего не делает. Ответ — объект сессии.
+Правило T15 «30 с тишины в файле» не отличает закрытую сессию от открытой и бездействующей. На
+практике (2026-10-23) hqc подхватил открытую в VS Code сессию после 30 с тишины и дописал ходы
+через `--resume`; затем пользователь написал в VS Code, и плагин прицепил свой ход к своей
+последней записи в памяти, а не к хвосту файла: у записи два потомка, VS Code видит только свою
+ветку, 37 записей hqc в его контекст не попали. С 0.22 (T20) подхват решает **держатель**
+транскрипта, а развилки, если всё-таки случились, видны в ленте.
+
+**Держатель.** Claude Code (2.1.308) ведёт реестр живых сессий `<config>/sessions/<pid>.json`
+(`<config>` — как в §9): `pid` (число; встречался и строкой), `sessionId`, `cwd`, `entrypoint`
+(`claude-vscode` у плагина VS Code, `sdk-cli` у `claude -p` и процессов адаптера, есть другие),
+`kind`, `status` (`idle` | `busy`), `updatedAt` (мс), `version` и другие поля. Рядом лежат
+`<pid>.<hash>.key` — воркер их не читает. Процесс, упавший без уборки, оставляет файл, поэтому
+запись живая, только если процесс `pid` существует (`kill -0`). Воркер читает каталог раз в
+проход зеркала (2 с; держателей — для всех транскриптов, а не только под зеркалом), исключает
+свои процессы — pid агентов и их группы процессов (адаптер запускает CLI лидером группы), а также
+запись `sdk-cli` транскрипта, который сейчас ведёт свой процесс (на случай обёртки с другим pid),
+— и пропускает незнакомые поля и битые файлы. Остальные записи — держатели; из нескольких на один
+транскрипт берётся `busy`, затем самая свежая. Есть ли реестр, воркер сообщает в `hello`
+(`capabilities.claude_code.sessions_registry: true`, если каталог существует, §5.4).
+
+- Изменение держателя (появился, исчез, сменил `status`) воркер сообщает хабу отчётом о
+  держателе — `session.state` с nil `session_id`, `runtime_session_id` транскрипта и `held_by:
+  {entrypoint, status} | null` (§5.4) — не чаще раза в 2 с на транскрипт, через outbox, в одном
+  порядке с `mirror.event` (прямой кадр обгонял бы события из outbox со старым `held_by`; так
+  провалился первый живой прогон T20). Каждое `mirror.event` несёт держателя, какого воркер видел
+  при чтении. На `hello` хаб забывает держателей сессий воркера (`locked_by` не трогает), воркер
+  после `hello.ack` сообщает текущих заново.
+- Сессия с держателем — `locked_by: vscode` независимо от записей в файл (в том числе импорт
+  открытой и бездействующей сессии). Держатель исчез — `locked_by: none` сразу, без 30 с, если
+  hqc-процесса по сессии нет (`process_state: stopped`); иначе остаётся `vscode`. При данных
+  реестра (`held_by` в `mirror.event`) `recent` сессию не запирает: запись без держателя сделал
+  процесс, который уже завершился.
+- Держатель появился, пока сессию ведёт hqc: хаб сразу ставит `locked_by: vscode` и пишет `system
+  session_released` с `reason: vscode_open` («Сессию открыли в VS Code: hqc остановил агента после
+  хода. Чтобы вести её отсюда, закройте её в VS Code и подхватите снова.»), `pending` вводы
+  становятся `failed`; воркер останавливает агента после текущего хода (сразу, если хода нет) и
+  очищает свою очередь ввода — как при чужой записи ниже.
+- Кнопка «подхватить» (`POST /api/sessions/{id}/takeover`). Живой держатель — `409 vscode_open`
+  с `message` «сессия открыта в VS Code: закройте её там и подхватите снова» и полем `held_by`.
+  Держателя нет: у воркера с реестром подхват проходит сразу; без данных реестра (старый CLI,
+  воркер без реестра) действует запасное правило — при `locked_by: vscode` нужна тишина 30 с с
+  момента, когда хаб получил последний `mirror.event` с `recent` (поле `vscode_active_at`),
+  раньше — `409 vscode_active`. Подхват ставит `locked_by: hqc`, пишет `system session_taken_over`
+  («Сессию подхватил hqc. Если она открыта в VS Code, её контекст там устарел: после возврата
+  переоткройте сессию в VS Code.») и шлёт воркеру `session.start` с `mode: resume` и
+  `runtime_session_id` — uuid файла; адаптер по наличию файла делает `--resume` (§8.1). Воркер
+  офлайн — `409 worker_offline`, архив — `409 archived`. Для `locked_by: none` подхват тоже
+  проходит, для `hqc` — ничего не делает. Ответ — объект сессии.
 - Сообщение в сессию с `locked_by: vscode` **отклоняется** `409 locked_vscode` с полем
-  `hint: "takeover"` (клиент предлагает «Подхватить»); тихой очереди нет. Воркер на ввод
-  отпущенной сессии отвечает `error {code: locked_vscode, retryable: false}`.
-- Детекция чужого писателя: учитываются только записи `type: user` и `type: assistant`
+  `hint: "takeover"` (и `held_by`, если держатель жив; клиент предлагает «Подхватить» или
+  закрыть сессию в VS Code); тихой очереди нет. Воркер на ввод отпущенной сессии отвечает
+  `error {code: locked_vscode, retryable: false}`.
+- Детекция чужого писателя — запасной путь для писателя, которого реестр не показал (процесс
+  короче прохода, нет реестра): учитываются только записи `type: user` и `type: assistant`
   основной цепочки (`isSidechain: false`, не `isMeta`), из которых получается хотя бы одно
   событие (пустой `thinking` не в счёт, §9). Запись с `uuid`, которого адаптер не видел
   в stream-json (и который не является его собственным промптом, §8.1), во время
   работы hqc-процесса означает, что сессию продолжили в VS Code: воркер
   останавливает своего агента после текущего хода (сразу, если хода нет), очередь ввода
   воркера очищается, `session.state` несёт `locked_by: vscode`; хаб пишет `system` с кодом
-  `session_released` («Сессию продолжили в VS Code: hqc остановил агента после хода…»), а
-  `pending` вводы становятся `failed`. Затем зеркало отдаёт придержанные записи. Пока
-  hqc-процесс не запущен, любая такая запись с `recent` переводит сессию в `locked_by: vscode`
-  (из `hqc` — тоже с `session_released`). `locked_by` из `session.state` хаб применяет так:
-  `vscode` воркера побеждает всегда; `vscode` хаба не снимается остановкой процесса (`none`)
-  и процессом, который хаб не запускал подхватом (`hqc`); иначе — как сообщил воркер.
-  Проверено на 2.1.307 фикстурами T0 (тест `t0_stream_and_transcript_share_uuids`) и на
-  2.1.308 фикстурами T15 (`t15_two_writers_share_one_transcript`, тесты зеркала
-  `own_records_are_not_foreign`, `outside_writer_is_detected`, живой
-  `live_vscode_import_takeover_release`): uuid всех записей `user`/`assistant` основной
-  цепочки, включая `tool_result` и эхо промпта, совпадают в stream-json и jsonl; при `--resume`
-  stream-json старую историю не повторяет.
+  `session_released` и `reason: foreign_write` («Сессию продолжили в VS Code: hqc остановил
+  агента после хода…»), а `pending` вводы становятся `failed`. Затем зеркало отдаёт придержанные
+  записи. Пока hqc-процесс не запущен, любая такая запись с `recent` без данных реестра переводит
+  сессию в `locked_by: vscode` (из `hqc` — тоже с `session_released`). `locked_by` из
+  `session.state` хаб применяет так: `vscode` воркера побеждает всегда; `vscode` хаба не
+  снимается остановкой процесса (`none`) и процессом, который хаб не запускал подхватом (`hqc`);
+  иначе — как сообщил воркер. Проверено на 2.1.307 фикстурами T0 (тест
+  `t0_stream_and_transcript_share_uuids`) и на 2.1.308 фикстурами T15
+  (`t15_two_writers_share_one_transcript`, тесты зеркала `own_records_are_not_foreign`,
+  `outside_writer_is_detected`, живой `live_vscode_import_takeover_release`): uuid всех записей
+  `user`/`assistant` основной цепочки, включая `tool_result` и эхо промпта, совпадают в
+  stream-json и jsonl; при `--resume` stream-json старую историю не повторяет.
+- **Развилка.** Писатель, продолжающий не с конца файла (VS Code — со своей последней записи в
+  памяти после ходов hqc; `claude --resume <uuid> --resume-session-at <uuid записи>`), начинает от
+  более ранней записи вторую линию ходов в том же файле; ходы другой линии в его контекст не
+  попадают. Зеркало держит дерево записей транскрипта (`uuid` → `parentUuid` всех записей с
+  `uuid`, включая `attachment`, кроме `isSidechain`) и число промптов (записей, дающих
+  `user.message`) под каждой записью. Два ребёнка сами по себе — не развилка: параллельные вызовы
+  инструментов дают их записи `tool_use` (фикстуры `auto-mode`, `auto-classifier`). Развилка —
+  промпт, над которым у какой-то записи есть другой ребёнок с промптами; точка `at_uuid` —
+  ближайшая такая запись, `orphaned_turns` — промпты её других детей, `branch_from` — `hqc`, если
+  новый промпт свой (реестр uuid адаптера, §9.2), иначе `vscode`. Воркер шлёт через
+  `mirror.event` перед событиями нового промпта `system session_forked` (`author: {kind:
+  system}`, payload `{text, code, at_uuid, branch_from, orphaned_turns}`, `event_id` — v5 от
+  строки `"<at_uuid>/fork"`, одно событие на точку) с текстом «VS Code продолжил с более ранней
+  точки: N ходов из hqc не попали в его контекст» (или «hqc продолжил с более ранней точки: N
+  ходов из VS Code не попали в его контекст»). Запись попадает в дерево, когда зеркало её прошло
+  (придержанная чужая может оказаться своей). После перезапуска воркер строит дерево заново по
+  уже прочитанной части файла и старых развилок не повторяет. Хаб хранит событие как обычное
+  `system`, клиент рисует строкой с предупреждением. Только для workspace под зеркалом.
+  Проверено на фикстуре `fork-2.1.308` (живой прогон T20 без VS Code, тест зеркала
+  `fork_is_reported_once`).
 - Одновременно сессию ведёт ровно один из двух.
 
 ### 9.4 Парсер
@@ -1727,7 +1811,8 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
    проекте, `fs.stat`/`fs.list_dirs`, сессии в выбранном workspace; упрощение итерации 1
    «один workspace из конфига воркера» снято), ~~служебная сессия воркера~~ (0.17, T17),
    ~~артефакты, `.hqc/inbox`~~ (0.18, T16, без `hqc_attach`), ~~импорт и зеркало VS Code,
-   подхват в обе стороны~~ (0.19, T15; сведение — T18). Критерий: подхватить с телефона
+   подхват в обе стороны~~ (0.19, T15; сведение — T18; подхват по реестру живых сессий и
+   развилки — 0.22, T20). Критерий: подхватить с телефона
    сессию, начатую в VS Code (живой тест `live_takeover`; через UI на телефоне не проверено).
 3. MCP hqc: attach, send, ask, list, search, schedule; фреймы `mcp.call`;
    MCP-сервер по §7.2. Персональная сессия.
@@ -1825,6 +1910,24 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.21 → 0.22 (T20, подхват без развилок)
+§9.3 переписан: правило «30 с тишины» не отличает закрытую сессию от открытой и бездействующей
+(случай 2026-10-23: развилка в транскрипте, 37 записей hqc вне контекста VS Code). Воркер читает
+реестр живых сессий Claude Code `<config>/sessions/<pid>.json` и сообщает держателей
+транскриптов; сессия с держателем — `locked_by: vscode` независимо от записей, держатель исчез —
+`none` сразу; при данных реестра `recent` не запирает; `POST /takeover` при держателе — `409
+vscode_open` с `held_by`, без держателя у воркера с реестром — сразу, 30 с остаются запасным
+правилом без реестра; держатель появился при hqc — `session_released` с `reason: vscode_open`,
+агент останавливается после хода. Развилка в транскрипте — `system session_forked` от зеркала.
+§3 Worker: `capabilities.claude_code.sessions_registry`; §3 Session: `held_by`, `vscode_held_at`,
+смысл `locked_by: vscode`. §4: код `session_forked` (`at_uuid`, `branch_from`, `orphaned_turns`),
+`reason` у `session_released` (`vscode_open` | `foreign_write`). §5.2: отчёты о держателе через
+outbox. §5.4: `held_by?` в `session.state` и `mirror.event` (поле нет / `null` / объект), отчёт о
+держателе — `session.state` с nil `session_id`, `sessions_registry` в `hello`. §6: `held_by?` в
+объекте сессии и `session.summary`, `409 vscode_open`, `held_by?` у `409 locked_vscode`. §9.2: две
+плашки клиента. Миграция хаба `0010`: `sessions.held_by`, `sessions.vscode_held_at`. Фикстура
+`fork-2.1.308`. Вопросы — `docs/notes/t20-questions.md`.
 
 ### 0.20 → 0.21 (T19, перерегистрация воркера и уборка отозванных)
 §5.1: регистрация с заменой — `replaceable[]` в `GET /api/workers/enroll/{code}`,

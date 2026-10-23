@@ -38,6 +38,77 @@ warnings`, `cargo test --workspace` (интеграционные тесты х�
 `cd client && npm test && npm run build`, `E2E_CLAUDE_BIN=/usr/bin/false
 tools/e2e-local.sh` печатает `PASS (rehearsal)`. Вопросы — `docs/notes/t14-questions.md`.
 
+## T15. Импорт, зеркало и подхват сессий Claude Code (сделано, SPEC 0.17 в ветке, после слияния 0.19)
+
+Разделы: §3 (Session, Workspace, Event), §4, §5.2–§5.4, §8.1 (идентификаторы, resume), §9,
+§17.1. Зависит от T14. Критерий итерации: подхватить с телефона сессию, начатую в VS Code, и
+вернуть обратно.
+- hqc-proto (только добавления): hub → worker `workspace.list_candidates {request_id}` →
+  `result {candidates[{path, sessions_count, last_active}]}` и `mirror.set {workspace_path,
+  enabled}`; worker → hub `mirror.event {workspace_path, runtime_session_id, cwd, event,
+  title?, recent}`; REST `CandidateList`, `CreateWorkspaceImport` (`mirror_enabled`);
+  `Event::id_from_claude_block`; примеры в `examples/wire`.
+- hqc-claude-jsonl: `Message::is_main` (не sidechain, не `isMeta`, не сводка `/compact`),
+  `stop_reason`, `blocks`, `first_cwd`; фикстуры 2.1.308 `vscode-takeover` (сессия `claude -p`,
+  подхват адаптером через `--resume` и ещё ход) и `adapter-then-outside` (сессия адаптера и
+  `claude -p --resume` снаружи), снятые `tools/spike/driver.py --arg-prompt / --resume`.
+- Воркер: зеркало — опрос `<config>/projects/*/<uuid>.jsonl` раз в 2 с для папок из
+  `mirror.set` (только внутри `allowed_roots`), смещения и кэш «файл → cwd» в
+  `$HQC_HOME/mirror/mirror.sqlite3`, первый проход — импорт истории; маппинг записей на §4;
+  реестр своих uuid (`OwnRecords`), который заполняет адаптер из stream-json; чужая запись
+  при живом процессе — через 5 с остановка агента после хода, `session.state locked_by:
+  vscode`, ввод отклоняется `locked_vscode` до следующего `session.start`; кандидаты по `cwd`;
+  `mirror.event` через outbox.
+- Хаб: сессия на неизвестный транскрипт в проекте workspace (`cwd` из записи, `ai-title`,
+  `locked_by` по `recent`), авторы от хаба, без push; `POST /api/sessions/{id}/takeover`
+  (`409 vscode_active` 30 с, `session.start mode: resume`, `system session_taken_over`);
+  `409 locked_vscode` с `hint: takeover`; освобождение (`system session_released`, `pending`
+  вводы `failed`); `mirror.set` при импорте и после `hello`; `GET
+  /api/workers/{id}/candidates`; миграция `0008` (`vscode_active_at`;
+  в ветке была `0006`, переименована в T18).
+- Клиент: на экране Workspaces «Импорт из Claude Code» (кандидаты воркера, выбранные папки
+  становятся workspace с зеркалом); в чате `locked_vscode` — «ведётся в VS Code», ввод закрыт,
+  кнопка «Подхватить».
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (парсер на фикстурах T15; зеркало: свои записи не чужие на фикстуре
+а, чужой писатель на фикстуре б, импорт, недописанные строки, кандидаты; воркер с фейковым
+хабом: освобождение после хода и `locked_vscode`; хаб с фейковым воркером: импорт, `409
+locked_vscode`, `409 vscode_active`, takeover, освобождение, `mirror.set` после `hello`), `cd
+client && npm test && npm run build`; живой `HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test
+live_takeover` («VS Code»-сессия → импорт → takeover → ход → освобождение). Вопросы —
+`docs/notes/t15-questions.md`.
+
+## T16. Артефакты и `.hqc/inbox` (сделано, SPEC 0.17 в ветке, после слияния 0.18)
+
+Разделы: §3 Artifact, §4 (`user.message.artifact_ids`, `attachment`), §5.3 `session.input`,
+§6, §8.1, §12, §20. Без MCP: `hqc_attach` и `PUT /worker/artifacts` — итерация 3.
+- hqc-proto: тела `Artifact` и `ArtifactUrl` (`api.artifact.json`, `api.artifact.url.json`).
+- Хаб: хранилище на диске `HQC_ARTIFACT_DIR` по sha256, миграция `0007` (`artifacts`,
+  `artifact_sessions`; в ветке была `0006`); `POST /api/artifacts` (multipart `file`, `kind?`; 100 МБ, `413
+  too_large`; дедупликация `(owner, sha256, name)`), `GET /api/artifacts/{id}`, `GET
+  /api/artifacts/{id}/url` (HMAC, 10 минут); `GET /artifacts/{id}?exp=&sig=` (`403`/`410`,
+  sandbox CSP, HTML inline только на хосте `HQC_ARTIFACT_PUBLIC_BASE`, этот хост отдаёт
+  только артефакты, его origin — в CSP клиента); `GET /worker/artifacts/{id}` токеном
+  воркера для сессий этого воркера; ввод проверяет `artifact_ids` (`400 unknown_artifact`)
+  и связывает их с сессией.
+- Воркер: `.hqc/inbox/<event_id>/` в рабочем каталоге (санация и уникальность имён, без
+  символических ссылок на пути, временный файл и `rename`), `.hqc/` в `info/exclude`, блок
+  «Вложения:» в тексте, image content block в stream-json Claude Code **[проверить]**;
+  фикстура `crates/hqc-worker/fixtures/inbox`.
+- Клиент: скрепка, перетаскивание и вставка файлов с превью картинок; загрузка перед
+  вводом, повтор без повторной загрузки; рендер вложений (image inline, diff, html — iframe
+  только с домена артефактов, text/file — карточка); ссылки перезапрашиваются на
+  `403`/`410`; пути вида `src/main.rs:42` в inline-коде и относительные ссылки копируются
+  в буфер («путь скопирован», t11 #1).
+- `Dockerfile` (`/var/lib/hqc/artifacts`), RUNBOOK §1.2, §1.6, §1.8, `tools/dev.sh`,
+  `tools/e2e-local.sh`.
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace` (хаб: `tests/artifacts.rs` — загрузка и виды,
+лимит, дедупликация, подпись и срок ссылки, чужой артефакт, заголовки и домен артефактов,
+скачивание воркером; воркер: `inbox_scenario`, `inbox_refusals`,
+`image_attachments_are_image_blocks`, модульные тесты `inbox`), `cd client && npm test &&
+npm run build` (`tests/attachments.test.tsx`). Вопросы — `docs/notes/t16-questions.md`.
+
 ## T17. Служебная сессия воркера и несессионные подтверждения (сделано, SPEC 0.17)
 
 Разделы: §3 (Worker, Session, PendingRequest), §4, §5.3, §5.4, §10.2, §13.1, §13.2, §16, §17.4.
@@ -72,72 +143,27 @@ warnings`, `cargo test --workspace` (хаб: `tests/system_session.rs` — со�
 build` (рендер `worker_log` и карточки, фильтр, сценарий через мок). Вопросы —
 `docs/notes/t17-questions.md`.
 
-## T16. Артефакты и `.hqc/inbox` (сделано, SPEC 0.17)
+## T18. Сведение T15 с T16 и T17 (сделано, SPEC 0.19)
 
-Разделы: §3 Artifact, §4 (`user.message.artifact_ids`, `attachment`), §5.3 `session.input`,
-§6, §8.1, §12, §20. Без MCP: `hqc_attach` и `PUT /worker/artifacts` — итерация 3.
-- hqc-proto: тела `Artifact` и `ArtifactUrl` (`api.artifact.json`, `api.artifact.url.json`).
-- Хаб: хранилище на диске `HQC_ARTIFACT_DIR` по sha256, миграция `0006` (`artifacts`,
-  `artifact_sessions`); `POST /api/artifacts` (multipart `file`, `kind?`; 100 МБ, `413
-  too_large`; дедупликация `(owner, sha256, name)`), `GET /api/artifacts/{id}`, `GET
-  /api/artifacts/{id}/url` (HMAC, 10 минут); `GET /artifacts/{id}?exp=&sig=` (`403`/`410`,
-  sandbox CSP, HTML inline только на хосте `HQC_ARTIFACT_PUBLIC_BASE`, этот хост отдаёт
-  только артефакты, его origin — в CSP клиента); `GET /worker/artifacts/{id}` токеном
-  воркера для сессий этого воркера; ввод проверяет `artifact_ids` (`400 unknown_artifact`)
-  и связывает их с сессией.
-- Воркер: `.hqc/inbox/<event_id>/` в рабочем каталоге (санация и уникальность имён, без
-  символических ссылок на пути, временный файл и `rename`), `.hqc/` в `info/exclude`, блок
-  «Вложения:» в тексте, image content block в stream-json Claude Code **[проверить]**;
-  фикстура `crates/hqc-worker/fixtures/inbox`.
-- Клиент: скрепка, перетаскивание и вставка файлов с превью картинок; загрузка перед
-  вводом, повтор без повторной загрузки; рендер вложений (image inline, diff, html — iframe
-  только с домена артефактов, text/file — карточка); ссылки перезапрашиваются на
-  `403`/`410`; пути вида `src/main.rs:42` в inline-коде и относительные ссылки копируются
-  в буфер («путь скопирован», t11 #1).
-- `Dockerfile` (`/var/lib/hqc/artifacts`), RUNBOOK §1.2, §1.6, §1.8, `tools/dev.sh`,
-  `tools/e2e-local.sh`.
+Разделы: §3 (Session, Agent), §4, §5, §5.3, §5.4, §6, §9, §10.2, §12, §16, §23. Зависит от
+T15, T16, T17. T16 и T17 слиты раньше (SPEC 0.18), T15 сливается последней.
+- Код: обе стороны каждого конфликта. hqc-proto — кадры `worker.approval.*` рядом с
+  `workspace.list_candidates`, `mirror.set`, `mirror.event`, списки примеров покрывают все.
+  Хаб — у сессии и `system`, и `vscode_active_at` (в `SESSION_COLS` тоже); `worker_ws`
+  разбирает `worker.approval.request` и `mirror.event`, после `hello` досылает ответы на
+  запросы воркера и шлёт `mirror.set`; `POST /takeover` служебной сессии — `409
+  system_session` (новое, тест в `tests/system_session.rs`). Воркер — `HubLink::event_json`
+  и `mirror_event`, супервизор держит ожидающие `workspace.use`, клиент артефактов и зеркало.
+  Клиент — `Composer` с вложениями (T16) не рендерится у служебной сессии (T17), а у
+  `locked_vscode` закрыт с подписью «Ведётся в VS Code» и плашкой «Подхватить» (T15); мок
+  хаба отвечает на ввод `409 system_session` и `409 locked_vscode`.
+- Миграция T15 `0006_mirror.sql` → `0008_mirror.sql` (`0006` — T17, `0007` — T16); она
+  только добавляет `sessions.vscode_active_at` и индекс и от соседних не зависит.
+- SPEC 0.19: записи §23 0.18 → 0.19 (T15), 0.17 → 0.18 (T16), 0.16 → 0.17 (T17); перенос
+  отложенного тремя задачами в §3, §4, §5, §6, §10.2, §16 (список — в записи 0.19). Решение
+  T16 «файлы пользователя всегда в `user.message.artifact_ids`» записано в §4.
 Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
-warnings`, `cargo test --workspace` (хаб: `tests/artifacts.rs` — загрузка и виды,
-лимит, дедупликация, подпись и срок ссылки, чужой артефакт, заголовки и домен артефактов,
-скачивание воркером; воркер: `inbox_scenario`, `inbox_refusals`,
-`image_attachments_are_image_blocks`, модульные тесты `inbox`), `cd client && npm test &&
-npm run build` (`tests/attachments.test.tsx`). Вопросы — `docs/notes/t16-questions.md`.
-
-## T15. Импорт, зеркало и подхват сессий Claude Code (сделано, SPEC 0.17)
-
-Разделы: §3 (Session, Workspace, Event), §4, §5.2–§5.4, §8.1 (идентификаторы, resume), §9,
-§17.1. Зависит от T14. Критерий итерации: подхватить с телефона сессию, начатую в VS Code, и
-вернуть обратно.
-- hqc-proto (только добавления): hub → worker `workspace.list_candidates {request_id}` →
-  `result {candidates[{path, sessions_count, last_active}]}` и `mirror.set {workspace_path,
-  enabled}`; worker → hub `mirror.event {workspace_path, runtime_session_id, cwd, event,
-  title?, recent}`; REST `CandidateList`, `CreateWorkspaceImport` (`mirror_enabled`);
-  `Event::id_from_claude_block`; примеры в `examples/wire`.
-- hqc-claude-jsonl: `Message::is_main` (не sidechain, не `isMeta`, не сводка `/compact`),
-  `stop_reason`, `blocks`, `first_cwd`; фикстуры 2.1.308 `vscode-takeover` (сессия `claude -p`,
-  подхват адаптером через `--resume` и ещё ход) и `adapter-then-outside` (сессия адаптера и
-  `claude -p --resume` снаружи), снятые `tools/spike/driver.py --arg-prompt / --resume`.
-- Воркер: зеркало — опрос `<config>/projects/*/<uuid>.jsonl` раз в 2 с для папок из
-  `mirror.set` (только внутри `allowed_roots`), смещения и кэш «файл → cwd» в
-  `$HQC_HOME/mirror/mirror.sqlite3`, первый проход — импорт истории; маппинг записей на §4;
-  реестр своих uuid (`OwnRecords`), который заполняет адаптер из stream-json; чужая запись
-  при живом процессе — через 5 с остановка агента после хода, `session.state locked_by:
-  vscode`, ввод отклоняется `locked_vscode` до следующего `session.start`; кандидаты по `cwd`;
-  `mirror.event` через outbox.
-- Хаб: сессия на неизвестный транскрипт в проекте workspace (`cwd` из записи, `ai-title`,
-  `locked_by` по `recent`), авторы от хаба, без push; `POST /api/sessions/{id}/takeover`
-  (`409 vscode_active` 30 с, `session.start mode: resume`, `system session_taken_over`);
-  `409 locked_vscode` с `hint: takeover`; освобождение (`system session_released`, `pending`
-  вводы `failed`); `mirror.set` при импорте и после `hello`; `GET
-  /api/workers/{id}/candidates`; миграция `0006` (`vscode_active_at`).
-- Клиент: на экране Workspaces «Импорт из Claude Code» (кандидаты воркера, выбранные папки
-  становятся workspace с зеркалом); в чате `locked_vscode` — «ведётся в VS Code», ввод закрыт,
-  кнопка «Подхватить».
-Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test --workspace` (парсер на фикстурах T15; зеркало: свои записи не чужие на фикстуре
-а, чужой писатель на фикстуре б, импорт, недописанные строки, кандидаты; воркер с фейковым
-хабом: освобождение после хода и `locked_vscode`; хаб с фейковым воркером: импорт, `409
-locked_vscode`, `409 vscode_active`, takeover, освобождение, `mirror.set` после `hello`), `cd
-client && npm test && npm run build`; живой `HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test
-live_takeover` («VS Code»-сессия → импорт → takeover → ход → освобождение). Вопросы —
-`docs/notes/t15-questions.md`.
+warnings`, `cargo test --workspace`, `cd client && npm run typecheck && npm test && npm run
+build`, `E2E_CLAUDE_BIN=/usr/bin/false tools/e2e-local.sh` → `PASS (rehearsal)`, живой
+`HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_takeover` → PASS (44 с, 2026-10-23).
+Открытое — вопросы в `docs/notes/t15-questions.md`, `t16-questions.md`, `t17-questions.md`.

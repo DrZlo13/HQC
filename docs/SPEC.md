@@ -141,7 +141,8 @@ Workspace — объект хаба **[решение]**: воркер о нём
 
 ### Session
 `project_id`, `owner_id`, `workspace_id` (nullable; с 0.16 обязателен при создании —
-сессии без workspace §8.4 через API пока не создаются), `worker_id` (воркер workspace;
+сессии без workspace §8.4 через API пока не создаются; без workspace — только служебная
+сессия воркера, §10.2), `worker_id` (воркер workspace;
 обязателен для Claude Code без workspace; для голой модели null; ACP-агенты без workspace
 не допускаются, §8.4), `cwd` (относительный путь внутри workspace, по умолчанию `.`),
 `title`, `title_source` (`default` | `runtime` | `user` — кто поставил заголовок), `slug`
@@ -149,7 +150,8 @@ Workspace — объект хаба **[решение]**: воркер о нём
 `auto_approve`, `wake_on_send` (по умолчанию false), `locked_by` (none/hqc/vscode),
 `last_seq`, `archived`, `vscode_active_at` (nullable; когда хаб последний раз получил
 событие зеркала с `recent` — запись в файл за последние 30 с; по нему считается тишина для
-подхвата, §9.3; в объект сессии API не входит). `state` и `queue_len` (§17.1) **не хранятся**, вычисляются
+подхвата, §9.3; в объект сессии API не входит), `system` (bool: служебная сессия воркера,
+§10.2; в объекте сессии API — только `system: true`). `state` и `queue_len` (§17.1) **не хранятся**, вычисляются
 хабом при отдаче. В первой версии в сессии ровно один агент; доступ людей к сессии
 определяется только Grant.
 
@@ -166,7 +168,8 @@ Code — `ai-title`, §8.1) хаб применяет и ставит `runtime`,
 N», `locked_by` по §9.1. Ищется по паре (`worker_id`, `runtime_session_id`).
 
 ### Agent (встроен в Session)
-`runtime` (claude_code / acp / bare), `acp_agent` (имя агента из локального конфига
+`runtime` (claude_code / acp / bare / none; `none` — только у служебной сессии воркера:
+агента нет, процесс не стартует, §10.2), `acp_agent` (имя агента из локального конфига
 воркера для `acp`), `model`, `runtime_session_id` (строка: uuid jsonl у Claude Code,
 произвольный id у ACP-агентов), `process_state`
 (stopped/starting/running/stopping), `system_prompt`, `disallowed_tools[]`,
@@ -225,7 +228,7 @@ name)`: тот же файл тем же пользователем под те�
 
 | type | payload | источник |
 |---|---|---|
-| `user.message` | `text`, `artifact_ids[]` | клиент |
+| `user.message` | `text`, `artifact_ids[]` | клиент; зеркало — промпты из транскрипта Claude Code (§9.1) |
 | `agent.delta` | `text` | адаптер; только транспорт, в базу не пишется |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id ввода, начавшего ход) | адаптер. `final: true` — конец хода; `final: false` — текст между вызовами инструментов |
 | `agent.thinking` | `text` | адаптер, если рантайм отдаёт |
@@ -237,24 +240,26 @@ name)`: тот же файл тем же пользователем под те�
 | `clarify.request` | `request_id`, `questions[{id, text, options?: [string], multi?: bool}]` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput.answers` (проверено на 2.1.307 при `--permission-prompt-tool stdio`, §8.1). У ACP-агентов источника нет |
 | `clarify.response` | `request_id`, `answers` (`{<id вопроса>: string \| [string]}`) | клиент |
 | `clarify.cancel` | `request_id`, `reason` (тот же набор, что у `approval.cancel`) | адаптер, воркер или хаб |
-| `attachment` | `artifact_id`, `kind`, `name`, `caption?` | клиент или агент через `hqc_attach` |
+| `attachment` | `artifact_id`, `kind`, `name`, `caption?` | агент через `hqc_attach` (итерация 3); файлы пользователя идут в `user.message.artifact_ids` (правило ниже) |
 | `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id?` (для ask) | хаб по `hqc_send`/`hqc_ask` |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `model?` | адаптер Claude Code по `result`; у ACP-агентов необязательно и без `cost_usd` (стандартного usage в ACP v1 нет) |
 | `status` | `state` (§17.1), `detail?` | воркер или хаб |
-| `system` | `text`, `code` | хаб или воркер; коды — ниже |
+| `system` | `text`, `code`, `level?` (`warn` \| `error`, только у `worker_log`) | хаб или воркер; коды — ниже |
 
 Коды `system` (список открытый, неизвестный код клиент показывает как текст):
 
 | code | источник | смысл |
 |---|---|---|
-| `session_created` | хаб | сессия создана |
+| `session_created` | хаб | сессия создана (у созданной зеркалом — «Сессия импортирована из Claude Code», §9.1) |
 | `turn_lost` | хаб | ход потерян: процесс агента остановился посреди хода, воркер перезапустился или от воркера долго нет событий хода (сторожевой таймер, «no events for N s»; §17.3) |
 | `agent_exited` | воркер | процесс агента завершился сам с ошибкой или посреди хода (§17.3) |
 | `policy_denied` | воркер | вызов инструмента отклонён правилом `deny` из `[permissions]` воркера, без запроса владельцу (§8.1, §14); клиент показывает «запрещено политикой воркера» |
 | `agent_start_failed` | хаб | агент не стартовал 3 раза подряд (или неретраибельно), `pending` вводы стали `failed` (§5.2) |
 | `input_rejected` | хаб | воркер отклонил ввод не как неудачный старт, ввод стал `failed` (§5.2) |
 | `ask_cancelled` | хаб | отложенный `hqc_ask` закрыт `mcp.cancel` от воркера (§5.2), итерация 3 |
-| `session_taken_over` | хаб | сессию подхватили (`POST /takeover`, §9.3), итерация 2 |
+| `session_taken_over` | хаб | сессию подхватили (`POST /takeover`, §9.3) |
+| `session_released` | хаб | сессию продолжили вне hqc (VS Code, `claude` в терминале): воркер остановил агента после хода, `pending` вводы стали `failed` (§9.3) |
+| `worker_log` | воркер | строка лога воркера уровня warn/error в его служебной сессии, уровень — поле `level` (§10.2); не считается непрочитанной (§6), push нет (§16) |
 | `workspace_unknown` | хаб (миграция 0.16) | сессия итерации 1 без workspace, чей воркер не сообщал папку: архивирована при обновлении хаба |
 
 Правила:
@@ -265,8 +270,10 @@ name)`: тот же файл тем же пользователем под те�
   (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`) читается как «неизвестное». Событие
   известного `type` с неверным `payload` — ошибка.
 
-- `artifact_ids[]` в `user.message` — вложения к сообщению; отдельное событие
-  `attachment` — для файлов без текста.
+- Файлы пользователя всегда идут в `user.message.artifact_ids[]`, в том числе без текста
+  (`text` пустой): это ввод, и агент их получает (§8.1, §12) **[решение]** (T16). Событие
+  `attachment` агенту не доставляется — это файл, показанный в ленте (`hqc_attach`,
+  итерация 3); клиент своих `attachment` не пишет.
 - `*_preview` обрезаются воркером до 4 КБ; полный результат инструмента в хаб
   не передаётся, кроме диффов и результатов, сохранённых артефактом.
 - `agent.delta` идёт клиентам по WebSocket и не сохраняется; сохраняется `agent.message`.
@@ -286,7 +293,8 @@ heartbeat 20 с, переподключение с экспоненциальн�
   `{event_id}` доставленного ввода, в остальных случаях пустой `{}`.
 - `error` {code, message, retryable, details?}. Начальный список `code`:
   `protocol_version_unsupported` (`details: {min_version}`), `unauthorized`,
-  `unknown_session`, `invalid_frame`, `agent_start_failed`, `internal`. Коды — строки,
+  `unknown_session`, `invalid_frame`, `agent_start_failed`, `internal`, `locked_vscode`
+  (ответ воркера на `session.input` сессии, которую он отпустил, §9.3). Коды — строки,
   список открытый; неизвестный код обрабатывается как `internal`.
 
 ### 5.1 Регистрация и версия
@@ -303,7 +311,8 @@ URL хаба у воркера (`hub_url` в `worker.toml` и аргумент `
 account = URL хаба); на других ОС в первой версии — файл `$HQC_HOME/token` с правами 0600
 (каталог 0700, запись через временный файл и rename); libsecret и DPAPI — позже.
 Токен отзывается из UI. В `hello` воркер шлёт
-`protocol_version`; хаб отвечает `hello.ack {protocol_version, worker_id, server_time}`
+`protocol_version`; хаб отвечает `hello.ack {protocol_version, worker_id, server_time,
+system_session_id?}` (служебная сессия воркера, §10.2)
 или `error {code: protocol_version_unsupported, details: {min_version}}`. Версию хаб
 проверяет до строгого разбора `hello`: `hello` другой версии может иметь другую форму,
 но всё равно должен получить `protocol_version_unsupported`, а не `invalid_frame`. При
@@ -422,8 +431,9 @@ MCP-вызовы (worker → hub → worker):
 ### 5.3 Фреймы hub → worker
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
   cwd, environment, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
-  auto_approve, session_token, owner_is_worker_owner, ask_timeout_s}
-  — `mode`: `new` | `resume` (§5.2); воркер вызывает `start` или `resume` адаптера (§8),
+  auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?}
+  — `mode`: `new` | `resume` (§5.2); `requested_by_owner` (передаётся только `true`) —
+  workspace сессии добавил владелец воркера: подтверждение новой папки не нужно (§10.2); воркер вызывает `start` или `resume` адаптера (§8),
   адаптер Claude Code при `new` всё равно проверяет jsonl с этим uuid и при наличии
   продолжает его через `--resume` (§8.1); `owner_is_worker_owner` нужен воркеру для `allow_foreign_sessions`, выбора
   профиля Hermes и допуска `isolation: none`; `ask_timeout_s` — чтобы выставить
@@ -478,7 +488,10 @@ MCP-вызовы (worker → hub → worker):
   иначе `error {invalid_frame}`; список держит в памяти.
 - `model.proxy` {request_id, model, body} → поток `model.proxy.chunk {request_id, data}`
   и `model.proxy.end {request_id, error?}`
-- `worker.approval.response` {request_id, option_id}
+- `worker.approval.response` {request_id, option_id} → `ack` — ответ владельца воркера на
+  `worker.approval.request` или `deny` при отмене хабом (истечение); воркер отвечает `ack` и
+  тогда, когда запроса у него уже нет. Не подтверждённый ответ хаб досылает после `hello`
+  (без `session.start`, §10.2).
 - `mcp.result` {request_id, result | error}
 
 ### 5.4 Фреймы worker → hub
@@ -501,11 +514,14 @@ MCP-вызовы (worker → hub → worker):
   последний `ai-title` файла, `recent` — файл изменён меньше 30 с назад, когда воркер читал
   запись. Хаб ищет сессию по воркеру и `runtime_session_id` и создаёт её для неизвестного;
   `event.session_id` (воркер ставит nil uuid) и `author.id` игнорирует и заполняет сам.
-- `worker.approval.request` {request_id, kind, description, expires_at}
+- `worker.approval.request` {request_id, kind, description, expires_at} → `ack {}` —
+  подтверждение владельца вне сессии (`kind`: `workspace.use`, позже `workspace.create`,
+  `workspace.delete`; список открытый). Хаб пишет `approval.request` в служебную сессию
+  воркера; повтор с тем же `request_id` после переподключения нового события не пишет (§10.2).
 - `mcp.call` {request_id, session_token, tool, args}
 - `mcp.cancel` {request_id, reason} — отмена отложенного вызова (§5.2, §7.2)
-- `result` {request_id, ...} / `error` на запросы хаба (`fs.stat`, `fs.list_dirs`, §5.3),
-  с `id` запроса.
+- `result` {request_id, ...} / `error` на запросы хаба (`fs.stat`, `fs.list_dirs`,
+  `workspace.list_candidates`, §5.3), с `id` запроса.
 - Загрузка артефактов: HTTP PUT `/worker/artifacts` с токеном воркера, не по WebSocket.
   Лимит артефакта **100 МБ**, нарезки на части нет.
 
@@ -537,8 +553,11 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
   Объект проекта — `{id, owner_id, name, slug, description, default_workspace_id?,
   is_personal, created_at, updated_at}` (`api.project.json`)
 - `GET /api/workspaces?project_id=` → `{workspaces[]}` (без `project_id` — все workspace
-  пользователя); `POST /api/workspaces` {project_id, worker_id, path, label?} → `201` и
-  workspace (`kind: dir`, §13.1): хаб шлёт воркеру `fs.stat` и хранит `canonical`. Воркер
+  пользователя); `POST /api/workspaces` {project_id, worker_id, path, label?,
+  mirror_enabled?} → `201` и workspace (`kind: dir`, §13.1): хаб шлёт воркеру `fs.stat` и
+  хранит `canonical`; `mirror_enabled: true` — импорт из Claude Code (`CreateWorkspaceImport`,
+  §9.1): хаб шлёт воркеру `mirror.set`, при удалении такого workspace — `mirror.set` с
+  `enabled: false`. Воркер
   не подключён — `409 worker_offline`, workspace не создаётся; ответа нет 10 с — `504
   worker_timeout`; путь вне `allowed_roots` — `400 outside_allowed_roots`, нет такого —
   `400 path_not_found`, не каталог — `400 not_a_directory`, воркер отверг кадр —
@@ -563,8 +582,12 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
   сохранённое `user.message` с `client_op_id` и `delivery: pending`; повтор с тем же
   `client_op_id` (дедупликация по `(session_id, client_op_id)`) → `200 {event}` с событием,
   сохранённым в первый раз
-- `POST /api/sessions/{id}/stop`, `/steer`, `/takeover` (§9.3), `/archive`,
-  `/unarchive`, `/retry` (§5.2)
+- `POST /api/sessions/{id}/stop`, `/steer`, `/takeover`, `/archive`, `/unarchive`, `/retry`
+  (§5.2). `/takeover` (§9.3) — продолжить в hqc сессию, которую вёл VS Code: `locked_by: hqc`,
+  `system session_taken_over`, воркеру `session.start` с `mode: resume`; ответ — объект
+  сессии; при `locked_by: hqc` ничего не делает. VS Code писал меньше 30 с назад — `409
+  vscode_active`, воркер офлайн — `409 worker_offline`, архив — `409 archived`, служебная
+  сессия — `409 system_session`
 - `POST /api/sessions/{id}/requests/{request_id}` {option_id | answers} → `{event_id, seq}`
   сохранённого ответа; закрытый запрос — `409 request_closed` (§10.1)
 - `POST /api/artifacts` (multipart: поле `file`, необязательное `kind`) → `201` и объект
@@ -582,7 +605,11 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
   `{name, os, created_at, country?}` (`EnrollInfo`; `country` — `CF-IPCountry` запроса
   `enroll`), `POST /api/workers/enroll/confirm` {code, name?} →
   `{worker_id, name}` (клиент открывает экран и по ссылке `#/enroll?code=XXXX-XXXX`, §5.1),
-  `DELETE /api/workers/{id}`, позже `GET /api/workers/{id}/candidates` (§9.1)
+  `DELETE /api/workers/{id}`. Объект воркера несёт `system_session_id` (§3 Worker).
+  `GET /api/workers/{id}/candidates` → `{candidates[{path, sessions_count, last_active}]}`
+  (`api.candidates.json`) — кадр `workspace.list_candidates` воркеру (§5.3, §9.1); офлайн —
+  `409 worker_offline`, нет ответа 10 с — `504 worker_timeout`, воркер без зеркала отказал —
+  `400 invalid_path`
 - `GET /api/search?q=&project=&fuzzy=`
 - `GET/POST/DELETE /api/grants`
 - `POST /api/push/subscribe` (тело — `PushSubscription.toJSON()`: `{endpoint,
@@ -598,7 +625,9 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
 `{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, title_source, slug, agent: {runtime,
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
-last_seq, archived, state, queue_len, last_read_seq, unread, created_at, updated_at}`.
+last_seq, archived, system?, state, queue_len, last_read_seq, unread, created_at, updated_at}`.
+`system: true` — служебная сессия воркера (§10.2): ввод, `stop`, `retry`, `takeover`,
+`archive` и `DELETE` — `409 system_session`, `PATCH auto_approve: true` — `403`.
 `state`, `queue_len` (§17.1), `last_read_seq` и `unread` вычисляются для запросившего
 пользователя.
 
@@ -623,9 +652,10 @@ WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; с�
   в объекте сессии); `{type: pong}`; `{type: error, code, message, session_id?}`.
   Неизвестный `type` клиент игнорирует.
 - `unread` — число событий с `seq > last_read_seq` среди: `agent.message` с
-  `final: true`, `approval.request`, `clarify.request`, `peer.message`, `system`.
-  Промежуточные `agent.message` (`final: false`), `status`, `usage`, вызовы инструментов
-  и вводы непрочитанным не считаются.
+  `final: true`, `approval.request`, `clarify.request`, `peer.message`, `system`, кроме
+  `system` с кодом `worker_log` (логи воркера в служебной сессии, §10.2). Промежуточные
+  `agent.message` (`final: false`), `status`, `usage`, вызовы инструментов и вводы
+  непрочитанным не считаются.
 
 Сессия создаётся в workspace своего проекта (§13.4) и на его воркере: `workspace_id` —
 этот workspace (другого проекта, или не на `worker_id`, если тот задан, — `400`); без
@@ -639,10 +669,14 @@ no_workspace`. Так только что зарегистрированный (
 `-` (уходит в командную строку агента); `client_op_id` — до 128 байт; иначе `400`.
 
 Ошибки REST: `{error: <code>, message}` с HTTP-статусом (у `workspace_conflict` — с
-дополнительными полями); `413 too_large` — артефакт больше лимита (§12); `409` с кодами `archived`, `locked_vscode`, `request_closed`,
-`no_workspace`, `worker_offline`, `workspace_conflict`, `workspace_in_use`,
-`personal_project`, `push_limit`, `conflict`; `400` — `bad_request` и коды проверки пути
-(`outside_allowed_roots`, `path_not_found`, `not_a_directory`, `invalid_path`); `504
+дополнительными полями, у `locked_vscode` — `hint`); `413 too_large` — артефакт больше
+лимита (§12); `409` с кодами `archived`, `locked_vscode` (ввод в сессию, которую ведёт VS
+Code; тело `{error, message, hint: "takeover"}`, клиент предлагает «Подхватить», §9.3),
+`vscode_active` (подхват раньше 30 с тишины, §9.3), `system_session` (служебная сессия
+воркера, §10.2), `request_closed`, `no_workspace`, `worker_offline`, `workspace_conflict`,
+`workspace_in_use`, `personal_project`, `push_limit`, `conflict`; `400` — `bad_request`,
+`unknown_artifact` (§12) и коды проверки пути (`outside_allowed_roots`, `path_not_found`,
+`not_a_directory`, `invalid_path`); `504
 worker_timeout` — воркер не ответил на запрос хаба; `403` — чужой `Origin` (§20); `429` и
 `503` — лимиты (§20). Ошибка проверки JWT Access
 отдаётся общим текстом, причина — в лог хаба. `GET .../events`
@@ -1213,8 +1247,8 @@ once / session / always / deny, у ACP-агентов — то, что пред�
 `session.start` ей не шлётся). В объекте сессии (§6) поле `system: true` (передаётся только
 `true`); в нумерации «Сессия N» (§3 Session) служебные сессии не считаются. `state` — как у
 обычной (§17.1): `worker_offline`, пока воркер не на связи, `waiting`, пока открыт запрос
-воркера, иначе `idle`. Ввод, `POST /stop`, `/retry`, `/archive` и `DELETE` для неё — `409
-system_session`; `PATCH auto_approve: true` — `403`. Клиент показывает служебные сессии не в
+воркера, иначе `idle`. Ввод, `POST /stop`, `/retry`, `/takeover`, `/archive` и `DELETE` для
+неё — `409 system_session`; `PATCH auto_approve: true` — `403`. Клиент показывает служебные сессии не в
 списке сессий личного проекта, а отдельной группой «Воркеры» в левой колонке (имя воркера,
 «ждёт ответа», «офлайн», непрочитанные); лента — обычная, без поля ввода и кнопок
 «Стоп»/«Повторить», с фильтром «только запросы» (карточки `approval.request` и
@@ -1508,7 +1542,7 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 (владельцу воркера; с 0.17 это событие `approval.request` в служебной сессии воркера,
 §10.2: `title` — имя воркера, `tag` — `<system_session_id>:<request_id>`; на строки
 `worker_log` push нет); финальный `agent.message`, `peer.message` и `system` о
-недоставленном вводе — владельцу сессии и пользователям с грантом, которые писали
+недоставленном вводе (кроме событий зеркала: на них push нет вовсе, §9.1) — владельцу сессии и пользователям с грантом, которые писали
 в эту сессию, если у них нет активной WS-подписки на неё. На iOS Web Push работает
 только из установленного PWA — ограничение первой версии. Мост в Telegram —
 опционально, через `hermes send`.
@@ -1630,9 +1664,10 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
    из веба, вести её с телефона, подтвердить разрешение.
 2. ~~Проекты и workspace~~ (сделано в 0.16, T14: проекты, несколько workspace `dir` в
    проекте, `fs.stat`/`fs.list_dirs`, сессии в выбранном workspace; упрощение итерации 1
-   «один workspace из конфига воркера» снято), служебная сессия воркера, импорт и зеркало
-   VS Code, подхват в обе стороны, артефакты, `.hqc/inbox`. Критерий: подхватить с
-   телефона сессию, начатую в VS Code.
+   «один workspace из конфига воркера» снято), ~~служебная сессия воркера~~ (0.17, T17),
+   ~~артефакты, `.hqc/inbox`~~ (0.18, T16, без `hqc_attach`), ~~импорт и зеркало VS Code,
+   подхват в обе стороны~~ (0.19, T15; сведение — T18). Критерий: подхватить с телефона
+   сессию, начатую в VS Code (живой тест `live_takeover`; через UI на телефоне не проверено).
 3. MCP hqc: attach, send, ask, list, search, schedule; фреймы `mcp.call`;
    MCP-сервер по §7.2. Персональная сессия.
 4. Общий ACP-адаптер (первый агент — Hermes, включая steer); голая модель
@@ -1745,10 +1780,23 @@ resume`, `system session_taken_over`; `409 locked_vscode` с `hint: takeover`; �
 `locked_by`, поля сессии зеркала. §5.3: `workspace.list_candidates {request_id}`, `mirror.set`
 подробно. §5.4: `mirror.event` с `title?`, `recent` и ответом `ack`. Код `system`
 `session_released`, ошибки `vscode_active` и `hint` у `locked_vscode`, `GET
-/api/workers/{id}/candidates` и `mirror_enabled` в `POST /api/workspaces` описаны в §9; их
-перенос в таблицы §4 и §6 — при сведении итерации (`docs/notes/t15-questions.md`). Миграция
+/api/workers/{id}/candidates` и `mirror_enabled` в `POST /api/workspaces` описаны в §9
+(`docs/notes/t15-questions.md`). Миграция
 хаба `0008` (при слиянии переименована из `0006`; `0006` занят T17, `0007` — T16):
 `sessions.vscode_active_at`, индекс по (`worker_id`, `runtime_session_id`).
+Сведение T15–T17 (T18): отложенное тремя задачами перенесено в общие разделы. §3 Session —
+`system`, исключение «без workspace» для служебной сессии, `runtime: none`. §4 — источник
+`user.message` из зеркала, коды `system` `session_released`, `worker_log` (поле `level`),
+`session_taken_over` без пометки итерации, правило «файлы пользователя всегда в
+`user.message.artifact_ids`, `attachment` — только `hqc_attach`» **[решение]** (T16, вопрос 1).
+§5 — код ошибки `locked_vscode`, `hello.ack.system_session_id`,
+`session.start.requested_by_owner`, подробно `worker.approval.request`/`response`, `result` на
+`workspace.list_candidates`. §6 — `mirror_enabled` в `POST /api/workspaces`, `GET
+/api/workers/{id}/candidates`, `POST /takeover` с ошибками, поле `system` и `409
+system_session` (теперь и на `/takeover`), `409 locked_vscode` с `hint`, `409 vscode_active`,
+`400 unknown_artifact`, исключение `worker_log` из непрочитанного. §10.2 — `/takeover` в
+списке запретов служебной сессии. §16 — без push на события зеркала. §19 — что из итерации
+2 сделано.
 
 ### 0.17 → 0.18 (T16, артефакты; слито после T17)
 §3 Artifact: `session_id` — первая сессия ввода, `storage_key` = sha256, уникальность
@@ -1777,7 +1825,8 @@ content block stream-json **[проверить]**, ошибки скачива�
 (код `system` `worker_log`, поле `level`), §5.3/§5.4 (новые кадры, `hello.ack.system_session_id`,
 `session.start.requested_by_owner`), §6 (поле `system` сессии, код `409 system_session`,
 правило непрочитанного), §3 Session (`runtime: none`), §3 PendingRequest (`kind:
-worker_approval` уже был в списке). Вопросы — `docs/notes/t17-questions.md`.
+worker_approval` уже был в списке); перенесены в 0.19 (T18). Вопросы —
+`docs/notes/t17-questions.md`.
 
 ### 0.15 → 0.16 (T14, проекты и несколько workspace)
 Снято упрощение итерации 1 «один workspace из конфига воркера» **[решение]**. §3 Project:

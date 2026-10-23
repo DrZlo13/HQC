@@ -8,7 +8,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEvent, parseServerFrame, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
-import { ActivityLine, BusyIndicator, ChatItems, type ChatActions } from '../src/ui/cards';
+import { ActivityLine, BusyIndicator, ChatItems, onlyRequests, type ChatActions } from '../src/ui/cards';
 import { CANONICAL_LABELS, POLICY_HINT_LABELS } from '../src/ui/labels';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -411,5 +411,70 @@ describe('turn indicator (T13): from the session state, no events of its own', (
       expect(r.line).toBeNull();
       render(null, root);
     }
+  });
+});
+
+describe("worker's service session (T17, SPEC §10.2)", () => {
+  const log = (seq: number, level: string, text: string) =>
+    ev('event.system', (e) => {
+      e.seq = seq;
+      e.ts = '2026-10-22T10:00:07Z';
+      e.payload = { text, code: 'worker_log', level };
+    });
+  const workerRequest = (seq: number) =>
+    ev('event.approval.request', (e) => {
+      const r = raw('worker.worker.approval.request').payload;
+      e.seq = seq;
+      e.author = { kind: 'system' };
+      e.payload = {
+        request_id: r.request_id,
+        tool: r.kind,
+        description: r.description,
+        options: [
+          { id: 'once', label: 'Allow', canonical: 'once' },
+          { id: 'deny', label: 'Deny', canonical: 'deny' },
+        ],
+        expires_at: '2026-10-22T11:00:00Z',
+      };
+    });
+
+  it('renders a log line with its time, level and text as is', () => {
+    const t = new Timeline();
+    t.apply(log(1, 'warn', 'hqc_worker::connection: hub connection lost: closed_by_hub *x*'));
+    t.apply(log(2, 'error', 'outbox write failed'));
+    show(t);
+    const lines = [...root.querySelectorAll('.line-worker-log')];
+    expect(lines).toHaveLength(2);
+    expect(lines[0].classList.contains('level-warn')).toBe(true);
+    expect(lines[0].querySelector('.log-level')!.textContent).toBe('предупреждение');
+    expect(lines[0].querySelector('.log-time')!.getAttribute('datetime')).toBe('2026-10-22T10:00:07Z');
+    expect(lines[0].querySelector('.log-time')!.textContent).toMatch(/^\d\d:\d\d:\d\d$/);
+    // Not Markdown: underscores and stars stay.
+    expect(lines[0].querySelector('.log-text')!.textContent).toBe(
+      'hqc_worker::connection: hub connection lost: closed_by_hub *x*',
+    );
+    expect(lines[1].classList.contains('level-error')).toBe(true);
+    expect(lines[1].querySelector('.log-level')!.textContent).toBe('ошибка');
+  });
+
+  it('shows the confirmation of a new folder with once / deny and sends the answer', async () => {
+    const t = new Timeline();
+    t.apply(workerRequest(1));
+    const { actions } = show(t);
+    expect(root.querySelector('.card-approval .card-title')!.textContent).toContain('сессии в новой папке');
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>('.card-approval button')];
+    expect(buttons.map((b) => b.textContent)).toEqual([CANONICAL_LABELS.once, CANONICAL_LABELS.deny]);
+    await act(async () => buttons[0].click());
+    expect(actions.approve).toHaveBeenCalledWith(raw('worker.worker.approval.request').payload.request_id, 'once');
+  });
+
+  it('«только запросы» keeps the request cards only', () => {
+    const t = new Timeline();
+    t.apply(log(1, 'warn', 'a'));
+    t.apply(workerRequest(2));
+    t.apply(log(3, 'error', 'b'));
+    const items = onlyRequests(t.items());
+    expect(items).toHaveLength(1);
+    expect(items[0].kind === 'event' && items[0].event.type).toBe('approval.request');
   });
 });

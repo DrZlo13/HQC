@@ -13,6 +13,10 @@
 // usage -> status idle. A message containing "вопрос" or "clarify" asks a clarify.request
 // instead of the approval; one containing "markdown" or "разметка" gets MARKDOWN_ANSWER
 // streamed and nothing else.
+//
+// The worker home-mac has its service session (SPEC §10.2, `system: true`): log lines
+// (`system {code: worker_log, level}`) and an open confirmation of a new folder; input there
+// is `409 system_session`.
 
 import { createServer } from 'node:http';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
@@ -167,6 +171,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   /** SPEC §6: the final agent.message, requests, peer messages and system after the cursor. */
   function isUnread(e) {
     if (e.type === 'agent.message') return e.payload.final === true;
+    // The worker's log lines in its service session do not count (SPEC §10.2).
+    if (e.type === 'system' && e.payload.code === 'worker_log') return false;
     return ['approval.request', 'clarify.request', 'peer.message', 'system'].includes(e.type);
   }
 
@@ -200,6 +206,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   /** The session object of SPEC §6 (hqc_proto::api::Session, examples/wire/api.session.json). */
   function info(s) {
     const sum = summaryOf(s);
+    if (s.system) {
+      const { workspace_id: _, ...rest } = info({ ...s, system: false });
+      return { ...rest, agent: { ...rest.agent, runtime: 'none', runtime_session_id: undefined }, system: true };
+    }
     return {
       id: s.id,
       project_id: s.project_id,
@@ -287,6 +297,45 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     }));
   }
   newSession('Пустая сессия');
+
+  // The service session of home-mac (SPEC §10.2): no workspace, no agent, no input.
+  {
+    const s = {
+      id: ex['api.session.system'].id,
+      project_id: project.id,
+      cwd: '.',
+      title: 'home-mac',
+      slug: `worker-${workerId}`,
+      archived: false,
+      system: true,
+      created_at: new Date().toISOString(),
+      last_seq: 0,
+      read_seq: 0,
+      events: [],
+      queue: [],
+      turn: null,
+      open: null,
+    };
+    sessions.set(s.id, s);
+    const log = (level, text) =>
+      store(s, mk(s, 'event.system', { text, code: 'worker_log', level }));
+    log('warn', 'hqc_worker::connection: hub connection lost: closed by hub; reconnecting in 1s');
+    log('error', 'hqc_worker::supervisor: known folders not saved: Permission denied');
+    const req = ex['worker.worker.approval.request'].payload;
+    const ev = store(s, mk(s, 'event.approval.request', {
+      request_id: req.request_id,
+      tool: req.kind,
+      description: req.description,
+      options: [
+        { id: 'once', label: 'Allow', canonical: 'once' },
+        { id: 'deny', label: 'Deny', canonical: 'deny' },
+      ],
+      expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      policy_hint: undefined,
+    }, { author: { kind: 'system' } }));
+    s.open = { kind: 'approval', request_id: req.request_id, event: ev, resolve: () => {} };
+    log('warn', 'пропущено 3');
+  }
 
   // ---- turns -------------------------------------------------------------------------
 
@@ -553,6 +602,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   });
   route('POST', '/api/sessions/:id/input', (p, body) => {
     const s = sessionOr404(p.id);
+    if (s.system) throw fail(409, 'system_session', "this is the worker's service session");
     if (typeof body?.text !== 'string' || !body.text.trim()) throw fail(400, 'bad_request', 'text required');
     // A resend with the same client_op_id is the same input: the stored event, 200 (SPEC §6).
     const dup = body.client_op_id && s.events.find((e) => e.client_op_id === String(body.client_op_id));

@@ -56,6 +56,20 @@ export const SYSTEM_CODE_LABELS: Record<string, string> = {
   policy_denied: 'Запрещено политикой воркера',
 };
 
+/** `level` of a worker log line (`system {code: worker_log}`, SPEC §10.2). */
+export const LOG_LEVEL_LABELS: Record<string, string> = {
+  warn: 'предупреждение',
+  error: 'ошибка',
+};
+
+/** `tool` of an `approval.request` in a worker's service session: the kind of
+ *  `worker.approval.request` (SPEC §10.2). Other values are shown as they are. */
+export const WORKER_REQUEST_LABELS: Record<string, string> = {
+  'workspace.use': 'сессии в новой папке',
+  'workspace.create': 'создание workspace',
+  'workspace.delete': 'удаление workspace',
+};
+
 export const CANCEL_LABELS: Record<CancelReason, string> = {
   timeout: 'истёк срок',
   stopped: 'ход остановлен',
@@ -68,6 +82,13 @@ export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms} мс`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)} с`;
   return `${Math.floor(ms / 60_000)} мин ${Math.round((ms % 60_000) / 1000)} с`;
+}
+
+/** Time with seconds, for log lines. */
+export function formatClock(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 export function formatTime(ts: string): string {

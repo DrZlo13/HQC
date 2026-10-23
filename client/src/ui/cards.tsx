@@ -6,10 +6,13 @@ import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } 
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import {
   CANCEL_LABELS,
+  LOG_LEVEL_LABELS,
   POLICY_HINT_LABELS,
+  WORKER_REQUEST_LABELS,
   activityLabel,
   STATE_LABELS,
   SYSTEM_CODE_LABELS,
+  formatClock,
   formatDuration,
   formatTime,
   isDeny,
@@ -44,6 +47,14 @@ export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActi
         }
       })}
     </>
+  );
+}
+
+/** The «только запросы» filter of the service session (SPEC §10.2): the request cards,
+ *  which show their own answer or cancellation. */
+export function onlyRequests(items: Item[]): Item[] {
+  return items.filter(
+    (it) => it.kind === 'event' && (it.event.type === 'approval.request' || it.event.type === 'clarify.request'),
   );
 }
 
@@ -160,6 +171,7 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
         </Line>
       );
     case 'system': {
+      if (event.payload.code === 'worker_log') return <WorkerLogLine event={event} />;
       const caption = SYSTEM_CODE_LABELS[event.payload.code];
       return (
         <Line kind={caption ? `system line-system-${event.payload.code}` : 'system'}>
@@ -176,6 +188,21 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
         </details>
       );
   }
+}
+
+/** A warn/error line of the worker's own log in its service session (SPEC §10.2): time,
+ *  level and the text as is (log text, not Markdown). */
+function WorkerLogLine({ event }: { event: EventOf<'system'> }) {
+  const level = event.payload.level ?? 'warn';
+  return (
+    <div class={`line line-worker-log level-${level}`}>
+      <time class="log-time" dateTime={event.ts}>
+        {formatClock(event.ts)}
+      </time>{' '}
+      <span class="log-level">{LOG_LEVEL_LABELS[level] ?? level}</span>{' '}
+      <span class="log-text">{event.payload.text}</span>
+    </div>
+  );
 }
 
 function Line({ kind, children }: { kind: string; children: preact.ComponentChildren }) {
@@ -314,7 +341,7 @@ export function ApprovalCard({ event, actions }: { event: EventOf<'approval.requ
   return (
     <div class={`card card-approval ${open ? 'is-open' : 'is-closed'}`}>
       <div class="card-title">
-        Разрешение · <b>{p.tool}</b>
+        Разрешение · <b>{WORKER_REQUEST_LABELS[p.tool] ?? p.tool}</b>
         {p.policy_hint && <span class={`policy-hint policy-${p.policy_hint}`}> · {POLICY_HINT_LABELS[p.policy_hint]}</span>}
       </div>
       <pre class="pre">{p.description}</pre>

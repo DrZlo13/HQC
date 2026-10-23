@@ -111,17 +111,26 @@ export class AppState {
   }
 
   /** Sessions of the project (the current one by default), newest activity first, without
-   *  archived ones. */
+   *  archived ones and without the workers' service sessions (listed apart, SPEC §10.2). */
   sortedSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
-      .filter((s) => !s.archived && s.project_id === projectId)
+      .filter((s) => !s.archived && !s.system && s.project_id === projectId)
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
+  }
+
+  /** The workers' service sessions (SPEC §10.2), by worker name: the «Воркеры» group. */
+  workerSessions(): SessionInfo[] {
+    return [...this.sessions.values()]
+      .filter((s) => s.system)
+      .sort((a, b) => a.title.localeCompare(b.title));
   }
 
   /** Unread over the project's sessions, for its badge. */
   projectUnread(projectId: string): number {
     let n = 0;
-    for (const s of this.sessions.values()) if (s.project_id === projectId && !s.archived) n += s.unread;
+    for (const s of this.sessions.values()) {
+      if (s.project_id === projectId && !s.archived && !s.system) n += s.unread;
+    }
     return n;
   }
 

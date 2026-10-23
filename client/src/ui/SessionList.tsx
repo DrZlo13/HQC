@@ -64,6 +64,7 @@ export function SessionList({ app, current }: { app: AppState; current?: string 
           + Проект
         </button>
       </nav>
+      <WorkerList app={app} current={current} />
       {project && (
         <div class="project-head">
           <div class="project-title">{project.is_personal ? 'Личный' : project.name}</div>
@@ -104,6 +105,30 @@ export function SessionList({ app, current }: { app: AppState; current?: string 
         {app.me && list.length === 0 && <li class="empty">Сессий пока нет</li>}
       </ul>
     </section>
+  );
+}
+
+/** «Воркеры»: the service session of each worker, by its name (SPEC §10.2). */
+function WorkerList({ app, current }: { app: AppState; current?: string }) {
+  const list = app.workerSessions();
+  if (list.length === 0) return null;
+  return (
+    <nav class="worker-list" aria-label="Воркеры">
+      <div class="group-title">Воркеры</div>
+      {list.map((s) => (
+        <a key={s.id} class={`project-row worker-row ${s.id === current ? 'is-current' : ''}`} href={`#/s/${s.id}`}>
+          <span class={`dot state-${s.state}`} aria-hidden="true" />
+          <span class="project-name">{s.title}</span>
+          {s.state === 'waiting' && <span class="worker-asks">ждёт ответа</span>}
+          {s.state === 'worker_offline' && <span class="worker-asks muted">офлайн</span>}
+          {s.unread > 0 && (
+            <span class="badge" aria-label={`непрочитанных: ${s.unread}`}>
+              {s.unread > 99 ? '99+' : s.unread}
+            </span>
+          )}
+        </a>
+      ))}
+    </nav>
   );
 }
 

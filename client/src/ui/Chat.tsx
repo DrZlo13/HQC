@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import { ChatSession } from '../session';
-import { ActivityLine, BusyIndicator, ChatItems, StreamingBubble, type ChatActions } from './cards';
+import { ActivityLine, BusyIndicator, ChatItems, StreamingBubble, onlyRequests, type ChatActions } from './cards';
 import { useSubscription } from './hooks';
 import { STATE_LABELS } from './labels';
 
@@ -10,6 +10,7 @@ const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
   const chat = useMemo(() => new ChatSession(app.api, app.socket, sessionId), [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [requestsOnly, setRequestsOnly] = useState(false);
   useEffect(() => {
     void chat.open();
     return () => chat.close();
@@ -19,6 +20,8 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
 
   const info = app.sessions.get(sessionId);
   const state = info?.state ?? 'unknown';
+  // The worker's service session (SPEC §10.2): requests and log lines, no input.
+  const system = info?.system ?? false;
   const t = chat.timeline;
 
   // Read cursor: whatever is on screen while the tab is visible counts as read.
@@ -55,7 +58,8 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
   const act = (fn: () => Promise<void>, failed: string) =>
     fn().catch((e: Error) => setNotice(`${failed}: ${e.message}`));
 
-  const showRetry = state === 'error' || t.hasFailedDelivery();
+  const showRetry = !system && (state === 'error' || t.hasFailedDelivery());
+  const items = requestsOnly ? onlyRequests(t.items()) : t.items();
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   useLayoutEffect(() => {
@@ -71,6 +75,7 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
         </a>
         <div class="bar-title">
           <div class="title">{info?.title || 'Сессия'}</div>
+          {system && <div class="muted small">служебная сессия воркера</div>}
           <div class={`state state-${state}`}>
             <BusyIndicator state={state} />
             {STATE_LABELS[state]}
@@ -78,7 +83,17 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
             {app.conn !== 'open' && ' · нет связи'}
           </div>
         </div>
-        {STOPPABLE.has(state) && (
+        {system && (
+          <button
+            type="button"
+            class={`btn btn-small btn-filter ${requestsOnly ? 'is-on' : ''}`}
+            aria-pressed={requestsOnly}
+            onClick={() => setRequestsOnly(!requestsOnly)}
+          >
+            Только запросы
+          </button>
+        )}
+        {!system && STOPPABLE.has(state) && (
           <button type="button" class="btn btn-deny btn-small" onClick={() => act(() => chat.stop(), 'Не остановлено')}>
             Стоп
           </button>
@@ -97,22 +112,25 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        <ChatItems items={t.items()} actions={actions} />
+        <ChatItems items={items} actions={actions} />
+        {requestsOnly && items.length === 0 && <div class="empty">Запросов нет</div>}
         {t.streaming && <StreamingBubble text={t.streaming} />}
-        <ActivityLine state={state} timeline={t} />
+        {!system && <ActivityLine state={state} timeline={t} />}
       </div>
       {notice && (
         <div class="notice" role="alert" onClick={() => setNotice(null)}>
           {notice}
         </div>
       )}
-      <Composer
-        disabled={state === 'archived'}
-        onSend={(text) => {
-          stick.current = true;
-          chat.send(text);
-        }}
-      />
+      {!system && (
+        <Composer
+          disabled={state === 'archived'}
+          onSend={(text) => {
+            stick.current = true;
+            chat.send(text);
+          }}
+        />
+      )}
     </section>
   );
 }

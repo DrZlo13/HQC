@@ -268,6 +268,52 @@ pre {
   text-overflow: ellipsis;
 }
 
+/* ---- workers' service sessions (T17, SPEC §10.2) ---- */
+
+.worker-list {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.group-title {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+.worker-asks {
+  font-size: 0.75rem;
+  color: var(--warn);
+}
+
+.btn-filter.is-on {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent);
+}
+
+.line-worker-log {
+  align-self: stretch;
+  text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.line-worker-log .log-level {
+  color: var(--warn);
+}
+
+.line-worker-log.level-error .log-level,
+.line-worker-log.level-error .log-text {
+  color: var(--deny);
+}
+
 .project-head {
   flex: none;
   display: flex;

@@ -194,3 +194,28 @@ it('switches projects from the left column and deletes a project', async () => {
   await until('gone', () => !$$('.project-row').some((r) => r.textContent?.includes('KiCad')));
   expect((await app.api.projects()).some((p) => p.id === kicad.id)).toBe(false);
 });
+
+it("lists the worker's service session apart: no input, request cards, «только запросы» (T17)", async () => {
+  const personal = $$('.project-row').find((r) => r.textContent?.includes('Личный'))!;
+  location.hash = personal.getAttribute('href')!;
+  const row = await until('workers group', () =>
+    $$('.worker-list .worker-row').find((r) => r.textContent?.includes('home-mac')),
+  );
+  expect($('.worker-list .group-title')!.textContent).toBe('Воркеры');
+  expect(row.textContent).toContain('ждёт ответа');
+  // Not among the sessions of the personal project, where it lives.
+  await until('personal sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
+  expect($$('.session-row').some((r) => r.getAttribute('href') === row.getAttribute('href'))).toBe(false);
+
+  location.hash = row.getAttribute('href')!;
+  await until('log lines', () => $$('.line-worker-log').length === 3);
+  expect($('.chat textarea')).toBeNull();
+  expect($('.chat .muted.small')!.textContent).toBe('служебная сессия воркера');
+  expect($('.line-worker-log.level-error .log-text')!.textContent).toContain('known folders not saved');
+  button('Только запросы')!.click();
+  await until('filtered', () => $$('.line-worker-log').length === 0 && $('.chat .card-approval'));
+  button('Разрешить', '.card-approval')!.click();
+  await until('answered', () => $('.card-approval .outcome')?.textContent?.includes('Разрешить'));
+  button('Только запросы')!.click();
+  await until('unfiltered', () => $$('.line-worker-log').length === 3);
+});

@@ -92,6 +92,11 @@ describe('examples/wire', () => {
   it('reads the session object', () => {
     const s = parseSessionInfo(load('api.session.json'));
     expect(s).toMatchObject({ title: 'hqc: run the tests', state: 'running', unread: 1, archived: false });
+    expect(s.system).toBe(false);
+    // The worker's service session (T17, SPEC §10.2).
+    const sys = parseSessionInfo(load('api.session.system.json'));
+    expect(sys).toMatchObject({ system: true, title: 'home-mac', state: 'waiting' });
+    expect(sys.workspace_id).toBeUndefined();
     const sum = (load('client.session.summary.json') as { session: Record<string, unknown> }).session;
     for (const k of ['project_id', 'title', 'state', 'queue_len', 'unread', 'last_seq', 'last_read_seq']) {
       expect((s as unknown as Record<string, unknown>)[k], k).toEqual(sum[k]);

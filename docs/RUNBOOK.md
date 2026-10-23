@@ -252,7 +252,7 @@ ingress:
    Everyone. Более конкретный путь побеждает, поэтому `/worker/*` идёт мимо Access.
 
 **Cookie приложения `hqc`** (Applications → `hqc` → Configure → Settings → Cookie
-settings): **SameSite = Lax**, **HttpOnly** включён, **Binding Cookie** включён. По
+settings): **SameSite = Lax**, **HttpOnly** включён, **Binding Cookie** выключен: с ней Cloudflare не пропускает WebSocket через Access (проверено 2026-10-23). По
 умолчанию cookie `CF_Authorization` уходит с `SameSite=None`, и чужая страница в браузере
 того, кто вошёл в hqc, может открыть `wss://hqc.example.com/api/ws` с этой cookie. Хаб
 сам отклоняет WebSocket и запросы на запись с чужим `Origin` (SPEC §20), Lax — второй

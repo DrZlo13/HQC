@@ -14,6 +14,64 @@ pub struct Config {
     pub client_dir: Option<PathBuf>,
     pub timing: Timing,
     pub limits: Limits,
+    pub artifacts: ArtifactConfig,
+}
+
+/// The artifact store and its signed links (SPEC §12).
+#[derive(Clone)]
+pub struct ArtifactConfig {
+    /// `HQC_ARTIFACT_DIR`: content by sha256, `<dir>/<sha[0..2]>/<sha>`.
+    pub dir: PathBuf,
+    /// `HQC_ARTIFACT_PUBLIC_BASE`: origin of the artifact domain (`https://artifacts.<hub>`),
+    /// outside Cloudflare Access. Signed links point there, HTML is shown inline only on it.
+    /// `None`: links are relative to the hub and HTML is only downloaded.
+    pub public_base: Option<String>,
+    /// Largest artifact (SPEC §12: 100 MB).
+    pub max_bytes: u64,
+    /// Lifetime of a signed link (SPEC §12: 10 minutes).
+    pub link_ttl: Duration,
+    /// HMAC key of signed links: `HQC_ARTIFACT_KEY`, else random per process (links of a
+    /// previous run stop working; the client asks for a new one).
+    pub key: Vec<u8>,
+}
+
+pub const MAX_ARTIFACT_BYTES: u64 = 100 * 1000 * 1000;
+
+impl ArtifactConfig {
+    /// Defaults with a random key.
+    pub fn new(dir: PathBuf) -> Self {
+        let mut key = vec![0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+        Self {
+            dir,
+            public_base: None,
+            max_bytes: MAX_ARTIFACT_BYTES,
+            link_ttl: Duration::from_secs(600),
+            key,
+        }
+    }
+
+    /// `host[:port]` of [`Self::public_base`], lowercase.
+    pub fn public_host(&self) -> Option<String> {
+        let b = self.public_base.as_deref()?;
+        let rest = b.split_once("://")?.1;
+        Some(rest.trim_end_matches('/').to_ascii_lowercase())
+    }
+}
+
+/// `HQC_ARTIFACT_PUBLIC_BASE`: `https://host[:port]` (or `http://` on loopback), no path.
+pub fn artifact_public_base(v: &str) -> anyhow::Result<String> {
+    let v = v.trim().trim_end_matches('/');
+    let ok = match v.split_once("://") {
+        Some(("https", h)) => !h.is_empty(),
+        Some(("http", h)) => crate::security::is_loopback_host(h),
+        _ => false,
+    };
+    let host = v.split_once("://").map(|x| x.1).unwrap_or("");
+    if !ok || host.contains(['/', '?', '#', '@']) {
+        bail!("HQC_ARTIFACT_PUBLIC_BASE={v}: expected https://host[:port] (http only on loopback), without a path");
+    }
+    Ok(v.to_string())
 }
 
 /// Limits of the unauthenticated `/worker/*` routes and of push subscriptions (SPEC §20).
@@ -138,7 +196,8 @@ pub fn turn_watchdog_from(v: Option<&str>) -> anyhow::Result<Option<Duration>> {
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`,
-    /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`.
+    /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`,
+    /// `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -190,6 +249,27 @@ impl Config {
             }
         }
 
+        let mut artifacts = ArtifactConfig::new(
+            var("HQC_ARTIFACT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("artifacts")),
+        );
+        artifacts.public_base = var("HQC_ARTIFACT_PUBLIC_BASE")
+            .map(|v| artifact_public_base(&v))
+            .transpose()?;
+        if let Some(k) = var("HQC_ARTIFACT_KEY") {
+            if k.len() < 32 {
+                bail!("HQC_ARTIFACT_KEY: at least 32 characters");
+            }
+            artifacts.key = k.into_bytes();
+        }
+        std::fs::create_dir_all(&artifacts.dir).with_context(|| {
+            format!(
+                "HQC_ARTIFACT_DIR={}: cannot create",
+                artifacts.dir.display()
+            )
+        })?;
+
         Ok(Self {
             database_url,
             listen,
@@ -201,6 +281,7 @@ impl Config {
                 ..Timing::default()
             },
             limits: Limits::default(),
+            artifacts,
         })
     }
 }
@@ -257,6 +338,26 @@ mod tests {
         assert_eq!(turn_watchdog_from(Some("30")).unwrap(), d(30));
         assert_eq!(turn_watchdog_from(Some("0")).unwrap(), None);
         assert!(turn_watchdog_from(Some("15m")).is_err());
+    }
+
+    #[test]
+    fn artifact_base() {
+        assert_eq!(
+            artifact_public_base("https://artifacts.example.com/").unwrap(),
+            "https://artifacts.example.com"
+        );
+        assert!(artifact_public_base("http://127.0.0.1:8081").is_ok());
+        for bad in [
+            "http://artifacts.example.com",
+            "https://a.example.com/x",
+            "artifacts.example.com",
+            "https://",
+        ] {
+            assert!(artifact_public_base(bad).is_err(), "{bad}");
+        }
+        let mut c = ArtifactConfig::new("x".into());
+        c.public_base = Some("https://Artifacts.example.com:8443".into());
+        assert_eq!(c.public_host().unwrap(), "artifacts.example.com:8443");
     }
 
     #[test]

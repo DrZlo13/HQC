@@ -4,7 +4,10 @@
 //!   `Origin` equal to the request's own host, and any other non-GET request on `/api/*` with
 //!   an `Origin` must match it too (cross-site WebSocket hijacking, CSRF with the Access
 //!   cookie). The origin's scheme is `https`, or `http` for a loopback host (development).
-//!   Every response gets the security headers ([`SECURITY_HEADERS`]).
+//!   Every response gets the security headers ([`SECURITY_HEADERS`]); with a separate artifact
+//!   domain its origin is added to `img-src`, `frame-src` and `connect-src` ([`client_csp`]).
+//!   Artifact content (`/artifacts/*`) sets its own sandbox CSP and framing (SPEC §12), and
+//!   the artifact domain serves nothing else.
 //! - [`RateLimiter`]: sliding one-minute windows per key, for `/worker/*` by client address
 //!   ([`ClientIp`]).
 
@@ -16,13 +19,13 @@ use std::{
 };
 
 use axum::{
-    extract::{ConnectInfo, FromRequestParts, Request},
+    extract::{ConnectInfo, FromRequestParts, Request, State},
     http::{header, request::Parts, HeaderValue, Method},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 
-use crate::error::ApiError;
+use crate::{app::AppState, error::ApiError};
 
 /// Set on every response of the hub, unless the handler set the header itself.
 pub const SECURITY_HEADERS: &[(&str, &str)] = &[
@@ -40,7 +43,36 @@ pub const SECURITY_HEADERS: &[(&str, &str)] = &[
 /// Largest WebSocket message accepted from a client or a worker.
 pub const MAX_WS_MESSAGE: usize = 1 << 20;
 
-pub async fn guard(req: Request, next: Next) -> Response {
+/// The hub's CSP; `artifact_origin` (`HQC_ARTIFACT_PUBLIC_BASE`) may be shown in `<img>`,
+/// `<iframe>` and read with `fetch` (SPEC §12).
+pub fn client_csp(artifact_origin: Option<&str>) -> String {
+    let base = SECURITY_HEADERS[0].1;
+    match artifact_origin {
+        None => base.to_string(),
+        Some(o) => base
+            .replace("connect-src 'self'", &format!("connect-src 'self' {o}"))
+            .replace(
+                "img-src 'self' data:",
+                &format!("img-src 'self' data: {o}; frame-src {o}"),
+            ),
+    }
+}
+
+pub async fn guard(State(app): State<AppState>, req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let artifact_route = path.starts_with("/artifacts/");
+    if !artifact_route
+        && path != "/health"
+        && crate::artifacts::is_artifact_host(&app.config.artifacts, req.headers())
+    {
+        // The artifact domain is outside Access: it serves signed content and nothing else.
+        let mut r = ApiError::NotFound.into_response();
+        r.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(crate::artifacts::CSP),
+        );
+        return r;
+    }
     let mut resp = match check_origin(&req) {
         Ok(()) => next.run(req).await,
         Err(why) => {
@@ -50,7 +82,18 @@ pub async fn guard(req: Request, next: Next) -> Response {
     };
     let h = resp.headers_mut();
     for (k, v) in SECURITY_HEADERS {
-        if !h.contains_key(*k) {
+        if h.contains_key(*k) {
+            continue;
+        }
+        if *k == "content-security-policy" {
+            if artifact_route {
+                h.insert(*k, HeaderValue::from_static(crate::artifacts::CSP));
+            } else if let Ok(v) =
+                HeaderValue::from_str(&client_csp(app.config.artifacts.public_base.as_deref()))
+            {
+                h.insert(*k, v);
+            }
+        } else if !(artifact_route && *k == "x-frame-options") {
             h.insert(*k, HeaderValue::from_static(v));
         }
     }
@@ -215,6 +258,25 @@ mod tests {
         ] {
             assert!(!same_origin(o, h), "{o} vs {h}");
         }
+    }
+
+    #[test]
+    fn artifact_origin_in_csp() {
+        assert_eq!(client_csp(None), SECURITY_HEADERS[0].1);
+        let c = client_csp(Some("https://artifacts.example.com"));
+        assert!(
+            c.contains("img-src 'self' data: https://artifacts.example.com;"),
+            "{c}"
+        );
+        assert!(
+            c.contains("frame-src https://artifacts.example.com;"),
+            "{c}"
+        );
+        assert!(
+            c.contains("connect-src 'self' https://artifacts.example.com wss: https:;"),
+            "{c}"
+        );
+        assert!(c.contains("frame-ancestors 'none'"), "{c}");
     }
 
     #[test]

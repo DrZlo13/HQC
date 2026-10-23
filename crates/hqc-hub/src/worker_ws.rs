@@ -202,7 +202,7 @@ impl WorkerConn {
     }
 }
 
-const AUTH_FAILURES: &str = "worker_ws_auth_failures";
+pub(crate) const AUTH_FAILURES: &str = "worker_ws_auth_failures";
 
 /// Before the upgrade: the bearer token (SPEC §5.1). Unauthenticated attempts are limited
 /// (SPEC §20): an address with too many bad tokens in the last minute gets 429 without a
@@ -238,7 +238,7 @@ pub async fn handler(
 }
 
 /// The shape [`crate::auth::new_secret`] gives worker tokens: `hqcw_` + 43 base64url chars.
-fn is_worker_token(t: &str) -> bool {
+pub(crate) fn is_worker_token(t: &str) -> bool {
     t.strip_prefix("hqcw_").is_some_and(|b| {
         b.len() == 43
             && b.bytes()

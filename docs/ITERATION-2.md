@@ -167,3 +167,40 @@ warnings`, `cargo test --workspace`, `cd client && npm run typecheck && npm test
 build`, `E2E_CLAUDE_BIN=/usr/bin/false tools/e2e-local.sh` → `PASS (rehearsal)`, живой
 `HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_takeover` → PASS (44 с, 2026-10-23).
 Открытое — вопросы в `docs/notes/t15-questions.md`, `t16-questions.md`, `t17-questions.md`.
+
+## T19. Перерегистрация воркера без потери привязок и уборка отозванных (сделано, SPEC 0.21)
+
+Разделы: §3 (Worker, Workspace, Session), §4, §5.1, §6, §10.2, §17.4. Фон: повторный `enroll`
+той же машины (смена бинарника, хранилища токена) давал новый `worker_id`; сессии, workspace
+и служебная сессия оставались на старом, «воркер офлайн» навсегда, а служебные сессии
+отозванных воркеров висели в группе «Воркеры».
+- hqc-proto: `EnrollInfo.replaceable[]` (`ReplaceableWorker {id, name, os, status, last_seen?,
+  sessions_count}`), `EnrollConfirmRequest.replace_worker_id?`, `EnrollConfirmed.replaced?`,
+  `EnrollPoll::Confirmed.replaced?`; примеры `api.enroll.*.replace*.json`.
+- Хаб: `GET /api/workers/enroll/{code}` перечисляет офлайн и отозванных воркеров
+  пользователя; `POST /api/workers/enroll/confirm` с `replace_worker_id` — проверка владельца
+  (`400`) и что воркер не на связи (`409 worker_online`), код получает существующий
+  `worker_id`, старый токен сбрасывается сразу, `name`/`os` новые, `revoked_at` и `boot_id`
+  сбрасываются, служебная сессия разархивируется и переименовывается, в неё —
+  `system worker_replaced` (`old_name`, `new_name`); опрос отдаёт `replaced`. `DELETE
+  /api/workers/{id}` архивирует служебную сессию с `system worker_revoked`, её запросы
+  закрываются `archived`. `DELETE /api/workers/{id}?purge=1` удаляет отозванного воркера,
+  служебную сессию и workspace (`409 worker_not_revoked`, `409 worker_has_sessions` с
+  `sessions_count`). `GET /api/workers?include_revoked=1`, `status: revoked`. Миграция `0009`:
+  `enroll_codes.replaced_name`, архивация служебных сессий уже отозванных воркеров.
+- Воркер: `enroll` печатает `Enrolled as worker <id> (replaced <имя>).`.
+- Клиент: на экране подтверждения — выбор «Новый воркер» / «Это та же машина, заменить
+  <имя>» (статус, последний раз на связи, число сессий); в «Настройках» у отозванных —
+  «Удалить» с объяснением `worker_has_sessions`; группа «Воркеры» без архивных служебных
+  сессий; мок хаба.
+- Документация: SPEC §3 Worker, §4, §5.1, §6, §10.2, §17.4, §23 (0.21); RUNBOOK §2.3
+  (перерегистрация той же машины), §2.6 (отзыв и удаление).
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace` (хаб: `tests/worker_replace.rs` — замена сохраняет id,
+сессии и workspace, старый токен не работает, новый `hello` с тем же `system_session_id`;
+нельзя заменить воркера на связи и чужого; отзыв архивирует служебную сессию, замена
+отозванного возвращает её; purge с сессиями — `409`, без — удаляет; миграция `0009`;
+воркер: `enroll_reports_the_replaced_worker`), `cd client && npm test && npm run build`
+(`tests/enroll.test.tsx` — диалог замены; `tests/workers.test.tsx` — «Удалить», 409, группа
+«Воркеры» без отозванных; e2e через мок), `E2E_CLAUDE_BIN=/usr/bin/false
+tools/e2e-local.sh` → `PASS (rehearsal)`. Вопросы — `docs/notes/t19-questions.md`.

@@ -49,6 +49,9 @@ RUN apt-get update \
     && groupadd --gid 10001 hqc \
     && useradd --uid 10001 --gid hqc --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin hqc
 
+# The artifact store (SPEC §12): mount a volume here; owned by hqc so a fresh named volume is.
+RUN mkdir -p /var/lib/hqc/artifacts && chown -R hqc:hqc /var/lib/hqc
+
 COPY --from=hub /src/target/release/hqc-hub /usr/local/bin/hqc-hub
 COPY --from=client /src/client/dist /opt/hqc/client
 
@@ -66,6 +69,7 @@ LABEL org.opencontainers.image.title="hqc-hub" \
 # NO_COLOR: plain log lines in `docker logs` and journald.
 ENV HQC_HUB_LISTEN=0.0.0.0:8080 \
     HQC_CLIENT_DIR=/opt/hqc/client \
+    HQC_ARTIFACT_DIR=/var/lib/hqc/artifacts \
     RUST_LOG=info \
     NO_COLOR=1
 USER hqc:hqc

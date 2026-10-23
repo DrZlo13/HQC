@@ -84,6 +84,9 @@ createdb hqc
 | `HQC_CLIENT_DIR` | нет | каталог собранного клиента (`client/dist`). Если задан, хаб отдаёт клиент на `/` того же домена; без `index.html` в нём хаб не стартует. Не задан — хаб отдаёт только `/api/*`, `/worker/*` и `/health` |
 | `HQC_DEV` | нет | `1` — dev-режим **без Access**: все запросы `/api/*` идут от `HQC_DEV_USER`. Только для локальной разработки: хаб откажется стартовать, если при этом задан любой `HQC_ACCESS_*` или `HQC_HUB_LISTEN` не loopback (`127.0.0.0/8`, `[::1]`, `localhost`). В DMZ не использовать |
 | `HQC_DEV_USER` | с `HQC_DEV=1` | email пользователя dev-режима; без `HQC_DEV=1` игнорируется с предупреждением |
+| `HQC_ARTIFACT_DIR` | нет, `artifacts` (в Docker-образе `/var/lib/hqc/artifacts`) | каталог хранилища артефактов (SPEC §12): файлы по sha256, `<dir>/<первые 2 знака>/<sha256>`, и `tmp/` для загрузок. Хаб создаёт его при старте и не стартует, если не может. Бэкапить вместе с базой (SPEC §20). Удаления артефактов пока нет |
+| `HQC_ARTIFACT_PUBLIC_BASE` | нет | origin отдельного домена артефактов, `https://artifacts.<домен хаба>` без пути (`http://` — только loopback). Подписанные ссылки ведут туда, HTML рендерится в iframe только оттуда; хаб добавляет этот origin в `img-src`/`frame-src`/`connect-src` своей CSP, а на этом хосте отдаёт только `/artifacts/*` (остальное — `404`). Домен — тот же туннель на тот же хаб, **вне** Access (§1.6). Не задан — ссылки относительные, на домене хаба (за Access), HTML только скачивается |
+| `HQC_ARTIFACT_KEY` | нет | ключ HMAC подписанных ссылок, не короче 32 символов (`openssl rand -hex 32`). Не задан — случайный на каждый запуск: ссылки прошлого запуска перестают работать, клиент просто запрашивает новые. Нужен, только если ссылки должны переживать перезапуск |
 | `HQC_TURN_WATCHDOG_S` | нет, `900` | сторожевой таймер хода (SPEC §17.3), целые секунды: если сессия в `running`, а от воркера по ней нет ни одного события (включая `agent.delta`) дольше этого, хаб закрывает ход с `system turn_lost` «no events for N s», и сессия в `error` до следующего ввода. Ожидание ответа на approval/clarify и офлайн воркера не считаются. `0` — выключить |
 | `RUST_LOG` | нет, `info` | уровень логов (`tracing`), например `hqc_hub=debug` |
 
@@ -263,6 +266,15 @@ Cloudflare отсекает флуд раньше, чем он дойдёт до
 (Rules → Settings → Normalize incoming URLs) оставить включённой: Bypass для `/worker/`
 не должен обходиться путями вида `/worker/../api/me`.
 
+**Домен артефактов** (необязательно, SPEC §12): отдельное имя, например
+`artifacts.hqc.example.com`, — ещё один `hostname` в `ingress` туннеля на тот же
+`http://127.0.0.1:8080` и `cloudflared tunnel route dns hqc artifacts.hqc.example.com`.
+Access на это имя **не** ставить (или Bypass, Everyone): доступ даёт подпись ссылки с TTL
+10 минут. В хабе — `HQC_ARTIFACT_PUBLIC_BASE=https://artifacts.hqc.example.com` (§1.2):
+только с ним HTML-вложения показываются в iframe-песочнице; на этом имени хаб отдаёт лишь
+`/artifacts/*`. Без отдельного домена всё работает, ссылки идут на домен хаба за Access, а
+HTML только скачивается.
+
 Откуда взять значения для хаба:
 - `HQC_ACCESS_AUD` — Applications → `hqc` → Configure (Overview) → **Application Audience
   (AUD) Tag**. Это тег именно приложения `hqc` (не `hqc-worker`).
@@ -354,11 +366,15 @@ services:
         condition: service_healthy
     env_file: ./hub.env
     read_only: true
+    volumes:
+      # Хранилище артефактов (HQC_ARTIFACT_DIR образа); бэкапить вместе с базой.
+      - hqc-artifacts:/var/lib/hqc/artifacts
     # без ports: наружу хаб виден только через cloudflared/Caddy в этой же сети
     networks: [default, edge]
 
 volumes:
   hqc-db:
+  hqc-artifacts:
 
 networks:
   # Общая сеть с cloudflared/Caddy из их compose-проекта: docker network create edge.

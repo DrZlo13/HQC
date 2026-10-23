@@ -28,3 +28,6 @@ futures-util = "0.3"
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
+# The live end-to-end test of T15 (tests/live_takeover.rs) runs a real worker in process.
+hqc-worker = { path = "../hqc-worker" }
+tokio-util = "0.7"

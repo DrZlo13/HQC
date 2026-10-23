@@ -11,9 +11,18 @@ import type {
   RequestCancel,
 } from './proto';
 
+/** A file of a message not yet stored: shown by name, images by their local preview. */
+export interface PendingAttachment {
+  name: string;
+  size: number;
+  /** `data:` URL of an image (the CSP allows no `blob:`). */
+  preview?: string;
+}
+
 export interface PendingMessage {
   client_op_id: string;
   text: string;
+  attachments?: PendingAttachment[];
   /** `sending` until the hub echoes it back; `failed` if the POST failed. */
   status: 'sending' | 'failed';
   error?: string;
@@ -183,9 +192,11 @@ export class Timeline {
     return this.calls.has(callId);
   }
 
-  addPending(clientOpId: string, text: string): void {
+  addPending(clientOpId: string, text: string, attachments?: PendingAttachment[]): void {
     if (this.echoed.has(clientOpId)) return;
-    this.pending.set(clientOpId, { client_op_id: clientOpId, text, status: 'sending' });
+    const p: PendingMessage = { client_op_id: clientOpId, text, status: 'sending' };
+    if (attachments?.length) p.attachments = attachments;
+    this.pending.set(clientOpId, p);
     this.changed();
   }
 

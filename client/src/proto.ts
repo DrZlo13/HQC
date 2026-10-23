@@ -871,3 +871,38 @@ export function parsePushMessage(v: unknown): PushMessage {
     payload: present(o, 'payload') ? parseEvent(o.payload) : undefined,
   };
 }
+
+/** An artifact of `POST /api/artifacts` and `GET /api/artifacts/{id}` (SPEC §3, §12). */
+export interface Artifact {
+  id: Uuid;
+  kind: ArtifactKind;
+  name: string;
+  mime: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
+export function parseArtifact(v: unknown): Artifact {
+  const o = obj(v, 'artifact');
+  return {
+    id: str(o, 'id'),
+    kind: tolerantEnum(o, 'kind', ARTIFACT_KINDS),
+    name: str(o, 'name'),
+    mime: optStr(o, 'mime') ?? '',
+    size: num(o, 'size'),
+    sha256: optStr(o, 'sha256') ?? '',
+    created_at: optStr(o, 'created_at') ?? '',
+  };
+}
+
+/** `GET /api/artifacts/{id}/url`: a signed link (SPEC §12); `url` may be relative to the hub. */
+export interface ArtifactUrl {
+  url: string;
+  expires_at: string;
+}
+
+export function parseArtifactUrl(v: unknown): ArtifactUrl {
+  const o = obj(v, 'artifact url');
+  return { url: str(o, 'url'), expires_at: str(o, 'expires_at') };
+}

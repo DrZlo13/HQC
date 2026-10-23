@@ -2,14 +2,30 @@
 
 import type { Api } from './api';
 import type { ClarifyAnswer } from './proto';
-import { Timeline } from './timeline';
+import { Timeline, type PendingAttachment } from './timeline';
 import type { HubSocket } from './ws';
 
 const PAGE = 200;
 
+/** A file picked in the composer, with its preview. */
+export interface OutgoingFile {
+  file: Blob;
+  name: string;
+  /** `data:` URL for an image. */
+  preview?: string;
+}
+
+interface Outgoing {
+  text: string;
+  files: OutgoingFile[];
+  /** Artifact ids of the files uploaded so far, by position: a resend does not upload again. */
+  ids: (string | undefined)[];
+}
+
 export class ChatSession {
   readonly timeline = new Timeline();
   private unsubscribe: (() => void) | null = null;
+  private readonly outgoing = new Map<string, Outgoing>();
   private reportedRead = 0;
   private closed = false;
 
@@ -51,11 +67,14 @@ export class ChatSession {
     this.unsubscribe = null;
   }
 
-  /** Shows the message at once and reconciles it with the hub echo by `client_op_id`. */
-  send(text: string): string {
+  /** Shows the message at once and reconciles it with the hub echo by `client_op_id`.
+   *  Files are uploaded first (`POST /api/artifacts`), then the input carries their ids
+   *  (SPEC §12). */
+  send(text: string, files: OutgoingFile[] = []): string {
     const op = newOpId();
-    this.timeline.addPending(op, text);
-    this.post(op, text);
+    this.outgoing.set(op, { text, files, ids: [] });
+    this.timeline.addPending(op, text, pendingFiles(files));
+    this.post(op);
     return op;
   }
 
@@ -64,22 +83,44 @@ export class ChatSession {
   resend(clientOpId: string): void {
     const p = this.timeline.dropPending(clientOpId);
     if (!p) return;
-    this.timeline.addPending(clientOpId, p.text);
-    this.post(clientOpId, p.text);
+    const o = this.outgoing.get(clientOpId) ?? { text: p.text, files: [], ids: [] };
+    this.outgoing.set(clientOpId, o);
+    this.timeline.addPending(clientOpId, o.text, pendingFiles(o.files));
+    this.post(clientOpId);
   }
 
   discard(clientOpId: string): void {
+    this.outgoing.delete(clientOpId);
     this.timeline.dropPending(clientOpId);
   }
 
   /** The reply carries the stored event (also for a repeated `client_op_id`), so the
    *  message is reconciled even if the socket is down; the echo with the same `seq` is a
    *  no-op. */
-  private post(op: string, text: string): void {
-    this.api.input(this.id, text, op).then(
-      (ev) => this.timeline.applyReply(ev),
-      (e: Error) => this.timeline.failPending(op, e.message),
-    );
+  private post(op: string): void {
+    const o = this.outgoing.get(op);
+    if (!o) return;
+    this.upload(o)
+      .then((ids) => this.api.input(this.id, o.text, op, ids))
+      .then(
+        (ev) => {
+          this.outgoing.delete(op);
+          this.timeline.applyReply(ev);
+        },
+        (e: Error) => this.timeline.failPending(op, e.message),
+      );
+  }
+
+  private async upload(o: Outgoing): Promise<string[]> {
+    for (const [i, f] of o.files.entries()) {
+      if (o.ids[i]) continue;
+      try {
+        o.ids[i] = (await this.api.uploadArtifact(f.file, f.name)).id;
+      } catch (e) {
+        throw new Error(`${f.name}: ${(e as Error).message}`);
+      }
+    }
+    return o.ids as string[];
   }
 
   approve(requestId: string, optionId: string): Promise<void> {
@@ -107,6 +148,10 @@ export class ChatSession {
       this.reportedRead = 0;
     });
   }
+}
+
+function pendingFiles(files: OutgoingFile[]): PendingAttachment[] {
+  return files.map((f) => ({ name: f.name, size: f.file.size, preview: f.preview }));
 }
 
 /** `crypto.randomUUID` needs a secure context; a phone on plain-HTTP LAN does not have one. */

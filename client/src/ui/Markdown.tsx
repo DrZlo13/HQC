@@ -1,6 +1,9 @@
 // Markdown of message texts (T11): marked's lexer gives tokens, this file turns them into
 // Preact elements. Nothing is ever parsed as HTML: raw HTML in the source is shown as
 // text, links are made only for http, https and mailto, images are not loaded.
+// Paths of files in the working copy (a relative link, or inline code like
+// `src/main.rs:42`) are buttons that copy the path (T16; opening the file comes later).
+// Code blocks marked `diff` or `patch` colour added and removed lines.
 
 import { Lexer, getDefaults, type MarkedToken, type Token, type Tokens } from 'marked';
 import type { ComponentChildren } from 'preact';
@@ -130,15 +133,32 @@ function inlineToken(t: MarkedToken, key: number): ComponentChildren {
       return <em key={key}>{inline(t.tokens)}</em>;
     case 'del':
       return <del key={key}>{inline(t.tokens)}</del>;
-    case 'codespan':
+    case 'codespan': {
+      const path = filePath(t.text);
+      if (path) {
+        return (
+          <FilePath key={key} path={path}>
+            <code>{t.text}</code>
+          </FilePath>
+        );
+      }
       return <code key={key}>{t.text}</code>;
+    }
     case 'br':
       return <br key={key} />;
     case 'checkbox':
       return <input key={key} type="checkbox" class="md-checkbox" checked={t.checked} disabled />;
     case 'link': {
       const href = safeHref(t.href);
-      if (!href) return t.raw;
+      if (!href) {
+        const path = filePath(t.href, true);
+        if (!path) return t.raw;
+        return (
+          <FilePath key={key} path={path}>
+            {inline(t.tokens)}
+          </FilePath>
+        );
+      }
       return (
         <a key={key} href={href} title={t.title ?? undefined} target="_blank" rel="noopener noreferrer">
           {inline(t.tokens)}
@@ -186,17 +206,107 @@ export function decodeEntities(s: string): string {
   });
 }
 
-function CodeBlock({ code, lang }: { code: string; lang: string }) {
+/** A code block; `diff`/`patch` get coloured lines. `title` replaces the language label
+ *  (an attached diff shows its file name), `extra` goes into the bar. */
+export function CodeBlock({
+  code,
+  lang,
+  title,
+  extra,
+}: {
+  code: string;
+  lang: string;
+  title?: string;
+  extra?: ComponentChildren;
+}) {
+  const diff = lang === 'diff' || lang === 'patch';
   return (
-    <div class="md-code">
+    <div class={diff ? 'md-code md-code-diff' : 'md-code'}>
       <div class="md-code-bar">
-        <span class="md-code-lang">{lang}</span>
+        <span class="md-code-lang">{title ?? lang}</span>
+        {extra}
         <CopyButton text={code} />
       </div>
       <pre>
-        <code>{code}</code>
+        <code>{diff ? diffLines(code) : code}</code>
       </pre>
     </div>
+  );
+}
+
+/** Class of a line of a unified diff, if it is marked. */
+export function diffClass(line: string): string | undefined {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-file';
+  if (line.startsWith('@@')) return 'diff-hunk';
+  if (line.startsWith('+')) return 'diff-add';
+  if (line.startsWith('-')) return 'diff-del';
+  return undefined;
+}
+
+function diffLines(code: string): ComponentChildren[] {
+  const lines = code.split('\n');
+  return lines.map((l, i) => {
+    const text = i < lines.length - 1 ? `${l}\n` : l;
+    const cls = diffClass(l);
+    return cls ? (
+      <span key={i} class={cls}>
+        {text}
+      </span>
+    ) : (
+      text
+    );
+  });
+}
+
+/** Extensions that make a bare name (no slash) look like a file. */
+const FILE_EXT =
+  /\.(rs|ts|tsx|js|jsx|mjs|cjs|json|jsonl|toml|ya?ml|md|txt|py|go|rb|java|kt|swift|c|h|cc|cpp|hpp|cs|sh|zsh|bash|sql|html?|css|scss|vue|svelte|lock|xml|proto|ini|cfg|conf|env|gradle|dart|lua|php|exs?|zig|nix|tf|csv|log|diff|patch|png|jpe?g|gif|svg|webp|pdf)$/i;
+
+/** The path as written if `s` looks like a file of the working copy: `src/main.rs`,
+ *  `./a/b/`, `/abs/x.ts`, `main.rs:42`, `src/a.ts:3:7`, `docs/x.md#L10`; otherwise null.
+ *  URLs, text with spaces and bare words with an unknown extension are not paths.
+ *  `relative`: absolute paths are not accepted either (link targets: `/api/...` is the hub). */
+export function filePath(s: string, relative = false): string | null {
+  const t = s.trim();
+  if (!t || t.length > 300 || /\s/.test(t)) return null;
+  const m = /^(.+?)(?::\d+(?::\d+)?|#L\d+(?:-L?\d+)?)?$/.exec(t);
+  const path = m ? m[1] : t;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith('//')) return null;
+  if (relative && (path.startsWith('/') || path.startsWith('~'))) return null;
+  if (!/^[\w.@+~/-]+$/.test(path) || !/[a-z]/i.test(path)) return null;
+  const parts = path.replace(/^\.{0,2}\//, '').replace(/\/$/, '').split('/');
+  if (parts.some((p) => !p || p === '.')) return null;
+  if (path.includes('/')) return t;
+  return FILE_EXT.test(path) && !path.startsWith('.') ? t : null;
+}
+
+/** A path in a message: a click copies it and says so. */
+function FilePath({ path, children }: { path: string; children: ComponentChildren }) {
+  const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle');
+  useEffect(() => {
+    if (state === 'idle') return;
+    const t = setTimeout(() => setState('idle'), 1500);
+    return () => clearTimeout(t);
+  }, [state]);
+  return (
+    <button
+      type="button"
+      class="md-path"
+      title={`Скопировать путь ${path}`}
+      onClick={(e) =>
+        copyText(path, (e.currentTarget as HTMLElement).ownerDocument).then(
+          () => setState('done'),
+          () => setState('failed'),
+        )
+      }
+    >
+      {children}
+      {state !== 'idle' && (
+        <span class="md-path-note" role="status">
+          {state === 'done' ? 'путь скопирован' : 'не скопировалось'}
+        </span>
+      )}
+    </button>
   );
 }
 

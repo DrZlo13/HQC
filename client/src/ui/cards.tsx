@@ -17,6 +17,8 @@ import {
   optionLabel,
 } from './labels';
 import { CopyButton, Markdown } from './Markdown';
+import type { ArtifactStore } from '../artifacts';
+import { AttachmentView, PendingAttachments } from './attachments';
 
 /** What cards need from the chat: lookups and actions. */
 export interface ChatActions {
@@ -25,7 +27,10 @@ export interface ChatActions {
   answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
   resend(clientOpId: string): void;
   discard(clientOpId: string): void;
-  openArtifact(id: string): void;
+  /** Opens the artifact in a new tab; `download`: as an attachment. */
+  openArtifact(id: string, download?: boolean): void;
+  /** Metadata and signed links of artifacts; without it attachments are plain cards. */
+  artifacts?: ArtifactStore;
   /** Wall clock, injectable for tests. */
   now?: () => number;
 }
@@ -68,7 +73,7 @@ export function ActivityLine({ state, timeline }: { state: SessionState; timelin
 export function EventView({ event, actions }: { event: HqcEvent; actions: ChatActions }) {
   switch (event.type) {
     case 'user.message':
-      return <UserBubble event={event} />;
+      return <UserBubble event={event} actions={actions} />;
     case 'agent.delta':
       return <StreamingBubble text={event.payload.text} />;
     case 'agent.message':
@@ -116,15 +121,13 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
       return <Line kind="approval">Ответы отправлены</Line>;
     case 'attachment':
       return (
-        <div class="card card-attachment">
-          <div class="card-title">
-            Вложение · {event.payload.name} <span class="muted">({event.payload.kind})</span>
-          </div>
-          {event.payload.caption && <div>{event.payload.caption}</div>}
-          <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(event.payload.artifact_id)}>
-            Открыть
-          </button>
-        </div>
+        <AttachmentView
+          id={event.payload.artifact_id}
+          kind={event.payload.kind}
+          name={event.payload.name}
+          caption={event.payload.caption}
+          actions={actions}
+        />
       );
     case 'peer.message':
       return (
@@ -182,14 +185,21 @@ function Line({ kind, children }: { kind: string; children: preact.ComponentChil
   return <div class={`line line-${kind}`}>{children}</div>;
 }
 
-function UserBubble({ event }: { event: EventOf<'user.message'> }) {
+function UserBubble({ event, actions }: { event: EventOf<'user.message'>; actions: ChatActions }) {
   const d = event.delivery;
+  const ids = event.payload.artifact_ids;
   return (
     <div class="bubble bubble-user">
-      <Markdown class="text" text={event.payload.text} />
+      {event.payload.text && <Markdown class="text" text={event.payload.text} />}
+      {ids.length > 0 && (
+        <div class="attachments">
+          {ids.map((id) => (
+            <AttachmentView key={id} id={id} actions={actions} />
+          ))}
+        </div>
+      )}
       <div class="meta">
-        <CopyButton text={event.payload.text} />
-        {event.payload.artifact_ids.length > 0 && <span>вложений: {event.payload.artifact_ids.length} · </span>}
+        {event.payload.text && <CopyButton text={event.payload.text} />}
         {formatTime(event.ts)}
         {d === 'pending' && <span class="delivery"> · ждёт доставки</span>}
         {d === 'failed' && <span class="delivery delivery-failed"> · не доставлено</span>}
@@ -201,7 +211,8 @@ function UserBubble({ event }: { event: EventOf<'user.message'> }) {
 function PendingBubble({ pending, actions }: { pending: PendingMessage; actions: ChatActions }) {
   return (
     <div class={`bubble bubble-user bubble-pending ${pending.status === 'failed' ? 'bubble-failed' : ''}`}>
-      <Markdown class="text" text={pending.text} />
+      {pending.text && <Markdown class="text" text={pending.text} />}
+      {pending.attachments && <PendingAttachments files={pending.attachments} />}
       <div class="meta">
         {pending.status === 'sending' ? (
           'отправка…'

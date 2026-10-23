@@ -1,19 +1,46 @@
 #!/usr/bin/env python3
 """Drive `claude -p` in stream-json mode, log every stdin/stdout frame, answer can_use_tool.
 
-usage: driver.py OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+usage: driver.py [--resume UUID] [--arg-prompt] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 POLICY: once | deny | always | ask_answer | none
+--resume UUID (or SPIKE_RESUME): continue that session with --resume instead of a new
+--session-id.
+--arg-prompt (or SPIKE_ARG_PROMPT=1): plain `claude -p PROMPT` (prompt as argument, text
+output, no host prompts), the way a user runs it in a terminal; POLICY is ignored.
 """
 import json, os, subprocess, sys, threading, time, uuid
 
-out, cwd, policy, prompt = sys.argv[1:5]
-extra = sys.argv[6:] if len(sys.argv) > 5 and sys.argv[5] == "--" else []
+args = sys.argv[1:]
+# `--resume UUID` / `--arg-prompt` before the positional arguments: the same as the
+# variables, for shells where setting the environment is awkward.
+while args and args[0] in ("--resume", "--arg-prompt"):
+    if args[0] == "--resume":
+        os.environ["SPIKE_RESUME"] = args[1]
+        args = args[2:]
+    else:
+        os.environ["SPIKE_ARG_PROMPT"] = "1"
+        args = args[1:]
+out, cwd, policy, prompt = args[0:4]
+extra = args[5:] if len(args) > 4 and args[4] == "--" else []
 os.makedirs(out, exist_ok=True)
-sid = str(uuid.uuid4())
+resume = os.environ.get("SPIKE_RESUME")
+sid = resume or str(uuid.uuid4())
+session = ["--resume", sid] if resume else ["--session-id", sid]
+if os.environ.get("SPIKE_ARG_PROMPT"):
+    cmd = ["claude", "-p", prompt, "--model", "claude-haiku-5-5", "--max-turns", "2"] \
+        + session + extra
+    json.dump({"cmd": cmd, "cwd": os.path.abspath(cwd), "session_id": sid},
+              open(f"{out}/run.json", "w"), indent=1)
+    t0 = time.time()
+    r = subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=open(f"{out}/stdout.txt", "w"),
+                       stderr=open(f"{out}/stderr.txt", "w"),
+                       timeout=float(os.environ.get("SPIKE_TIMEOUT", "180")))
+    print(f"session={sid} rc={r.returncode} elapsed={time.time() - t0:.1f}s")
+    sys.exit(0)
 cmd = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stream-json",
        "--permission-prompts", "host", "--include-partial-messages",
        "--replay-user-messages", "--verbose", "--model", "claude-haiku-5-5",
-       "--max-turns", "2", "--session-id", sid] + extra
+       "--max-turns", "2"] + session + extra
 json.dump({"cmd": cmd, "cwd": os.path.abspath(cwd), "session_id": sid, "policy": policy,
            "env": {k: v for k, v in os.environ.items() if k.startswith("MCP_")}},
           open(f"{out}/run.json", "w"), indent=1)

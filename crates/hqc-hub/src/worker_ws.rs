@@ -445,6 +445,15 @@ async fn handle_text(
             }
             Ok(())
         }
+        WorkerFrame::MirrorEvent(_) => {
+            conn.error(
+                &id,
+                error_code::INVALID_FRAME,
+                "mirror.event is not supported yet",
+                false,
+            );
+            Ok(())
+        }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
     };

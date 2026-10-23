@@ -481,6 +481,19 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     // `null`: the worker's allowed_roots.
     optStr(p, 'path');
   },
+  'workspace.list_candidates': (p) => void str(p, 'request_id'),
+  'mirror.set': (p) => {
+    str(p, 'workspace_path');
+    bool(p, 'enabled');
+  },
+  'mirror.event': (p) => {
+    str(p, 'workspace_path');
+    str(p, 'runtime_session_id');
+    str(p, 'cwd');
+    parseEvent(p.event);
+    optStr(p, 'title');
+    bool(p, 'recent');
+  },
   'session.start': (p) => {
     str(p, 'session_id');
     strictEnum(p, 'mode', START_MODES);

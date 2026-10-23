@@ -129,9 +129,6 @@ idle_timeout = 0
 allow_foreign_sessions = false
 claude_bin = "$(command -v claude || echo "$HOME/.local/bin/claude")"
 
-[workspace]
-path = "$WORKSPACE"
-
 # Политика одобрений (SPEC §14, RUNBOOK §2.2): allow — без вопросов, deny — никогда и без
 # вопроса (сильнее always), остальное спрашивает. Свой deny заменяет набор по умолчанию.
 [permissions]
@@ -164,6 +161,9 @@ TOML
     fi
     start_worker_gui "$BIN/hqc-worker"
     python3 "$HELPER" wait-online "$RUN/worker_id" || fail "worker not online, see $RUN/worker.log"
+    # Workspaces are hub objects (SPEC §3): this repository in the personal project of
+    # $USER_EMAIL, once; more are added in the client.
+    python3 "$HELPER" workspace "$RUN/worker_id" "$WORKSPACE" || fail "workspace, see $RUN/hub.log"
     log "up: $HUB  workspace $WORKSPACE  logs $RUN/{hub,worker}.log"
 }
 

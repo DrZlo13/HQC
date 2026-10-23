@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.15, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.16, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -110,8 +110,14 @@ version, load_session, resume, image, isolation}]` — результат `initi
 хаб хранит копию из `hello` для отображения и ранней валидации.
 
 ### Project
-`owner_id`, `name`, `slug`, `description`, `default_workspace_id` (nullable),
-`session_template` (§13.3), `is_personal`.
+`owner_id`, `name` (1–100 символов), `slug` (уникален у владельца, не меняется при
+переименовании), `description`, `default_workspace_id` (nullable),
+`session_template` (§13.3), `is_personal`. Первый workspace проекта становится его
+`default_workspace_id`; при удалении default-workspace им становится самый ранний из
+оставшихся. Личный проект (`is_personal`) нельзя удалить и переименовать (`409
+personal_project`), остальные поля меняются; новых проектов можно создавать сколько угодно.
+Удаление проекта удаляет его workspace-записи и сессии (с событиями, как §17.4), процессам
+агентов уходит `session.kill`; папки и транскрипты на воркерах не трогаются.
 
 ### Workspace
 `project_id`, `worker_id`, `path`, `label`, `environment` (имя; отображение привязки
@@ -119,10 +125,18 @@ version, load_session, resume, image, isolation}]` — результат `initi
 (dir/clone/worktree), `origin_workspace_id`, `mirror_enabled`.
 Workspace — **логическая** граница: все операции hqc (cwd сессий, inbox, зеркало,
 удаление) ограничены его путём. Принудительной изоляции файловой системы он не даёт.
+Workspace — объект хаба **[решение]**: воркер о нём знает только то, что его путь лежит
+внутри `allowed_roots` (проверяет при `fs.stat` и при каждом `session.start`, §5.3).
+`path` — канонический путь, который вернул воркер на `fs.stat` (симлинки раскрыты).
+Папка принадлежит ровно одному проекту: на одном воркере пути workspace уникальны и не
+вложены друг в друга (сравнение по компонентам пути: `/a/b` и `/a/bc` не пересекаются);
+новый путь, который совпадает с существующим workspace, лежит внутри или содержит его, —
+`409 workspace_conflict` (§6). На разных воркерах один и тот же путь — разные папки.
 
 ### Session
-`project_id`, `owner_id`, `workspace_id` (nullable), `worker_id` (обязателен
-для Claude Code без workspace; для голой модели null; ACP-агенты без workspace
+`project_id`, `owner_id`, `workspace_id` (nullable; с 0.16 обязателен при создании —
+сессии без workspace §8.4 через API пока не создаются), `worker_id` (воркер workspace;
+обязателен для Claude Code без workspace; для голой модели null; ACP-агенты без workspace
 не допускаются, §8.4), `cwd` (относительный путь внутри workspace, по умолчанию `.`),
 `title`, `title_source` (`default` | `runtime` | `user` — кто поставил заголовок), `slug`
 (уникален в проекте, не меняется при переименовании), `agent`,
@@ -222,6 +236,7 @@ Code — `ai-title`, §8.1) хаб применяет и ставит `runtime`,
 | `input_rejected` | хаб | воркер отклонил ввод не как неудачный старт, ввод стал `failed` (§5.2) |
 | `ask_cancelled` | хаб | отложенный `hqc_ask` закрыт `mcp.cancel` от воркера (§5.2), итерация 3 |
 | `session_taken_over` | хаб | сессию подхватили (`POST /takeover`, §9.3), итерация 2 |
+| `workspace_unknown` | хаб (миграция 0.16) | сессия итерации 1 без workspace, чей воркер не сообщал папку: архивирована при обновлении хаба |
 
 Правила:
 
@@ -394,7 +409,9 @@ MCP-вызовы (worker → hub → worker):
   продолжает его через `--resume` (§8.1); `owner_is_worker_owner` нужен воркеру для `allow_foreign_sessions`, выбора
   профиля Hermes и допуска `isolation: none`; `ask_timeout_s` — чтобы выставить
   таймаут MCP-инструмента рантайма (§7.1); без `model` воркер берёт модель рантайма
-  по умолчанию.
+  по умолчанию. `workspace_path` — `path` из записи workspace сессии; воркер принимает
+  его, только если путь, раскрытый со симлинками, — каталог внутри `allowed_roots`, и
+  проверяет `cwd` против него (§8.1), иначе `error {invalid_frame}`.
 - `session.input` {session_id, event_id, text, artifact_ids[],
   peer_prefix[{from: "<project-slug>/<session-slug>", text, ts}]} —
   артефакты воркер скачивает через `GET /worker/artifacts/{id}` своим токеном
@@ -414,6 +431,19 @@ MCP-вызовы (worker → hub → worker):
   `clarify.response` с `answers: {}` — пустой объект означает отмену; адаптер Claude
   Code отвечает на `can_use_tool` для `AskUserQuestion` поведением `deny`, модель
   продолжает ход без ответов.
+- `fs.stat` {request_id, path} → `result {request_id, exists, is_dir, canonical?,
+  inside_allowed_roots}` — проверка папки перед созданием workspace (§13.1). `canonical` —
+  путь с раскрытыми симлинками, есть, если путь существует; `inside_allowed_roots` считается
+  по нему (для несуществующего — по ближайшему существующему предку). Вне `allowed_roots`
+  воркер о пути ничего не сообщает: `{exists: false, is_dir: false, inside_allowed_roots:
+  false}`. Относительный путь — `error {invalid_frame}`.
+- `fs.list_dirs` {request_id, path | null} → `result {request_id, entries[{name, path}]}`
+  — дерево папок для выбора workspace в клиенте: при `path: null` — `allowed_roots`, иначе
+  подкаталоги `path` (только каталоги, без скрытых, симлинки — только на каталоги внутри
+  `allowed_roots`, сортировка по имени без учёта регистра, не больше 500). Путь вне
+  `allowed_roots` (после раскрытия симлинков) — `error {invalid_frame}`.
+  У обоих кадров `request_id` равен `id` кадра; ответ — `result` или `error` с тем же `id`.
+  Хаб ждёт ответ 10 с (`504 worker_timeout` в REST, §6).
 - `workspace.create` {request_id, kind: clone|worktree|dir, path, origin_url?,
   origin_path?, branch?, requested_by_owner} → `result {ok, path, error?}`
 - `workspace.delete` {request_id, path, requested_by_owner} → `result` (§13.2)
@@ -428,10 +458,10 @@ MCP-вызовы (worker → hub → worker):
 - `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[]}
   — `boot_id`: uuid, новый на каждый запуск процесса воркера, одинаковый во всех `hello`
-  этого процесса (§5.2, §17.3). В `capabilities` в итерации 1 воркер кладёт
-  `workspace_path` — единственный workspace из своего конфига; хаб создаёт по нему
-  workspace в личном проекте владельца, без него сессию не создать (`409 no_workspace`).
-  Временное поле до `workspace.create` (TODO §19, итерация 2).
+  этого процесса (§5.2, §17.3). `capabilities` — `{claude_code?: {version}, acp_agents[]}`.
+  Workspace воркер не сообщает (с 0.16; поле итерации 1 `capabilities.workspace_path` хаб
+  больше не читает): workspace создаются в хабе (§3, §6) и проверяются воркером по
+  `allowed_roots`.
 - `event` {event} → `ack` (`session_id` внутри события)
 - `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?}
   — `title`: заголовок, который дал сессии рантайм (§8.1); воркер повторяет последний во
@@ -442,7 +472,8 @@ MCP-вызовы (worker → hub → worker):
 - `worker.approval.request` {request_id, kind, description, expires_at}
 - `mcp.call` {request_id, session_token, tool, args}
 - `mcp.cancel` {request_id, reason} — отмена отложенного вызова (§5.2, §7.2)
-- `result` / `error` на запросы хаба.
+- `result` {request_id, ...} / `error` на запросы хаба (`fs.stat`, `fs.list_dirs`, §5.3),
+  с `id` запроса.
 - Загрузка артефактов: HTTP PUT `/worker/artifacts` с токеном воркера, не по WebSocket.
   Лимит артефакта **100 МБ**, нарезки на части нет.
 
@@ -463,12 +494,37 @@ Dev-режим (локальная разработка без Access): `HQC_DEV
 примеры-контракт — `examples/wire/api.*.json` и `client.*.json`; их читают тесты хаба
 и клиента. Неизвестные поля игнорируются в обе стороны.
 
-HTTP API итерации 1 (список не полный; остальное помечено «позже»):
+HTTP API (итерация 1 и проекты с workspace из итерации 2; список не полный, остальное
+помечено «позже»):
 
 - `GET /api/me`; позже `PATCH /api/me` (ключи, часовой пояс)
-- `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/{id}`
-- `GET/POST /api/projects/{id}/sessions` (список — `{sessions: [<сессия>]}`, создание —
-  `201` и объект сессии), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4)
+- `GET /api/projects` → `{projects[]}`, `POST /api/projects` {name, description?} → `201`
+  и проект, `GET/PATCH/DELETE /api/projects/{id}` (`PATCH` {name?, description?,
+  default_workspace_id?} — workspace этого проекта, иначе `400`; личный проект —
+  `409 personal_project` на переименование и удаление; `DELETE` → `204`, §3 Project).
+  Объект проекта — `{id, owner_id, name, slug, description, default_workspace_id?,
+  is_personal, created_at, updated_at}` (`api.project.json`)
+- `GET /api/workspaces?project_id=` → `{workspaces[]}` (без `project_id` — все workspace
+  пользователя); `POST /api/workspaces` {project_id, worker_id, path, label?} → `201` и
+  workspace (`kind: dir`, §13.1): хаб шлёт воркеру `fs.stat` и хранит `canonical`. Воркер
+  не подключён — `409 worker_offline`, workspace не создаётся; ответа нет 10 с — `504
+  worker_timeout`; путь вне `allowed_roots` — `400 outside_allowed_roots`, нет такого —
+  `400 path_not_found`, не каталог — `400 not_a_directory`, воркер отверг кадр —
+  `400 invalid_path`; путь совпадает с workspace того же воркера, лежит внутри или содержит
+  его — `409 workspace_conflict` с телом `{error, message, existing_workspace_id,
+  existing_project_id, existing_path}` (`api.workspace.conflict.json`; клиент пишет «эта
+  папка уже в проекте <имя>» со ссылкой). `PATCH /api/workspaces/{id}` {label} (зеркало —
+  позже), `DELETE /api/workspaces/{id}` → `204`: только запись, папка не трогается
+  (§13.2); пока в нём есть неархивные сессии — `409 workspace_in_use`, архивные теряют
+  `workspace_id` и не разархивируются (`409 no_workspace`). Объект workspace — `{id,
+  project_id, worker_id, path, label, environment, kind, ephemeral, created_by_hqc,
+  mirror_enabled, created_at, updated_at}` (`api.workspace.json`)
+- `GET /api/workers/{id}/dirs?path=` → `{entries[{name, path}]}` — кадр `fs.list_dirs`
+  воркеру (§5.3); без `path` — `allowed_roots`; вне них — `400 invalid_path`; офлайн —
+  `409 worker_offline`
+- `GET/POST /api/projects/{id}/sessions` (список — `{sessions: [<сессия>]}`, создание
+  {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?} — `201` и объект
+  сессии, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4)
 - `GET /api/sessions/{id}/events?after_seq=&limit=` — пагинация по `seq`, ответ
   `{events[], last_seq}`
 - `POST /api/sessions/{id}/input` {text, artifact_ids[], client_op_id} → `201 {event}` —
@@ -486,9 +542,7 @@ HTTP API итерации 1 (список не полный; остальное 
   `{name, os, created_at, country?}` (`EnrollInfo`; `country` — `CF-IPCountry` запроса
   `enroll`), `POST /api/workers/enroll/confirm` {code, name?} →
   `{worker_id, name}` (клиент открывает экран и по ссылке `#/enroll?code=XXXX-XXXX`, §5.1),
-  `DELETE /api/workers/{id}`, `GET /api/workers/{id}/candidates`
-- `GET/POST /api/workspaces`, `PATCH /api/workspaces/{id}` (зеркало, метка),
-  `DELETE /api/workspaces/{id}`
+  `DELETE /api/workers/{id}`, позже `GET /api/workers/{id}/candidates` (§9.1)
 - `GET /api/search?q=&project=&fuzzy=`
 - `GET/POST/DELETE /api/grants`
 - `POST /api/push/subscribe` (тело — `PushSubscription.toJSON()`: `{endpoint,
@@ -533,18 +587,24 @@ WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; с�
   Промежуточные `agent.message` (`final: false`), `status`, `usage`, вызовы инструментов
   и вводы непрочитанным не считаются.
 
-Создание сессии без `worker_id` выбирает воркер по умолчанию: никогда не тот, что ещё ни
-разу не подключался (`last_seen` пуст); онлайн раньше офлайн; среди них — воркер, на
-котором у пользователя уже есть сессии, раньше нового; затем самый недавно виденный. Так
-только что зарегистрированный (возможно, по присланной ссылке, §5.1) воркер не перехватывает
-новые сессии, пока есть привычный онлайн-воркер. Нет подходящего — `409 no_worker`.
+Сессия создаётся в workspace своего проекта (§13.4) и на его воркере: `workspace_id` —
+этот workspace (другого проекта, или не на `worker_id`, если тот задан, — `400`); без
+`workspace_id`, но с `worker_id` — workspace проекта на этом воркере (default, если он там,
+иначе самый ранний); без обоих — `default_workspace_id` проекта. Нет такого — `409
+no_workspace`. Так только что зарегистрированный (возможно, по присланной ссылке, §5.1)
+воркер не получает новые сессии, пока пользователь сам не добавит на нём workspace и не
+выберет его. Правило «воркер по умолчанию» итерации 1 и код `409 no_worker` сняты.
 
 Ограничения полей: `title` — до 200 символов; `model` — `^[A-Za-z0-9._:-]{1,64}$` и не с
 `-` (уходит в командную строку агента); `client_op_id` — до 128 байт; иначе `400`.
 
-Ошибки REST: `{error: <code>, message}` с HTTP-статусом; `409` с кодами `archived`,
-`locked_vscode`, `request_closed`, `no_worker`, `no_workspace`, `push_limit`, `conflict`;
-`403` — чужой `Origin` (§20); `429` и `503` — лимиты (§20). Ошибка проверки JWT Access
+Ошибки REST: `{error: <code>, message}` с HTTP-статусом (у `workspace_conflict` — с
+дополнительными полями); `409` с кодами `archived`, `locked_vscode`, `request_closed`,
+`no_workspace`, `worker_offline`, `workspace_conflict`, `workspace_in_use`,
+`personal_project`, `push_limit`, `conflict`; `400` — `bad_request` и коды проверки пути
+(`outside_allowed_roots`, `path_not_found`, `not_a_directory`, `invalid_path`); `504
+worker_timeout` — воркер не ответил на запрос хаба; `403` — чужой `Origin` (§20); `429` и
+`503` — лимиты (§20). Ошибка проверки JWT Access
 отдаётся общим текстом, причина — в лог хаба. `GET .../events`
 дополнительно принимает `before_seq` (последние `limit` событий до него).
 
@@ -1083,9 +1143,15 @@ HTML рендерится в iframe с этого домена, `sandbox="allow-
 от существующего workspace на ветку). Только внутри `allowed_roots`, с подтверждением
 владельца воркера через служебную сессию (§10.2), кроме случая, когда он сам
 инициатор.
+С 0.16 реализован `dir` (`POST /api/workspaces`, §6): папку выбирают в клиенте по дереву
+`fs.list_dirs` или вводят путь руками, воркер проверяет её `fs.stat` (§5.3), хаб хранит
+канонический путь. Добавлять workspace на воркер может только его владелец (до шаринга
+итерации 6 других пользователей у воркера нет), поэтому подтверждения через служебную
+сессию пока нет; воркер офлайн — workspace не создаётся. `clone` и `worktree` — итерация 5.
 
 ### 13.2 Удаление
-`dir` — удаляется только запись в хабе, папка не трогается. `clone` и `worktree`
+`dir` — удаляется только запись в хабе, папка не трогается; пока в workspace есть
+неархивные сессии — `409 workspace_in_use` (§6), архивные остаются без workspace. `clone` и `worktree`
 удаляются с диска только при `created_by_hqc: true`: `worktree` — через
 `git worktree remove`, `clone` — удаление папки. Перед удалением воркер проверяет
 незакоммиченные изменения и непушенные коммиты; при их наличии запрос подтверждения
@@ -1100,15 +1166,19 @@ HTML рендерится в iframe с этого домена, `sandbox="allow-
 где сессия соответствует детали или плате.
 
 ### 13.4 Выбор workspace
-При создании сессии из UI workspace выбирается явно; `hqc_spawn` и крон требуют
+При создании сессии из UI workspace выбирается явно (в форме заранее выбран
+`default_workspace_id` проекта, `cwd` — необязательная подпапка); `hqc_spawn` и крон требуют
 `workspace` или используют `default_workspace_id` проекта; без того и другого —
-ошибка.
+ошибка (`409 no_workspace` в REST, §6).
 
 ## 14. Локальный конфиг и окружения воркера
 
 Локальный конфиг воркера — единственный источник истины для:
 
-- `allowed_roots[]`;
+- `allowed_roots[]` — единственное, что воркер знает о workspace: любой workspace из
+  `session.start` и любой путь `fs.*` должны лежать внутри (§5.3). Блока `[workspace]`
+  в `worker.toml` с 0.16 нет: workspace создаются в хабе (§3, §13.1); блок итерации 1 в
+  старом файле игнорируется с предупреждением в логе при старте;
 - `environments{}` — именованные окружения;
 - `env_bindings[]` — записи `{path, environment, hermes_profile?, foreign_profile?}`.
   Привязка ищется **по пути workspace** (не по `cwd` сессии), берётся самая длинная
@@ -1311,11 +1381,13 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 1. Хаб с Postgres и проверкой JWT Access, воркер с регистрацией и outbox, доставка
    в обе стороны с ack и политикой `failed`, адаптер Claude Code с `can_use_tool`,
    веб-чат, кнопки разрешений, Web Push. Упрощения: workspace один и задаётся
-   конфигом воркера, проект один (личный), MCP hqc нет. Критерий: начать сессию
+   конфигом воркера, проект один (личный) — оба сняты в 0.16 (T14), MCP hqc нет. Критерий: начать сессию
    из веба, вести её с телефона, подтвердить разрешение.
-2. Проекты и workspace, служебная сессия воркера, импорт и зеркало VS Code, подхват
-   в обе стороны, артефакты, `.hqc/inbox`. Критерий: подхватить с телефона сессию,
-   начатую в VS Code.
+2. ~~Проекты и workspace~~ (сделано в 0.16, T14: проекты, несколько workspace `dir` в
+   проекте, `fs.stat`/`fs.list_dirs`, сессии в выбранном workspace; упрощение итерации 1
+   «один workspace из конфига воркера» снято), служебная сессия воркера, импорт и зеркало
+   VS Code, подхват в обе стороны, артефакты, `.hqc/inbox`. Критерий: подхватить с
+   телефона сессию, начатую в VS Code.
 3. MCP hqc: attach, send, ask, list, search, schedule; фреймы `mcp.call`;
    MCP-сервер по §7.2. Персональная сессия.
 4. Общий ACP-адаптер (первый агент — Hermes, включая steer); голая модель
@@ -1412,6 +1484,24 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.15 → 0.16 (T14, проекты и несколько workspace)
+Снято упрощение итерации 1 «один workspace из конфига воркера» **[решение]**. §3 Project:
+CRUD, первый workspace — default, личный проект не удаляется и не переименовывается. §3
+Workspace: объект хаба, воркер знает только `allowed_roots`; `path` канонический из
+`fs.stat`; папка принадлежит одному проекту — на воркере пути уникальны и не вложены. §3
+Session: `workspace_id` обязателен при создании. §4: код `system` `workspace_unknown`. §5.3:
+кадры `fs.stat`, `fs.list_dirs` (ответ — `result` с `request_id`), проверка
+`workspace_path` воркером против `allowed_roots`. §5.4: `capabilities.workspace_path` убран
+из `hello`, `result` на запросы хаба. §6: REST проектов и workspace, `GET
+/api/workers/{id}/dirs`, выбор workspace сессии вместо «воркера по умолчанию» (`409
+no_worker` снят), коды `worker_offline`, `workspace_conflict` (с телом), `workspace_in_use`,
+`personal_project`, `400` проверки пути, `504 worker_timeout`. §13.1, §13.2, §13.4: `dir`
+через `fs.stat`, удаление записи, выбор workspace. §14: `worker.toml` без `[workspace]`
+(старый блок игнорируется). §19: часть итерации 2 «проекты и workspace» сделана. Миграция
+хаба `0005`: workspace итерации 1 из `workers.capabilities`, привязка к ним сессий,
+сессии без известной папки архивируются с `system workspace_unknown`. Вопросы и
+отложенное — `docs/notes/t14-questions.md`.
 
 ### 0.14 → 0.15 (T13)
 Заголовок сессии из рантайма. §3 Session: поле `title_source` (`default` | `runtime` |

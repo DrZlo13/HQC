@@ -7,7 +7,12 @@ Subcommands (hub URL from $HUB, a loopback dev-mode hub):
   client                          GET / is the web client (HQC_CLIENT_DIR)
   confirm <enroll.log>            read the code printed by `hqc-worker enroll`, confirm it
   wait-online <worker_id_file>    wait until the worker is online in GET /api/workers
-  scenario <workspace> <out.json> session, input, approval (once), final DONE, idle;
+  workspace <worker_id_file> <path>
+                                  make <path> on that worker a workspace of the personal
+                                  project (POST /api/workspaces, the worker checks it);
+                                  nothing to do if it already is a workspace
+  scenario <workspace> <out.json> session in that workspace, input, approval (once),
+                                  final DONE, idle;
                                   with E2E_REHEARSAL=1 (claude_bin is not Claude Code):
                                   agent_start_failed, input failed, state error
   report <out.json>               events with seq and type, and the checks
@@ -112,14 +117,51 @@ def wait_online(worker_id_file):
     log(f"worker {wid} is online")
 
 
+def find_workspace(project, worker_id, path):
+    real = os.path.realpath(path)
+    for w in call("GET", f"/api/workspaces?project_id={project}")["workspaces"]:
+        if (worker_id is None or w["worker_id"] == worker_id) and w["path"] in (path, real):
+            return w
+    return None
+
+
+def workspace(worker_id_file, path):
+    """Workspaces are hub objects since T14 (SPEC §3): the folder becomes one through REST
+    once the worker is online, because the worker checks it (`fs.stat`)."""
+    wid = open(worker_id_file).read().strip()
+    project = call("GET", "/api/me")["personal_project_id"]
+    w = find_workspace(project, wid, path)
+    if w:
+        log(f"workspace {w['path']} is already in the personal project")
+        return 0
+    body = {"project_id": project, "worker_id": wid, "path": path}
+    r = call("POST", "/api/workspaces", body, ok=(201, 409))
+    if r.get("error") == "workspace_conflict":
+        # Already a workspace of another project (moved there by hand): leave it.
+        log(f"{path} is already a workspace of project {r['existing_project_id']}: {r['message']}")
+        return 0
+    if r.get("error"):
+        raise SystemExit(f"POST /api/workspaces: {r}")
+    log(f"workspace {r['path']} added to the personal project ({r['id']})")
+    return 0
+
+
 def scenario(workspace, out):
     me = call("GET", "/api/me")
     project = me["personal_project_id"]
+    ws = find_workspace(project, None, workspace)
+    if not ws:
+        raise SystemExit(f"no workspace {workspace} in the personal project")
     s = call("POST", f"/api/projects/{project}/sessions",
-             {"title": "e2e-local", "runtime": "claude_code", "model": MODEL})
+             {"title": "e2e-local", "workspace_id": ws["id"], "model": MODEL})
     sid = s["id"]
-    log(f"session {sid} in project {project}, runtime {s['agent']['runtime']}")
+    log(f"session {sid} in project {project}, workspace {ws['path']}, "
+        f"runtime {s['agent']['runtime']}")
     result = {"session_id": sid, "events": [], "checks": {}}
+    result["checks"]["session in the workspace"] = (
+        s.get("workspace_id") == ws["id"] and s["cwd"] == ".")
+    default = call("GET", f"/api/projects/{project}").get("default_workspace_id")
+    result["checks"]["workspace is the project default"] = default == ws["id"]
 
     def finish(code):
         # Stored as they are now (delivery of the input changes after it is stored).
@@ -173,6 +215,11 @@ def scenario(workspace, out):
 
     if REHEARSAL:
         checks = result["checks"]
+        # The worker must have taken the workspace path (inside allowed_roots) and failed on
+        # the binary only; a refused session.start ends the same way, with its reason.
+        refused = [e for e in events if e["type"] == "system"
+                   and re.search(r"workspace|allowed_roots|cwd", e["payload"].get("text", ""))]
+        checks["workspace accepted by the worker"] = not refused
         checks["system agent_start_failed"] = any(
             e["type"] == "system" and e["payload"].get("code") == "agent_start_failed" for e in events)
         stored = call("GET", f"/api/sessions/{sid}/events?after_seq=0&limit=500")["events"]
@@ -230,7 +277,8 @@ def report(out):
 def main():
     cmd, args = sys.argv[1], sys.argv[2:]
     fn = {"wait-health": wait_health, "vapid": vapid, "client": client, "confirm": confirm,
-          "wait-online": wait_online, "scenario": scenario, "report": report}[cmd]
+          "wait-online": wait_online, "workspace": workspace, "scenario": scenario,
+          "report": report}[cmd]
     sys.exit(fn(*args) or 0)
 
 

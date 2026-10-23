@@ -138,9 +138,6 @@ allowed_roots = ["$WORKSPACE"]
 idle_timeout = 0
 allow_foreign_sessions = false
 $CLAUDE_BIN_LINE
-
-[workspace]
-path = "$WORKSPACE"
 EOF
 # Run directly (env execs), not through a shell function: $! must be the worker itself.
 WORKER=(env -u HQC_WORKER_CONFIG HQC_HOME="$RUN/home" HQC_TOKEN_STORE=file
@@ -159,8 +156,10 @@ log "token stored in $RUN/home/token ($(stat -f %Lp "$RUN/home/token"))"
 "${WORKER[@]}" run >"$RUN/worker.log" 2>&1 &
 WORKER_PID=$!
 python3 "$HELPER" wait-online "$RUN/worker_id" || fail "worker not online, see $RUN/worker.log"
+# Workspaces are hub objects (SPEC §3): the worker checks the folder with fs.stat.
+python3 "$HELPER" workspace "$RUN/worker_id" "$WORKSPACE" || fail "workspace, see $RUN/hub.log"
 
-# 4. Session, input, approval, final answer.
+# 4. Session in that workspace, input, approval, final answer.
 E2E_REHEARSAL="$REHEARSAL" python3 "$HELPER" scenario "$WORKSPACE" "$RUN/scenario.json" \
     || fail "scenario checks"
 

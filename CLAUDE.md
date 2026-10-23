@@ -6,8 +6,8 @@ Hub / worker / client system for driving LLM agents on many machines from one ch
 - `docs/SPEC.md` is the specification. Code follows it; when code needs the spec to change,
   change the spec in the same PR, bump its version line and add an entry to §23. Never let
   behaviour drift from the spec silently.
-- `docs/ITERATION-1.md` is the current task list. Each task names the spec sections it
-  implements and its acceptance criteria.
+- `docs/ITERATION-2.md` is the current task list (`docs/ITERATION-1.md` — the closed first
+  iteration). Each task names the spec sections it implements and its acceptance criteria.
 - Marks in the spec: **[решение]** = decided, ask before changing; **[проверить]** = verify
   on a real build first, then replace the mark with what you found (version, fixture).
 

@@ -1,0 +1,5 @@
+{
+  "id": "h-10",
+  "type": "mirror.set",
+  "payload": { "workspace_path": "/Users/home-mac/work/cad", "enabled": true }
+}

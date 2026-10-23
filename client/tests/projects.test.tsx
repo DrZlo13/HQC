@@ -219,3 +219,43 @@ it("lists the worker's service session apart: no input, request cards, «тол�
   button('Только запросы')!.click();
   await until('unfiltered', () => $$('.line-worker-log').length === 3);
 });
+
+// T15 (SPEC §9): import a folder with Claude Code sessions, see the session read-only as
+// «ведётся в VS Code», take it over and write.
+it('imports from Claude Code and takes a session over', async () => {
+  promptAnswer = 'Платы';
+  button('+ Проект')!.click();
+  await until('workspaces screen', () => $('.workspaces'));
+  const pid = location.hash.split('/')[2];
+  button('Импорт из Claude Code')!.click();
+  const row = await until('candidates', () =>
+    $$('.candidate').find((r) => r.textContent?.includes('/kicad/power-board')),
+  );
+  expect(row.textContent).toContain('сессий: 1');
+  expect($$('.candidate')).toHaveLength(2);
+  expect(button('Импортировать')!.disabled).toBe(true);
+  row.querySelector<HTMLInputElement>('input[type=checkbox]')!.click();
+  await until('import enabled', () => !button('Импортировать')?.disabled);
+  button('Импортировать')!.click();
+  const ws = await until('workspace listed', () =>
+    $$('.workspace-row').find((r) => r.textContent?.includes('/kicad/power-board')),
+  );
+  expect(ws.querySelector('.tag-mirror')!.textContent).toBe('сессии VS Code');
+  expect(app.workspaces.get(pid)![0].mirror_enabled).toBe(true);
+
+  location.hash = `#/p/${pid}`;
+  const link = await until('imported session', () =>
+    $$('.session-row').find((r) => r.textContent?.includes('Из VS Code: power-board')),
+  );
+  location.hash = link.getAttribute('href')!;
+  await until('history', () => $('.chat')?.textContent?.includes('VSCODE-DONE'));
+  await until('locked', () => $('.locked-banner'));
+  expect($('.chat .state')!.textContent).toContain('ведётся в VS Code');
+  expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(true);
+  expect($<HTMLTextAreaElement>('.chat textarea')!.placeholder).toBe('Ведётся в VS Code');
+
+  button('Подхватить')!.click();
+  await until('taken over', () => !$('.locked-banner'));
+  await until('system line', () => $('.chat')?.textContent?.includes('Подхвачена из VS Code'));
+  expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
+});

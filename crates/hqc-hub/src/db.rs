@@ -767,6 +767,8 @@ pub struct SessionRow {
     pub start_sent: bool,
     /// The service session of `worker_id` (SPEC §10.2).
     pub system: bool,
+    /// The last mirrored event written while VS Code was active (SPEC §9.3).
+    pub vscode_active_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -775,7 +777,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.title, s.title_source, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
-    s.start_sent, s.system, s.created_at, s.updated_at";
+    s.start_sent, s.system, s.vscode_active_at, s.created_at, s.updated_at";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1059,6 +1061,98 @@ pub async fn set_process_state(
     .bind(locked_by)
     .execute(db)
     .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- mirror (SPEC §9)
+
+/// The session of transcript `runtime_session_id` on this worker.
+pub async fn session_by_runtime(
+    db: &PgPool,
+    worker_id: Uuid,
+    runtime_session_id: &str,
+) -> sqlx::Result<Option<SessionRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {SESSION_COLS} FROM sessions s
+         WHERE s.worker_id = $1 AND s.runtime_session_id = $2
+         ORDER BY s.created_at LIMIT 1"
+    ))
+    .bind(worker_id)
+    .bind(runtime_session_id)
+    .fetch_optional(db)
+    .await
+}
+
+pub async fn workspace_by_path(
+    db: &PgPool,
+    worker_id: Uuid,
+    path: &str,
+) -> sqlx::Result<Option<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 AND path = $2"
+    ))
+    .bind(worker_id)
+    .bind(path)
+    .fetch_optional(db)
+    .await
+}
+
+pub async fn mirrored_workspaces(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 AND mirror_enabled
+         ORDER BY created_at, id"
+    ))
+    .bind(worker_id)
+    .fetch_all(db)
+    .await
+}
+
+pub async fn set_workspace_mirror(db: &PgPool, id: Uuid, on: bool) -> sqlx::Result<WorkspaceRow> {
+    sqlx::query_as(&format!(
+        "UPDATE workspaces SET mirror_enabled = $2, updated_at = now() WHERE id = $1
+         RETURNING {WORKSPACE_COLS}"
+    ))
+    .bind(id)
+    .bind(on)
+    .fetch_one(db)
+    .await
+}
+
+/// A session found by the mirror: it runs transcript `runtime_session_id`; `locked_by` and,
+/// for a live transcript, `vscode_active_at` by SPEC §9.1.
+pub async fn adopt_transcript(
+    db: &PgPool,
+    id: Uuid,
+    runtime_session_id: &str,
+    locked_by: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET runtime_session_id = $2, locked_by = $3,
+            vscode_active_at = CASE WHEN $3 = 'vscode' THEN now() END, updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(runtime_session_id)
+    .bind(locked_by)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_locked_by(db: &PgPool, id: Uuid, locked_by: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET locked_by = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(locked_by)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn touch_vscode(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET vscode_active_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
     Ok(())
 }
 

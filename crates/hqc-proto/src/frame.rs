@@ -107,6 +107,10 @@ pub enum WorkerFrame {
     /// hub acks it and answers later with `worker.approval.response`.
     #[serde(rename = "worker.approval.request")]
     WorkerApprovalRequest(WorkerApprovalRequest),
+    /// An event read from a Claude Code transcript by the mirror (SPEC §9.1, §9.2); goes
+    /// through the outbox and is answered like `event`.
+    #[serde(rename = "mirror.event")]
+    MirrorEvent(MirrorEvent),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -137,6 +141,64 @@ pub mod worker_approval {
     /// Option ids of the `approval.request` the hub writes, and of the answer.
     pub const ONCE: &str = "once";
     pub const DENY: &str = "deny";
+}
+
+/// `mirror.event {workspace_path, runtime_session_id, cwd, event, title?, recent}` (SPEC
+/// §5.4, §9.2). The hub finds the session by the worker and `runtime_session_id` (the
+/// transcript's uuid) and creates it in the workspace's project when there is none; the
+/// worker does not know hqc session ids, so `event.session_id` is ignored (the worker sends
+/// the nil uuid). `author` is replaced by the hub too: the workspace owner for
+/// `user.message`, the session's agent otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MirrorEvent {
+    /// The mirrored workspace (`mirror.set`) the transcript's `cwd` lies in.
+    pub workspace_path: String,
+    pub runtime_session_id: String,
+    /// Absolute working directory from the transcript's records.
+    pub cwd: String,
+    pub event: Event,
+    /// The transcript's last `ai-title`, if any (SPEC §8.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The transcript was modified less than [`MIRROR_RECENT_S`] seconds before the worker
+    /// read this record: someone writes it now (SPEC §9.1, §9.3). Old history (an import)
+    /// comes with `false`.
+    #[serde(default)]
+    pub recent: bool,
+}
+
+/// The quiet period of SPEC §9.1/§9.3: a transcript written within it is live in VS Code.
+pub const MIRROR_RECENT_S: u64 = 30;
+
+/// `workspace.list_candidates {request_id}` -> `result` [`CandidatesResult`] (SPEC §5.3,
+/// §9.1). `request_id` equals the frame `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListCandidates {
+    pub request_id: String,
+}
+
+/// `mirror.set {workspace_path, enabled}` -> `ack` (SPEC §5.3, §9.2). The hub sends it for
+/// every workspace with `mirror_enabled` after `hello` and when one is created; the worker
+/// mirrors only paths inside its `allowed_roots`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorSet {
+    pub workspace_path: String,
+    pub enabled: bool,
+}
+
+/// Result of `workspace.list_candidates`: working directories (from the records' `cwd`)
+/// that have Claude Code transcripts, inside the worker's `allowed_roots`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidatesResult {
+    pub candidates: Vec<Candidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Candidate {
+    pub path: String,
+    pub sessions_count: u32,
+    /// Modification time of the newest transcript.
+    pub last_active: DateTime<Utc>,
 }
 
 /// Frames sent by the hub (SPEC §5.3).
@@ -197,6 +259,12 @@ pub enum HubFrame {
         request_id: String,
         option_id: String,
     },
+    /// Folders with Claude Code sessions, for the import (SPEC §5.3, §9.1).
+    #[serde(rename = "workspace.list_candidates")]
+    WorkspaceListCandidates(ListCandidates),
+    /// Mirror the transcripts of a workspace, or stop (SPEC §5.3, §9.2).
+    #[serde(rename = "mirror.set")]
+    MirrorSet(MirrorSet),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -234,6 +302,7 @@ pub struct RequestResult {
 pub enum ResultBody {
     FsStat(FsStatResult),
     FsListDirs(FsListDirsResult),
+    Candidates(CandidatesResult),
 }
 
 /// Result of `fs.stat`. `canonical` is the path with symlinks resolved, present when it
@@ -419,6 +488,8 @@ mod tests {
         "fs.stat",
         "fs.list_dirs",
         "worker.approval.response",
+        "workspace.list_candidates",
+        "mirror.set",
         "ack",
         "error",
     ];
@@ -428,6 +499,7 @@ mod tests {
         "session.state",
         "result",
         "worker.approval.request",
+        "mirror.event",
         "ack",
         "error",
     ];
@@ -479,6 +551,14 @@ mod tests {
             "worker.approval.response",
             include_str!("../examples/wire/hub.worker.approval.response.json"),
         ),
+        (
+            "workspace.list_candidates",
+            include_str!("../examples/wire/hub.workspace.list_candidates.json"),
+        ),
+        (
+            "mirror.set",
+            include_str!("../examples/wire/hub.mirror.set.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -502,8 +582,16 @@ mod tests {
             include_str!("../examples/wire/worker.result.fs.list_dirs.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.candidates.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
+        ),
+        (
+            "mirror.event",
+            include_str!("../examples/wire/worker.mirror.event.json"),
         ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         ("error", include_str!("../examples/wire/worker.error.json")),
@@ -522,6 +610,8 @@ mod tests {
             HubFrame::FsStat(_) => "fs.stat",
             HubFrame::FsListDirs(_) => "fs.list_dirs",
             HubFrame::WorkerApprovalResponse { .. } => "worker.approval.response",
+            HubFrame::WorkspaceListCandidates(_) => "workspace.list_candidates",
+            HubFrame::MirrorSet(_) => "mirror.set",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -534,6 +624,7 @@ mod tests {
             WorkerFrame::SessionState { .. } => "session.state",
             WorkerFrame::Result(_) => "result",
             WorkerFrame::WorkerApprovalRequest(_) => "worker.approval.request",
+            WorkerFrame::MirrorEvent(_) => "mirror.event",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }
@@ -636,13 +727,18 @@ mod tests {
                 include_str!("../examples/wire/hub.fs.list_dirs.json"),
                 include_str!("../examples/wire/worker.result.fs.list_dirs.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.workspace.list_candidates.json"),
+                include_str!("../examples/wire/worker.result.candidates.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
             let res: Envelope<WorkerFrame> = serde_json::from_str(res).unwrap();
-            let (request_id, is_stat) = match &req.body {
-                HubFrame::FsStat(r) => (&r.request_id, true),
-                HubFrame::FsListDirs(r) => (&r.request_id, false),
+            let (request_id, kind) = match &req.body {
+                HubFrame::FsStat(r) => (&r.request_id, 0),
+                HubFrame::FsListDirs(r) => (&r.request_id, 1),
+                HubFrame::WorkspaceListCandidates(r) => (&r.request_id, 2),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -650,7 +746,12 @@ mod tests {
                 panic!("not a result");
             };
             assert_eq!((&res.id, &r.request_id), (&req.id, &req.id));
-            assert_eq!(matches!(r.body, ResultBody::FsStat(_)), is_stat);
+            let got = match r.body {
+                ResultBody::FsStat(_) => 0,
+                ResultBody::FsListDirs(_) => 1,
+                ResultBody::Candidates(_) => 2,
+            };
+            assert_eq!(got, kind);
         }
         // The roots are asked for with an explicit `null`.
         let roots = serde_json::to_value(HubFrame::FsListDirs(FsListDirs {

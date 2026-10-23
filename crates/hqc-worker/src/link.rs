@@ -66,6 +66,17 @@ impl HubLink {
         Ok(())
     }
 
+    /// Queue a `mirror.event` (SPEC §5.4, §9.2): through the outbox, keyed by its event id.
+    pub fn mirror_event(&self, ev: hqc_proto::frame::MirrorEvent) -> anyhow::Result<()> {
+        self.outbox.push_frame(
+            ev.event.event_id,
+            crate::outbox::FRAME_MIRROR_EVENT,
+            &serde_json::to_value(&ev)?,
+        )?;
+        self.outbox_ready.notify_one();
+        Ok(())
+    }
+
     pub fn set_system_session(&self, id: Uuid) {
         self.system_session.send_if_modified(|v| {
             let changed = *v != Some(id);

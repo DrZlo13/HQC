@@ -212,6 +212,20 @@ pub struct WorkspaceConflict {
 /// `GET /api/workers/{id}/dirs?path=`: the worker's `fs.list_dirs` (SPEC §5.3, §6).
 pub type DirList = crate::frame::FsListDirsResult;
 
+/// `GET /api/workers/{id}/candidates`: the worker's `workspace.list_candidates` (SPEC §9.1).
+pub type CandidateList = crate::frame::CandidatesResult;
+
+/// `POST /api/workspaces` as the hub reads it (SPEC §9.1): [`CreateWorkspace`] plus
+/// `mirror_enabled`, which the import from Claude Code sets. With it the hub sends the worker
+/// `mirror.set` and the worker imports the folder's transcripts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateWorkspaceImport {
+    #[serde(flatten)]
+    pub workspace: CreateWorkspace,
+    #[serde(default)]
+    pub mirror_enabled: bool,
+}
+
 /// `GET /api/sessions/{id}/events`: stored events as raw JSON, oldest first.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventPage {
@@ -476,6 +490,17 @@ mod tests {
         let a: Artifact = roundtrip(include_str!("../examples/wire/api.artifact.json"));
         assert_eq!(a.kind, crate::event::ArtifactKind::Image);
         roundtrip::<ArtifactUrl>(include_str!("../examples/wire/api.artifact.url.json"));
+        let cl: CandidateList = roundtrip(include_str!("../examples/wire/api.candidates.json"));
+        assert_eq!(cl.candidates.len(), 2);
+        let i: CreateWorkspaceImport = roundtrip(include_str!(
+            "../examples/wire/api.workspace.import.request.json"
+        ));
+        assert!(i.mirror_enabled);
+        // A plain `CreateWorkspace` body is an import without the mirror.
+        let plain: CreateWorkspaceImport =
+            serde_json::from_str(include_str!("../examples/wire/api.workspace.request.json"))
+                .unwrap();
+        assert_eq!((plain.workspace, plain.mirror_enabled), (c, false));
         let s: CreateSessionRequest =
             roundtrip(include_str!("../examples/wire/api.session.request.json"));
         assert_eq!(s.workspace_id, Some(w.id));

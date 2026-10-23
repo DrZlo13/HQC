@@ -346,6 +346,20 @@ impl Event {
     pub fn id_from_claude_record(record_uuid: &Uuid) -> Uuid {
         Uuid::new_v5(&CLAUDE_RECORD_NS, record_uuid.as_bytes())
     }
+
+    /// Event id of content block `index` of a jsonl record (SPEC §3 Event, §9.2): block 0 is
+    /// [`Event::id_from_claude_record`], block `i > 0` v5 of `"<uuid>/<i>"`. The adapter,
+    /// the mirror and the import all use it, so one fact from two sources has one id.
+    pub fn id_from_claude_block(record_uuid: &Uuid, index: usize) -> Uuid {
+        if index == 0 {
+            Self::id_from_claude_record(record_uuid)
+        } else {
+            Uuid::new_v5(
+                &CLAUDE_RECORD_NS,
+                format!("{record_uuid}/{index}").as_bytes(),
+            )
+        }
+    }
 }
 
 #[cfg(test)]

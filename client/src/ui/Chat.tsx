@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { ApiError } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize } from '../artifacts';
 import { ChatSession, type OutgoingFile } from '../session';
@@ -69,6 +70,22 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
 
   const showRetry = !system && (state === 'error' || t.hasFailedDelivery());
   const items = requestsOnly ? onlyRequests(t.items()) : t.items();
+  const locked = state === 'locked_vscode';
+  // SPEC §9.3: read-only while VS Code drives it; the hub refuses takeover until VS Code has
+  // been quiet for 30 s (`409 vscode_active`).
+  const takeover = () =>
+    app.api.takeover(sessionId).then(
+      () => {
+        setNotice(null);
+        return app.refreshSessions();
+      },
+      (e: unknown) =>
+        setNotice(
+          e instanceof ApiError && e.code === 'vscode_active'
+            ? 'В VS Code ещё пишут в эту сессию; подхватить можно через 30 с тишины.'
+            : `Не подхвачено: ${(e as Error).message}`,
+        ),
+    );
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   useLayoutEffect(() => {
@@ -76,7 +93,7 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
 
-  const disabled = state === 'archived';
+  const disabled = state === 'archived' || locked;
   return (
     <section
       class={dragging ? 'chat chat-dragging' : 'chat'}
@@ -148,9 +165,18 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
           {notice}
         </div>
       )}
+      {locked && (
+        <div class="locked-banner">
+          <span>Сессия ведётся в VS Code. Чтобы писать отсюда, подхватите её.</span>
+          <button type="button" class="btn btn-primary btn-small btn-takeover" onClick={() => void takeover()}>
+            Подхватить
+          </button>
+        </div>
+      )}
       {!system && (
         <Composer
           disabled={disabled}
+          placeholder={locked ? 'Ведётся в VS Code' : undefined}
           files={files}
           onFiles={addFiles}
           onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
@@ -187,12 +213,14 @@ export function toOutgoing(file: File): Promise<OutgoingFile> {
 export function Composer({
   onSend,
   disabled,
+  placeholder,
   files = [],
   onFiles = () => {},
   onRemove = () => {},
 }: {
   onSend: (text: string) => void;
   disabled: boolean;
+  placeholder?: string;
   files?: OutgoingFile[];
   onFiles?: (files: FileList | File[]) => void;
   onRemove?: (index: number) => void;
@@ -266,7 +294,7 @@ export function Composer({
         ref={area}
         class="input"
         rows={1}
-        placeholder={disabled ? 'Сессия в архиве' : 'Сообщение'}
+        placeholder={placeholder ?? (disabled ? 'Сессия в архиве' : 'Сообщение')}
         disabled={disabled}
         value={text}
         onInput={(e) => setText((e.currentTarget as HTMLTextAreaElement).value)}

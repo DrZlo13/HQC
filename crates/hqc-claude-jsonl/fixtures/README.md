@@ -21,7 +21,15 @@ Claude Code 2.1.308, permission policy (T12, SPEC §8.1, §14; findings in
 - `auto-deny` — the worker's default deny list under `--permission-mode auto`;
 - `restricted-settings` — `--settings` under `--restricted`.
 
-In the stream files of these sets the `input_json_delta` fragments of a tool input whose
+Claude Code 2.1.308, two writers of one session (T15, SPEC §9; `tools/spike/driver.py`
+with `--arg-prompt` and `--resume`):
+
+- `vscode-takeover` — `claude -p "<prompt>"` (prompt as argument, as a person runs it), then
+  `--resume` with the adapter's flags and one more turn; the stream is the adapter's run;
+- `adapter-then-outside` — an adapter session (stream), then `claude -p --resume <uuid>
+  "<prompt>"` from outside; the transcript ends with the outside turn.
+
+In the stream files of the T12 sets the `input_json_delta` fragments of a tool input whose
 path had to be rewritten are joined into the first fragment (sanitizing split paths).
 
 T0 runs used `claude -p --input-format stream-json --output-format stream-json

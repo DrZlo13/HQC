@@ -1,6 +1,11 @@
 //! Tolerant parser for Claude Code transcripts (SPEC §9.4): unknown record types are kept
 //! as `Record::Other` and never fail the parse. Fixtures in `fixtures/` were captured from
-//! Claude Code 2.1.307 with `api-request*` records removed and the file snapshot stripped.
+//! Claude Code 2.1.307 and 2.1.308 with `api-request*` records removed and the file
+//! snapshot stripped.
+//!
+//! One parser serves the adapter (titles), the mirror and the import (SPEC §9.4): the
+//! mirror reads [`Message::is_main`] records, takes the session's working directory from
+//! [`first_cwd`] and the end of a turn from [`Message::stop_reason`].
 //!
 //! Record `uuid`s are shared between the jsonl file and stream-json output (verified on
 //! 2.1.307, SPEC §8.1), which is what makes mirror/adapter event ids line up.
@@ -35,7 +40,54 @@ pub struct Message {
     pub cwd: Option<String>,
     #[serde(default)]
     pub timestamp: Option<String>,
+    /// Text the CLI injected as a user message (caveats, slash command output): not
+    /// something a person typed.
+    #[serde(default)]
+    pub is_meta: bool,
+    /// The summary that replaces the history after `/compact`.
+    #[serde(default)]
+    pub is_compact_summary: bool,
     pub message: serde_json::Value,
+}
+
+impl Message {
+    /// A record of the session's main chain that shows in its history: not a subagent's
+    /// (`isSidechain`), not injected by the CLI (`isMeta`, compact summary). These are the
+    /// records the mirror maps to events and the foreign-writer check looks at (SPEC §9.3).
+    pub fn is_main(&self) -> bool {
+        !self.is_sidechain && !self.is_meta && !self.is_compact_summary
+    }
+
+    /// `message.stop_reason` of an assistant record: `end_turn` on the blocks of the turn's
+    /// last API message, `tool_use` before a tool call (2.1.308). Every block of a message
+    /// is a record of its own and carries the message's `stop_reason` in the transcript;
+    /// stream-json leaves it `null`.
+    pub fn stop_reason(&self) -> Option<&str> {
+        self.message.get("stop_reason")?.as_str()
+    }
+
+    /// The content blocks; a plain string (a typed prompt) is one `text` block.
+    pub fn blocks(&self) -> Vec<serde_json::Value> {
+        match self.message.get("content") {
+            Some(serde_json::Value::String(s)) => {
+                vec![serde_json::json!({"type": "text", "text": s})]
+            }
+            Some(serde_json::Value::Array(a)) => a.clone(),
+            _ => vec![],
+        }
+    }
+}
+
+/// The working directory of a transcript: `cwd` of its first record that has one. The
+/// folder name under `projects/` cannot be decoded back (SPEC §9), so this is the source.
+pub fn first_cwd(s: &str) -> Option<String> {
+    s.lines().filter(|l| l.contains("\"cwd\"")).find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        v.get("cwd")?
+            .as_str()
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// `{"type": "ai-title", "aiTitle": "...", "sessionId": "..."}` (2.1.307). The CLI may write
@@ -184,6 +236,100 @@ mod tests {
             .collect();
         ids.sort();
         ids
+    }
+
+    /// T15 sets (2.1.308): a session started with `claude -p "<prompt>"` and taken over
+    /// through `--resume` with the adapter's flags (`vscode-takeover`), and an adapter session
+    /// continued by `claude -p --resume` from outside (`adapter-then-outside`). The stream
+    /// is the adapter's run; the transcript holds both writers.
+    const T15_SETS: &[(&str, &str, &str)] = &[
+        (
+            "vscode-takeover",
+            include_str!("../fixtures/vscode-takeover-2.1.308.jsonl"),
+            include_str!("../fixtures/stream-vscode-takeover-2.1.308.jsonl"),
+        ),
+        (
+            "adapter-then-outside",
+            include_str!("../fixtures/adapter-then-outside-2.1.308.jsonl"),
+            include_str!("../fixtures/stream-adapter-then-outside-2.1.308.jsonl"),
+        ),
+    ];
+
+    fn main_records(records: &[Record]) -> Vec<&Message> {
+        records
+            .iter()
+            .filter_map(|r| match r {
+                Record::User(m) | Record::Assistant(m) if m.is_main() => Some(m),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// SPEC §9: `--resume` appends to the same file; both writers' records carry the same
+    /// `cwd` and `sessionId`; the adapter's uuids are all in the transcript, the other
+    /// writer's records are exactly the rest; no `ai-title` in either run.
+    #[test]
+    fn t15_two_writers_share_one_transcript() {
+        for (name, transcript, stream) in T15_SETS {
+            let (tr, bad_tr) = parse_str(transcript);
+            let (st, bad_st) = parse_str(stream);
+            assert_eq!((bad_tr, bad_st), (0, 0), "{name}");
+            assert_eq!(
+                first_cwd(transcript).as_deref(),
+                Some(format!("/tmp/hqc-fixture/{name}").as_str())
+            );
+            let main = main_records(&tr);
+            let sessions: std::collections::BTreeSet<_> =
+                main.iter().map(|m| m.session_id).collect();
+            assert_eq!(sessions.len(), 1, "{name}: one session id");
+            let own: std::collections::HashSet<Uuid> =
+                main_records(&st).iter().map(|m| m.uuid).collect();
+            let foreign: Vec<&Message> = main
+                .iter()
+                .copied()
+                .filter(|m| !own.contains(&m.uuid))
+                .collect();
+            assert!(
+                own.iter().all(|u| main.iter().any(|m| m.uuid == *u)),
+                "{name}"
+            );
+            match *name {
+                // `claude -p` before the adapter: prompt, tool_use, tool_result, thinking, text.
+                "vscode-takeover" => {
+                    assert_eq!(foreign.len(), 5, "{name}");
+                    assert_eq!(own.len(), 2, "{name}: echo of the prompt and the answer");
+                    assert!(main[..5].iter().all(|m| !own.contains(&m.uuid)));
+                }
+                // The outside turn after the adapter's: prompt, thinking, text.
+                "adapter-then-outside" => {
+                    assert_eq!(foreign.len(), 3, "{name}");
+                    assert_eq!(own.len(), 4, "{name}");
+                    assert!(main[4..].iter().all(|m| !own.contains(&m.uuid)));
+                }
+                _ => unreachable!(),
+            }
+            // The last record of each writer's turn ends it.
+            assert_eq!(main.last().unwrap().stop_reason(), Some("end_turn"));
+            assert_eq!(last_ai_title(transcript), None, "{name}: ai-title");
+        }
+    }
+
+    #[test]
+    fn meta_records_are_not_main() {
+        let m = |extra: &str| match parse_line(&format!(
+            r#"{{"type":"user","uuid":"{}","message":{{"content":"x"}}{extra}}}"#,
+            Uuid::nil()
+        ))
+        .unwrap()
+        {
+            Record::User(m) => m,
+            other => panic!("{other:?}"),
+        };
+        assert!(m("").is_main());
+        assert!(!m(r#","isMeta":true"#).is_main());
+        assert!(!m(r#","isSidechain":true"#).is_main());
+        assert!(!m(r#","isCompactSummary":true"#).is_main());
+        assert_eq!(m("").blocks()[0]["text"], "x");
     }
 
     /// SPEC §8.1, §9.3: stream-json and the transcript share message uuids, and the

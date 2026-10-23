@@ -26,6 +26,20 @@ use crate::{
 pub enum Source {
     Worker,
     Hub,
+    /// A transcript record from the worker's mirror (SPEC §9.2): history, it opens no
+    /// requests.
+    Mirror,
+}
+
+/// Side effects of a stored mirrored event: clients are notified, a final answer closes
+/// the turn (SPEC §9.2).
+pub async fn after_mirror_store(
+    app: &AppState,
+    s: &SessionRow,
+    row: &EventRow,
+    kind: &EventKind,
+) -> anyhow::Result<()> {
+    after_store(app, s, row, kind, Source::Mirror).await
 }
 
 /// An `event` frame from a worker: `ack {event_id, seq}`; a duplicate gets the stored
@@ -223,7 +237,11 @@ async fn after_store(
         },
         _ => {}
     }
-    push::on_event(app, s, row, kind);
+    // An import brings hundreds of old answers; what VS Code does live is the user's own
+    // work at that machine. Neither is worth a notification.
+    if source != Source::Mirror {
+        push::on_event(app, s, row, kind);
+    }
     app.session_changed(s.id);
     Ok(())
 }

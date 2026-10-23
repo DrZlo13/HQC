@@ -103,6 +103,10 @@ async fn service_session_is_created_and_takes_no_input() {
         .post(&format!("/api/sessions/{sid}/stop"), json!({}))
         .await;
     conflict(s, &v);
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{sid}/takeover"), json!({}))
+        .await;
+    conflict(s, &v);
     assert_eq!(hub.delete(&format!("/api/sessions/{sid}")).await, 409);
     let (s, _) = hub
         .patch(

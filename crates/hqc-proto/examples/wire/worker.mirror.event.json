@@ -1,0 +1,19 @@
+{
+  "id": "w-5",
+  "type": "mirror.event",
+  "payload": {
+    "workspace_path": "/Users/home-mac/work/cad",
+    "runtime_session_id": "8dd26c03-4e07-4685-b0d2-b99924e96975",
+    "cwd": "/Users/home-mac/work/cad/bracket",
+    "event": {
+      "session_id": "00000000-0000-0000-0000-000000000000",
+      "event_id": "5c1e0c49-1f6f-5c2d-9b38-4f1b0e1d2a77",
+      "ts": "2026-10-23T00:10:17.962Z",
+      "author": { "kind": "agent", "id": "00000000-0000-0000-0000-000000000000" },
+      "type": "agent.message",
+      "payload": { "text": "VSCODE-DONE", "final": true, "in_reply_to": "2a0e93cc-2c0a-5a6e-8a8e-3d4c5b6a7980" }
+    },
+    "title": "Echo hqc-vscode",
+    "recent": true
+  }
+}

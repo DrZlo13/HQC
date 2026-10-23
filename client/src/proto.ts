@@ -484,6 +484,19 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     // `null`: the worker's allowed_roots.
     optStr(p, 'path');
   },
+  'workspace.list_candidates': (p) => void str(p, 'request_id'),
+  'mirror.set': (p) => {
+    str(p, 'workspace_path');
+    bool(p, 'enabled');
+  },
+  'mirror.event': (p) => {
+    str(p, 'workspace_path');
+    str(p, 'runtime_session_id');
+    str(p, 'cwd');
+    parseEvent(p.event);
+    optStr(p, 'title');
+    bool(p, 'recent');
+  },
   'session.start': (p) => {
     str(p, 'session_id');
     strictEnum(p, 'mode', START_MODES);
@@ -773,6 +786,8 @@ export interface Workspace {
   path: string;
   label: string;
   kind: string;
+  /** Its Claude Code sessions are mirrored (imported from VS Code, SPEC §9). */
+  mirror_enabled: boolean;
   created_at: string;
 }
 
@@ -785,6 +800,7 @@ export function parseWorkspace(v: unknown): Workspace {
     path: str(o, 'path'),
     label: optStr(o, 'label') ?? '',
     kind: str(o, 'kind'),
+    mirror_enabled: o.mirror_enabled === true,
     created_at: str(o, 'created_at'),
   };
 }
@@ -804,6 +820,20 @@ export function parseDirList(v: unknown): DirEntry[] {
   return arr(obj(v, 'dir list'), 'entries').map((e, i) => {
     const o = obj(e, `entries[${i}]`);
     return { name: str(o, 'name'), path: str(o, 'path') };
+  });
+}
+
+/** A folder with Claude Code sessions (`GET /api/workers/{id}/candidates`, SPEC §9.1). */
+export interface Candidate {
+  path: string;
+  sessions_count: number;
+  last_active: string;
+}
+
+export function parseCandidateList(v: unknown): Candidate[] {
+  return arr(obj(v, 'candidate list'), 'candidates').map((e, i) => {
+    const o = obj(e, `candidates[${i}]`);
+    return { path: str(o, 'path'), sessions_count: num(o, 'sessions_count'), last_active: str(o, 'last_active') };
   });
 }
 

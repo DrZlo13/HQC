@@ -1389,3 +1389,61 @@ async fn native_messaging_tools_can_be_kept() {
     assert!(!args.contains(&"--disallowedTools".to_string()), "{args:?}");
     a.kill().await.unwrap();
 }
+
+/// T15 (SPEC §9.3), fixture `vscode-takeover` (2.1.308): the takeover turn registers the
+/// process as live and every record it produced, the prompt's echo included, as its own;
+/// the records `claude -p` wrote before are not. After `kill` the process is not live.
+#[tokio::test]
+async fn takeover_records_are_registered_as_own() {
+    const TRANSCRIPT: &str =
+        include_str!("../../../../hqc-claude-jsonl/fixtures/vscode-takeover-2.1.308.jsonl");
+    const STREAM: &str =
+        include_str!("../../../../hqc-claude-jsonl/fixtures/stream-vscode-takeover-2.1.308.jsonl");
+    let runtime: Uuid = "8dd26c03-4e07-4685-b0d2-b99924e96975".parse().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new(STREAM);
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+    let s = spec(Uuid::now_v7(), work.path(), runtime);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    assert!(own.is_live(runtime));
+    a.input(&SessionInput {
+        session_id: s.session_id,
+        event_id: Uuid::now_v7(),
+        text: "Reply with exactly: HQC-TURN".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+    })
+    .await
+    .unwrap();
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if ev == AdapterEvent::TurnEnded {
+            break;
+        }
+    }
+    let (records, _) = hqc_claude_jsonl::parse_str(TRANSCRIPT);
+    let main: Vec<Uuid> = records
+        .iter()
+        .filter_map(|r| match r {
+            hqc_claude_jsonl::Record::User(m) | hqc_claude_jsonl::Record::Assistant(m)
+                if m.is_main() =>
+            {
+                Some(m.uuid)
+            }
+            _ => None,
+        })
+        .collect();
+    let owned: Vec<bool> = main.iter().map(|u| own.is_own(runtime, *u)).collect();
+    // prompt, tool_use, tool_result, thinking, text of `claude -p`; then the adapter's.
+    assert_eq!(owned, [false, false, false, false, false, true, true]);
+    a.kill().await.unwrap();
+    assert!(!own.is_live(runtime));
+}

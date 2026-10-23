@@ -31,3 +31,6 @@ tokio-util = { version = "0.7", features = ["io"] }
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["multipart"] }
 tokio-tungstenite = "0.29"
+# The live end-to-end test of T15 (tests/live_takeover.rs) runs a real worker in process.
+hqc-worker = { path = "../hqc-worker" }
+tokio-util = "0.7"

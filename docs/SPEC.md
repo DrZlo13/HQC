@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.18, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.19, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -147,7 +147,9 @@ Workspace — объект хаба **[решение]**: воркер о нём
 `title`, `title_source` (`default` | `runtime` | `user` — кто поставил заголовок), `slug`
 (уникален в проекте, не меняется при переименовании), `agent`,
 `auto_approve`, `wake_on_send` (по умолчанию false), `locked_by` (none/hqc/vscode),
-`last_seq`, `archived`. `state` и `queue_len` (§17.1) **не хранятся**, вычисляются
+`last_seq`, `archived`, `vscode_active_at` (nullable; когда хаб последний раз получил
+событие зеркала с `recent` — запись в файл за последние 30 с; по нему считается тишина для
+подхвата, §9.3; в объект сессии API не входит). `state` и `queue_len` (§17.1) **не хранятся**, вычисляются
 хабом при отдаче. В первой версии в сессии ровно один агент; доступ людей к сессии
 определяется только Grant.
 
@@ -156,6 +158,12 @@ Workspace — объект хаба **[решение]**: воркер о нём
 `PATCH title` ставят `user`. Заголовок от рантайма (`session.state.title`, §5.4; у Claude
 Code — `ai-title`, §8.1) хаб применяет и ставит `runtime`, только если `title_source` не
 `user`: переименованную пользователем сессию рантайм не переименовывает.
+
+Зеркало (§9): `locked_by` — кто ведёт сессию: `hqc` — процесс воркера (с подхвата или первого
+ввода до его остановки), `vscode` — чужой писатель транскрипта (VS Code, `claude` в терминале),
+`none` — никто. Сессия, созданная зеркалом, получает `runtime_session_id` = uuid файла, `cwd`
+из записи относительно workspace, заголовок из `ai-title` (`title_source: runtime`) или «Сессия
+N», `locked_by` по §9.1. Ищется по паре (`worker_id`, `runtime_session_id`).
 
 ### Agent (встроен в Session)
 `runtime` (claude_code / acp / bare), `acp_agent` (имя агента из локального конфига
@@ -458,8 +466,16 @@ MCP-вызовы (worker → hub → worker):
 - `workspace.create` {request_id, kind: clone|worktree|dir, path, origin_url?,
   origin_path?, branch?, requested_by_owner} → `result {ok, path, error?}`
 - `workspace.delete` {request_id, path, requested_by_owner} → `result` (§13.2)
-- `workspace.list_candidates` {} → `result {candidates[{path, sessions_count, last_active}]}`
-- `mirror.set` {workspace_path, enabled} → `ack`
+- `workspace.list_candidates` {request_id} → `result {request_id, candidates[{path,
+  sessions_count, last_active}]}` — папки с транскриптами Claude Code (§9.1): `path` — `cwd`
+  записей, только внутри `allowed_roots`, сортировка по пути; `last_active` — время изменения
+  самого свежего файла. `request_id` равен `id` кадра, ждёт хаб 10 с, как `fs.*`. Воркер без
+  зеркала отвечает `error {invalid_frame}`.
+- `mirror.set` {workspace_path, enabled} → `ack` — следить за транскриптами папки (§9.2) или
+  перестать. Хаб шлёт после каждого `hello` для всех workspace воркера с `mirror_enabled`, при
+  создании такого workspace и с `enabled: false` при его удалении. Воркер с `enabled: true`
+  принимает только существующую папку внутри `allowed_roots` (после раскрытия симлинков),
+  иначе `error {invalid_frame}`; список держит в памяти.
 - `model.proxy` {request_id, model, body} → поток `model.proxy.chunk {request_id, data}`
   и `model.proxy.end {request_id, error?}`
 - `worker.approval.response` {request_id, option_id}
@@ -478,8 +494,13 @@ MCP-вызовы (worker → hub → worker):
   — `title`: заголовок, который дал сессии рантайм (§8.1); воркер повторяет последний во
   всех следующих `session.state`, хаб применяет его по правилу `title_source` (§3 Session),
   приводя к одной строке до 200 символов.
-- `mirror.event` {workspace_path, runtime_session_id, cwd, event} — события из
-  зеркала (§9.2); хаб создаёт сессию для неизвестного `runtime_session_id`.
+- `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent} — события из
+  зеркала (§9.1, §9.2), через outbox, ответ — `ack {event_id, seq}` как на `event` (дубль —
+  `seq` сохранённого, папка не под зеркалом этого воркера или `cwd` вне неё — без `seq`).
+  `workspace_path` — путь из `mirror.set`, `cwd` — абсолютный путь из записи, `title` —
+  последний `ai-title` файла, `recent` — файл изменён меньше 30 с назад, когда воркер читал
+  запись. Хаб ищет сессию по воркеру и `runtime_session_id` и создаёт её для неизвестного;
+  `event.session_id` (воркер ставит nil uuid) и `author.id` игнорирует и заполняет сам.
 - `worker.approval.request` {request_id, kind, description, expires_at}
 - `mcp.call` {request_id, session_token, tool, args}
 - `mcp.cancel` {request_id, reason} — отмена отложенного вызова (§5.2, §7.2)
@@ -1029,53 +1050,130 @@ SDK) **не используется**: нативный адаптер §8.1 п
 `queue-operation`, `system` и другие; парсер их пропускает, кроме `ai-title` — его
 разбирает отдельно (поле `aiTitle`), адаптер берёт из него заголовок сессии (§8.1).
 
+Формат на 2.1.308 (T15, фикстуры `vscode-takeover-2.1.308` и `adapter-then-outside-2.1.308`,
+`docs/notes/t15-questions.md`):
+
+- `claude -p "<промпт>"` (промпт аргументом, как человек в терминале) и `--resume <uuid>` в
+  stream-json-режиме адаптера дописывают **один и тот же** файл: обе части несут одни `cwd`
+  и `sessionId`, `entrypoint: sdk-cli`, `version`, `gitBranch`. Каждая часть начинается парой
+  `queue-operation` (`enqueue`/`dequeue`, без `uuid`), затем запись промпта `user`.
+- Каждый блок контента — **отдельная запись** со своим `uuid` (`thinking`, `text`, `tool_use`
+  одного ответа модели — три записи с общим `message.id` и полем `apiBlockIndex`); в
+  `message.content` записи один блок. `message.stop_reason` есть в jsonl у каждой записи
+  ответа: `tool_use` перед вызовом инструмента, `end_turn` у записей последнего ответа хода; в
+  stream-json это поле `null`.
+- `thinking` в jsonl — пустой текст с `signature`; в stream-json адаптера такой записи в обоих
+  прогонах не было (вместо неё — `attachment` `thinking_drop`), поэтому для детекции чужого
+  писателя она не считается (§9.3).
+- `attachment` (окружение, список инструментов, CLAUDE.md, скиллы) имеют `uuid` и входят в
+  цепочку `parentUuid` между `user` и `assistant`; основная цепочка определяется по типу
+  записи, а не по `parentUuid`.
+- Новые типы без `uuid`: `api-request-shape`, `atis-latch`, `mode`; служебные `cost-state`,
+  `last-prompt`. `ai-title` в обоих прогонах 2.1.308 **не записан** — и для промпта
+  аргументом (на 2.1.307 был), так что заголовок импортированной сессии чаще всего «Сессия N».
+- У записей промпта есть `promptId`, `promptSource: sdk`, `turnOrigin`, `turnPosition`,
+  `permissionMode`; у записей CLI-инъекций — `isMeta: true` (парсер такие не показывает),
+  у сводки после `/compact` — `isCompactSummary: true`.
+
 ### 9.1 Импорт
-При регистрации воркер отдаёт `workspace.list_candidates` (пути из `cwd` записей).
-Пользователь выбирает, какие папки станут workspace и в каких проектах. Для
-выбранных воркер читает jsonl и отдаёт историю как события §4 с исходными `ts`
-и детерминированными `event_id`. Начальный `locked_by`: `vscode`, если в файл
-писали за последние 30 с, иначе `none`.
+Кандидаты — `workspace.list_candidates` (§5.3, `GET /api/workers/{id}/candidates`): воркер
+обходит `<config>/projects/*/<uuid>.jsonl`, берёт `cwd` первой записи, где оно есть (кэш «файл
+→ cwd» на диске, §5.2), группирует по `cwd` с числом сессий и `last_active` (время изменения
+самого свежего файла) и отдаёт только папки внутри `allowed_roots`. В клиенте на экране
+Workspaces кнопка «Импорт из Claude Code» показывает кандидатов; выбранные папки становятся
+workspace проекта через обычный `POST /api/workspaces` с полем `mirror_enabled: true`
+(тело `CreateWorkspaceImport`). Хаб шлёт воркеру `mirror.set` (§5.3) — так же для всех
+workspace с зеркалом после каждого `hello`; при удалении workspace — `mirror.set` с
+`enabled: false`. Воркер принимает только папку внутри `allowed_roots` (§2.1).
+
+Импорт — первый проход зеркала по файлу (смещение 0): воркер отдаёт всю историю основной
+цепочки событиями §4 через `mirror.event` с исходными `ts` и `event_id` по §3 Event
+(`Event::id_from_claude_block`). Маппинг: `user` с текстом — `user.message` (`delivery:
+delivered`), `tool_result` — `tool.result`; `assistant` с текстом — `agent.message`, `final:
+true` при `stop_reason: end_turn`, `in_reply_to` — последний промпт файла; `tool_use` —
+`tool.call`; непустой `thinking` — `agent.thinking`. Записи без событий (`attachment`,
+снимки, `api-request*`, `queue-operation`, пустой `thinking`, картинки) пропускаются.
+
+Хаб на неизвестный `runtime_session_id` этого воркера создаёт сессию в проекте workspace:
+`cwd` — путь записи относительно workspace, заголовок — `ai-title` (поле `title` кадра), если
+есть, иначе «Сессия N» (§3 Session), `system session_created` «Сессия импортирована из Claude
+Code». Начальный `locked_by` по флагу `recent` кадра: воркер ставит его, если файл изменён
+меньше 30 с назад в момент чтения (часы воркера, не хаба) — тогда `vscode`, иначе `none`.
+Автора, которого воркер не знает, ставит хаб: владелец workspace у `user.message`, агент сессии
+у остальных. Push по событиям зеркала не шлётся (импорт — сотни старых ответов).
 
 ### 9.2 Зеркало
-На workspace с `mirror_enabled` воркер следит за всеми папками `~/.claude/projects/*`,
-чей `cwd` лежит внутри пути workspace. Правило зависит от `locked_by` сессии,
-а не от того, кто её начал:
+На workspace с `mirror_enabled` воркер следит за всеми файлами `<config>/projects/*/<uuid>.jsonl`,
+чей `cwd` лежит внутри пути workspace (сравнение по компонентам пути). Опрос раз в **2 с**,
+а не уведомления файловой системы **[решение]**: проход — `read_dir` папки проектов и `stat`
+каждого файла, читаются только байты после смещения на диске; уведомлений хватило бы не
+всегда (FSEvents склеивает события и сообщает каталоги, inotify нужен на каждую папку и не
+видит созданное до установки), смещения и пересканирование всё равно нужны, а 2 с — много
+меньше 30 с, которые важны для подхвата. Смещение двигается только за обработанные полные
+строки; недописанная строка ждёт следующего прохода; файл, ставший короче, читается заново
+(дубли гасит `event_id`). Смещения, последний промпт файла и `ai-title` хранятся рядом с кэшем
+`cwd` (`$HQC_HOME/mirror/mirror.sqlite3`); `mirror.event` идёт через outbox, как `event`.
 
-- `locked_by: hqc` — зеркало **не эмитит**, события даёт адаптер; зеркало только
-  детектирует чужого писателя (§9.3).
-- `locked_by: vscode` или `none` — зеркало эмитит новые записи основной цепочки
-  через `mirror.event`; неизвестный uuid файла становится новой сессией hqc
-  с `locked_by: vscode` и `cwd` из записи.
+Свои записи воркер знает по `uuid`: адаптер Claude Code кладёт в общий реестр в памяти (по
+`runtime_session_id`) uuid каждого сообщения `user`/`assistant` основной цепочки из stream-json,
+включая эхо `--replay-user-messages` своих промптов, и отмечает, пока процесс сессии жив. Зеркало
+свои записи **никогда не эмитит** (их отдал адаптер, в том числе промпт — как `user.message` хаба
+со своим `event_id`). Правило для чужих записей:
+
+- процесс hqc этой сессии жив (`locked_by: hqc`) — зеркало **не эмитит** и не двигает смещение
+  дальше первой чужой записи; если она остаётся чужой дольше **5 с** (stream-json может
+  отставать от файла), это чужой писатель (§9.3);
+- процесса нет (`locked_by: vscode` или `none`) — запись эмитится сразу через `mirror.event`;
+  с `recent` хаб переводит сессию в `locked_by: vscode` (если была `hqc` — это освобождение,
+  §9.3).
 - Поскольку адаптер и зеркало выводят `event_id` из одного и того же `uuid` записи,
   стык при переключении `locked_by` в любую сторону гасится уникальным индексом.
   Для записи с несколькими блоками контента правило §3 Event обязательно и для
   зеркала: блок `i > 0` — v5 от `"<uuid>/<i>"`. CLI до сих пор писал один блок на
-  запись (все фикстуры и живые прогоны), но иначе стык дал бы дубли.
+  запись (все фикстуры и живые прогоны, в том числе 2.1.308), но иначе стык дал бы дубли.
 
-Сессия с `locked_by: vscode` видна в хабе read-only с пометкой «ведётся в VS Code».
+Сессия с `locked_by: vscode` видна в хабе read-only: `state: locked_vscode`, в клиенте подпись
+«ведётся в VS Code», поле ввода закрыто, кнопка «Подхватить».
 
 ### 9.3 Подхват **[решение]**
-- Кнопка «подхватить» (`POST /takeover`) при `locked_by: vscode` и отсутствии записи
-  в файл за последние 30 с: воркер запускает `--resume <uuid>`, `locked_by: hqc`.
-  Хаб пишет `system`: «если сессия открыта в VS Code, её контекст устарел, после
-  возврата переоткройте её там».
-- Сообщение в сессию с `locked_by: vscode` **отклоняется** с предложением подхватить;
-  тихой очереди нет.
+- Кнопка «подхватить» (`POST /api/sessions/{id}/takeover`) при `locked_by: vscode` и
+  отсутствии записи в файл за последние 30 с: хаб ставит `locked_by: hqc`, пишет `system` с
+  кодом `session_taken_over` («Сессию подхватил hqc. Если она открыта в VS Code, её контекст там
+  устарел: после возврата переоткройте сессию в VS Code.») и шлёт воркеру `session.start` с
+  `mode: resume` и `runtime_session_id` — uuid файла; адаптер по наличию файла делает
+  `--resume` (§8.1). «Тишина» — 30 с с момента, когда хаб получил последний `mirror.event` с
+  `recent` (поле сессии `vscode_active_at`); раньше — `409 vscode_active`, воркер офлайн —
+  `409 worker_offline`, архив — `409 archived`. Для `locked_by: none` подхват тоже проходит, для
+  `hqc` — ничего не делает. Ответ — объект сессии.
+- Сообщение в сессию с `locked_by: vscode` **отклоняется** `409 locked_vscode` с полем
+  `hint: "takeover"` (клиент предлагает «Подхватить»); тихой очереди нет. Воркер на ввод
+  отпущенной сессии отвечает `error {code: locked_vscode, retryable: false}`.
 - Детекция чужого писателя: учитываются только записи `type: user` и `type: assistant`
-  основной цепочки (`isSidechain: false`). Запись с `uuid`, которого адаптер не видел
+  основной цепочки (`isSidechain: false`, не `isMeta`), из которых получается хотя бы одно
+  событие (пустой `thinking` не в счёт, §9). Запись с `uuid`, которого адаптер не видел
   в stream-json (и который не является его собственным промптом, §8.1), во время
   работы hqc-процесса означает, что сессию продолжили в VS Code: воркер
-  останавливает своего агента после текущего хода, ставит `locked_by: vscode`, хаб
-  пишет `system`. Пока hqc-процесс не запущен, любая такая запись переводит сессию
-  в `locked_by: vscode`. Проверено на 2.1.307 фикстурами T0 (тест
-  `t0_stream_and_transcript_share_uuids`): uuid всех записей `user`/`assistant` основной
-  цепочки, включая `tool_result` и эхо промпта, совпадают в stream-json и jsonl.
+  останавливает своего агента после текущего хода (сразу, если хода нет), очередь ввода
+  воркера очищается, `session.state` несёт `locked_by: vscode`; хаб пишет `system` с кодом
+  `session_released` («Сессию продолжили в VS Code: hqc остановил агента после хода…»), а
+  `pending` вводы становятся `failed`. Затем зеркало отдаёт придержанные записи. Пока
+  hqc-процесс не запущен, любая такая запись с `recent` переводит сессию в `locked_by: vscode`
+  (из `hqc` — тоже с `session_released`). `locked_by` из `session.state` хаб применяет так:
+  `vscode` воркера побеждает всегда; `vscode` хаба не снимается остановкой процесса (`none`)
+  и процессом, который хаб не запускал подхватом (`hqc`); иначе — как сообщил воркер.
+  Проверено на 2.1.307 фикстурами T0 (тест `t0_stream_and_transcript_share_uuids`) и на
+  2.1.308 фикстурами T15 (`t15_two_writers_share_one_transcript`, тесты зеркала
+  `own_records_are_not_foreign`, `outside_writer_is_detected`, живой
+  `live_vscode_import_takeover_release`): uuid всех записей `user`/`assistant` основной
+  цепочки, включая `tool_result` и эхо промпта, совпадают в stream-json и jsonl; при `--resume`
+  stream-json старую историю не повторяет.
 - Одновременно сессию ведёт ровно один из двух.
 
 ### 9.4 Парсер
 Формат jsonl неофициальный и меняется между версиями. Парсер терпит незнакомые типы
-записей, логирует их и не падает. Один парсер обслуживает импорт, зеркало и
-отображение подхваченной сессии. Покрывается фикстурами с реальных файлов.
+записей, логирует их и не падает. Один парсер (`hqc-claude-jsonl`) обслуживает импорт,
+зеркало и заголовок адаптера: `Message::is_main`, `stop_reason`, `blocks`, `first_cwd`,
+`last_ai_title`. Покрывается фикстурами с реальных файлов (по набору на версию CLI).
 
 ## 10. Разрешения
 
@@ -1632,6 +1730,26 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 
 ## 23. История изменений
 
+### 0.18 → 0.19 (T15, импорт, зеркало и подхват сессий Claude Code; слито после T16 и T17)
+§9 уточнён фактами 2.1.308 (живые прогоны T15, фикстуры `vscode-takeover` и
+`adapter-then-outside`): `claude -p` и `--resume` пишут один файл, блок — отдельная запись,
+`stop_reason` в jsonl, пустой `thinking` с подписью, `ai-title` не пишется. §9.1: кандидаты по
+`cwd` внутри `allowed_roots`, импорт через `POST /api/workspaces` с `mirror_enabled`, маппинг
+записей на §4, сессия для неизвестного транскрипта, `locked_by` по `recent`, авторы от хаба,
+без push. §9.2: опрос раз в 2 с **[решение]**, смещения и кэш в `$HQC_HOME/mirror`, реестр своих
+uuid адаптера, свои записи не эмитятся, чужие при живом процессе придерживаются 5 с.
+§9.3: `POST /takeover` (`409 vscode_active`, `worker_offline`, `archived`), `session.start mode:
+resume`, `system session_taken_over`; `409 locked_vscode` с `hint: takeover`; освобождение —
+агент останавливается после хода, `system session_released`, `pending` вводы `failed`;
+правило применения `locked_by` из `session.state`. §3 Session: `vscode_active_at`, смысл
+`locked_by`, поля сессии зеркала. §5.3: `workspace.list_candidates {request_id}`, `mirror.set`
+подробно. §5.4: `mirror.event` с `title?`, `recent` и ответом `ack`. Код `system`
+`session_released`, ошибки `vscode_active` и `hint` у `locked_vscode`, `GET
+/api/workers/{id}/candidates` и `mirror_enabled` в `POST /api/workspaces` описаны в §9; их
+перенос в таблицы §4 и §6 — при сведении итерации (`docs/notes/t15-questions.md`). Миграция
+хаба `0008` (при слиянии переименована из `0006`; `0006` занят T17, `0007` — T16):
+`sessions.vscode_active_at`, индекс по (`worker_id`, `runtime_session_id`).
+
 ### 0.17 → 0.18 (T16, артефакты; слито после T17)
 §3 Artifact: `session_id` — первая сессия ввода, `storage_key` = sha256, уникальность
 `(owner_id, sha256, name)`. §6: тела `POST /api/artifacts` (`file`, `kind?` → объект
@@ -1643,6 +1761,7 @@ content block stream-json **[проверить]**, ошибки скачива�
 только на `HQC_ARTIFACT_PUBLIC_BASE`, CSP хаба с origin домена артефактов, права воркера,
 поведение клиента. Миграция хаба `0007` (при слиянии переименована из `0006`, занятого T17). Вопросы и отложенное —
 `docs/notes/t16-questions.md`.
+
 ### 0.16 → 0.17 (T17, служебная сессия воркера и несессионные подтверждения)
 §3 Worker: `system_session_id` — когда создаётся (регистрация, миграция `0006`, `hello`), где
 виден (`hello.ack`, `GET /api/workers`). §10.2 переписан фактами: служебная сессия (личный

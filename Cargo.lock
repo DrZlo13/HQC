@@ -1183,6 +1183,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "hqc-proto",
+ "hqc-worker",
  "jsonwebtoken",
  "rand 0.8.8",
  "reqwest",

@@ -30,9 +30,15 @@ pub struct Outbox {
 pub struct Entry {
     pub seq: i64,
     pub event_id: Uuid,
-    /// The event as JSON, sent as `event {event}`.
+    /// The event as JSON, sent as `event {event}`; for a `mirror.event` its whole payload.
     pub event: serde_json::Value,
+    /// [`FRAME_EVENT`] or [`FRAME_MIRROR_EVENT`].
+    pub frame: String,
 }
+
+pub const FRAME_EVENT: &str = "event";
+/// `mirror.event` (SPEC §5.4): through the outbox like `event`, keyed by the event's id.
+pub const FRAME_MIRROR_EVENT: &str = "mirror.event";
 
 impl Outbox {
     /// Opens (creating if needed) `<dir>/outbox.sqlite3`. The directory is 0700 and the
@@ -66,15 +72,39 @@ impl Outbox {
             db.execute_batch("ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
                 .context("adding outbox.attempts")?;
         }
+        // Outboxes before T15 hold `event` frames only.
+        let has_frame: bool = db
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('outbox') WHERE name = 'frame'",
+                [],
+                |r| r.get(0),
+            )
+            .context("reading the outbox schema")?;
+        if !has_frame {
+            db.execute_batch("ALTER TABLE outbox ADD COLUMN frame TEXT NOT NULL DEFAULT 'event'")
+                .context("adding outbox.frame")?;
+        }
         Ok(Self { db: Mutex::new(db) })
     }
 
     /// Appends an event; an `event_id` already waiting is kept as is.
     pub fn push(&self, event_id: Uuid, event: &serde_json::Value) -> anyhow::Result<()> {
+        self.push_frame(event_id, FRAME_EVENT, event)
+    }
+
+    /// Appends a frame carrying event `event_id`: `payload` is the event for
+    /// [`FRAME_EVENT`], the frame's payload otherwise. The same `event_id` waiting already
+    /// (the adapter's copy of a mirrored record) is kept as is.
+    pub fn push_frame(
+        &self,
+        event_id: Uuid,
+        frame: &str,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
         self.db()
             .execute(
-                "INSERT OR IGNORE INTO outbox (event_id, event) VALUES (?1, ?2)",
-                params![event_id.to_string(), event.to_string()],
+                "INSERT OR IGNORE INTO outbox (event_id, event, frame) VALUES (?1, ?2, ?3)",
+                params![event_id.to_string(), payload.to_string(), frame],
             )
             .context("writing to the outbox")?;
         Ok(())
@@ -109,21 +139,23 @@ impl Outbox {
     pub fn after(&self, after: i64) -> anyhow::Result<Vec<Entry>> {
         let db = self.db();
         let mut st = db.prepare_cached(
-            "SELECT seq, event_id, event FROM outbox WHERE seq > ?1 ORDER BY seq",
+            "SELECT seq, event_id, event, frame FROM outbox WHERE seq > ?1 ORDER BY seq",
         )?;
         let rows = st.query_map(params![after], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?;
         rows.map(|r| {
-            let (seq, id, ev) = r?;
+            let (seq, id, ev, frame) = r?;
             Ok(Entry {
                 seq,
                 event_id: id.parse().context("outbox event_id")?,
                 event: serde_json::from_str(&ev).context("outbox event")?,
+                frame,
             })
         })
         .collect()

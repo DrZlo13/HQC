@@ -388,6 +388,29 @@ pre {
   font-weight: normal;
 }
 
+.candidate-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.candidate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 36px;
+  overflow-wrap: anywhere;
+}
+
+.import-claude {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .dir-browser {
   width: 100%;
   border: 1px solid var(--line);
@@ -823,6 +846,18 @@ pre {
   flex: none;
   padding: 8px 12px;
   background: color-mix(in srgb, var(--deny) 15%, var(--panel));
+  font-size: 0.9rem;
+}
+
+/* SPEC §9.3: a session VS Code drives is read-only here until taken over. */
+.locked-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--accent, #4c8bf5) 15%, var(--panel));
   font-size: 0.9rem;
 }
 

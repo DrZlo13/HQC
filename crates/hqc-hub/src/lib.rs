@@ -23,6 +23,7 @@ pub mod db;
 pub mod delivery;
 pub mod error;
 pub mod events;
+pub mod mirror;
 pub mod push;
 pub mod requests;
 pub mod security;
@@ -84,6 +85,8 @@ pub fn router(app: AppState) -> Router {
             axum::routing::delete(api::delete_worker),
         )
         .route("/api/workers/{id}/dirs", get(api::worker_dirs))
+        .route("/api/workers/{id}/candidates", get(api::worker_candidates))
+        .route("/api/sessions/{id}/takeover", post(api::takeover))
         .route("/api/push/vapid", get(api::vapid))
         .route(
             "/api/push/subscribe",

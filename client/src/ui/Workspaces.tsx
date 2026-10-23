@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, type WorkerInfo } from '../api';
 import type { AppState } from '../app';
-import { parseWorkspaceConflict, type DirEntry, type Workspace } from '../proto';
+import { parseWorkspaceConflict, type Candidate, type DirEntry, type Workspace } from '../proto';
 import { useSubscription } from './hooks';
 import { workspaceTitle } from './SessionList';
 
@@ -29,6 +29,7 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
   useSubscription((fn) => app.onChange(fn), [app]);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = app.projects.get(projectId);
   const list = app.workspaces.get(projectId);
@@ -105,6 +106,7 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
                   <div class="workspace-main">
                     <b>{workspaceTitle(w, workers ?? undefined)}</b>
                     {isDefault && <span class="tag">по умолчанию</span>}
+                    {w.mirror_enabled && <span class="tag tag-mirror">сессии VS Code</span>}
                   </div>
                   <div class="row">
                     {!isDefault && (
@@ -129,10 +131,22 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
             workers={workers ?? []}
             onDone={() => setAdding(false)}
           />
+        ) : importing ? (
+          <ImportFromClaude
+            app={app}
+            projectId={projectId}
+            workers={workers ?? []}
+            onDone={() => setImporting(false)}
+          />
         ) : (
-          <button type="button" class="btn btn-primary btn-add-workspace" onClick={() => setAdding(true)}>
-            Добавить workspace
-          </button>
+          <div class="row">
+            <button type="button" class="btn btn-primary btn-add-workspace" onClick={() => setAdding(true)}>
+              Добавить workspace
+            </button>
+            <button type="button" class="btn btn-import-claude" onClick={() => setImporting(true)}>
+              Импорт из Claude Code
+            </button>
+          </div>
         )}
         {project && !project.is_personal && (
           <>
@@ -149,6 +163,134 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
         )}
       </div>
     </section>
+  );
+}
+
+/** The import from Claude Code (SPEC §9.1): folders the worker found Claude Code sessions
+ *  in (by the `cwd` of their transcripts); each picked one becomes a workspace of this
+ *  project with the mirror on, and its sessions with their history show up in the project. */
+function ImportFromClaude({
+  app,
+  projectId,
+  workers,
+  onDone,
+}: {
+  app: AppState;
+  projectId: string;
+  workers: WorkerInfo[];
+  onDone: () => void;
+}) {
+  const online = workers.filter((w) => w.status === 'online');
+  const [worker, setWorker] = useState(online[0]?.id ?? workers[0]?.id ?? '');
+  const [list, setList] = useState<Candidate[] | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<{ path: string; error: ReturnType<typeof addError> }[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!worker && workers[0]) setWorker(online[0]?.id ?? workers[0].id);
+  }, [workers]);
+
+  useEffect(() => {
+    if (!worker) return;
+    setList(null);
+    setLoadError(null);
+    setPicked(new Set());
+    app.api.candidates(worker).then(setList, (e) => {
+      setList([]);
+      setLoadError(addError(e, app).text);
+    });
+  }, [app, worker]);
+
+  const toggle = (path: string) => {
+    const next = new Set(picked);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    setPicked(next);
+  };
+
+  const run = async () => {
+    setBusy(true);
+    setErrors([]);
+    const failed: typeof errors = [];
+    for (const path of picked) {
+      try {
+        await app.api.createWorkspace({ project_id: projectId, worker_id: worker, path, mirror_enabled: true });
+      } catch (e) {
+        failed.push({ path, error: addError(e, app) });
+      }
+    }
+    await app.workspacesChanged(projectId).catch(() => {});
+    // The worker sends the history in the background; sessions appear as it arrives.
+    await app.refreshSessions().catch(() => {});
+    setBusy(false);
+    if (failed.length) setErrors(failed);
+    else onDone();
+  };
+
+  if (workers.length === 0) {
+    return (
+      <div class="import-claude">
+        <p class="muted">
+          Нет ни одного воркера. <a href="#/settings">Зарегистрируйте машину</a>.
+        </p>
+        <button type="button" class="btn btn-small" onClick={onDone}>
+          Отмена
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div class="import-claude">
+      <p class="muted small">
+        Папки, в которых на воркере есть сессии Claude Code (VS Code или терминал). Выбранные станут workspace этого
+        проекта: их сессии появятся здесь с историей, новые записи будут подтягиваться.
+      </p>
+      <label class="field">
+        <span class="muted small">Воркер</span>
+        <select class="input" name="worker" value={worker} onChange={(e) => setWorker((e.target as HTMLSelectElement).value)}>
+          {workers.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+              {w.status === 'online' ? '' : ' (офлайн)'}
+            </option>
+          ))}
+        </select>
+      </label>
+      {loadError && <div class="error-text">{loadError}</div>}
+      {list === null && !loadError && <div class="muted small">…</div>}
+      {list && list.length === 0 && !loadError && <div class="muted small">Сессий Claude Code не найдено</div>}
+      {list && list.length > 0 && (
+        <ul class="candidate-list">
+          {list.map((c) => (
+            <li key={c.path}>
+              <label class="candidate">
+                <input type="checkbox" checked={picked.has(c.path)} onChange={() => toggle(c.path)} />
+                <span class="candidate-path">{c.path}</span>
+                <span class="muted small">
+                  {' '}
+                  · сессий: {c.sessions_count} · {new Date(c.last_active).toLocaleString('ru-RU')}
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+      {errors.map((e) => (
+        <div key={e.path} class="error-text">
+          {e.path}: {e.error.text} {e.error.link && <a href={e.error.link.href}>{e.error.link.label}</a>}
+        </div>
+      ))}
+      <div class="row">
+        <button type="button" class="btn btn-small btn-primary btn-run-import" disabled={busy || picked.size === 0} onClick={run}>
+          Импортировать
+        </button>
+        <button type="button" class="btn btn-small" onClick={onDone}>
+          Отмена
+        </button>
+      </div>
+    </div>
   );
 }
 

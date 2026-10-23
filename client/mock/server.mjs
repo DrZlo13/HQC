@@ -190,6 +190,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
 
   function stateOf(s) {
     if (s.archived) return 'archived';
+    if (s.locked === 'vscode') return 'locked_vscode';
     if (s.open) return 'waiting';
     if (s.events.some((e) => e.type === 'user.message' && e.delivery === 'failed')) return 'error';
     if (s.turn) return 'running';
@@ -219,7 +220,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       },
       auto_approve: false,
       wake_on_send: false,
-      locked_by: s.turn ? 'hqc' : 'none',
+      locked_by: s.locked ?? (s.turn ? 'hqc' : 'none'),
       last_seq: s.last_seq,
       archived: s.archived,
       state: sum.state,
@@ -512,11 +513,50 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     }
     const w = {
       ...ex['api.workspace'], id: randomUUID(), project_id: pr.id, worker_id: body.worker_id, path,
-      label: String(body?.label ?? ''), created_at: now(), updated_at: now(),
+      label: String(body?.label ?? ''), mirror_enabled: body?.mirror_enabled === true,
+      created_at: now(), updated_at: now(),
     };
     workspaces.set(w.id, w);
     pr.default_workspace_id ??= w.id;
+    if (w.mirror_enabled) importClaude(w);
     return withStatus(201, w);
+  });
+  // The import from Claude Code (SPEC §9.1): what the worker's mirror would send for the
+  // folder: one session with its history, driven by VS Code, quiet for a minute.
+  function importClaude(w) {
+    const s = newSession(`Из VS Code: ${w.path.split('/').at(-1)}`, randomUUID(), {
+      project_id: w.project_id, workspace_id: w.id,
+    });
+    const u = store(s, mk(s, 'event.user.message', { text: 'Run echo hqc-vscode', artifact_ids: [] }, {
+      delivery: 'delivered', delivered_at: now(),
+    }));
+    store(s, mk(s, 'event.agent.message', { text: 'VSCODE-DONE', final: true, in_reply_to: u.event_id }));
+    s.locked = 'vscode';
+    s.vscode_active_at = Date.now() - 60_000;
+    pushSummary(s);
+  }
+  // Folders with Claude Code sessions on home-mac (`workspace.list_candidates`).
+  route('GET', '/api/workers/:id/candidates', (p) => {
+    if (!workerOnline(p.id)) throw fail(409, 'worker_offline', 'the worker is offline');
+    return {
+      candidates: [
+        { path: `${ROOT}/cad`, sessions_count: 3, last_active: '2026-10-22T18:04:11Z' },
+        { path: `${ROOT}/kicad/power-board`, sessions_count: 1, last_active: '2026-10-23T00:10:17Z' },
+      ],
+    };
+  });
+  // SPEC §9.3: after 30 s without writes from VS Code.
+  route('POST', '/api/sessions/:id/takeover', (p) => {
+    const s = sessionOr404(p.id);
+    if (s.locked === 'vscode' && Date.now() - (s.vscode_active_at ?? 0) < 30_000) {
+      throw fail(409, 'vscode_active', 'VS Code wrote to the session recently');
+    }
+    s.locked = undefined;
+    store(s, mk(s, 'event.system', {
+      code: 'session_taken_over',
+      text: 'Сессию подхватил hqc. Если она открыта в VS Code, её контекст там устарел.',
+    }));
+    return info(s);
   });
   route('PATCH', '/api/workspaces/:id', (p, body) => {
     const w = workspaces.get(p.id);
@@ -553,6 +593,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   });
   route('POST', '/api/sessions/:id/input', (p, body) => {
     const s = sessionOr404(p.id);
+    if (s.locked === 'vscode') {
+      throw fail(409, 'locked_vscode', 'the session is being driven from VS Code; take it over first', {
+        hint: 'takeover',
+      });
+    }
     if (typeof body?.text !== 'string' || !body.text.trim()) throw fail(400, 'bad_request', 'text required');
     // A resend with the same client_op_id is the same input: the stored event, 200 (SPEC §6).
     const dup = body.client_op_id && s.events.find((e) => e.client_op_id === String(body.client_op_id));

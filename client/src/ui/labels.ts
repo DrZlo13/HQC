@@ -19,7 +19,7 @@ export function isDeny(o: ApprovalOption): boolean {
 
 export const STATE_LABELS: Record<SessionState, string> = {
   archived: 'в архиве',
-  locked_vscode: 'занята VS Code',
+  locked_vscode: 'ведётся в VS Code',
   worker_offline: 'воркер офлайн',
   waiting: 'ждёт ответа',
   error: 'ошибка',
@@ -54,6 +54,8 @@ export const POLICY_HINT_LABELS: Record<PolicyHint, string> = {
 /** `system.code` → caption before the text; other codes show the text alone (SPEC §4). */
 export const SYSTEM_CODE_LABELS: Record<string, string> = {
   policy_denied: 'Запрещено политикой воркера',
+  session_taken_over: 'Подхвачена из VS Code',
+  session_released: 'Возвращена в VS Code',
 };
 
 export const CANCEL_LABELS: Record<CancelReason, string> = {

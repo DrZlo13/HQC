@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   isKnownType,
   parseApiError,
+  parseCandidateList,
   parseDirList,
   parseEvent,
   parseEventPage,
@@ -129,6 +130,10 @@ describe('examples/wire', () => {
       existing_path: w.path,
     });
     expect(parseWorkspaceConflict(load('api.error.json'))).toBeNull();
+    // T15: candidates for the import from Claude Code; a mirrored workspace.
+    expect(parseCandidateList(load('api.candidates.json')).map((c) => c.sessions_count)).toEqual([3, 41]);
+    expect(w.mirror_enabled).toBe(false);
+    expect(parseWorkspace({ ...(load('api.workspace.json') as object), mirror_enabled: true }).mirror_enabled).toBe(true);
     const s = parseSessionInfo(load('api.session.json'));
     expect(s).toMatchObject({ workspace_id: w.id, cwd: '.' });
     const req = load('api.session.request.json') as { workspace_id: string };

@@ -768,6 +768,8 @@ export interface Workspace {
   path: string;
   label: string;
   kind: string;
+  /** Its Claude Code sessions are mirrored (imported from VS Code, SPEC §9). */
+  mirror_enabled: boolean;
   created_at: string;
 }
 
@@ -780,6 +782,7 @@ export function parseWorkspace(v: unknown): Workspace {
     path: str(o, 'path'),
     label: optStr(o, 'label') ?? '',
     kind: str(o, 'kind'),
+    mirror_enabled: o.mirror_enabled === true,
     created_at: str(o, 'created_at'),
   };
 }
@@ -799,6 +802,20 @@ export function parseDirList(v: unknown): DirEntry[] {
   return arr(obj(v, 'dir list'), 'entries').map((e, i) => {
     const o = obj(e, `entries[${i}]`);
     return { name: str(o, 'name'), path: str(o, 'path') };
+  });
+}
+
+/** A folder with Claude Code sessions (`GET /api/workers/{id}/candidates`, SPEC §9.1). */
+export interface Candidate {
+  path: string;
+  sessions_count: number;
+  last_active: string;
+}
+
+export function parseCandidateList(v: unknown): Candidate[] {
+  return arr(obj(v, 'candidate list'), 'candidates').map((e, i) => {
+    const o = obj(e, `candidates[${i}]`);
+    return { path: str(o, 'path'), sessions_count: num(o, 'sessions_count'), last_active: str(o, 'last_active') };
   });
 }
 

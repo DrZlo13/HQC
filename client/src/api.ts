@@ -2,6 +2,7 @@
 // client sends cookies along and never handles tokens itself.
 
 import {
+  parseCandidateList,
   parseDirList,
   parseEnrollInfo,
   parseEvent,
@@ -15,6 +16,7 @@ import {
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceList,
+  type Candidate,
   type ClarifyAnswer,
   type DirEntry,
   type EnrollInfo,
@@ -145,8 +147,26 @@ export class Api {
 
   /** The worker checks the folder (`fs.stat`); `409 workspace_conflict` carries the
    *  workspace that already holds it in `ApiError.body` (`parseWorkspaceConflict`). */
-  async createWorkspace(w: { project_id: string; worker_id: string; path: string; label?: string }): Promise<Workspace> {
+  async createWorkspace(w: {
+    project_id: string;
+    worker_id: string;
+    path: string;
+    label?: string;
+    /** The import from Claude Code (SPEC §9.1): the worker mirrors the folder's sessions. */
+    mirror_enabled?: boolean;
+  }): Promise<Workspace> {
     return parseWorkspace(await this.req('POST', '/api/workspaces', w));
+  }
+
+  /** Folders with Claude Code sessions on the worker (`workspace.list_candidates`, SPEC §9.1). */
+  async candidates(workerId: string): Promise<Candidate[]> {
+    return parseCandidateList(await this.req('GET', `/api/workers/${enc(workerId)}/candidates`));
+  }
+
+  /** Continue a session VS Code drove (SPEC §9.3); `409 vscode_active` within 30 s of its
+   *  last write. */
+  async takeover(id: string): Promise<SessionInfo> {
+    return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/takeover`));
   }
 
   /** Removes the record only; the folder is not touched (SPEC §13.2). */

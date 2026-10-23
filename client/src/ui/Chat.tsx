@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { ApiError } from '../api';
 import type { AppState } from '../app';
 import { ChatSession } from '../session';
 import { ActivityLine, BusyIndicator, ChatItems, StreamingBubble, type ChatActions } from './cards';
@@ -56,6 +57,22 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
     fn().catch((e: Error) => setNotice(`${failed}: ${e.message}`));
 
   const showRetry = state === 'error' || t.hasFailedDelivery();
+  const locked = state === 'locked_vscode';
+  // SPEC §9.3: read-only while VS Code drives it; the hub refuses takeover until VS Code has
+  // been quiet for 30 s (`409 vscode_active`).
+  const takeover = () =>
+    app.api.takeover(sessionId).then(
+      () => {
+        setNotice(null);
+        return app.refreshSessions();
+      },
+      (e: unknown) =>
+        setNotice(
+          e instanceof ApiError && e.code === 'vscode_active'
+            ? 'В VS Code ещё пишут в эту сессию; подхватить можно через 30 с тишины.'
+            : `Не подхвачено: ${(e as Error).message}`,
+        ),
+    );
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   useLayoutEffect(() => {
@@ -106,8 +123,17 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
           {notice}
         </div>
       )}
+      {locked && (
+        <div class="locked-banner">
+          <span>Сессия ведётся в VS Code. Чтобы писать отсюда, подхватите её.</span>
+          <button type="button" class="btn btn-primary btn-small btn-takeover" onClick={() => void takeover()}>
+            Подхватить
+          </button>
+        </div>
+      )}
       <Composer
-        disabled={state === 'archived'}
+        disabled={state === 'archived' || locked}
+        placeholder={locked ? 'Ведётся в VS Code' : undefined}
         onSend={(text) => {
           stick.current = true;
           chat.send(text);
@@ -119,7 +145,15 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
 
 const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 
-function Composer({ onSend, disabled }: { onSend: (text: string) => void; disabled: boolean }) {
+function Composer({
+  onSend,
+  disabled,
+  placeholder,
+}: {
+  onSend: (text: string) => void;
+  disabled: boolean;
+  placeholder?: string;
+}) {
   const [text, setText] = useState('');
   const area = useRef<HTMLTextAreaElement>(null);
   const submit = () => {
@@ -147,7 +181,7 @@ function Composer({ onSend, disabled }: { onSend: (text: string) => void; disabl
         ref={area}
         class="input"
         rows={1}
-        placeholder={disabled ? 'Сессия в архиве' : 'Сообщение'}
+        placeholder={placeholder ?? (disabled ? 'Сессия в архиве' : 'Сообщение')}
         disabled={disabled}
         value={text}
         onInput={(e) => setText((e.currentTarget as HTMLTextAreaElement).value)}

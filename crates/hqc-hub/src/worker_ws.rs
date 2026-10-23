@@ -445,14 +445,29 @@ async fn handle_text(
             }
             Ok(())
         }
-        WorkerFrame::MirrorEvent(_) => {
-            conn.error(
-                &id,
-                error_code::INVALID_FRAME,
-                "mirror.event is not supported yet",
-                false,
-            );
-            Ok(())
+        WorkerFrame::MirrorEvent(m) => {
+            let raw_event = raw["payload"]["event"].clone();
+            match crate::mirror::ingest(app, conn, &raw_event, &m).await {
+                Ok(ack) => {
+                    conn.reply(&id, HubFrame::Ack(ack));
+                    Ok(())
+                }
+                // As for `event` (SPEC §5.2).
+                Err(e) if db::is_data_error(&e) => {
+                    tracing::error!(worker_id = %conn.worker_id, event_id = %m.event.event_id, error = %e, "mirrored event refused by the database, rejected");
+                    conn.error(
+                        &id,
+                        error_code::INVALID_FRAME,
+                        "event refused by the database",
+                        false,
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    conn.error(&id, error_code::INTERNAL, "event not stored", true);
+                    Err(e)
+                }
+            }
         }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
@@ -527,6 +542,7 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         for sid in db::sessions_to_restart(&app.db, conn.worker_id).await? {
             delivery::kick(app, sid, true).await;
         }
+        crate::mirror::after_hello(app, conn).await?;
         Ok(())
     }
     .await;
@@ -567,8 +583,13 @@ async fn on_session_state(
     }
     let name = |v: Value| v.as_str().unwrap_or_default().to_string();
     let ps = name(serde_json::to_value(process_state)?);
-    let lb = name(serde_json::to_value(locked_by)?);
+    let reported = name(serde_json::to_value(locked_by)?);
+    let lb = crate::mirror::next_lock(&s.locked_by, &reported).to_string();
     db::set_process_state(&app.db, session_id, &ps, runtime_session_id.as_deref(), &lb).await?;
+    if s.locked_by == "hqc" && lb == "vscode" {
+        // The worker stopped its agent for another writer (SPEC §9.3).
+        crate::mirror::released(app, session_id).await?;
+    }
     // Unless the user renamed the session (SPEC §3 Session).
     if let Some(t) = title.as_deref().and_then(runtime_title) {
         db::set_runtime_title(&app.db, session_id, &t).await?;
@@ -603,7 +624,7 @@ async fn on_session_state(
 
 /// A runtime title as stored: one line, at most `MAX_TITLE` characters (SPEC §6), U+0000
 /// replaced (SPEC §5.2); `None` if nothing is left.
-fn runtime_title(t: &str) -> Option<String> {
+pub(crate) fn runtime_title(t: &str) -> Option<String> {
     let t: String = t
         .split_whitespace()
         .collect::<Vec<_>>()

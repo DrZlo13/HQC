@@ -13,13 +13,13 @@ use axum::{
 use chrono::Utc;
 use hqc_proto::{
     api::{
-        self, CreateProject, CreateSessionRequest, CreateWorkspace, DirList, EnrollConfirmRequest,
-        EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest, EnrollStarted, EventPage,
-        InputRequest, InputResponse, PatchProject, PatchWorkspace, ProjectList, PushSubscription,
-        SessionList, VapidKey, WorkspaceList,
+        self, CandidateList, CreateProject, CreateSessionRequest, CreateWorkspaceImport, DirList,
+        EnrollConfirmRequest, EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest,
+        EnrollStarted, EventPage, InputRequest, InputResponse, PatchProject, PatchWorkspace,
+        ProjectList, PushSubscription, SessionList, VapidKey, WorkspaceList,
     },
     event::CancelReason,
-    frame::{FsListDirs, FsStat, HubFrame, ResultBody},
+    frame::{FsListDirs, FsStat, HubFrame, ListCandidates, ResultBody},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -287,8 +287,9 @@ pub async fn workspaces(
 pub async fn create_workspace(
     State(app): State<AppState>,
     user: CurrentUser,
-    Json(b): Json<CreateWorkspace>,
+    Json(body): Json<CreateWorkspaceImport>,
 ) -> ApiResult<impl IntoResponse> {
+    let b = body.workspace;
     let project = project_for(&app, &user, b.project_id).await?;
     let worker = own_worker(&app, &user, b.worker_id).await?;
     let path = check_path(&b.path)?;
@@ -382,7 +383,18 @@ pub async fn create_workspace(
             ));
         }
     };
-    tracing::info!(workspace_id = %ws.id, project_id = %ws.project_id, worker_id = %ws.worker_id, path = %ws.path, "workspace added");
+    // The import from Claude Code (SPEC §9.1): the worker mirrors the folder and sends its
+    // history.
+    let ws = if body.mirror_enabled {
+        let ws = db::set_workspace_mirror(&app.db, ws.id, true).await?;
+        if let Some(conn) = app.workers.get(ws.worker_id) {
+            crate::mirror::set(&conn, &ws.path, true);
+        }
+        ws
+    } else {
+        ws
+    };
+    tracing::info!(workspace_id = %ws.id, project_id = %ws.project_id, worker_id = %ws.worker_id, path = %ws.path, mirror = ws.mirror_enabled, "workspace added");
     Ok((StatusCode::CREATED, Json(ws.to_api())))
 }
 
@@ -415,6 +427,11 @@ pub async fn delete_workspace(
     let ws = workspace_for(&app, &user, id).await?;
     match db::delete_workspace(&app.db, &ws).await? {
         db::WorkspaceDelete::Deleted => {
+            if ws.mirror_enabled {
+                if let Some(conn) = app.workers.get(ws.worker_id) {
+                    crate::mirror::set(&conn, &ws.path, false);
+                }
+            }
             tracing::info!(workspace_id = %id, path = %ws.path, "workspace removed");
             Ok(StatusCode::NO_CONTENT)
         }
@@ -454,6 +471,40 @@ pub async fn worker_dirs(
         ResultBody::FsListDirs(l) => Ok(Json(l)),
         other => Err(anyhow::anyhow!("fs.list_dirs answered with {other:?}").into()),
     }
+}
+
+/// `GET /api/workers/{id}/candidates`: folders with Claude Code sessions on the worker
+/// (`workspace.list_candidates`, SPEC §9.1), for the import.
+pub async fn worker_candidates(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<CandidateList>> {
+    let worker = match db::worker(&app.db, id).await? {
+        Some(w) if w.owner_id == user.id && w.revoked_at.is_none() => w,
+        _ => return Err(ApiError::NotFound),
+    };
+    match ask_worker(&app, worker.id, |request_id| {
+        HubFrame::WorkspaceListCandidates(ListCandidates { request_id })
+    })
+    .await?
+    {
+        ResultBody::Candidates(c) => Ok(Json(c)),
+        other => Err(anyhow::anyhow!("workspace.list_candidates answered with {other:?}").into()),
+    }
+}
+
+/// `POST /api/sessions/{id}/takeover` (SPEC §9.3): continue a session VS Code drove.
+/// `409 vscode_active` while VS Code wrote within 30 s, `409 worker_offline`.
+pub async fn takeover(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    crate::mirror::takeover(&app, &s).await?;
+    let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
+    Ok(Json(json!(state::view(&app, user.id, s).await?)))
 }
 
 // ---------------------------------------------------------------- sessions
@@ -724,9 +775,13 @@ pub async fn input(
         ));
     }
     if s.locked_by == "vscode" {
-        return Err(ApiError::Conflict(
+        // No silent queue (SPEC §9.3): the client offers «Подхватить».
+        let mut extra = serde_json::Map::new();
+        extra.insert("hint".into(), json!("takeover"));
+        return Err(ApiError::ConflictWith(
             "locked_vscode",
-            "the session is being driven from VS Code; take it over first".into(),
+            "the session is being driven from VS Code; take it over first (POST /takeover)".into(),
+            extra,
         ));
     }
     if b.text.trim().is_empty() && b.artifact_ids.is_empty() {

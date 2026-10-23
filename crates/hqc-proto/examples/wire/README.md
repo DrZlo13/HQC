@@ -22,7 +22,8 @@ Rust tests require that each file deserializes and serializes back to exactly th
   `api.session.request.json` (creating a session in a workspace), `api.project*.json` and
   `api.projects.json` (projects), `api.workspace*.json` and `api.workspaces.json`
   (workspaces; `api.workspace.conflict.json` — the `409 workspace_conflict` body),
-  `api.dirs.json` (`GET /api/workers/{id}/dirs`).
+  `api.dirs.json` (`GET /api/workers/{id}/dirs`), `api.artifact.json` (`POST /api/artifacts`,
+  `GET /api/artifacts/{id}`) and `api.artifact.url.json` (`GET /api/artifacts/{id}/url`).
 
 Optional fields are omitted when absent; readers must accept `null` for them as well.
 

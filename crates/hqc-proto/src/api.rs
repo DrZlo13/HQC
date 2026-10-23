@@ -233,6 +233,27 @@ pub struct InputResponse {
     pub event: serde_json::Value,
 }
 
+/// An artifact as `POST /api/artifacts` and `GET /api/artifacts/{id}` return it (SPEC §3
+/// Artifact, §6, §12). Events carry only `id`; the content is fetched by a signed link.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub id: Uuid,
+    pub kind: crate::event::ArtifactKind,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    /// Hex sha256 of the content.
+    pub sha256: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /api/artifacts/{id}/url`: a signed link valid until `expires_at` (SPEC §12).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactUrl {
+    pub url: String,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Error body of every REST endpoint, with the matching HTTP status (SPEC §6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiError {
@@ -444,6 +465,9 @@ mod tests {
                 .unwrap();
         assert_eq!(plain.error, "workspace_conflict");
         roundtrip::<DirList>(include_str!("../examples/wire/api.dirs.json"));
+        let a: Artifact = roundtrip(include_str!("../examples/wire/api.artifact.json"));
+        assert_eq!(a.kind, crate::event::ArtifactKind::Image);
+        roundtrip::<ArtifactUrl>(include_str!("../examples/wire/api.artifact.url.json"));
         let s: CreateSessionRequest =
             roundtrip(include_str!("../examples/wire/api.session.request.json"));
         assert_eq!(s.workspace_id, Some(w.id));

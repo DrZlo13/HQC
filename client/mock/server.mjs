@@ -186,7 +186,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       unread: s.events.filter((e) => e.seq > s.read_seq && isUnread(e)).length,
       last_seq: s.last_seq,
       last_read_seq: s.read_seq,
-      ...(s.held_by ? { held_by: s.held_by } : {}),
+      ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
     };
   }
 
@@ -240,7 +240,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       unread: sum.unread,
       created_at: s.created_at,
       updated_at: s.events.at(-1)?.ts ?? s.created_at,
-      ...(s.held_by ? { held_by: s.held_by } : {}),
+      ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
     };
   }
 
@@ -607,6 +607,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     o.vscode_active_at = Date.now() - 60_000;
     pushSummary(o);
   }
+  /** Test knob: the holder exists (takeover still refuses) but summaries do not mention it,
+   *  as for a client that has not heard of it yet. */
+  function hideHolder(id, hidden) {
+    const s = sessions.get(id);
+    if (!s) return;
+    s.holder_hidden = hidden;
+    pushSummary(s);
+  }
   /** The user closed session `id` in VS Code: nobody holds it, it is free at once. */
   function closeVsCode(id) {
     const s = sessions.get(id);
@@ -682,7 +690,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (s.locked === 'vscode') {
       throw fail(409, 'locked_vscode', 'the session is being driven from VS Code; take it over first', {
         hint: 'takeover',
-        ...(s.held_by ? { held_by: s.held_by } : {}),
+        ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
       });
     }
     if (typeof body?.text !== 'string' || !body.text.trim()) throw fail(400, 'bad_request', 'text required');
@@ -935,6 +943,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     sessions,
     pushSubscriptions,
     closeVsCode,
+    hideHolder,
     /** Drops every client socket, to exercise reconnect. */
     dropClients() {
       for (const c of clients) c.ws.terminate();

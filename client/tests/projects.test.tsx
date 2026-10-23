@@ -12,7 +12,7 @@ import { AppState } from '../src/app';
 import { App } from '../src/ui/App';
 import { HubSocket } from '../src/ws';
 
-let mock: { url: string; close(): Promise<void>; closeVsCode(id: string): void };
+let mock: { url: string; close(): Promise<void>; closeVsCode(id: string): void; hideHolder(id: string, hidden: boolean): void };
 let win: Window;
 let app: AppState;
 let root: HTMLElement;
@@ -278,24 +278,14 @@ it('does not take over a session open in VS Code', async () => {
   expect(fork.querySelector('.warn-icon')).not.toBeNull();
   expect(fork.textContent).toContain('не попал в его контекст');
 
-  // The client has not heard of the holder yet: «Подхватить», refused with the hub's text.
-  const s = app.sessions.get(sid)!;
-  app.mergeSummary([
-    {
-      session_id: sid,
-      project_id: s.project_id,
-      title: s.title,
-      state: s.state,
-      queue_len: s.queue_len,
-      unread: s.unread,
-      last_seq: s.last_seq,
-      last_read_seq: s.last_read_seq,
-    },
-  ]);
+  // The client has not heard of the holder yet (its summaries do not mention it): «Подхватить»
+  // is offered and the hub refuses it with its text.
+  mock.hideHolder(sid, true);
   await until('plain banner', () => $('.locked-banner') && !$('.locked-open'));
   button('Подхватить')!.click();
   const notice = await until('notice', () => $('.notice'));
   expect(notice.textContent).toBe('сессия открыта в VS Code: закройте её там и подхватите снова');
+  mock.hideHolder(sid, false);
   await until('open banner again', () => $('.locked-banner.locked-open'));
 
   mock.closeVsCode(sid);

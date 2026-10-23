@@ -611,6 +611,40 @@ async fn enroll_refuses_plain_http_and_redirects() {
     assert!(store.load().unwrap().is_none());
 }
 
+// T19: confirmed as the same machine as an existing worker, enroll says which one it
+// replaced; the worker id is the old one's.
+#[tokio::test]
+async fn enroll_reports_the_replaced_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = hqc_worker::token::TokenStore::File(dir.path().join("token"));
+    let old = Uuid::now_v7();
+    let hub = http_server(move |path, _| match path {
+        "/worker/enroll" => (
+            200,
+            json!({"code": "ABCD-1234", "poll_token": "pt-1", "poll_interval_s": 0,
+                   "expires_at": chrono::Utc::now() + chrono::Duration::minutes(10)}),
+        ),
+        "/worker/enroll/poll" => (
+            200,
+            json!({"status": "confirmed", "token": TOKEN, "worker_id": old,
+                   "replaced": "home-mac-old"}),
+        ),
+        _ => (404, json!({})),
+    })
+    .await;
+    let mut out = Vec::new();
+    let id = hqc_worker::enroll::enroll(&format!("http://{hub}"), "w", false, &store, &mut out)
+        .await
+        .unwrap();
+    assert_eq!(id, old);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains(&format!("Enrolled as worker {old} (replaced home-mac-old)")),
+        "{out}"
+    );
+    assert!(!out.contains(TOKEN));
+}
+
 // T9: at most `max_sessions` agents run; one more start is retryable `agent_start_failed`.
 #[tokio::test]
 async fn max_sessions_limits_running_agents() {

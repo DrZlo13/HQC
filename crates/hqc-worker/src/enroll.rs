@@ -5,7 +5,9 @@
 //! 2. the code and the link `{hub}/#/enroll?code=XXXX-XXXX` are printed; the user confirms
 //!    in the web app (`POST /api/workers/enroll/confirm {code}`);
 //! 3. `POST {hub}/worker/enroll/poll` `{poll_token}` until `{status: confirmed, worker_id,
-//!    token}`; `pending` means wait, `expired` (or HTTP 404/410) ends enrollment.
+//!    token, replaced?}`; `pending` means wait, `expired` (or HTTP 404/410) ends enrollment.
+//!    `replaced` — the user confirmed this as the same machine as an existing worker, whose
+//!    id this one now has.
 //!
 //! `poll_token` is a secret between this process and the hub, sent in the body rather than
 //! the URL so that it does not end up in access logs. The token is never printed or logged.
@@ -85,12 +87,23 @@ pub async fn enroll(
             Ok(r) if r.status().is_success() => {
                 match r.json().await.context("enrollment poll response")? {
                     EnrollPoll::Pending => {}
-                    EnrollPoll::Confirmed { worker_id, token } => {
+                    EnrollPoll::Confirmed {
+                        worker_id,
+                        token,
+                        replaced,
+                    } => {
                         if token.is_empty() {
                             bail!("hub confirmed enrollment without a token");
                         }
                         store.save(&Secret::new(token))?;
-                        writeln!(out, "Enrolled as worker {worker_id}.")?;
+                        match replaced {
+                            // The user chose "the same machine": its sessions and workspaces
+                            // stay with this worker id (SPEC §5.1).
+                            Some(old) => {
+                                writeln!(out, "Enrolled as worker {worker_id} (replaced {old}).")?
+                            }
+                            None => writeln!(out, "Enrolled as worker {worker_id}.")?,
+                        }
                         return Ok(worker_id);
                     }
                     EnrollPoll::Expired => bail!("enrollment code expired"),

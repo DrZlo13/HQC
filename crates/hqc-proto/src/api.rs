@@ -331,6 +331,10 @@ pub struct EnrollConfirmRequest {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// "The same machine": the user's offline or revoked worker that the enrolling one
+    /// replaces, keeping its id, sessions and workspaces (SPEC §5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_worker_id: Option<Uuid>,
 }
 
 /// `GET /api/workers/enroll/{code}`: what the worker that printed an unconfirmed code said
@@ -343,6 +347,23 @@ pub struct EnrollInfo {
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
+    /// The user's workers the enrolling one may replace: offline or revoked (SPEC §5.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaceable: Vec<ReplaceableWorker>,
+}
+
+/// A worker of [`EnrollInfo::replaceable`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplaceableWorker {
+    pub id: Uuid,
+    pub name: String,
+    pub os: String,
+    /// `offline` | `revoked`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Sessions on the worker that are neither archived nor its service session.
+    pub sessions_count: i64,
 }
 
 /// Reply to `POST /api/workers/enroll/confirm`.
@@ -350,6 +371,9 @@ pub struct EnrollInfo {
 pub struct EnrollConfirmed {
     pub worker_id: Uuid,
     pub name: String,
+    /// The name the replaced worker had (with `replace_worker_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<String>,
 }
 
 /// `POST /worker/enroll` (SPEC §5.1).
@@ -385,7 +409,13 @@ pub struct EnrollPollRequest {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum EnrollPoll {
     Pending,
-    Confirmed { worker_id: Uuid, token: String },
+    Confirmed {
+        worker_id: Uuid,
+        token: String,
+        /// The name of the worker this enrollment replaced (SPEC §5.1); its id is `worker_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced: Option<String>,
+    },
     Expired,
 }
 
@@ -411,7 +441,29 @@ mod tests {
             "../examples/wire/api.enroll.poll.request.json"
         ));
         let p: EnrollPoll = roundtrip(include_str!("../examples/wire/api.enroll.poll.json"));
-        assert!(matches!(p, EnrollPoll::Confirmed { .. }));
+        assert!(matches!(p, EnrollPoll::Confirmed { replaced: None, .. }));
+        let p: EnrollPoll = roundtrip(include_str!(
+            "../examples/wire/api.enroll.poll.replace.json"
+        ));
+        assert!(matches!(
+            p,
+            EnrollPoll::Confirmed {
+                replaced: Some(_),
+                ..
+            }
+        ));
+        let r: EnrollConfirmRequest = roundtrip(include_str!(
+            "../examples/wire/api.enroll.confirm.replace.request.json"
+        ));
+        assert!(r.replace_worker_id.is_some());
+        let r: EnrollInfo = roundtrip(include_str!(
+            "../examples/wire/api.enroll.info.replace.json"
+        ));
+        assert_eq!(r.replaceable.len(), 2);
+        let r: EnrollConfirmed = roundtrip(include_str!(
+            "../examples/wire/api.enroll.confirm.replace.json"
+        ));
+        assert!(r.replaced.is_some());
         assert_eq!(
             serde_json::from_str::<EnrollPoll>(r#"{"status":"pending"}"#).unwrap(),
             EnrollPoll::Pending

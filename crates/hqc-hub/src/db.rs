@@ -383,6 +383,95 @@ pub async fn revoke_worker(db: &PgPool, id: Uuid, owner: Uuid) -> sqlx::Result<b
     Ok(r.rows_affected() > 0)
 }
 
+/// The owner's workers, revoked ones too, oldest first.
+pub async fn all_workers_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<WorkerRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKER_COLS} FROM workers WHERE owner_id = $1 ORDER BY created_at"
+    ))
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
+const LIVE_SESSIONS_OF_WORKER: &str = "SELECT count(*) FROM sessions
+    WHERE NOT system AND NOT archived AND (worker_id = $1
+        OR workspace_id IN (SELECT id FROM workspaces WHERE worker_id = $1))";
+
+/// Sessions on the worker that still work there: neither archived nor its service
+/// session. They keep a worker from being deleted (SPEC §6).
+pub async fn live_sessions_of_worker(db: &PgPool, worker_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar(LIVE_SESSIONS_OF_WORKER)
+        .bind(worker_id)
+        .fetch_one(db)
+        .await
+}
+
+pub enum WorkerPurge {
+    Deleted,
+    /// Sessions that are not archived still run there.
+    HasSessions(i64),
+}
+
+/// Deletes a revoked worker with its service session and workspace records (SPEC §6,
+/// §17.4). Refused while a session that is not archived works on it; archived ones lose
+/// their worker and workspace and stay as history. A deleted default workspace is replaced
+/// by the project's oldest remaining one.
+pub async fn purge_worker(db: &PgPool, id: Uuid) -> sqlx::Result<WorkerPurge> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT id FROM workers WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let live: i64 = sqlx::query_scalar(LIVE_SESSIONS_OF_WORKER)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if live > 0 {
+        return Ok(WorkerPurge::HasSessions(live));
+    }
+    let projects: Vec<Uuid> =
+        sqlx::query_scalar("SELECT DISTINCT project_id FROM workspaces WHERE worker_id = $1")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+    sqlx::query("DELETE FROM sessions WHERE worker_id = $1 AND system")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM workspaces WHERE worker_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM workers WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE projects p SET default_workspace_id = (
+            SELECT id FROM workspaces WHERE project_id = p.id ORDER BY created_at, id LIMIT 1),
+            updated_at = now()
+         WHERE p.id = ANY($1) AND p.default_workspace_id IS NULL",
+    )
+    .bind(&projects)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(WorkerPurge::Deleted)
+}
+
+/// Archives the service session of a revoked worker (SPEC §10.2), so the «Воркеры» group
+/// leaves it out; its history stays.
+pub async fn archive_system_session(db: &PgPool, session_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET archived = true, turn_open = false, updated_at = now()
+         WHERE id = $1 AND system",
+    )
+    .bind(session_id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------- enrollment
 
 #[derive(Debug, Clone, FromRow)]
@@ -456,17 +545,39 @@ pub async fn enroll_info(
             os,
             created_at,
             country,
+            replaceable: vec![],
         },
     ))
 }
 
-/// Confirm a code: creates the worker row (without a token yet) owned by `user`.
+pub enum EnrollConfirm {
+    /// No live unconfirmed code.
+    NoCode,
+    /// `replace_worker_id` is not a worker of the user.
+    UnknownWorker,
+    /// Another confirmed code is already replacing that worker.
+    ReplaceBusy,
+    Confirmed {
+        worker_id: Uuid,
+        name: String,
+        /// With a replacement: the old name and the service session (SPEC §5.1).
+        replaced: Option<(String, Option<Uuid>)>,
+    },
+}
+
+/// Confirm a code. Without `replace`: creates the worker row (without a token yet) owned by
+/// `user`, with its service session. With `replace` (the user's worker, checked offline by
+/// the caller): the code gets that worker's id; its token stops working now, the name and
+/// OS become the enrolling worker's, a revocation is lifted and the service session is
+/// unarchived and renamed; sessions and workspaces stay (SPEC §5.1). The new token goes to
+/// the row on poll.
 pub async fn enroll_confirm(
     db: &PgPool,
     code: &str,
     user: Uuid,
     name: Option<&str>,
-) -> sqlx::Result<Option<(Uuid, String)>> {
+    replace: Option<Uuid>,
+) -> sqlx::Result<EnrollConfirm> {
     let mut tx = db.begin().await?;
     let Some(e) = sqlx::query_as::<_, EnrollRow>(
         "SELECT id, code, name, os, expires_at, confirmed_by, worker_id FROM enroll_codes
@@ -476,28 +587,94 @@ pub async fn enroll_confirm(
     .fetch_optional(&mut *tx)
     .await?
     else {
-        return Ok(None);
+        return Ok(EnrollConfirm::NoCode);
     };
     let name = name.map(str::to_string).unwrap_or(e.name);
-    let wid = new_id();
-    sqlx::query("INSERT INTO workers (id, owner_id, name, os) VALUES ($1, $2, $3, $4)")
-        .bind(wid)
-        .bind(user)
-        .bind(&name)
-        .bind(&e.os)
-        .execute(&mut *tx)
-        .await?;
-    create_system_session(&mut tx, wid).await?;
+    let (wid, replaced) = match replace {
+        None => {
+            let wid = new_id();
+            sqlx::query("INSERT INTO workers (id, owner_id, name, os) VALUES ($1, $2, $3, $4)")
+                .bind(wid)
+                .bind(user)
+                .bind(&name)
+                .bind(&e.os)
+                .execute(&mut *tx)
+                .await?;
+            create_system_session(&mut tx, wid).await?;
+            (wid, None)
+        }
+        Some(wid) => {
+            let Some(old_name) = sqlx::query_scalar::<_, String>(
+                "SELECT name FROM workers WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+            )
+            .bind(wid)
+            .bind(user)
+            .fetch_optional(&mut *tx)
+            .await?
+            else {
+                return Ok(EnrollConfirm::UnknownWorker);
+            };
+            let busy: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM enroll_codes
+                    WHERE worker_id = $1 AND confirmed_by IS NOT NULL AND expires_at > now())",
+            )
+            .bind(wid)
+            .fetch_one(&mut *tx)
+            .await?;
+            if busy {
+                return Ok(EnrollConfirm::ReplaceBusy);
+            }
+            // `boot_id` NULL: the new process's first `hello` counts as a restart (SPEC §5.2).
+            sqlx::query(
+                "UPDATE workers SET token_hash = NULL, name = $2, os = $3, revoked_at = NULL,
+                    boot_id = NULL, updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(wid)
+            .bind(&name)
+            .bind(&e.os)
+            .execute(&mut *tx)
+            .await?;
+            let system = create_system_session(&mut tx, wid).await?;
+            sqlx::query(
+                "UPDATE sessions SET archived = false, title = $2, updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(system)
+            .bind(&name)
+            .execute(&mut *tx)
+            .await?;
+            (wid, Some((old_name, system)))
+        }
+    };
     sqlx::query(
-        "UPDATE enroll_codes SET confirmed_by = $2, confirmed_at = now(), worker_id = $3 WHERE id = $1",
+        "UPDATE enroll_codes SET confirmed_by = $2, confirmed_at = now(), worker_id = $3,
+            replaced_name = $4
+         WHERE id = $1",
     )
     .bind(e.id)
     .bind(user)
     .bind(wid)
+    .bind(replaced.as_ref().map(|(n, _)| n))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Some((wid, name)))
+    Ok(EnrollConfirm::Confirmed {
+        worker_id: wid,
+        name,
+        replaced,
+    })
+}
+
+/// The user's workers an enrolling one may replace, with their live session counts (SPEC
+/// §5.1); the caller drops the online ones.
+pub async fn replace_candidates(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<(WorkerRow, i64)>> {
+    let mut out = vec![];
+    for w in all_workers_of(db, owner).await? {
+        let n = live_sessions_of_worker(db, w.id).await?;
+        out.push((w, n));
+    }
+    Ok(out)
 }
 
 pub enum EnrollPoll {
@@ -505,6 +682,8 @@ pub enum EnrollPoll {
     /// Token issued; the enrollment row is gone.
     Confirmed {
         worker_id: Uuid,
+        /// The replaced worker's former name (SPEC §5.1).
+        replaced: Option<String>,
     },
     Gone,
 }
@@ -538,6 +717,11 @@ pub async fn enroll_poll(
         }
         return Ok(EnrollPoll::Pending);
     };
+    let replaced: Option<String> =
+        sqlx::query_scalar("SELECT replaced_name FROM enroll_codes WHERE id = $1")
+            .bind(e.id)
+            .fetch_one(&mut *tx)
+            .await?;
     sqlx::query("UPDATE workers SET token_hash = $2, updated_at = now() WHERE id = $1")
         .bind(worker_id)
         .bind(token_hash)
@@ -548,7 +732,10 @@ pub async fn enroll_poll(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(EnrollPoll::Confirmed { worker_id })
+    Ok(EnrollPoll::Confirmed {
+        worker_id,
+        replaced,
+    })
 }
 
 // ---------------------------------------------------------------- workspaces

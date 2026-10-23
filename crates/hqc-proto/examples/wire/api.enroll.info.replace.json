@@ -1,0 +1,23 @@
+{
+  "name": "home-mac",
+  "os": "macos",
+  "created_at": "2026-10-22T10:00:00Z",
+  "country": "DE",
+  "replaceable": [
+    {
+      "id": "0199f3a2-7c10-7000-8000-0000000000b1",
+      "name": "home-mac-old",
+      "os": "macos",
+      "status": "offline",
+      "last_seen": "2026-10-21T18:30:00Z",
+      "sessions_count": 7
+    },
+    {
+      "id": "0199f3a2-7c10-7000-8000-0000000000b2",
+      "name": "llm-server",
+      "os": "linux",
+      "status": "revoked",
+      "sessions_count": 0
+    }
+  ]
+}

@@ -946,16 +946,32 @@ pub async fn read_cursor(
 
 // ---------------------------------------------------------------- workers
 
-pub async fn workers(State(app): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
-    let ws: Vec<Value> = db::workers_of(&app.db, user.id)
-        .await?
+#[derive(Debug, Deserialize)]
+pub struct WorkersQuery {
+    /// `1`: revoked workers too, with `status: revoked` (the settings screen, SPEC §6).
+    #[serde(default)]
+    pub include_revoked: Option<String>,
+}
+
+pub async fn workers(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Query(q): Query<WorkersQuery>,
+) -> ApiResult<Json<Value>> {
+    let rows = if q.include_revoked.as_deref() == Some("1") {
+        db::all_workers_of(&app.db, user.id).await?
+    } else {
+        db::workers_of(&app.db, user.id).await?
+    };
+    let ws: Vec<Value> = rows
         .into_iter()
         .map(|w| {
             json!({
                 "id": w.id,
                 "name": w.name,
                 "os": w.os,
-                "status": if app.workers.is_online(w.id) { "online" } else { "offline" },
+                "status": worker_status(&app, &w),
+                "revoked_at": w.revoked_at,
                 "last_seen": w.last_seen,
                 "protocol_version": w.protocol_version,
                 "capabilities": w.capabilities,
@@ -971,6 +987,17 @@ pub async fn workers(State(app): State<AppState>, user: CurrentUser) -> ApiResul
         })
         .collect();
     Ok(Json(json!({ "workers": ws })))
+}
+
+/// `online` | `offline` | `revoked`.
+fn worker_status(app: &AppState, w: &db::WorkerRow) -> &'static str {
+    if w.revoked_at.is_some() {
+        "revoked"
+    } else if app.workers.is_online(w.id) {
+        "online"
+    } else {
+        "offline"
+    }
 }
 
 /// Lookups of enrollment codes per user and minute (info and confirm together): codes are
@@ -997,12 +1024,28 @@ pub async fn enroll_info(
     Path(code): Path<String>,
 ) -> ApiResult<Json<EnrollInfo>> {
     limit_enroll_lookups(&app, &user)?;
-    let info = db::enroll_info(&app.db, &normalize_enroll_code(&code))
+    let mut info = db::enroll_info(&app.db, &normalize_enroll_code(&code))
         .await?
         .ok_or(ApiError::NotFound)?;
+    info.replaceable = db::replace_candidates(&app.db, user.id)
+        .await?
+        .into_iter()
+        .filter(|(w, _)| worker_status(&app, w) != "online")
+        .map(|(w, sessions_count)| api::ReplaceableWorker {
+            status: worker_status(&app, &w).into(),
+            id: w.id,
+            name: w.name,
+            os: w.os,
+            last_seen: w.last_seen,
+            sessions_count,
+        })
+        .collect();
     Ok(Json(info))
 }
 
+/// `POST /api/workers/enroll/confirm`. With `replace_worker_id` the enrolling worker takes
+/// over the user's offline or revoked worker: same id, sessions and workspaces; its old
+/// token stops working (SPEC §5.1).
 pub async fn enroll_confirm(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1011,27 +1054,165 @@ pub async fn enroll_confirm(
     limit_enroll_lookups(&app, &user)?;
     let code = normalize_enroll_code(&b.code);
     let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
-    let (worker_id, name) = db::enroll_confirm(&app.db, &code, user.id, name)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    tracing::info!(%worker_id, user = %user.id, "worker enrollment confirmed");
-    Ok(Json(EnrollConfirmed { worker_id, name }))
+    // A revoked worker's connection is already being closed.
+    let target = match b.replace_worker_id {
+        Some(id) => db::worker(&app.db, id).await?,
+        None => None,
+    };
+    if target.is_some_and(|w| worker_status(&app, &w) == "online") {
+        return Err(ApiError::Conflict(
+            "worker_online",
+            "the worker is online: only an offline or revoked worker can be replaced".into(),
+        ));
+    }
+    let (worker_id, name, replaced) =
+        match db::enroll_confirm(&app.db, &code, user.id, name, b.replace_worker_id).await? {
+            db::EnrollConfirm::NoCode => return Err(ApiError::NotFound),
+            db::EnrollConfirm::UnknownWorker => {
+                return Err(ApiError::BadRequest("unknown worker".into()))
+            }
+            db::EnrollConfirm::ReplaceBusy => {
+                return Err(ApiError::Conflict(
+                    "conflict",
+                    "another confirmed enrollment is already replacing this worker".into(),
+                ))
+            }
+            db::EnrollConfirm::Confirmed {
+                worker_id,
+                name,
+                replaced,
+            } => (worker_id, name, replaced),
+        };
+    let Some((old_name, system)) = replaced else {
+        tracing::info!(%worker_id, user = %user.id, "worker enrollment confirmed");
+        return Ok(Json(EnrollConfirmed {
+            worker_id,
+            name,
+            replaced: None,
+        }));
+    };
+    // A connection that got in before the token was cleared belongs to the old process.
+    if let Some(c) = app.workers.get(worker_id) {
+        c.close();
+    }
+    let system = match system {
+        Some(id) => db::session(&app.db, id).await?,
+        None => None,
+    };
+    if let Some(s) = system {
+        events::store_hub_event(
+            &app,
+            &s,
+            json!({"kind": "system"}),
+            "system",
+            json!({
+                "text": format!("Воркер перерегистрирован: «{old_name}» → «{name}»"),
+                "code": "worker_replaced",
+                "old_name": old_name,
+                "new_name": name,
+            }),
+            None,
+            None,
+        )
+        .await?;
+        app.session_changed(s.id);
+    }
+    tracing::info!(%worker_id, user = %user.id, %old_name, "worker enrollment confirmed as a replacement");
+    Ok(Json(EnrollConfirmed {
+        worker_id,
+        name,
+        replaced: Some(old_name),
+    }))
 }
 
-/// Revoke the worker's token and drop its connection (SPEC §5.1).
+#[derive(Debug, Deserialize)]
+pub struct DeleteWorkerQuery {
+    /// `1`: delete a revoked worker instead of revoking.
+    #[serde(default)]
+    pub purge: Option<String>,
+}
+
+/// `DELETE /api/workers/{id}`: revoke the worker's token, drop its connection and archive
+/// its service session (SPEC §5.1, §10.2). `?purge=1`: delete a revoked worker (SPEC §6).
 pub async fn delete_worker(
     State(app): State<AppState>,
     user: CurrentUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<StatusCode> {
+    Query(q): Query<DeleteWorkerQuery>,
+) -> ApiResult<axum::response::Response> {
+    if q.purge.as_deref() == Some("1") {
+        return purge_worker(&app, &user, id).await;
+    }
     if !db::revoke_worker(&app.db, id, user.id).await? {
         return Err(ApiError::NotFound);
     }
     if let Some(c) = app.workers.get(id) {
         c.close();
     }
+    let system = match db::worker(&app.db, id)
+        .await?
+        .and_then(|w| w.system_session_id)
+    {
+        Some(sid) => db::session(&app.db, sid).await?,
+        None => None,
+    };
+    if let Some(s) = system {
+        events::system(
+            &app,
+            &s,
+            "worker_revoked",
+            &format!("Токен воркера «{}» отозван", s.title),
+        )
+        .await?;
+        db::archive_system_session(&app.db, s.id).await?;
+        // The process that asked is cut off: nobody is left to deliver an answer to.
+        for p in db::open_requests_of_session(&app.db, s.id).await? {
+            requests::cancel_without_frame(&app, &p, CancelReason::Archived).await?;
+        }
+        app.session_changed(s.id);
+    }
     tracing::info!(worker_id = %id, "worker revoked");
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Delete a revoked worker with its service session and workspace records; `409
+/// worker_has_sessions` with their number while sessions that are not archived work there.
+async fn purge_worker(
+    app: &AppState,
+    user: &CurrentUser,
+    id: Uuid,
+) -> ApiResult<axum::response::Response> {
+    let w = match db::worker(&app.db, id).await? {
+        Some(w) if w.owner_id == user.id => w,
+        _ => return Err(ApiError::NotFound),
+    };
+    if w.revoked_at.is_none() {
+        return Err(ApiError::Conflict(
+            "worker_not_revoked",
+            "revoke the worker before deleting it".into(),
+        ));
+    }
+    match db::purge_worker(&app.db, id).await? {
+        db::WorkerPurge::HasSessions(n) => Ok((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "worker_has_sessions",
+                "message": format!(
+                    "{n} session(s) still work on this worker: move them by enrolling the machine \
+                     again as its replacement, or archive them"
+                ),
+                "sessions_count": n,
+            })),
+        )
+            .into_response()),
+        db::WorkerPurge::Deleted => {
+            if let Some(sid) = w.system_session_id {
+                app.session_changed(sid);
+            }
+            tracing::info!(worker_id = %id, "revoked worker deleted");
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+    }
 }
 
 /// `POST /worker/enroll` (no auth): a code for the user to confirm and a secret to poll
@@ -1108,9 +1289,16 @@ pub async fn worker_enroll_poll(
     let token = new_secret("hqcw_");
     match db::enroll_poll(&app.db, &hash_secret(&b.poll_token), &hash_secret(&token)).await? {
         EnrollPoll::Pending => Ok(Json(api::EnrollPoll::Pending)),
-        EnrollPoll::Confirmed { worker_id } => {
-            tracing::info!(%worker_id, "worker token issued");
-            Ok(Json(api::EnrollPoll::Confirmed { worker_id, token }))
+        EnrollPoll::Confirmed {
+            worker_id,
+            replaced,
+        } => {
+            tracing::info!(%worker_id, replaced = replaced.is_some(), "worker token issued");
+            Ok(Json(api::EnrollPoll::Confirmed {
+                worker_id,
+                token,
+                replaced,
+            }))
         }
         EnrollPoll::Gone => Ok(Json(api::EnrollPoll::Expired)),
     }

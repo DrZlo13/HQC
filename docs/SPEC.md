@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.20, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.21, 2026-10-23. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -109,7 +109,12 @@ version, load_session, resume, image, isolation}]` — результат `initi
 подтверждении регистрации (`POST /api/workers/enroll/confirm`), воркерам до 0.17 — миграцией
 хаба `0006`, а если её всё же нет — на `hello`. Хаб сообщает её воркеру в `hello.ack`
 (`system_session_id`); `GET /api/workers` отдаёт её в объекте воркера. Отзыв воркера сессию
-не удаляет: история остаётся.
+не удаляет, а архивирует (история остаётся, §10.2); регистрация с заменой (§5.1)
+разархивирует её, удаление отозванного воркера (§6) удаляет её вместе с воркером.
+
+Регистрация с заменой (§5.1) оставляет воркеру его `id`: `name`, `os` и `token_hash` берутся
+у новой регистрации, `revoked_at` и `boot_id` сбрасываются; сессии, workspace и служебная
+сессия остаются на этом `id`.
 
 Поля `allowed_roots`, `environments`, `env_bindings`, `allow_foreign_sessions`,
 `share_local_models`, `acp_agents` — **источник истины в локальном конфиге воркера**;
@@ -261,6 +266,8 @@ name)`: тот же файл тем же пользователем под те�
 | `session_released` | хаб | сессию продолжили вне hqc (VS Code, `claude` в терминале): воркер остановил агента после хода, `pending` вводы стали `failed` (§9.3) |
 | `worker_log` | воркер | строка лога воркера уровня warn/error в его служебной сессии, уровень — поле `level` (§10.2); не считается непрочитанной (§6), push нет (§16) |
 | `workspace_unknown` | хаб (миграция 0.16) | сессия итерации 1 без workspace, чей воркер не сообщал папку: архивирована при обновлении хаба |
+| `worker_replaced` | хаб | в служебной сессии: воркер перерегистрирован с заменой (§5.1); дополнительные поля `old_name`, `new_name` |
+| `worker_revoked` | хаб | в служебной сессии: токен воркера отозван, сессия архивирована (§5.1, §10.2) |
 
 Правила:
 
@@ -327,17 +334,44 @@ system_session_id?}` (служебная сессия воркера, §10.2)
   `poll_token` — секрет воркера, передаётся только в теле (не в URL), в базе только хэш.
   Хаб сохраняет при коде `CF-IPCountry` и адрес запроса (лимиты, §20).
 - Пользователь вводит код в вебе. Сначала `GET /api/workers/enroll/{code}` →
-  `{name, os, created_at, country?}` (404 — нет такого живого кода): клиент показывает имя,
-  ОС, время и страну, и кнопка подтверждения активна только после их загрузки — ссылку с
-  кодом мог прислать кто-то другой. Затем `POST /api/workers/enroll/confirm {code, name?}`
-  → `{worker_id, name}`; регистр и дефис в коде не важны. Поиск кода (оба запроса) — не
-  больше 30 в минуту на пользователя.
+  `{name, os, created_at, country?, replaceable?}` (404 — нет такого живого кода): клиент
+  показывает имя, ОС, время и страну, и кнопка подтверждения активна только после их
+  загрузки — ссылку с кодом мог прислать кто-то другой. Затем `POST
+  /api/workers/enroll/confirm {code, name?, replace_worker_id?}` → `{worker_id, name,
+  replaced?}`; регистр и дефис в коде не важны. Поиск кода (оба запроса) — не больше 30
+  в минуту на пользователя.
 - Воркер опрашивает `POST /worker/enroll/poll {poll_token}` → `{status: pending}`,
-  `{status: confirmed, worker_id, token}` (токен выдаётся ровно один раз, в базе только
-  хэш) или `{status: expired}`.
+  `{status: confirmed, worker_id, token, replaced?}` (токен выдаётся ровно один раз, в базе
+  только хэш) или `{status: expired}`.
 - `/worker/ws` — заголовок `Authorization: Bearer <token>`; неизвестный или отозванный
   токен — 401 до апгрейда, отзыв между апгрейдом и `hello` — `error {unauthorized}` на
-  `hello` и закрытие. `DELETE /api/workers/{id}` отзывает токен и рвёт соединение.
+  `hello` и закрытие. `DELETE /api/workers/{id}` отзывает токен, рвёт соединение и
+  архивирует служебную сессию воркера с `system worker_revoked` (§10.2).
+
+**Регистрация с заменой** (с 0.21). Повторный `enroll` той же машины (новый бинарник, другое
+хранилище токена, отозванный токен) иначе дал бы новый `worker_id`, а сессии, workspace и
+служебная сессия остались бы на старом, навсегда офлайн. Поэтому `replaceable[]` в ответе
+`GET /api/workers/enroll/{code}` — воркеры пользователя, которые сейчас не на связи или
+отозваны: `{id, name, os, status: offline|revoked, last_seen?, sessions_count}`
+(`sessions_count` — неархивные сессии на воркере, без служебной); пусто — поля нет. Клиент
+предлагает «это та же машина, заменить <имя>» (по умолчанию — новый воркер). С
+`replace_worker_id` хаб при подтверждении:
+- проверяет, что воркер принадлежит пользователю (иначе `400`), и что он не на связи (`409
+  worker_online`; отозванный воркер на связи не считается); пока другой подтверждённый, но
+  не забранный опросом код уже заменяет этот воркер, — `409 conflict`. Отказ код не тратит;
+- новой записи не создаёт: код получает этот `worker_id`; старый токен перестаёт работать
+  сразу (`token_hash` сбрасывается, оставшееся соединение рвётся), `name` (из `name?` или
+  присланного воркером) и `os` — новой регистрации, `revoked_at` снимается, `boot_id`
+  сбрасывается (первый `hello` нового процесса — перезапуск, §5.2);
+- служебная сессия остаётся (разархивируется и получает новое имя заголовком), в неё пишется
+  `system {code: worker_replaced, old_name, new_name}`; сессии и workspace не меняются;
+- в ответе `replaced` — прежнее имя воркера. Новый токен записывается на этот `worker_id`
+  при опросе; ответ опроса несёт тот же `replaced`, `hqc-worker enroll` печатает «Enrolled as
+  worker <id> (replaced <имя>)».
+
+Подтверждение замены — то же решение владельца, что и обычная регистрация: воркер,
+которого заменили по чужой ссылке, получил бы сессии заменённого. Поэтому клиент
+показывает замену явным выбором с именем и числом сессий, а не галочкой по умолчанию.
 
 ### 5.2 Гарантии доставки
 Worker → hub:
@@ -601,11 +635,23 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
   unknown_artifact`, больше 32 — `400`. Отдача по ссылке — `GET /artifacts/{id}?exp=&sig=`
   (вне `/api`, §12), воркеру — `GET /worker/artifacts/{id}` (§5.3)
 - `PUT /api/sessions/{id}/read_cursor` {last_read_seq}
-- `GET /api/workers` → `{workers[]}`, `GET /api/workers/enroll/{code}` →
-  `{name, os, created_at, country?}` (`EnrollInfo`; `country` — `CF-IPCountry` запроса
-  `enroll`), `POST /api/workers/enroll/confirm` {code, name?} →
-  `{worker_id, name}` (клиент открывает экран и по ссылке `#/enroll?code=XXXX-XXXX`, §5.1),
-  `DELETE /api/workers/{id}`. Объект воркера несёт `system_session_id` (§3 Worker).
+- `GET /api/workers` → `{workers[]}` — неотозванные воркеры; `?include_revoked=1` — и
+  отозванные (экран «Настройки»). Объект воркера — `{id, name, os, status: online | offline |
+  revoked, revoked_at?, last_seen?, system_session_id, ...}` (§3 Worker).
+  `GET /api/workers/enroll/{code}` → `{name, os, created_at, country?, replaceable?}`
+  (`EnrollInfo`; `country` — `CF-IPCountry` запроса `enroll`; `replaceable` — §5.1), `POST
+  /api/workers/enroll/confirm` {code, name?, replace_worker_id?} → `{worker_id, name,
+  replaced?}` (клиент открывает экран и по ссылке `#/enroll?code=XXXX-XXXX`; замена,
+  `409 worker_online` — §5.1; примеры `api.enroll.*.replace*.json`).
+  `DELETE /api/workers/{id}` → `204`: отзыв (§5.1), служебная сессия архивируется (§10.2);
+  уже отозванный или чужой — `404`.
+  `DELETE /api/workers/{id}?purge=1` → `204`: удаление **отозванного** воркера — запись
+  воркера, его служебная сессия (с событиями, как §17.4) и его workspace-записи (папки не
+  трогаются, §13.2; default-workspace проекта заменяется самым ранним из оставшихся). Не
+  отозван — `409 worker_not_revoked`; пока на воркере есть неархивные сессии (кроме
+  служебной) — `409 worker_has_sessions` с телом `{error, message, sessions_count}`: клиент
+  предлагает перенести их регистрацией с заменой (§5.1) или архивировать. Архивные сессии
+  удаление переживают без `worker_id` и `workspace_id` (разархивация — `409 no_workspace`).
   `GET /api/workers/{id}/candidates` → `{candidates[{path, sessions_count, last_active}]}`
   (`api.candidates.json`) — кадр `workspace.list_candidates` воркеру (§5.3, §9.1); офлайн —
   `409 worker_offline`, нет ответа 10 с — `504 worker_timeout`, воркер без зеркала отказал —
@@ -674,7 +720,9 @@ no_workspace`. Так только что зарегистрированный (
 Code; тело `{error, message, hint: "takeover"}`, клиент предлагает «Подхватить», §9.3),
 `vscode_active` (подхват раньше 30 с тишины, §9.3), `system_session` (служебная сессия
 воркера, §10.2), `request_closed`, `no_workspace`, `worker_offline`, `workspace_conflict`,
-`workspace_in_use`, `personal_project`, `push_limit`, `conflict`; `400` — `bad_request`,
+`workspace_in_use`, `personal_project`, `push_limit`, `conflict`, `worker_online` (замена
+воркера на связи, §5.1), `worker_not_revoked` и `worker_has_sessions` (удаление воркера, у
+второго — `sessions_count`); `400` — `bad_request`,
 `unknown_artifact` (§12) и коды проверки пути (`outside_allowed_roots`, `path_not_found`,
 `not_a_directory`, `invalid_path`); `504
 worker_timeout` — воркер не ответил на запрос хаба; `403` — чужой `Origin` (§20); `429` и
@@ -1254,6 +1302,15 @@ once / session / always / deny, у ACP-агентов — то, что пред�
 «Стоп»/«Повторить», с фильтром «только запросы» (карточки `approval.request` и
 `clarify.request`).
 
+**Отзыв, замена, удаление** (с 0.21). Отзыв воркера (`DELETE /api/workers/{id}`, §5.1) пишет в
+его служебную сессию `system worker_revoked` и архивирует её сам хаб (запрет `/archive` —
+только для пользователя); её открытые запросы закрываются `approval.cancel {archived}` без
+кадра воркеру — спросивший процесс отрезан. Группа «Воркеры» показывает только
+неархивные служебные сессии, то есть неотозванных воркеров; служебные сессии отозванных до
+0.21 воркеров архивирует миграция хаба `0009`. Регистрация с заменой (§5.1) разархивирует
+служебную сессию, переименовывает её по новому имени и пишет `system worker_replaced`;
+удаление отозванного воркера (§6) удаляет её (§17.4).
+
 **Кадры** (§5.3, §5.4; добавлены в 0.17, версия протокола та же):
 - worker → hub `worker.approval.request {request_id, kind, description, expires_at}` → `ack
   {}`. `kind`: `workspace.use` (ниже), `workspace.create`, `workspace.delete` (итерация 5,
@@ -1641,6 +1698,10 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
   (если на них не ссылается другая сессия) удаляются; файлы jsonl на воркере
   **не трогаются**; поздние события из outbox воркера получают `ack` и отбрасываются
   (§5.2).
+- Удаление воркера (`DELETE /api/workers/{id}?purge=1`, §6; только отозванного и без
+  неархивных сессий): его служебная сессия удаляется как сессия выше, его workspace-записи —
+  как §13.2 (архивные сессии теряют `workspace_id` и `worker_id`, история остаётся), затем
+  запись воркера. Файлы на машине не трогаются.
 
 ## 18. Стек
 
@@ -1764,6 +1825,21 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.20 → 0.21 (T19, перерегистрация воркера и уборка отозванных)
+§5.1: регистрация с заменой — `replaceable[]` в `GET /api/workers/enroll/{code}`,
+`replace_worker_id` в `POST /api/workers/enroll/confirm`, `replaced` в ответах подтверждения
+и опроса; при замене `worker_id` прежний, старый токен перестаёт работать при
+подтверждении, `name`/`os` новой регистрации, `revoked_at` и `boot_id` сбрасываются,
+`409 worker_online`, `400` на чужой воркер, `409 conflict` на вторую замену того же воркера.
+§6: `GET /api/workers?include_revoked=1` и `status: revoked`, `revoked_at`; `DELETE
+/api/workers/{id}?purge=1` (`409 worker_not_revoked`, `409 worker_has_sessions` с
+`sessions_count`); коды ошибок. §3 Worker, §10.2: отзыв архивирует служебную сессию
+(`system worker_revoked`, запросы — `approval.cancel {archived}` без кадра), замена
+разархивирует (`system worker_replaced` с `old_name`/`new_name`), группа «Воркеры» — только
+неотозванные. §4: коды `worker_replaced`, `worker_revoked`. §17.4: удаление воркера. Миграция
+хаба `0009`: `enroll_codes.replaced_name`, архивация служебных сессий уже отозванных
+воркеров. Вопросы — `docs/notes/t19-questions.md`.
 
 ### 0.19 → 0.20 (Origin за прокси)
 §20: проверка `Origin` на `/api/*` учитывает `X-Forwarded-Host` и список

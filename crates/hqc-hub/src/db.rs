@@ -1244,7 +1244,10 @@ pub async fn set_process_state(
 ) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE sessions SET process_state = $2,
-            runtime_session_id = COALESCE($3, runtime_session_id), locked_by = $4, updated_at = now()
+            runtime_session_id = COALESCE($3, runtime_session_id), locked_by = $4,
+            vscode_active_at = CASE WHEN $4 = 'vscode' AND locked_by <> 'vscode'
+                THEN now() ELSE vscode_active_at END,
+            updated_at = now()
          WHERE id = $1",
     )
     .bind(id)
@@ -1350,12 +1353,19 @@ pub async fn imported_counts(
     .await
 }
 
+/// `SET` clause for a new `locked_by` in `$2`: a session that becomes VS Code's gets
+/// `vscode_active_at`, which takeover counts its 30 s from (SPEC §9.3).
+const STAMP_VSCODE: &str = "vscode_active_at = CASE WHEN $2 = 'vscode' AND locked_by <> 'vscode'
+    THEN now() ELSE vscode_active_at END";
+
 pub async fn set_locked_by(db: &PgPool, id: Uuid, locked_by: &str) -> sqlx::Result<()> {
-    sqlx::query("UPDATE sessions SET locked_by = $2, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(locked_by)
-        .execute(db)
-        .await?;
+    sqlx::query(&format!(
+        "UPDATE sessions SET locked_by = $2, {STAMP_VSCODE}, updated_at = now() WHERE id = $1"
+    ))
+    .bind(id)
+    .bind(locked_by)
+    .execute(db)
+    .await?;
     Ok(())
 }
 

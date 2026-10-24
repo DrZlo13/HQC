@@ -251,6 +251,13 @@ async fn ask_worker(
 ) -> ApiResult<ResultBody> {
     let offline = || ApiError::Conflict("worker_offline", "the worker is offline".into());
     let conn = app.workers.get(worker_id).ok_or_else(offline)?;
+    // A slow or hostile worker does not tie up the hub with waiting requests (SPEC §20).
+    let Ok(_slot) = conn.fs_slots.try_acquire() else {
+        return Err(ApiError::Limited(
+            "worker_busy",
+            "too many requests to this worker in flight, retry later".into(),
+        ));
+    };
     match conn.request(build, WORKER_REQUEST_TIMEOUT).await {
         Ok(body) => Ok(body),
         Err(RequestError::Offline) => Err(offline()),

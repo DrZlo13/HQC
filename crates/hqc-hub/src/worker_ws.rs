@@ -101,6 +101,8 @@ pub struct WorkerConn {
     /// Requests waiting for their `result` / `error` ([`WorkerConn::request`]), by frame id.
     /// Dropped with the connection, so a waiting request learns that the worker is gone.
     requests: std::sync::Mutex<HashMap<String, oneshot::Sender<Result<ResultBody, WireError>>>>,
+    /// `fs.*` requests of the API in flight (SPEC §20: `worker_fs_concurrency`).
+    pub fs_slots: tokio::sync::Semaphore,
 }
 
 /// Why [`WorkerConn::request`] has no result.
@@ -266,6 +268,7 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         next_id: AtomicU64::new(1),
         st: Default::default(),
         requests: Default::default(),
+        fs_slots: tokio::sync::Semaphore::new(app.config.limits.worker_fs_concurrency),
     });
     tracing::info!(%worker_id, "worker connected");
 

@@ -328,9 +328,13 @@ pub async fn takeover(app: &AppState, s: &SessionRow) -> ApiResult<()> {
         Some(w) => db::worker_has_registry(&app.db, w).await?,
         None => false,
     };
-    if let (Some(at), false) = (s.vscode_active_at, registry) {
-        let quiet = (Utc::now() - at).num_seconds();
-        if s.locked_by == "vscode" && quiet < MIRROR_RECENT_S as i64 {
+    // A VS Code lock without a time counts as written just now (T22): the lock is set with
+    // one, so a missing time is no proof of silence.
+    if s.locked_by == "vscode" && !registry {
+        let quiet = s
+            .vscode_active_at
+            .map_or(0, |at| (Utc::now() - at).num_seconds());
+        if quiet < MIRROR_RECENT_S as i64 {
             return Err(ApiError::Conflict(
                 "vscode_active",
                 format!(

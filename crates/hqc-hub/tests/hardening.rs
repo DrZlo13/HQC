@@ -385,3 +385,109 @@ async fn mirror_sessions_are_limited() {
     assert_eq!(project_sessions(&hub, &pid).await, 1);
     hub.finish().await;
 }
+
+/// Without registry data, `locked_by: vscode` without `vscode_active_at` counts as active:
+/// takeover is refused, and a session that becomes VS Code's gets the time.
+#[tokio::test]
+async fn takeover_without_vscode_time_is_refused() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, MIRROR_ROOT, hub.boot_id).await;
+    let pid = mirrored_project(&hub, &mut w).await;
+    let runtime = uuid::Uuid::new_v4().to_string();
+    mirror(&mut w, &runtime, MIRROR_WS).await;
+    let (_, v) = hub.get(&format!("/api/projects/{pid}/sessions")).await;
+    let sid = v["sessions"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(v["sessions"][0]["locked_by"], "none");
+    sqlx::query("UPDATE sessions SET locked_by = 'vscode', vscode_active_at = NULL WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&sid).unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{sid}/takeover"), json!({}))
+        .await;
+    assert_eq!((s, v["error"].as_str()), (409, Some("vscode_active")), "{v}");
+    w.expect_silence(Duration::from_millis(100)).await;
+
+    // The worker reports `vscode` for a session of hqc: the lock gets its time.
+    sqlx::query("UPDATE sessions SET locked_by = 'none', vscode_active_at = NULL WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&sid).unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let id = w
+        .send(
+            "session.state",
+            json!({"session_id": sid, "process_state": "stopped", "locked_by": "vscode"}),
+        )
+        .await;
+    let ack = w.expect("ack").await;
+    assert_eq!(ack["id"], id);
+    let at: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("SELECT vscode_active_at FROM sessions WHERE id = $1")
+            .bind(uuid::Uuid::parse_str(&sid).unwrap())
+            .fetch_one(&hub.app.db)
+            .await
+            .unwrap();
+    assert!(at.is_some());
+    hub.finish().await;
+}
+
+/// The turn watchdog reads only sessions with an open turn: a partial index exists.
+#[tokio::test]
+async fn turn_open_is_indexed() {
+    let hub = TestHub::start().await;
+    let def: Option<String> = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE tablename = 'sessions'
+           AND indexname = 'sessions_turn_open' AND schemaname = current_schema()",
+    )
+    .fetch_optional(&hub.app.db)
+    .await
+    .unwrap();
+    assert!(def.is_some_and(|d| d.contains("WHERE turn_open")));
+    hub.finish().await;
+}
+
+/// At most `worker_fs_concurrency` `fs.*` requests wait for one worker; more get
+/// `429 worker_busy` without reaching it.
+#[tokio::test]
+async fn fs_requests_per_worker_are_limited() {
+    let hub = std::sync::Arc::new(
+        TestHub::start_limited(Limits {
+            worker_fs_concurrency: 2,
+            ..Limits::default()
+        })
+        .await,
+    );
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, MIRROR_ROOT, hub.boot_id).await;
+    let url = format!("/api/workers/{}/dirs?path=/w", w.worker_id);
+    let waiting: Vec<_> = (0..2)
+        .map(|_| {
+            let hub = hub.clone();
+            let url = url.clone();
+            tokio::spawn(async move { hub.get(&url).await })
+        })
+        .collect();
+    let frames = [w.expect("fs.list_dirs").await, w.expect("fs.list_dirs").await];
+    let (s, v) = hub.get(&url).await;
+    assert_eq!((s, v["error"].as_str()), (429, Some("worker_busy")), "{v}");
+    w.expect_silence(Duration::from_millis(100)).await;
+    for f in &frames {
+        let (ty, payload) = w.fs_reply(f);
+        w.reply(&f["id"], ty, payload).await;
+    }
+    for t in waiting {
+        assert_eq!(t.await.unwrap().0, 200);
+    }
+    // Places are free again.
+    let (s, v) = hub
+        .while_worker_answers(&mut w, hub.get(&url))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    match std::sync::Arc::try_unwrap(hub) {
+        Ok(hub) => hub.finish().await,
+        Err(_) => panic!("hub still shared"),
+    }
+}

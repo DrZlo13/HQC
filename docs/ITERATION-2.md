@@ -253,3 +253,47 @@ tools/e2e-local.sh` → `PASS (rehearsal)`. Вопросы — `docs/notes/t19-q
 Живой `HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_holder` подтвердил держателя и `409
 vscode_open`, освобождение после выхода процесса упало и исправлено (порядок отчётов и
 `recent`), повторный живой прогон не делался. Вопросы — `docs/notes/t20-questions.md`.
+
+## T21. Пять решений пользователя: зеркало по умолчанию, заголовки, отпечаток машины, уборка (сделано, SPEC 0.23)
+
+Разделы: §3 (Worker, Workspace, Session, Artifact), §5.1, §6, §9.1, §9.2, §12, §17.4, §23. Решения
+пользователя, обсуждать не нужно; параллельно шла T22 (лимиты), поэтому hqc-proto — только
+добавлением, миграция `0011`, §5.3 и §5.4 не правились.
+- hqc-proto (только добавление): `MirrorSet.sessions[] {runtime_session_id, since_ts}`, кадр hub →
+  worker `session.cleanup {session_id, workspace_path | null, cwd, event_ids[]}`,
+  `Hello.machine_id?`, `EnrollRequest.machine_id?`, `ReplaceableWorker.same_machine`,
+  `PatchWorkspace.mirror_enabled?`; `CreateWorkspaceImport.mirror_enabled` по умолчанию `true`;
+  примеры `hub.mirror.set.sessions.json`, `hub.session.cleanup*.json`,
+  `worker.hello.machine.json`, `api.enroll.request.machine.json`,
+  `api.workspace.patch.mirror.request.json`, `same_machine` в `api.enroll.info.replace.json`.
+- Хаб: миграция `0011` (`mirror_enabled` по умолчанию и у существующих, `workers.machine_hash`,
+  `enroll_codes.machine_hash`); `PATCH /api/workspaces/{id} {mirror_enabled}` → `mirror.set`;
+  `mirror.set` с сессиями workspace и временем их последнего события (после `hello`, при создании
+  и включении); модуль `llm` (`complete(system, user, max_tokens)`, провайдеры `anthropic` и
+  `openai`), заголовки после первого финального ответа (`titles.rs`); `machine_hash` из `enroll` и
+  `hello`, порядок и `same_machine` в `replaceable`; уборка артефактов раз в сутки
+  (`HQC_ARTIFACT_RETENTION_DAYS`), файл переносится в сторону и возвращается, если запись
+  появилась; `session.cleanup` при архивации, удалении сессии и проекта.
+- Воркер: первый проход зеркала по транскрипту из `mirror.set.sessions` пропускает записи с
+  `timestamp` <= `since_ts`; `cleanup.rs` — `session.cleanup` (inbox-папки вводов или scratch) и
+  уборка inbox старше 14 дней при старте по `known_workspaces.json` и `inbox_dirs.json` (рабочие
+  каталоги, куда писались вложения), с проверкой путей против `allowed_roots` и workspace, без
+  перехода по символическим ссылкам; `machine.rs` — отпечаток машины для `enroll` и `hello`.
+- Клиент: переключатель «Сессии VS Code» у каждого workspace; предвыбор замены воркера той же
+  машины с пометкой «та же машина»; разбор кадра `session.cleanup`; мок хаба.
+- Документация: SPEC 0.23; RUNBOOK §1.2 (`HQC_TITLE_*`, `HQC_ARTIFACT_RETENTION_DAYS`), §4;
+  вопросы T15, T16, T19, T20 помечены «Решено в T21».
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (хаб: `tests/t21.rs` — зеркало по умолчанию и `PATCH` (в том числе
+офлайн), `mirror.set` с `since_ts` последнего события, миграция `0011`, `same_machine` и порядок,
+`machine_hash` из `hello`, заголовки через фейковые серверы формата Anthropic и OpenAI, fallback
+без модели, при `500` и таймауте, неперезапись заголовка пользователя и `ai-title`, заголовок
+импортированной сессии, уборка артефактов (общий sha256, `attachment`, свежие), `session.cleanup`
+при архивации и удалении; воркер: `mirror::tests::enabling_on_a_workspace_with_hqc_sessions_brings_no_duplicates`
+на фикстуре `adapter-then-outside`, `cleanup::tests` — только перечисленные папки, отказ вне
+`allowed_roots`, `..`, символические ссылки на `cwd`, `.hqc` и папку события, scratch, уборка при
+старте только старых uuid-папок в известных местах; `machine::tests`; `inbox_scenario` —
+`session.cleanup` через фейковый хаб; `enroll_reports_the_replaced_worker` — `machine_id`), `cd
+client && npm test && npm run build` (`enroll.test.tsx` — предвыбор, `projects.test.tsx` —
+переключатель), `E2E_CLAUDE_BIN=/usr/bin/false tools/e2e-local.sh` → `PASS (rehearsal)`. Живых
+прогонов `claude` не было. Вопросы — `docs/notes/t21-questions.md`.

@@ -77,6 +77,11 @@ pub enum Inbound {
         runtime_session_id: Uuid,
         held_by: Option<HeldBy>,
     },
+    /// The hub refused a record of transcript `runtime_session_id` with `mirror_quota`
+    /// (SPEC §9.1, §20): the mirror reads it again later.
+    MirrorQuota {
+        runtime_session_id: Uuid,
+    },
 }
 
 /// How many delivered input ids a session remembers to re-ack resent inputs.
@@ -268,6 +273,12 @@ impl Supervisor {
                 }
                 return;
             }
+            Inbound::MirrorQuota { runtime_session_id } => {
+                if let Some(m) = &self.mirror {
+                    let _ = m.cmds.send(MirrorCmd::Defer { runtime_session_id });
+                }
+                return;
+            }
             Inbound::Holder {
                 runtime_session_id,
                 held_by,
@@ -424,6 +435,20 @@ impl Supervisor {
                 self.mirror_set(&id, m);
                 return;
             }
+            HubFrame::SessionCleanup(c) => {
+                // Acked at once: the hub does not wait for it (T21).
+                self.link.reply(&id, ack(None));
+                let cfg = self.cfg.clone();
+                tokio::task::spawn_blocking(move || match crate::cleanup::session(&cfg, &c) {
+                    Ok(n) => {
+                        tracing::info!(session_id = %c.session_id, removed = n, "session cleaned up")
+                    }
+                    Err(e) => {
+                        tracing::warn!(session_id = %c.session_id, "session.cleanup refused: {e:#}")
+                    }
+                });
+                return;
+            }
             other => {
                 tracing::debug!(?other, "frame not for the supervisor");
                 return;
@@ -578,9 +603,15 @@ impl Supervisor {
             _ if !m.enabled => path.to_path_buf(),
             _ => return refuse("workspace_path is not a folder inside allowed_roots"),
         };
+        let since = m
+            .sessions
+            .iter()
+            .filter_map(|s| Some((s.runtime_session_id.parse().ok()?, s.since_ts)))
+            .collect();
         let _ = mirror.cmds.send(MirrorCmd::Set {
             path: canonical,
             enabled: m.enabled,
+            since,
         });
         self.link.reply(id, ack(None));
     }

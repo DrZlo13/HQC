@@ -240,8 +240,16 @@ it('imports from Claude Code and takes a session over', async () => {
   const ws = await until('workspace listed', () =>
     $$('.workspace-row').find((r) => r.textContent?.includes('/kicad/power-board')),
   );
-  expect(ws.querySelector('.tag-mirror')!.textContent).toBe('сессии VS Code');
+  const toggle = ws.querySelector<HTMLInputElement>('.mirror-toggle input')!;
+  expect(ws.querySelector('.mirror-toggle')!.textContent).toBe('Сессии VS Code');
+  expect(toggle.checked).toBe(true);
   expect(app.workspaces.get(pid)![0].mirror_enabled).toBe(true);
+  // T21: the switch goes to the hub (PATCH) and back.
+  toggle.click();
+  await until('mirror off', () => app.workspaces.get(pid)![0].mirror_enabled === false);
+  await until('unchecked', () => !$<HTMLInputElement>('.workspace-row .mirror-toggle input')!.checked);
+  $<HTMLInputElement>('.workspace-row .mirror-toggle input')!.click();
+  await until('mirror on', () => app.workspaces.get(pid)![0].mirror_enabled === true);
 
   location.hash = `#/p/${pid}`;
   const link = await until('imported session', () =>

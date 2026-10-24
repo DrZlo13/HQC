@@ -303,6 +303,10 @@ async fn after_store(
         }
         EventKind::AgentMessage { r#final: true, .. } => {
             db::set_turn(&app.db, s.id, false, false).await?;
+            if source != Source::Hub {
+                // «Сессия N» gets a real title (T21).
+                crate::titles::after_first_answer(app, s.id, &s.title_source, s.system);
+            }
         }
         EventKind::Status { state, .. } => match state {
             SessionState::Idle => db::set_turn(&app.db, s.id, false, false).await?,

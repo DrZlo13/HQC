@@ -96,6 +96,34 @@ it('offers to replace an offline or revoked worker and sends the choice (T19)', 
   expect(root.querySelector('.outcome.ok')!.textContent).toContain('заменил «home-mac-old»');
 });
 
+// T21: a worker of the same machine comes first and is preselected; "new worker" stays a choice.
+it('preselects replacing the worker of the same machine', async () => {
+  const enrollInfo = vi.fn(async () => ({
+    name: 'home-mac',
+    os: 'macos',
+    created_at: '2026-10-22T10:00:00Z',
+    replaceable: [
+      { id: 'w-same', name: 'home-mac-old', os: 'macos', status: 'offline', sessions_count: 7, same_machine: true },
+      { id: 'w-other', name: 'llm-server', os: 'linux', status: 'revoked', sessions_count: 0 },
+    ],
+  }));
+  const enrollConfirm = vi.fn(async () => ({ worker_id: 'w-new', name: 'home-mac' }));
+  mount({ enrollInfo, enrollConfirm }, 'abcd-1234');
+  await act(async () => {});
+  const radios = [...root.querySelectorAll<HTMLInputElement>('.enroll-replace input[type=radio]')];
+  expect(radios.map((r) => r.checked)).toEqual([false, true, false]);
+  const badges = [...root.querySelectorAll('.enroll-replace label')].map((l) => l.querySelector('.badge'));
+  expect(badges.map((b) => b?.textContent ?? null)).toEqual([null, ' та же машина', null]);
+  expect(button().textContent).toBe('Подтвердить замену');
+  // The user may still say "new worker".
+  await act(async () => {
+    radios[0].click();
+  });
+  expect(button().textContent).toBe('Подтвердить');
+  await act(async () => button().click());
+  expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234', undefined);
+});
+
 it('confirms a new worker when nothing is chosen', async () => {
   const enrollInfo = vi.fn(async () => ({
     name: 'box',

@@ -23,11 +23,13 @@ pub mod db;
 pub mod delivery;
 pub mod error;
 pub mod events;
+pub mod llm;
 pub mod mirror;
 pub mod push;
 pub mod requests;
 pub mod security;
 pub mod state;
+pub mod titles;
 pub mod watchdog;
 pub mod worker_ws;
 
@@ -127,6 +129,9 @@ pub fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> App
     tokio::spawn(requests::expiry_loop(app.clone()));
     if let Some(limit) = app.config.timing.turn_watchdog {
         tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));
+    }
+    if let Some(keep) = app.config.artifacts.retention {
+        tokio::spawn(artifacts::cleanup_loop(app.clone(), keep));
     }
     app
 }

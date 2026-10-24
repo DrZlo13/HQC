@@ -448,6 +448,7 @@ pub fn start_worker_logs(
         logs,
         conn: fast_conn(),
         shutdown_timeout: Duration::from_secs(5),
+        machine_id: None,
         mirror: env
             .mirror
             .clone()
@@ -458,6 +459,7 @@ pub fn start_worker_logs(
                 own_records: own,
                 poll: Duration::from_millis(100),
                 grace: Duration::from_millis(300),
+                quota_retry: Duration::from_millis(800),
             }),
     };
     let shutdown = CancellationToken::new();

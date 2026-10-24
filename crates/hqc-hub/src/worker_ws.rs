@@ -476,8 +476,17 @@ async fn handle_text(
         WorkerFrame::MirrorEvent(m) => {
             let raw_event = raw["payload"]["event"].clone();
             match crate::mirror::ingest(app, conn, &raw_event, &m).await {
-                Ok(ack) => {
+                Ok(crate::mirror::Ingested::Ack(ack)) => {
                     conn.reply(&id, HubFrame::Ack(ack));
+                    Ok(())
+                }
+                Ok(crate::mirror::Ingested::Quota) => {
+                    conn.error(
+                        &id,
+                        error_code::MIRROR_QUOTA,
+                        "daily limit of imported sessions reached",
+                        true,
+                    );
                     Ok(())
                 }
                 // As for `event` (SPEC §5.2).

@@ -39,3 +39,11 @@ is the ack for an event dropped because the hub does not know its session (no `s
 `allowed_roots`. `worker.worker.approval.request.json` (`w-9`) is a confirmation the worker
 asks its owner for outside a session (SPEC §10.2); the owner's answer comes later as
 `hub.worker.approval.response.json` (a new frame `h-12` with the same `request_id`).
+
+T21: `hub.mirror.set.sessions.json` — `mirror.set` with the hub's sessions of the workspace and
+the time of their last event (`since_ts`): the worker's first pass over these transcripts skips
+older records. `hub.session.cleanup.json` / `hub.session.cleanup.scratch.json` — the session was
+archived or deleted: remove its inbox folders, or the scratch folder of a session without
+workspace. `worker.hello.machine.json` and `api.enroll.request.machine.json` carry the machine
+fingerprint `machine_id`; in `api.enroll.info.replace.json` a worker of the same machine has
+`same_machine`; `api.workspace.patch.mirror.request.json` switches the mirror of a workspace.

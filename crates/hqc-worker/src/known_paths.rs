@@ -34,6 +34,10 @@ impl KnownPaths {
         })
     }
 
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.set.lock().unwrap().iter().cloned().collect()
+    }
+
     pub fn contains(&self, path: &Path) -> bool {
         self.set.lock().unwrap().contains(path)
     }

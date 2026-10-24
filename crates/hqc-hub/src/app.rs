@@ -40,6 +40,12 @@ pub struct Inner {
     pub turn_activity: Mutex<HashMap<Uuid, Instant>>,
     /// Worker -> the last push on one of its own requests (SPEC §10.2, §20: one per 10 s).
     pub worker_pushes: Mutex<HashMap<Uuid, Instant>>,
+    /// The title model (`HQC_TITLE_MODEL`, T21); `None`: titles come from the first prompt.
+    pub titles: Option<crate::llm::Llm>,
+    /// Sessions whose title the hub has started to derive in this process ([`crate::titles`]).
+    pub titling: Mutex<std::collections::HashSet<Uuid>>,
+    /// Title model calls at once: an import brings many sessions at the same time.
+    pub title_calls: Semaphore,
 }
 
 impl Deref for AppState {
@@ -85,6 +91,9 @@ impl AppState {
             ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),
             turn_activity: Mutex::new(HashMap::new()),
             worker_pushes: Mutex::new(HashMap::new()),
+            titles: config.title_model.clone().map(crate::llm::Llm::new),
+            titling: Mutex::new(Default::default()),
+            title_calls: Semaphore::new(crate::titles::MAX_CALLS),
             config,
         }))
     }

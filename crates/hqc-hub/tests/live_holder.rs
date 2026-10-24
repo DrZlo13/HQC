@@ -103,6 +103,7 @@ async fn live_holder_blocks_takeover() {
         outbox_dir: run.join("home/outbox"),
         conn: ConnOptions::default(),
         shutdown_timeout: Duration::from_secs(10),
+        machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         logs: None,
         mirror: Some(MirrorOptions {
@@ -112,6 +113,7 @@ async fn live_holder_blocks_takeover() {
             own_records: own,
             poll: hqc_worker::mirror::POLL,
             grace: hqc_worker::mirror::GRACE,
+            quota_retry: hqc_worker::mirror::QUOTA_RETRY,
         }),
     };
     let stop = CancellationToken::new();

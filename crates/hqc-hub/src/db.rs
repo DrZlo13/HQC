@@ -223,11 +223,13 @@ pub struct WorkerRow {
     pub system_session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The machine fingerprint of its last `hello` or enrollment (SPEC §5.1, T21).
+    pub machine_hash: Option<String>,
 }
 
 const WORKER_COLS: &str = "id, owner_id, name, os, revoked_at, last_seen, protocol_version, \
     capabilities, environments, env_bindings, allowed_roots, allow_foreign_sessions, \
-    share_local_models, local_models, system_session_id, created_at, updated_at";
+    share_local_models, local_models, system_session_id, created_at, updated_at, machine_hash";
 
 pub async fn worker(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkerRow>> {
     sqlx::query_as(&format!("SELECT {WORKER_COLS} FROM workers WHERE id = $1"))
@@ -267,7 +269,7 @@ pub async fn worker_hello(
          UPDATE workers SET protocol_version = $2, capabilities = $3, environments = $4,
             env_bindings = $5, allowed_roots = $6, allow_foreign_sessions = $7,
             share_local_models = $8, local_models = $9, boot_id = $10, last_seen = now(),
-            updated_at = now()
+            machine_hash = COALESCE($11, machine_hash), updated_at = now()
          WHERE id = $1 AND revoked_at IS NULL
          RETURNING (SELECT boot_id FROM old)",
     )
@@ -281,6 +283,7 @@ pub async fn worker_hello(
     .bind(h.share_local_models)
     .bind(serde_json::to_value(&h.local_models).unwrap_or_default())
     .bind(h.boot_id)
+    .bind(h.machine_id.as_deref().and_then(machine_hash))
     .fetch_optional(db)
     .await
 }
@@ -493,6 +496,13 @@ pub struct NewEnroll<'a> {
     pub expires_at: DateTime<Utc>,
     pub country: Option<&'a str>,
     pub client_ip: &'a str,
+    pub machine_hash: Option<&'a str>,
+}
+
+/// A machine fingerprint as stored: 64 lowercase hex digits (sha256), else nothing.
+pub fn machine_hash(v: &str) -> Option<String> {
+    let v = v.trim().to_ascii_lowercase();
+    (v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).then_some(v)
 }
 
 pub async fn enroll_create(db: &PgPool, e: NewEnroll<'_>) -> sqlx::Result<()> {
@@ -500,8 +510,9 @@ pub async fn enroll_create(db: &PgPool, e: NewEnroll<'_>) -> sqlx::Result<()> {
         .execute(db)
         .await?;
     sqlx::query(
-        "INSERT INTO enroll_codes (id, code, poll_token_hash, name, os, expires_at, country, client_ip)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO enroll_codes (id, code, poll_token_hash, name, os, expires_at, country,
+            client_ip, machine_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(new_id())
     .bind(e.code)
@@ -511,6 +522,7 @@ pub async fn enroll_create(db: &PgPool, e: NewEnroll<'_>) -> sqlx::Result<()> {
     .bind(e.expires_at)
     .bind(e.country)
     .bind(e.client_ip)
+    .bind(e.machine_hash)
     .execute(db)
     .await?;
     Ok(())
@@ -527,27 +539,38 @@ pub async fn enroll_active_count(db: &PgPool, client_ip: &str) -> sqlx::Result<(
     .await
 }
 
-/// A live unconfirmed code, for the confirmation screen (SPEC §6).
+/// A live unconfirmed code, for the confirmation screen (SPEC §6), with the machine
+/// fingerprint the enrolling worker sent.
 pub async fn enroll_info(
     db: &PgPool,
     code: &str,
-) -> sqlx::Result<Option<hqc_proto::api::EnrollInfo>> {
-    let row: Option<(String, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
-        "SELECT name, os, created_at, country FROM enroll_codes
+) -> sqlx::Result<Option<(hqc_proto::api::EnrollInfo, Option<String>)>> {
+    type Row = (
+        String,
+        String,
+        DateTime<Utc>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT name, os, created_at, country, machine_hash FROM enroll_codes
          WHERE code = $1 AND expires_at > now() AND confirmed_by IS NULL",
     )
     .bind(code)
     .fetch_optional(db)
     .await?;
-    Ok(row.map(
-        |(name, os, created_at, country)| hqc_proto::api::EnrollInfo {
-            name,
-            os,
-            created_at,
-            country,
-            replaceable: vec![],
-        },
-    ))
+    Ok(row.map(|(name, os, created_at, country, machine)| {
+        (
+            hqc_proto::api::EnrollInfo {
+                name,
+                os,
+                created_at,
+                country,
+                replaceable: vec![],
+            },
+            machine,
+        )
+    }))
 }
 
 pub enum EnrollConfirm {
@@ -593,13 +616,17 @@ pub async fn enroll_confirm(
     let (wid, replaced) = match replace {
         None => {
             let wid = new_id();
-            sqlx::query("INSERT INTO workers (id, owner_id, name, os) VALUES ($1, $2, $3, $4)")
-                .bind(wid)
-                .bind(user)
-                .bind(&name)
-                .bind(&e.os)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "INSERT INTO workers (id, owner_id, name, os, machine_hash)
+                 SELECT $1, $2, $3, $4, machine_hash FROM enroll_codes WHERE id = $5",
+            )
+            .bind(wid)
+            .bind(user)
+            .bind(&name)
+            .bind(&e.os)
+            .bind(e.id)
+            .execute(&mut *tx)
+            .await?;
             create_system_session(&mut tx, wid).await?;
             (wid, None)
         }
@@ -627,12 +654,15 @@ pub async fn enroll_confirm(
             // `boot_id` NULL: the new process's first `hello` counts as a restart (SPEC §5.2).
             sqlx::query(
                 "UPDATE workers SET token_hash = NULL, name = $2, os = $3, revoked_at = NULL,
-                    boot_id = NULL, updated_at = now()
+                    boot_id = NULL, updated_at = now(),
+                    machine_hash = COALESCE(
+                        (SELECT machine_hash FROM enroll_codes WHERE id = $4), machine_hash)
                  WHERE id = $1",
             )
             .bind(wid)
             .bind(&name)
             .bind(&e.os)
+            .bind(e.id)
             .execute(&mut *tx)
             .await?;
             let system = create_system_session(&mut tx, wid).await?;
@@ -821,6 +851,8 @@ pub struct NewWorkspace<'a> {
     /// Canonical, as the worker reported it in `fs.stat`.
     pub path: &'a str,
     pub label: &'a str,
+    /// On by default since T21 (SPEC §9.2).
+    pub mirror_enabled: bool,
 }
 
 pub enum WorkspaceInsert {
@@ -852,8 +884,8 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
         return Ok(WorkspaceInsert::Conflict(w));
     }
     let row: WorkspaceRow = sqlx::query_as(&format!(
-        "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING {WORKSPACE_COLS}"
+        "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label, mirror_enabled)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {WORKSPACE_COLS}"
     ))
     .bind(new_id())
     .bind(n.project_id)
@@ -861,6 +893,7 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     .bind(n.worker_id)
     .bind(n.path)
     .bind(n.label)
+    .bind(n.mirror_enabled)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
@@ -1089,6 +1122,50 @@ pub async fn set_runtime_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Resu
     Ok(())
 }
 
+/// A title the hub derived itself (T21, SPEC §3 Session): only over the default «Сессия N»,
+/// never over the user's or the runtime's. `false` if the session has another title by now.
+pub async fn set_generated_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<bool> {
+    let r = sqlx::query(
+        "UPDATE sessions SET title = $2, title_source = 'runtime', updated_at = now()
+         WHERE id = $1 AND title_source = 'default'",
+    )
+    .bind(id)
+    .bind(title)
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Text of the session's first event of `kind` (with `final: true` for `agent.message`).
+pub async fn first_text(db: &PgPool, id: Uuid, kind: &str) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT payload->>'text' FROM events
+         WHERE session_id = $1 AND type = $2
+           AND ($2 <> 'agent.message' OR payload->>'final' = 'true')
+           AND coalesce(payload->>'text', '') <> ''
+         ORDER BY seq LIMIT 1",
+    )
+    .bind(id)
+    .bind(kind)
+    .fetch_optional(db)
+    .await
+}
+
+/// `user.message` events of the session that carried artifacts: their inbox folders on the
+/// worker (`session.cleanup`, T21).
+pub async fn inbox_events(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT event_id FROM events
+         WHERE session_id = $1 AND type = 'user.message'
+           AND jsonb_typeof(payload->'artifact_ids') = 'array'
+           AND jsonb_array_length(payload->'artifact_ids') > 0
+         ORDER BY seq",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+}
+
 pub fn slugify(title: &str) -> String {
     slugify_or(title, "session")
 }
@@ -1310,6 +1387,28 @@ pub async fn set_workspace_mirror(db: &PgPool, id: Uuid, on: bool) -> sqlx::Resu
     .bind(id)
     .bind(on)
     .fetch_one(db)
+    .await
+}
+
+/// Most sessions one `mirror.set` lists (the most recently active first), so that the frame
+/// stays well under the WebSocket message limit (SPEC §20).
+pub const MAX_MIRROR_SINCE: i64 = 5000;
+
+/// `mirror.set.sessions` (T21, SPEC §9.1): the workspace's sessions with a transcript and the
+/// time of the last event the hub has of each.
+pub async fn mirror_since(
+    db: &PgPool,
+    workspace_id: Uuid,
+) -> sqlx::Result<Vec<(String, DateTime<Utc>)>> {
+    sqlx::query_as(
+        "SELECT s.runtime_session_id, max(e.ts) AS since FROM sessions s
+         JOIN events e ON e.session_id = s.id
+         WHERE s.workspace_id = $1 AND s.runtime_session_id IS NOT NULL AND NOT s.system
+         GROUP BY s.runtime_session_id ORDER BY since DESC LIMIT $2",
+    )
+    .bind(workspace_id)
+    .bind(MAX_MIRROR_SINCE)
+    .fetch_all(db)
     .await
 }
 

@@ -219,6 +219,58 @@ async fn mirror_set_imports_the_history() {
     w.stop().await;
 }
 
+/// Merge of T21 and T22: the hub refuses the records of a new transcript with a retryable
+/// `mirror_quota` (its daily limit of imported sessions). They leave the outbox, the
+/// transcript is not sent again before `quota_retry` (800 ms here, an hour in production),
+/// and then it is sent whole, with the same event ids.
+#[tokio::test]
+async fn mirror_quota_sends_the_transcript_again_later() {
+    let env = Env::with_mirror();
+    let file = write_transcript(&env);
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let mut hub = FakeHub::start().await;
+    let adapters = FakeAdapters::new();
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let ws = env.workspace().display().to_string();
+    assert_eq!(mirror_set(&mut c, &ws, true).await["type"], "ack");
+    let mut first = vec![];
+    for _ in 0..6 {
+        let f = c.expect("mirror.event").await;
+        first.push(event_id(&f));
+        c.send(json!({"id": f["id"], "type": "error", "payload": {
+            "code": "mirror_quota", "message": "daily limit", "retryable": true}}))
+            .await;
+    }
+    let refused = std::time::Instant::now();
+    assert!(c
+        .maybe("mirror.event", Duration::from_millis(400))
+        .await
+        .is_none());
+    let mut again = vec![];
+    for _ in 0..6 {
+        let f = c.expect("mirror.event").await;
+        again.push(event_id(&f));
+        c.send(json!({"id": f["id"], "type": "ack",
+            "payload": {"event_id": f["payload"]["event"]["event_id"], "seq": 1}}))
+            .await;
+    }
+    assert!(refused.elapsed() >= Duration::from_millis(700));
+    assert_eq!(again, first);
+    assert!(c
+        .maybe("mirror.event", Duration::from_millis(400))
+        .await
+        .is_none());
+    w.stop().await;
+}
+
 /// A Claude Code registry entry `<config>/sessions/<pid>.json` for `RUNTIME`, held by a live
 /// process that is not the worker's (the test process itself).
 fn write_holder(env: &Env, status: &str) -> std::path::PathBuf {

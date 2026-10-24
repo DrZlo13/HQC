@@ -618,12 +618,14 @@ async fn enroll_reports_the_replaced_worker() {
     let dir = tempfile::tempdir().unwrap();
     let store = hqc_worker::token::TokenStore::File(dir.path().join("token"));
     let old = Uuid::now_v7();
-    let hub = http_server(move |path, _| match path {
-        "/worker/enroll" => (
-            200,
+    let sent = Arc::new(std::sync::Mutex::new(Value::Null));
+    let seen = sent.clone();
+    let hub = http_server(move |path, body| match path {
+        "/worker/enroll" => (200, {
+            *seen.lock().unwrap() = body;
             json!({"code": "ABCD-1234", "poll_token": "pt-1", "poll_interval_s": 0,
-                   "expires_at": chrono::Utc::now() + chrono::Duration::minutes(10)}),
-        ),
+                       "expires_at": chrono::Utc::now() + chrono::Duration::minutes(10)})
+        }),
         "/worker/enroll/poll" => (
             200,
             json!({"status": "confirmed", "token": TOKEN, "worker_id": old,
@@ -643,6 +645,15 @@ async fn enroll_reports_the_replaced_worker() {
         "{out}"
     );
     assert!(!out.contains(TOKEN));
+    // T21: the machine fingerprint, a sha256 in hex, never the id itself.
+    let m = sent.lock().unwrap()["machine_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        m.len() == 64 && m.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{m}"
+    );
 }
 
 // T9: at most `max_sessions` agents run; one more start is retryable `agent_start_failed`.
@@ -994,6 +1005,27 @@ async fn inbox_scenario() {
         .join(".hqc/inbox")
         .join(plain.to_string())
         .exists());
+
+    // T21: the working directory is remembered for the sweep at start, and archiving the
+    // session removes its inbox folder, nothing else.
+    let dirs =
+        std::fs::read_to_string(env.known_paths().with_file_name("inbox_dirs.json")).unwrap();
+    assert!(dirs.contains(&*env.workspace().to_string_lossy()), "{dirs}");
+    let id = c
+        .frame(
+            "session.cleanup",
+            json!({"session_id": sid, "workspace_path": env.workspace(), "cwd": ".",
+                   "event_ids": [eid, plain]}),
+        )
+        .await;
+    while c.expect("ack").await["id"] != id.as_str() {}
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while inbox.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "inbox not removed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(env.workspace().join(".hqc/inbox").is_dir());
+    assert!(env.workspace().join(".git/info/exclude").exists());
     w.stop().await;
 }
 

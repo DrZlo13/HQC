@@ -19,7 +19,7 @@ use hqc_proto::{
         ProjectList, PushSubscription, SessionList, VapidKey, WorkspaceList,
     },
     event::CancelReason,
-    frame::{FsListDirs, FsStat, HubFrame, ListCandidates, ResultBody},
+    frame::{FsListDirs, FsStat, HubFrame, ListCandidates, ResultBody, SessionCleanup},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -205,6 +205,13 @@ pub async fn delete_project(
             "the personal project cannot be deleted".into(),
         ));
     }
+    // The inbox folders of its sessions go too (T21); computed before the events are gone.
+    let mut cleanups = vec![];
+    for s in db::sessions_of_project(&app.db, id).await? {
+        if let Some(f) = cleanup_frame(&app, &s).await? {
+            cleanups.push((s.worker_id, f));
+        }
+    }
     let killed = db::delete_project(&app.db, id).await?;
     for (session_id, worker_id) in &killed {
         if let Some(conn) = app.workers.get(*worker_id) {
@@ -213,6 +220,11 @@ pub async fn delete_project(
             });
         }
         app.session_changed(*session_id);
+    }
+    for (worker_id, f) in cleanups {
+        if let Some(conn) = worker_id.and_then(|w| app.workers.get(w)) {
+            conn.send(f);
+        }
     }
     tracing::info!(project_id = %id, sessions = killed.len(), "project deleted");
     Ok(StatusCode::NO_CONTENT)
@@ -374,6 +386,7 @@ pub async fn create_workspace(
             worker_id: worker.id,
             path: canonical,
             label: &hqc_proto::replace_nul(label),
+            mirror_enabled: body.mirror_enabled,
         },
     )
     .await?;
@@ -402,17 +415,13 @@ pub async fn create_workspace(
             ));
         }
     };
-    // The import from Claude Code (SPEC §9.1): the worker mirrors the folder and sends its
-    // history.
-    let ws = if body.mirror_enabled {
-        let ws = db::set_workspace_mirror(&app.db, ws.id, true).await?;
+    // Mirrored by default (T21; the import of SPEC §9.1): the worker follows the folder's
+    // transcripts and sends their history.
+    if ws.mirror_enabled {
         if let Some(conn) = app.workers.get(ws.worker_id) {
-            crate::mirror::set(&conn, &ws.path, true);
+            crate::mirror::enable(&app, &conn, &ws).await?;
         }
-        ws
-    } else {
-        ws
-    };
+    }
     tracing::info!(workspace_id = %ws.id, project_id = %ws.project_id, worker_id = %ws.worker_id, path = %ws.path, mirror = ws.mirror_enabled, "workspace added");
     Ok((StatusCode::CREATED, Json(ws.to_api())))
 }
@@ -423,16 +432,27 @@ pub async fn patch_workspace(
     Path(id): Path<Uuid>,
     Json(b): Json<PatchWorkspace>,
 ) -> ApiResult<Json<api::Workspace>> {
-    let ws = workspace_for(&app, &user, id).await?;
-    let Some(label) = b.label.as_deref().map(str::trim) else {
-        return Ok(Json(ws.to_api()));
-    };
-    if label.chars().count() > MAX_LABEL {
-        return Err(ApiError::BadRequest(format!(
-            "label is longer than {MAX_LABEL} characters"
-        )));
+    let mut ws = workspace_for(&app, &user, id).await?;
+    if let Some(label) = b.label.as_deref().map(str::trim) {
+        if label.chars().count() > MAX_LABEL {
+            return Err(ApiError::BadRequest(format!(
+                "label is longer than {MAX_LABEL} characters"
+            )));
+        }
+        ws = db::set_workspace_label(&app.db, id, &hqc_proto::replace_nul(label)).await?;
     }
-    let ws = db::set_workspace_label(&app.db, id, &hqc_proto::replace_nul(label)).await?;
+    // The switch «Сессии VS Code» (T21, SPEC §9.2). An offline worker learns it after `hello`.
+    if let Some(on) = b.mirror_enabled.filter(|on| *on != ws.mirror_enabled) {
+        ws = db::set_workspace_mirror(&app.db, id, on).await?;
+        if let Some(conn) = app.workers.get(ws.worker_id) {
+            if on {
+                crate::mirror::enable(&app, &conn, &ws).await?;
+            } else {
+                crate::mirror::disable(&conn, &ws.path);
+            }
+        }
+        tracing::info!(workspace_id = %id, path = %ws.path, mirror = on, "workspace mirror switched");
+    }
     Ok(Json(ws.to_api()))
 }
 
@@ -448,7 +468,7 @@ pub async fn delete_workspace(
         db::WorkspaceDelete::Deleted => {
             if ws.mirror_enabled {
                 if let Some(conn) = app.workers.get(ws.worker_id) {
-                    crate::mirror::set(&conn, &ws.path, false);
+                    crate::mirror::disable(&conn, &ws.path);
                 }
             }
             tracing::info!(workspace_id = %id, path = %ws.path, "workspace removed");
@@ -733,13 +753,44 @@ pub async fn delete_session(
 ) -> ApiResult<StatusCode> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
     not_system(&s)?;
+    let cleanup = cleanup_frame(&app, &s).await?;
     send_to_worker(&app, &s, HubFrame::SessionKill { session_id: id });
+    if let Some(f) = cleanup {
+        send_to_worker(&app, &s, f);
+    }
     sqlx::query("DELETE FROM sessions WHERE id = $1")
         .bind(id)
         .execute(&app.db)
         .await?;
     app.session_changed(id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `session.cleanup` for an archived or deleted session (T21, SPEC §5.3, §17.4): its inbox
+/// folders, or the scratch folder of a session without workspace. `None` when there is
+/// nothing on a worker to clean. A worker that is offline misses it; its own sweep of old
+/// inbox folders at start covers that.
+async fn cleanup_frame(app: &AppState, s: &SessionRow) -> anyhow::Result<Option<HubFrame>> {
+    if s.system || s.worker_id.is_none() {
+        return Ok(None);
+    }
+    let workspace_path = match s.workspace_id {
+        Some(w) => match db::workspace(&app.db, w).await? {
+            Some(ws) => Some(ws.path),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let event_ids = db::inbox_events(&app.db, s.id).await?;
+    if workspace_path.is_some() && event_ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(HubFrame::SessionCleanup(SessionCleanup {
+        session_id: s.id,
+        workspace_path,
+        cwd: s.cwd.clone(),
+        event_ids,
+    })))
 }
 
 /// Fire-and-forget control frame; `false` when the worker is offline.
@@ -896,6 +947,9 @@ pub async fn archive(
     .execute(&app.db)
     .await?;
     send_to_worker(&app, &s, HubFrame::SessionKill { session_id: id });
+    if let Some(f) = cleanup_frame(&app, &s).await? {
+        send_to_worker(&app, &s, f);
+    }
     requests::cancel_open_of_session(&app, id, CancelReason::Archived).await?;
     for row in db::move_inputs(&app.db, id, "pending", "failed").await? {
         delivery::notify_delivery(&app, &row);
@@ -1036,7 +1090,7 @@ pub async fn enroll_info(
     Path(code): Path<String>,
 ) -> ApiResult<Json<EnrollInfo>> {
     limit_enroll_lookups(&app, &user)?;
-    let mut info = db::enroll_info(&app.db, &normalize_enroll_code(&code))
+    let (mut info, machine) = db::enroll_info(&app.db, &normalize_enroll_code(&code))
         .await?
         .ok_or(ApiError::NotFound)?;
     info.replaceable = db::replace_candidates(&app.db, user.id)
@@ -1045,6 +1099,7 @@ pub async fn enroll_info(
         .filter(|(w, _)| worker_status(&app, w) != "online")
         .map(|(w, sessions_count)| api::ReplaceableWorker {
             status: worker_status(&app, &w).into(),
+            same_machine: machine.is_some() && w.machine_hash == machine,
             id: w.id,
             name: w.name,
             os: w.os,
@@ -1052,6 +1107,8 @@ pub async fn enroll_info(
             sessions_count,
         })
         .collect();
+    // Workers of the same machine first (T21, SPEC §5.1); the sort is stable.
+    info.replaceable.sort_by_key(|w| !w.same_machine);
     Ok(Json(info))
 }
 
@@ -1274,6 +1331,11 @@ pub async fn worker_enroll(
             expires_at,
             country: country.as_deref(),
             client_ip: &ip,
+            machine_hash: b
+                .machine_id
+                .as_deref()
+                .and_then(db::machine_hash)
+                .as_deref(),
         },
     )
     .await?;

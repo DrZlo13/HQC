@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod capabilities;
+pub mod cleanup;
 pub mod config;
 pub mod connection;
 pub mod enroll;
@@ -13,6 +14,7 @@ pub mod fs;
 pub mod inbox;
 pub mod known_paths;
 pub mod link;
+pub mod machine;
 pub mod mirror;
 pub mod outbox;
 pub mod permissions;
@@ -61,6 +63,8 @@ pub struct Worker {
     /// The mirror of Claude Code sessions (SPEC §9); `None` leaves it off (`mirror.set` and
     /// `workspace.list_candidates` are refused).
     pub mirror: Option<MirrorOptions>,
+    /// The machine fingerprint for `hello` ([`machine::fingerprint`], T21).
+    pub machine_id: Option<String>,
 }
 
 pub struct MirrorOptions {
@@ -75,6 +79,9 @@ pub struct MirrorOptions {
     pub own_records: Arc<mirror::OwnRecords>,
     pub poll: Duration,
     pub grace: Duration,
+    /// A transcript the hub refused with `mirror_quota` is read again after this
+    /// ([`mirror::QUOTA_RETRY`]).
+    pub quota_retry: Duration,
 }
 
 impl Worker {
@@ -90,6 +97,7 @@ impl Worker {
             allow_foreign_sessions: self.config.allow_foreign_sessions,
             share_local_models: false,
             local_models: vec![],
+            machine_id: self.machine_id.clone(),
         }
     }
 
@@ -105,6 +113,25 @@ impl Worker {
             tracing::info!(pending, "outbox has events from a previous run");
         }
         let known = Arc::new(KnownPaths::load(&self.known_paths_file)?);
+        // Working directories the worker wrote inboxes into (T21).
+        let inboxes = Arc::new(KnownPaths::load(
+            &self.known_paths_file.with_file_name("inbox_dirs.json"),
+        )?);
+        {
+            let (cfg, ws, dirs) = (self.config.clone(), known.paths(), inboxes.paths());
+            tokio::task::spawn_blocking(move || {
+                let n = cleanup::sweep(
+                    &cfg,
+                    &ws,
+                    &dirs,
+                    cleanup::INBOX_MAX_AGE,
+                    std::time::SystemTime::now(),
+                );
+                if n > 0 {
+                    tracing::info!(removed = n, "old inbox folders removed");
+                }
+            });
+        }
         let (link, direct) = HubLink::new(outbox);
         let log_stop = CancellationToken::new();
         let log_task = self
@@ -126,7 +153,8 @@ impl Worker {
         let conn_stop = CancellationToken::new();
         let conn_task = tokio::spawn(conn.run(conn_stop.clone()));
 
-        let artifacts = inbox::ArtifactClient::new(&self.config.hub_url, self.token.clone());
+        let artifacts = inbox::ArtifactClient::new(&self.config.hub_url, self.token.clone())
+            .with_inboxes(inboxes);
         let mut sup = Supervisor::new(
             Arc::new(self.config),
             self.adapters,
@@ -146,6 +174,7 @@ impl Worker {
                 core = core.with_registry(d, Box::new(mirror::holders::System));
             }
             core.grace = m.grace;
+            core.quota_retry = m.quota_retry;
             sup = sup.with_mirror(mirror::MirrorHandle {
                 cmds,
                 store,

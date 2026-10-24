@@ -75,6 +75,9 @@ pub struct ArtifactClient {
     token: Secret,
     max_artifact: u64,
     max_input: u64,
+    /// Where the working directories with an inbox are remembered, for the sweep at start
+    /// ([`crate::cleanup::sweep`], T21).
+    inboxes: Option<std::sync::Arc<crate::known_paths::KnownPaths>>,
 }
 
 impl ArtifactClient {
@@ -92,6 +95,7 @@ impl ArtifactClient {
             token,
             max_artifact: MAX_ARTIFACT_BYTES,
             max_input: MAX_INPUT_BYTES,
+            inboxes: None,
         }
     }
 
@@ -100,6 +104,11 @@ impl ArtifactClient {
     pub fn with_limits(mut self, max_artifact: u64, max_input: u64) -> Self {
         self.max_artifact = max_artifact;
         self.max_input = max_input;
+        self
+    }
+
+    pub fn with_inboxes(mut self, k: std::sync::Arc<crate::known_paths::KnownPaths>) -> Self {
+        self.inboxes = Some(k);
         self
     }
 
@@ -202,6 +211,11 @@ pub async fn prepare(
         return Ok((input.clone(), vec![]));
     }
     let dir = inbox_dir(spec, input.event_id)?;
+    if let Some(k) = &client.inboxes {
+        if let Err(e) = k.insert(&spec.workdir) {
+            tracing::warn!(workdir = %spec.workdir.display(), "inbox folder not remembered: {e:#}");
+        }
+    }
     if let Err(e) = exclude_hqc(&spec.workspace, allowed_roots) {
         tracing::warn!(workspace = %spec.workspace.display(), "cannot add .hqc/ to .git/info/exclude: {e:#}");
     }

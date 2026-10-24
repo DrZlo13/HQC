@@ -163,10 +163,16 @@ export class Api {
     worker_id: string;
     path: string;
     label?: string;
-    /** The import from Claude Code (SPEC §9.1): the worker mirrors the folder's sessions. */
+    /** The worker mirrors the folder's Claude Code sessions (SPEC §9.1); on by default
+     *  since T21. */
     mirror_enabled?: boolean;
   }): Promise<Workspace> {
     return parseWorkspace(await this.req('POST', '/api/workspaces', w));
+  }
+
+  /** `PATCH /api/workspaces/{id}`: the label, or the switch «Сессии VS Code» (T21). */
+  async patchWorkspace(id: string, patch: { label?: string; mirror_enabled?: boolean }): Promise<Workspace> {
+    return parseWorkspace(await this.req('PATCH', `/api/workspaces/${enc(id)}`, patch));
   }
 
   /** Folders with Claude Code sessions on the worker (`workspace.list_candidates`, SPEC §9.1). */

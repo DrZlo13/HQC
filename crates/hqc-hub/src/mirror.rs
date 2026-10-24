@@ -17,14 +17,16 @@
 //! - `POST /takeover` ([`takeover`]): refused while a holder lives (`409 vscode_open`);
 //!   without registry data, after 30 s of silence. The session becomes `locked_by: hqc` and
 //!   the worker gets `session.start` with `mode: resume`.
-//! - After `hello` the worker gets `mirror.set` for every mirrored workspace of its own.
+//! - After `hello` the worker gets `mirror.set` for every mirrored workspace of its own, with
+//!   the hub's sessions of the workspace and the time of their last event (T21): the
+//!   worker's first pass over those transcripts skips what the hub already has.
 
 use std::path::Path;
 
 use chrono::Utc;
 use hqc_proto::{
     event::EventKind,
-    frame::{Ack, HeldBy, HubFrame, MirrorEvent, MirrorSet, MIRROR_RECENT_S},
+    frame::{Ack, HeldBy, HubFrame, MirrorEvent, MirrorSet, MirrorSince, MIRROR_RECENT_S},
 };
 use serde_json::{json, Value};
 
@@ -83,14 +85,30 @@ fn relative_cwd(workspace: &str, cwd: &str) -> Option<String> {
     Some(if s.is_empty() { ".".into() } else { s })
 }
 
+/// What the hub answers a `mirror.event`.
+#[derive(Debug, PartialEq)]
+pub enum Ingested {
+    Ack(Ack),
+    /// A new transcript over the worker's daily limit (SPEC §20): `error mirror_quota`,
+    /// retryable; the worker reads the transcript again at most once an hour (SPEC §9.1).
+    Quota,
+}
+
+impl From<Ack> for Ingested {
+    fn from(a: Ack) -> Self {
+        Self::Ack(a)
+    }
+}
+
 /// A `mirror.event` (SPEC §5.4): `ack {event_id, seq}`; without `seq` when the workspace is
-/// not mirrored (any more) on this worker or the record lies outside it.
+/// not mirrored (any more) on this worker or the record lies outside it; `error
+/// mirror_quota` for a new transcript over the daily limit.
 pub async fn ingest(
     app: &AppState,
     conn: &WorkerConn,
     raw: &Value,
     m: &MirrorEvent,
-) -> anyhow::Result<Ack> {
+) -> anyhow::Result<Ingested> {
     let event_id = m.event.event_id;
     let dropped = Ack {
         event_id: Some(event_id),
@@ -100,23 +118,23 @@ pub async fn ingest(
         Some(w) if w.mirror_enabled => w,
         _ => {
             tracing::debug!(worker_id = %conn.worker_id, path = %m.workspace_path, "mirror.event for a workspace that is not mirrored, dropped");
-            return Ok(dropped);
+            return Ok(dropped.into());
         }
     };
     if !is_transcript_id(&m.runtime_session_id) {
         tracing::warn!(worker_id = %conn.worker_id, runtime_session_id = %m.runtime_session_id, "mirror.event with a runtime_session_id that is not a uuid, dropped");
-        return Ok(dropped);
+        return Ok(dropped.into());
     }
     if m.cwd.len() > MAX_CWD {
         tracing::warn!(worker_id = %conn.worker_id, len = m.cwd.len(), "mirror.event with a cwd over {MAX_CWD} bytes, dropped");
-        return Ok(dropped);
+        return Ok(dropped.into());
     }
     let Some(cwd) = relative_cwd(&ws.path, &m.cwd) else {
         tracing::warn!(worker_id = %conn.worker_id, cwd = %m.cwd, workspace = %ws.path, "mirror.event outside its workspace, dropped");
-        return Ok(dropped);
+        return Ok(dropped.into());
     };
     if matches!(m.event.kind, EventKind::AgentDelta { .. }) {
-        return Ok(dropped);
+        return Ok(dropped.into());
     }
     let title = m.title.as_deref().and_then(crate::worker_ws::runtime_title);
     let held = m.held_by.as_ref().and_then(|h| h.as_ref());
@@ -131,11 +149,15 @@ pub async fn ingest(
         None => {
             let limits = &app.config.limits;
             let (today, in_workspace) = db::imported_counts(&app.db, conn.worker_id, ws.id).await?;
-            if today >= limits.mirror_sessions_per_day
-                || in_workspace >= limits.mirror_sessions_per_workspace
-            {
-                tracing::warn!(worker_id = %conn.worker_id, workspace = %ws.path, today, in_workspace, runtime_session_id = %m.runtime_session_id, "mirror: too many imported sessions, event dropped");
-                return Ok(dropped);
+            if in_workspace >= limits.mirror_sessions_per_workspace {
+                tracing::warn!(worker_id = %conn.worker_id, workspace = %ws.path, in_workspace, runtime_session_id = %m.runtime_session_id, "mirror: too many imported sessions in the workspace, event dropped");
+                return Ok(dropped.into());
+            }
+            // The first import after the mirror went on everywhere (T21) may bring more
+            // transcripts than a day allows: they wait, they are not lost (SPEC §9.1, §20).
+            if today >= limits.mirror_sessions_per_day {
+                tracing::warn!(worker_id = %conn.worker_id, workspace = %ws.path, today, runtime_session_id = %m.runtime_session_id, "mirror: daily limit of imported sessions reached, the worker retries later");
+                return Ok(Ingested::Quota);
             }
             let id = db::create_session(
                 &app.db,
@@ -234,7 +256,7 @@ pub async fn ingest(
         db::set_runtime_title(&app.db, s.id, t).await?;
     }
     app.session_changed(s.id);
-    Ok(ack)
+    Ok(ack.into())
 }
 
 /// The new `locked_by` when the worker reports `reported` for a session that has `prev`
@@ -361,15 +383,38 @@ pub async fn takeover(app: &AppState, s: &SessionRow) -> ApiResult<()> {
 /// After `hello`: the worker learns which of its folders are mirrored.
 pub async fn after_hello(app: &AppState, conn: &WorkerConn) -> anyhow::Result<()> {
     for ws in db::mirrored_workspaces(&app.db, conn.worker_id).await? {
-        set(conn, &ws.path, true);
+        enable(app, conn, &ws).await?;
     }
     Ok(())
 }
 
-pub fn set(conn: &WorkerConn, path: &str, enabled: bool) {
+/// `mirror.set` with `enabled: true` for `ws` and the hub's sessions in it (SPEC §9.1, T21).
+pub async fn enable(
+    app: &AppState,
+    conn: &WorkerConn,
+    ws: &db::WorkspaceRow,
+) -> anyhow::Result<()> {
+    let sessions = db::mirror_since(&app.db, ws.id)
+        .await?
+        .into_iter()
+        .map(|(runtime_session_id, since_ts)| MirrorSince {
+            runtime_session_id,
+            since_ts,
+        })
+        .collect();
+    conn.send(HubFrame::MirrorSet(MirrorSet {
+        workspace_path: ws.path.clone(),
+        enabled: true,
+        sessions,
+    }));
+    Ok(())
+}
+
+pub fn disable(conn: &WorkerConn, path: &str) {
     conn.send(HubFrame::MirrorSet(MirrorSet {
         workspace_path: path.to_string(),
-        enabled,
+        enabled: false,
+        sessions: vec![],
     }));
 }
 

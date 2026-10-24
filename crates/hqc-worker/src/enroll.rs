@@ -51,6 +51,8 @@ pub async fn enroll(
             name: name.to_string(),
             os: std::env::consts::OS.into(),
             protocol_version: Some(hqc_proto::PROTOCOL_VERSION),
+            // The hub then offers replacing the worker of this machine (T21, SPEC §5.1).
+            machine_id: crate::machine::fingerprint(crate::config::hqc_home().ok().as_deref()),
         })
         .send()
         .await

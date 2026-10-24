@@ -286,6 +286,8 @@ const MIRROR_WS: &str = "/w/proj";
 
 /// A project with a mirrored workspace `MIRROR_WS` on `w`'s worker; its id.
 async fn mirrored_project(hub: &TestHub, w: &mut FakeWorker) -> String {
+    // T21 sets `mirror.set` aside unless asked for.
+    w.see_mirror_set = true;
     let (s, p) = hub.post("/api/projects", json!({"name": "cad"})).await;
     assert_eq!(s, 201, "{p}");
     let pid = p["id"].as_str().unwrap().to_string();
@@ -302,6 +304,13 @@ async fn mirrored_project(hub: &TestHub, w: &mut FakeWorker) -> String {
 
 /// `mirror.event` of one record; the `ack` payload.
 async fn mirror(w: &mut FakeWorker, runtime: &str, cwd: &str) -> Value {
+    let ack = mirror_reply(w, runtime, cwd).await;
+    assert_eq!(ack["type"], "ack", "unexpected frame {ack}");
+    ack["payload"].clone()
+}
+
+/// The hub's reply to a `mirror.event`: `ack` or `error`.
+async fn mirror_reply(w: &mut FakeWorker, runtime: &str, cwd: &str) -> Value {
     let event = json!({
         "session_id": uuid::Uuid::nil(),
         "event_id": uuid::Uuid::new_v4(),
@@ -313,9 +322,9 @@ async fn mirror(w: &mut FakeWorker, runtime: &str, cwd: &str) -> Value {
     let p = json!({"workspace_path": MIRROR_WS, "runtime_session_id": runtime, "cwd": cwd,
                    "event": event, "recent": false});
     let id = w.send("mirror.event", p).await;
-    let ack = w.expect("ack").await;
-    assert_eq!(ack["id"], id);
-    ack["payload"].clone()
+    let reply = w.recv().await;
+    assert_eq!(reply["id"], id);
+    reply
 }
 
 async fn project_sessions(hub: &TestHub, pid: &str) -> usize {
@@ -364,8 +373,12 @@ async fn mirror_sessions_are_limited() {
     for r in &ids[..2] {
         assert!(mirror(&mut w, r, MIRROR_WS).await["seq"].as_u64().is_some());
     }
-    let ack = mirror(&mut w, &ids[2], MIRROR_WS).await;
-    assert!(ack.get("seq").is_none(), "{ack}");
+    // Over the daily limit the record waits: a retryable `mirror_quota` (merge of T21 and
+    // T22), the worker sends the transcript again later.
+    let e = mirror_reply(&mut w, &ids[2], MIRROR_WS).await;
+    assert_eq!(e["type"], "error", "{e}");
+    assert_eq!(e["payload"]["code"], "mirror_quota", "{e}");
+    assert_eq!(e["payload"]["retryable"], true, "{e}");
     assert!(mirror(&mut w, &ids[0], MIRROR_WS).await["seq"]
         .as_u64()
         .is_some());

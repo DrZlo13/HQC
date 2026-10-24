@@ -137,6 +137,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
             own_records: adapters.own_records(),
             poll: hqc_worker::mirror::POLL,
             grace: hqc_worker::mirror::GRACE,
+            quota_retry: hqc_worker::mirror::QUOTA_RETRY,
         }
     });
     let worker = Worker {
@@ -151,6 +152,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
         logs: Some(logs),
         conn: ConnOptions::default(),
         shutdown_timeout: Duration::from_secs(10),
+        machine_id: hqc_worker::machine::fingerprint(config::hqc_home().ok().as_deref()),
     };
 
     let shutdown = CancellationToken::new();

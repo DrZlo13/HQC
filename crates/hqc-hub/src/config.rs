@@ -20,6 +20,9 @@ pub struct Config {
     /// the request's `Host`, which a reverse proxy may rewrite (SPEC §20). Empty: the `Host`
     /// or `X-Forwarded-Host` of the request.
     pub public_origins: Vec<String>,
+    /// `HQC_TITLE_MODEL` with `HQC_TITLE_BASE_URL` and `HQC_TITLE_API_KEY` (T21): the model
+    /// that titles sessions; `None`: titles from the first prompt.
+    pub title_model: Option<crate::llm::LlmConfig>,
 }
 
 /// The artifact store and its signed links (SPEC §12).
@@ -38,6 +41,22 @@ pub struct ArtifactConfig {
     /// HMAC key of signed links: `HQC_ARTIFACT_KEY`, else random per process (links of a
     /// previous run stop working; the client asks for a new one).
     pub key: Vec<u8>,
+    /// `HQC_ARTIFACT_RETENTION_DAYS` (T21, default 30, `0` off): artifacts no event refers to
+    /// and unused for this long are removed by a daily cleanup.
+    pub retention: Option<Duration>,
+}
+
+pub const DEFAULT_ARTIFACT_RETENTION_DAYS: u64 = 30;
+
+/// `HQC_ARTIFACT_RETENTION_DAYS`: whole days, 0 = never remove, unset = 30.
+pub fn retention_from(v: Option<&str>) -> anyhow::Result<Option<Duration>> {
+    let days = match v.map(str::trim).filter(|v| !v.is_empty()) {
+        None => DEFAULT_ARTIFACT_RETENTION_DAYS,
+        Some(v) => v
+            .parse::<u64>()
+            .with_context(|| format!("HQC_ARTIFACT_RETENTION_DAYS={v}: expected whole days"))?,
+    };
+    Ok((days > 0).then(|| Duration::from_secs(days * 86_400)))
 }
 
 pub const MAX_ARTIFACT_BYTES: u64 = 100 * 1000 * 1000;
@@ -53,6 +72,9 @@ impl ArtifactConfig {
             max_bytes: MAX_ARTIFACT_BYTES,
             link_ttl: Duration::from_secs(600),
             key,
+            retention: Some(Duration::from_secs(
+                DEFAULT_ARTIFACT_RETENTION_DAYS * 86_400,
+            )),
         }
     }
 
@@ -214,7 +236,8 @@ impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`,
     /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`,
-    /// `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`, `HQC_PUBLIC_ORIGINS`.
+    /// `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`, `HQC_ARTIFACT_RETENTION_DAYS`,
+    /// `HQC_PUBLIC_ORIGINS`, `HQC_TITLE_MODEL`, `HQC_TITLE_BASE_URL`, `HQC_TITLE_API_KEY`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -280,6 +303,16 @@ impl Config {
             }
             artifacts.key = k.into_bytes();
         }
+        artifacts.retention = retention_from(var("HQC_ARTIFACT_RETENTION_DAYS").as_deref())?;
+        let title_model = var("HQC_TITLE_MODEL")
+            .map(|m| {
+                crate::llm::LlmConfig::parse(
+                    &m,
+                    var("HQC_TITLE_BASE_URL").as_deref(),
+                    var("HQC_TITLE_API_KEY").as_deref(),
+                )
+            })
+            .transpose()?;
         std::fs::create_dir_all(&artifacts.dir).with_context(|| {
             format!(
                 "HQC_ARTIFACT_DIR={}: cannot create",
@@ -300,6 +333,7 @@ impl Config {
             limits: Limits::default(),
             artifacts,
             public_origins: public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?,
+            title_model,
         })
     }
 }
@@ -372,6 +406,15 @@ mod tests {
         assert_eq!(turn_watchdog_from(Some("30")).unwrap(), d(30));
         assert_eq!(turn_watchdog_from(Some("0")).unwrap(), None);
         assert!(turn_watchdog_from(Some("15m")).is_err());
+    }
+
+    #[test]
+    fn retention_variable() {
+        let days = |d: u64| Some(Duration::from_secs(d * 86_400));
+        assert_eq!(retention_from(None).unwrap(), days(30));
+        assert_eq!(retention_from(Some("7")).unwrap(), days(7));
+        assert_eq!(retention_from(Some("0")).unwrap(), None);
+        assert!(retention_from(Some("2w")).is_err());
     }
 
     #[test]

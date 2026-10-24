@@ -474,6 +474,30 @@ impl Connection {
                 }
             }
             HubFrame::Error(e) => match in_flight.remove(&f.id) {
+                // Over the hub's daily limit of imported sessions (SPEC §9.1, §20): the event
+                // leaves the outbox and the mirror reads its transcript again in an hour.
+                Some(eid) if e.code == error_code::MIRROR_QUOTA => {
+                    match self.link.outbox.take_mirror(eid) {
+                        Ok(Some(rid)) => match rid.parse() {
+                            Ok(runtime_session_id) => {
+                                tracing::warn!(event_id = %eid, runtime_session_id = %rid, "hub: daily limit of imported sessions; the transcript is read again later");
+                                let _ = self
+                                    .inbound
+                                    .send(Inbound::MirrorQuota { runtime_session_id })
+                                    .await;
+                            }
+                            Err(_) => {
+                                tracing::warn!(event_id = %eid, "mirror_quota for a transcript id that is not a uuid")
+                            }
+                        },
+                        Ok(None) => {
+                            tracing::warn!(event_id = %eid, "mirror_quota for an event that is not a mirrored one")
+                        }
+                        Err(err) => {
+                            tracing::error!(event_id = %eid, "outbox delete failed: {err:#}")
+                        }
+                    }
+                }
                 Some(eid) if !e.retryable => {
                     tracing::error!(event_id = %eid, code = %e.code, "hub rejected an event, dropping it: {}", e.message);
                     let _ = self.link.outbox.remove(eid);
@@ -533,6 +557,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::WorkerApprovalResponse { .. } => "worker.approval.response",
         HubFrame::WorkspaceListCandidates(_) => "workspace.list_candidates",
         HubFrame::MirrorSet(_) => "mirror.set",
+        HubFrame::SessionCleanup(_) => "session.cleanup",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

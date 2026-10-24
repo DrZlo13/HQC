@@ -125,6 +125,19 @@ impl Outbox {
         Ok(n > 0)
     }
 
+    /// Deletes `event_id` if it is a [`FRAME_MIRROR_EVENT`]; returns its transcript id.
+    pub fn take_mirror(&self, event_id: Uuid) -> anyhow::Result<Option<String>> {
+        self.db()
+            .query_row(
+                "DELETE FROM outbox WHERE event_id = ?1 AND frame = ?2
+                 RETURNING json_extract(event, '$.runtime_session_id')",
+                params![event_id.to_string(), FRAME_MIRROR_EVENT],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("deleting a mirrored event")
+    }
+
     /// Counts one more failed send of `event_id`; returns the count, `None` if the event is
     /// not there.
     pub fn failed(&self, event_id: Uuid) -> anyhow::Result<Option<u32>> {

@@ -31,6 +31,18 @@
 //! reported to the supervisor ([`Output::Holder`]), at most once per [`POLL`] per transcript,
 //! and every `mirror.event` carries the current holder (`held_by`).
 //!
+//! Sessions hqc already has (T21, SPEC §9.1). `mirror.set` lists the hub's sessions of the
+//! workspace with the time of their last event; the first pass over such a transcript (one
+//! the mirror has never read, offset 0) skips records not newer than that time, so enabling
+//! the mirror on a workspace where hqc sessions ran brings no duplicate prompts. Transcripts
+//! the hub does not know are imported whole.
+//!
+//! The hub's daily limit of imported sessions (SPEC §9.1, §20). A record of a transcript the
+//! hub does not have yet may come back as `error mirror_quota`: the transcript is read again
+//! from the start ([`Mirror::defer`]), not sooner than [`QUOTA_RETRY`] (an hour) later. The
+//! first import after the mirror went on everywhere thus spreads over days instead of losing
+//! what does not fit into one.
+//!
 //! Forks (SPEC §9.3, T20). The mirror keeps the tree of each transcript's records
 //! ([`fork::Tree`]); a prompt that starts a second line of turns from an earlier record
 //! gives `system session_forked` through `mirror.event`.
@@ -65,6 +77,8 @@ pub const POLL: Duration = Duration::from_secs(2);
 /// How long an unknown record must stay unknown while the worker's own process runs the
 /// session before it counts as another writer's.
 pub const GRACE: Duration = Duration::from_secs(5);
+/// How long a transcript refused with `mirror_quota` waits before it is read again.
+pub const QUOTA_RETRY: Duration = Duration::from_secs(3600);
 /// Lines read to find a transcript's `cwd` before giving up on it for this poll.
 const CWD_LINES: usize = 200;
 
@@ -108,6 +122,13 @@ pub struct Mirror {
     reported_at: HashMap<Uuid, Instant>,
     /// Record trees of the transcripts read in this process, for forks.
     trees: HashMap<PathBuf, fork::Tree>,
+    /// From `mirror.set`: transcript -> the time of the hub's last event of its session.
+    since: HashMap<Uuid, DateTime<Utc>>,
+    /// Transcripts in their first pass with a `since` limit, until read to the end.
+    skipping: HashMap<PathBuf, DateTime<Utc>>,
+    /// Transcripts refused with `mirror_quota`: not read before this moment.
+    deferred: HashMap<Uuid, Instant>,
+    pub quota_retry: Duration,
 }
 
 impl Mirror {
@@ -129,6 +150,10 @@ impl Mirror {
             reported: HashMap::new(),
             reported_at: HashMap::new(),
             trees: HashMap::new(),
+            since: HashMap::new(),
+            skipping: HashMap::new(),
+            deferred: HashMap::new(),
+            quota_retry: QUOTA_RETRY,
         }
     }
 
@@ -144,9 +169,11 @@ impl Mirror {
         self
     }
 
-    /// `mirror.set`: `path` is canonical and inside `allowed_roots` (the supervisor checked).
-    pub fn set(&mut self, path: PathBuf, enabled: bool) {
-        tracing::info!(path = %path.display(), enabled, "mirror.set");
+    /// `mirror.set`: `path` is canonical and inside `allowed_roots` (the supervisor checked);
+    /// `since` — the hub's sessions there and the time of their last event.
+    pub fn set(&mut self, path: PathBuf, enabled: bool, since: Vec<(Uuid, DateTime<Utc>)>) {
+        tracing::info!(path = %path.display(), enabled, sessions = since.len(), "mirror.set");
+        self.since.extend(since);
         if enabled {
             self.workspaces.insert(path);
         } else {
@@ -156,6 +183,44 @@ impl Mirror {
 
     pub fn workspaces(&self) -> impl Iterator<Item = &PathBuf> {
         self.workspaces.iter()
+    }
+
+    /// The hub refused a record of `runtime` with `mirror_quota`: the transcript is read
+    /// again from the start, not before [`Self::quota_retry`] has passed. Records sent after
+    /// the refused one are refused too and only move the moment further.
+    pub fn defer(&mut self, runtime: Uuid, now: Instant) -> anyhow::Result<()> {
+        // Every record of the transcript in flight comes back refused: rewind once.
+        if self
+            .deferred
+            .insert(runtime, now + self.quota_retry)
+            .is_some()
+        {
+            return Ok(());
+        }
+        let name = format!("{runtime}.jsonl");
+        let known = self
+            .files
+            .keys()
+            .find(|p| p.file_name().is_some_and(|n| *n == *name))
+            .cloned();
+        let Some(path) = known.or_else(|| {
+            transcripts(&self.projects)
+                .into_iter()
+                .find_map(|(p, r)| (r == runtime).then_some(p))
+        }) else {
+            return Ok(());
+        };
+        tracing::info!(path = %path.display(), retry_in = ?self.quota_retry, "mirror: transcript over the hub's daily limit, read again later");
+        let row = self.row(&path)?;
+        self.trees.remove(&path);
+        self.skipping.remove(&path);
+        self.save(
+            &path,
+            FileRow {
+                cwd: row.cwd,
+                ..FileRow::default()
+            },
+        )
     }
 
     /// One pass over the registry of live sessions and every transcript.
@@ -297,6 +362,12 @@ impl Mirror {
         wall: SystemTime,
         out: &mut Vec<Output>,
     ) -> anyhow::Result<()> {
+        if let Some(until) = self.deferred.get(&runtime) {
+            if now < *until {
+                return Ok(());
+            }
+            self.deferred.remove(&runtime);
+        }
         let meta = std::fs::metadata(path)?;
         let mut row = self.row(path)?;
         let Some(cwd) = row.cwd.clone() else {
@@ -318,6 +389,13 @@ impl Mirror {
         if size == row.offset {
             return Ok(());
         }
+        if row.offset == 0 {
+            if let Some(t) = self.since.get(&runtime) {
+                tracing::info!(path = %path.display(), since = %t, "first pass over a transcript hqc has: older records skipped");
+                self.skipping.insert(path.to_path_buf(), *t);
+            }
+        }
+        let skip_until = self.skipping.get(path).copied();
         if !self.trees.contains_key(path) {
             // First read in this process: the records already handled shape the tree, and
             // forks among them were reported before.
@@ -411,11 +489,18 @@ impl Mirror {
             }
             let events = map::record_events(&rec, row.last_prompt);
             row.last_prompt = map::prompt_id(&events).or(row.last_prompt);
-            for event in events {
-                out.push(wrap(event, row.title.clone()));
+            // The hub has this part already (T21).
+            let old = skip_until.is_some_and(|t| record_ts(&rec).is_some_and(|ts| ts <= t));
+            if !old {
+                for event in events {
+                    out.push(wrap(event, row.title.clone()));
+                }
             }
             self.held.remove(&uuid);
             pos = end;
+        }
+        if pos == size {
+            self.skipping.remove(path);
         }
         row.offset = pos;
         self.save(path, row)
@@ -450,6 +535,18 @@ pub fn transcripts(projects: &Path) -> Vec<(PathBuf, Uuid)> {
     }
     out.sort();
     out
+}
+
+/// The record's own `timestamp`, if it has one.
+fn record_ts(rec: &Record) -> Option<DateTime<Utc>> {
+    match rec {
+        Record::User(m) | Record::Assistant(m) => m
+            .timestamp
+            .as_deref()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc)),
+        _ => None,
+    }
 }
 
 /// A prompt a person typed: what counts as a turn in a line of the tree.
@@ -540,7 +637,13 @@ pub fn candidates(
 /// `mirror.set` from the supervisor.
 #[derive(Debug)]
 pub enum MirrorCmd {
-    Set { path: PathBuf, enabled: bool },
+    Set {
+        path: PathBuf,
+        enabled: bool,
+        since: Vec<(Uuid, DateTime<Utc>)>,
+    },
+    /// `error mirror_quota` on a record of this transcript ([`Mirror::defer`]).
+    Defer { runtime_session_id: Uuid },
 }
 
 /// What the supervisor needs of the mirror: its commands and, for candidates, the state.
@@ -567,7 +670,13 @@ pub async fn run(
         tokio::select! {
             _ = stop.cancelled() => break,
             c = cmds.recv() => match c {
-                Some(MirrorCmd::Set { path, enabled }) => mirror.set(path, enabled),
+                Some(MirrorCmd::Set { path, enabled, since }) => mirror.set(path, enabled, since),
+                Some(MirrorCmd::Defer { runtime_session_id }) => {
+                    if let Err(e) = mirror.defer(runtime_session_id, Instant::now()) {
+                        tracing::warn!(%runtime_session_id, "mirror: {e:#}");
+                    }
+                    continue;
+                }
                 None => break,
             },
             _ = tick.tick() => {}

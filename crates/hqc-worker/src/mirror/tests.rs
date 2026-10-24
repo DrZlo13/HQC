@@ -52,7 +52,7 @@ fn setup(name: &str, transcript: &str) -> Setup {
         Arc::new(Store::memory()),
         own.clone(),
     );
-    mirror.set(PathBuf::from("/tmp/hqc-fixture"), true);
+    mirror.set(PathBuf::from("/tmp/hqc-fixture"), true, vec![]);
     Setup {
         _dir: dir,
         file,
@@ -226,7 +226,8 @@ fn import_and_partial_lines() {
         labels(&out)
     );
     // Not mirrored: nothing.
-    s.mirror.set(PathBuf::from("/tmp/hqc-fixture"), false);
+    s.mirror
+        .set(PathBuf::from("/tmp/hqc-fixture"), false, vec![]);
     append(&s.file, OUTSIDE);
     assert!(s.mirror.poll(Instant::now(), SystemTime::now()).is_empty());
 }
@@ -321,7 +322,7 @@ fn fork_is_reported_once() {
         s.mirror.store.clone(),
         s.own.clone(),
     );
-    again.set(PathBuf::from("/tmp/hqc-fixture"), true);
+    again.set(PathBuf::from("/tmp/hqc-fixture"), true, vec![]);
     let answer = "120fb1ee-3831-484d-aef2-a9505079a043";
     append(
         &s.file,
@@ -362,7 +363,8 @@ fn holder_in_registry() {
         s.own.clone(),
     )
     .with_registry(sessions.clone(), Box::new(holders::System));
-    s.mirror.set(PathBuf::from("/tmp/hqc-fixture"), true);
+    s.mirror
+        .set(PathBuf::from("/tmp/hqc-fixture"), true, vec![]);
     append(&s.file, VSCODE);
     let held = HeldBy {
         entrypoint: "claude-vscode".into(),
@@ -404,4 +406,119 @@ fn holder_in_registry() {
         .mirror
         .poll(t0 + Duration::from_secs(6), SystemTime::now())
         .is_empty());
+}
+
+/// T21: the mirror is enabled on a workspace where hqc already ran a session (fixture b: the
+/// adapter's turn, then an outside turn). The hub lists that transcript with the time of its
+/// last event; the first pass skips what the hub has (no duplicate prompt with another
+/// event id) and sends only the outside turn. A transcript the hub does not list is imported
+/// whole, and a later `mirror.set` (after the next `hello`) changes nothing for files already
+/// read.
+#[test]
+fn enabling_on_a_workspace_with_hqc_sessions_brings_no_duplicates() {
+    let since: DateTime<Utc> = "2026-10-23T00:10:58Z".parse().unwrap();
+    let mut s = setup("adapter-then-outside", OUTSIDE);
+    s.mirror.set(
+        PathBuf::from("/tmp/hqc-fixture"),
+        true,
+        vec![(s.runtime, since)],
+    );
+    append(&s.file, OUTSIDE);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(
+        labels(&out),
+        [
+            "user:Reply with exactly: OUTSIDE-TURN",
+            "agent:OUTSIDE-TURN"
+        ]
+    );
+    // A later turn is not limited any more.
+    s.mirror.set(
+        PathBuf::from("/tmp/hqc-fixture"),
+        true,
+        vec![(s.runtime, Utc::now())],
+    );
+    let last_prompt = OUTSIDE
+        .lines()
+        .find(|l| {
+            l.contains("Reply with exactly: OUTSIDE-TURN") && l.contains("\"type\": \"user\"")
+        })
+        .unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(last_prompt).unwrap();
+    v["uuid"] = serde_json::json!(Uuid::new_v4());
+    // After the last record: a continuation, not a fork.
+    v["parentUuid"] = serde_json::json!("e965b24b-6355-4c01-8f1e-d1a303611946");
+    v["timestamp"] = serde_json::json!("2026-10-23T00:12:00Z");
+    v["message"]["content"] = serde_json::json!("one more");
+    append(&s.file, &format!("{v}\n"));
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(labels(&out), ["user:one more"]);
+
+    // Not listed: the whole history.
+    let mut s = setup("adapter-then-outside", OUTSIDE);
+    s.mirror.set(
+        PathBuf::from("/tmp/hqc-fixture"),
+        true,
+        vec![(Uuid::new_v4(), since)],
+    );
+    append(&s.file, OUTSIDE);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(
+        labels(&out),
+        [
+            "user:Run the shell command: echo hqc-adapter. Then reply with exactly: ADAPTER-DONE",
+            "call",
+            "result",
+            "agent:ADAPTER-DONE",
+            "user:Reply with exactly: OUTSIDE-TURN",
+            "agent:OUTSIDE-TURN"
+        ]
+    );
+}
+
+/// Merge of T21 and T22: a transcript the hub refused with `mirror_quota` (its daily limit of
+/// imported sessions) is read again from the start, but not before `quota_retry` has
+/// passed; the refusals of all its records in flight rewind it once.
+#[test]
+fn quota_refusal_reads_the_transcript_again_later() {
+    let mut s = setup("adapter-then-outside", OUTSIDE);
+    append(&s.file, OUTSIDE);
+    let t0 = Instant::now();
+    let all = labels(&s.mirror.poll(t0, SystemTime::now()));
+    assert_eq!(all.len(), 6, "{all:?}");
+    assert!(s.mirror.poll(t0, SystemTime::now()).is_empty());
+
+    for _ in 0..all.len() {
+        s.mirror.defer(s.runtime, t0).unwrap();
+    }
+    let early = t0 + QUOTA_RETRY - Duration::from_secs(1);
+    assert!(s.mirror.poll(early, SystemTime::now()).is_empty());
+    // A record written meanwhile waits as well.
+    let last_prompt = OUTSIDE
+        .lines()
+        .find(|l| {
+            l.contains("Reply with exactly: OUTSIDE-TURN") && l.contains("\"type\": \"user\"")
+        })
+        .unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(last_prompt).unwrap();
+    v["uuid"] = serde_json::json!(Uuid::new_v4());
+    v["parentUuid"] = serde_json::json!("e965b24b-6355-4c01-8f1e-d1a303611946");
+    v["message"]["content"] = serde_json::json!("one more");
+    append(&s.file, &format!("{v}\n"));
+    assert!(s.mirror.poll(early, SystemTime::now()).is_empty());
+
+    let later = t0 + QUOTA_RETRY;
+    let again = labels(&s.mirror.poll(later, SystemTime::now()));
+    assert_eq!(again[..all.len()], all[..], "the whole history again");
+    assert_eq!(again[all.len()..], ["user:one more"]);
+    assert!(s.mirror.poll(later, SystemTime::now()).is_empty());
+
+    // Refused again: another hour.
+    s.mirror.defer(s.runtime, later).unwrap();
+    assert!(s
+        .mirror
+        .poll(later + Duration::from_secs(60), SystemTime::now())
+        .is_empty());
+    let third = labels(&s.mirror.poll(later + QUOTA_RETRY, SystemTime::now()));
+    assert_eq!(third, again);
 }

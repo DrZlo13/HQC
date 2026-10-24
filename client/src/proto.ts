@@ -489,6 +489,12 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'workspace_path');
     bool(p, 'enabled');
   },
+  // T21: the inbox folders (or the scratch folder) of an archived or deleted session.
+  'session.cleanup': (p) => {
+    str(p, 'session_id');
+    optStr(p, 'workspace_path');
+    str(p, 'cwd');
+  },
   'mirror.event': (p) => {
     str(p, 'workspace_path');
     str(p, 'runtime_session_id');
@@ -914,6 +920,8 @@ export interface ReplaceableWorker {
   last_seen?: string;
   /** Sessions on it that are neither archived nor its service session. */
   sessions_count: number;
+  /** It last reported the same machine fingerprint as the enrolling worker (T21). */
+  same_machine?: boolean;
 }
 
 export function parseEnrollInfo(v: unknown): EnrollInfo {
@@ -934,6 +942,7 @@ export function parseEnrollInfo(v: unknown): EnrollInfo {
             status: str(w, 'status'),
             last_seen: optStr(w, 'last_seen'),
             sessions_count: num(w, 'sessions_count'),
+            same_machine: w.same_machine === true,
           };
         }),
   };

@@ -47,3 +47,7 @@ archived or deleted: remove its inbox folders, or the scratch folder of a sessio
 workspace. `worker.hello.machine.json` and `api.enroll.request.machine.json` carry the machine
 fingerprint `machine_id`; in `api.enroll.info.replace.json` a worker of the same machine has
 `same_machine`; `api.workspace.patch.mirror.request.json` switches the mirror of a workspace.
+
+T24: `hub.title.request.json` — the hub asks the session's worker for a title by the first prompt
+and the first final answer (each cut to 2000 characters); `worker.result.title.json` is the
+answer, one line of at most 60 characters. A failure is a plain `error` with the same `id`.

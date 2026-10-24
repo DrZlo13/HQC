@@ -558,6 +558,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::WorkspaceListCandidates(_) => "workspace.list_candidates",
         HubFrame::MirrorSet(_) => "mirror.set",
         HubFrame::SessionCleanup(_) => "session.cleanup",
+        HubFrame::TitleRequest(_) => "title.request",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

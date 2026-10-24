@@ -19,6 +19,7 @@ pub mod mirror;
 pub mod outbox;
 pub mod permissions;
 pub mod supervisor;
+pub mod title;
 pub mod token;
 pub mod worker_log;
 

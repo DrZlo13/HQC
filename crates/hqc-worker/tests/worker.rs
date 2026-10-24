@@ -1090,3 +1090,61 @@ async fn inbox_refusals() {
         .any(|c| matches!(c, FakeCall::Input { .. })));
     w.stop().await;
 }
+
+// T24: `title.request` runs a one-off `claude -p` outside every session and answers with
+// `result {title}`; a failing run is an `error`, and nothing reaches the session adapters.
+#[tokio::test]
+async fn title_request_runs_claude_once() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let bin = env.dir.path().join("claude");
+    let result = json!({"type": "result", "subtype": "success", "is_error": false,
+                        "result": "«Починка\nсборки»."});
+    write(
+        &bin,
+        &format!("#!/bin/sh\ncat > /dev/null\nprintf '%s' '{result}'\n"),
+    );
+    let exec = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(&bin, exec).unwrap();
+    let mut config = env.config(&hub.url());
+    config.claude_bin = Some(bin.clone());
+    config.scratch_root = env.dir.path().join("home/scratch");
+    let w = start_worker_with(&env, config, &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    let id = c
+        .frame(
+            "title.request",
+            json!({"request_id": "h-5", "session_id": sid, "user_text": "почини сборку",
+                   "agent_text": "готово"}),
+        )
+        .await;
+    let r = c.expect("result").await;
+    assert_eq!(r["id"], id.as_str());
+    assert_eq!(
+        r["payload"],
+        json!({"request_id": "h-5", "title": "Починка сборки"})
+    );
+    let titles = env.dir.path().join("home/titles");
+    assert_eq!(
+        std::fs::read_dir(&titles).unwrap().count(),
+        0,
+        "run folder removed"
+    );
+
+    write(&bin, "#!/bin/sh\necho 'Not logged in' >&2\nexit 1\n");
+    let id = c
+        .frame(
+            "title.request",
+            json!({"request_id": "h-6", "session_id": sid, "user_text": "a", "agent_text": ""}),
+        )
+        .await;
+    let e = c.expect("error").await;
+    assert_eq!(e["id"], id.as_str());
+    let msg = e["payload"]["message"].as_str().unwrap();
+    assert!(msg.contains("Not logged in"), "{e}");
+    assert!(adapters.calls().is_empty(), "{:?}", adapters.calls());
+    w.stop().await;
+}

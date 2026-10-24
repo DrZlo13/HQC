@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>hqc — сессии (телефон)</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#0F1115}
+a{color:#9DB2FF}a:hover{color:#C3D0FF}
+.mrow{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;min-height:44px;text-decoration:none;color:#E6E8EB}
+.mrow:hover{background:#171A20;color:#E6E8EB}
+.seg{height:34px;border:0;border-radius:7px;background:transparent;color:#9AA1AB;font:500 13px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:#252A35;color:#F1F3F5}
+.chip{flex:0 0 auto;height:36px;padding:0 14px;border-radius:18px;border:1px solid #262B35;background:#15181E;color:#9AA1AB;font:500 14px Inter,system-ui,sans-serif;display:flex;align-items:center;gap:8px;cursor:pointer}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+
+<div style="position: relative; width: 390px; height: 844px; overflow: hidden; background: #0F1115; color: #E6E8EB; font-family: Inter, system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.45; display: flex; flex-direction: column">
+
+  <header style="padding: 16px 16px 8px; display: flex; flex-direction: column; gap: 12px">
+    <div style="display: flex; align-items: center; gap: 4px">
+      <h1 style="flex: 1; margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -.01em">Сессии</h1>
+      <button aria-label="Поиск по названию и пути" style="width: 44px; height: 44px; border-radius: 22px; border: 0; background: transparent; color: #C9CFD8; display: flex; align-items: center; justify-content: center; cursor: pointer">
+        <svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="9" r="5.5"></circle><path d="M13.5 13.5l4 4"></path></svg>
+      </button>
+      <button aria-label="Аккаунт и настройки" style="width: 44px; height: 44px; border-radius: 22px; border: 0; background: transparent; display: flex; align-items: center; justify-content: center; cursor: pointer">
+        <span style="width: 32px; height: 32px; border-radius: 16px; background: #2A3142; color: #C9CFD8; font: 600 13px Inter, system-ui, sans-serif; display: flex; align-items: center; justify-content: center">D</span>
+      </button>
+    </div>
+
+    <div role="group" aria-label="Проекты" style="display: flex; gap: 8px; overflow-x: auto; margin: 0 -16px; padding: 0 16px 2px">
+      <button class="chip" aria-pressed="true" style="background: #1C2230; color: #F1F3F5; border-color: {{accent}}">HQC<span style="min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center">1</span></button>
+      <button class="chip" aria-pressed="false">physics-mp<span style="min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center">1</span></button>
+      <button class="chip" aria-pressed="false">Личный</button>
+      <button class="chip" aria-label="Новый проект" style="padding: 0 12px; border-style: dashed">
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg>
+      </button>
+    </div>
+
+    <div role="group" aria-label="Порядок сессий" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 10px; background: #15181E; border: 1px solid #222731">
+      <sc-for list="{{modes}}" as="m" hint-placeholder-count="3">
+        <button class="{{m.cls}}" aria-pressed="{{m.pressed}}" onClick="{{m.pick}}">{{m.label}}</button>
+      </sc-for>
+    </div>
+  </header>
+
+  <div style="flex: 1; overflow-y: auto; padding-bottom: 96px">
+    <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+      <section style="padding-top: 10px">
+        <div style="display: flex; align-items: center; gap: 6px; padding: 4px 16px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase">
+          <span style="color: {{g.color}}">{{g.label}}</span>
+          <span style="color: #858C97">{{g.count}}</span>
+          <span style="flex: 1"></span>
+          <span style="color: #858C97; font-weight: 400; letter-spacing: 0; text-transform: none">{{g.hint}}</span>
+        </div>
+        <sc-for list="{{g.items}}" as="item" hint-placeholder-count="2">
+          <div draggable="{{item.draggable}}" onDragStart="{{item.onStart}}" onDragOver="{{item.onOver}}" onDrop="{{item.onDrop}}" onDragEnd="{{item.onEnd}}" style="{{item.wrapStyle}}">
+            <a class="mrow" href="{{item.href}}">
+              <span class="{{item.dotClass}}" style="{{item.dotStyle}}"></span>
+              <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+                <span style="display: flex; gap: 8px; align-items: baseline">
+                  <span style="flex: 1; min-width: 0; font-weight: 600; color: {{item.titleColor}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.title}}</span>
+                  <sc-if value="{{item.showWhen}}" hint-placeholder-val="{{ false }}">
+                    <span style="flex: 0 0 auto; font-size: 12px; color: #858C97; font-variant-numeric: tabular-nums">{{item.when}}</span>
+                  </sc-if>
+                </span>
+                <span style="font-size: 13px; color: {{item.subColor}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.sub}}</span>
+                <span style="font: 12px/1.5 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #858C97; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.where}}</span>
+              </span>
+              <sc-if value="{{item.custom}}" hint-placeholder-val="{{ false }}">
+                <svg aria-hidden="true" style="flex: 0 0 18px; align-self: center; color: #5B616C" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h12M4 10h12M4 13h12"></path></svg>
+              </sc-if>
+            </a>
+          </div>
+        </sc-for>
+      </section>
+    </sc-for>
+
+    <section style="margin: 18px 16px 0; padding-top: 14px; border-top: 1px solid #1E222A; display: flex; flex-direction: column; gap: 8px">
+      <div style="font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #9AA1AB">Воркеры</div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 14px">
+        <span style="width: 8px; height: 8px; border-radius: 4px; background: #4FC58A"></span>
+        <span style="flex: 1">drzlo-mac</span>
+        <span style="color: #858C97; font-size: 13px">1 активная</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 14px">
+        <span style="width: 8px; height: 8px; border-radius: 4px; background: #4FC58A"></span>
+        <span style="flex: 1">home-mac</span>
+        <span style="color: #858C97; font-size: 13px">нет активных</span>
+      </div>
+    </section>
+  </div>
+
+  <button aria-label="Новая сессия" style="position: absolute; right: 16px; bottom: 24px; height: 56px; padding: 0 20px 0 16px; border-radius: 28px; border: 0; background: {{accent}}; color: #0B0E16; font: 600 15px Inter, system-ui, sans-serif; display: flex; align-items: center; gap: 8px; cursor: pointer; box-shadow: 0 8px 24px rgba(0,0,0,.45)">
+    <svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg>
+    Новая
+  </button>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#8FA8FF","options":["#8FA8FF","#6FD3C7","#F2B35B","#C9A2FF"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { mode: 'state', order: ['t12', 'sdk', 'cli', 'vsc', 's2', 's4', 's5'], dragId: null, overId: null };
+  }
+  sessions() {
+    return [
+      { id: 't12', title: 'тест 12', state: 'wait', sub: 'Ждёт разрешения · Bash', worker: 'drzlo-mac', path: '~/work/hqc', when: '19:47', day: 'today', rank: 0 },
+      { id: 'vsc', title: 'Тестовое сообщение из VSCode', state: 'idle', sub: 'Свободна', worker: 'drzlo-mac', path: '~/work/hqc', when: '17:30', day: 'today', rank: 1 },
+      { id: 's5', title: 'Сессия 5', state: 'idle', sub: 'Свободна', worker: 'home-mac', path: '~/work/hqc', when: '14:05', day: 'today', rank: 2 },
+      { id: 'sdk', title: 'EP-sdk-cli', state: 'idle', sub: 'Свободна', worker: 'drzlo-mac', path: '~/work/ep/sdk-cli', when: 'вчера', day: 'yesterday', rank: 3 },
+      { id: 'cli', title: 'EP-cli', state: 'idle', sub: 'Свободна', worker: 'drzlo-mac', path: '~/work/ep/cli', when: 'вчера', day: 'yesterday', rank: 4 },
+      { id: 's4', title: 'Сессия 4', state: 'idle', sub: 'Свободна', worker: 'home-mac', path: '~/work/hqc/tools', when: '21 окт', day: 'earlier', rank: 5 },
+      { id: 's2', title: 'Сессия 2', state: 'idle', sub: 'Свободна', worker: 'home-mac', path: '~/work/hqc', when: '20 окт', day: 'earlier', rank: 6 }
+    ];
+  }
+  move(from, to) {
+    if (!from || !to || from === to) return;
+    const o = this.state.order.slice();
+    const fi = o.indexOf(from);
+    const ti = o.indexOf(to);
+    o.splice(fi, 1);
+    o.splice(o.indexOf(to) + (fi < ti ? 1 : 0), 0, from);
+    this.setState({ order: o, dragId: null, overId: null });
+  }
+  renderVals() {
+    const accent = this.props.accent ?? '#8FA8FF';
+    const st = this.state;
+    const S = this.sessions();
+    const byId = {};
+    S.forEach((s) => { byId[s.id] = s; });
+    const custom = st.mode === 'custom';
+    const deco = (s) => {
+      const dot = s.state === 'wait' ? 'background:#F2B35B' : (s.state === 'run' ? 'background:' + accent : 'box-shadow: inset 0 0 0 1.5px #6B7280');
+      let wrap = '';
+      if (custom && st.dragId === s.id) wrap += 'opacity:.4;';
+      if (custom && st.dragId && st.overId === s.id && st.dragId !== s.id) {
+        const down = st.order.indexOf(st.dragId) < st.order.indexOf(s.id);
+        wrap += 'box-shadow: inset 0 ' + (down ? '-2px' : '2px') + ' 0 ' + accent + ';';
+      }
+      return Object.assign({}, s, {
+        href: s.id === 't12' ? 'Mobile-Session.dc.html' : '#',
+        where: s.worker + ' · ' + s.path.replace(/^~\/work\//, ''),
+        dotStyle: 'flex:0 0 10px;height:10px;margin-top:6px;border-radius:5px;' + dot,
+        dotClass: s.state === 'run' ? 'pulse' : '',
+        subColor: s.state === 'wait' ? '#E0B06A' : '#9AA1AB',
+        titleColor: s.state === 'idle' ? '#D7DCE3' : '#F1F3F5',
+        showWhen: st.mode === 'recent',
+        custom: custom,
+        draggable: custom ? 'true' : 'false',
+        wrapStyle: wrap,
+        onStart: custom ? (e) => { try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', s.id); } catch (_) {} this.setState({ dragId: s.id }); } : undefined,
+        onOver: custom ? (e) => { e.preventDefault(); if (this.state.overId !== s.id) this.setState({ overId: s.id }); } : undefined,
+        onDrop: custom ? (e) => { e.preventDefault(); this.move(this.state.dragId, s.id); } : undefined,
+        onEnd: custom ? () => this.setState({ dragId: null, overId: null }) : undefined
+      });
+    };
+    const byRank = S.slice().sort((a, b) => a.rank - b.rank);
+    let groups;
+    if (st.mode === 'state') {
+      groups = [
+        { label: 'Ждёт вас', color: '#F2B35B', items: byRank.filter((s) => s.state === 'wait') },
+        { label: 'Работает', color: '#9AA1AB', items: byRank.filter((s) => s.state === 'run') },
+        { label: 'Свободны', color: '#9AA1AB', items: byRank.filter((s) => s.state === 'idle') }
+      ];
+    } else if (st.mode === 'recent') {
+      groups = [
+        { label: 'Сегодня', color: '#9AA1AB', items: byRank.filter((s) => s.day === 'today') },
+        { label: 'Вчера', color: '#9AA1AB', items: byRank.filter((s) => s.day === 'yesterday') },
+        { label: 'Раньше', color: '#9AA1AB', items: byRank.filter((s) => s.day === 'earlier') }
+      ];
+    } else {
+      groups = [{ label: 'Свой порядок', color: '#9AA1AB', hint: 'удерживайте и тяните', items: st.order.map((id) => byId[id]) }];
+    }
+    groups = groups.filter((g) => g.items.length).map((g) => Object.assign({ hint: '' }, g, { count: custom ? '' : String(g.items.length), items: g.items.map(deco) }));
+    const modes = [['state', 'Состояние'], ['recent', 'Недавние'], ['custom', 'Свой']].map((m) => ({
+      label: m[1],
+      cls: st.mode === m[0] ? 'seg on' : 'seg',
+      pressed: st.mode === m[0] ? 'true' : 'false',
+      pick: () => this.setState({ mode: m[0], dragId: null, overId: null })
+    }));
+    return { accent: accent, groups: groups, modes: modes };
+  }
+}
+</script>
+</body>
+</html>

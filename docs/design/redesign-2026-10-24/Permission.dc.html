@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>hqc — запрос разрешения</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#0F1115}
+a{color:#9DB2FF}a:hover{color:#C3D0FF}
+code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:#1A1E26;border:1px solid #252A34;border-radius:5px;padding:1px 5px;color:#D7DCE3}
+.ghost:hover{background:#1C2029;color:#E6E8EB}
+.sess{text-align:left;width:100%;border:0;background:transparent;color:inherit;font:inherit;padding:8px;border-radius:8px;cursor:pointer;display:flex;gap:10px}
+.sess:hover{background:#191C23}
+.sess.on{background:#1C2029}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:#9AA1AB;font:500 12px Inter,system-ui,sans-serif;cursor:pointer}
+.seg:hover{color:#E6E8EB}
+.seg.on{background:#252A35;color:#F1F3F5}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 5px;border-radius:4px;background:rgba(0,0,0,.18);margin-left:8px}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+
+<div style="min-height: 900px; display: flex; flex-wrap: wrap; background: #0F1115; color: #E6E8EB; font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 14px; line-height: 1.55">
+
+  <!-- Rail: projects -->
+  <nav aria-label="Проекты" style="flex: 0 0 68px; background: #0A0C0F; border-right: 1px solid #1E222A; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 0">
+    <div style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; letter-spacing: .02em; color: #9AA1AB">hqc</div>
+    <div style="width: 28px; height: 1px; background: #1E222A; margin: 2px 0 4px"></div>
+    <div style="position: relative">
+      <button aria-label="physics-mp" class="ghost" style="width: 44px; height: 44px; border-radius: 12px; border: 0; background: #15181E; color: #9AA1AB; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer">PM</button>
+      <span style="position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; border: 2px solid #0A0C0F">1</span>
+    </div>
+    <div style="position: relative">
+      <button aria-label="HQC" style="width: 44px; height: 44px; border-radius: 12px; border: 0; background: #1C2230; color: #E6E8EB; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer; box-shadow: 0 0 0 2px {{accent}}">HQ</button>
+      <span style="position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; border: 2px solid #0A0C0F">1</span>
+    </div>
+    <button aria-label="Личный" class="ghost" style="width: 44px; height: 44px; border-radius: 12px; border: 0; background: #15181E; color: #9AA1AB; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer">Л</button>
+    <button aria-label="Новый проект" class="ghost" style="width: 44px; height: 44px; border-radius: 12px; border: 1px dashed #2E3440; background: transparent; color: #8B929C; cursor: pointer; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg>
+    </button>
+    <div style="flex: 1"></div>
+    <button aria-label="Настройки" class="ghost" style="width: 44px; height: 44px; border-radius: 12px; border: 0; background: transparent; color: #8B929C; cursor: pointer; display: flex; align-items: center; justify-content: center">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 6h14M3 14h14"></path><circle cx="7" cy="6" r="2" fill="#0A0C0F"></circle><circle cx="13" cy="14" r="2" fill="#0A0C0F"></circle></svg>
+    </button>
+    <div title="who.just.the.doctor@gmail.com" style="width: 32px; height: 32px; border-radius: 16px; background: #2A3142; color: #C9CFD8; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center">D</div>
+  </nav>
+
+  <!-- Sidebar: sessions -->
+  <aside aria-label="Сессии проекта" style="flex: 1 1 270px; max-width: 300px; background: #121419; border-right: 1px solid #1E222A; display: flex; flex-direction: column">
+    <div style="padding: 16px 16px 12px; display: flex; align-items: center; gap: 8px">
+      <div style="flex: 1; min-width: 0">
+        <div style="font-size: 15px; font-weight: 600">HQC</div>
+        <div style="font-size: 12px; color: #8B929C">1 ждёт вас · 6 свободны</div>
+      </div>
+      <button aria-label="Новая сессия" style="height: 34px; padding: 0 12px; border-radius: 8px; border: 0; background: {{accent}}; color: #0B0E16; font: 600 13px Inter, system-ui, sans-serif; cursor: pointer; display: flex; align-items: center; gap: 6px">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg>
+        Новая
+      </button>
+    </div>
+    <div style="padding: 0 12px 10px; display: flex; flex-direction: column; gap: 8px">
+      <label style="display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: 8px; background: #0F1115; border: 1px solid #222731; color: #8B929C">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="9" r="5"></circle><path d="M13 13l4 4"></path></svg>
+        <input aria-label="Поиск сессий" placeholder="Поиск сессий" style="flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: #E6E8EB; font: 13px Inter, system-ui, sans-serif">
+      </label>
+      <div role="group" aria-label="Порядок сессий" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 9px; background: #0F1115; border: 1px solid #222731">
+        <sc-for list="{{modes}}" as="m" hint-placeholder-count="3">
+          <button class="{{m.cls}}" aria-pressed="{{m.pressed}}" onClick="{{m.pick}}">{{m.label}}</button>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="flex: 1; overflow-y: auto; padding: 4px 8px 12px; display: flex; flex-direction: column; gap: 14px">
+      <sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+        <div style="display: flex; flex-direction: column; gap: 2px">
+          <div style="display: flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase">
+            <span style="color: {{g.color}}">{{g.label}}</span>
+            <span style="color: #6F7682">{{g.count}}</span>
+            <span style="flex: 1"></span>
+            <span style="color: #6F7682; font-weight: 400; letter-spacing: 0; text-transform: none">{{g.hint}}</span>
+          </div>
+          <sc-for list="{{g.items}}" as="item" hint-placeholder-count="2">
+            <div draggable="{{item.draggable}}" onDragStart="{{item.onStart}}" onDragOver="{{item.onOver}}" onDrop="{{item.onDrop}}" onDragEnd="{{item.onEnd}}" style="{{item.wrapStyle}}">
+              <button class="{{item.rowClass}}" aria-current="{{item.current}}">
+                <sc-if value="{{item.custom}}" hint-placeholder-val="{{ false }}">
+                  <svg aria-hidden="true" style="flex: 0 0 10px; margin-top: 5px; color: #5B616C; cursor: grab" width="10" height="14" viewBox="0 0 10 14" fill="currentColor"><circle cx="2.5" cy="2.5" r="1.3"></circle><circle cx="7.5" cy="2.5" r="1.3"></circle><circle cx="2.5" cy="7" r="1.3"></circle><circle cx="7.5" cy="7" r="1.3"></circle><circle cx="2.5" cy="11.5" r="1.3"></circle><circle cx="7.5" cy="11.5" r="1.3"></circle></svg>
+                </sc-if>
+                <span class="{{item.dotClass}}" style="{{item.dotStyle}}"></span>
+                <span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+                  <span style="display: flex; gap: 8px; align-items: baseline">
+                    <span style="flex: 1; min-width: 0; font-weight: 500; color: {{item.titleColor}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.title}}</span>
+                    <sc-if value="{{item.showWhen}}" hint-placeholder-val="{{ false }}">
+                      <span style="flex: 0 0 auto; font-size: 11px; color: #6F7682; font-variant-numeric: tabular-nums">{{item.when}}</span>
+                    </sc-if>
+                  </span>
+                  <span style="font-size: 12px; color: {{item.subColor}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.sub}}</span>
+                  <span title="{{item.where}}" style="margin-top: 1px; font: 11.5px/1.5 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #858C97; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.where}}</span>
+                </span>
+              </button>
+            </div>
+          </sc-for>
+        </div>
+      </sc-for>
+    </div>
+
+    <!-- Workers -->
+    <div style="border-top: 1px solid #1E222A; padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 8px">
+      <div style="font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #8B929C">Воркеры</div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 13px">
+        <span style="width: 8px; height: 8px; border-radius: 4px; background: #4FC58A"></span>
+        <span style="flex: 1">drzlo-mac</span>
+        <span style="color: #8B929C; font-size: 12px">1 активная</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 13px">
+        <span style="width: 8px; height: 8px; border-radius: 4px; background: #4FC58A"></span>
+        <span style="flex: 1">home-mac</span>
+        <span style="color: #8B929C; font-size: 12px">нет активных</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main: session waiting for permission -->
+  <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column">
+    <header style="padding: 14px 28px; border-bottom: 1px solid #1E222A; display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+        <h1 style="margin: 0; font-size: 16px; font-weight: 600; line-height: 1.3">тест 12</h1>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: #9AA1AB">
+          <span style="{{chipStyle}}">
+            <span class="{{chipDotClass}}" style="{{chipDotStyle}}"></span>{{chipLabel}}
+          </span>
+          <span>drzlo-mac</span>
+          <span style="color: #4A505C">/</span>
+          <span style="display: inline-flex; align-items: center; gap: 4px"><span style="font-family: 'JetBrains Mono', ui-monospace, monospace; color: #C9CFD8">~/work/hqc</span><button aria-label="Скопировать путь" class="ghost" style="width: 24px; height: 24px; border-radius: 6px; border: 0; background: transparent; color: #8B929C; cursor: pointer; display: inline-flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="7" y="7" width="9" height="9" rx="2"></rect><path d="M4 13V5a1 1 0 0 1 1-1h8"></path></svg></button></span>
+          <span style="color: #4A505C">/</span>
+          <span>Opus 5.5</span>
+          <span style="color: #4A505C">/</span>
+          <span style="font-variant-numeric: tabular-nums">$0.07 за сессию</span>
+        </div>
+      </div>
+      <button class="ghost" style="height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid #2A2F3A; background: transparent; color: #C9CFD8; font: 500 13px Inter, system-ui, sans-serif; cursor: pointer; display: flex; align-items: center; gap: 8px">
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="1" y="1" width="10" height="10" rx="2"></rect></svg>Остановить
+      </button>
+      <button aria-label="Ещё: в архив, переименовать" class="ghost" style="width: 36px; height: 36px; border-radius: 8px; border: 0; background: transparent; color: #9AA1AB; cursor: pointer; display: flex; align-items: center; justify-content: center">
+        <svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><circle cx="4.5" cy="10" r="1.6"></circle><circle cx="10" cy="10" r="1.6"></circle><circle cx="15.5" cy="10" r="1.6"></circle></svg>
+      </button>
+    </header>
+
+    <div style="flex: 1; overflow-y: auto; padding: 24px 28px 32px; display: flex; justify-content: center">
+      <div style="width: 100%; max-width: 760px; display: flex; flex-direction: column; gap: 24px">
+
+        <div style="display: flex; align-items: center; gap: 12px; font-size: 12px; color: #6F7682">
+          <span style="flex: 1; height: 1px; background: #1E222A"></span>
+          <span>Сессия начата сегодня в 16:18</span>
+          <span style="flex: 1; height: 1px; background: #1E222A"></span>
+        </div>
+
+        <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px">
+          <div style="max-width: 80%; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: #1F2636; color: #EEF1F6">ntcn 12 f hfccrf;b rfr ns xbxftim nfrjq ntrcn&amp;</div>
+          <div style="font-size: 12px; color: #6F7682">16:18</div>
+        </div>
+
+        <article style="display: flex; flex-direction: column; gap: 12px; color: #D7DCE3">
+          <p style="margin: 0">Похоже, вы печатали на английской раскладке. Я прочитал это так: <strong style="color: #F1F3F5">«тест 12 а расскажи как ты читаешь такой текст?»</strong></p>
+          <p style="margin: 0">Как я это понимаю:</p>
+          <ol style="margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px">
+            <li><strong style="color: #F1F3F5">Узнаю шаблон.</strong> Строки вроде <code>ntcn</code>, <code>hfccrf;b</code>, <code>xbxftim</code> не похожи ни на один язык, но такие ошибки встречаются часто.</li>
+            <li><strong style="color: #F1F3F5">Сопоставляю клавиши.</strong> Каждая латинская буква стоит на той же клавише, что и русская в ЙЦУКЕН: <code>n→т</code>, <code>t→е</code>, <code>c→с</code>, <code>f→а</code> и так далее.</li>
+            <li><strong style="color: #F1F3F5">Проверяю по смыслу.</strong> Если после замены получаются осмысленные слова и связная фраза, гипотеза верна.</li>
+          </ol>
+          <p style="margin: 0">Можете писать как удобно, я пойму в любой раскладке.</p>
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: #6F7682; font-variant-numeric: tabular-nums">
+            <span>16:18</span><span>·</span><span>2 → 555 токенов</span><span>·</span><span>кэш 14,4k</span><span>·</span><span>$0.073</span>
+          </div>
+        </article>
+
+        <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px">
+          <div style="max-width: 80%; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: #1F2636; color: #EEF1F6">сделай ls /</div>
+          <div style="font-size: 12px; color: #6F7682">19:47</div>
+        </div>
+
+        <!-- Permission request: one card instead of tool row + panel -->
+        <sc-if value="{{pending}}" hint-placeholder-val="{{ true }}">
+          <section aria-label="Запрос разрешения" style="border-radius: 12px; background: #17150F; border: 1px solid #4A3A1E; overflow: hidden">
+            <div style="padding: 14px 16px 12px; display: flex; align-items: center; gap: 10px">
+              <span style="flex: 0 0 28px; height: 28px; border-radius: 8px; background: #2A2213; color: #F2B35B; display: flex; align-items: center; justify-content: center">
+                <svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.5v4.5c0 4-2.6 6.8-6 8-3.4-1.2-6-4-6-8V5z"></path></svg>
+              </span>
+              <div style="flex: 1; min-width: 0">
+                <div style="font-weight: 600; color: #F1F3F5">Агент хочет выполнить команду</div>
+                <div style="font-size: 12px; color: #B9A07A">Bash · List root directory</div>
+              </div>
+              <span style="font-size: 12px; color: #8B929C; font-variant-numeric: tabular-nums">ждёт 0:42</span>
+            </div>
+            <div style="margin: 0 16px; border-radius: 8px; background: #0B0D11; border: 1px solid #232833; overflow-x: auto">
+              <pre style="margin: 0; padding: 12px 14px; font: 13px/1.6 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #E6E8EB"><span style="color: #6F7682">$ </span>ls /</pre>
+            </div>
+            <div style="margin: 10px 16px 0; display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 1.5; color: #9AA1AB">
+              <svg aria-hidden="true" style="flex: 0 0 14px; margin-top: 2px" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="10" cy="10" r="7.5"></circle><path d="M10 9v5M10 6.2v.1"></path></svg>
+              <span>Правило воркера разрешает Bash, но Claude Code спросил сам: путь <code>/</code> вне рабочей папки <code>~/work/hqc</code>.</span>
+            </div>
+            <div style="padding: 14px 16px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px">
+              <button onClick="{{allow}}" style="height: 40px; padding: 0 16px; border-radius: 9px; border: 0; background: {{accent}}; color: #0B0E16; font: 600 14px Inter, system-ui, sans-serif; cursor: pointer; display: flex; align-items: center">Разрешить<span class="kbd">⏎</span></button>
+              <button onClick="{{allowSession}}" class="ghost" style="height: 40px; padding: 0 14px; border-radius: 9px; border: 1px solid #2E3440; background: #1A1D24; color: #E6E8EB; font: 500 14px Inter, system-ui, sans-serif; cursor: pointer">Всегда в этой сессии</button>
+              <span style="flex: 1"></span>
+              <button onClick="{{deny}}" class="ghost" style="height: 40px; padding: 0 12px; border-radius: 9px; border: 0; background: transparent; color: #C9CFD8; font: 500 14px Inter, system-ui, sans-serif; cursor: pointer; display: flex; align-items: center">Отклонить<span class="kbd" style="background: #232833">Esc</span></button>
+            </div>
+          </section>
+        </sc-if>
+
+        <sc-if value="{{resolved}}" hint-placeholder-val="{{ false }}">
+          <div style="display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #9AA1AB">
+              <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="{{resIconColor}}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="{{resIconPath}}"></path></svg>
+              <span style="font: 12.5px 'JetBrains Mono', ui-monospace, monospace; color: #C9CFD8">ls /</span>
+              <span>· {{resLabel}}</span>
+              <span style="flex: 1"></span>
+              <button onClick="{{reset}}" class="ghost" style="height: 28px; padding: 0 8px; border-radius: 6px; border: 0; background: transparent; color: #8B929C; font: 12px Inter, system-ui, sans-serif; cursor: pointer">Показать запрос снова</button>
+            </div>
+            <sc-if value="{{allowed}}" hint-placeholder-val="{{ true }}">
+              <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #12151B; border: 1px solid #1F2430">
+                <span class="pulse" style="flex: 0 0 8px; height: 8px; border-radius: 4px; background: {{accent}}"></span>
+                <span style="font-size: 13px; color: #C3D0FF">Выполняется</span>
+                <span style="flex: 1; min-width: 0; font: 12.5px 'JetBrains Mono', ui-monospace, monospace; color: #C9CFD8">ls /</span>
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
+
+      </div>
+    </div>
+
+    <!-- Composer -->
+    <div style="padding: 12px 28px 18px; border-top: 1px solid #1E222A; display: flex; justify-content: center">
+      <div style="width: 100%; max-width: 760px; display: flex; flex-direction: column; gap: 6px; padding: 10px 10px 10px 14px; border-radius: 12px; background: #161A21; border: 1px solid #2A2F3A">
+        <textarea aria-label="Сообщение" rows="2" placeholder="{{placeholder}}" style="resize: none; border: 0; outline: 0; background: transparent; color: #E6E8EB; font: 14px/1.5 Inter, system-ui, sans-serif; padding: 2px 0"></textarea>
+        <div style="display: flex; align-items: center; gap: 6px">
+          <button aria-label="Прикрепить файл" class="ghost" style="width: 34px; height: 34px; border-radius: 8px; border: 0; background: transparent; color: #8B929C; cursor: pointer; display: flex; align-items: center; justify-content: center">
+            <svg aria-hidden="true" width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 9.5l-5.8 5.8a3.5 3.5 0 0 1-5-5l6.4-6.4a2.3 2.3 0 0 1 3.3 3.3l-6.4 6.4a1.2 1.2 0 0 1-1.7-1.7l5.8-5.8"></path></svg>
+          </button>
+          <span style="flex: 1; font-size: 12px; color: #6F7682">{{composerHint}}</span>
+          <button aria-label="Отправить" style="width: 34px; height: 34px; border-radius: 8px; border: 0; background: {{accent}}; color: #0B0E16; cursor: pointer; display: flex; align-items: center; justify-content: center">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 16V4M5 9l5-5 5 5"></path></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#8FA8FF","options":["#8FA8FF","#6FD3C7","#F2B35B","#C9A2FF"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  sessions() {
+    return [
+      { id: 't12', title: 'тест 12', state: 'wait', sub: 'Ждёт разрешения · Bash', worker: 'drzlo-mac', path: '~/work/hqc', when: '19:47', day: 'today', rank: 0, active: true },
+      { id: 'vsc', title: 'Тестовое сообщение из VSCode', state: 'idle', sub: 'Свободна', worker: 'drzlo-mac', path: '~/work/hqc', when: '17:30', day: 'today', rank: 1 },
+      { id: 's5', title: 'Сессия 5', state: 'idle', sub: 'Свободна', worker: 'home-mac', path: '~/work/hqc', when: '14:05', day: 'today', rank: 2 },
+      { id: 'sdk', title: 'EP-sdk-cli', state: 'idle', sub: 'Свободна', worker: 'drzlo-mac', path: '~/work/ep/sdk-cli', when: 'вчера', day: 'yesterday', rank: 3 },
+      { id: 'cli', title: 'EP-cli', state: 'idle', sub: 'Свободна', worker: 'drzlo-mac', path: '~/work/ep/cli', when: 'вчера', day: 'yesterday', rank: 4 },
+      { id: 's4', title: 'Сессия 4', state: 'idle', sub: 'Свободна', worker: 'home-mac', path: '~/work/hqc/tools', when: '21 окт', day: 'earlier', rank: 5 },
+      { id: 's2', title: 'Сессия 2', state: 'idle', sub: 'Свободна', worker: 'home-mac', path: '~/work/hqc', when: '20 окт', day: 'earlier', rank: 6 }
+    ];
+  }
+  initialOrder() { return ['t12', 'sdk', 'cli', 'vsc', 's2', 's4', 's5']; }
+  extraState() { return { perm: 'pending' }; }
+  constructor(props) {
+    super(props);
+    this.state = Object.assign({ mode: 'state', order: this.initialOrder(), dragId: null, overId: null }, this.extraState());
+  }
+  move(from, to) {
+    if (!from || !to || from === to) return;
+    const o = this.state.order.slice();
+    const fi = o.indexOf(from);
+    const ti = o.indexOf(to);
+    o.splice(fi, 1);
+    o.splice(o.indexOf(to) + (fi < ti ? 1 : 0), 0, from);
+    this.setState({ order: o, dragId: null, overId: null });
+  }
+  sidebarVals(accent) {
+    const st = this.state;
+    const S = this.sessions();
+    const byId = {};
+    S.forEach((s) => { byId[s.id] = s; });
+    const custom = st.mode === 'custom';
+    const deco = (s) => {
+      const dot = s.state === 'wait' ? 'background:#F2B35B' : (s.state === 'run' ? 'background:' + accent : 'box-shadow: inset 0 0 0 1.5px #6B7280');
+      let wrap = 'border-radius:8px;';
+      if (custom && st.dragId === s.id) wrap += 'opacity:.4;';
+      if (custom && st.dragId && st.overId === s.id && st.dragId !== s.id) {
+        const down = st.order.indexOf(st.dragId) < st.order.indexOf(s.id);
+        wrap += 'box-shadow: inset 0 ' + (down ? '-2px' : '2px') + ' 0 ' + accent + ';';
+      }
+      return Object.assign({}, s, {
+        dotStyle: 'flex:0 0 8px;height:8px;margin-top:7px;border-radius:4px;' + dot,
+        where: s.worker + ' · ' + s.path.replace(/^~\/work\//, ''),
+        dotClass: s.state === 'run' ? 'pulse' : '',
+        subColor: s.state === 'wait' ? '#D9A960' : '#8B929C',
+        titleColor: s.state === 'idle' ? '#C9CFD8' : '#E6E8EB',
+        rowClass: s.active ? 'sess on' : 'sess',
+        current: s.active ? 'page' : 'false',
+        showWhen: st.mode === 'recent',
+        custom: custom,
+        draggable: custom ? 'true' : 'false',
+        wrapStyle: wrap,
+        onStart: custom ? (e) => { try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', s.id); } catch (_) {} this.setState({ dragId: s.id }); } : undefined,
+        onOver: custom ? (e) => { e.preventDefault(); if (this.state.overId !== s.id) this.setState({ overId: s.id }); } : undefined,
+        onDrop: custom ? (e) => { e.preventDefault(); this.move(this.state.dragId, s.id); } : undefined,
+        onEnd: custom ? () => this.setState({ dragId: null, overId: null }) : undefined
+      });
+    };
+    const byRank = S.slice().sort((a, b) => a.rank - b.rank);
+    let groups;
+    if (st.mode === 'state') {
+      groups = [
+        { label: 'Ждёт вас', color: '#F2B35B', items: byRank.filter((s) => s.state === 'wait') },
+        { label: 'Работает', color: '#9AA1AB', items: byRank.filter((s) => s.state === 'run') },
+        { label: 'Свободны', color: '#9AA1AB', items: byRank.filter((s) => s.state === 'idle') }
+      ];
+    } else if (st.mode === 'recent') {
+      groups = [
+        { label: 'Сегодня', color: '#9AA1AB', items: byRank.filter((s) => s.day === 'today') },
+        { label: 'Вчера', color: '#9AA1AB', items: byRank.filter((s) => s.day === 'yesterday') },
+        { label: 'Раньше', color: '#9AA1AB', items: byRank.filter((s) => s.day === 'earlier') }
+      ];
+    } else {
+      groups = [{ label: 'Свой порядок', color: '#9AA1AB', hint: 'перетаскивайте', items: st.order.map((id) => byId[id]) }];
+    }
+    groups = groups.filter((g) => g.items.length).map((g) => Object.assign({ hint: '' }, g, { count: custom ? '' : String(g.items.length), items: g.items.map(deco) }));
+    const modes = [['state', 'Состояние'], ['recent', 'Недавние'], ['custom', 'Свой']].map((m) => ({
+      label: m[1],
+      cls: st.mode === m[0] ? 'seg on' : 'seg',
+      pressed: st.mode === m[0] ? 'true' : 'false',
+      pick: () => this.setState({ mode: m[0], dragId: null, overId: null })
+    }));
+    return { groups: groups, modes: modes };
+  }
+  renderVals() {
+    const accent = this.props.accent ?? '#8FA8FF';
+    const perm = this.state.perm;
+    const sb = this.sidebarVals(accent);
+    const pending = perm === 'pending';
+    const denied = perm === 'denied';
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 11px; font-weight: 500; ';
+    return {
+      accent: accent,
+      groups: sb.groups,
+      modes: sb.modes,
+      pending: pending,
+      resolved: !pending,
+      allowed: perm === 'allowed' || perm === 'session',
+      resLabel: perm === 'session' ? 'разрешено до конца сессии' : (denied ? 'отклонено' : 'разрешено'),
+      resIconColor: denied ? '#9AA1AB' : '#4FC58A',
+      resIconPath: denied ? 'M5 5l10 10M15 5L5 15' : 'M4 10l4 4 8-8',
+      chipStyle: pending ? chip + 'background: #2A2213; color: #F2C27A' : (denied ? chip + 'background: #1C2029; color: #C9CFD8' : chip + 'background: #18203A; color: #C3D0FF'),
+      chipDotStyle: 'width: 6px; height: 6px; border-radius: 3px; background: ' + (pending ? '#F2B35B' : (denied ? '#6B7280' : accent)),
+      chipDotClass: pending ? '' : (denied ? '' : 'pulse'),
+      chipLabel: pending ? 'Ждёт разрешения' : (denied ? 'Ждёт ответа' : 'Работает'),
+      placeholder: pending ? 'Или напишите, что сделать вместо этого…' : 'Сообщение',
+      composerHint: pending ? 'Ответ отклонит команду и уйдёт агенту' : '',
+      allow: () => this.setState({ perm: 'allowed' }),
+      allowSession: () => this.setState({ perm: 'session' }),
+      deny: () => this.setState({ perm: 'denied' }),
+      reset: () => this.setState({ perm: 'pending' })
+    };
+  }
+}
+</script>
+</body>
+</html>

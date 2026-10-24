@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>hqc — запрос разрешения (телефон)</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#0F1115}
+a{color:#9DB2FF}a:hover{color:#C3D0FF}
+code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;background:#1A1E26;border:1px solid #252A34;border-radius:5px;padding:0 4px;color:#D7DCE3}
+.icon{width:44px;height:44px;border-radius:22px;border:0;background:transparent;color:#C9CFD8;display:flex;align-items:center;justify-content:center;cursor:pointer;text-decoration:none}
+.icon:hover{background:#1A1D24;color:#F1F3F5}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+
+<div style="width: 390px; height: 844px; overflow: hidden; background: #0F1115; color: #E6E8EB; font-family: Inter, system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.5; display: flex; flex-direction: column">
+
+  <header style="flex: 0 0 auto; padding: 6px 4px 6px; border-bottom: 1px solid #1E222A; display: flex; align-items: center; gap: 2px">
+    <a class="icon" href="Mobile-List.dc.html" aria-label="Назад к сессиям">
+      <svg aria-hidden="true" width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 4.5L7 10l5.5 5.5"></path></svg>
+    </a>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+      <div style="font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">тест 12</div>
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9AA1AB; min-width: 0">
+        <span class="{{dotClass}}" style="{{dotStyle}}"></span>
+        <span style="color: {{statusColor}}; white-space: nowrap">{{statusLabel}}</span>
+        <span style="color: #4A505C">·</span>
+        <span style="font-family: 'JetBrains Mono', ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">drzlo-mac · hqc</span>
+      </div>
+    </div>
+    <button class="icon" aria-label="Остановить агента">
+      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 12 12" fill="currentColor"><rect x="1" y="1" width="10" height="10" rx="2"></rect></svg>
+    </button>
+    <button class="icon" aria-label="Ещё: путь, модель, расход, архив">
+      <svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><circle cx="4.5" cy="10" r="1.7"></circle><circle cx="10" cy="10" r="1.7"></circle><circle cx="15.5" cy="10" r="1.7"></circle></svg>
+    </button>
+  </header>
+
+  <!-- Feed, scrolled to the latest -->
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding: 0 16px 16px; display: flex; flex-direction: column; justify-content: flex-end; gap: 18px">
+    <article style="display: flex; flex-direction: column; gap: 10px; color: #D7DCE3">
+      <p style="margin: 0">Похоже, вы печатали на английской раскладке. Я прочитал это так: <strong style="color: #F1F3F5">«тест 12 а расскажи как ты читаешь такой текст?»</strong></p>
+      <p style="margin: 0">Сопоставляю клавиши: латинская буква стоит на той же клавише, что и русская в ЙЦУКЕН, <code>n→т</code>, <code>t→е</code>, <code>c→с</code>. Потом проверяю, складываются ли слова в смысл.</p>
+      <p style="margin: 0">Можете писать как удобно, я пойму в любой раскладке.</p>
+      <div style="font-size: 12px; color: #858C97">16:18 · $0.073</div>
+    </article>
+
+    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px">
+      <div style="max-width: 80%; padding: 9px 14px; border-radius: 16px 16px 4px 16px; background: #1F2636; color: #EEF1F6">сделай ls /</div>
+      <div style="font-size: 12px; color: #858C97">19:47</div>
+    </div>
+
+    <sc-if value="{{resolved}}" hint-placeholder-val="{{ false }}">
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #9AA1AB">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="{{resIconColor}}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="{{resIconPath}}"></path></svg>
+          <span style="font: 13px 'JetBrains Mono', ui-monospace, monospace; color: #C9CFD8">ls /</span>
+          <span>· {{resLabel}}</span>
+        </div>
+        <sc-if value="{{allowed}}" hint-placeholder-val="{{ true }}">
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #12151B; border: 1px solid #1F2430">
+            <span class="pulse" style="flex: 0 0 8px; height: 8px; border-radius: 4px; background: {{accent}}"></span>
+            <span style="font-size: 14px; color: #C3D0FF">Выполняется</span>
+            <span style="font: 13px 'JetBrains Mono', ui-monospace, monospace; color: #C9CFD8">ls /</span>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+  </div>
+
+  <!-- Permission sheet replaces the composer while pending -->
+  <sc-if value="{{pending}}" hint-placeholder-val="{{ true }}">
+    <section aria-label="Запрос разрешения" style="flex: 0 0 auto; border-radius: 18px 18px 0 0; background: #17150F; border-top: 1px solid #4A3A1E; padding: 16px 16px 22px; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 -12px 32px rgba(0,0,0,.4)">
+      <div style="display: flex; align-items: center; gap: 10px">
+        <span style="flex: 0 0 32px; height: 32px; border-radius: 9px; background: #2A2213; color: #F2B35B; display: flex; align-items: center; justify-content: center">
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.5v4.5c0 4-2.6 6.8-6 8-3.4-1.2-6-4-6-8V5z"></path></svg>
+        </span>
+        <div style="flex: 1; min-width: 0">
+          <div style="font-weight: 600; color: #F1F3F5">Выполнить команду?</div>
+          <div style="font-size: 13px; color: #B9A07A">Bash · List root directory</div>
+        </div>
+        <span style="font-size: 12px; color: #9AA1AB; font-variant-numeric: tabular-nums">0:42</span>
+      </div>
+      <div style="border-radius: 10px; background: #0B0D11; border: 1px solid #232833; overflow-x: auto">
+        <pre style="margin: 0; padding: 12px 14px; font: 14px/1.6 'JetBrains Mono', ui-monospace, Menlo, monospace; color: #E6E8EB"><span style="color: #6F7682">$ </span>ls /</pre>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.45; color: #9AA1AB">
+        <svg aria-hidden="true" style="flex: 0 0 14px; margin-top: 2px" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="10" cy="10" r="7.5"></circle><path d="M10 9v5M10 6.2v.1"></path></svg>
+        <span>Правило разрешает Bash, но Claude Code спросил сам: путь <code>/</code> вне <code>hqc</code>.</span>
+      </div>
+      <button onClick="{{allow}}" style="height: 50px; border-radius: 12px; border: 0; background: {{accent}}; color: #0B0E16; font: 600 16px Inter, system-ui, sans-serif; cursor: pointer">Разрешить</button>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+        <button onClick="{{allowSession}}" style="height: 46px; border-radius: 12px; border: 1px solid #2E3440; background: #1A1D24; color: #E6E8EB; font: 500 15px Inter, system-ui, sans-serif; cursor: pointer">Всегда в сессии</button>
+        <button onClick="{{deny}}" style="height: 46px; border-radius: 12px; border: 1px solid #2E3440; background: #1A1D24; color: #E6E8EB; font: 500 15px Inter, system-ui, sans-serif; cursor: pointer">Отклонить</button>
+      </div>
+      <button onClick="{{reply}}" style="height: 44px; border: 0; background: transparent; color: #9DB2FF; font: 500 15px Inter, system-ui, sans-serif; cursor: pointer">Ответить текстом вместо этого</button>
+    </section>
+  </sc-if>
+
+  <sc-if value="{{showComposer}}" hint-placeholder-val="{{ false }}">
+    <div style="flex: 0 0 auto; border-top: 1px solid #1E222A; padding: 10px 12px 22px; display: flex; flex-direction: column; gap: 8px">
+      <sc-if value="{{replying}}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-radius: 10px; background: #17150F; border: 1px solid #4A3A1E; font-size: 13px; color: #E0B06A">
+          <span style="flex: 1">Ответ отклонит <code>ls /</code> и уйдёт агенту</span>
+          <button onClick="{{cancelReply}}" aria-label="Вернуться к запросу" class="icon" style="width: 32px; height: 32px; color: #E0B06A">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"></path></svg>
+          </button>
+        </div>
+      </sc-if>
+      <div style="display: flex; align-items: flex-end; gap: 6px">
+        <button class="icon" aria-label="Прикрепить файл" style="width: 44px; height: 44px; color: #9AA1AB">
+          <svg aria-hidden="true" width="19" height="19" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 9.5l-5.8 5.8a3.5 3.5 0 0 1-5-5l6.4-6.4a2.3 2.3 0 0 1 3.3 3.3l-6.4 6.4a1.2 1.2 0 0 1-1.7-1.7l5.8-5.8"></path></svg>
+        </button>
+        <textarea aria-label="Сообщение" rows="1" placeholder="{{placeholder}}" style="flex: 1; min-width: 0; min-height: 44px; box-sizing: border-box; resize: none; border-radius: 22px; border: 1px solid #2A2F3A; background: #161A21; color: #E6E8EB; font: 15px/1.4 Inter, system-ui, sans-serif; padding: 11px 16px; outline: 0"></textarea>
+        <button aria-label="Отправить" style="flex: 0 0 44px; height: 44px; border-radius: 22px; border: 0; background: {{accent}}; color: #0B0E16; display: flex; align-items: center; justify-content: center; cursor: pointer">
+          <svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 16V4M5 9l5-5 5 5"></path></svg>
+        </button>
+      </div>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#8FA8FF","options":["#8FA8FF","#6FD3C7","#F2B35B","#C9A2FF"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { perm: 'pending' };
+  }
+  renderVals() {
+    const accent = this.props.accent ?? '#8FA8FF';
+    const perm = this.state.perm;
+    const pending = perm === 'pending';
+    const replying = perm === 'reply';
+    const denied = perm === 'denied';
+    const allowed = perm === 'allowed' || perm === 'session';
+    const waiting = pending || replying;
+    return {
+      accent: accent,
+      pending: pending,
+      replying: replying,
+      showComposer: !pending,
+      resolved: allowed || denied,
+      allowed: allowed,
+      resLabel: perm === 'session' ? 'разрешено до конца сессии' : (denied ? 'отклонено' : 'разрешено'),
+      resIconColor: denied ? '#9AA1AB' : '#4FC58A',
+      resIconPath: denied ? 'M5 5l10 10M15 5L5 15' : 'M4 10l4 4 8-8',
+      statusLabel: waiting ? 'Ждёт разрешения' : (denied ? 'Ждёт ответа' : 'Работает'),
+      statusColor: waiting ? '#E0B06A' : '#9AA1AB',
+      dotStyle: 'flex: 0 0 7px; height: 7px; border-radius: 4px; background: ' + (waiting ? '#F2B35B' : (denied ? '#6B7280' : accent)),
+      dotClass: allowed ? 'pulse' : '',
+      placeholder: replying ? 'Что сделать вместо этого?' : 'Сообщение',
+      allow: () => this.setState({ perm: 'allowed' }),
+      allowSession: () => this.setState({ perm: 'session' }),
+      deny: () => this.setState({ perm: 'denied' }),
+      reply: () => this.setState({ perm: 'reply' }),
+      cancelReply: () => this.setState({ perm: 'pending' })
+    };
+  }
+}
+</script>
+</body>
+</html>

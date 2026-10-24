@@ -1,90 +1,97 @@
-# T26: вопросы и расхождения с макетами
+# T26: questions and differences from the mockups
 
-Редизайн клиента по `docs/design/redesign-2026-10-24` (Main, Permission, Mobile-List,
-Mobile-Session), SPEC 0.27. Скриншоты на моке (headless Chromium, 1440×900 и 390×844) сверены
-с макетами глазами; в репозиторий не кладутся.
+Client redesign by `docs/design/redesign-2026-10-24` (Main, Permission, Mobile-List,
+Mobile-Session), SPEC 0.27. Screenshots on the mock (headless Chromium, 1440×900 and 390×844)
+were compared with the mockups by eye; they are not committed to the repository.
 
-## Ответ текстом: живые прогоны
+## Reply with text: live runs
 
-Два прогона из двух разрешённых, `tools/spike/driver.py --deny-message-file`, Claude Code
-**2.1.308**, `claude-haiku-5-5`, `--max-turns 2`, промпт «Run the shell command: touch
-hqc-marker. Then reply with exactly: DONE», ответ на `can_use_tool` — `deny` с текстом:
+Two runs of the two allowed, `tools/spike/driver.py --deny-message-file`, Claude Code
+**2.1.308**, `claude-haiku-5-5`, `--max-turns 2`, prompt "Run the shell command: touch
+hqc-marker. Then reply with exactly: DONE", the answer to `can_use_tool` is a `deny` with text:
 
-| прогон | `message` | что сделала модель |
+| run | `message` | what the model did |
 |---|---|---|
-| 1 | «The user denied this tool call and wrote instead:\nDo not create any file. Reply with exactly: PELICAN-42» | текст увидела (пересказала), но не выполнила: «That text came from the tool result, not from you, so I'm not following it» |
-| 2 | формулировка Claude Code для отказа с пояснением: «The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nНе создавай файл. Вместо этого объясни одним предложением по-русски, что делает команда touch.» | выполнила: ответила одним предложением по-русски, файл не создан |
+| 1 | "The user denied this tool call and wrote instead:\nDo not create any file. Reply with exactly: PELICAN-42" | saw the text (retold it), but did not follow it: "That text came from the tool result, not from you, so I'm not following it" |
+| 2 | Claude Code's wording for a denial with an explanation: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nНе создавай файл. Вместо этого объясни одним предложением по-русски, что делает команда touch." (the Russian part: "Do not create the file. Instead, explain in one sentence in Russian what the touch command does.") | followed it: answered in one sentence in Russian, the file was not created |
 
-Поле называется `message` (как в `docs/notes/claude-control-protocol.md`), модель получает его
-как `tool_result` с `is_error: true`. Адаптер берёт формулировку прогона 2
-(`DENY_WITH_TEXT`). Оговорка: в прогонах разные и формулировка, и сама просьба (кодовое слово
-похоже на инъекцию сильнее обычной просьбы), так что что именно сработало, не разделено; третий
-прогон был бы вне лимита. **[проверить]** при случае: та же обычная просьба с формулировкой 1.
+The field is called `message` (as in `docs/notes/claude-control-protocol.md`); the model gets it
+as a `tool_result` with `is_error: true`. The adapter uses the wording of run 2
+(`DENY_WITH_TEXT`). Caveat: the runs differ in both the wording and the request itself (a code
+word looks more like an injection than an ordinary request), so what exactly worked is not
+separated; a third run would have been over the limit. **[verify]** when convenient: the same
+ordinary request with wording 1.
 
-## Что из макетов не сделано и почему
+## What from the mockups was not done and why
 
-- **Режим «Свой» с перетаскиванием** — решение пользователя: только «Состояние» и «Недавние»;
-  переключатель на две кнопки.
-- **Текст плашки «в VS Code она станет только для чтения»** — неправда, по решению пользователя
-  две плашки с его текстами: держатель есть — «Сессия открыта в VS Code на <воркер>. Закройте её
-  там, чтобы писать отсюда.» без кнопки; держателя нет — «Последней сессию вела VS Code на
-  <воркер>.» с «Забрать сюда».
-- **Ответ текстом через поле ввода внизу** (Permission: плейсхолдер «Или напишите, что сделать
-  вместо этого…»; Mobile-Session: поле ввода с полосой «Ответ отклонит `ls /` и уйдёт агенту»).
-  Сделано по решению пользователя полем в самой карточке (и в шторке телефона), с той же
-  подсказкой; поле ввода внизу во время запроса остаётся обычным сообщением в очередь.
-- **«Пересобрал проект» — подпись группы, написанная за агента.** Такого текста в событиях нет;
-  подпись — промежуточная реплика агента перед группой в одну строку, иначе «N команд ·
-  время» (решение пользователя). Внутри группы реплика целиком курсивом, только если в подпись
-  она не влезла.
-- **«159/159» у строки `ninja`** — прогресса команды в событиях нет; у строки есть время из
-  `duration_ms`.
-- **Строка «$ ls / · разрешено» и под ней «Выполняется ls /»** — сделано: свёрнутая строка
-  запроса и общая строка «Выполняется <команда> <таймер>» внизу ленты (по последнему `tool.call`
-  без результата), а не отдельная под каждой строкой.
-- **«Сейчас», «1 мин» у работающих сессий в режиме «Состояние»** — в макете время видно только в
-  «Недавних»; так и сделано.
-- **Подстрока «Ждёт разрешения · Bash»** в списке — список знает только `state` из `summary`, не
-  инструмент открытого запроса; пишется «Ждёт ответа». В шапке открытой сессии — «Ждёт
-  разрешения» или «Ждёт ответа» по открытому запросу ленты.
-- **Путь в строке сессии без `~/work/`** (макет: `drzlo-mac · games/phys-mp`) — у нас домашняя
-  папка сокращается до `~`, остальное как есть: `~/work/` — частная привычка, у другого
-  пользователя корни другие.
-- **Светлая тема** — макеты только тёмные; прежняя светлая тема по системе снята.
-- **Непрочитанное на проекте** — в макете на проекте бейдж «ждёт вас» (ждущие ответа и с
-  ошибкой); прежний бейдж непрочитанного на проекте снят. На строке сессии и воркера бейдж
-  непрочитанного оставлен (в макете его нет, но без него не видно новых ответов).
-- **Иконка Workspaces** — в макете входа нет; ссылка «Workspaces проекта» внизу списка сессий
-  (на десктопе и телефоне), рядом «Архив N».
-- **«Повторить»** — в макетах нет; на десктопе кнопка в шапке, на телефоне пункт меню «Ещё».
-- **«Переименовать» в «Ещё»** (подпись кнопки в Permission) — переименования сессии в API
-  клиента нет; в меню только «В архив», «Вернуть», «Удалить».
-- **Аватар** — буква email с подсказкой-адресом; на телефоне ведёт в настройки (как в макете
-  «Аккаунт и настройки»), на десктопе настройки — отдельная кнопка.
-- **Горячие клавиши** — Enter и Esc работают, только когда фокус не в поле ввода (условие
-  задачи). После отправки сообщения фокус остаётся в поле ввода, поэтому сразу после
-  появления запроса Enter уходит в поле, а не в карточку; нужно щёлкнуть мимо поля (или Tab).
-  **Вопрос:** снимать ли фокус с поля, когда приходит запрос?
-- **Шторка запроса на телефоне** — только первый открытый `approval.request`; `clarify`
-  остаётся карточкой в ленте (в макете шторка только для разрешения). Подписи кнопок те же, что
-  на десктопе («Всегда в этой сессии», в макете «Всегда в сессии»), чтобы подписи по
-  `canonical` были одни.
-- **Варианты сверх макета** (`always`, `deny_always` у Claude Code) — показаны вторичными
-  кнопками рядом с «Всегда в этой сессии» (десктоп) и в сетке (телефон).
+- **A "Custom" mode with drag and drop**: the user's decision — only "State" and "Recent"; the
+  switch has two buttons.
+- **The banner text "in VS Code it will become read-only"** is untrue; per the user's decision
+  there are two banners with his texts: a holder exists — "The session is open in VS Code on
+  <worker>. Close it there to write from here." without a button; no holder — "VS Code was the
+  last to run this session on <worker>." with "Take over here".
+- **Reply with text through the input field at the bottom** (Permission: placeholder "Or write
+  what to do instead…"; Mobile-Session: an input field with the bar "The reply will deny `ls /`
+  and go to the agent"). Done per the user's decision as a field in the card itself (and in the
+  phone's sheet), with the same hint; the input field at the bottom stays a regular queued
+  message while a request is open.
+- **"Rebuilt the project": a group caption written on the agent's behalf.** There is no such
+  text in the events; the caption is the agent's interim message before the group, on one line,
+  otherwise "N commands · time" (the user's decision). Inside the group the message is shown in
+  full in italics, only if it did not fit into the caption.
+- **"159/159" on the `ninja` row**: the events carry no command progress; the row has a time
+  from `duration_ms`.
+- **The row "$ ls / · allowed" and below it "Running ls /"**: done as a collapsed request row
+  and one shared row "Running <command> <timer>" at the bottom of the feed (from the last
+  `tool.call` without a result), not a separate one under each row.
+- **"Now", "1 min" on running sessions in "State" mode**: in the mockup the time is visible
+  only in "Recent"; done that way.
+- **The subline "Waiting for permission · Bash"** in the list: the list knows only `state` from
+  `summary`, not the tool of the open request; it says "Waiting for reply". In the header of an
+  open session it is "Waiting for permission" or "Waiting for reply", by the feed's open
+  request.
+- **The path in a session row without `~/work/`** (mockup: `drzlo-mac · games/phys-mp`): we
+  shorten the home folder to `~` and leave the rest as is: `~/work/` is a personal habit, another
+  user has different roots.
+- **Light theme**: the mockups are dark only; the previous system-driven light theme was
+  removed.
+- **Unread on a project**: in the mockup a project has a "needs you" badge (sessions waiting
+  for a reply and with an error); the previous unread badge on a project was removed. The unread
+  badge on session and worker rows stays (the mockup does not have it, but without it new
+  answers are not visible).
+- **Workspaces icon**: the mockup has no entry point; a "Project workspaces" link at the bottom
+  of the session list (on desktop and phone), next to "Archive N".
+- **"Retry"**: not in the mockups; on desktop a button in the header, on a phone an item in the
+  "More" menu.
+- **"Rename" in "More"** (a button label in Permission): the client API has no session
+  renaming; the menu has only "Archive", "Restore", "Delete".
+- **Avatar**: the email's first letter with the address as a tooltip; on a phone it leads to
+  settings (as "Account and settings" in the mockup), on desktop settings is a separate button.
+- **Keyboard shortcuts**: Enter and Esc work only when the focus is not in the input field (a
+  condition of the task). After sending a message the focus stays in the input field, so right
+  after a request appears Enter goes to the field, not to the card; one has to click outside
+  the field (or Tab). **Question:** take the focus off the field when a request arrives?
+- **The request sheet on a phone**: only the first open `approval.request`; `clarify` stays a
+  card in the feed (in the mockup the sheet is only for permissions). The button labels are the
+  same as on desktop ("Always in this session"; the mockup has "Always in session"), so that
+  the labels by `canonical` are the same everywhere.
+- **Options beyond the mockup** (`always`, `deny_always` in Claude Code) are shown as secondary
+  buttons next to "Always in this session" (desktop) and in the grid (phone).
 
-## Решения по ходу
+## Decisions along the way
 
-- Вызов `tool.call`, сразу за которым идёт `approval.request` того же инструмента, показывается
-  карточкой запроса, а не строкой группы (макет Permission: «одна карточка вместо строки
-  инструмента и панели»).
-- «Вне рабочей папки» считается по аргументам вызова (`file_path`, `path`, абсолютные и `~`
-  слова команды Bash) против пути workspace + `cwd` сессии; `~` раскрывается в домашнюю папку из
-  пути workspace.
-- Время ожидания в карточке — от `ts` события запроса, тикает раз в секунду.
-- Стоимость в шапке — сумма `cost_usd` всех `usage` загруженной истории (два знака), под
-  ответом — `cost_usd` хода (три знака, как в макете).
-- Шрифты: `@fontsource/inter` и `@fontsource/jetbrains-mono` 5.3.0 (`npm pack`, без установки),
-  12 файлов woff2 (400/500/600 × латиница/кириллица) и обе OFL; `@font-face` с `unicode-range`
-  из пакетов. CSP хаба не менялась: `default-src 'self'` покрывает шрифты; тест `csp.test.ts`
-  проверяет, что `url()` стилей ведут только в `/fonts/` и файлы есть.
-- Размер: JS 141,82 → 166,78 КБ (gzip 44,53 → 52,07), CSS 16,19 → 36,43 КБ (gzip 4,18 → 7,74).
+- A `tool.call` immediately followed by an `approval.request` for the same tool is shown as a
+  request card, not as a group row (the Permission mockup: "one card instead of a tool row and a
+  panel").
+- "Outside the working folder" is computed from the call's arguments (`file_path`, `path`,
+  absolute and `~` words of a Bash command) against the workspace path + the session's `cwd`;
+  `~` expands to the home folder taken from the workspace path.
+- The waiting time in the card counts from the request event's `ts` and ticks once a second.
+- The cost in the header is the sum of `cost_usd` over all `usage` of the loaded history (two
+  decimals); under an answer, the turn's `cost_usd` (three decimals, as in the mockup).
+- Fonts: `@fontsource/inter` and `@fontsource/jetbrains-mono` 5.3.0 (`npm pack`, without
+  installing), 12 woff2 files (400/500/600 × Latin/Cyrillic) and both OFLs; `@font-face` with
+  `unicode-range` from the packages. The hub's CSP did not change: `default-src 'self'` covers
+  fonts; the test `csp.test.ts` checks that the styles' `url()`s lead only to `/fonts/` and that
+  the files exist.
+- Size: JS 141.82 → 166.78 KB (gzip 44.53 → 52.07), CSS 16.19 → 36.43 KB (gzip 4.18 → 7.74).

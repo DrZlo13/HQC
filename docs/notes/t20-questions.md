@@ -1,107 +1,119 @@
-# T20: вопросы и находки
+# T20: questions and findings
 
-Подхват без развилок (SPEC §9.3, версия 0.22). Claude Code **2.1.308**, home-mac,
-`claude-haiku-5-5`, `--max-turns 2`. Живых прогонов два из двух разрешённых, оба через
+Takeover without forks (SPEC §9.3, version 0.22). Claude Code **2.1.308**, home-mac,
+`claude-haiku-5-5`, `--max-turns 2`. Live runs: two of the two allowed, both through
 `tools/spike/driver.py`:
 
-| прогон | что | результат |
+| run | what | result |
 |---|---|---|
-| а | `tmp/spike-t20-a/ws`: `claude -p "Reply with exactly: ONE"` (`--arg-prompt`), затем `--resume` с флагами адаптера и ход `HQC-TURN`, затем `--arg-prompt --resume <uuid> -- --resume-session-at <uuid ответа ONE>` и ход `VSCODE-TURN` | развилка в одном файле без VS Code; фикстура `fork-2.1.308` |
-| б | `HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_holder`: `driver.py` в фоне, `claude -p` ждёт в инструменте `slow` из `tools/spike/slow-mcp.js` (40 с) | реестр увидел держателя (`sdk-cli`, `busy`), сессия импортирована `locked_vscode` с `held_by`, `POST /takeover` → `409 vscode_open`; после выхода процесса сессия **не** освободилась — см. ниже, исправлено, повторно живьём не прогонялось |
+| a | `tmp/spike-t20-a/ws`: `claude -p "Reply with exactly: ONE"` (`--arg-prompt`), then `--resume` with the adapter's flags and turn `HQC-TURN`, then `--arg-prompt --resume <uuid> -- --resume-session-at <uuid of answer ONE>` and turn `VSCODE-TURN` | a fork in one file without VS Code; fixture `fork-2.1.308` |
+| b | `HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_holder`: `driver.py` in the background, `claude -p` waits in the `slow` tool from `tools/spike/slow-mcp.js` (40 s) | the registry saw the holder (`sdk-cli`, `busy`), the session was imported `locked_vscode` with `held_by`, `POST /takeover` → `409 vscode_open`; after the process exited the session was **not** released — see below; fixed, not rerun live |
 
-`HQC_LIVE_CLAUDE=1` и `HQC_TEST_DATABASE_URL` передавались через `cargo --config 'env.…'`.
+`HQC_LIVE_CLAUDE=1` and `HQC_TEST_DATABASE_URL` were passed through `cargo --config 'env.…'`.
 
-## Реестр живых сессий (2.1.308, home-mac)
+## The registry of live sessions (2.1.308, home-mac)
 
-Записи `~/.claude/sessions/<pid>.json` на этой машине (все — `sdk-cli`, VS Code тут не открыт):
-`pid` (число), `sessionId`, `cwd`, `startedAt`, `procStart` (строка времени запуска процесса),
-`version`, `peerProtocol`, `peerFeatures[]`, `kind: interactive`, `entrypoint`, `pidDomain`,
-`messagingSocketPath`, `name`, `nameSource`, `nameSince`, `status` (`idle`/`busy`), `updatedAt`
-и `statusUpdatedAt` (мс). Рядом `<pid>.<hash>.key` — не читаются. В примере пользователя с VS Code
-`pid` — строка (`"69786"`), `entrypoint: claude-vscode`; парсер берёт оба вида.
+Records `~/.claude/sessions/<pid>.json` on this machine (all `sdk-cli`, VS Code is not open
+here): `pid` (number), `sessionId`, `cwd`, `startedAt`, `procStart` (a string with the process
+start time), `version`, `peerProtocol`, `peerFeatures[]`, `kind: interactive`, `entrypoint`,
+`pidDomain`, `messagingSocketPath`, `name`, `nameSource`, `nameSince`, `status`
+(`idle`/`busy`), `updatedAt` and `statusUpdatedAt` (ms). Next to them, `<pid>.<hash>.key` — not
+read. In the user's VS Code example `pid` is a string (`"69786"`), `entrypoint:
+claude-vscode`; the parser accepts both forms.
 
-- `claude -p` в stream-json-режиме (как SDK и наш адаптер) регистрируется (`sdk-cli`, `busy` во
-  время хода) — прогон б. Регистрируется ли `claude -p "<промпт>"` в текстовом режиме, не
-  проверялось (в прогоне б был stream-json).
-- Процессы адаптера hqc тоже `sdk-cli`; воркер исключает их по pid и группе процессов (адаптер
-  запускает CLI лидером группы), а также любую запись `sdk-cli` транскрипта, который сейчас ведёт
-  свой процесс (если CLI запущен обёрткой с другим pid). Цена: `claude -p --resume` из терминала
-  во время хода hqc держателем не считается — его ловит старая детекция чужой записи (§9.3).
-  **T25 (SPEC 0.26):** у воркера с реестром детекции по `uuid` больше нет — она дважды ложно
-  отпустила сессию (`/compact` и первый ввод после `--resume`, боевой лог 2026-10-24). Такой
-  `claude -p --resume` во время работы hqc сессию теперь не освобождает, его записи эмитятся в
-  ленту; см. `docs/notes/t25-questions.md`.
+- `claude -p` in stream-json mode (like the SDK and our adapter) registers (`sdk-cli`, `busy`
+  during a turn) — run b. Whether `claude -p "<prompt>"` in text mode registers was not
+  checked (run b used stream-json).
+- hqc adapter processes are `sdk-cli` too; the worker excludes them by pid and process group
+  (the adapter starts the CLI as a group leader), and also any `sdk-cli` record of a
+  transcript that one of its own processes is currently running (in case the CLI is started
+  by a wrapper with a different pid). The cost: `claude -p --resume` from a terminal during an
+  hqc turn is not counted as a holder — the old foreign-write detection catches it (§9.3).
+  **T25 (SPEC 0.26):** a worker with the registry no longer has `uuid`-based detection — it
+  twice released a session falsely (`/compact` and the first input after `--resume`,
+  production log 2026-10-24). Such a `claude -p --resume` while hqc is working no longer
+  releases the session; its records are emitted into the feed; see
+  `docs/notes/t25-questions.md`.
 
-## Развилка (прогон а)
+## The fork (run a)
 
-`--resume-session-at <uuid>` (принят 2.1.308; есть ли он в `--help`, не смотрели) продолжает сессию с
-указанной записи в **том же** файле: промпт `VSCODE-TURN` получил `parentUuid` = uuid ответа
-`ONE`, у которого уже был ребёнок — `attachment prompt_snapshot` перед промптом `HQC-TURN`. Так
-развилка воспроизводится без VS Code; синтетическая фикстура не понадобилась.
+`--resume-session-at <uuid>` (accepted by 2.1.308; whether it is in `--help` we did not check)
+continues the session from the given record in **the same** file: the prompt `VSCODE-TURN` got
+`parentUuid` = the uuid of answer `ONE`, which already had a child — `attachment
+prompt_snapshot` before the prompt `HQC-TURN`. This reproduces a fork without VS Code; a
+synthetic fixture was not needed.
 
-Находки по формату:
-- на 2.1.308 перед промптом `--resume`-хода стоит `attachment` `prompt_snapshot`, поэтому дети
-  точки развилки — не обязательно сами промпты;
-- **два ребёнка у записи бывают и без развилки**: параллельные вызовы инструментов дают записи
-  `tool_use` второго ребёнка (следующий `tool_use` и `tool_result`; фикстуры `auto-mode`,
-  `auto-classifier`). Поэтому правило «у записи появился второй ребёнок» из постановки
-  уточнено: развилка — промпт, над которым у записи есть другой ребёнок с промптами в поддереве.
+Format findings:
+- on 2.1.308 an `attachment` `prompt_snapshot` precedes the prompt of a `--resume` turn, so the
+  children of a fork point are not necessarily prompts themselves;
+- **a record has two children even without a fork**: parallel tool calls produce `tool_use`
+  records as a second child (the next `tool_use` and `tool_result`; fixtures `auto-mode`,
+  `auto-classifier`). So the rule "the record got a second child" from the task statement was
+  refined: a fork is a prompt above which the record has another child with prompts in its
+  subtree.
 
-## Что пошло не так в прогоне б и как исправлено
+## What went wrong in run b and how it was fixed
 
-После выхода `claude -p` сессия осталась `locked_vscode`. Две причины, обе воспроизведены
-тестами на фикстурах и исправлены:
+After `claude -p` exited, the session stayed `locked_vscode`. Two causes, both reproduced by
+fixture tests and fixed:
 
-1. Отчёт «держателя нет» шёл прямым кадром, а `mirror.event` — через outbox; прямой кадр
-   обгонял события предыдущего прохода, и их `held_by` (ещё живой держатель) возвращал замок.
-   Теперь отчёты о держателе идут через outbox в одном порядке с `mirror.event`.
-2. Последние записи процесса приходили с `recent` и по правилу T15 запирали сессию снова, уже без
-   держателя. Теперь при данных реестра (`held_by` в кадре) `recent` не запирает: запирает только
-   держатель. Тест хаба `holder_blocks_takeover_until_closed` проверяет именно эту
-   последовательность.
+1. The "no holder" report went as a direct frame, while `mirror.event` went through the
+   outbox; the direct frame overtook the previous pass's events, and their `held_by` (the
+   holder still alive) put the lock back. Now holder reports go through the outbox in the same
+   order as `mirror.event`.
+2. The process's last records came with `recent` and, by the T15 rule, locked the session
+   again, already without a holder. Now, with registry data (`held_by` in the frame), `recent`
+   does not lock: only a holder locks. The hub test `holder_blocks_takeover_until_closed`
+   checks exactly this sequence.
 
-Повторить живой тест (`live_holder`) не позволил лимит прогонов. **Нужен повторный прогон**:
-`HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_holder -- --nocapture` (один `claude -p`,
-около 50 с).
+The run limit did not allow repeating the live test (`live_holder`). **A rerun is needed**:
+`HQC_LIVE_CLAUDE=1 cargo test -p hqc-hub --test live_holder -- --nocapture` (one `claude -p`,
+about 50 s).
 
-## Решения, которые стоит подтвердить
+## Decisions worth confirming
 
-- **Отчёт о держателе — `session.state` с nil `session_id`.** Воркер не знает `session_id`
-  сессий, созданных зеркалом, а задача разрешала только добавлять поля в `mirror.event` и
-  `session.state`. Новый кадр (`mirror.holder`) был бы чище; оставлено так, хаб различает отчёт по
-  nil `session_id` и читает в нём только `held_by`.
-- **`held_by` трёхзначный**: поля нет — нет данных реестра, `null` — никого, объект — держатель.
-  По наличию поля хаб решает, действует ли `recent` и правило 30 с; для `POST /takeover` — по
-  `capabilities.claude_code.sessions_registry` воркера.
-- **`held_by` в `session.summary`** — тоже добавлено (не было в постановке): без него клиент не
-  узнаёт о появлении или уходе держателя до перезапроса списка.
-- **Держатель исчез, а hqc-процесс сессии ещё жив** (ход после освобождения): `locked_by` остаётся
-  `vscode`; когда процесс остановится, сессия так и останется «ведётся в VS Code» с кнопкой
-  «Подхватить», и подхват пройдёт сразу (держателя нет).
-- **На `hello` хаб забывает держателей**, `locked_by` не трогает; воркер сообщает текущих после
-  `hello.ack`. В промежутке (до первого прохода, ≤ 2 с) подхват открытой сессии может пройти.
-- **`reason` у `session_released`**: `vscode_open` (держатель) и `foreign_write` (чужая запись);
-  в постановке был только `vscode_open`.
-- **Подхват при свежей записи без держателя проходит сразу** (у воркера с реестром): такую запись
-  сделал уже завершившийся процесс.
-- **Плашка «открыта»** пишет «VS Code» для `entrypoint: claude-vscode` и «Claude Code вне hqc» для
-  остальных (терминал, SDK).
+- **The holder report is a `session.state` with a nil `session_id`.** The worker does not know
+  the `session_id` of sessions created by the mirror, and the task only allowed adding fields
+  to `mirror.event` and `session.state`. A new frame (`mirror.holder`) would be cleaner; left
+  as is, the hub recognizes the report by the nil `session_id` and reads only `held_by` from
+  it.
+- **`held_by` has three states**: the field is absent — no registry data, `null` — nobody, an
+  object — the holder. By the presence of the field the hub decides whether `recent` and the
+  30 s rule apply; for `POST /takeover` — by the worker's
+  `capabilities.claude_code.sessions_registry`.
+- **`held_by` in `session.summary`** was added too (it was not in the task statement): without
+  it the client does not learn that a holder appeared or left until it re-requests the list.
+- **The holder is gone, but the session's hqc process is still alive** (a turn after the
+  release): `locked_by` stays `vscode`; when the process stops, the session stays "In VS Code"
+  with the "Take over" button, and the takeover goes through immediately (there is no
+  holder).
+- **On `hello` the hub forgets the holders**, leaving `locked_by` alone; the worker reports the
+  current ones after `hello.ack`. In between (before the first pass, ≤ 2 s) a takeover of an
+  open session may go through.
+- **`reason` of `session_released`**: `vscode_open` (a holder) and `foreign_write` (a foreign
+  write); the task statement had only `vscode_open`.
+- **A takeover with a fresh write and no holder goes through immediately** (for a worker with
+  the registry): such a write was made by a process that has already exited.
+- **The "open" banner** says "VS Code" for `entrypoint: claude-vscode` and "Claude Code outside
+  hqc" for the rest (terminal, SDK).
 
-## Открытые вопросы
+## Open questions
 
-1. **Переиспользование pid.** Файл упавшего процесса остаётся; если его pid занял другой процесс,
-   `kill -0` скажет «жив», и сессия будет «открыта» до перезагрузки машины или нового процесса с
-   этим файлом. Можно сверять `procStart` записи со временем старта процесса (`proc_pidinfo` на
-   macOS, `/proc/<pid>/stat` на Linux). Не сделано.
-2. **Живой VS Code** не проверялся: на home-mac он не открыт. Что плагин держит запись, пока
-   вкладка сессии открыта, и снимает при закрытии вкладки (а не только при закрытии окна), —
-   **[проверить]** на маке пользователя по RUNBOOK §4.
-3. **Развилки вне зеркала.** Сессия hqc в workspace без `mirror_enabled` развилку не покажет:
-   дерево строит только зеркало. Держатель при этом работает (реестр читается для всех
-   транскриптов). Связано с вопросом 2 T15 (зеркало на всех workspace по умолчанию).
-   Решено в T21: зеркало включено у всех workspace по умолчанию (SPEC 0.23 §9.2).
-4. **Развилка от `/rewind` или правки сообщения в CLI** — тоже вторая линия ходов; зеркало назовёт
-   её «VS Code продолжил с более ранней точки», хотя это намеренный откат. Различать не умеем.
-5. **Текст при `branch_from: hqc`** («hqc продолжил с более ранней точки…») вживую не
-   встречался, проверен только юнит-тестом текста. Какую ветку берёт `--resume` в файле с
-   развилкой (последнюю по времени или по порядку строк), не проверялось.
+1. **pid reuse.** A crashed process's file stays; if another process takes its pid, `kill -0`
+   says "alive", and the session stays "open" until the machine reboots or a new process
+   comes with that file. The record's `procStart` could be checked against the process start
+   time (`proc_pidinfo` on macOS, `/proc/<pid>/stat` on Linux). Not done.
+2. **Live VS Code** was not checked: it is not open on home-mac. That the plugin holds the
+   record while the session tab is open and removes it when the tab closes (not only when the
+   window closes) — **[verify]** on the user's Mac per RUNBOOK §4.
+3. **Forks outside the mirror.** An hqc session in a workspace without `mirror_enabled` will
+   not show a fork: only the mirror builds the tree. The holder works regardless (the registry
+   is read for all transcripts). Related to T15 question 2 (mirror on all workspaces by
+   default).
+   Resolved in T21: the mirror is on for all workspaces by default (SPEC 0.23 §9.2).
+4. **A fork from `/rewind` or editing a message in the CLI** is also a second line of turns;
+   the mirror will call it "VS Code continued from an earlier point", although it is a
+   deliberate rollback. We cannot tell them apart.
+5. **The text for `branch_from: hqc`** ("hqc continued from an earlier point…") has not
+   occurred live, it was checked only by a unit test of the text. Which branch `--resume`
+   takes in a file with a fork (the latest by time or by line order) was not checked.

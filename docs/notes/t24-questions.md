@@ -1,8 +1,9 @@
 
-## Открыто: удаление сессии и транскрипт (2026-10-24)
+## Open: deleting a session and the transcript (2026-10-24)
 
-Удаление сессии в hqc стирает её в хабе и чистит `.hqc/inbox`, транскрипт
-`~/.claude/projects/…/<uuid>.jsonl` не трогается (так и оставляем: чужой файл Claude Code hqc
-не удаляет). Хаб не помнит удалённые `runtime_session_id`, поэтому если беседу продолжить в VS
-Code, зеркало заведёт её в hqc заново. Вариант на решение: хаб помнит удалённые транскрипты
-воркера, и зеркало их игнорирует. Пользователь решит позже.
+Deleting a session in hqc erases it in the hub and cleans `.hqc/inbox`; the transcript
+`~/.claude/projects/…/<uuid>.jsonl` is not touched (and we keep it that way: hqc does not
+delete Claude Code's file). The hub does not remember deleted `runtime_session_id`s, so if the
+conversation is continued in VS Code, the mirror will create it in hqc again. An option to
+decide on: the hub remembers the worker's deleted transcripts, and the mirror ignores them.
+The user will decide later.

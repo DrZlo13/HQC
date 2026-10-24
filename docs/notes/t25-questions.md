@@ -1,71 +1,77 @@
-# T25: вопросы и находки
+# T25: questions and findings
 
-Ложное освобождение сессии во время работы hqc (SPEC §9.2, §9.3, версия 0.26). Claude Code
-**2.1.308**, home-mac, `claude-haiku-5-5`, `--max-turns 2`. Живых прогонов три из трёх
-разрешённых, все через `tools/spike/driver.py` в `tmp/spike-t25-a/ws` с флагами адаптера
+False release of a session while hqc is working (SPEC §9.2, §9.3, version 0.26). Claude Code
+**2.1.308**, home-mac, `claude-haiku-5-5`, `--max-turns 2`. Live runs: three of the three
+allowed, all through `tools/spike/driver.py` in `tmp/spike-t25-a/ws` with the adapter's flags
 (`--permission-prompt-tool stdio --strict-mcp-config --allowedTools mcp__hqc --setting-sources
 user,local --permission-mode default`):
 
-| прогон | что | результат |
+| run | what | result |
 |---|---|---|
-| 1 | новая сессия, `Reply with exactly: ONE` | — |
-| 2 | `--resume`, `Reply with exactly: TWO` | эхо `--replay-user-messages` несёт `uuid` записи промпта в jsonl (`2b86849f…` в обоих) |
-| 3 | `--resume`, `/compact` | в jsonl: `compact_boundary`, сводка (`isCompactSummary`, в stream-json есть как `isSynthetic`), пояснение (`isMeta`), команда `<command-name>/compact</command-name>…` (**нет в stream-json**), вывод `<local-command-stdout>Compacted </local-command-stdout>` (есть, эхо) |
+| 1 | new session, `Reply with exactly: ONE` | — |
+| 2 | `--resume`, `Reply with exactly: TWO` | the `--replay-user-messages` echo carries the `uuid` of the prompt record in jsonl (`2b86849f…` in both) |
+| 3 | `--resume`, `/compact` | in jsonl: `compact_boundary`, the summary (`isCompactSummary`, present in stream-json as `isSynthetic`), an explanation (`isMeta`), the command `<command-name>/compact</command-name>…` (**not in stream-json**), the output `<local-command-stdout>Compacted </local-command-stdout>` (present, echoed) |
 
-Фикстура `resume-compact-2.1.308` (транскрипт после трёх прогонов, потоки прогонов 2 и 3).
+Fixture `resume-compact-2.1.308` (the transcript after the three runs, the streams of runs 2
+and 3).
 
-## Пункт 2 (`/compact`) — воспроизведён
+## Item 2 (`/compact`) — reproduced
 
-Из записей `/compact` в основной цепочке зеркало не знает только команду `<command-name>`: её
-`uuid` stream-json не называет. Это и есть «another writer continues a session the worker runs»
-из лога. Исправлено двумя путями: у воркера с реестром детекции по `uuid` нет вовсе (решение
-T25); и без реестра запись команды теперь своя — адаптер кладёт текст ввода (`/compact`), а
-зеркало сводит `<command-name>`/`<command-args>` к набранному тексту.
+Of the `/compact` records in the main chain, the only one the mirror does not know is the
+`<command-name>` command: stream-json does not name its `uuid`. That is exactly the "another
+writer continues a session the worker runs" from the log. Fixed in two ways: a worker with the
+registry has no `uuid`-based detection at all (a T25 decision); and without the registry the
+command record is now recognized as its own — the adapter keeps the input text (`/compact`),
+and the mirror reduces `<command-name>`/`<command-args>` to the typed text.
 
-## Пункт 1 (первый ввод после `--resume`) — не воспроизведён
+## Item 1 (the first input after `--resume`) — not reproduced
 
-На 2.1.308 `uuid` эха после `--resume` совпадает с записью (прогон 2, тест
-`t25_resume_prompt_and_compact`; так же было в фикстурах T15 и T20). Почему на drzlo-mac было
-иначе, отсюда не выяснить. Кандидаты, по убыванию правдоподобия:
+On 2.1.308 the echo's `uuid` after `--resume` matches the record (run 2, test
+`t25_resume_prompt_and_compact`; it was the same in the T15 and T20 fixtures). Why it was
+different on drzlo-mac cannot be found out from here. Candidates, from most to least likely:
 
-- **другая версия CLI** на drzlo-mac (в логе её нет) — **[проверить]**: `claude --version` там и
-  поле `version` записи `e4b09ae1…` в транскрипте;
-- ввод пришёл, пока CLI был занят (ход или загрузка большого транскрипта), и CLI склеил его с
-  очередью (`queue-operation`) в запись с новым `uuid`, а эхо выдал при постановке в очередь; в
-  прогонах очередь сразу разбиралась (`enqueue`/`dequeue` в одну миллисекунду);
-- эхо пришло позже 5 с после записи (чтение stdout адаптера стоит, пока выполняются действия
-  предыдущей строки).
+- **a different CLI version** on drzlo-mac (the log does not show it) — **[verify]**:
+  `claude --version` there and the `version` field of record `e4b09ae1…` in the transcript;
+- the input arrived while the CLI was busy (a turn or loading a large transcript), and the CLI
+  merged it with the queue (`queue-operation`) into a record with a new `uuid`, while it emitted
+  the echo when queueing; in the runs the queue was drained immediately (`enqueue`/`dequeue` in
+  the same millisecond);
+- the echo arrived more than 5 s after the record (reading the adapter's stdout stalls while
+  the previous line's actions run).
 
-Что бы это ни было, промпт теперь узнаётся и по тексту ввода (`OwnRecords::claim`): запись-промпт
-с незнакомым `uuid` своя, если её текст совпал с ещё не сопоставленным вводом этого транскрипта.
-Так запасной путь (воркер без реестра) тоже не ошибается. Если причина окажется в склейке
-нескольких вводов в одну запись, текст не совпадёт ни с одним вводом — у воркера с реестром это
-уже не освобождение, а без реестра останется ложное срабатывание; нужен боевой транскрипт.
+Whatever it is, a prompt is now also recognized by the input text (`OwnRecords::claim`): a
+prompt record with an unknown `uuid` is our own if its text matches a not yet matched input of
+this transcript. So the fallback path (a worker without the registry) does not err either. If
+the cause turns out to be several inputs merged into one record, the text will not match any
+input — for a worker with the registry this is no longer a release, but without the registry a
+false positive remains; a production transcript is needed.
 
-## Решения, которые стоит подтвердить
+## Decisions worth confirming
 
-- **Незнакомая запись при живом процессе и реестре эмитится** после тех же 5 с (а не держится до
-  остановки процесса): иначе зеркало стояло бы на ней весь срок жизни процесса — без
-  `ai-title`, развилок и следующих записей. Хаб на `mirror.event` с `held_by` сессию не запирает
-  (T20), только обновляет `vscode_active_at` при `recent`. Если промпт всё-таки не узнан ни по
-  `uuid`, ни по тексту, в ленте будет второй `user.message` с тем же текстом.
-- **Запись команды `/compact` (если не узнана) показывается как `user.message`** с сырым
-  `<command-name>…`. Красивее было бы `system` или сокрытие; не делалось — после T25 она
-  узнаётся по тексту и не эмитится.
-- **Сопоставление по тексту** — точное равенство после `trim`; вводы, не сопоставленные ни с
-  одной записью (например, workspace без зеркала), копятся до 32 на транскрипт и вытесняются
-  старейшими. Ложное «своё» возможно, только если в VS Code набрали ровно тот же текст, что
-  несопоставленный ввод hqc.
-- **Цена решения** (SPEC §9.3): `claude -p --resume` из терминала во время хода hqc (его
-  `sdk-cli`-запись реестр исключает) и процесс короче прохода сессию не освобождают.
+- **An unknown record with a live process and the registry is emitted** after the same 5 s
+  (rather than held until the process stops): otherwise the mirror would be stuck on it for the
+  whole lifetime of the process — no `ai-title`, forks or following records. The hub does not
+  lock the session on a `mirror.event` with `held_by` (T20), it only updates
+  `vscode_active_at` on `recent`. If a prompt is still recognized neither by `uuid` nor by text,
+  the feed gets a second `user.message` with the same text.
+- **The `/compact` command record (if not recognized) is shown as a `user.message`** with the
+  raw `<command-name>…`. A `system` line or hiding it would be nicer; not done — after T25 it
+  is recognized by text and not emitted.
+- **Matching by text** is exact equality after `trim`; inputs not matched to any record (e.g.
+  a workspace without the mirror) accumulate up to 32 per transcript, evicting the oldest. A
+  false "own" is possible only if exactly the same text as an unmatched hqc input was typed in
+  VS Code.
+- **The cost of the decision** (SPEC §9.3): `claude -p --resume` from a terminal during an hqc
+  turn (the registry excludes its `sdk-cli` record) and a process shorter than a pass do not
+  release the session.
 
-## Открытые вопросы
+## Open questions
 
-1. Причина пункта 1 на drzlo-mac — см. выше; нужен `claude --version` и кусок транскрипта
-   вокруг `e4b09ae1…` (записи `queue-operation` рядом).
-2. Другие слэш-команды (`/clear`, `/model`, пользовательские команды) живьём не проверялись;
-   `/clear`, вероятно, начинает новый транскрипт — с ним зеркало и держатели не проверены.
+1. The cause of item 1 on drzlo-mac — see above; `claude --version` and a piece of the
+   transcript around `e4b09ae1…` (the `queue-operation` records nearby) are needed.
+2. Other slash commands (`/clear`, `/model`, custom commands) were not checked live; `/clear`
+   probably starts a new transcript — the mirror and holders were not checked with it.
 
-## Версия CLI на drzlo-mac (2026-10-24)
+## CLI version on drzlo-mac (2026-10-24)
 
-На маке пользователя, где воспроизвелся пункт 1, Claude Code 2.1.307 (запись e4b09ae1 тоже 2.1.307), на home-mac 2.1.308. Версия совпадает с главной гипотезой: на 2.1.307 эхо --replay-user-messages после --resume, видимо, несёт другой uuid. Сопоставление по тексту из T25 закрывает это и без обновления CLI.
+On the user's Mac, where item 1 reproduced, Claude Code is 2.1.307 (record e4b09ae1 is 2.1.307 too), on home-mac 2.1.308. The version fits the main hypothesis: on 2.1.307 the --replay-user-messages echo after --resume apparently carries a different uuid. Matching by text from T25 covers this even without a CLI update.

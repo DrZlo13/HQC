@@ -129,8 +129,8 @@ idle_timeout = 0
 allow_foreign_sessions = false
 claude_bin = "$(command -v claude || echo "$HOME/.local/bin/claude")"
 
-# Политика одобрений (SPEC §14, RUNBOOK §2.2): allow — без вопросов, deny — никогда и без
-# вопроса (сильнее always), остальное спрашивает. Свой deny заменяет набор по умолчанию.
+# Approval policy (SPEC §14, RUNBOOK §2.2): allow runs without asking, deny never runs and
+# never asks (overrides always), everything else asks. A custom deny replaces the default set.
 [permissions]
 mode = "ask"
 allow = [

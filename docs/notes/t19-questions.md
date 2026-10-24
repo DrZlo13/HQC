@@ -1,81 +1,90 @@
-# T19 — перерегистрация воркера и уборка отозванных: решения, вопросы
+# T19 — worker re-enrollment and cleanup of revoked workers: decisions, questions
 
-Задача: регистрация с заменой существующего воркера, архивация служебной сессии при отзыве,
-удаление отозванного воркера. SPEC 0.21 (§3 Worker, §4, §5.1, §6, §10.2, §17.4, §23), задача —
-`docs/ITERATION-2.md`. Живых прогонов claude — ноль.
+Task: enrollment that replaces an existing worker, archiving the service session on
+revocation, deleting a revoked worker. SPEC 0.21 (§3 Worker, §4, §5.1, §6, §10.2, §17.4, §23);
+task: `docs/ITERATION-2.md`. Live claude runs: zero.
 
-## Решения, принятые по ходу (не были оговорены в постановке)
+## Decisions made along the way (not covered by the task statement)
 
-- **Когда происходит замена — при подтверждении, а не при опросе.** Проверки (`409
-  worker_online`, `400` на чужой воркер) нужны пользователю сразу, в ответе на «Подтвердить».
-  Поэтому при подтверждении хаб уже сбрасывает `token_hash` заменяемого (старый токен
-  перестаёт работать), переносит `name`/`os`, снимает `revoked_at`, сбрасывает `boot_id`,
-  разархивирует служебную сессию и пишет `system worker_replaced`; при опросе на тот же
-  `worker_id` записывается только хэш нового токена — ровно как для нового воркера. Если
-  после подтверждения воркер так и не заберёт токен (процесс убит), заменённый воркер
-  остаётся без токена и без отзыва — «офлайн»; лечится той же заменой ещё раз.
-- **Нужна миграция `0009`.** Опрос должен сообщить прежнее имя (`replaced`), а к этому моменту
-  имя в `workers` уже новое — прежнее хранится в `enroll_codes.replaced_name`. Той же
-  миграцией архивируются служебные сессии воркеров, отозванных до T19, иначе они остались бы
-  в группе «Воркеры».
-- **`boot_id` сбрасывается** при замене: первый `hello` нового процесса — перезапуск (§5.2):
-  `process_state` сессий сбрасывается, открытые запросы — `worker_restart`. Процессы старого
-  запуска на машине уже не существуют (или не должны), так что это честно.
-- **Онлайн проверяется по памяти хаба, у отозванного воркера — нет.** Соединение отозванного
-  воркера хаб закрывает сам, но реестр соединений освобождается асинхронно; отозванный
-  считается не на связи всегда (`status: revoked` важнее `online`). Если гонка всё же
-  пропустит соединение, заменённое подтверждение его рвёт (`close`).
-- **Вторая замена того же воркера, пока первая не забрана опросом**, — `409 conflict`:
-  иначе второй опрос перезаписал бы токен первого, и первый процесс отвалился бы при
-  переподключении. Отказы (`worker_online`, `400`, `409`) код не тратят.
-- **Чужой и несуществующий воркер в `replace_worker_id` — `400` (`bad_request`, «unknown
-  worker»)**, как у `worker_id` в `POST /api/workspaces`, а не `404`: `404` здесь уже значит
-  «нет такого кода».
-- **`replaceable` перечисляет и отозванных, и офлайн-воркеров**, с числом неархивных сессий —
-  чтобы выбор «та же машина» был осознанным. По умолчанию выбран «Новый воркер»: замена
-  отдаёт новому процессу все сессии заменяемого, а ссылку с кодом мог прислать кто-то
-  другой (§5.1) — поэтому явный выбор с именем, а не галочка.
-- **Имя при замене — новое** (присланное `enroll`, `--name`), заголовок служебной сессии
-  меняется вместе с ним (§10.2: заголовок — имя воркера). Поле `name?` подтверждения в
-  клиенте по-прежнему не выводится.
-- **Где показывать отозванных.** `GET /api/workers` без параметров, как и раньше, отдаёт
-  только неотозванных (выбор воркера для workspace, импорт, названия); «Настройки» просят
-  `?include_revoked=1`. Новое значение `status: revoked` и поле `revoked_at`.
-- **Отзыв архивирует служебную сессию сам хаб** (запрет `/archive` — для пользователя).
-  Открытые запросы воркера в ней закрываются `approval.cancel {archived}` без кадра
-  `worker.approval.response`: доставить его некому, а после замены у нового процесса другой
-  `boot_id`, и ответ всё равно был бы сброшен. Группа «Воркеры» в клиенте фильтрует
-  служебные сессии по `archived`, так что отзыв и замена видны сразу через
-  `session.summary`, без отдельного списка воркеров.
-- **«Удалить» — `DELETE /api/workers/{id}?purge=1`**, а не отдельный маршрут: по стилю §6
-  (`DELETE` — тот же ресурс), и отзыв остаётся обязательным первым шагом (`409
-  worker_not_revoked` для неотозванного) — нечаянно удалить работающую машину одним запросом
-  нельзя.
-- **Какие сессии мешают удалению.** «Сессии» в `409 worker_has_sessions` — неархивные, кроме
-  служебной, с `worker_id` воркера или в его workspace. Архивные не мешают: как при удалении
-  workspace (§13.2), они теряют `workspace_id` (и здесь `worker_id`) и остаются историей;
-  разархивировать их нельзя (`409 no_workspace`). Так «или архивировать» из постановки
-  действительно снимает отказ. Default-workspace проектов пересчитывается как в §13.2.
+- **The replacement happens on confirmation, not on polling.** The user needs the checks
+  (`409 worker_online`, `400` for someone else's worker) right away, in the answer to
+  "Confirm". So on confirmation the hub already resets the replaced worker's `token_hash` (the
+  old token stops working), carries over `name`/`os`, clears `revoked_at`, resets `boot_id`,
+  unarchives the service session and writes `system worker_replaced`; on polling, only the new
+  token's hash is written to the same `worker_id` — exactly as for a new worker. If after the
+  confirmation the worker never picks up the token (the process was killed), the replaced
+  worker is left with no token and no revocation — "offline"; the cure is the same replacement
+  once more.
+- **Migration `0009` is needed.** Polling must report the previous name (`replaced`), and by
+  then the name in `workers` is already the new one — the previous one is stored in
+  `enroll_codes.replaced_name`. The same migration archives the service sessions of workers
+  revoked before T19, otherwise they would stay in the "Workers" group.
+- **`boot_id` is reset** on replacement: the new process's first `hello` is a restart (§5.2):
+  the sessions' `process_state` is reset, open requests get `worker_restart`. The old run's
+  processes no longer exist on the machine (or should not), so this is honest.
+- **Online status is checked from the hub's memory; a revoked worker is never online.** The hub
+  closes a revoked worker's connection itself, but the connection registry is freed
+  asynchronously; a revoked worker always counts as not connected (`status: revoked` takes
+  precedence over `online`). If a race still lets a connection through, the replacing
+  confirmation drops it (`close`).
+- **A second replacement of the same worker before polling has picked up the first** is
+  `409 conflict`: otherwise the second poll would overwrite the first one's token, and the
+  first process would fall off on reconnect. Refusals (`worker_online`, `400`, `409`) do not
+  consume the code.
+- **Someone else's or a nonexistent worker in `replace_worker_id` is `400` (`bad_request`,
+  "unknown worker")**, as with `worker_id` in `POST /api/workspaces`, not `404`: `404` here
+  already means "no such code".
+- **`replaceable` lists both revoked and offline workers**, with the number of non-archived
+  sessions — so that choosing "the same machine" is deliberate. "New worker" is selected by
+  default: a replacement hands all of the replaced worker's sessions to the new process, and
+  the link with the code may have been sent by someone else (§5.1) — hence an explicit choice
+  by name rather than a checkbox.
+- **The name on replacement is the new one** (sent by `enroll`, `--name`); the service
+  session's title changes with it (§10.2: the title is the worker's name). The confirmation's
+  `name?` field is still not shown in the client.
+- **Where revoked workers are shown.** `GET /api/workers` without parameters returns only
+  non-revoked ones, as before (choosing a worker for a workspace, import, names); "Settings"
+  asks for `?include_revoked=1`. New value `status: revoked` and field `revoked_at`.
+- **On revocation the hub archives the service session itself** (the `/archive` ban is for
+  the user). The worker's open requests in it are closed with `approval.cancel {archived}`
+  without a `worker.approval.response` frame: there is no one to deliver it to, and after a
+  replacement the new process has a different `boot_id`, so the answer would be dropped
+  anyway. The "Workers" group in the client filters service sessions by `archived`, so
+  revocation and replacement are visible right away through `session.summary`, without a
+  separate list of workers.
+- **"Delete" is `DELETE /api/workers/{id}?purge=1`**, not a separate route: in the style of
+  §6 (`DELETE` is the same resource), and revocation stays a mandatory first step
+  (`409 worker_not_revoked` for a non-revoked worker) — a working machine cannot be deleted
+  by accident with one request.
+- **Which sessions block deletion.** "Sessions" in `409 worker_has_sessions` are the
+  non-archived ones, other than the service session, with the worker's `worker_id` or in its
+  workspace. Archived ones do not block: as when deleting a workspace (§13.2), they lose
+  `workspace_id` (and here `worker_id`) and stay as history; they cannot be unarchived
+  (`409 no_workspace`). This way "or archive them" from the task statement really does lift
+  the refusal. The projects' default workspace is recomputed as in §13.2.
 
-## Вопросы
+## Questions
 
-1. **Удаление вместе с архивными сессиями.** Сейчас архивные сессии удалённого воркера
-   остаются без воркера и workspace. Нужна ли опция «удалить и их» (`?purge=1&sessions=1`)?
-   Пока нет: история дешёвая, а удаление сессий есть по одной.
-2. **Замена воркера на связи.** Запрещена (`409 worker_online`) — так в постановке. Сценарий
-   «переношу воркер на новую машину, старая ещё работает» требует сначала остановить или
-   отозвать старую. Если понадобится «заменить с отключением», это `?force=1` с отзывом.
-3. **Подтверждение замены с другого воркера того же пользователя.** Замена возможна на любую
-   машину пользователя: хаб не знает, «та же» ли это машина (у воркера нет постоянного
-   идентификатора машины). Можно добавить в `POST /worker/enroll` отпечаток (хэш
-   `IOPlatformUUID` / `/etc/machine-id`) и предлагать замену только совпадающих — но это
-   ещё одно поле, утекающее с машины; не стал без решения.
-   Решено в T21: `machine_id` (sha256 с солью `hqc` от `IOPlatformUUID` / `/etc/machine-id` /
-   `MachineGuid` / случайного id в `$HQC_HOME`) в `enroll` и `hello`; воркеры той же машины идут в
-   `replaceable` первыми с `same_machine: true`, клиент предвыбирает их замену, но заменить можно
-   и другой воркер (SPEC 0.23 §5.1).
-4. **Локальное состояние воркера при замене с другим `$HQC_HOME`.** Outbox, кэш
-   `known_workspaces.json` и смещения зеркала живут в `$HQC_HOME`; при смене каталога
-   неотправленные события старого запуска теряются, а папки чужих сессий снова потребуют
-   подтверждения. Хаб на это не влияет; описано в RUNBOOK неявно (меняется только хранилище
-   токена). Нужна ли отдельная заметка?
+1. **Deleting together with archived sessions.** Now the archived sessions of a deleted worker
+   remain without a worker and workspace. Is an option "delete them too"
+   (`?purge=1&sessions=1`) needed? Not for now: history is cheap, and sessions can be deleted
+   one by one.
+2. **Replacing an online worker.** Forbidden (`409 worker_online`) — as in the task statement.
+   The scenario "I am moving the worker to a new machine, the old one still runs" requires
+   stopping or revoking the old one first. If "replace with disconnection" is ever needed, it
+   is `?force=1` with revocation.
+3. **Confirming a replacement from another worker of the same user.** Replacement is possible
+   onto any of the user's machines: the hub does not know whether it is "the same" machine (a
+   worker has no persistent machine identifier). A fingerprint could be added to
+   `POST /worker/enroll` (a hash of `IOPlatformUUID` / `/etc/machine-id`) and replacement
+   offered only for matching ones — but that is one more field leaking from the machine; I did
+   not do it without a decision.
+   Resolved in T21: `machine_id` (sha256 salted with `hqc` of `IOPlatformUUID` /
+   `/etc/machine-id` / `MachineGuid` / a random id in `$HQC_HOME`) in `enroll` and `hello`;
+   workers of the same machine come first in `replaceable` with `same_machine: true`, the
+   client preselects replacing them, but another worker can be replaced too (SPEC 0.23 §5.1).
+4. **The worker's local state on a replacement with a different `$HQC_HOME`.** The outbox, the
+   `known_workspaces.json` cache and the mirror offsets live in `$HQC_HOME`; when the
+   directory changes, unsent events of the old run are lost, and folders of other people's
+   sessions will need confirmation again. The hub has no influence on this; the RUNBOOK
+   describes it implicitly (only the token storage changes). Is a separate note needed?

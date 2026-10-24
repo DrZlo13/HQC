@@ -1,81 +1,84 @@
-# T6 — сквозной прогон, runbook: решения и открытые вопросы
+# T6 — end-to-end run, runbook: decisions and open questions
 
-Задача T6 делалась без человека и без телефона: сквозной прогон — локальный, одной
-машиной (`tools/e2e-local.sh`), runbook — `docs/RUNBOOK.md`. `docs/SPEC.md` не менялся;
-пункты, которые, возможно, стоит внести в спеку, помечены **→ спека**.
+Task T6 was done without a human and without a phone: the end-to-end run is local, on one
+machine (`tools/e2e-local.sh`); the runbook is `docs/RUNBOOK.md`. `docs/SPEC.md` was not
+changed; items that might be worth entering into the spec are marked **→ spec**.
 
-## Сквозной прогон (`tools/e2e-local.sh`)
+## End-to-end run (`tools/e2e-local.sh`)
 
-1. Хаб в dev-режиме на `127.0.0.1:<свободный порт ≥ 18000>`, отдельная база `hqc_e2e`
-   (`dropdb --if-exists --force` + `createdb` в начале, `dropdb --force` в конце), push
-   включён: ключи VAPID генерируются `openssl` на каждый прогон, скрипт проверяет, что
-   `GET /api/push/vapid` отдаёт открытый ключ (то есть хаб принял закрытый). Сама доставка
-   push не проверяется — подписки браузера нет.
-2. Воркер: `HQC_HOME=tmp/e2e-<дата>/home`, `HQC_TOKEN_STORE=file`, workspace
-   `tmp/e2e-<дата>/workspace`; каталог пересоздаётся на каждом прогоне, `~/.hqc` не
-   трогается, `HQC_WORKER_CONFIG` из окружения сбрасывается.
-3. Сессия создаётся с `model: claude-haiku-5-5`. Тело `POST /api/projects/{id}/sessions`
-   в §6 не описано; хаб принимает `{title, worker_id, model, cwd, auto_approve}`, поле
-   `runtime` игнорирует (в итерации 1 рантайм один). **→ спека §6: тело создания сессии.**
-4. `--max-turns` задать нельзя: ни хаб, ни адаптер его не передают (T4, п. 1). Ход
-   прогона — два обращения к модели (вызов `Bash`, ответ `DONE`), но ограничения нет. Если
-   правило CLAUDE.md («`--max-turns` не больше 2») должно распространяться на e2e, нужен
-   способ его задать (поле сессии или настройка воркера). Вопрос.
-5. Если `client/dist` собран, хаб запускается с `HQC_CLIENT_DIR` и скрипт проверяет, что
-   `/` — `index.html` клиента, а `/sw.js` отдаётся.
-6. Транскрипты прогонов остаются в
-   `~/.claude/projects/-Users-home-mac-work-hqc-tmp-e2e-<дата>-workspace/`: скрипт их
-   проверяет, но не удаляет (это данные Claude Code, не hqc).
-7. `E2E_CLAUDE_BIN=/usr/bin/false` прогоняет всё, кроме живого хода, без расхода
-   подписки: так найден баг из п. 8.
+1. The hub in dev mode on `127.0.0.1:<a free port ≥ 18000>`, a separate database `hqc_e2e`
+   (`dropdb --if-exists --force` + `createdb` at the start, `dropdb --force` at the end), push
+   on: VAPID keys are generated with `openssl` for each run, and the script checks that
+   `GET /api/push/vapid` returns the public key (i.e. the hub accepted the private one). Push
+   delivery itself is not checked: there is no browser subscription.
+2. Worker: `HQC_HOME=tmp/e2e-<date>/home`, `HQC_TOKEN_STORE=file`, workspace
+   `tmp/e2e-<date>/workspace`; the directory is recreated on each run, `~/.hqc` is not
+   touched, `HQC_WORKER_CONFIG` from the environment is cleared.
+3. The session is created with `model: claude-haiku-5-5`. The body of
+   `POST /api/projects/{id}/sessions` is not described in §6; the hub accepts
+   `{title, worker_id, model, cwd, auto_approve}` and ignores the `runtime` field (iteration 1
+   has one runtime). **→ spec §6: the session creation body.**
+4. `--max-turns` cannot be set: neither the hub nor the adapter passes it (T4, item 1). The
+   run's turn is two model calls (a `Bash` call, the answer `DONE`), but there is no limit. If
+   the CLAUDE.md rule ("`--max-turns` no more than 2") should apply to e2e, a way to set it is
+   needed (a session field or a worker setting). Open question.
+5. If `client/dist` is built, the hub starts with `HQC_CLIENT_DIR` and the script checks that
+   `/` is the client's `index.html` and that `/sw.js` is served.
+6. The runs' transcripts stay in
+   `~/.claude/projects/-Users-home-mac-work-hqc-tmp-e2e-<date>-workspace/`: the script checks
+   them but does not delete them (this is Claude Code's data, not hqc's).
+7. `E2E_CLAUDE_BIN=/usr/bin/false` runs everything except the live turn without spending the
+   subscription: that is how the bug in item 8 was found.
 
-## Найдено и исправлено
+## Found and fixed
 
-8. **Хаб: неудачный старт перезапускался без паузы.** Воркер при неудачном старте шлёт
-   `session.state` `starting` → `stopped` и `error {agent_start_failed}`. Обработчик
-   `session.state stopped` сбрасывал ожидание ответа на `session.start` и сразу слал
-   новый `session.start`, минуя `start_retry_delay` (§5.2: «повторяется через паузу»).
-   Итог на живом воркере: три старта за ~10 мс, ввод `failed`, а четвёртый старт давал
-   второе событие `system agent_start_failed`. Исправлено (`worker_ws.rs`,
-   `on_session_state`): `stopped` не сбрасывает ожидающий ответа `session.start` и не
-   поднимает сессию, у которой идёт счёт неудачных стартов, — повтор ведёт
-   `on_start_failed`. Тест `failed_start_with_state_frames_waits_between_retries` (оба
-   порядка `error`/`stopped`, пауза между стартами, одно `agent_start_failed`); без правки
-   падает. Спека не менялась: код теперь делает то, что в ней написано.
+8. **Hub: a failed start was retried without a pause.** On a failed start the worker sends
+   `session.state` `starting` → `stopped` and `error {agent_start_failed}`. The
+   `session.state stopped` handler reset the wait for the answer to `session.start` and sent a
+   new `session.start` at once, bypassing `start_retry_delay` (§5.2: "retried after a
+   pause"). The result on a live worker: three starts in ~10 ms, the input `failed`, and a
+   fourth start produced a second `system agent_start_failed` event. Fixed (`worker_ws.rs`,
+   `on_session_state`): `stopped` does not reset a `session.start` that awaits an answer and
+   does not bring up a session whose failed starts are being counted; `on_start_failed`
+   drives the retry. Test `failed_start_with_state_frames_waits_between_retries` (both
+   `error`/`stopped` orders, a pause between starts, a single `agent_start_failed`); it fails
+   without the fix. The spec did not change: the code now does what it says.
 
-## Правки для runbook
+## Runbook changes
 
-9. **Хаб отдаёт клиент**: `HQC_CLIENT_DIR` — каталог `client/dist`, отдаётся на `/` (без
-   SPA-fallback: маршруты клиента в `#`), `/api/*` и `/worker/*` с диска не берутся, выход
-   за каталог — 404, `index.html`/`sw.js`/манифест — `no-cache`, `assets/*` — immutable.
-   Без переменной поведение прежнее. До этого клиент было нечем раздать с того же origin,
-   а он ходит в `/api` относительным путём (README клиента уже говорил «клиент раздаёт
-   хаб»). Тест `client_files::tests`. **→ спека §6/§20: «клиент отдаётся хабом с того же
-   домена, за тем же Access»?**
-10. **`hqc-hub --version`** (и ошибка на любой другой аргумент вместо молчаливого
-    игнорирования). Тест `tests/cli.rs`.
-11. **Отзыв воркера в клиенте**: кнопка «Отозвать» в «Настройках» (`DELETE
-    /api/workers/{id}`, маршрут в хабе был). §5.1 говорит «токен отзывается из UI», в T5
-    кнопки не было. Мок поддерживает `DELETE`, тест в `client/tests/e2e.test.tsx`.
-12. **Манифест за Access**: `<link rel="manifest" crossorigin="use-credentials">`. Без
-    атрибута браузер запрашивает манифест без cookies, и за Access вместо него пришла бы
-    страница входа — установка PWA сломалась бы. На настоящем Access не проверено
-    **[проверить]**.
+9. **The hub serves the client**: `HQC_CLIENT_DIR` is the `client/dist` directory, served at
+   `/` (no SPA fallback: the client's routes are in `#`), `/api/*` and `/worker/*` are never
+   taken from disk, escaping the directory gives 404, `index.html`/`sw.js`/the manifest are
+   `no-cache`, `assets/*` are immutable. Without the variable the behaviour is as before.
+   Before this there was nothing to serve the client from the same origin, while it calls
+   `/api` by a relative path (the client's README already said "the hub serves the client").
+   Test `client_files::tests`. **→ spec §6/§20: "the client is served by the hub from the
+   same domain, behind the same Access"?**
+10. **`hqc-hub --version`** (and an error on any other argument instead of silently ignoring
+    it). Test `tests/cli.rs`.
+11. **Worker revocation in the client**: a "Revoke" button in "Settings" (`DELETE
+    /api/workers/{id}`; the hub already had the route). §5.1 says "the token is revoked from
+    the UI", but T5 had no button. The mock supports `DELETE`; the test is in
+    `client/tests/e2e.test.tsx`.
+12. **The manifest behind Access**: `<link rel="manifest" crossorigin="use-credentials">`.
+    Without the attribute the browser requests the manifest without cookies, and behind Access
+    it would get the login page instead, breaking PWA installation. Not verified on a real
+    Access **[verify]**.
 
-## Открытые вопросы
+## Open questions
 
-13. **Прогон с телефона** (T6, §19.1) не выполнен: нет устройства и настоящего
-    Cloudflare Access в автономном прогоне. Не проверены: вход через Access, WebSocket
-    `/api/ws` через туннель, установка PWA, настоящий push на iOS и Android, вёрстка
-    глазами (T5 «Не проверено»). Запись результата в §23 — после ручного прогона по
-    `docs/RUNBOOK.md` §4.
-14. **`HQC_VAPID_SUBJECT` по умолчанию `mailto:hqc@localhost`.** Push-сервис Apple, по
-    имеющимся сведениям, отвергает подписи с недействительным `sub`; runbook велит задать
-    настоящий адрес. Возможно, стоит сделать переменную обязательной при заданных ключах.
-15. **Keychain и обновление бинарника.** Решено 2026-10-23: см. deploy-findings #8, RUNBOOK §2.4. Элемент Keychain создаёт `hqc-worker enroll`;
-    после замены неподписанного бинарника macOS может спросить разрешение на доступ, а под
-    launchd спросить некому. Не проверено **[проверить]**; в runbook — обходной путь
-    (один запуск в Терминале или повторный `enroll`).
-16. **Нет события `status running`.** Адаптер шлёт только `status idle` в конце хода;
-    «работает» клиент берёт из вычисленного `state` сессии (§17.1). Расхождения со спекой
-    нет (источник `status` — «воркер или хаб», обязательности нет), отмечено для справки.
+13. **The run from a phone** (T6, §19.1) was not done: no device and no real Cloudflare Access
+    in an autonomous run. Not verified: login through Access, the `/api/ws` WebSocket through
+    the tunnel, PWA installation, real push on iOS and Android, the layout by eye (T5 "Not
+    verified"). The result goes into §23 after a manual run per `docs/RUNBOOK.md` §4.
+14. **`HQC_VAPID_SUBJECT` defaults to `mailto:hqc@localhost`.** Apple's push service
+    reportedly rejects signatures with an invalid `sub`; the runbook says to set a real
+    address. It may be worth making the variable mandatory when the keys are set.
+15. **Keychain and binary updates.** Resolved 2026-10-23: see deploy-findings #8, RUNBOOK §2.4. The Keychain item is created by `hqc-worker enroll`;
+    after an unsigned binary is replaced, macOS may ask for permission to access it, and under
+    launchd there is no one to ask. Not verified **[verify]**; the runbook has a workaround
+    (one run in Terminal or a repeated `enroll`).
+16. **There is no `status running` event.** The adapter sends only `status idle` at the end of
+    a turn; the client takes "running" from the session's computed `state` (§17.1). There is
+    no discrepancy with the spec (the source of `status` is "the worker or the hub", nothing
+    is mandatory); noted for reference.

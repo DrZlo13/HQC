@@ -1,67 +1,67 @@
-# T11: markdown в клиенте — решения и открытые вопросы
+# T11: markdown in the client — decisions and open questions
 
-Рендер — `client/src/ui/Markdown.tsx` (лексер marked → элементы Preact), копирование —
-`client/src/clipboard.ts`, тесты — `client/tests/markdown.test.tsx` и шаг в
-`client/tests/e2e.test.tsx`. SPEC не менялся: §4 и §6 не говорят, как показывать `text`,
-а §20 (CSP) сборка соблюдает как была: inline-скриптов нет (тест `csp.test.ts`), в бандле
-нет `eval` и `new Function`. Код клиента не использует `innerHTML` и
-`dangerouslySetInnerHTML` (в бандле есть только ветка самого Preact для этого свойства).
+Rendering: `client/src/ui/Markdown.tsx` (marked lexer → Preact elements); copying:
+`client/src/clipboard.ts`; tests: `client/tests/markdown.test.tsx` and a step in
+`client/tests/e2e.test.tsx`. SPEC did not change: §4 and §6 do not say how to show `text`,
+and the build keeps §20 (CSP) as before: no inline scripts (test `csp.test.ts`), no `eval`
+or `new Function` in the bundle. The client code does not use `innerHTML` or
+`dangerouslySetInnerHTML` (the bundle only contains Preact's own branch for that property).
 
-## Что решено без спроса
+## Decided without asking
 
-1. **Ссылки только абсолютные** `http:`, `https:`, `mailto:` (проверка через `new URL`).
-   Относительные (`/api/...`, `#якорь`, `//host`) показываются исходным текстом
-   `[текст](адрес)`, как и `javascript:`/`data:`/`file:`: относительный адрес у сообщения
-   агента указывает на хаб, а не туда, что агент имел в виду. Если агенты пишут ссылки на
-   файлы рабочей копии (`[x](src/main.rs)`), их стоит показывать иначе — вопрос ниже.
-2. **Одиночный перевод строки — `<br>`** (`breaks: true`), как просили; это отличается от
-   CommonMark, где он склеивается в пробел.
-3. **Сырой HTML** — текстом: блочный HTML моноширинным абзацем с сохранением переносов,
-   инлайновый — как есть внутри строки.
-4. **Сущности**: декодируются числовые (`&#65;`, `&#x41;`) и `&amp; &lt; &gt; &quot;
-   &apos; &nbsp;`; прочие именованные (`&copy;`) остаются как написаны — полная таблица
-   HTML весит больше всего остального.
-5. **Картинки**: курсив с alt-текстом и ссылка на адрес (если схема разрешена), иначе
-   адрес текстом. `data:`-картинки поэтому показываются длинной строкой.
-6. **Чекбоксы задач** — `disabled`, только для показа.
-7. **Кнопка «Копировать»** есть у `user.message`, `agent.message` (промежуточных и
-   финальных) и `peer.message`; кладёт `payload.text` как есть. У строк `system`, у
-   потока дельт и у ещё не отправленного сообщения кнопки нет. Кнопки и полоса с языком
-   над кодом — `user-select: none`, чтобы при выделении мышью и Cmd-C они не попадали в
-   скопированный текст.
-8. **Поток**: каждая дельта перерисовывает весь текст заново (лексер на весь буфер,
-   `useMemo` по тексту). Незакрытый блок кода показывается блоком кода до конца текста,
-   незакрытое `**` — буквально, пока не закроется. Курсор потока рисует CSS после последнего
-   блока (после списка или блока кода он встаёт на новую строку).
-9. **Подсветки синтаксиса нет**, только подпись языка (первое слово после ```` ``` ````).
+1. **Only absolute links**: `http:`, `https:`, `mailto:` (checked with `new URL`).
+   Relative ones (`/api/...`, `#anchor`, `//host`) are shown as the source text
+   `[text](address)`, as are `javascript:`/`data:`/`file:`: a relative address in an agent
+   message points at the hub, not where the agent meant. If agents write links to files in
+   the working copy (`[x](src/main.rs)`), those should be shown differently — question below.
+2. **A single line break is `<br>`** (`breaks: true`), as requested; this differs from
+   CommonMark, where it collapses into a space.
+3. **Raw HTML** is shown as text: block HTML as a monospace paragraph keeping line breaks,
+   inline HTML as is within the line.
+4. **Entities**: numeric ones (`&#65;`, `&#x41;`) and `&amp; &lt; &gt; &quot;
+   &apos; &nbsp;` are decoded; other named ones (`&copy;`) stay as written — the full HTML
+   table weighs more than everything else combined.
+5. **Images**: italic alt text and a link to the address (if the scheme is allowed),
+   otherwise the address as text. `data:` images are therefore shown as a long string.
+6. **Task checkboxes** are `disabled`, display only.
+7. **The "Copy" button** is on `user.message`, `agent.message` (intermediate and final) and
+   `peer.message`; it copies `payload.text` as is. `system` lines, the delta stream and a
+   message not yet sent have no button. The buttons and the language bar above code are
+   `user-select: none`, so selecting with the mouse and Cmd-C does not put them into the
+   copied text.
+8. **Streaming**: each delta re-renders the whole text (lexer over the whole buffer,
+   `useMemo` on the text). An unclosed code block is shown as a code block to the end of the
+   text; an unclosed `**` literally until it closes. The stream cursor is drawn by CSS after
+   the last block (after a list or code block it moves to a new line).
+9. **No syntax highlighting**, only the language label (the first word after ```` ``` ````).
 
-## Не поддержано
+## Not supported
 
-- Сноски, математика, `<details>`, определения, якоря у заголовков, эмодзи-коды `:x:`.
-- Markdown в `agent.thinking`, превью инструментов и вопросах `clarify` — там по-прежнему
-  `<pre>`/текст. Нужно ли — вопрос ниже.
+- Footnotes, math, `<details>`, definition lists, heading anchors, emoji codes `:x:`.
+- Markdown in `agent.thinking`, tool previews and `clarify` questions — still `<pre>`/text
+  there. Whether it is needed — question below.
 
-## Открытые вопросы
+## Open questions
 
-1. **Ссылки на файлы рабочей копии.** Агенты Claude Code часто пишут `[main.rs](src/main.rs)`
-   или `src/main.rs:42`. Сейчас это текст. Можно сделать их ссылкой на артефакт или на
-   просмотр файла, когда такое появится (§14?).
-2. **Markdown в размышлениях (`agent.thinking`)** — оставить `<pre>` или рендерить так же?
-3. **Длинное сообщение в `examples/wire`.** Длинного примера там нет, а `crates/` в T11
-   трогать было нельзя: тест берёт конверт `event.agent.message.json` и подставляет
-   сгенерированный текст на ~100 КБ. Предложение: добавить в `hqc-proto/examples/wire`
-   пример с длинным markdown-ответом реального агента (без секретов) и брать его.
-4. **Квадратичность потока.** На каждую дельту лексер проходит весь буфер; на ответе в
-   100 КБ это заметно только на слабом телефоне. Если станет проблемой — перерисовывать
-   не чаще кадра или кэшировать закрытые блоки.
-5. **Размер бандла**: 18,6 → 34,1 КБ gzip (JS), почти весь прирост — marked. Приемлемо ли
-   для первого открытия с телефона через туннель, или стоит грузить markdown лениво
-   (отдельным чанком после первого экрана)?
+1. **Links to working-copy files.** Claude Code agents often write `[main.rs](src/main.rs)`
+   or `src/main.rs:42`. Now this is text. It could become a link to an artifact or to a file
+   viewer once one exists (§14?).
+2. **Markdown in thinking (`agent.thinking`)** — keep `<pre>` or render it the same way?
+3. **A long message in `examples/wire`.** There is no long example there, and `crates/` was
+   off limits in T11: the test takes the `event.agent.message.json` envelope and substitutes
+   ~100 KB of generated text. Proposal: add to `hqc-proto/examples/wire` an example with a
+   long markdown answer from a real agent (no secrets) and use it.
+4. **Quadratic streaming.** On every delta the lexer walks the whole buffer; on a 100 KB
+   answer this is noticeable only on a weak phone. If it becomes a problem — re-render at
+   most once per frame or cache the closed blocks.
+5. **Bundle size**: 18.6 → 34.1 KB gzip (JS), almost all of the growth is marked. Is that
+   acceptable for the first load from a phone through a tunnel, or should markdown load
+   lazily (a separate chunk after the first screen)?
 
-## Не проверено
+## Not checked
 
-- Глазами в браузере не смотрелось: в окружении T11 браузера нет. Проверено в happy-dom
-  (рендер, копирование, сценарий через `<App>` с моком), сборкой и типами. Нужен ручной
-  прогон: `npm run dev:mock`, написать «покажи markdown» в любой сессии; отдельно — что
-  Cmd-C по выделению через блок кода не захватывает «Копировать» и подпись языка, и что
-  запасное копирование через textarea работает в Safari на iPhone по http.
+- Not looked at in a browser: the T11 environment has no browser. Checked in happy-dom
+  (rendering, copying, a scenario through `<App>` with a mock), the build and types. A manual
+  run is needed: `npm run dev:mock`, write "show markdown" in any session; separately —
+  that Cmd-C on a selection across a code block does not capture "Copy" and the language
+  label, and that the fallback copy through a textarea works in Safari on iPhone over http.

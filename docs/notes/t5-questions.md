@@ -1,121 +1,125 @@
-# T5: решения и открытые вопросы
+# T5: decisions and open questions
 
-Клиент делался без хаба (T2 шёл параллельно) и без возможности спросить. Ниже — места,
-где спека (0.9) молчит или допускает разные чтения, и что выбрал клиент. Мок
-(`client/mock/server.mjs`) реализует ровно эти формы. **SPEC.md в этой ветке не менялся**,
-чтобы не конфликтовать с T2, который владеет §6; пункты с пометкой «в спеку» нужно внести
-в §6 при сведении T2 и T5 (с записью в §23). Сведено в 0.11 (T7): клиент и мок
-перешли на формы хаба.
+The client was built without the hub (T2 ran in parallel) and with no one to ask. Below are the
+places where the spec (0.9) is silent or allows different readings, and what the client chose.
+The mock (`client/mock/server.mjs`) implements exactly these shapes. **SPEC.md was not changed
+in this branch**, to avoid conflicts with T2, which owns §6; items marked "into the spec" need
+to go into §6 when T2 and T5 are merged (with an entry in §23). Merged in 0.11 (T7): the client
+and the mock moved to the hub's shapes.
 
-## Протокол `/api/ws`
+## The `/api/ws` protocol
 
-1. **Конверт сообщений** (в спеку). Клиент шлёт `{id?, type, payload}` — как фреймы §5,
-   `id` необязателен:
+1. **Message envelope** (into the spec). The client sends `{id?, type, payload}`, like the §5
+   frames, with `id` optional:
    - `subscribe {session_id, after_seq}`;
    - `subscribe_summary {}`;
-   - `unsubscribe {session_id}` — **добавлено клиентом**, в §6 его нет; клиент шлёт его при
-     уходе из чата. Хаб может игнорировать, но тогда события закрытых чатов будут идти
-     до конца соединения.
+   - `unsubscribe {session_id}`: **added by the client**, it is not in §6; the client sends it
+     when leaving a chat. The hub may ignore it, but then events of closed chats keep coming
+     until the connection ends.
 
-   Хаб шлёт:
-   - `{type: "event", payload: {event}}` — как фрейм `event` воркера; клиент принимает
-     и событие прямо в `payload`;
-   - `{type: "summary", payload: {sessions: [{session_id, state, queue_len, unread, last_seq?}]}}` —
-     на `subscribe_summary` полный список, дальше только изменившиеся сессии; клиент
-     сливает по `session_id`, а на незнакомый `session_id` перечитывает список сессий;
+   The hub sends:
+   - `{type: "event", payload: {event}}`, like the worker's `event` frame; the client also
+     accepts the event directly in `payload`;
+   - `{type: "summary", payload: {sessions: [{session_id, state, queue_len, unread, last_seq?}]}}`:
+     the full list on `subscribe_summary`, then only the sessions that changed; the client
+     merges by `session_id`, and on an unknown `session_id` re-reads the session list;
    - `{type: "error", payload: {code, message}}`.
 
-   Неизвестные `type` клиент игнорирует.
-   Решено в 0.11: форма хаба — плоские фреймы без `id` и `payload`, `unsubscribe` есть, плюс `subscribed`, `delivery`, `session.summary`, `ping`/`pong` (§6, `hqc_proto::client_frame`).
-2. **`agent.delta` по WS** приходит обычным `event` с полным конвертом события без `seq`
-   (как `examples/wire/event.agent.delta.json`). Клиент копит дельты в буфер и сбрасывает
-   его по любому `agent.message`, по `status` не `running` и по обрыву сокета (дельты
-   после разрыва не продолжают старый текст).
-   Решено в 0.11: так и есть, `{type: event, event}` без `seq`, пример `client.event.delta.json` (§6).
-3. **Изменение `delivery`.** События append-only, но `delivery`/`delivered_at` у
-   `user.message` меняются. Клиент считает, что хаб **присылает то же событие повторно**
-   (тот же `seq` и `event_id`, новые поля), и заменяет его по `seq`. Нужен выбор в T2:
-   это, отдельное событие или поле в `summary`. Без любого из них «ждёт доставки» не
-   сменится до перезагрузки.
-   Решено в 0.11: отдельный фрейм `{type: delivery, session_id, event_id, seq, delivery, delivered_at?}`; клиент и мок переделаны, событие повторно не шлётся (§6).
+   The client ignores unknown `type`s.
+   Resolved in 0.11: the hub's shape is flat frames without `id` and `payload`, `unsubscribe` exists, plus `subscribed`, `delivery`, `session.summary`, `ping`/`pong` (§6, `hqc_proto::client_frame`).
+2. **`agent.delta` over WS** arrives as a regular `event` with the full event envelope and no
+   `seq` (like `examples/wire/event.agent.delta.json`). The client accumulates deltas in a
+   buffer and flushes it on any `agent.message`, on a `status` other than `running` and when
+   the socket drops (deltas after a disconnect do not continue the old text).
+   Resolved in 0.11: that is how it works, `{type: event, event}` without `seq`, example `client.event.delta.json` (§6).
+3. **A change of `delivery`.** Events are append-only, but `delivery`/`delivered_at` of a
+   `user.message` change. The client assumes the hub **sends the same event again** (the same
+   `seq` and `event_id`, new fields) and replaces it by `seq`. T2 has to choose: this, a
+   separate event, or a field in `summary`. Without any of them "awaiting delivery" will not
+   change until a reload.
+   Resolved in 0.11: a separate frame `{type: delivery, session_id, event_id, seq, delivery, delivered_at?}`; the client and the mock were reworked, the event is not sent again (§6).
 
 ## REST
 
-4. **Списки.** `GET /api/projects/{id}/sessions` и `GET /api/sessions/{id}/events`:
-   клиент принимает и голый массив, и `{sessions: [...]}` / `{events: [...]}`. Мок отдаёт
-   массивы.
-   Решено в 0.11: только `{sessions: [...]}` и `{events: [...], last_seq}`, клиент и мок так же (§6).
-5. **Объект сессии** (в спеку): `id, title, slug, state, queue_len, last_seq, archived,
-   updated_at` и либо `unread`, либо `last_read_seq` (тогда клиент считает
-   `last_seq - last_read_seq`). §3 Session не содержит `unread`.
-   Решено в 0.11: объект сессии хаба (§6, `hqc_proto::api::Session`) содержит всё из списка плюс `last_read_seq`; клиент читает его строго.
-6. **Что считать непрочитанным.** Клиент просто показывает число из хаба. Мок считает
-   все события после `last_read_seq`, включая `status` и `usage`, — это шумно. Предложение
-   для T2: считать только `agent.message final`, `approval.request`, `clarify.request`,
-   `peer.message` и `system`.
-   Решено в 0.11: принято, правило в §6, реализовано в хабе и моке.
-7. **Создание сессии**: `POST /api/projects/{id}/sessions {title}`; воркер и workspace
-   выбирает хаб (итерация 1: единственный workspace из конфига воркера). Ответ — объект
-   сессии.
-   Решено в 0.11: так в хабе (`201` и объект сессии) и в §6.
-8. **Ввод**: `POST /api/sessions/{id}/input {text, artifact_ids: [], client_op_id}`. Тело
-   ответа клиент не читает и ждёт эхо по WS. Если POST упал, сообщение помечается «не
-   отправлено» с кнопкой «Ещё раз», которая шлёт **тот же `client_op_id`**. Предложение для
-   T2 (в спеку): хаб дедуплицирует ввод по `(session_id, client_op_id)` и на повтор
-   отвечает уже сохранённым событием — иначе потерянный ответ на POST даёт двойной ход.
-   Мок так и делает.
-   Решено в 0.11: хаб и мок отвечают `{event}` (201, повтор — 200 с тем же событием); клиент показывает событие из ответа сразу, не сдвигая `lastSeq` (§6).
-9. **Ошибки**: тело `{code, message}`; клиент показывает `message`. Ответ на закрытый
-   запрос (`POST .../requests/{id}`) в моке — 409 `request_closed`; клиент показывает
-   ошибку под кнопками, кнопки убирает только событие `approval.response`/`approval.cancel`.
-   Решено в 0.11: тело `{error, message}` (клиент хранит `error` как код), второй ответ — 409 `request_closed` без события (§6, §10.1).
-10. **История**: клиент читает её страницами по 200 от `after_seq=0`, потом делает
-    `subscribe` от последнего `seq`. Для длинных сессий нужна загрузка с хвоста
-    (`before_seq` или `limit` с конца) — в §6 только `after_seq`. Пока не нужно.
-11. **Ссылка на артефакт**: `GET /api/artifacts/{id}/url` → `{url}`.
-12. **Регистрация воркера**: `POST /api/workers/enroll/confirm {code}`; клиент убирает
-    пробелы и переводит код в верхний регистр, ответ `{worker_id, name?}` (имя показывается).
-    Экран открывается и по `#/enroll?code=ABCD-1234` — предложение для T3: воркер может
-    печатать готовую ссылку `<hub>/#/enroll?code=...`.
-    Решено в 0.11: воркер печатает ссылку; ответ хаба `{worker_id, name}` (§5.1, §6).
+4. **Lists.** `GET /api/projects/{id}/sessions` and `GET /api/sessions/{id}/events`:
+   the client accepts both a bare array and `{sessions: [...]}` / `{events: [...]}`. The mock
+   returns arrays.
+   Resolved in 0.11: only `{sessions: [...]}` and `{events: [...], last_seq}`, and the client and the mock likewise (§6).
+5. **The session object** (into the spec): `id, title, slug, state, queue_len, last_seq,
+   archived, updated_at` and either `unread` or `last_read_seq` (then the client computes
+   `last_seq - last_read_seq`). §3 Session has no `unread`.
+   Resolved in 0.11: the hub's session object (§6, `hqc_proto::api::Session`) has everything in the list plus `last_read_seq`; the client reads it strictly.
+6. **What counts as unread.** The client just shows the number from the hub. The mock counts
+   all events after `last_read_seq`, including `status` and `usage`, which is noisy. A proposal
+   for T2: count only `agent.message final`, `approval.request`, `clarify.request`,
+   `peer.message` and `system`.
+   Resolved in 0.11: accepted, the rule is in §6, implemented in the hub and the mock.
+7. **Creating a session**: `POST /api/projects/{id}/sessions {title}`; the hub picks the worker
+   and the workspace (iteration 1: the only workspace from the worker's config). The response
+   is the session object.
+   Resolved in 0.11: that is how the hub does it (`201` and the session object), and so does §6.
+8. **Input**: `POST /api/sessions/{id}/input {text, artifact_ids: [], client_op_id}`. The
+   client does not read the response body and waits for the echo over WS. If the POST fails,
+   the message is marked "not sent" with a "Retry" button that sends **the same
+   `client_op_id`**. A proposal for T2 (into the spec): the hub deduplicates input by
+   `(session_id, client_op_id)` and answers a repeat with the already stored event; otherwise
+   a lost response to the POST gives a double turn. The mock does so.
+   Resolved in 0.11: the hub and the mock answer `{event}` (201, a repeat gets 200 with the same event); the client shows the event from the response at once, without moving `lastSeq` (§6).
+9. **Errors**: body `{code, message}`; the client shows `message`. An answer to a closed
+   request (`POST .../requests/{id}`) gets 409 `request_closed` in the mock; the client shows
+   the error under the buttons, and only an `approval.response`/`approval.cancel` event removes
+   the buttons.
+   Resolved in 0.11: body `{error, message}` (the client keeps `error` as the code), a second answer gets 409 `request_closed` without an event (§6, §10.1).
+10. **History**: the client reads it in pages of 200 from `after_seq=0`, then does `subscribe`
+    from the last `seq`. Long sessions need loading from the tail (`before_seq` or `limit`
+    from the end); §6 has only `after_seq`. Not needed yet.
+11. **Artifact link**: `GET /api/artifacts/{id}/url` → `{url}`.
+12. **Worker enrollment**: `POST /api/workers/enroll/confirm {code}`; the client strips spaces
+    and upper-cases the code, the response is `{worker_id, name?}` (the name is shown).
+    The screen also opens from `#/enroll?code=ABCD-1234`; a proposal for T3: the worker could
+    print a ready link `<hub>/#/enroll?code=...`.
+    Resolved in 0.11: the worker prints the link; the hub's response is `{worker_id, name}` (§5.1, §6).
 
 ## Web Push
 
-13. **`GET /api/push/vapid`** → `{public_key}` (base64url, несжатая точка P-256) — маршрута
-    нет в списке §6 (в спеку). `POST /api/push/subscribe` получает
+13. **`GET /api/push/vapid`** → `{public_key}` (base64url, an uncompressed P-256 point): the
+    route is not in the §6 list (into the spec). `POST /api/push/subscribe` receives
     `PushSubscription.toJSON()`: `{endpoint, expirationTime, keys: {p256dh, auth}}`.
-    Решено в 0.11: так в §6 и хабе; `public_key: null` — push на хабе выключен, клиент это показывает.
-14. **Тело push** (договориться с T2): JSON `{session_id, type, title?, body?, tag?, payload?}`.
-    Если `title`/`body` нет, сервис-воркер строит их по `type` и `payload` (то есть хаб может
-    прислать само событие §4). Клик открывает `#/s/<session_id>`: фокусирует открытое окно
-    клиента или открывает новое. `approval.request` и `clarify.request` показываются с
-    `requireInteraction`.
-    Решено в 0.11: форма клиента принята, `payload` — само событие §4 (опускается, если не влезает в push); хаб шлёт так, sw.js читает событие из `payload` (§16).
-15. Сервис-воркер **не кэширует** приложение: без хаба клиент бесполезен, а закэшированная
-    старая сборка против нового хаба хуже явной сетевой ошибки.
+    Resolved in 0.11: so in §6 and the hub; `public_key: null` means push is off on the hub, and the client shows that.
+14. **Push body** (to agree with T2): JSON `{session_id, type, title?, body?, tag?, payload?}`.
+    If there is no `title`/`body`, the service worker builds them from `type` and `payload`
+    (so the hub can send the §4 event itself). A click opens `#/s/<session_id>`: it focuses an
+    open client window or opens a new one. `approval.request` and `clarify.request` are shown
+    with `requireInteraction`.
+    Resolved in 0.11: the client's shape is accepted, `payload` is the §4 event itself (omitted if it does not fit into the push); the hub sends that, and sw.js reads the event from `payload` (§16).
+15. The service worker **does not cache** the app: without the hub the client is useless, and a
+    stale cached build against a new hub is worse than an explicit network error.
 
-## Поведение UI
+## UI behaviour
 
-16. **Подписи кнопок разрешений** — по `canonical` (Разрешить / Разрешить в сессии /
-    Разрешать всегда / Отклонить / Запрещать всегда); при неизвестном `canonical` — `label`
-    агента; подпись агента всегда в `title` кнопки. Кнопок ровно столько, сколько `options[]`.
-17. **`expires_at`**: после срока по часам устройства кнопки скрываются с пометкой «срок
-    истёк», не дожидаясь `approval.cancel {timeout}` от хаба. Риск — неверные часы
-    телефона; если это окажется проблемой, оставить кнопки до события отмены.
-18. **Кто отвечает на запрос** (§10.1, отвечает только владелец воркера): в итерации 1
-    один пользователь, клиент кнопки не прячет; отказ хаба показывается как ошибка.
-19. **Прочитанное**: пока чат открыт и вкладка видима, курсор двигается на последний `seq`
-    (`PUT read_cursor`), значок в списке гаснет сразу, не дожидаясь `summary`.
-20. **Строгость**: `author.kind` и `delivery` разбираются строго, как в `hqc-proto` (их нет
-    в списке терпимых перечислений §4). Событие с ошибкой разбора не роняет чат, а
-    показывается свёрнутой карточкой «некорректное событие».
-21. `tool.result` показывается внутри карточки своего `tool.call` (по `call_id`);
-    результат без вызова — отдельной карточкой.
-22. Язык интерфейса — русский, без i18n.
+16. **Permission button labels** follow `canonical` (Allow / Allow for this session /
+    Always allow / Deny / Always deny); for an unknown `canonical`, the agent's `label`; the
+    agent's label is always in the button's `title`. There are exactly as many buttons as
+    `options[]`.
+17. **`expires_at`**: once it passes by the device clock, the buttons are hidden with an
+    "expired" note, without waiting for `approval.cancel {timeout}` from the hub. The risk is a
+    wrong phone clock; if that turns out to be a problem, keep the buttons until the cancel
+    event.
+18. **Who answers a request** (§10.1, only the worker owner answers): iteration 1 has one user,
+    so the client does not hide the buttons; the hub's refusal is shown as an error.
+19. **Read state**: while a chat is open and the tab is visible, the cursor moves to the last
+    `seq` (`PUT read_cursor`), and the badge in the list goes out at once, without waiting for
+    `summary`.
+20. **Strictness**: `author.kind` and `delivery` are parsed strictly, as in `hqc-proto` (they
+    are not in the §4 list of tolerant enums). An event that fails to parse does not crash the
+    chat; it is shown as a collapsed "malformed event" card.
+21. A `tool.result` is shown inside the card of its `tool.call` (by `call_id`); a result
+    without a call gets a card of its own.
+22. The interface language is Russian, no i18n.
 
-## Не проверено
+## Not verified
 
-- Вёрстка не смотрелась глазами ни в одном браузере: в окружении T5 браузера нет. UI
-  проверен тестами в happy-dom (полный сценарий через `<App>`), сборкой и типами. Нужен
-  ручной прогон на телефоне (T6).
-- Push от реального хаба не проверен: мок не шифрует push.
+- The layout was not looked at in any browser: the T5 environment has no browser. The UI was
+  checked by tests in happy-dom (a full scenario through `<App>`), by the build and by types.
+  A manual run on a phone is needed (T6).
+- Push from a real hub was not verified: the mock does not encrypt push.

@@ -1,11 +1,11 @@
-# Claude Code: control-протокол stream-json (T0)
+# Claude Code: the stream-json control protocol (T0)
 
-Проверено 2026-10-22 на Claude Code **2.1.307** (macOS arm64, home-mac), модель
-`claude-haiku-5-5`, `--max-turns 2`. Фикстуры — `crates/hqc-claude-jsonl/fixtures/*-2.1.307.jsonl`
-(тройки `stdin-<x>` / `stream-<x>` / `<x>`), тест сверки uuid —
+Verified 2026-10-22 on Claude Code **2.1.307** (macOS arm64, home-mac), model
+`claude-haiku-5-5`, `--max-turns 2`. Fixtures: `crates/hqc-claude-jsonl/fixtures/*-2.1.307.jsonl`
+(triples `stdin-<x>` / `stream-<x>` / `<x>`); the uuid cross-check test is in
 `crates/hqc-claude-jsonl/src/lib.rs` (`t0_stream_and_transcript_share_uuids`).
 
-Команда всех прогонов:
+Command for all runs:
 
 ```
 claude -p --output-format stream-json --input-format stream-json \
@@ -14,26 +14,26 @@ claude -p --output-format stream-json --input-format stream-json \
   --model claude-haiku-5-5 --max-turns 2 --session-id <uuid>
 ```
 
-Ввод — одна строка `{"type":"user","message":{"role":"user","content":"<текст>"}}`; после
-`result` драйвер закрывает stdin, процесс выходит.
+Input: one line `{"type":"user","message":{"role":"user","content":"<text>"}}`; after
+`result` the driver closes stdin and the process exits.
 
-## 0. Расхождение: нужен `--permission-prompt-tool stdio`
+## 0. Discrepancy: `--permission-prompt-tool stdio` is required
 
-Флага `--permission-prompts host` (он и так по умолчанию) **недостаточно**. Без
-`--permission-prompt-tool stdio` CLI не шлёт `control_request`: всё, что требует
-подтверждения, отклоняется сразу, а `AskUserQuestion` отсутствует в `tools` из `system/init`.
-Рукопожатие `initialize` (`{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}`)
-этого не меняет. Отказ выглядит так:
+The `--permission-prompts host` flag (the default anyway) is **not enough**. Without
+`--permission-prompt-tool stdio` the CLI sends no `control_request`: everything that needs
+approval is denied at once, and `AskUserQuestion` is missing from `tools` in `system/init`.
+The `initialize` handshake (`{"type":"control_request","request_id":"init-1","request":{"subtype":"initialize"}}`)
+does not change this. A denial looks like this:
 
 ```json
 {"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"toolu_…","message":"touch in '…/hqc-marker-once' needs approval. …"}
 ```
 
-и в `tool_result_meta`: `"permission_decision": {"decision": "reject", "source": "config"}`.
+and in `tool_result_meta`: `"permission_decision": {"decision": "reject", "source": "config"}`.
 
-## 1. `can_use_tool`: запрос и ответы
+## 1. `can_use_tool`: request and responses
 
-Запрос (stdout), фикстура `stream-permission-allow-2.1.307.jsonl`:
+Request (stdout), fixture `stream-permission-allow-2.1.307.jsonl`:
 
 ```json
 {"type":"control_request","request_id":"277e1a0e-1e92-4891-b337-a8d7b97fe1ec",
@@ -48,40 +48,40 @@ claude -p --output-format stream-json --input-format stream-json \
   "tool_use_id":"toolu_01VkowPqKRFd3dYT6tKPSUwo"}}
 ```
 
-`request_id` — на верхнем уровне, не внутри `request`. Необязательные поля (по коду CLI):
-`permission_suggestions`, `blocked_path`, `requires_user_interaction`, `tool_kind`; у MCP-инструментов
-ещё `mcp_server {name, source}` и `server_policy_ask_only`. `tool_use_id` совпадает с `id` блока
-`tool_use` в предшествующем `assistant`.
+`request_id` is at the top level, not inside `request`. Optional fields (per the CLI code):
+`permission_suggestions`, `blocked_path`, `requires_user_interaction`, `tool_kind`; MCP tools
+also have `mcp_server {name, source}` and `server_policy_ask_only`. `tool_use_id` equals the `id`
+of the `tool_use` block in the preceding `assistant`.
 
-Ответ allow (stdin):
+Allow response (stdin):
 
 ```json
 {"type":"control_response","response":{"subtype":"success","request_id":"<request_id>",
- "response":{"behavior":"allow","updatedInput":{…input без изменений…}}}}
+ "response":{"behavior":"allow","updatedInput":{…input unchanged…}}}}
 ```
 
-Ответ deny (stdin), фикстура `permission-deny`:
+Deny response (stdin), fixture `permission-deny`:
 
 ```json
 {"type":"control_response","response":{"subtype":"success","request_id":"<request_id>",
  "response":{"behavior":"deny","message":"denied by hqc spike"}}}
 ```
 
-→ `tool_result` с `"is_error": true`, `content` = `message`, `permission_decision.source = "user_reject"`;
-`result.permission_denials[]` содержит вызов.
+→ `tool_result` with `"is_error": true`, `content` = `message`, `permission_decision.source = "user_reject"`;
+`result.permission_denials[]` contains the call.
 
-Отказ с текстом пользователя (T26, два прогона 2026-10-24, 2.1.308, haiku, `driver.py
---deny-message-file`, вне фикстур): `message` целиком приходит модели как `tool_result`. С
-«The user denied this tool call and wrote instead:\n<текст>» модель текст увидела, но
-ответила, что это пришло из результата инструмента, а не от пользователя, и просьбу не
-выполнила. С формулировкой самого Claude Code «The user doesn't want to proceed with this tool
+Denial with the user's text (T26, two runs on 2026-10-24, 2.1.308, haiku, `driver.py
+--deny-message-file`, not in fixtures): the whole `message` reaches the model as a `tool_result`.
+With "The user denied this tool call and wrote instead:\n<text>" the model saw the text but
+replied that it came from the tool result, not from the user, and did not do what was asked.
+With Claude Code's own wording "The user doesn't want to proceed with this tool
 use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to
-the file). To tell you how to proceed, the user said:\n<текст>» — выполнила (ответила по-русски,
-как просили, без новых вызовов). Тексты просьб в прогонах разные («Reply with exactly:
-PELICAN-42» против обычной просьбы), так что вклад формулировки и самой просьбы не разделён;
-адаптер берёт формулировку Claude Code.
+the file). To tell you how to proceed, the user said:\n<text>" it did (replied in Russian,
+as asked, with no new calls). The requests differed between the runs ("Reply with exactly:
+PELICAN-42" versus an ordinary request), so the effect of the wording is not separated from
+that of the request; the adapter uses Claude Code's wording.
 
-Ответ always (stdin), фикстура `permission-always`:
+Always response (stdin), fixture `permission-always`:
 
 ```json
 {"type":"control_response","response":{"subtype":"success","request_id":"<request_id>",
@@ -89,26 +89,28 @@ PELICAN-42» против обычной просьбы), так что вкла
   "updatedPermissions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"touch hqc-marker *"}],"behavior":"allow","destination":"localSettings"}, …]}}}
 ```
 
-Правило записано в `<cwd>/.claude/settings.local.json` (рабочая папка — корень своего git-репо):
+The rule is written to `<cwd>/.claude/settings.local.json` (the working folder is the root of
+its own git repo):
 
 ```json
 {"permissions":{"allow":["Bash(touch hqc-marker *)"]}}
 ```
 
-Новый процесс в той же папке выполнил ту же команду без `control_request`.
+A new process in the same folder ran the same command without a `control_request`.
 
-Особенности:
-- Если отдать **все** `permission_suggestions`, применяются и `setMode acceptEdits` с
-  `addDirectories` на сессию: следом приходит `{"type":"system","subtype":"status","permissionMode":"acceptEdits"}`.
-  Для `always` адаптер должен передавать только элементы `addRules` с `destination: localSettings`.
-- CLI повторяет в stdout каждый наш `control_response` (адаптер его пропускает).
-- Вызов MCP-инструмента тоже приходит как `can_use_tool` (с `mcp_server`), поэтому инструменты hqc
-  (итерация 3) нужно заранее разрешать, иначе каждый `hqc_*` будет спрашивать владельца.
+Details:
+- If **all** `permission_suggestions` are passed back, `setMode acceptEdits` and
+  `addDirectories` are applied to the session too: a `{"type":"system","subtype":"status","permissionMode":"acceptEdits"}` follows.
+  For `always` the adapter must pass only the `addRules` items with `destination: localSettings`.
+- The CLI echoes each of our `control_response` lines to stdout (the adapter skips it).
+- An MCP tool call also arrives as `can_use_tool` (with `mcp_server`), so the hqc tools
+  (iteration 3) must be allowed up front, otherwise every `hqc_*` call will ask the owner.
 
-Вывод: формы запроса и ответов подтверждены, `always` пишет правило в `.claude/settings.local.json`
-рабочей папки, но только при `--permission-prompt-tool stdio` и с фильтрацией подсказок.
+Conclusion: the request and response shapes are confirmed; `always` writes the rule to the
+working folder's `.claude/settings.local.json`, but only with `--permission-prompt-tool stdio`
+and with the suggestions filtered.
 
-## 2. Эхо `--replay-user-messages`
+## 2. The `--replay-user-messages` echo
 
 ```json
 {"type":"user","message":{"role":"user","content":"Run the shell command: …"},
@@ -116,15 +118,16 @@ PELICAN-42» против обычной просьбы), так что вкла
  "timestamp":"2026-10-22T03:…Z","isReplay":true}
 ```
 
-Во всех пяти прогонах `uuid` эха равен `uuid` записи промпта (`type: user`, `content` — строка)
-в `~/.claude/projects/<encoded-cwd>/<session>.jsonl`; множества uuid `user`/`assistant`
-основной цепочки в stream-json и jsonl совпадают полностью.
+In all five runs the echo's `uuid` equals the `uuid` of the prompt record (`type: user`,
+`content` a string) in `~/.claude/projects/<encoded-cwd>/<session>.jsonl`; the sets of
+`user`/`assistant` uuids of the main chain in stream-json and in the jsonl match exactly.
 
-Вывод: эхо несёт uuid промпта из jsonl, запасной вариант с сопоставлением по тексту не нужен.
+Conclusion: the echo carries the prompt's uuid from the jsonl; no fallback matching by text is
+needed.
 
 ## 3. `AskUserQuestion`
 
-Запрос, фикстура `ask-user-question`:
+Request, fixture `ask-user-question`:
 
 ```json
 {"type":"control_request","request_id":"ba5388a6-…",
@@ -135,124 +138,127 @@ PELICAN-42» против обычной просьбы), так что вкла
   "tool_use_id":"toolu_01YLJVU3fVH3ktk7Hk7aKGX8","requires_user_interaction":true}}
 ```
 
-Ответ: `allow` с исходным `input` плюс `answers` — объект «текст вопроса → `label` выбранного варианта»:
+Response: `allow` with the original `input` plus `answers`, an object "question text → `label`
+of the chosen option":
 
 ```json
 {"type":"control_response","response":{"subtype":"success","request_id":"ba5388a6-…",
- "response":{"behavior":"allow","updatedInput":{"questions":[…как в запросе…],
+ "response":{"behavior":"allow","updatedInput":{"questions":[…as in the request…],
   "answers":{"Which area should I focus on first?":"Hub (Recommended)"}}}}}
 ```
 
 → `tool_result`: `Your questions have been answered: "Which area should I focus on first?"="Hub (Recommended)". …`,
-модель продолжает ход.
+the model continues the turn.
 
-Вывод: `AskUserQuestion` приходит как `can_use_tool` с `requires_user_interaction: true`, ответы
-принимаются через `updatedInput.answers` (только при `--permission-prompt-tool stdio`).
+Conclusion: `AskUserQuestion` arrives as `can_use_tool` with `requires_user_interaction: true`;
+answers are accepted via `updatedInput.answers` (only with `--permission-prompt-tool stdio`).
 
 ## 4. `MCP_TOOL_TIMEOUT`
 
-Stdio MCP-сервер с инструментом `slow(seconds)` (node, один файл), передан строкой:
+A stdio MCP server with a `slow(seconds)` tool (node, one file), passed inline:
 `--strict-mcp-config --mcp-config '{"mcpServers":{"slow":{"command":"node","args":["…/slow-mcp.js"]}}}'`.
 
-| `MCP_TOOL_TIMEOUT` | вызов | результат |
+| `MCP_TOOL_TIMEOUT` | call | result |
 |---|---|---|
-| `3000` | `slow(8)` | через 3 с: `tool_result` `"MCP server \"slow\" tool \"slow\" timed out after 3s"`, `is_error: true`; серверу ушёл `notifications/cancelled` |
-| `3` | `slow(8)` | через 1 с: `timed out after 1s` (значение поднято до минимума 1000 мс) |
-| не задан | `slow(75)` | `slept 75s`, без таймаута |
+| `3000` | `slow(8)` | after 3 s: `tool_result` `"MCP server \"slow\" tool \"slow\" timed out after 3s"`, `is_error: true`; the server received `notifications/cancelled` |
+| `3` | `slow(8)` | after 1 s: `timed out after 1s` (the value is raised to the 1000 ms minimum) |
+| unset | `slow(75)` | `slept 75s`, no timeout |
 
-По коду CLI 2.1.307: таймаут = поле `timeout` сервера в `--mcp-config` (мс, учитывается при ≥ 1000)
-→ иначе `MCP_TOOL_TIMEOUT` → иначе `1e8` мс (≈ 27,8 ч); результат зажат в [1000, 2^31−1] мс.
-Отдельно есть idle-таймаут `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`: по коду для stdio-серверов
-по умолчанию 1 800 000 мс (30 мин), для http/sse 300 000 мс; не меньше поля `timeout` сервера
-и не больше основного таймаута. Проверка живым прогоном — в разделе 6.
+Per the CLI 2.1.307 code: timeout = the server's `timeout` field in `--mcp-config` (ms, honoured
+when ≥ 1000) → otherwise `MCP_TOOL_TIMEOUT` → otherwise `1e8` ms (≈ 27.8 h); the result is
+clamped to [1000, 2^31−1] ms. There is also a separate idle timeout,
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`: per the code it defaults to 1,800,000 ms (30 min) for stdio
+servers and 300,000 ms for http/sse; it is no less than the server's `timeout` field and no
+more than the main timeout. A live run checking it is in section 6.
 
-Прогоны с MCP закончились `error_max_turns`: модель сначала тратит ход на `ToolSearch` для
-загрузки схемы инструмента. На измерение таймаута это не влияет.
+The MCP runs ended with `error_max_turns`: the model first spends a turn on `ToolSearch` to load
+the tool's schema. This does not affect the timeout measurement.
 
-Вывод: `MCP_TOOL_TIMEOUT` — в миллисекундах, по умолчанию 1e8 мс (фактически без ограничения),
-минимум 1000 мс; есть также поле `timeout` в конфиге сервера.
+Conclusion: `MCP_TOOL_TIMEOUT` is in milliseconds, defaults to 1e8 ms (effectively no limit),
+minimum 1000 ms; there is also a `timeout` field in the server config.
 
-## 5. `--allowedTools` для MCP-сервера hqc
+## 5. `--allowedTools` for the hqc MCP server
 
-Тот же сервер под именем `hqc`, `slow(1)`, ответов на `can_use_tool` драйвер не даёт:
+The same server named `hqc`, `slow(1)`, the driver does not answer `can_use_tool`:
 
-| флаг | результат |
+| flag | result |
 |---|---|
-| `--allowedTools mcp__hqc` | вызов прошёл без `control_request`, `slept 1s` |
-| `--allowedTools 'mcp__hqc__*'` | то же |
-| без флага | `control_request` `can_use_tool` для `mcp__hqc__slow`, ход ждёт ответа |
+| `--allowedTools mcp__hqc` | the call went through without a `control_request`, `slept 1s` |
+| `--allowedTools 'mcp__hqc__*'` | same |
+| no flag | `control_request` `can_use_tool` for `mcp__hqc__slow`, the turn waits for an answer |
 
-Вывод: обе формы работают на 2.1.307; в спеке зафиксирована `mcp__hqc`.
+Conclusion: both forms work on 2.1.307; the spec fixes `mcp__hqc`.
 
-## 6. Idle-таймаут stdio MCP-сервера
+## 6. Idle timeout of a stdio MCP server
 
-Сервер `hqc`, `slow(1920)` (32 мин), `--allowedTools mcp__hqc`, `MCP_TOOL_TIMEOUT` и
-`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` не заданы:
+Server `hqc`, `slow(1920)` (32 min), `--allowedTools mcp__hqc`, `MCP_TOOL_TIMEOUT` and
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` unset:
 
-| сервер во время вызова | результат |
+| server during the call | result |
 |---|---|
-| молчит | через 1800 с `tool_result` `is_error: true`: `MCP server "hqc" tool "slow" sent no response or progress for 1800s; aborting. If this server is configured in your MCP settings, set a per-server "timeout" (ms) to allow longer silent runs for just this server; otherwise set CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables).` `notifications/cancelled` серверу **не** приходит |
-| шлёт `notifications/progress` с `progressToken` из `_meta` вызова раз в 60 с | `slept 1920s`, без обрыва |
+| silent | after 1800 s `tool_result` `is_error: true`: `MCP server "hqc" tool "slow" sent no response or progress for 1800s; aborting. If this server is configured in your MCP settings, set a per-server "timeout" (ms) to allow longer silent runs for just this server; otherwise set CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables).` The server does **not** receive `notifications/cancelled` |
+| sends `notifications/progress` with the `progressToken` from the call's `_meta` every 60 s | `slept 1920s`, no abort |
 
-`progressToken` CLI кладёт в `params._meta` каждого `tools/call` (вместе с `claudecode/toolUseId`).
-Короткий прогон с `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=3000` и молчащим `slow(8)` обрыва не дал —
-вероятно, проверка простоя идёт с крупным шагом; не выяснялось.
+The CLI puts `progressToken` into `params._meta` of every `tools/call` (together with
+`claudecode/toolUseId`). A short run with `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=3000` and a silent
+`slow(8)` did not abort; the idle check probably runs at a coarse interval; not investigated.
 
-Вывод: при значениях по умолчанию вызов MCP-инструмента без ответа и без progress-уведомлений
-обрывается через 30 минут; progress-уведомления раз в минуту его удерживают.
+Conclusion: with the defaults, an MCP tool call with no response and no progress notifications
+is aborted after 30 minutes; progress notifications once a minute keep it alive.
 
 ## Permission policy, 2.1.308
 
-Проверено 2026-10-22 на Claude Code **2.1.308** (home-mac), `claude-haiku-5-5`,
-`--max-turns 2`, драйвер `tools/spike/driver.py`, шесть прогонов (T12). Общие флаги — как
-у воркера: `--permission-prompt-tool stdio --setting-sources user,local --strict-mcp-config`
-(в прогоне 6 вместо `--setting-sources` — `--restricted`). Модель просили сделать все вызовы
-одним сообщением параллельно. Фикстуры — `crates/hqc-claude-jsonl/fixtures/*-2.1.308.jsonl`:
+Verified 2026-10-22 on Claude Code **2.1.308** (home-mac), `claude-haiku-5-5`,
+`--max-turns 2`, driver `tools/spike/driver.py`, six runs (T12). Common flags as in the
+worker: `--permission-prompt-tool stdio --setting-sources user,local --strict-mcp-config`
+(run 6 uses `--restricted` instead of `--setting-sources`). The model was asked to make all
+calls in parallel in one message. Fixtures: `crates/hqc-claude-jsonl/fixtures/*-2.1.308.jsonl`:
 
-| набор | режим | что проверяет |
+| set | mode | what it checks |
 |---|---|---|
 | `auto-mode` | `auto` | cat / touch / `rm -rf tmp/x` / curl |
-| `auto-classifier` | `auto` | `rm -rf ~/…` вне workspace, `git push --force`, `sudo -n true` (драйвер на всё отвечает deny) |
-| `always-git-push` | `manual` | `always` на `git push origin master` и `touch hqc-local-1` |
-| `settings-deny` | `manual` | `--settings` allow/deny поверх правил из `always-git-push` |
-| `auto-deny` | `auto` | deny по умолчанию из `worker.toml` в режиме auto |
-| `restricted-settings` | `manual`, `--restricted` | `--settings` в restricted |
+| `auto-classifier` | `auto` | `rm -rf ~/…` outside the workspace, `git push --force`, `sudo -n true` (the driver answers deny to everything) |
+| `always-git-push` | `manual` | `always` on `git push origin master` and `touch hqc-local-1` |
+| `settings-deny` | `manual` | `--settings` allow/deny on top of the rules from `always-git-push` |
+| `auto-deny` | `auto` | the default deny list from `worker.toml` in auto mode |
+| `restricted-settings` | `manual`, `--restricted` | `--settings` under restricted |
 
-Признак решения CLI в каждом `tool_result` — `tool_result_meta[].permission_decision`:
+The CLI's decision is recorded in each `tool_result` as `tool_result_meta[].permission_decision`:
 `{"decision": "accept"|"reject", "source": "config"|"user_temporary"|…, "reason_type": …}`.
-Значения `reason_type`, встреченные здесь: `classifier` (решил классификатор auto), `mode`
-(режим: правка в рабочей папке), `rule` (правило целиком), `subcommandResults` (команда
-разобрана на подкоманды, каждая сверена с правилами).
+`reason_type` values seen here: `classifier` (decided by the auto classifier), `mode`
+(the mode: an edit in the working folder), `rule` (a rule as a whole), `subcommandResults` (the
+command was split into subcommands, each checked against the rules).
 
-### 1. `--permission-mode auto` в `-p`
+### 1. `--permission-mode auto` in `-p`
 
-Работает: `system/init` → `"permissionMode": "auto"`, ошибок нет. В обоих прогонах **ни
-одного `can_use_tool`**: CLI решил всё сам.
+Works: `system/init` → `"permissionMode": "auto"`, no errors. In both runs **not a single
+`can_use_tool`**: the CLI decided everything itself.
 
-| команда | решение | `reason_type` |
+| command | decision | `reason_type` |
 |---|---|---|
-| `cat a.txt` | выполнена | `classifier` |
-| `touch new.txt` | выполнена | `mode` |
-| `rm -rf tmp/x` (внутри workspace) | выполнена, папка удалена | `mode` |
-| `curl -s https://example.com …` | выполнена (200) | `classifier` |
-| `rm -rf ~/hqc-spike-t12-nonexistent` (вне workspace) | выполнена | `classifier` |
-| `git push --force origin master` | выполнена (упала: нет ветки) | `classifier` |
-| `sudo -n true` | выполнена (упала: нужен пароль) | `classifier` |
+| `cat a.txt` | ran | `classifier` |
+| `touch new.txt` | ran | `mode` |
+| `rm -rf tmp/x` (inside the workspace) | ran, folder removed | `mode` |
+| `curl -s https://example.com …` | ran (200) | `classifier` |
+| `rm -rf ~/hqc-spike-t12-nonexistent` (outside the workspace) | ran | `classifier` |
+| `git push --force origin master` | ran (failed: no branch) | `classifier` |
+| `sudo -n true` | ran (failed: password required) | `classifier` |
 
-Перед решением классификатора приходят `{"type":"system","subtype":"permission_check_status","tool_use_id":…,"status":"checking"|"done"}`.
-В `can_use_tool` признака классификатора увидеть не удалось: запросов не было. Вывод:
-при явной просьбе пользователя классификатор пропускает и разрушительное, и сетевое, и
-`sudo`; хост ничего не видит до `tool_result`. В режиме auto единственная граница — deny.
+Before a classifier decision come `{"type":"system","subtype":"permission_check_status","tool_use_id":…,"status":"checking"|"done"}`.
+No classifier marker could be seen in `can_use_tool`: there were no requests. Conclusion:
+when the user asks explicitly, the classifier lets through destructive commands, network
+access and `sudo` alike; the host sees nothing until `tool_result`. In auto mode the only
+boundary is deny.
 
-### 2. `--settings` с `permissions.allow`/`deny` и правило `always`
+### 2. `--settings` with `permissions.allow`/`deny` and an `always` rule
 
-`--settings '<json>'` применяется вместе с `--setting-sources user,local` (прогон
-`settings-deny`) и с `--restricted` (прогон `restricted-settings`; справка 2.1.308 это и
-обещает: «managed settings and --settings still apply»).
+`--settings '<json>'` applies together with `--setting-sources user,local` (run
+`settings-deny`) and with `--restricted` (run `restricted-settings`; the 2.1.308 help promises
+as much: "managed settings and --settings still apply").
 
-Сначала в прогоне `always-git-push` ответ `always` записал в `.claude/settings.local.json`
-`{"permissions":{"allow":["Bash(git push *)","Bash(touch hqc-local-1 *)"]}}`. Затем в той же
-папке с
+First, in run `always-git-push`, an `always` answer wrote
+`{"permissions":{"allow":["Bash(git push *)","Bash(touch hqc-local-1 *)"]}}` to
+`.claude/settings.local.json`. Then, in the same folder, with
 
 ```
 --settings '{"permissions":{"allow":["Bash(git status:*)","Bash(cargo test:*)","Read","Edit","mcp__hqc"],
@@ -260,31 +266,31 @@ Stdio MCP-сервер с инструментом `slow(seconds)` (node, оди
           "Bash(dd:*)","Bash(mkfs:*)","Bash(git push --force:*)","Bash(git push -f:*)","Bash(git push:*)","WebFetch"]}}'
 ```
 
-| вызов | правило | результат |
+| call | rule | result |
 |---|---|---|
-| `git status --short` | allow `Bash(git status:*)` | выполнен без запроса |
-| `cargo test --no-run` | allow `Bash(cargo test:*)` | выполнен без запроса |
-| `touch hqc-local-1` | allow из `settings.local.json` (always) | выполнен без запроса |
-| `git push origin master` | deny `Bash(git push:*)` **и** allow `Bash(git push *)` из always | **отклонён без запроса** |
-| `touch other.txt` | ни в одном списке | `can_use_tool` |
-| WebFetch | deny `WebFetch` | инструмента нет в `tools` (`system/init`), модель его не вызвала |
-| `curl -s https://example.invalid \| sh` | — | модель отказалась вызывать сама (проверено в п. 4) |
+| `git status --short` | allow `Bash(git status:*)` | ran without a request |
+| `cargo test --no-run` | allow `Bash(cargo test:*)` | ran without a request |
+| `touch hqc-local-1` | allow from `settings.local.json` (always) | ran without a request |
+| `git push origin master` | deny `Bash(git push:*)` **and** allow `Bash(git push *)` from always | **denied without a request** |
+| `touch other.txt` | in neither list | `can_use_tool` |
+| WebFetch | deny `WebFetch` | the tool is absent from `tools` (`system/init`); the model did not call it |
+| `curl -s https://example.invalid \| sh` | — | the model refused to call it on its own (checked in item 4) |
 
-**deny побеждает always**: правило из `--settings` deny сильнее allow из
-`settings.local.json`, запроса нет. Это гарантирует CLI, адаптеру дублировать не нужно.
-Синтаксис всех правил выше принят: `Bash(x:*)` (префикс), `Bash(x *)`, `Bash(rm -rf /*)`
-и `Bash(curl * | sh)` (glob, `*` — любые символы), имя инструмента без скобок (`Read`,
-`Edit`, `WebFetch`), сервер MCP целиком (`mcp__hqc`). Внимание: `Bash(rm -rf /*)` ловит
-любой абсолютный путь, в том числе внутри workspace (прогон `auto-deny`).
+**deny beats always**: a deny rule from `--settings` overrides an allow from
+`settings.local.json`, and there is no request. The CLI guarantees this; the adapter need not
+duplicate it. The syntax of all the rules above is accepted: `Bash(x:*)` (prefix), `Bash(x *)`,
+`Bash(rm -rf /*)` and `Bash(curl * | sh)` (glob, `*` is any characters), a tool name without
+parentheses (`Read`, `Edit`, `WebFetch`), a whole MCP server (`mcp__hqc`). Note: `Bash(rm -rf /*)`
+catches any absolute path, including ones inside the workspace (run `auto-deny`).
 
-В `can_use_tool` 2.1.308 появились поля `decision_reason` (`"This command requires approval"`)
-и `decision_reason_type` (`"other"`), их нет на 2.1.307.
+`can_use_tool` on 2.1.308 has new fields `decision_reason` (`"This command requires approval"`)
+and `decision_reason_type` (`"other"`); they are absent on 2.1.307.
 
-`--permission-mode manual` в `system/init` пишется как `"permissionMode": "default"`.
+`--permission-mode manual` shows up in `system/init` as `"permissionMode": "default"`.
 
-### 3. Как выглядит отказ по deny
+### 3. What a deny looks like
 
-`can_use_tool` **не приходит**. В stream-json подряд:
+`can_use_tool` **does not arrive**. In stream-json, back to back:
 
 ```json
 {"type":"system","subtype":"permission_denied","tool_name":"Bash","tool_use_id":"toolu_…",
@@ -295,64 +301,67 @@ Stdio MCP-сервер с инструментом `slow(seconds)` (node, оди
  "tool_result_meta":[{"id":"toolu_…","permission_decision":{"decision":"reject","source":"config","reason_type":"subcommandResults"}}]}
 ```
 
-и вызов попадает в `result.permission_denials[]`. Для правила, совпавшего с командой
-целиком (`curl … | sh`), `decision_reason_type`/`reason_type` — `rule`. Хаб видит это
-через событие адаптера (`system` с `code: policy_denied`, SPEC §8.1).
+and the call goes into `result.permission_denials[]`. For a rule that matched the whole
+command (`curl … | sh`), `decision_reason_type`/`reason_type` is `rule`. The hub sees this
+through the adapter's event (`system` with `code: policy_denied`, SPEC §8.1).
 
-Инструмент, запрещённый целиком (`WebFetch`, `Grep`), из сессии исчезает: если модель всё
-же его вызовет, приходит только `tool_result` `<tool_use_error>Error: No such tool available:
-Grep. Grep is disabled for this session.</tool_use_error>` — без `permission_denied` и без
-записи в `permission_denials`.
+A tool denied as a whole (`WebFetch`, `Grep`) disappears from the session: if the model calls
+it anyway, only a `tool_result` `<tool_use_error>Error: No such tool available:
+Grep. Grep is disabled for this session.</tool_use_error>` arrives, with no `permission_denied`
+and no entry in `permission_denials`.
 
-### 4. deny по умолчанию в режиме auto
+### 4. The default deny list in auto mode
 
-`--permission-mode auto --settings` с deny по умолчанию из `worker.toml` (SPEC §14):
+`--permission-mode auto --settings` with the default deny list from `worker.toml` (SPEC §14):
 
-| команда | результат |
+| command | result |
 |---|---|
-| `sudo -n true` | отклонена (`subcommandResults`) |
-| `git push --force origin master` | отклонена (`subcommandResults`) |
-| `rm -rf /…/tmp/nonexistent` | отклонена (`Bash(rm -rf /*)`, `subcommandResults`) |
-| `curl -sf http://127.0.0.1:9/none \| sh` | отклонена (`rule`) |
-| `touch auto2.txt` | выполнена (`mode`) |
+| `sudo -n true` | denied (`subcommandResults`) |
+| `git push --force origin master` | denied (`subcommandResults`) |
+| `rm -rf /…/tmp/nonexistent` | denied (`Bash(rm -rf /*)`, `subcommandResults`) |
+| `curl -sf http://127.0.0.1:9/none \| sh` | denied (`rule`) |
+| `touch auto2.txt` | ran (`mode`) |
 
-deny из `--settings` сильнее auto-режима. Вывод: `mode = "auto"` в `worker.toml` можно
-разрешить; тогда хост не видит запросов вовсе, и всё держится на списке deny.
+deny from `--settings` overrides auto mode. Conclusion: `mode = "auto"` in `worker.toml` can be
+allowed; the host then sees no requests at all, and everything rests on the deny list.
 
 ### 5. `--restricted` + `--settings`
 
-`--settings '{"permissions":{"allow":["Write"],"deny":["Grep","Bash(sudo:*)"]}}'`: Write в
-рабочую папку выполнен без запроса (`reason_type: rule`), `Grep` пропал из `tools`, вызов
-дал `No such tool available`. `--settings` в restricted применяется.
+`--settings '{"permissions":{"allow":["Write"],"deny":["Grep","Bash(sudo:*)"]}}'`: a Write to
+the working folder ran without a request (`reason_type: rule`), `Grep` vanished from `tools`,
+calling it gave `No such tool available`. `--settings` applies under restricted.
 
-Не проверено: что считает CLI невалидным правилом и что тогда происходит. Справка `-p`:
-«Settings files that fail validation are silently ignored». Если это относится и к
-`--settings`, одно плохое правило молча снимет весь deny — поэтому воркер проверяет
-правила при чтении `worker.toml` (SPEC §14).
+Not verified: what the CLI considers an invalid rule and what happens then. The `-p` help says:
+"Settings files that fail validation are silently ignored". If that applies to `--settings`
+too, one bad rule would silently drop the whole deny list, which is why the worker validates
+the rules when it reads `worker.toml` (SPEC §14).
 
-## Заголовок сессии одноразовым `claude -p`, 2.1.308 (T24)
+## Session title with a one-shot `claude -p`, 2.1.308 (T24)
 
-Так воркер выполняет `title.request` (SPEC §3 Session, §8.1; код — `hqc_worker::title`).
-Точная командная строка, рабочий каталог — пустая `$HQC_HOME/titles/<0|1>`:
+This is how the worker runs `title.request` (SPEC §3 Session, §8.1; code: `hqc_worker::title`).
+The exact command line as run; the working directory is an empty `$HQC_HOME/titles/<0|1>`:
 
 ```
 claude -p --model claude-haiku-5-5 --max-turns 1 --no-session-persistence \
   --strict-mcp-config --setting-sources "" --tools "" \
-  --system-prompt "Придумай короткий заголовок беседы, не больше 60 символов, на языке пользователя. Ответь только заголовком без кавычек и точки в конце." \
+  --system-prompt "Write a short title for this conversation, at most 60 characters, in the language the user writes in. Reply with the title only, without quotes or a trailing period." \
   --output-format json
 ```
 
-На stdin: `Сообщение пользователя:\n<user_text>\n\nОтвет агента:\n<agent_text>\n`. Окружение — как
-у адаптера (`child_env`), без `CLAUDE_CODE_ENTRYPOINT`. Ответ — один JSON
-`{"type":"result","subtype":"success","is_error":false,"result":"<заголовок>",…}`.
+On stdin: `User message:\n<user_text>\n\nAgent answer:\n<agent_text>\n`. Environment as
+for the adapter (`child_env`), without `CLAUDE_CODE_ENTRYPOINT`. The answer is a single JSON
+`{"type":"result","subtype":"success","is_error":false,"result":"<title>",…}`.
 
-Два живых прогона `live_session_title` (`HQC_LIVE_CLAUDE=1`, 2026-10-24, 2.1.308): заголовки
-«Сторожевой таймер: лимит 2,5 с» за 1,7 с и «Починка cargo test в hqc-hub: сторожевой таймер» за
-3,1 с. CLI принимает пустые `--setting-sources ""` и `--tools ""` (ошибки разбора нет, ход идёт
-без инструментов). После завершения: нового транскрипта в `~/.claude/projects` нет (папки для
-закодированного пути запуска нет, новых `.jsonl` за время прогона нет), ни один файл
-`~/.claude/sessions/*.json` не упоминает папку запуска, `~/.claude.json` её тоже не упоминает.
-Без `--no-session-persistence` транскрипт попал бы в зеркало и в историю VS Code.
+The prompt and the stdin labels are as of T28; the runs below used their earlier Russian
+version, which also asked for the title in the user's language. Two live runs of
+`live_session_title` (`HQC_LIVE_CLAUDE=1`, 2026-10-24, 2.1.308), Russian conversation: the titles
+"Сторожевой таймер: лимит 2,5 с" in 1.7 s and "Починка cargo test в hqc-hub: сторожевой таймер"
+in 3.1 s. The CLI accepts empty `--setting-sources ""` and `--tools ""` (no parse error, the turn
+runs without tools). Afterwards: no new transcript in `~/.claude/projects` (no folder for the
+encoded launch path, no new `.jsonl` during the run), no `~/.claude/sessions/*.json` file
+mentions the launch folder, and `~/.claude.json` does not mention it either.
+Without `--no-session-persistence` the transcript would end up in the mirror and in the VS Code
+history.
 
 ## Cost and slash commands, 2.1.308 (T27)
 

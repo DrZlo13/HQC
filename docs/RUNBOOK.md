@@ -1,25 +1,25 @@
-# hqc — как поднять у себя (итерация 1)
+# hqc — how to set it up yourself (iteration 1)
 
-Для человека, который ставит hqc на свои машины: хаб в домашней DMZ за Cloudflare Tunnel,
-воркер на маке, клиент в браузере телефона. Архитектура и протокол — `docs/SPEC.md`
-(§2, §5, §6, §20), здесь только эксплуатация. Все команды, переменные и поля конфига ниже
-взяты из кода (`crates/hqc-hub/src/config.rs`, `crates/hqc-worker/src/config.rs`,
-`crates/hqc-worker/src/main.rs`); чего здесь нет — того в итерации 1 нет.
+For whoever installs hqc on their own machines: the hub in a home DMZ behind Cloudflare Tunnel,
+a worker on a Mac, the client in a phone browser. Architecture and protocol are in `docs/SPEC.md`
+(§2, §5, §6, §20); this file covers operations only. Every command, variable and config field
+below comes from the code (`crates/hqc-hub/src/config.rs`, `crates/hqc-worker/src/config.rs`,
+`crates/hqc-worker/src/main.rs`); anything not here does not exist in iteration 1.
 
-Схема:
+Diagram:
 
 ```
-телефон / браузер ──HTTPS──> Cloudflare (Access) ──Tunnel──> cloudflared ──> hqc-hub :8080 ──> Postgres
-                                                                               ^
-home-mac: hqc-worker run ──HTTPS/WSS /worker/* (без Access, токен воркера)─────┘
-          └─ claude -p (подписка, залогиненная на этой машине)
+phone / browser ──HTTPS──> Cloudflare (Access) ──Tunnel──> cloudflared ──> hqc-hub :8080 ──> Postgres
+                                                                             ^
+home-mac: hqc-worker run ──HTTPS/WSS /worker/* (no Access, worker token)─────┘
+          └─ claude -p (subscription logged in on this machine)
 ```
 
-## 0. Сборка
+## 0. Build
 
-Нужны Rust stable (версия зафиксирована в `rust-toolchain.toml`, `rustup` поставит её сам)
-и Node.js 20.19+ для сборки клиента (для его тестов — 22+). Хаб для DMZ собирать не нужно:
-есть готовый Docker-образ с клиентом внутри (§1.8).
+You need Rust stable (the version is pinned in `rust-toolchain.toml`, `rustup` installs it
+itself) and Node.js 20.19+ to build the client (22+ for its tests). You do not need to build the
+hub for the DMZ: there is a ready Docker image with the client inside (§1.8).
 
 ```sh
 git clone <repo> hqc && cd hqc
@@ -29,33 +29,33 @@ target/release/hqc-worker --version               # hqc-worker 0.1.0
 cd client && npm ci && npm run build              # client/dist
 ```
 
-Хаб собирайте на той ОС и архитектуре, где он будет работать (на Linux-хосте DMZ — там
-же или в CI; Docker-образ собирает CI, §1.8), воркер — на маке. Бинарники самодостаточны: Postgres-клиент встроен,
-SQLite outbox воркера тоже.
+Build the hub on the OS and architecture it will run on (for a Linux DMZ host, on that host or
+in CI; CI builds the Docker image, §1.8), the worker on the Mac. The binaries are self-contained:
+the Postgres client is built in, and so is the worker's SQLite outbox.
 
-## 0.1 Локальная разработка без Cloudflare
+## 0.1 Local development without Cloudflare
 
-`tools/dev.sh up` собирает хаб и воркер в dev-профиле, поднимает хаб в dev-режиме на
-`127.0.0.1:8080` (база `hqc_dev`, пользователь `dev@local`, клиент из `client/dist`),
-при первом запуске регистрирует воркер с отдельным `HQC_HOME` в `tmp/dev/home` и запускает
-его, а когда воркер online — добавляет через REST workspace с путём репозитория
-(`DEV_WORKSPACE`, внутри `allowed_roots` = `DEV_ROOTS`) в личный проект `dev@local`, если его
-там ещё нет; остальные workspace добавляются в клиенте. `down`, `restart`, `status`,
-`logs`, `reset` — по именам. Состояние живёт между запусками. С другой машины хаб открывается через ssh-проброс:
-`ssh -N -L 8080:127.0.0.1:8080 <user>@<host>`, затем `http://127.0.0.1:8080`. Хаб слушает
-только loopback, и в dev-режиме это обязательно (§6). Воркер запускает `claude`, поэтому
-`up` надо выполнять из сессии с разблокированной связкой Keychain (§2.3).
+`tools/dev.sh up` builds the hub and the worker in the dev profile, starts the hub in dev mode on
+`127.0.0.1:8080` (database `hqc_dev`, user `dev@local`, client from `client/dist`),
+on the first run enrolls the worker with a separate `HQC_HOME` in `tmp/dev/home` and starts
+it, and once the worker is online adds, over REST, a workspace with the repository path
+(`DEV_WORKSPACE`, inside `allowed_roots` = `DEV_ROOTS`) to the personal project of `dev@local` if it
+is not there yet; other workspaces are added in the client. `down`, `restart`, `status`,
+`logs`, `reset` do what they say. State persists between runs. From another machine, open the hub
+through an ssh tunnel: `ssh -N -L 8080:127.0.0.1:8080 <user>@<host>`, then `http://127.0.0.1:8080`.
+The hub listens on loopback only, and in dev mode this is mandatory (§6). The worker runs
+`claude`, so `up` must be run from a session with an unlocked Keychain (§2.3).
 
-## 1. Хаб в DMZ
+## 1. Hub in the DMZ
 
 ### 1.1 Postgres
 
-Хаб работает с Postgres 17 (проверено; расширения в итерации 1 не нужны). Подключение
-без TLS — sqlx собран без TLS, поэтому база должна быть на том же хосте, что и хаб
-(или в доверенной сети без `sslmode=require` в строке подключения).
+The hub works with Postgres 17 (verified; iteration 1 needs no extensions). The connection
+has no TLS (sqlx is built without TLS), so the database must be on the same host as the hub
+(or in a trusted network, without `sslmode=require` in the connection string).
 
 ```sh
-# Linux (Debian/Ubuntu), от администратора:
+# Linux (Debian/Ubuntu), as an administrator:
 sudo -u postgres createuser --pwprompt hqc
 sudo -u postgres createdb -O hqc hqc
 # macOS + Homebrew:
@@ -63,52 +63,52 @@ brew install postgresql@17 && brew services start postgresql@17
 createdb hqc
 ```
 
-**Миграции** применяются автоматически при каждом старте хаба (встроены в бинарник из
-`crates/hqc-hub/migrations`, таблица `_sqlx_migrations`). Отдельной команды нет;
-`sqlx-cli` не нужен. Перед обновлением хаба — бэкап: `pg_dump -Fc hqc > hqc-$(date +%F).dump`.
+**Migrations** are applied automatically on every hub start (embedded in the binary from
+`crates/hqc-hub/migrations`, table `_sqlx_migrations`). There is no separate command;
+`sqlx-cli` is not needed. Before upgrading the hub, back up: `pg_dump -Fc hqc > hqc-$(date +%F).dump`.
 
-### 1.2 Переменные окружения хаба
+### 1.2 Hub environment variables
 
-Хаб настраивается только переменными окружения; аргумент командной строки один —
-`--version`. Пустое значение считается незаданным.
+The hub is configured by environment variables only; it takes a single command-line argument,
+`--version`. An empty value counts as unset.
 
-| переменная | обязательна | что это |
+| variable | required | what it is |
 |---|---|---|
-| `HQC_DATABASE_URL` | да | строка подключения Postgres, например `postgresql://hqc:<пароль>@127.0.0.1/hqc` |
-| `HQC_HUB_LISTEN` | нет, `127.0.0.1:8080` | адрес и порт HTTP. Хаб слушает только интерфейс, на который ходит `cloudflared` (§20); с туннелем на том же хосте — loopback. В Docker-образе — `0.0.0.0:8080` внутри контейнера, порт наружу не публикуется (§1.8) |
-| `HQC_ACCESS_TEAM_DOMAIN` | да (без `HQC_DEV`) | домен команды Cloudflare Zero Trust, `<team>.cloudflareaccess.com` (можно с `https://` и `/` — хаб обрежет). Из него хаб берёт issuer `https://<team>.cloudflareaccess.com` и JWKS `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` |
-| `HQC_ACCESS_AUD` | да (без `HQC_DEV`) | Application Audience (AUD) tag Access-приложения хаба; хаб проверяет `aud` в JWT `Cf-Access-Jwt-Assertion` |
-| `HQC_VAPID_PRIVATE` | нет | закрытый ключ VAPID для Web Push: 32 байта скаляра P-256, base64url без `=` (§1.5). Задаётся вместе с `HQC_VAPID_PUBLIC` или не задаётся вовсе — иначе хаб не стартует |
-| `HQC_VAPID_PUBLIC` | нет | открытый ключ VAPID: несжатая точка P-256 (65 байт), base64url без `=`. Его отдаёт `GET /api/push/vapid`. Без пары ключей push выключен, клиент пишет «На хабе не настроены ключи VAPID» |
-| `HQC_VAPID_SUBJECT` | нет, `mailto:hqc@localhost` | `sub` в подписи VAPID: `mailto:` или `https:`. Задайте настоящий адрес — push-сервисы (особенно Apple) могут отвергать подписи с выдуманным |
-| `HQC_CLIENT_DIR` | нет | каталог собранного клиента (`client/dist`). Если задан, хаб отдаёт клиент на `/` того же домена; без `index.html` в нём хаб не стартует. Не задан — хаб отдаёт только `/api/*`, `/worker/*` и `/health` |
-| `HQC_DEV` | нет | `1` — dev-режим **без Access**: все запросы `/api/*` идут от `HQC_DEV_USER`. Только для локальной разработки: хаб откажется стартовать, если при этом задан любой `HQC_ACCESS_*` или `HQC_HUB_LISTEN` не loopback (`127.0.0.0/8`, `[::1]`, `localhost`). В DMZ не использовать |
-| `HQC_DEV_USER` | с `HQC_DEV=1` | email пользователя dev-режима; без `HQC_DEV=1` игнорируется с предупреждением |
-| `HQC_ARTIFACT_DIR` | нет, `artifacts` (в Docker-образе `/var/lib/hqc/artifacts`) | каталог хранилища артефактов (SPEC §12): файлы по sha256, `<dir>/<первые 2 знака>/<sha256>`, и `tmp/` для загрузок. Хаб создаёт его при старте и не стартует, если не может. Бэкапить вместе с базой (SPEC §20). Неиспользуемые артефакты удаляет уборка раз в сутки (`HQC_ARTIFACT_RETENTION_DAYS`) |
-| `HQC_ARTIFACT_RETENTION_DAYS` | нет, `30` | уборка артефактов (SPEC §12, T21): раз в сутки (и сразу после старта) хаб удаляет записи артефактов, на которые не ссылается ни одно событие и которые не загружались и не прикладывались к вводу столько дней; файл с диска — когда на его sha256 не осталось записей. Целые дни, `0` — не удалять |
-| `HQC_ARTIFACT_PUBLIC_BASE` | нет | origin отдельного домена артефактов, `https://artifacts.<домен хаба>` без пути (`http://` — только loopback). Подписанные ссылки ведут туда, HTML рендерится в iframe только оттуда; хаб добавляет этот origin в `img-src`/`frame-src`/`connect-src` своей CSP, а на этом хосте отдаёт только `/artifacts/*` (остальное — `404`). Домен — тот же туннель на тот же хаб, **вне** Access (§1.6). Не задан — ссылки относительные, на домене хаба (за Access), HTML только скачивается |
-| `HQC_ARTIFACT_KEY` | нет | ключ HMAC подписанных ссылок, не короче 32 символов (`openssl rand -hex 32`). Не задан — случайный на каждый запуск: ссылки прошлого запуска перестают работать, клиент просто запрашивает новые. Нужен, только если ссылки должны переживать перезапуск |
-| `HQC_PUBLIC_ORIGINS` | нет | origin'ы, по которым браузеры открывают хаб, через запятую: `https://hqc.example.com`. Когда задано, `Origin` на `/api/*` (WebSocket и запись) сверяется с этим списком, а не с `Host` запроса. Нужно, если перед хабом стоит прокси, который переписывает `Host` в имя контейнера (Caddy с `header_up Host`, cloudflared с `httpHostHeader`) и не ставит `X-Forwarded-Host`; симптом — `WebSocket connection to wss://…/api/ws failed` в браузере и `Origin does not match the hub's host` в логе хаба |
-| `HQC_TURN_WATCHDOG_S` | нет, `900` | сторожевой таймер хода (SPEC §17.3), целые секунды: если сессия в `running`, а от воркера по ней нет ни одного события (включая `agent.delta`) дольше этого, хаб закрывает ход с `system turn_lost` «no events for N s», и сессия в `error` до следующего ввода. Ожидание ответа на approval/clarify и офлайн воркера не считаются. `0` — выключить |
-| `RUST_LOG` | нет, `info` | уровень логов (`tracing`), например `hqc_hub=debug` |
+| `HQC_DATABASE_URL` | yes | Postgres connection string, e.g. `postgresql://hqc:<password>@127.0.0.1/hqc` |
+| `HQC_HUB_LISTEN` | no, `127.0.0.1:8080` | HTTP address and port. The hub listens only on the interface `cloudflared` connects to (§20); with the tunnel on the same host, loopback. In the Docker image it is `0.0.0.0:8080` inside the container, and the port is not published (§1.8) |
+| `HQC_ACCESS_TEAM_DOMAIN` | yes (without `HQC_DEV`) | Cloudflare Zero Trust team domain, `<team>.cloudflareaccess.com` (`https://` and `/` are allowed; the hub strips them). From it the hub derives the issuer `https://<team>.cloudflareaccess.com` and the JWKS `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` |
+| `HQC_ACCESS_AUD` | yes (without `HQC_DEV`) | Application Audience (AUD) tag of the hub's Access application; the hub checks `aud` in the `Cf-Access-Jwt-Assertion` JWT |
+| `HQC_VAPID_PRIVATE` | no | VAPID private key for Web Push: a 32-byte P-256 scalar, base64url without `=` (§1.5). Set together with `HQC_VAPID_PUBLIC` or not at all; otherwise the hub does not start |
+| `HQC_VAPID_PUBLIC` | no | VAPID public key: an uncompressed P-256 point (65 bytes), base64url without `=`. Served by `GET /api/push/vapid`. Without the key pair push is off, and the client says "VAPID keys are not configured on the hub" |
+| `HQC_VAPID_SUBJECT` | no, `mailto:hqc@localhost` | `sub` in the VAPID signature: `mailto:` or `https:`. Set a real address: push services (Apple especially) may reject signatures with a made-up one |
+| `HQC_CLIENT_DIR` | no | directory of the built client (`client/dist`). If set, the hub serves the client at `/` on the same domain; without an `index.html` in it the hub does not start. If unset, the hub serves only `/api/*`, `/worker/*` and `/health` |
+| `HQC_DEV` | no | `1`: dev mode **without Access**; all `/api/*` requests come from `HQC_DEV_USER`. For local development only: the hub refuses to start if any `HQC_ACCESS_*` is also set or `HQC_HUB_LISTEN` is not loopback (`127.0.0.0/8`, `[::1]`, `localhost`). Do not use in the DMZ |
+| `HQC_DEV_USER` | with `HQC_DEV=1` | email of the dev-mode user; without `HQC_DEV=1` it is ignored with a warning |
+| `HQC_ARTIFACT_DIR` | no, `artifacts` (in the Docker image `/var/lib/hqc/artifacts`) | artifact storage directory (SPEC §12): files by sha256, `<dir>/<first 2 chars>/<sha256>`, and `tmp/` for uploads. The hub creates it on start and does not start if it cannot. Back it up together with the database (SPEC §20). Unused artifacts are removed by a daily cleanup (`HQC_ARTIFACT_RETENTION_DAYS`) |
+| `HQC_ARTIFACT_RETENTION_DAYS` | no, `30` | artifact cleanup (SPEC §12, T21): once a day (and right after start) the hub deletes artifact records that no event references and that have not been uploaded or attached to an input for this many days; the file is deleted from disk once no records for its sha256 remain. Whole days; `0` means never delete |
+| `HQC_ARTIFACT_PUBLIC_BASE` | no | origin of a separate artifact domain, `https://artifacts.<hub domain>` without a path (`http://` only for loopback). Signed links point there, and HTML is rendered in an iframe only from there; the hub adds this origin to `img-src`/`frame-src`/`connect-src` of its CSP, and on this host serves only `/artifacts/*` (everything else is `404`). The domain is the same tunnel to the same hub, **outside** Access (§1.6). If unset, links are relative, on the hub's domain (behind Access), and HTML can only be downloaded |
+| `HQC_ARTIFACT_KEY` | no | HMAC key for signed links, at least 32 characters (`openssl rand -hex 32`). If unset, a random one per run: links from the previous run stop working, and the client just requests new ones. Needed only if links must survive a restart |
+| `HQC_PUBLIC_ORIGINS` | no | comma-separated origins browsers open the hub at: `https://hqc.example.com`. When set, `Origin` on `/api/*` (WebSocket and writes) is checked against this list instead of the request's `Host`. Needed if a proxy in front of the hub rewrites `Host` to the container name (Caddy with `header_up Host`, cloudflared with `httpHostHeader`) and does not set `X-Forwarded-Host`; the symptom is `WebSocket connection to wss://…/api/ws failed` in the browser and `Origin does not match the hub's host` in the hub log |
+| `HQC_TURN_WATCHDOG_S` | no, `900` | turn watchdog (SPEC §17.3), whole seconds: if a session is `running` and the worker has sent no event for it (including `agent.delta`) for longer than this, the hub closes the turn with `system turn_lost` "no events for N s", and the session stays in `error` until the next input. Waiting for an answer to approval/clarify and the worker being offline do not count. `0` turns it off |
+| `RUST_LOG` | no, `info` | log level (`tracing`), e.g. `hqc_hub=debug` |
 
-Мастер-ключа для `api_keys` (§3, §20) в итерации 1 нет — ключи пользователей не хранятся.
+There is no master key for `api_keys` (§3, §20) in iteration 1: user keys are not stored.
 
-Хабу нужен исходящий HTTPS: к `<team>.cloudflareaccess.com` (JWKS) и к push-сервисам
-браузеров (`fcm.googleapis.com`, `web.push.apple.com`, `updates.push.services.mozilla.com`
-и т.п.).
+The hub needs outbound HTTPS: to `<team>.cloudflareaccess.com` (JWKS) and to browser push
+services (`fcm.googleapis.com`, `web.push.apple.com`, `updates.push.services.mozilla.com`
+etc.).
 
-Проверка после старта: `curl http://127.0.0.1:8080/health` → `ok`; в логе
+Check after start: `curl http://127.0.0.1:8080/health` → `ok`; in the log
 `hqc-hub listening addr=… protocol=1`.
 
 ### 1.3 systemd (Linux)
 
-Без Docker; с Docker — §1.8.
+Without Docker; with Docker, see §1.8.
 
-`/etc/hqc/hub.env` (права `0600`, владелец `root`; в файле пароль базы и ключ VAPID):
+`/etc/hqc/hub.env` (mode `0600`, owner `root`; the file holds the database password and the VAPID key):
 
 ```sh
-HQC_DATABASE_URL=postgresql://hqc:<пароль>@127.0.0.1/hqc
+HQC_DATABASE_URL=postgresql://hqc:<password>@127.0.0.1/hqc
 HQC_HUB_LISTEN=127.0.0.1:8080
 HQC_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
 HQC_ACCESS_AUD=<AUD tag>
@@ -149,16 +149,16 @@ sudo useradd --system --no-create-home hqc
 sudo install -m 0755 target/release/hqc-hub /usr/local/bin/
 sudo mkdir -p /opt/hqc && sudo cp -r client/dist /opt/hqc/client
 sudo systemctl daemon-reload && sudo systemctl enable --now hqc-hub
-journalctl -u hqc-hub -f            # логи (хаб пишет в stdout)
+journalctl -u hqc-hub -f            # logs (the hub writes to stdout)
 ```
 
-Хаб читает файлы клиента при каждом запросе: новая сборка `client/dist` в
-`HQC_CLIENT_DIR` подхватывается без перезапуска.
+The hub reads the client files on every request: a new `client/dist` build in
+`HQC_CLIENT_DIR` is picked up without a restart.
 
-### 1.4 launchd (если хаб на маке)
+### 1.4 launchd (if the hub is on a Mac)
 
-`/Library/LaunchDaemons/local.hqc.hub.plist` (владелец `root:wheel`, права `0600` — в нём
-секреты); `UserName` — непривилегированный пользователь, под которым работает хаб:
+`/Library/LaunchDaemons/local.hqc.hub.plist` (owner `root:wheel`, mode `0600`: it contains
+secrets); `UserName` is the unprivileged user the hub runs as:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -192,16 +192,16 @@ journalctl -u hqc-hub -f            # логи (хаб пишет в stdout)
 
 ```sh
 sudo launchctl bootstrap system /Library/LaunchDaemons/local.hqc.hub.plist
-sudo launchctl kickstart -k system/local.hqc.hub     # перезапуск
-sudo launchctl bootout system/local.hqc.hub          # остановка
+sudo launchctl kickstart -k system/local.hqc.hub     # restart
+sudo launchctl bootout system/local.hqc.hub          # stop
 ```
 
-Каталог лога должен существовать и быть доступен пользователю `hqc` на запись.
+The log directory must exist and be writable by the `hqc` user.
 
-### 1.5 Ключи VAPID
+### 1.5 VAPID keys
 
-Нужна пара P-256 в «сыром» виде, base64url без `=`. Через `openssl` (так же их делает
-`tools/e2e-local.sh`, хаб такие ключи принимает):
+You need a P-256 pair in "raw" form, base64url without `=`. With `openssl` (this is also how
+`tools/e2e-local.sh` makes them; the hub accepts such keys):
 
 ```sh
 openssl ecparam -name prime256v1 -genkey -noout -out vapid.pem
@@ -210,25 +210,25 @@ echo "HQC_VAPID_PRIVATE=$(openssl ec -in vapid.pem -outform DER 2>/dev/null | ta
 echo "HQC_VAPID_PUBLIC=$(openssl ec -in vapid.pem -pubout -outform DER 2>/dev/null | tail -c 65 | b64url)"
 ```
 
-Ключи генерируются один раз. Смена ключей делает все существующие подписки
-недействительными: на каждом устройстве придётся заново нажать «Подписаться на
-уведомления». `vapid.pem` после переноса значений в `hub.env` можно удалить.
+Generate the keys once. Changing the keys invalidates all existing subscriptions: on every
+device you will have to press "Subscribe to notifications" again. `vapid.pem` can be deleted
+once the values are in `hub.env`.
 
-### 1.6 Cloudflare Tunnel и Access
+### 1.6 Cloudflare Tunnel and Access
 
-Хаб публикуется одним именем, например `hqc.example.com`. Людям (`/`, `/api/*`,
-в том числе WebSocket `/api/ws`) — только через Access; воркерам (`/worker/*`) — без Access,
-их пускает токен воркера (§6, §20).
+The hub is published under one name, e.g. `hqc.example.com`. People (`/`, `/api/*`,
+including the WebSocket `/api/ws`) come in only through Access; workers (`/worker/*`) without
+Access, let in by the worker token (§6, §20).
 
-**Туннель.** `cloudflared tunnel login`, `cloudflared tunnel create hqc`,
-`cloudflared tunnel route dns hqc hqc.example.com`. Конфиг `/etc/cloudflared/config.yml`
-(два маршрута на один и тот же хаб; разделение на «с Access» и «без Access» делается
-приложениями Access ниже, маршрут `/worker/` выделен явно, чтобы его было видно и чтобы
-при желании направить его на отдельный порт):
+**Tunnel.** `cloudflared tunnel login`, `cloudflared tunnel create hqc`,
+`cloudflared tunnel route dns hqc hqc.example.com`. Config `/etc/cloudflared/config.yml`
+(two routes to the same hub; the split into "with Access" and "without Access" is done by the
+Access applications below; the `/worker/` route is separated explicitly to make it visible and
+so it can be pointed at a separate port if you want):
 
 ```yaml
-tunnel: <UUID туннеля>
-credentials-file: /etc/cloudflared/<UUID туннеля>.json
+tunnel: <tunnel UUID>
+credentials-file: /etc/cloudflared/<tunnel UUID>.json
 ingress:
   - hostname: hqc.example.com
     path: ^/worker/
@@ -238,123 +238,123 @@ ingress:
   - service: http_status:404
 ```
 
-`sudo cloudflared service install` ставит его службой (systemd или launchd). Хаб в Docker
-(§1.8): `service: http://hqc-hub:8080` у cloudflared в той же Docker-сети. WebSocket
-туннель пропускает без настроек; долгие соединения держатся heartbeat'ом хаба и
-воркера (20 с) и переподключением.
+`sudo cloudflared service install` installs it as a service (systemd or launchd). Hub in Docker
+(§1.8): `service: http://hqc-hub:8080` for cloudflared in the same Docker network. The tunnel
+passes WebSocket with no extra settings; long-lived connections are kept up by the hub and
+worker heartbeat (20 s) and by reconnecting.
 
-**Access** (Zero Trust → Access → Applications), два self-hosted приложения на тот же
-домен:
+**Access** (Zero Trust → Access → Applications): two self-hosted applications on the same
+domain:
 
-1. `hqc` — домен `hqc.example.com`, путь пустой (весь сайт). Политика **Allow** для ваших
-   email (или группы). Session Duration — длинный (например, 1 месяц): установленное на
-   телефон PWA иначе часто будет открываться на странице входа.
-2. `hqc-worker` — домен `hqc.example.com`, путь `worker`. Политика **Bypass**, Include:
-   Everyone. Более конкретный путь побеждает, поэтому `/worker/*` идёт мимо Access.
+1. `hqc`: domain `hqc.example.com`, empty path (the whole site). An **Allow** policy for your
+   emails (or a group). Session Duration: long (e.g. 1 month); otherwise the PWA installed on
+   the phone will often open on the login page.
+2. `hqc-worker`: domain `hqc.example.com`, path `worker`. A **Bypass** policy, Include:
+   Everyone. The more specific path wins, so `/worker/*` bypasses Access.
 
-**Cookie приложения `hqc`** (Applications → `hqc` → Configure → Settings → Cookie
-settings): **SameSite = Lax**, **HttpOnly** включён, **Binding Cookie** выключен: с ней Cloudflare не пропускает WebSocket через Access (проверено 2026-10-23). По
-умолчанию cookie `CF_Authorization` уходит с `SameSite=None`, и чужая страница в браузере
-того, кто вошёл в hqc, может открыть `wss://hqc.example.com/api/ws` с этой cookie. Хаб
-сам отклоняет WebSocket и запросы на запись с чужим `Origin` (SPEC §20), Lax — второй
-рубеж. После смены проверить, что установленное на телефон PWA открывается без
-повторного входа.
+**Cookie of the `hqc` application** (Applications → `hqc` → Configure → Settings → Cookie
+settings): **SameSite = Lax**, **HttpOnly** on, **Binding Cookie** off: with it Cloudflare does not pass WebSocket through Access (verified 2026-10-23). By
+default the `CF_Authorization` cookie is sent with `SameSite=None`, and a foreign page in the
+browser of someone logged in to hqc can open `wss://hqc.example.com/api/ws` with that cookie. The
+hub itself rejects WebSocket and write requests with a foreign `Origin` (SPEC §20); Lax is the
+second line of defence. After the change, check that the PWA installed on the phone opens
+without logging in again.
 
-**Rate limiting на `/worker/*`** (Security → WAF → Rate limiting rules, на зону домена):
-правило «URI Path starts with `/worker/`», характеристика — IP, например 60 запросов за
-10 секунд → Block на 1 минуту; отдельное, строже, для `/worker/enroll` (например, 10 в
-минуту). Хаб и сам ограничивает `/worker/*` по `CF-Connecting-IP` (§20 SPEC), правило
-Cloudflare отсекает флуд раньше, чем он дойдёт до туннеля и базы. Нормализацию URL
-(Rules → Settings → Normalize incoming URLs) оставить включённой: Bypass для `/worker/`
-не должен обходиться путями вида `/worker/../api/me`.
+**Rate limiting on `/worker/*`** (Security → WAF → Rate limiting rules, on the domain's zone):
+a rule "URI Path starts with `/worker/`", characteristic IP, e.g. 60 requests per
+10 seconds → Block for 1 minute; a separate, stricter one for `/worker/enroll` (e.g. 10 per
+minute). The hub itself also rate-limits `/worker/*` by `CF-Connecting-IP` (SPEC §20); the
+Cloudflare rule cuts off a flood before it reaches the tunnel and the database. Leave URL
+normalization (Rules → Settings → Normalize incoming URLs) on: the Bypass for `/worker/`
+must not be reachable with paths like `/worker/../api/me`.
 
-**Домен артефактов** (необязательно, SPEC §12): отдельное имя, например
-`artifacts.hqc.example.com`, — ещё один `hostname` в `ingress` туннеля на тот же
-`http://127.0.0.1:8080` и `cloudflared tunnel route dns hqc artifacts.hqc.example.com`.
-Access на это имя **не** ставить (или Bypass, Everyone): доступ даёт подпись ссылки с TTL
-10 минут. В хабе — `HQC_ARTIFACT_PUBLIC_BASE=https://artifacts.hqc.example.com` (§1.2):
-только с ним HTML-вложения показываются в iframe-песочнице; на этом имени хаб отдаёт лишь
-`/artifacts/*`. Без отдельного домена всё работает, ссылки идут на домен хаба за Access, а
-HTML только скачивается.
+**Artifact domain** (optional, SPEC §12): a separate name, e.g.
+`artifacts.hqc.example.com`: one more `hostname` in the tunnel's `ingress` to the same
+`http://127.0.0.1:8080` and `cloudflared tunnel route dns hqc artifacts.hqc.example.com`.
+Do **not** put Access on this name (or use Bypass, Everyone): access is granted by the link
+signature with a 10-minute TTL. In the hub, `HQC_ARTIFACT_PUBLIC_BASE=https://artifacts.hqc.example.com` (§1.2):
+only with it are HTML attachments shown in a sandboxed iframe; on this name the hub serves only
+`/artifacts/*`. Everything works without a separate domain: links go to the hub's domain behind
+Access, and HTML can only be downloaded.
 
-Откуда взять значения для хаба:
-- `HQC_ACCESS_AUD` — Applications → `hqc` → Configure (Overview) → **Application Audience
-  (AUD) Tag**. Это тег именно приложения `hqc` (не `hqc-worker`).
-- `HQC_ACCESS_TEAM_DOMAIN` — Settings → Custom Pages (или Team domain в общих настройках
-  Zero Trust): `<team>.cloudflareaccess.com`.
+Where to get the values for the hub:
+- `HQC_ACCESS_AUD`: Applications → `hqc` → Configure (Overview) → **Application Audience
+  (AUD) Tag**. It is the tag of the `hqc` application specifically (not `hqc-worker`).
+- `HQC_ACCESS_TEAM_DOMAIN`: Settings → Custom Pages (or Team domain in the general Zero Trust
+  settings): `<team>.cloudflareaccess.com`.
 
-Проверка снаружи: `https://hqc.example.com/` — экран входа Access, после входа — клиент;
+Check from outside: `https://hqc.example.com/` shows the Access login screen, then the client;
 `curl -i https://hqc.example.com/worker/enroll -X POST -H 'content-type: application/json'
--d '{}'` — ответ хаба (ошибка разбора тела `4xx`), а не редирект на вход Access.
-Запрос к `/api/me` мимо Access (без заголовка `Cf-Access-Jwt-Assertion`) хаб отклоняет
-сам. Лимит тела запроса через туннель ~100 МБ (§20).
+-d '{}'` returns a hub response (a body parse error, `4xx`), not a redirect to the Access login.
+A request to `/api/me` bypassing Access (without the `Cf-Access-Jwt-Assertion` header) is
+rejected by the hub itself. The request body limit through the tunnel is ~100 MB (§20).
 
-**HTTP/3 в зоне выключить** (Network → HTTP/3 with QUIC → Off). Проверено 2026-10-23:
-Chrome, открыв сайт по HTTP/3, поднимает WebSocket внутри той же QUIC-сессии (extended
-CONNECT, RFC 9220), а край Cloudflare такой поток до origin не доносит и сбрасывает без
-ответа. Симптомы: в консоли `WebSocket connection to wss://…/api/ws failed:` без кода, в
-Network у `ws` пустой Protocol и статус «Finished», в журнале Caddy и хаба запросов к
-`/api/ws` нет вовсе, при этом Safari и телефон работают, а воркер по `/worker/ws`
-подключён. Воспроизведение из консоли Chrome: `new WebSocket('wss://<хаб>/worker/ws')`
-должен дать «Unexpected response code: 401» от хаба; по HTTP/3 он тоже падает без кода,
-значит Access ни при чём. Временная проверка на одном компьютере:
-`chrome://flags/#enable-quic` → Disabled. После выключения HTTP/3 в зоне Chrome может ещё
-несколько минут ходить по QUIC из кэша Alt-Svc.
+**Turn HTTP/3 off in the zone** (Network → HTTP/3 with QUIC → Off). Verified 2026-10-23:
+Chrome, having opened the site over HTTP/3, sets up the WebSocket inside the same QUIC session
+(extended CONNECT, RFC 9220), and the Cloudflare edge does not carry such a stream to the origin
+and resets it without a response. Symptoms: in the console `WebSocket connection to wss://…/api/ws failed:`
+with no code, in Network the `ws` entry has an empty Protocol and status "Finished", the Caddy and
+hub logs show no requests to `/api/ws` at all, while Safari and the phone work and the worker is
+connected over `/worker/ws`. To reproduce from the Chrome console: `new WebSocket('wss://<hub>/worker/ws')`
+should give "Unexpected response code: 401" from the hub; over HTTP/3 it also fails with no code,
+so Access is not the cause. Temporary check on a single computer:
+`chrome://flags/#enable-quic` → Disabled. After HTTP/3 is turned off in the zone, Chrome may keep
+using QUIC from its Alt-Svc cache for a few more minutes.
 
-### 1.7 Раздача клиента
+### 1.7 Serving the client
 
-Клиент — статические файлы `client/dist` после `npm run build`. Он обращается к `/api`
-относительным путём и маршрутизирует в `#`, поэтому должен жить на том же домене, что и
-API, за тем же приложением Access. Проще всего — отдать его самим хабом:
-`HQC_CLIENT_DIR=/opt/hqc/client` (скопировать туда содержимое `client/dist`). `index.html`,
-`sw.js` и манифест отдаются с `Cache-Control: no-cache`, файлы `assets/*` (имена с хэшем) —
-как неизменяемые. В Docker-образе (§1.8) клиент уже лежит в `/opt/hqc/client` и включён.
+The client is the static files of `client/dist` after `npm run build`. It calls `/api` by a
+relative path and routes with `#`, so it must live on the same domain as the API, behind the
+same Access application. The simplest way is to have the hub serve it:
+`HQC_CLIENT_DIR=/opt/hqc/client` (copy the contents of `client/dist` there). `index.html`,
+`sw.js` and the manifest are served with `Cache-Control: no-cache`, `assets/*` files (hashed
+names) as immutable. In the Docker image (§1.8) the client is already in `/opt/hqc/client` and enabled.
 
-### 1.8 Хаб в Docker
+### 1.8 Hub in Docker
 
-Вместо §1.3: готовый образ `ghcr.io/drzlo13/hqc-hub` (linux/amd64; Dockerfile в корне
-репозитория). На сервере ничего не собирается — только `docker compose pull`. Образ
-собирает workflow `.github/workflows/image.yml`, только после зелёного `ci` на том же коммите.
+Instead of §1.3: the ready image `ghcr.io/drzlo13/hqc-hub` (linux/amd64; Dockerfile at the
+repository root). Nothing is built on the server, only `docker compose pull`. The image is
+built by the `.github/workflows/image.yml` workflow, only after a green `ci` on the same commit.
 
-**Теги.**
+**Tags.**
 
-| тег | когда появляется | для чего |
+| tag | when it appears | what for |
 |---|---|---|
-| `sha-<7 знаков коммита>` | каждая сборка | развёртывание: неизменяемый, откат — предыдущий `sha-…` |
-| `master` | каждый зелёный push в `master` | плавающий, «последний master»; в боевом compose не использовать |
-| `X.Y.Z`, `X.Y`, `latest` | тег `vX.Y.Z` (версия обязана совпасть с `workspace.package.version` в `Cargo.toml`) | релизы; `vX.Y.Z-rc.N` даёт только `X.Y.Z-rc.N` и `sha-…` |
+| `sha-<7 chars of the commit>` | every build | deployment: immutable; to roll back, use the previous `sha-…` |
+| `master` | every green push to `master` | floating, "latest master"; do not use in a production compose |
+| `X.Y.Z`, `X.Y`, `latest` | tag `vX.Y.Z` (the version must match `workspace.package.version` in `Cargo.toml`) | releases; `vX.Y.Z-rc.N` produces only `X.Y.Z-rc.N` and `sha-…` |
 
-В compose пишите конкретный `sha-…` или `X.Y.Z`. Версию в образе показывает
-`docker run --rm ghcr.io/drzlo13/hqc-hub:<тег> --version` (`hqc-hub 0.1.0`), коммит — метка
-`org.opencontainers.image.revision` (`docker image inspect`). Пакет публичный: `pull` без
-логина. Если пакет закрыт — `docker login ghcr.io -u <github-логин>` с classic PAT
-только с `read:packages`.
+In compose, use a specific `sha-…` or `X.Y.Z`. The version in the image is shown by
+`docker run --rm ghcr.io/drzlo13/hqc-hub:<tag> --version` (`hqc-hub 0.1.0`), the commit by the
+label `org.opencontainers.image.revision` (`docker image inspect`). The package is public: `pull`
+needs no login. If the package is private: `docker login ghcr.io -u <github-login>` with a
+classic PAT with only `read:packages`.
 
-**Что в образе.** `/usr/local/bin/hqc-hub` (`ENTRYPOINT`, аргументов не нужно), клиент
-в `/opt/hqc/client`, пользователь `hqc` (uid/gid 10001), порт 8080, из пакетов —
-`ca-certificates` и `libssl3t64`. Заданы по умолчанию (§1.2; переопределяются в env):
+**What is in the image.** `/usr/local/bin/hqc-hub` (`ENTRYPOINT`, no arguments needed), the
+client in `/opt/hqc/client`, user `hqc` (uid/gid 10001), port 8080, and from packages
+`ca-certificates` and `libssl3t64`. Defaults (§1.2; override them in env):
 
-| переменная | значение в образе |
+| variable | value in the image |
 |---|---|
 | `HQC_HUB_LISTEN` | `0.0.0.0:8080` |
 | `HQC_CLIENT_DIR` | `/opt/hqc/client` |
 | `RUST_LOG` | `info` |
-| `NO_COLOR` | `1` — логи без ANSI-цветов |
+| `NO_COLOR` | `1`: logs without ANSI colours |
 
-Задать нужно: `HQC_DATABASE_URL`, `HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD`; для push —
-`HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT` (§1.5). `HQC_DEV` в
-контейнере не работает и не нужен: с `0.0.0.0` хаб в dev-режиме откажется стартовать.
+You must set: `HQC_DATABASE_URL`, `HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD`; for push,
+`HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT` (§1.5). `HQC_DEV` does not work
+in the container and is not needed: with `0.0.0.0` the hub refuses to start in dev mode.
 
-**Состояние.** Хаб хранит всё в Postgres; на диске контейнера он ничего не пишет (корень
-образа можно монтировать read-only, `/tmp` не нужен), логи — в stdout. Volume нужен только
-базе.
+**State.** The hub keeps everything in Postgres; it writes nothing to the container's disk (the
+image root can be mounted read-only, `/tmp` is not needed), logs go to stdout. Only the database
+needs a volume.
 
-**`0.0.0.0:8080` безопасен, только пока порт не опубликован наружу.** Внутри контейнера
-это интерфейс compose-сети, а не хоста; Access (§1.6) защищает только то, что приходит
-через туннель. Поэтому у `hqc-hub` нет `ports:` — `cloudflared` или Caddy ходят к нему по
-имени `hqc-hub:8080` в той же сети. Если они на хосте, а не в контейнере, публикуйте только
-на loopback: `ports: ["127.0.0.1:8080:8080"]`, никогда `8080:8080` (Docker открывает такой
-порт на всех интерфейсах в обход ufw/nftables хоста).
+**`0.0.0.0:8080` is safe only as long as the port is not published.** Inside the container
+this is the compose network's interface, not the host's; Access (§1.6) protects only what comes
+through the tunnel. That is why `hqc-hub` has no `ports:`: `cloudflared` or Caddy reach it by
+the name `hqc-hub:8080` in the same network. If they run on the host rather than in a container,
+publish on loopback only: `ports: ["127.0.0.1:8080:8080"]`, never `8080:8080` (Docker opens
+such a port on all interfaces, bypassing the host's ufw/nftables).
 
 `/srv/hqc/compose.yml`:
 
@@ -373,7 +373,7 @@ services:
       retries: 10
 
   hqc-hub:
-    image: ghcr.io/drzlo13/hqc-hub:sha-<коммит>   # или X.Y.Z
+    image: ghcr.io/drzlo13/hqc-hub:sha-<commit>   # or X.Y.Z
     restart: unless-stopped
     depends_on:
       hqc-db:
@@ -381,9 +381,9 @@ services:
     env_file: ./hub.env
     read_only: true
     volumes:
-      # Хранилище артефактов (HQC_ARTIFACT_DIR образа); бэкапить вместе с базой.
+      # Artifact storage (the image's HQC_ARTIFACT_DIR); back it up together with the database.
       - hqc-artifacts:/var/lib/hqc/artifacts
-    # без ports: наружу хаб виден только через cloudflared/Caddy в этой же сети
+    # no ports: the hub is reachable only through cloudflared/Caddy in this same network
     networks: [default, edge]
 
 volumes:
@@ -391,25 +391,25 @@ volumes:
   hqc-artifacts:
 
 networks:
-  # Общая сеть с cloudflared/Caddy из их compose-проекта: docker network create edge.
-  # Если они описаны в этом же compose.yml — уберите edge и оставьте default.
+  # Shared network with cloudflared/Caddy from their compose project: docker network create edge.
+  # If they are defined in this same compose.yml, remove edge and keep default.
   edge:
     external: true
 ```
 
-`/srv/hqc/db.env` и `/srv/hqc/hub.env` — права `0600`, в git не класть; пароль в обоих
-один и тот же (`openssl rand -hex 24`; hex — чтобы не экранировать его в URL):
+`/srv/hqc/db.env` and `/srv/hqc/hub.env`: mode `0600`, keep them out of git; the password is
+the same in both (`openssl rand -hex 24`; hex so it needs no escaping in the URL):
 
 ```sh
 # db.env
 POSTGRES_USER=hqc
 POSTGRES_DB=hqc
-POSTGRES_PASSWORD=<пароль>
+POSTGRES_PASSWORD=<password>
 ```
 
 ```sh
 # hub.env
-HQC_DATABASE_URL=postgresql://hqc:<пароль>@hqc-db/hqc
+HQC_DATABASE_URL=postgresql://hqc:<password>@hqc-db/hqc
 HQC_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
 HQC_ACCESS_AUD=<AUD tag>
 HQC_VAPID_PRIVATE=<base64url>
@@ -417,125 +417,126 @@ HQC_VAPID_PUBLIC=<base64url>
 HQC_VAPID_SUBJECT=mailto:<you>@<domain>
 ```
 
-**Проверьте, что у `hqc-hub` и `hqc-db` в `compose.yml` нет `ports:`** (или только
-`127.0.0.1:…`, см. выше). Хаб доверяет `CF-Connecting-IP` и `Cf-Access-Jwt-Assertion`
-только потому, что до него можно дойти лишь через туннель: открытый наружу порт даёт
-`/worker/*` и статику без Cloudflare, а лимиты по адресу — подделываемыми.
+**Check that `hqc-hub` and `hqc-db` have no `ports:` in `compose.yml`** (or only
+`127.0.0.1:…`, see above). The hub trusts `CF-Connecting-IP` and `Cf-Access-Jwt-Assertion`
+only because it can be reached only through the tunnel: a port open to the outside exposes
+`/worker/*` and the static files without Cloudflare, and makes per-address limits spoofable.
 
-База — в той же compose-сети и без опубликованного порта, поэтому подключение без TLS
-(§1.1) здесь допустимо. `POSTGRES_*` действуют только при первом запуске на пустом volume:
-сменить пароль потом — `ALTER ROLE hqc PASSWORD …` в базе и правка обоих файлов.
+The database is in the same compose network with no published port, so a connection without
+TLS (§1.1) is acceptable here. `POSTGRES_*` take effect only on the first start on an empty
+volume: to change the password later, run `ALTER ROLE hqc PASSWORD …` in the database and edit
+both files.
 
-В туннеле (§1.6) вместо `http://127.0.0.1:8080` — `http://hqc-hub:8080` (cloudflared в
-контейнере в сети `edge`); Caddy — `reverse_proxy hqc-hub:8080`.
+In the tunnel (§1.6), use `http://hqc-hub:8080` instead of `http://127.0.0.1:8080` (cloudflared
+in a container in the `edge` network); for Caddy, `reverse_proxy hqc-hub:8080`.
 
 ```sh
 cd /srv/hqc
 docker compose pull && docker compose up -d
-docker compose logs -f hqc-hub       # ждать: hqc-hub listening addr=0.0.0.0:8080 protocol=1
+docker compose logs -f hqc-hub       # wait for: hqc-hub listening addr=0.0.0.0:8080 protocol=1
 docker compose exec hqc-db psql -U hqc -d hqc -c 'select version, description from _sqlx_migrations'
 ```
 
-`HEALTHCHECK` в образе нет (в нём нет `curl`); `GET /health` → `ok` проверяет прокси или
-`curl` с хоста, где виден хаб. Если база недоступна, хаб завершается с ошибкой, и его
-перезапускает `restart: unless-stopped`.
+The image has no `HEALTHCHECK` (it has no `curl`); `GET /health` → `ok` is checked by the proxy
+or by `curl` from a host that can see the hub. If the database is unreachable, the hub exits with
+an error, and `restart: unless-stopped` restarts it.
 
-**Обновление.** Миграции применяются при старте нового контейнера (§1.1), отката миграций
-нет — поэтому сначала дамп:
+**Upgrade.** Migrations are applied when the new container starts (§1.1), and there is no
+migration rollback, so dump first:
 
 ```sh
 cd /srv/hqc
 docker compose exec -T hqc-db pg_dump -U hqc -Fc hqc > backup/hqc-$(date +%F-%H%M).dump
-# в compose.yml: image: ghcr.io/drzlo13/hqc-hub:<новый тег>
+# in compose.yml: image: ghcr.io/drzlo13/hqc-hub:<new tag>
 docker compose pull hqc-hub
 docker compose up -d hqc-hub
 docker compose logs --since 5m hqc-hub
 ```
 
-Откат: прежний тег в `compose.yml` и `up -d`. Если новая версия успела применить
-миграцию, старый хаб на такой базе может не стартовать — тогда восстановить дамп:
+Rollback: the previous tag in `compose.yml` and `up -d`. If the new version has already applied
+a migration, the old hub may fail to start on that database; then restore the dump:
 `docker compose stop hqc-hub`,
-`docker compose exec -T hqc-db pg_restore -U hqc -d hqc --clean --if-exists < backup/<файл>.dump`,
-затем `up -d`. Мажорная версия Postgres привязана к volume: `postgres:17` → `18` только
-через `pg_dump`/`pg_restore` в новый volume, не сменой тега.
+`docker compose exec -T hqc-db pg_restore -U hqc -d hqc --clean --if-exists < backup/<file>.dump`,
+then `up -d`. The Postgres major version is tied to the volume: `postgres:17` → `18` only
+through `pg_dump`/`pg_restore` into a new volume, not by changing the tag.
 
-Собрать образ самому: `docker build -t hqc-hub .` в корне репозитория (на машине той же
-архитектуры, что сервер, или с `--platform linux/amd64`).
+To build the image yourself: `docker build -t hqc-hub .` at the repository root (on a machine
+with the same architecture as the server, or with `--platform linux/amd64`).
 
-## 2. Воркер на macOS
+## 2. Worker on macOS
 
-### 2.1 Установка
+### 2.1 Installation
 
 ```sh
 cargo build --release -p hqc-worker
 sudo install -m 0755 target/release/hqc-worker /usr/local/bin/
 hqc-worker --version
-which claude          # путь к Claude Code CLI, понадобится для claude_bin
-claude --version      # CLI установлен и залогинен подпиской этого пользователя
+which claude          # path to the Claude Code CLI, needed for claude_bin
+claude --version      # the CLI is installed and logged in with this user's subscription
 ```
 
-Воркер запускается от того пользователя macOS, чья подписка Claude Code и чьи проекты
-используются. Подкоманды: `enroll <hub_url>`, `run`; `mcp` и `env` в итерации 1 печатают
-«not implemented».
+The worker runs as the macOS user whose Claude Code subscription and projects are used.
+Subcommands: `enroll <hub_url>`, `run`; `mcp` and `env` print "not implemented" in
+iteration 1.
 
-Переменные окружения воркера:
+Worker environment variables:
 
-| переменная | по умолчанию | что это |
+| variable | default | what it is |
 |---|---|---|
-| `HQC_HOME` | `~/.hqc` | каталог воркера: `worker.toml`, outbox, токен в файловом режиме |
-| `HQC_WORKER_CONFIG` | `$HQC_HOME/worker.toml` | путь к конфигу, если он лежит не в `HQC_HOME` |
-| `HQC_TOKEN_STORE` | не задана | `file` — хранить токен в файле `$HQC_HOME/token` (0600) вместо Keychain; на маке нужно только для тестов и прогонов вроде `tools/e2e-local.sh` |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | где Claude Code хранит транскрипты; воркер смотрит туда, чтобы выбрать `--resume` или `--session-id` |
-| `RUST_LOG` | `info` | уровень логов; токен в логах не появляется даже на `trace` |
+| `HQC_HOME` | `~/.hqc` | worker directory: `worker.toml`, outbox, the token in file mode |
+| `HQC_WORKER_CONFIG` | `$HQC_HOME/worker.toml` | config path, if it is not in `HQC_HOME` |
+| `HQC_TOKEN_STORE` | unset | `file`: store the token in the file `$HQC_HOME/token` (0600) instead of Keychain; on a Mac only needed for tests and runs like `tools/e2e-local.sh` |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | where Claude Code keeps transcripts; the worker looks there to choose between `--resume` and `--session-id` |
+| `RUST_LOG` | `info` | log level; the token never appears in logs, even at `trace` |
 
 ### 2.2 `worker.toml`
 
-`~/.hqc/worker.toml`. Это единственный источник истины для ограничений воркера: хаб их
-не может ни задать, ни расширить (§2.1, §14). Неизвестное поле — ошибка запуска (опечатка
-не должна молча ослабить ограничения).
+`~/.hqc/worker.toml`. This is the only source of truth for the worker's restrictions: the hub
+can neither set nor widen them (§2.1, §14). An unknown field is a startup error (a typo must not
+silently weaken the restrictions).
 
 ```toml
-# URL хаба, ровно тот же, что в `hqc-worker enroll` (без завершающего /): по нему токен
-# ищется в Keychain. Только https://; http:// — для localhost / 127.0.0.0/8 / [::1].
+# Hub URL, exactly the same as in `hqc-worker enroll` (no trailing /): the token is looked up
+# in Keychain by it. Only https://; http:// is for localhost / 127.0.0.0/8 / [::1].
 hub_url = "https://hqc.example.com"
 
-# Разрешить http:// к хабу не на loopback (токен воркера пойдёт открытым текстом). Только
-# для отладки в изолированной сети; для `enroll` то же самое — флаг --insecure-http.
+# Allow http:// to a non-loopback hub (the worker token will travel in plain text). Only
+# for debugging in an isolated network; for `enroll` the same is the --insecure-http flag.
 # insecure_http = false
 
-# Сколько процессов агентов может работать одновременно; следующий старт хаб получит как
-# `agent_start_failed` (retryable) и повторит позже. По умолчанию 8.
+# How many agent processes may run at once; the hub receives the next start as
+# `agent_start_failed` (retryable) and retries later. Default 8.
 # max_sessions = 8
 
-# Корни, за пределы которых сессии не выходят. Абсолютные пути; симлинки раскрываются.
-# Непустой список. Workspace (папки сессий) добавляются в веб-клиенте и обязаны лежать
-# внутри: воркер проверяет каждый путь сам (fs.stat, session.start), а дерево папок в
-# клиенте показывает только то, что внутри этих корней.
+# Roots sessions never leave. Absolute paths; symlinks are resolved.
+# A non-empty list. Workspaces (session folders) are added in the web client and must lie
+# inside them: the worker checks every path itself (fs.stat, session.start), and the folder
+# tree in the client shows only what is inside these roots.
 allowed_roots = ["/Users/me/work"]
 
-# Секунды простоя, после которых процесс агента завершается (следующий ввод поднимет его
-# через --resume). 0 или отсутствие — простаивающий агент не трогается (§17.3).
+# Idle seconds after which an agent process exits (the next input brings it back
+# with --resume). 0 or absent: an idle agent is left alone (§17.3).
 idle_timeout = 0
 
-# Пускать ли сессии чужих пользователей хаба. В итерации 1 пользователь один — false.
+# Whether to let in sessions of other hub users. Iteration 1 has one user: false.
 allow_foreign_sessions = false
 
-# Путь к Claude Code CLI. По умолчанию — `claude` из PATH процесса воркера. Под launchd
-# PATH короткий (~/.local/bin в него не входит), поэтому лучше указать явно.
+# Path to the Claude Code CLI. Defaults to `claude` from the worker process's PATH. Under
+# launchd PATH is short (~/.local/bin is not in it), so better set it explicitly.
 claude_bin = "/Users/me/.local/bin/claude"
 
-# Блока [workspace] больше нет (с T14): workspace — объекты хаба, их добавляют в клиенте
-# (проект → Workspaces → «Добавить workspace»). Старый блок итерации 1 воркер игнорирует и
-# пишет об этом предупреждение при старте — уберите его из файла.
+# The [workspace] block is gone (since T14): workspaces are hub objects added in the client
+# (project → Workspaces → "Add a workspace"). The worker ignores the old iteration 1 block and
+# logs a warning about it on start; remove it from the file.
 
-# Политика разрешений Claude Code (SPEC §8.1, §14). Блок можно не писать: тогда mode = "ask",
-# allow пуст, deny — набор по умолчанию (sudo, ssh, scp, rm -rf /*, curl | sh, dd, mkfs,
+# Claude Code permission policy (SPEC §8.1, §14). The block may be omitted: then mode = "ask",
+# allow is empty, deny is the default set (sudo, ssh, scp, rm -rf /*, curl | sh, dd, mkfs,
 # git push --force / -f).
 [permissions]
 mode = "ask"
 allow = [
-  # Edit/Write без скобок — правка любого файла, куда может писать пользователь, не только
-  # workspace; уберите их, если хотите подтверждать каждую правку.
+  # Edit/Write without parentheses: editing any file the user can write to, not only the
+  # workspace; remove them if you want to confirm every edit.
   "Read", "Glob", "Grep", "Edit", "Write",
   "Bash(cargo build:*)", "Bash(cargo check:*)", "Bash(cargo test:*)",
   "Bash(cargo clippy:*)", "Bash(cargo fmt:*)", "Bash(cargo run:*)",
@@ -552,42 +553,42 @@ deny = [
 ]
 ```
 
-Три уровня `[permissions]`, от сильного к слабому:
+Three levels of `[permissions]`, from strongest to weakest:
 
-1. **`deny`** — не выполняется и не спрашивается. Его не отменяют ни «Разрешать всегда»,
-   ни `mode = "auto"`, ни `auto_approve` хаба; в чате вместо карточки появляется строка
-   «Запрещено политикой воркера». Инструмент без скобок (`WebFetch`) пропадает из сессии
-   целиком. Свой `deny` **заменяет** набор по умолчанию, поэтому перенесите в него те
-   правила по умолчанию, которые нужны; `deny = []` отключает запреты совсем.
-2. **`allow`** и правила «Разрешать всегда» (CLI пишет их в
-   `<корень git-репозитория>/.claude/settings.local.json`) — выполняется без вопроса.
-3. **Остальное** — при `mode = "ask"` приходит карточка разрешения; при `mode = "auto"`
-   решает классификатор Claude Code, ничего не спрашивая (проверено: он пропускает и
-   `rm -rf` вне папки, и `git push --force`, если пользователь об этом попросил), так что в
-   этом режиме граница — только `deny`.
+1. **`deny`**: not run and not asked about. Neither "Always allow", nor `mode = "auto"`, nor
+   the hub's `auto_approve` overrides it; instead of a card the chat shows the line
+   "Blocked by worker policy". A tool without parentheses (`WebFetch`) disappears from the
+   session entirely. Your own `deny` **replaces** the default set, so copy into it the default
+   rules you need; `deny = []` disables the bans altogether.
+2. **`allow`** and "Always allow" rules (the CLI writes them to
+   `<git repository root>/.claude/settings.local.json`): run without asking.
+3. **Everything else**: with `mode = "ask"` a permission card appears; with `mode = "auto"`
+   the Claude Code classifier decides without asking (verified: it lets through both
+   `rm -rf` outside the folder and `git push --force` if the user asked for it), so in this
+   mode `deny` is the only boundary.
 
-Синтаксис правил: `Bash(cargo test:*)` — команда `cargo test` с любыми аргументами (префикс
-до границы слова: `Bash(mkfs*)` не ловит `mkfs.ext4`), `Bash(curl * | sh)` — `*` любые
-символы, `Bash(git status)` — ровно эта команда; составные команды (`a && b`, `a | b`) CLI
-проверяет по каждой части. `Read`, `Edit`, `WebFetch` — инструмент целиком,
-`mcp__hqc` — все инструменты MCP-сервера. Неверное правило — ошибка запуска воркера: CLI
-молча выбросил бы весь файл настроек вместе с `deny`. `Bash(rm -rf /*)` ловит любой
-абсолютный путь, в том числе внутри workspace — относительные (`rm -rf target`) проходят.
+Rule syntax: `Bash(cargo test:*)` is the `cargo test` command with any arguments (a prefix up
+to a word boundary: `Bash(mkfs*)` does not catch `mkfs.ext4`), `Bash(curl * | sh)`: `*` is any
+characters, `Bash(git status)` is exactly this command; compound commands (`a && b`, `a | b`)
+the CLI checks part by part. `Read`, `Edit`, `WebFetch` are the whole tool,
+`mcp__hqc` is all tools of the MCP server. An invalid rule is a worker startup error: the CLI
+would silently drop the whole settings file, `deny` included. `Bash(rm -rf /*)` catches any
+absolute path, including inside the workspace; relative ones (`rm -rf target`) pass.
 
-`show_in_vscode` (по умолчанию `true`): воркер запускает Claude Code с
-`CLAUDE_CODE_ENTRYPOINT=claude-vscode`, иначе CLI пишет транскрипт с `entrypoint: sdk-cli`, а
-история бесед расширения VS Code показывает только свои сессии (проверено 2026-10-24 на
-2.1.309). В `--settings` воркер всегда кладёт `voiceEnabled: false`: иначе macOS спрашивает
-доступ к микрофону от имени `hqc-worker`.
+`show_in_vscode` (default `true`): the worker starts Claude Code with
+`CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with
+`entrypoint: sdk-cli`, and the VS Code extension's conversation history shows only its own
+sessions (verified 2026-10-24 on 2.1.309). The worker always puts `voiceEnabled: false` into
+`--settings`: otherwise macOS asks for microphone access on behalf of `hqc-worker`.
 
-Заголовки сессий (SPEC §3 Session, §8.1, T24) придумывает воркер на той же подписке: после первого
-ответа сессии хаб присылает `title.request`, воркер запускает `claude -p --model
-claude-haiku-5-5 --max-turns 1 --no-session-persistence …` без инструментов в пустой папке
-`~/.hqc/titles/<0|1>` и удаляет её. Это один короткий ход haiku на сессию; транскрипта и следа в
-истории VS Code он не оставляет. Если `claude` не залогинен, в логе воркера `no session title:
-…`, а заголовок берётся из первой строки промпта.
+Session titles (SPEC §3 Session, §8.1, T24) are made up by the worker on the same subscription:
+after the session's first reply the hub sends `title.request`, and the worker runs `claude -p --model
+claude-haiku-5-5 --max-turns 1 --no-session-persistence …` without tools in an empty folder
+`~/.hqc/titles/<0|1>` and then deletes it. This is one short haiku turn per session; it leaves no
+transcript and no trace in the VS Code history. If `claude` is not logged in, the worker log says
+`no session title: …`, and the title is taken from the first line of the prompt.
 
-### 2.3 Регистрация (`enroll`)
+### 2.3 Enrollment (`enroll`)
 
 ```sh
 hqc-worker enroll https://hqc.example.com
@@ -596,57 +597,58 @@ hqc-worker enroll https://hqc.example.com
 # Waiting...
 ```
 
-Открыть ссылку (с телефона или ноутбука, войдя через Access) и подтвердить код — либо
-в клиенте «Настройки» → «Подтвердить код воркера» и ввести код руками (регистр и дефис
-не важны). Перед кнопкой «Подтвердить» клиент показывает имя машины, ОС, время запроса и
-страну (по Cloudflare): если это не ваша машина и не только что запущенный `enroll` — не
-подтверждайте, ссылку могли прислать. Код живёт 10 минут. После подтверждения воркер печатает
-`Enrolled as worker <id>.` и сохраняет токен:
+Open the link (from a phone or laptop, logged in through Access) and confirm the code, or
+in the client go to "Settings" → "Confirm a worker code" and type the code by hand (case and hyphen
+do not matter). Before the "Confirm" button the client shows the machine name, OS, request time
+and country (from Cloudflare): if this is not your machine and not an `enroll` you have just
+started, do not confirm; the link may have been sent to you. The code lives for 10 minutes. After
+confirmation the worker prints `Enrolled as worker <id>.` and stores the token:
 
-- на macOS — Keychain, generic password, service `hqc-worker`, account = `hub_url`.
-  Посмотреть: `security find-generic-password -s hqc-worker -a https://hqc.example.com`;
-- с `HQC_TOKEN_STORE=file` (и на других ОС) — `$HQC_HOME/token`, права 0600.
+- on macOS in Keychain, generic password, service `hqc-worker`, account = `hub_url`.
+  To view: `security find-generic-password -s hqc-worker -a https://hqc.example.com`;
+- with `HQC_TOKEN_STORE=file` (and on other OSes) in `$HQC_HOME/token`, mode 0600.
 
-Имя воркера в вебе — имя хоста без домена (`home-mac`, а не `home-mac.tail….ts.net`);
-другое — флагом `--name`: `hqc-worker enroll --name home-mac https://hqc.example.com`.
+The worker's name in the web app is the host name without the domain (`home-mac`, not
+`home-mac.tail….ts.net`); set a different one with `--name`:
+`hqc-worker enroll --name home-mac https://hqc.example.com`.
 
-По ssh связка ключей обычно заперта. `enroll` проверяет хранилище пробной записью до
-запроса кода и при отказе Keychain сразу выходит с подсказкой: выполнить в той же
-ssh-сессии `security unlock-keychain` и повторить, либо задать `HQC_TOKEN_STORE=file`
-(тогда и `run` должен идти с ней же). Токен хаб выдаёт один раз, так что до хаба дело
-не доходит и ничего не сгорает.
+Over ssh the keychain is usually locked. `enroll` tests the store with a trial write before
+requesting a code, and if Keychain refuses it exits right away with a hint: run
+`security unlock-keychain` in the same ssh session and retry, or set `HQC_TOKEN_STORE=file`
+(then `run` must use it too). The hub issues the token only once, so the hub is never reached
+and nothing is burned.
 
-`enroll` не пишет `worker.toml`: если его нет, воркер подскажет путь.
+`enroll` does not write `worker.toml`: if it is missing, the worker will tell you the path.
 
-**Перерегистрация той же машины** (SPEC §5.1, с 0.21). Если машину регистрируют заново —
-после пересборки бинарника, смены хранилища токена (Keychain → `HQC_TOKEN_STORE=file`),
-отзыва токена, — это должен остаться тот же воркер, иначе его сессии, workspace и служебная
-сессия навсегда остаются на старом id «офлайн». Порядок:
+**Re-enrolling the same machine** (SPEC §5.1, since 0.21). If a machine is enrolled again
+(after rebuilding the binary, changing the token store (Keychain → `HQC_TOKEN_STORE=file`),
+or token revocation), it must stay the same worker; otherwise its sessions, workspaces and the
+worker's service session stay forever on the old id, "offline". Steps:
 
-1. Остановить старый `run` (`launchctl bootout gui/$(id -u)/local.hqc.worker`): воркер,
-   который сейчас на связи, заменить нельзя (`409 worker_online`).
-2. `hqc-worker enroll <hub_url>` (с `HQC_TOKEN_STORE=file`, если токен должен лежать в
-   файле), открыть ссылку.
-3. На экране подтверждения под данными машины — список ваших воркеров, которые офлайн или
-   отозваны, с числом сессий. Выбрать «Это та же машина, заменить <имя>» и нажать
-   «Подтвердить замену». «Новый воркер» (по умолчанию) — новая запись с новым id.
-4. `enroll` печатает `Enrolled as worker <id> (replaced <имя>).` — `<id>` тот же, что был.
-   Старый токен перестал работать в момент подтверждения; в служебной сессии воркера —
-   строка «Воркер перерегистрирован: «старое» → «новое»». Запустить `run` снова.
+1. Stop the old `run` (`launchctl bootout gui/$(id -u)/local.hqc.worker`): a worker that is
+   currently connected cannot be replaced (`409 worker_online`).
+2. `hqc-worker enroll <hub_url>` (with `HQC_TOKEN_STORE=file` if the token should be kept in a
+   file), open the link.
+3. On the confirmation screen, below the machine details, is a list of your workers that are
+   offline or revoked, with their session counts. Choose "The same machine, replace <name>" and press
+   "Confirm replacement". "New worker" (the default) creates a new record with a new id.
+4. `enroll` prints `Enrolled as worker <id> (replaced <name>).`: `<id>` is the same as before.
+   The old token stopped working at the moment of confirmation; the worker's service session
+   shows the line `Worker re-enrolled: “old” → “new”`. Start `run` again.
 
-Имя и ОС берутся у новой регистрации (`--name`, чтобы оставить прежнее). Процессы агентов
-старого запуска считаются завершёнными (как при перезапуске воркера): ввод продолжится
-через `--resume`. Если по ошибке подтверждён «Новый воркер» — отзовите его, затем
-перерегистрируйте машину ещё раз с заменой старого; лишний воркер без сессий удаляется
-кнопкой «Удалить» (§2.6).
+The name and OS come from the new enrollment (use `--name` to keep the old one). Agent
+processes of the old run are considered finished (as on a worker restart): input continues
+through `--resume`. If "New worker" was confirmed by mistake, revoke it, then re-enroll the
+machine once more replacing the old one; a spare worker without sessions is removed with the
+"Delete" button (§2.6).
 
-### 2.4 launchd-агент для `run`
+### 2.4 launchd agent for `run`
 
-Агент (LaunchAgent), а не демон: воркеру нужен Keychain пользователя (его токен и логин
-Claude Code), а он доступен только в сессии пользователя.
+An agent (LaunchAgent), not a daemon: the worker needs the user's Keychain (its token and the
+Claude Code login), which is available only in the user's session.
 
-`~/Library/LaunchAgents/local.hqc.worker.plist` (пути — абсолютные, `~` launchd
-не раскрывает):
+`~/Library/LaunchAgents/local.hqc.worker.plist` (paths are absolute; launchd does not expand
+`~`):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -674,177 +676,178 @@ Claude Code), а он доступен только в сессии пользо
 </plist>
 ```
 
-`PATH` нужен и самому `claude` (он запускает `git`, оболочку и т.п.), даже если
-`claude_bin` указан.
+`PATH` is also needed by `claude` itself (it runs `git`, the shell and so on), even if
+`claude_bin` is set.
 
 ```sh
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hqc.worker.plist
 launchctl print gui/$(id -u)/local.hqc.worker | grep -E 'state|pid'
-launchctl kickstart -k gui/$(id -u)/local.hqc.worker   # перезапуск (например, после обновления)
-launchctl bootout gui/$(id -u)/local.hqc.worker        # остановка
+launchctl kickstart -k gui/$(id -u)/local.hqc.worker   # restart (e.g. after an update)
+launchctl bootout gui/$(id -u)/local.hqc.worker        # stop
 ```
 
-Остановка шлёт SIGTERM: воркер завершает процессы агентов, сообщает хабу `stopped` и до
-5 с досылает outbox; неотправленное остаётся на диске и уйдёт при следующем запуске.
+Stopping sends SIGTERM: the worker ends the agent processes, reports `stopped` to the hub and
+spends up to 5 s flushing the outbox; whatever is unsent stays on disk and goes out on the next start.
 
-Элемент Keychain привязан к подписи бинарника, который его создал. У неподписанной сборки (`cargo build`, ad-hoc подпись линковщика) подпись меняется при каждой пересборке, поэтому после замены `hqc-worker` воркер под launchd упирается в диалог Keychain на экране мака (рядом с ним в `ps` появляется `SecurityAgent`), а лог остаётся пустым. Проверено 2026-10-23 на 0.1.0. Для машины, где воркер пересобирают, используйте файловое хранилище: `HQC_TOKEN_STORE=file` при `enroll` и та же переменная в `EnvironmentVariables` plist; токен лежит в `$HQC_HOME/token` с правами 0600. Keychain имеет смысл только для подписанного релизного бинарника.
+A Keychain item is bound to the signature of the binary that created it. An unsigned build (`cargo build`, the linker's ad-hoc signature) gets a new signature on every rebuild, so after `hqc-worker` is replaced, the worker under launchd gets stuck on a Keychain dialog on the Mac's screen (`SecurityAgent` shows up next to it in `ps`), and the log stays empty. Verified 2026-10-23 on 0.1.0. For a machine where the worker is rebuilt, use the file store: `HQC_TOKEN_STORE=file` at `enroll` and the same variable in the plist's `EnvironmentVariables`; the token lives in `$HQC_HOME/token` with mode 0600. Keychain makes sense only for a signed release binary.
 
-### 2.5 Где что лежит, логи
+### 2.5 Where things are, logs
 
-| что | где |
+| what | where |
 |---|---|
-| конфиг | `~/.hqc/worker.toml` |
-| токен | Keychain (`hqc-worker` / `hub_url`); в файловом режиме `~/.hqc/token` |
-| outbox (события, ещё не подтверждённые хабом) | `~/.hqc/outbox/outbox.sqlite3` (SQLite, WAL); `sqlite3 ~/.hqc/outbox/outbox.sqlite3 'select count(*) from outbox'` — сколько ждёт отправки |
-| логи воркера | stderr; под launchd — `~/Library/Logs/hqc-worker.log` (`tail -f`) |
-| папки запусков заголовков | `~/.hqc/titles/0`, `~/.hqc/titles/1` — есть только во время запуска |
-| транскрипты Claude Code | `~/.claude/projects/<путь workspace, где всё кроме букв и цифр заменено на ->/<runtime_session_id>.jsonl` |
+| config | `~/.hqc/worker.toml` |
+| token | Keychain (`hqc-worker` / `hub_url`); in file mode `~/.hqc/token` |
+| outbox (events not yet acknowledged by the hub) | `~/.hqc/outbox/outbox.sqlite3` (SQLite, WAL); `sqlite3 ~/.hqc/outbox/outbox.sqlite3 'select count(*) from outbox'` shows how many are waiting to be sent |
+| worker logs | stderr; under launchd `~/Library/Logs/hqc-worker.log` (`tail -f`) |
+| title run folders | `~/.hqc/titles/0`, `~/.hqc/titles/1`; exist only during a run |
+| Claude Code transcripts | `~/.claude/projects/<workspace path with everything except letters and digits replaced by ->/<runtime_session_id>.jsonl` |
 
-Что искать в логе: `connected to hub worker_id=…` — подключение есть; `hub rejected the
-worker token` — токен отозван или не тот хаб; `worker update needed` — версия протокола не совпала
-(воркер повторяет раз в час и больше ничего не делает); `agent start failed` — не
-запускается `claude` (путь, логин).
+What to look for in the log: `connected to hub worker_id=…`: connected; `hub rejected the
+worker token`: the token is revoked or this is the wrong hub; `worker update needed`: the protocol
+version does not match (the worker retries once an hour and does nothing else); `agent start failed`:
+`claude` does not start (path, login).
 
-### 2.6 Отзыв токена
+### 2.6 Token revocation
 
-В клиенте: «Настройки» → «Воркеры» → «Отозвать». Хаб помечает токен отозванным, рвёт
-соединение и архивирует служебную сессию воркера (в ней — строка «Токен воркера … отозван»);
-воркер пропадает из группы «Воркеры» в левой колонке, а в «Настройках» остаётся с пометкой
-«отозван» и кнопкой «Удалить». Сам воркер будет переподключаться и писать в лог `hub
-rejected the worker token; run hqc-worker enroll again`. На самой машине затем остановите
-агент (`launchctl bootout …`) и удалите старый токен:
+In the client: "Settings" → "Workers" → "Revoke". The hub marks the token revoked, drops the
+connection and archives the worker's service session (with the line `Token of worker “…” revoked` in it);
+the worker disappears from the "Workers" group in the left column, and in "Settings" it stays,
+marked "revoked", with a "Delete" button. The worker itself will keep reconnecting and logging `hub
+rejected the worker token; run hqc-worker enroll again`. On the machine itself, then stop the
+agent (`launchctl bootout …`) and delete the old token:
 `security delete-generic-password -s hqc-worker -a https://hqc.example.com`
-(в файловом режиме — `rm ~/.hqc/token`). Чтобы вернуть машину с её сессиями — `hqc-worker
-enroll <hub_url>` и при подтверждении «Это та же машина, заменить <имя>» (§2.3): отзыв
-снимается, id, сессии и workspace остаются.
+(in file mode, `rm ~/.hqc/token`). To bring the machine back with its sessions: `hqc-worker
+enroll <hub_url>` and, when confirming, "The same machine, replace <name>" (§2.3): the
+revocation is lifted, and the id, sessions and workspaces remain.
 
-**Удаление отозванного воркера.** «Настройки» → «Удалить» у отозванного воркера: хаб удаляет
-запись воркера, его служебную сессию с историей и его workspace-записи (папки на машине не
-трогаются). Пока на воркере есть неархивные сессии, хаб отказывает (`409
-worker_has_sessions`), клиент пишет их число: либо перенесите их, перерегистрировав машину с
-заменой этого воркера (§2.3), либо архивируйте. Архивные сессии удаление переживают — без
-воркера и workspace, только как история (разархивировать их нельзя). Неотозванный воркер
-сначала отзовите.
+**Deleting a revoked worker.** "Settings" → "Delete" on the revoked worker: the hub deletes the
+worker record, its service session with its history and its workspace records (folders on the
+machine are not touched). While the worker has non-archived sessions, the hub refuses (`409
+worker_has_sessions`), and the client shows their number: either move them by re-enrolling the
+machine as a replacement for this worker (§2.3), or archive them. Archived sessions survive the
+deletion, without a worker or workspace, as history only (they cannot be restored). Revoke a
+non-revoked worker first.
 
-Если украден ноутбук или токен — отзывайте из клиента сразу: хаб хранит только хэш, новый
-токен выдаётся только через подтверждение кода под вашим логином Access.
+If a laptop or a token is stolen, revoke from the client right away: the hub stores only a hash,
+and a new token is issued only through code confirmation under your Access login.
 
-## 3. Клиент
+## 3. Client
 
-Сборка: `cd client && npm ci && npm run build` → `client/dist`; раздача — §1.7. Для
-разработки — `client/README.md` (`npm run dev`, `npm run dev:mock`).
+Build: `cd client && npm ci && npm run build` → `client/dist`; serving is in §1.7. For
+development, see `client/README.md` (`npm run dev`, `npm run dev:mock`).
 
-С телефона:
+From the phone:
 
-1. Открыть `https://hqc.example.com/`, войти через Access.
-2. Установить PWA. Android (Chrome): меню → «Установить приложение». iPhone (Safari):
-   «Поделиться» → «На экран „Домой“». Установленное приложение на iOS хранит cookies
-   отдельно от Safari — войти через Access придётся ещё раз уже внутри него.
-3. Включить уведомления: в приложении «Настройки» → «Подписаться на уведомления» и
-   разрешить. Push приходит на `approval.request`, `clarify.request`, финальный ответ агента
-   и недоставленный ввод — если эта сессия сейчас не открыта на каком-либо устройстве
-   (§16). Нажатие открывает сессию.
+1. Open `https://hqc.example.com/`, log in through Access.
+2. Install the PWA. Android (Chrome): menu → "Install app". iPhone (Safari):
+   "Share" → "Add to Home Screen". On iOS the installed app keeps cookies separately from
+   Safari, so you will have to log in through Access once more inside it.
+3. Turn on notifications: in the app, "Settings" → "Subscribe to notifications", and
+   allow. Push arrives for `approval.request`, `clarify.request`, the agent's final reply
+   and an undelivered input, if that session is not currently open on any device
+   (§16). Tapping it opens the session.
 
-Ограничения push:
-- **iOS / iPadOS**: Web Push работает только из установленного на экран «Домой» PWA
-  (iOS 16.4+), не из вкладки Safari; подписываться нужно изнутри установленного приложения.
-- Push требует HTTPS (через туннель — есть); по IP локальной сети не работает.
-- Если сессия Access истекла, уведомление всё равно придёт (push идёт от хаба через
-  сервис браузера), но по нажатию откроется страница входа.
-- Сервис-воркер клиента ничего не кэширует: без связи с хабом клиент не открывается.
+Push limitations:
+- **iOS / iPadOS**: Web Push works only from a PWA installed to the Home Screen
+  (iOS 16.4+), not from a Safari tab; subscribe from inside the installed app.
+- Push requires HTTPS (through the tunnel you have it); it does not work over a LAN IP.
+- If the Access session has expired, the notification still arrives (push goes from the hub
+  through the browser's service), but tapping it opens the login page.
+- The client's service worker caches nothing: without a connection to the hub the client does not open.
 
-## 4. Проверка
+## 4. Check
 
-Ручной вариант того, что делает `tools/e2e-local.sh` (его можно запустить на любой машине
-разработчика: он поднимает хаб в dev-режиме на loopback, отдельную базу `hqc_e2e` и
-временный воркер, проходит сценарий одним ходом `claude-haiku-5-5` и всё убирает; это
-стоит одного короткого запроса подписки).
+A manual version of what `tools/e2e-local.sh` does (it can be run on any developer machine:
+it starts the hub in dev mode on loopback, a separate database `hqc_e2e` and a temporary
+worker, runs the scenario with one `claude-haiku-5-5` turn and cleans everything up; it costs
+one short subscription request).
 
-1. `https://hqc.example.com/health` (после входа в Access) — `ok`. Клиент открывается,
-   в «Настройках» виден ваш email.
-2. «Настройки» → «Уведомления»: не «На хабе не настроены ключи VAPID». Подписаться.
-3. На маке: `hqc-worker enroll https://hqc.example.com`, подтвердить код по ссылке,
-   `launchctl bootstrap …` (§2.4). В «Настройках» → «Воркеры» машина в статусе `online`.
-   В левой колонке у проекта (личного или нового, «+ Проект») — «Workspaces» →
-   «Добавить workspace»: выбрать воркер и папку внутри `allowed_roots` (по дереву или
-   путём). Первый workspace проекта становится основным.
-4. Создать сессию в проекте («Новая»: название по желанию, workspace — основной заранее
-   выбран, папка внутри него — необязательно), отправить:
+1. `https://hqc.example.com/health` (after logging in to Access): `ok`. The client opens,
+   and "Settings" shows your email.
+2. "Settings" → "Notifications": not "VAPID keys are not configured on the hub". Subscribe.
+3. On the Mac: `hqc-worker enroll https://hqc.example.com`, confirm the code via the link,
+   `launchctl bootstrap …` (§2.4). In "Settings" → "Workers" the machine is `online`.
+   In the left column, on a project (the personal one or a new one, "+ project"), go to
+   "Workspaces" → "Add a workspace": choose the worker and a folder inside `allowed_roots` (from
+   the tree or by path). The project's first workspace becomes its primary one.
+4. Create a session in the project ("New session": title optional, the primary workspace
+   preselected, a folder inside it optional), send:
    `Run the shell command: touch hqc-e2e && echo hqc-e2e. Then reply with exactly: DONE`.
-   Пометка «ждёт доставки» под сообщением пропадает, сессия «работает».
-5. Появляется карточка `Bash` и запрос разрешения с кнопками; закрыть приложение на
-   телефоне — должен прийти push о запросе. Открыть по нему, нажать «Разрешить».
-6. Карточка инструмента получает результат `hqc-e2e`, приходит финальный ответ `DONE`,
-   сессия «свободна».
-7. На маке: файл `hqc-e2e` появился в папке workspace; транскрипт
-   `~/.claude/projects/<закодированный путь workspace>/<uuid>.jsonl` существует.
-8. «Стоп» во время следующего хода прерывает его; открытый запрос разрешения при этом
-   закрывается как отменённый.
-9. Подхват сессии из VS Code (SPEC §9.3; нужен Claude Code с реестром живых сессий
-   `~/.claude/sessions`, в логе воркера при старте `capabilities` с `sessions_registry: true`).
-   В VS Code в папке внутри `allowed_roots` начать сессию Claude Code и получить ответ. В
-   клиенте: проект → «Workspaces» → «Импорт из Claude Code», выбрать эту папку (или, если папка
-   уже workspace проекта, — переключатель «Сессии VS Code» у неё включён: с T21 он включён у
-   всех workspace по умолчанию). Сессия появляется
-   в проекте с плашкой «Сессия открыта в VS Code … закройте её там», кнопки «Подхватить» нет,
-   поле ввода закрыто.
-10. **Закройте сессию в VS Code** (вкладку Claude Code с этой сессией). В течение пары секунд
-    плашка пропадает, сессия «свободна»; ждать 30 с не нужно. Отправить сообщение из клиента —
-    ответ приходит, в VS Code ничего не меняется.
-11. Снова открыть сессию в VS Code (из списка прошлых сессий): сессия в клиенте снова «открыта в
-    VS Code»; если агент hqc ещё работал, он останавливается после хода и в ленте строка
-    «Возвращена в VS Code» с просьбой закрыть сессию там. Если в ленте появилась
-    строка «Развилка» с предупреждением — VS Code продолжил не с конца транскрипта: перечисленные
-    ходы hqc в его контекст не попали (переоткройте сессию в VS Code, чтобы она перечитала файл).
+   The "awaiting delivery" mark under the message goes away, the session is "Running".
+5. A `Bash` card appears and a permission request with buttons; close the app on the
+   phone: a push about the request should arrive. Open it, press "Allow".
+6. The tool card gets the result `hqc-e2e`, the final reply `DONE` arrives, the
+   session is "Idle".
+7. On the Mac: the file `hqc-e2e` appeared in the workspace folder; the transcript
+   `~/.claude/projects/<encoded workspace path>/<uuid>.jsonl` exists.
+8. "Stop" during the next turn interrupts it; an open permission request is then
+   closed as cancelled.
+9. Taking over a session from VS Code (SPEC §9.3; needs a Claude Code with a registry of live
+   sessions `~/.claude/sessions`; on start the worker log shows `capabilities` with `sessions_registry: true`).
+   In VS Code, in a folder inside `allowed_roots`, start a Claude Code session and get a reply. In
+   the client: project → "Workspaces" → "Import from Claude Code", choose this folder (or, if the
+   folder is already a workspace of the project, its "VS Code sessions" switch is on: since T21 it
+   is on for every workspace by default). The session appears
+   in the project with the banner "Session is open in VS Code … close it there"; there is no
+   "Take over" button, and the input field is closed.
+10. **Close the session in VS Code** (the Claude Code tab with this session). Within a couple of
+    seconds the banner goes away and the session is "Idle"; no need to wait 30 s. Send a message
+    from the client: the reply arrives, nothing changes in VS Code.
+11. Reopen the session in VS Code (from the list of past sessions): the session in the client is
+    "In VS Code" again; if the hqc agent was still working, it stops after the turn and the feed
+    shows the line "Returned to VS Code" asking to close the session there. If the feed shows a
+    "Fork" line with a warning, VS Code did not continue from the end of the transcript: the
+    listed hqc turns did not make it into its context (reopen the session in VS Code so it rereads
+    the file).
 
-Если что-то не так: лог хаба (`journalctl -u hqc-hub`, в Docker — `docker compose logs hqc-hub`), лог воркера
-(`~/Library/Logs/hqc-worker.log`), состояние сессии в клиенте (`ошибка` — нажать
-«Повторить» после исправления причины).
+If something is wrong: the hub log (`journalctl -u hqc-hub`, in Docker `docker compose logs hqc-hub`),
+the worker log (`~/Library/Logs/hqc-worker.log`), the session state in the client ("Error": press
+"Retry" after fixing the cause).
 
-## 5. Известные ограничения итерации 1
+## 5. Known limitations of iteration 1
 
-По §19.1 и заметкам `docs/notes/t2..t6-questions.md`:
+Per §19.1 and the notes `docs/notes/t2..t6-questions.md`:
 
-- ~~Один проект, один workspace~~ — снято в T14: проекты создаются, переименовываются и
-  удаляются в клиенте (личный — только описание), в проекте несколько workspace на любых
-  воркерах. Workspace только `dir` (существующая папка); `clone`, `worktree`, `ephemeral` и
-  шаблон сессии — итерация 5. Сессия без workspace (§8.4) через клиент не создаётся.
-  Удаление workspace убирает только запись; пока в нём есть неархивные сессии, хаб его не
-  удаляет.
-- **Обновление с итерации 1** (миграция хаба `0005`): workspace из старого `[workspace]
-  path` (хаб помнит его из последнего `hello`) переносится в личный проект, сессии
-  привязываются к нему; сессии, для которых папка неизвестна, архивируются с системной
-  записью «Archived on upgrade…». Блок `[workspace]` в `worker.toml` после обновления
-  воркера можно удалить (он игнорируется).
-- **Нет MCP hqc** (`hqc-worker mcp` не реализован): агенты не шлют сообщения друг другу,
-  нет `ask`/`send`, вложений от агента, поиска, расписаний.
-- **Нет зеркала и импорта сессий VS Code**, нет подхвата; сессия, начатая в hqc, видна в
-  `~/.claude/projects`, но обратно изменения из VS Code в hqc не попадут.
-- **Нет артефактов**: вложения в сообщения не передаются агенту (воркер пишет warn).
-- **Окружения**: только `default`; `environments`, `env_bindings`, `ssh_keys`,
-  `allow_local_mcp` не реализованы (`hqc-worker env` — «not implemented»). Процесс агента
-  получает только `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`,
-  `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`, `ANTHROPIC_*` из окружения воркера; `HQC_*` и
-  остальное — нет.
-- **Один пользователь**: шаринга и грантов нет, `allow_foreign_sessions` держите `false`.
-- **Адаптер Claude Code**: `system_prompt` и `disallowed_tools` передаются
-  (`--append-system-prompt`, `--disallowedTools`), `restricted` — `--restricted`;
-  `.claude/settings.json` репозитория не применяется (`--setting-sources user,local`), но
-  `.claude/settings.local.json` — применяется (туда пишет `always`). `MCP_TOOL_TIMEOUT` не
-  передаётся; ограничения числа ходов (`--max-turns`) нет. Команды только для чтения
-  (например, `echo`) CLI разрешает сам, без запроса (§8.1). Формат ответа на вопрос с
-  множественным выбором (`AskUserQuestion`) не проверен на живой сборке.
-- **Состояние хода**: ход, закончившийся без финального текста, при позднем `ack` ввода
-  может остаться «работает» до следующего хода (§5.2 **[проверить]**).
-- **`session.kill`** очищает очередь воркера; ожидающие вводы досылаются только после
-  следующего переподключения воркера (T3, п. 10).
-- **Токен воркера**: Keychain только на macOS; на других ОС — файл 0600. Трея и
-  `hqc-worker update` нет: о несовместимой версии сообщает только лог.
-- **Хаб**: Postgres без TLS (база на том же хосте); лимиты `/worker/*` — в памяти процесса
-  хаба, по адресу из `CF-Connecting-IP` (enroll 10/мин и 10 живых кодов на адрес, 1000
-  всего; poll 60/мин; 20 неверных токенов `/worker/ws` в минуту; 16 проверок токена
-  одновременно), после перезапуска счётчики обнуляются; мастер-ключа и `api_keys` нет.
-- **Клиент**: проверен тестами и сборкой; ручной прогон на телефоне через Access и
-  настоящий push на iOS/Android в рамках T6 не выполнялись (нет устройства в автономном
-  прогоне) — это первое, что нужно сделать после установки (§4). История сессии
-  загружается с начала целиком (без подгрузки хвоста), офлайн-режима нет.
+- ~~One project, one workspace~~: lifted in T14: projects are created, renamed and
+  deleted in the client (the personal one: description only), and a project has several
+  workspaces on any workers. Workspaces are `dir` only (an existing folder); `clone`, `worktree`,
+  `ephemeral` and the session template are iteration 5. A session without a workspace (§8.4)
+  cannot be created from the client. Deleting a workspace removes only the record; while it has
+  non-archived sessions, the hub does not delete it.
+- **Upgrading from iteration 1** (hub migration `0005`): the workspace from the old `[workspace]
+  path` (the hub remembers it from the last `hello`) moves into the personal project, and sessions
+  are bound to it; sessions whose folder is unknown are archived with the system
+  record "Archived on upgrade…". The `[workspace]` block in `worker.toml` can be removed after the
+  worker is upgraded (it is ignored).
+- **No hqc MCP** (`hqc-worker mcp` is not implemented): agents do not message each other,
+  no `ask`/`send`, no attachments from the agent, no search, no schedules.
+- **No mirror and no import of VS Code sessions**, no takeover; a session started in hqc is visible
+  in `~/.claude/projects`, but changes made in VS Code do not come back to hqc.
+- **No artifacts**: attachments to messages are not passed to the agent (the worker logs a warn).
+- **Environments**: only `default`; `environments`, `env_bindings`, `ssh_keys`,
+  `allow_local_mcp` are not implemented (`hqc-worker env` prints "not implemented"). The agent
+  process gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`,
+  `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`, `ANTHROPIC_*` from the worker's environment; `HQC_*` and
+  everything else are not passed.
+- **One user**: no sharing and no grants; keep `allow_foreign_sessions` `false`.
+- **Claude Code adapter**: `system_prompt` and `disallowed_tools` are passed
+  (`--append-system-prompt`, `--disallowedTools`), `restricted` as `--restricted`;
+  the repository's `.claude/settings.json` is not applied (`--setting-sources user,local`), but
+  `.claude/settings.local.json` is (that is where `always` writes). `MCP_TOOL_TIMEOUT` is not
+  passed; there is no turn limit (`--max-turns`). Read-only commands
+  (e.g. `echo`) the CLI allows by itself, without a request (§8.1). The format of the answer to a
+  multiple-choice question (`AskUserQuestion`) has not been verified on a live build.
+- **Turn state**: a turn that ended without final text may, with a late `ack` of the input,
+  stay "Running" until the next turn (§5.2 **[verify]**).
+- **`session.kill`** clears the worker's queue; pending inputs are resent only after the
+  worker's next reconnect (T3, item 10).
+- **Worker token**: Keychain only on macOS; on other OSes a 0600 file. No tray and no
+  `hqc-worker update`: an incompatible version is reported only in the log.
+- **Hub**: Postgres without TLS (database on the same host); `/worker/*` limits are kept in the
+  hub process's memory, by the address from `CF-Connecting-IP` (enroll 10/min and 10 live codes per
+  address, 1000 in total; poll 60/min; 20 invalid `/worker/ws` tokens per minute; 16 token checks
+  at once), and the counters reset on restart; no master key and no `api_keys`.
+- **Client**: verified by tests and the build; a manual run on a phone through Access and
+  real push on iOS/Android were not done within T6 (no device in the autonomous
+  run); this is the first thing to do after installation (§4). Session history
+  loads from the beginning in full (no lazy loading of the tail), and there is no offline mode.

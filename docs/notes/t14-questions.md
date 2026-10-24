@@ -1,91 +1,97 @@
-# T14 — проекты и несколько workspace: решения, вопросы, что не проверено
+# T14 — projects and multiple workspaces: decisions, questions, what was not checked
 
-Задача: снять упрощение итерации 1 «один workspace из конфига воркера». SPEC 0.16 (§3, §4,
-§5.3, §5.4, §6, §13, §14, §19, §23), задача — `docs/ITERATION-2.md`. Живых прогонов claude —
-ноль.
+Task: remove the iteration 1 simplification "one workspace from the worker config". SPEC 0.16
+(§3, §4, §5.3, §5.4, §6, §13, §14, §19, §23); task: `docs/ITERATION-2.md`. Live claude runs:
+zero.
 
-## Решения, принятые по ходу (не были оговорены в постановке)
+## Decisions made along the way (not covered by the task statement)
 
-- **Старый блок `[workspace]` в `worker.toml` не ломает запуск.** Постановка говорит «блок
-  убирается»; при строгом конфиге (`deny_unknown_fields`) воркер home-mac после обновления
-  просто не стартовал бы. Блок читается и игнорируется, при старте — warning «уберите его».
-  Ограничений он не задавал (граница — `allowed_roots`), поэтому терпимость ничего не
-  ослабляет. Если нужен жёсткий отказ — одна строка в `config.rs`.
-- **`fs.stat` вне `allowed_roots` ничего не сообщает о пути**: `{exists: false, is_dir:
-  false, inside_allowed_roots: false}` без `canonical`, в том числе для симлинка изнутри
-  корней наружу. Иначе скомпрометированный хаб мог бы проверять существование любых путей
-  на машине. Для несуществующего пути «внутри» считается по ближайшему существующему
-  предку, раскрытому со симлинками.
-- **Хаб не принимает «канонический» путь с `.`/`..`** (`400 invalid_path`): проверка
-  вложенности сравнивает компоненты пути, ей нужен уже раскрытый путь.
-- **Удаление workspace с живыми сессиями — `409 workspace_in_use`.** У сессий FK
-  `ON DELETE SET NULL`, а без workspace сессия не стартует; молча ломать живые сессии хуже,
-  чем попросить архивировать их. Архивные теряют `workspace_id`, разархивировать такую —
-  `409 no_workspace`.
-- **Удаление проекта каскадное**: workspace-записи и сессии с событиями, `session.kill`
-  агентам; клиент спрашивает подтверждение с числом сессий. Альтернатива — `409`, пока в
-  проекте есть сессии; выбрал каскад, потому что удалять сессии по одной в клиенте нечем.
-- **Личный проект нельзя переименовать и удалить и через API** (`409 personal_project`), не
-  только в UI; описание и `default_workspace_id` у него меняются.
-- **`worker_id` без `workspace_id`** при создании сессии: workspace проекта на этом
-  воркере (default, если он там, иначе самый ранний). Правило «воркер по умолчанию»
-  итерации 1 (`409 no_worker`) снято целиком: с workspace оно не нужно, а защиту от
-  «фишингового» воркера даёт то, что у нового воркера нет workspace, пока пользователь его не
-  добавит. Тест `a_fresh_worker_is_not_the_default` переписан под это.
-- **Подтверждения владельца через служебную сессию (§13.1) для `dir` нет**: workspace на
-  воркер может добавить только его владелец (других пользователей у воркера до итерации 6
-  нет). Когда появятся гранты, здесь нужна проверка §13.1.
-- **Таймаут ответа воркера на `fs.*` — 10 с, константа** (`504 worker_timeout`), в конфиг
-  хаба не вынесен. Если воркер отвечает `error` — `400 invalid_path` с его текстом.
-- **Корреляция `result`**: `request_id` равен `id` кадра; хаб ищет ожидающий запрос по `id`
-  кадра ответа, затем по `request_id`. При обрыве соединения ожидающие запросы сразу
-  получают `409 worker_offline`, а не таймаут.
-- **Новые id в миграции — `gen_random_uuid()` (v4)**, не v7: в Postgres 17 нет `uuidv7()`.
-  Порядок по времени у этих записей ни на что не влияет.
-- **Клиент**: в личном проекте нет кнопок «Переименовать» и «Удалить проект»; метку
-  workspace можно задать при добавлении, правки метки в UI нет (API `PATCH` есть). Дерево
-  папок: клик по папке — войти, «Выбрать эту папку» — подставить путь, двойной клик по
-  папке — тоже подставить; «↑ Выше» из корня ведёт к списку корней.
+- **The old `[workspace]` block in `worker.toml` does not break startup.** The task says "the
+  block is removed"; with a strict config (`deny_unknown_fields`) the home-mac worker would
+  simply fail to start after the update. The block is read and ignored; at startup a warning
+  says "remove it". It never imposed restrictions (the boundary is `allowed_roots`), so
+  tolerating it weakens nothing. If a hard refusal is wanted, it is one line in `config.rs`.
+- **`fs.stat` outside `allowed_roots` reveals nothing about the path**: `{exists: false,
+  is_dir: false, inside_allowed_roots: false}` without `canonical`, including for a symlink
+  from inside the roots to the outside. Otherwise a compromised hub could probe whether any
+  path exists on the machine. For a nonexistent path, "inside" is decided by the nearest
+  existing ancestor, resolved through symlinks.
+- **The hub does not accept a "canonical" path with `.`/`..`** (`400 invalid_path`): the
+  nesting check compares path components and needs an already resolved path.
+- **Deleting a workspace with live sessions is `409 workspace_in_use`.** Sessions have an FK
+  `ON DELETE SET NULL`, and a session without a workspace does not start; silently breaking
+  live sessions is worse than asking to archive them. Archived ones lose `workspace_id`;
+  unarchiving such a session is `409 no_workspace`.
+- **Deleting a project cascades**: workspace records and sessions with their events,
+  `session.kill` to the agents; the client asks for confirmation showing the number of
+  sessions. The alternative is `409` while the project has sessions; I chose the cascade
+  because the client has no way to delete sessions one by one.
+- **The personal project cannot be renamed or deleted through the API either**
+  (`409 personal_project`), not only in the UI; its description and `default_workspace_id`
+  can be changed.
+- **`worker_id` without `workspace_id`** when creating a session: the project's workspace on
+  that worker (the default one if it is there, otherwise the earliest). The iteration 1 rule
+  "default worker" (`409 no_worker`) is removed entirely: with workspaces it is not needed,
+  and protection against a "phishing" worker comes from the fact that a new worker has no
+  workspace until the user adds one. The test `a_fresh_worker_is_not_the_default` was
+  rewritten accordingly.
+- **There is no owner confirmation through the service session (§13.1) for `dir`**: only the
+  worker's owner can add a workspace on it (a worker has no other users until iteration 6).
+  When grants appear, the §13.1 check is needed here.
+- **The timeout for a worker's answer to `fs.*` is 10 s, a constant** (`504 worker_timeout`),
+  not in the hub config. If the worker answers `error`, it is `400 invalid_path` with its text.
+- **`result` correlation**: `request_id` equals the frame's `id`; the hub looks up the pending
+  request by the reply frame's `id`, then by `request_id`. When the connection drops, pending
+  requests get `409 worker_offline` immediately rather than a timeout.
+- **New ids in the migration are `gen_random_uuid()` (v4)**, not v7: Postgres 17 has no
+  `uuidv7()`. Time ordering of these records does not matter for anything.
+- **Client**: the personal project has no "Rename" and "Delete project" buttons; a workspace
+  label can be set when adding it, there is no label editing in the UI (the API has `PATCH`).
+  Folder tree: clicking a folder enters it, "Choose this folder" fills in the path, a double
+  click on a folder fills it in too; "↑ Up" from a root leads to the list of roots.
 
-## Миграция 0005: что она делает и чего не делает
+## Migration 0005: what it does and does not do
 
-- Для каждого воркера с `capabilities.workspace_path` в последнем `hello` создаёт (если его
-  ещё нет) workspace в личном проекте владельца; сессии без `workspace_id` на этом воркере
-  привязываются к нему; первый workspace проекта становится default.
-- Workspace прошлых `hello` (путь в конфиге менялся), на которые не ссылается ни одна
-  сессия, удаляются. Те, на которые ссылаются сессии, **остаются** — даже если они вложены в
-  текущий или содержат его. Инвариант «на воркере пути не вложены» для таких исторических
-  записей может нарушаться; новые пути проверяются против всех записей, так что новых
-  нарушений не будет. **Вопрос:** сливать такие записи (сессии переедут в другой путь, и
-  `--resume` их транскриптов перестанет находить jsonl) или оставить как есть?
-- Сессии, для которых папка неизвестна (воркер никогда не сообщал `workspace_path`, или
-  воркера нет), архивируются с `system workspace_unknown`. Их `pending` вводы становятся
-  `failed`, открытые `pending_requests` закрываются — **без** событий `approval.cancel` /
-  `clarify.cancel` и без кадров клиенту (миграция идёт до старта хаба). Если клиент держит
-  карточку открытой — после перезагрузки она останется в архивной сессии без ответа.
-- На реальной базе (боевой хаб, `hqc_dev`) миграция не прогонялась: проверена тестом
-  `migration_carries_iteration1_sessions_over` на засеянной схеме после миграций 0001–0004.
-  Перед обновлением боевого хаба — бэкап (RUNBOOK §1).
+- For each worker with `capabilities.workspace_path` in its last `hello` it creates (if not
+  there yet) a workspace in the owner's personal project; sessions on that worker without
+  `workspace_id` are bound to it; the project's first workspace becomes the default.
+- Workspaces from earlier `hello`s (the path in the config changed) that no session refers to
+  are deleted. Those that sessions refer to **stay** — even if they are nested in the current
+  one or contain it. The invariant "paths on a worker are not nested" may be violated for such
+  historical records; new paths are checked against all records, so there will be no new
+  violations. **Question:** merge such records (sessions move to another path, and `--resume`
+  of their transcripts will no longer find the jsonl) or leave them as is?
+- Sessions whose folder is unknown (the worker never reported `workspace_path`, or the worker
+  is gone) are archived with `system workspace_unknown`. Their `pending` inputs become
+  `failed`, open `pending_requests` are closed — **without** `approval.cancel` /
+  `clarify.cancel` events and without frames to the client (the migration runs before the hub
+  starts). If a client has a card open, after a reload it stays in the archived session
+  unanswered.
+- The migration was not run on a real database (the production hub, `hqc_dev`): it was checked
+  by the test `migration_carries_iteration1_sessions_over` on a seeded schema after migrations
+  0001–0004. Back up before updating the production hub (RUNBOOK §1).
 
-## Что не проверено
+## What was not checked
 
-- **Живой e2e** (`tools/e2e-local.sh` с настоящим claude) не запускался — тратит подписку.
-  Репетиция `E2E_CLAUDE_BIN=/usr/bin/false` — `PASS (rehearsal)`; в ней же новая проверка,
-  что отказ — из-за бинарника, а не из-за пути workspace. Живой сценарий отличается только
-  ходом агента; путь workspace и `cwd` те же, что в репетиции.
-- **`tools/dev.sh up`** не запускался (поднимает launchd-задачу в GUI-домене и настоящий
-  claude). Шаг с workspace — та же команда `e2e-local.py workspace`, что прошла в
-  репетиции; при повторном `up` она видит существующий workspace и ничего не делает, а если
-  папку перенесли в другой проект — пишет об этом и не падает.
-- **Клиент на телефоне** не проверялся: вёрстка левой колонки (проекты чипами сверху,
-  сессии ниже) и экрана Workspaces проверена только тестами в happy-dom.
-- **Windows-воркеры**: проверка вложенности в хабе сравнивает пути по правилам Unix
-  (`std::path::Path` хаба на Linux); для `C:\...` нужен будет свой разбор, когда появятся
-  воркеры на Windows.
+- **Live e2e** (`tools/e2e-local.sh` with real claude) was not run — it costs the
+  subscription. The rehearsal `E2E_CLAUDE_BIN=/usr/bin/false` gives `PASS (rehearsal)`; it
+  also includes a new check that the failure comes from the binary and not from the workspace
+  path. The live scenario differs only in the agent's turn; the workspace path and `cwd` are
+  the same as in the rehearsal.
+- **`tools/dev.sh up`** was not run (it starts a launchd job in the GUI domain and real
+  claude). The workspace step is the same command `e2e-local.py workspace` that passed in the
+  rehearsal; on a repeated `up` it sees the existing workspace and does nothing, and if the
+  folder was moved to another project it says so and does not fail.
+- **The client on a phone** was not checked: the layout of the left column (projects as chips
+  at the top, sessions below) and of the Workspaces screen was checked only by tests in
+  happy-dom.
+- **Windows workers**: the nesting check in the hub compares paths by Unix rules (the hub's
+  `std::path::Path` on Linux); `C:\...` will need its own parsing when Windows workers appear.
 
-## Отложено
+## Deferred
 
-- `PATCH /api/workspaces/{id}` для `mirror_enabled` (зеркало — следующие задачи итерации 2).
-- `clone`, `worktree`, `ephemeral`, шаблон сессии (§13) — итерация 5.
-- Сессии без workspace (§8.4) через REST и клиент.
-- Перенос workspace в другой проект (сейчас — удалить запись и добавить заново).
+- `PATCH /api/workspaces/{id}` for `mirror_enabled` (the mirror is in the next iteration 2
+  tasks).
+- `clone`, `worktree`, `ephemeral`, the session template (§13) — iteration 5.
+- Sessions without a workspace (§8.4) through REST and the client.
+- Moving a workspace to another project (for now: delete the record and add it again).

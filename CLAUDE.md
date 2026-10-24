@@ -8,7 +8,7 @@ Hub / worker / client system for driving LLM agents on many machines from one ch
   behaviour drift from the spec silently.
 - `docs/ITERATION-2.md` is the current task list (`docs/ITERATION-1.md` — the closed first
   iteration). Each task names the spec sections it implements and its acceptance criteria.
-- Marks in the spec: **[решение]** = decided, ask before changing; **[проверить]** = verify
+- Marks in the spec: **[decision]** = decided, ask before changing; **[verify]** = verify
   on a real build first, then replace the mark with what you found (version, fixture).
 
 ## Layout
@@ -35,7 +35,7 @@ Hub / worker / client system for driving LLM agents on many machines from one ch
 - Never commit `api-request-blob` records, `.credentials.json`, worker tokens or `.env`.
 - Postgres for tests: `HQC_TEST_DATABASE_URL` (local `postgresql://localhost/hqc_test`);
   migrations live in `crates/hqc-hub/migrations`.
-- Language: spec and docs are in Russian; code, comments and commit messages in English.
+- Language: everything is in English (spec, docs, UI, code, comments, commit messages).
 
 ## Machines
 - This repo is developed on `home-mac` (macOS arm64), which is also the first worker.

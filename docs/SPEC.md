@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.26, 2026-10-24. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.27, 2026-10-24. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -261,7 +261,7 @@ name)`: тот же файл тем же пользователем под те�
 | `tool.call` | `call_id`, `tool`, `args_preview` | адаптер |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (краткий текст ошибки), `duration_ms?`, `artifact_id?` (дифф или большой результат, §12) | адаптер |
 | `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny) | адаптер; `options` — **реальные варианты агента**, `canonical` ∈ once/session/always/deny/deny_always для кнопок клиента; `policy_hint` — вызов подходит под правило `allow` или `deny` блока `[permissions]` воркера (§14), нет поля — не подходит ни под одно; клиент подписывает им карточку |
-| `approval.response` | `request_id`, `option_id`, `by` (user id или `auto`) | клиент или хаб при `auto_approve` |
+| `approval.response` | `request_id`, `option_id`, `by` (user id или `auto`), `message?` (текст пользователя вместо вызова, только с вариантом `deny`/`deny_always`, §10.1) | клиент или хаб при `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived) | адаптер, воркер или хаб. Ответ с другого устройства отменой не считается: первый ответ закрывает запрос, второй получает `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, options?: [string], multi?: bool}]` | адаптер Claude Code: инструмент `AskUserQuestion` приходит как `can_use_tool`, ответ уходит в `updatedInput.answers` (проверено на 2.1.307 при `--permission-prompt-tool stdio`, §8.1). У ACP-агентов источника нет |
 | `clarify.response` | `request_id`, `answers` (`{<id вопроса>: string \| [string]}`) | клиент |
@@ -532,7 +532,8 @@ MCP-вызовы (worker → hub → worker):
   одновременно: сверх — сразу `error {internal, retryable: true}`; неудачный запуск или таймаут
   25 с — `error {internal}`. `title` — одна строка до 60 символов без кавычек. `request_id` равен
   `id` кадра; хаб ждёт ответ 30 с.
-- `approval.response` {session_id, request_id, option_id},
+- `approval.response` {session_id, request_id, option_id, message?} (`message` — ответ
+  текстом с вариантом deny, §10.1),
   `clarify.response` {session_id, request_id, answers}; поля `by` во фреймах нет, оно
   только в событиях. Фрейма `approval.cancel` нет: отменяя запрос сам (таймаут, `stop`,
   архивация), хаб пишет событие `approval.cancel` и шлёт воркеру
@@ -686,8 +687,10 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
   vscode_open` с `held_by`; без данных реестра VS Code писал меньше 30 с назад — `409
   vscode_active`; воркер офлайн — `409 worker_offline`, архив — `409 archived`, служебная
   сессия — `409 system_session`
-- `POST /api/sessions/{id}/requests/{request_id}` {option_id | answers} → `{event_id, seq}`
-  сохранённого ответа; закрытый запрос — `409 request_closed` (§10.1)
+- `POST /api/sessions/{id}/requests/{request_id}` {option_id, message? | answers} → `{event_id, seq}`
+  сохранённого ответа; закрытый запрос — `409 request_closed` (§10.1). `message` — ответ
+  текстом вместо вызова (§10.1): только у `approval` в сессии и только с вариантом
+  `canonical: deny`/`deny_always`, не пустой, до 16 КиБ, иначе `400`
 - `POST /api/artifacts` (multipart: поле `file`, необязательное `kind`) → `201` и объект
   артефакта `{id, kind, name, mime, size, sha256, created_at}` (`api.artifact.json`); тот
   же файл под тем же именем повторно → `200` и прежний объект; больше 100 МБ — `413
@@ -1479,6 +1482,20 @@ once / session / always / deny, у ACP-агентов — то, что пред�
 открытые к концу прерванного хода, адаптер Claude Code молча забывает). Открытый `clarify`
 хаб отменяет так же: событие `clarify.cancel` и фрейм `clarify.response` с
 `answers: {}`; адаптер отвечает рантайму `deny`, ход продолжается без ответов.
+**Ответ текстом** (T26). Вместо кнопки пользователь может написать, что сделать вместо
+вызова: клиент отвечает вариантом `canonical: deny` (если его нет — `deny_always`) с полем
+`message`; хаб кладёт `message` в событие `approval.response` и во фрейм `approval.response`
+воркеру (§5.3), клиент показывает его в ленте как сообщение пользователя. Адаптер Claude Code
+отвечает `control_response` `deny`, чей `message` — формулировка самого Claude Code для отказа
+с пояснением («The user doesn't want to proceed with this tool use. … To tell you how to
+proceed, the user said:») и текст пользователя с новой строки; модель получает его как
+результат инструмента и продолжает ход. Проверено живыми прогонами на 2.1.308
+(`claude-haiku-5-5`): с этой формулировкой модель делает то, что написано; с простым «The user
+denied this tool call and wrote instead:» текст она видела, но приняла за инструкцию из
+результата инструмента и не выполнила. Это ввод в текущий ход, а не новый `user.message`:
+очереди и `delivery` у него нет. У ACP-агентов (§8.2) — позже; у запросов воркера (§10.2) и
+`clarify` поля нет (`400`).
+
 При `auto_approve` хаб отвечает первым вариантом с `canonical: once`, `by: auto`
 (вызовы под `deny` из `[permissions]` воркера до хаба не доходят, §8.1, §14);
 режим включает только владелец воркера, в UI подсвечен; на расшаренном проекте он
@@ -1857,10 +1874,11 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 Событие `status.state` использует тот же набор.
 
 Клиент показывает ход по `state` (из `summary`/`session.summary` и объекта сессии), без
-отдельных событий: `running` — индикатор в шапке и строка «агент работает» внизу ленты
-(«выполняет <tool>», пока у последнего `tool.call` нет `tool.result`), `queued` — «ввод в
-очереди», `waiting` — «ждёт подтверждения». Событие `status` строкой ленты не рисуется,
-кроме `error` с `detail`.
+отдельных событий: `running` — пульсирующая пилюля «Работает» в шапке и строка «Агент
+работает» внизу ленты («Выполняется <команда или инструмент> <время с `ts` вызова>», пока у
+последнего `tool.call` нет `tool.result`, T26), `queued` — «Ввод в очереди», `waiting` — «Ждёт
+подтверждения», если открытого запроса нет в ленте (иначе его карточка и есть эта строка).
+Событие `status` строкой ленты не рисуется, кроме `error` с `detail`.
 
 «Идёт ход» хаб ведёт сам: ход открывается `ack` воркера на `session.input` (воркер
 передаёт ввод рантайму по одному на ход, §17.2) и закрывается `agent.message` с
@@ -2080,6 +2098,17 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.26 → 0.27 (T26, редизайн клиента и ответ текстом на запрос)
+§4, §5.3, §6, §10.1: у `approval.response` (событие, фрейм воркеру и тело `POST
+.../requests/{id}`) необязательное поле `message` — ответ текстом вместо вызова, только с
+вариантом `deny`/`deny_always` запроса в сессии (иначе `400`; у `clarify` и запросов воркера
+поля нет). Хаб передаёт его воркеру, адаптер Claude Code кладёт в `message` ответа `deny` с
+формулировкой самого Claude Code для отказа с пояснением; клиент показывает текст как сообщение
+пользователя. Два живых прогона на 2.1.308 (haiku): модель видит текст отказа в результате
+инструмента; с простой формулировкой она не выполнила просьбу, считая её инструкцией из
+результата, с формулировкой Claude Code — выполнила. §17.1: строки хода клиента в новом виде
+(«Выполняется <команда> <время>», пилюля «Работает» в шапке).
 
 ### 0.25 → 0.26 (T25, ложное освобождение во время работы hqc)
 §9.3 **[решение]**: у воркера с реестром держателей детекции чужого писателя по `uuid` записей

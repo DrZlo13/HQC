@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Drive `claude -p` in stream-json mode, log every stdin/stdout frame, answer can_use_tool.
 
-usage: driver.py [--resume UUID] [--arg-prompt] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+usage: driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 POLICY: once | deny | always | ask_answer | none
+--deny-message-file FILE (or SPIKE_DENY_MESSAGE): the `message` of a deny answer.
 --resume UUID (or SPIKE_RESUME): continue that session with --resume instead of a new
 --session-id.
 --arg-prompt (or SPIKE_ARG_PROMPT=1): plain `claude -p PROMPT` (prompt as argument, text
@@ -13,9 +14,12 @@ import json, os, subprocess, sys, threading, time, uuid
 args = sys.argv[1:]
 # `--resume UUID` / `--arg-prompt` before the positional arguments: the same as the
 # variables, for shells where setting the environment is awkward.
-while args and args[0] in ("--resume", "--arg-prompt"):
+while args and args[0] in ("--resume", "--arg-prompt", "--deny-message-file"):
     if args[0] == "--resume":
         os.environ["SPIKE_RESUME"] = args[1]
+        args = args[2:]
+    elif args[0] == "--deny-message-file":
+        os.environ["SPIKE_DENY_MESSAGE"] = open(args[1]).read().rstrip("\n")
         args = args[2:]
     else:
         os.environ["SPIKE_ARG_PROMPT"] = "1"
@@ -62,7 +66,8 @@ def send(obj):
 def answer(req_id, req):
     tool, inp = req.get("tool_name"), req.get("input", {})
     if policy == "deny":
-        resp = {"behavior": "deny", "message": "denied by hqc spike"}
+        resp = {"behavior": "deny",
+                "message": os.environ.get("SPIKE_DENY_MESSAGE", "denied by hqc spike")}
     elif policy == "always":
         resp = {"behavior": "allow", "updatedInput": inp,
                 "updatedPermissions": req.get("permission_suggestions", [])}

@@ -27,6 +27,7 @@ pub enum FakeCall {
     Approval {
         request_id: String,
         option_id: String,
+        message: Option<String>,
     },
     Clarify {
         request_id: String,
@@ -204,10 +205,16 @@ impl Adapter for FakeAdapter {
         Ok(())
     }
 
-    async fn answer_approval(&mut self, request_id: &str, option_id: &str) -> anyhow::Result<()> {
+    async fn answer_approval(
+        &mut self,
+        request_id: &str,
+        option_id: &str,
+        message: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.record(FakeCall::Approval {
             request_id: request_id.into(),
             option_id: option_id.into(),
+            message: message.map(Into::into),
         });
         Ok(())
     }

@@ -70,6 +70,17 @@ claude -p --output-format stream-json --input-format stream-json \
 → `tool_result` с `"is_error": true`, `content` = `message`, `permission_decision.source = "user_reject"`;
 `result.permission_denials[]` содержит вызов.
 
+Отказ с текстом пользователя (T26, два прогона 2026-10-24, 2.1.308, haiku, `driver.py
+--deny-message-file`, вне фикстур): `message` целиком приходит модели как `tool_result`. С
+«The user denied this tool call and wrote instead:\n<текст>» модель текст увидела, но
+ответила, что это пришло из результата инструмента, а не от пользователя, и просьбу не
+выполнила. С формулировкой самого Claude Code «The user doesn't want to proceed with this tool
+use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to
+the file). To tell you how to proceed, the user said:\n<текст>» — выполнила (ответила по-русски,
+как просили, без новых вызовов). Тексты просьб в прогонах разные («Reply with exactly:
+PELICAN-42» против обычной просьбы), так что вклад формулировки и самой просьбы не разделён;
+адаптер берёт формулировку Claude Code.
+
 Ответ always (stdin), фикстура `permission-always`:
 
 ```json

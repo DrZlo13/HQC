@@ -444,6 +444,57 @@ async fn failed_start_with_state_frames_waits_between_retries() {
     hub.finish().await;
 }
 
+/// T26: «ответить текстом вместо этого» — a deny answer with `message` stores it in
+/// `approval.response` and carries it in the frame to the worker; with an allow option, blank
+/// or too long it is refused and the request stays open.
+#[tokio::test]
+async fn approval_deny_with_message() {
+    let hub = TestHub::start().await;
+    let (_, me) = hub.get("/api/me").await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("deny with text").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-m", "2099-01-01T00:00:00Z"),
+    ))
+    .await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+
+    let path = format!("/api/sessions/{sid}/requests/req-m");
+    let long = "x".repeat(hqc_hub::requests::MAX_ANSWER_MESSAGE + 1);
+    for bad in [
+        json!({"option_id": "allow", "message": "do it"}),
+        json!({"option_id": "deny", "message": "  "}),
+        json!({"option_id": "deny", "message": long}),
+    ] {
+        let (s, r) = hub.post(&path, bad).await;
+        assert_eq!(s, 400, "{r}");
+    }
+    let text = "Не трогай корень, посмотри только ~/work/hqc";
+    let (s, r) = hub
+        .post(&path, json!({"option_id": "deny", "message": text}))
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("approval.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "request_id": "req-m", "option_id": "deny", "message": text})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    let events = hub.events(&sid).await;
+    let resp = events.last().unwrap();
+    assert_eq!(resp["type"], "approval.response");
+    assert_eq!(
+        resp["payload"],
+        json!({"request_id": "req-m", "option_id": "deny", "by": me["id"], "message": text})
+    );
+    hub.finish().await;
+}
+
 /// 4. approval.request -> POST requests -> approval.response to the worker; expiry gives
 /// approval.cancel and the deny frame.
 #[tokio::test]

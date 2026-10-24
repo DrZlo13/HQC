@@ -647,9 +647,14 @@ impl Adapter for ClaudeCodeAdapter {
         Ok(())
     }
 
-    async fn answer_approval(&mut self, request_id: &str, option_id: &str) -> anyhow::Result<()> {
+    async fn answer_approval(
+        &mut self,
+        request_id: &str,
+        option_id: &str,
+        message: Option<&str>,
+    ) -> anyhow::Result<()> {
         let p = self.running()?;
-        let actions = lock(&p.core).answer_approval(request_id, option_id)?;
+        let actions = lock(&p.core).answer_approval(request_id, option_id, message)?;
         p.io.run(actions).await
     }
 

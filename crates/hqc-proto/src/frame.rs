@@ -313,6 +313,10 @@ pub enum HubFrame {
         session_id: Uuid,
         request_id: String,
         option_id: String,
+        /// The user's text with a deny option (T26): the adapter gives it to the runtime as
+        /// the reason of the denial.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// Empty `answers` means the hub cancelled the request; the adapter answers the
     /// runtime with `deny` and the turn goes on without answers.
@@ -641,6 +645,10 @@ mod tests {
         (
             "approval.response",
             include_str!("../examples/wire/hub.approval.response.json"),
+        ),
+        (
+            "approval.response",
+            include_str!("../examples/wire/hub.approval.response.message.json"),
         ),
         (
             "clarify.response",

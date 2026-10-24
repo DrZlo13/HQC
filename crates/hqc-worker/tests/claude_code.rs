@@ -178,3 +178,81 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
     );
     w.stop().await;
 }
+
+/// T26: «ответить текстом вместо этого». The hub's `approval.response` with the deny option
+/// and `message` reaches Claude Code as `control_response` `deny` whose `message` carries the
+/// user's text (the model gets it as the tool result, SPEC §10.1).
+#[tokio::test]
+async fn deny_with_message_reaches_control_response() {
+    let env = Env::new();
+    let claude = ScriptedClaude::new(&fixture("stream-permission-deny-2.1.307.jsonl"));
+    let stdin = fixture("stdin-permission-deny-2.1.307.jsonl");
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    let prompt: Value = serde_json::from_str(stdin.lines().next().unwrap()).unwrap();
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": Uuid::now_v7(),
+               "text": prompt["message"]["content"], "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+
+    let text = "Не создавай файл, просто скажи DONE";
+    let mut seq = 0;
+    let answer = loop {
+        let f = c.recv().await;
+        if f["type"] != "event" || f["payload"]["event"]["type"] == "agent.delta" {
+            continue;
+        }
+        seq += 1;
+        c.ack_event(&f, seq).await;
+        let ev = &f["payload"]["event"];
+        if ev["type"] == "approval.request" {
+            let p = &ev["payload"];
+            let deny = p["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["canonical"] == "deny")
+                .unwrap();
+            break c
+                .frame(
+                    "approval.response",
+                    json!({"session_id": sid, "request_id": p["request_id"],
+                           "option_id": deny["id"], "message": text}),
+                )
+                .await;
+        }
+    };
+    loop {
+        let f = c.recv().await;
+        if f["type"] == "ack" && f["id"] == answer.as_str() {
+            break;
+        }
+        if f["type"] == "event" && f["payload"]["event"]["type"] != "agent.delta" {
+            seq += 1;
+            c.ack_event(&f, seq).await;
+        }
+    }
+    let sent = claude.stdin();
+    let resp = &sent[1]["response"]["response"];
+    assert_eq!(resp["behavior"], "deny", "{}", sent[1]);
+    let want = format!(
+        "{}\n{text}",
+        hqc_worker::adapter::claude_code::engine::DENY_WITH_TEXT
+    );
+    assert_eq!(resp["message"], want.as_str());
+    w.stop().await;
+}

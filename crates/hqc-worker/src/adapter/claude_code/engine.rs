@@ -43,6 +43,11 @@ pub const PREVIEW_LIMIT: usize = 4096;
 pub const ERROR_TEXT_LIMIT: usize = 300;
 
 pub const DENY_MESSAGE: &str = "The user denied this tool call.";
+/// Before the user's text of a denial with text (T26, SPEC §10.1): Claude Code's own wording
+/// of a rejection with feedback. Checked live on 2.1.308 with haiku: with it the model does
+/// what the text says; with a plain «denied and wrote instead:» it saw the text but took it
+/// for an instruction from the tool result and did not follow it.
+pub const DENY_WITH_TEXT: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:";
 pub const CLARIFY_CANCEL_MESSAGE: &str = "The user did not answer the questions.";
 pub const POLICY_DENY_MESSAGE: &str = "Denied by the worker's permission policy";
 /// `system.code` of a tool call refused by a deny rule of `[permissions]` (SPEC §4).
@@ -181,10 +186,13 @@ impl Core {
         Some((Action::Write(req), self.turn))
     }
 
+    /// `message`: the user's text with `deny` (T26); it goes to Claude Code as the reason of
+    /// the denial, which the model gets as the tool result.
     pub fn answer_approval(
         &mut self,
         request_id: &str,
         option_id: &str,
+        message: Option<&str>,
     ) -> anyhow::Result<Vec<Action>> {
         let p = self
             .pending
@@ -210,7 +218,10 @@ impl Core {
         };
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
-            "deny" => deny(request_id, DENY_MESSAGE),
+            "deny" => match message {
+                Some(m) => deny(request_id, &format!("{DENY_WITH_TEXT}\n{m}")),
+                None => deny(request_id, DENY_MESSAGE),
+            },
             "always" if !self.restricted && !local_rules.is_empty() => {
                 allow(request_id, &input, Some(local_rules))
             }

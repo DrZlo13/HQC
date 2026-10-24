@@ -90,7 +90,13 @@ pub trait Adapter: Send {
     async fn stop(&mut self) -> anyhow::Result<()>;
     /// Terminate the process. Returns when it is gone.
     async fn kill(&mut self) -> anyhow::Result<()>;
-    async fn answer_approval(&mut self, request_id: &str, option_id: &str) -> anyhow::Result<()>;
+    /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
+    async fn answer_approval(
+        &mut self,
+        request_id: &str,
+        option_id: &str,
+        message: Option<&str>,
+    ) -> anyhow::Result<()>;
     /// Empty `answers`: the hub cancelled the request (SPEC §5.3).
     async fn answer_clarify(
         &mut self,

@@ -173,6 +173,8 @@ enum Cmd {
         id: String,
         request_id: String,
         option_id: String,
+        /// The user's text with a deny option (T26).
+        message: Option<String>,
     },
     Clarify {
         id: String,
@@ -379,12 +381,14 @@ impl Supervisor {
                 session_id,
                 request_id,
                 option_id,
+                message,
             } => (
                 session_id,
                 Cmd::Approval {
                     id,
                     request_id,
                     option_id,
+                    message,
                 },
             ),
             HubFrame::ClarifyResponse {
@@ -834,8 +838,12 @@ impl Session {
                 id,
                 request_id,
                 option_id,
+                message,
             } => {
-                let r = self.adapter.answer_approval(&request_id, &option_id).await;
+                let r = self
+                    .adapter
+                    .answer_approval(&request_id, &option_id, message.as_deref())
+                    .await;
                 self.reply_result(&id, r);
             }
             Cmd::Clarify {

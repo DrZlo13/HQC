@@ -207,7 +207,7 @@ impl Harness {
                 AdapterEvent::Event(e) => match &e.kind {
                     EventKind::ApprovalRequest { request_id, .. } => self
                         .adapter
-                        .answer_approval(request_id, approval)
+                        .answer_approval(request_id, approval, None)
                         .await
                         .unwrap(),
                     EventKind::ClarifyRequest { request_id, .. } => self
@@ -953,7 +953,7 @@ fn session_rule_answers_repeats_itself() {
 
     let a = core.on_line(&can_use_tool_line(&fx, "r1", None));
     assert_eq!(approvals(&a), 1);
-    let w = writes(&core.answer_approval("r1", "session").unwrap());
+    let w = writes(&core.answer_approval("r1", "session", None).unwrap());
     assert_eq!(w[0]["response"]["response"]["behavior"], "allow");
     assert!(w[0]["response"]["response"]
         .get("updatedPermissions")
@@ -1011,16 +1011,16 @@ fn approval_errors_and_restricted_always() {
         _ => panic!(),
     };
     assert_eq!(ids, ["once", "session", "deny"]);
-    assert!(core.answer_approval("r1", "bogus").is_err());
-    assert!(core.answer_approval("nope", "once").is_err());
+    assert!(core.answer_approval("r1", "bogus", None).is_err());
+    assert!(core.answer_approval("nope", "once", None).is_err());
     // `always` in restricted mode behaves as `session`: no updatedPermissions.
-    let w = writes(&core.answer_approval("r1", "always").unwrap());
+    let w = writes(&core.answer_approval("r1", "always", None).unwrap());
     assert!(w[0]["response"]["response"]
         .get("updatedPermissions")
         .is_none());
     assert_eq!(core.session_rules(), 2);
     // Answered: a second answer is an error.
-    assert!(core.answer_approval("r1", "once").is_err());
+    assert!(core.answer_approval("r1", "once", None).is_err());
 }
 
 fn policy(allow: &[&str], deny: &[&str]) -> Arc<crate::permissions::Policy> {
@@ -1096,7 +1096,7 @@ fn always_is_not_offered_for_denied_calls() {
     assert_eq!(sys[0].0, "policy_denied");
     assert!(sys[0].1.contains("git push origin master"), "{}", sys[0].1);
     // Nothing is left open to answer with `always` later.
-    assert!(core.answer_approval("r1", "always").is_err());
+    assert!(core.answer_approval("r1", "always", None).is_err());
 
     // A chained command with a denied part is denied too.
     let a = core.on_line(&can_use_tool_line(&fx, "r2", Some("git add . && git push")));

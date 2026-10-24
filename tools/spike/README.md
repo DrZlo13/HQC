@@ -13,7 +13,7 @@ Starts `claude -p` in stream-json mode with `--permission-prompts host
 policy and closes stdin after `result`.
 
 ```
-tools/spike/driver.py [--resume UUID] [--arg-prompt] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+tools/spike/driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 ```
 
 - `--resume UUID` (or `SPIKE_RESUME`): continue that session with `--resume` instead of a new
@@ -27,6 +27,8 @@ tools/spike/driver.py [--resume UUID] [--arg-prompt] OUT_DIR CWD POLICY PROMPT [
   each question), `none` (never answer).
 - Pass `--permission-prompt-tool stdio` after `--`: without it the CLI denies instead of
   asking (SPEC §8.1).
+- `--deny-message-file FILE` (or `SPIKE_DENY_MESSAGE`): the `message` of the `deny` answer
+  (default `denied by hqc spike`; T26: the user's text of a denial with text);
 - `SPIKE_TIMEOUT` (seconds, default 180) kills the run; `SPIKE_INIT=1` sends an `initialize`
   control request first.
 - `OUT_DIR` gets `run.json` (command, cwd, session id), `stdin.jsonl`, `stdout.jsonl`,

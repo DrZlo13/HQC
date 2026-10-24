@@ -209,6 +209,10 @@ pub enum EventKind {
         option_id: String,
         /// A user id or `auto`.
         by: String,
+        /// The user's text with a deny option: «ответить текстом вместо этого» (T26). It
+        /// goes to the runtime with the denial; the client shows it as the user's message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     #[serde(rename = "approval.cancel")]
     ApprovalCancel {
@@ -502,6 +506,22 @@ mod tests {
             EventKind::System { .. } => "system",
             EventKind::Unknown { .. } => return None,
         })
+    }
+
+    /// T26: a denial with the user's text; without `message` the field is absent.
+    #[test]
+    fn approval_response_message_roundtrips() {
+        let src = include_str!("../examples/wire/event.approval.response.message.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ApprovalResponse { message, .. } = &e.kind else {
+            panic!("not approval.response: {:?}", e.kind);
+        };
+        assert_eq!(
+            message.as_deref(),
+            Some("Не трогай корень, посмотри только ~/work/hqc")
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }
 
     #[test]

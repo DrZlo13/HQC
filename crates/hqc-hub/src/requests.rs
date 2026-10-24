@@ -37,6 +37,35 @@ use crate::{
 pub struct AnswerBody {
     pub option_id: Option<String>,
     pub answers: Option<BTreeMap<String, ClarifyAnswer>>,
+    /// Text instead of the call (T26): only with a deny option of an in-session approval.
+    pub message: Option<String>,
+}
+
+/// Longest `message` of an approval answer, in bytes.
+pub const MAX_ANSWER_MESSAGE: usize = 16 * 1024;
+
+/// The `message` of an approval answer, checked: only with a `deny`/`deny_always` option,
+/// not blank, not over [`MAX_ANSWER_MESSAGE`]; NUL replaced (SPEC §4).
+fn answer_message(
+    message: Option<String>,
+    option: &ApprovalOption,
+) -> Result<Option<String>, ApiError> {
+    use hqc_proto::event::ApprovalCanonical::{Deny, DenyAlways};
+    let Some(m) = message else { return Ok(None) };
+    if !matches!(option.canonical, Deny | DenyAlways) {
+        return Err(ApiError::BadRequest(
+            "message goes only with a deny option".into(),
+        ));
+    }
+    if m.trim().is_empty() {
+        return Err(ApiError::BadRequest("message must not be blank".into()));
+    }
+    if m.len() > MAX_ANSWER_MESSAGE {
+        return Err(ApiError::BadRequest(format!(
+            "message is over {MAX_ANSWER_MESSAGE} bytes"
+        )));
+    }
+    Ok(Some(hqc_proto::replace_nul(&m).into_owned()))
 }
 
 fn options(payload: &Value) -> Vec<ApprovalOption> {
@@ -86,19 +115,30 @@ pub async fn answer(
             let option_id = body
                 .option_id
                 .ok_or_else(|| ApiError::BadRequest("option_id is required".into()))?;
-            if !options(&p.payload).iter().any(|o| o.id == option_id) {
+            let Some(option) = options(&p.payload).into_iter().find(|o| o.id == option_id) else {
                 return Err(ApiError::BadRequest(format!(
                     "unknown option `{option_id}`"
                 )));
+            };
+            let mut frame =
+                json!({"session_id": s.id, "request_id": request_id, "option_id": option_id});
+            let mut event = json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()});
+            if let Some(m) = answer_message(body.message, &option)? {
+                frame["message"] = json!(m);
+                event["message"] = json!(m);
             }
             (
-                json!({"type": "approval.response",
-                       "payload": {"session_id": s.id, "request_id": request_id, "option_id": option_id}}),
+                json!({"type": "approval.response", "payload": frame}),
                 "approval.response",
-                json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
+                event,
             )
         }
         "worker_approval" => {
+            if body.message.is_some() {
+                return Err(ApiError::BadRequest(
+                    "a worker request takes no message".into(),
+                ));
+            }
             // Only the owner of the worker that asks (SPEC §10.2).
             let owner = match p.worker_id {
                 Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
@@ -124,6 +164,11 @@ pub async fn answer(
             )
         }
         "clarify" => {
+            if body.message.is_some() {
+                return Err(ApiError::BadRequest(
+                    "a clarify request takes answers, not a message".into(),
+                ));
+            }
             let answers = body
                 .answers
                 .ok_or_else(|| ApiError::BadRequest("answers is required".into()))?;

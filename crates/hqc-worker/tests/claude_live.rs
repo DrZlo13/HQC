@@ -154,7 +154,10 @@ async fn live_repo_settings_ignored() {
                     let ids: Vec<String> = options.iter().map(|o| o.id.clone()).collect();
                     println!("approval.request {tool} {ids:?} -> always");
                     options_seen = Some(ids);
-                    adapter.answer_approval(request_id, "always").await.unwrap();
+                    adapter
+                        .answer_approval(request_id, "always", None)
+                        .await
+                        .unwrap();
                 }
             }
             AdapterEvent::TurnEnded => break,
@@ -247,7 +250,10 @@ async fn live_bash_turn_with_approval() {
                 } = &e.kind
                 {
                     println!("approval.request {tool} -> once");
-                    adapter.answer_approval(request_id, "once").await.unwrap();
+                    adapter
+                        .answer_approval(request_id, "once", None)
+                        .await
+                        .unwrap();
                 }
             }
             AdapterEvent::TurnEnded => break,
@@ -477,7 +483,10 @@ async fn live_permission_policy() {
                 } => {
                     println!("approval.request {description:?} hint {policy_hint:?} -> once");
                     asked.push(description.clone());
-                    adapter.answer_approval(request_id, "once").await.unwrap();
+                    adapter
+                        .answer_approval(request_id, "once", None)
+                        .await
+                        .unwrap();
                 }
                 EventKind::System { code, text, .. } => {
                     println!("system {code}: {text}");

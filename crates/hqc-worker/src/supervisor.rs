@@ -39,8 +39,8 @@ use std::path::{Path, PathBuf};
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, ProcessState,
-    RequestResult, ResultBody, SessionInput, SessionStart, StartMode, WireError,
-    WorkerApprovalRequest, WorkerFrame,
+    RequestResult, ResultBody, SessionInput, SessionStart, StartMode, TitleRequest, TitleResult,
+    WireError, WorkerApprovalRequest, WorkerFrame,
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -129,6 +129,8 @@ pub struct Supervisor {
     mirror: Option<MirrorHandle>,
     /// Current holders by transcript, reported again on every connect (SPEC §9.3).
     holders: HashMap<Uuid, HeldBy>,
+    /// `title.request` runs (T24).
+    titler: Arc<crate::title::Titler>,
 }
 
 /// A confirmation asked for and the `session.start` frames that wait for it.
@@ -201,6 +203,7 @@ impl Supervisor {
         Self {
             artifacts,
             slots: Arc::new(Semaphore::new(cfg.max_sessions)),
+            titler: Arc::new(crate::title::Titler::from_config(&cfg)),
             cfg,
             factory,
             link,
@@ -449,6 +452,10 @@ impl Supervisor {
                 });
                 return;
             }
+            HubFrame::TitleRequest(r) => {
+                self.title_request(id, r);
+                return;
+            }
             other => {
                 tracing::debug!(?other, "frame not for the supervisor");
                 return;
@@ -579,6 +586,33 @@ impl Supervisor {
                 Err(msg) => {
                     tracing::info!(%request_id, "fs request refused: {msg}");
                     wire_error(error_code::INVALID_FRAME, msg, false)
+                }
+            };
+            link.reply(&id, frame);
+        });
+    }
+
+    /// `title.request` (T24): a one-off `claude -p` outside every session ([`crate::title`]);
+    /// `result {title}` or `error` (`retryable` when [`crate::title::MAX_CONCURRENT`] runs
+    /// are busy).
+    fn title_request(&self, id: String, r: TitleRequest) {
+        let (link, titler) = (self.link.clone(), self.titler.clone());
+        tokio::spawn(async move {
+            let frame = match titler.title(&r.user_text, &r.agent_text).await {
+                Ok(title) => {
+                    tracing::info!(session_id = %r.session_id, %title, "session title");
+                    WorkerFrame::Result(RequestResult {
+                        request_id: r.request_id,
+                        body: ResultBody::Title(TitleResult { title }),
+                    })
+                }
+                Err(crate::title::TitleError::Busy) => {
+                    tracing::info!(session_id = %r.session_id, "title.request refused: busy");
+                    wire_error(error_code::INTERNAL, "title runs are busy", true)
+                }
+                Err(crate::title::TitleError::Failed(e)) => {
+                    tracing::warn!(session_id = %r.session_id, "no session title: {e}");
+                    wire_error(error_code::INTERNAL, e, false)
                 }
             };
             link.reply(&id, frame);

@@ -20,9 +20,6 @@ pub struct Config {
     /// the request's `Host`, which a reverse proxy may rewrite (SPEC §20). Empty: the `Host`
     /// or `X-Forwarded-Host` of the request.
     pub public_origins: Vec<String>,
-    /// `HQC_TITLE_MODEL` with `HQC_TITLE_BASE_URL` and `HQC_TITLE_API_KEY` (T21): the model
-    /// that titles sessions; `None`: titles from the first prompt.
-    pub title_model: Option<crate::llm::LlmConfig>,
 }
 
 /// The artifact store and its signed links (SPEC §12).
@@ -202,6 +199,9 @@ pub struct Timing {
     /// (SPEC §17.3); `HQC_TURN_WATCHDOG_S`, `None` (0) turns the watchdog off. Checked every
     /// `expiry_interval`.
     pub turn_watchdog: Option<Duration>,
+    /// How long the hub waits for the worker's answer to `title.request` (T24, SPEC §3
+    /// Session) before the title comes from the first prompt.
+    pub title_request: Duration,
 }
 
 impl Default for Timing {
@@ -215,6 +215,7 @@ impl Default for Timing {
             enroll_ttl: Duration::from_secs(600),
             ask_timeout_s: 600,
             turn_watchdog: Some(Duration::from_secs(DEFAULT_TURN_WATCHDOG_S)),
+            title_request: Duration::from_secs(30),
         }
     }
 }
@@ -237,7 +238,7 @@ impl Config {
     /// `HQC_ACCESS_AUD`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`,
     /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`,
     /// `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`, `HQC_ARTIFACT_RETENTION_DAYS`,
-    /// `HQC_PUBLIC_ORIGINS`, `HQC_TITLE_MODEL`, `HQC_TITLE_BASE_URL`, `HQC_TITLE_API_KEY`.
+    /// `HQC_PUBLIC_ORIGINS`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -304,15 +305,6 @@ impl Config {
             artifacts.key = k.into_bytes();
         }
         artifacts.retention = retention_from(var("HQC_ARTIFACT_RETENTION_DAYS").as_deref())?;
-        let title_model = var("HQC_TITLE_MODEL")
-            .map(|m| {
-                crate::llm::LlmConfig::parse(
-                    &m,
-                    var("HQC_TITLE_BASE_URL").as_deref(),
-                    var("HQC_TITLE_API_KEY").as_deref(),
-                )
-            })
-            .transpose()?;
         std::fs::create_dir_all(&artifacts.dir).with_context(|| {
             format!(
                 "HQC_ARTIFACT_DIR={}: cannot create",
@@ -333,7 +325,6 @@ impl Config {
             limits: Limits::default(),
             artifacts,
             public_origins: public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?,
-            title_model,
         })
     }
 }

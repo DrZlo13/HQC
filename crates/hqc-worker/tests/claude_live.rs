@@ -621,3 +621,78 @@ async fn live_ai_title() {
     );
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// T24 (SPEC §3 Session, §8.1): `title.request` as the worker runs it — one `claude -p` with
+/// the fixed flags of `hqc_worker::title::args` in an empty folder. A title comes back; no
+/// transcript appears under `<config>/projects` and no record of the process stays in
+/// `<config>/sessions`; the folder is removed.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_session_title -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_session_title() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let config_dir = paths::default_config_dir().expect("claude config dir");
+    let jsonl = |dir: &std::path::Path| -> HashSet<std::path::PathBuf> {
+        let mut out = HashSet::new();
+        for d in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
+                if f.path().extension().is_some_and(|e| e == "jsonl") {
+                    out.insert(f.path());
+                }
+            }
+        }
+        out
+    };
+    let projects = config_dir.join("projects");
+    let before = jsonl(&projects);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root
+        .canonicalize()
+        .unwrap()
+        .join(format!("live-titles-{}", Uuid::now_v7()));
+    let titler =
+        hqc_worker::title::Titler::new("claude".into(), root.clone(), hqc_worker::title::TIMEOUT);
+    let started = std::time::Instant::now();
+    let title = titler
+        .title(
+            "Почини сборку: cargo test падает на hqc-hub, тест сторожевого таймера ждёт 600 мс",
+            "Готово: на CI раннер медленнее, поднял лимит теста до 2,5 с, теперь зелёный.",
+        )
+        .await
+        .expect("a title");
+    let caps = hqc_worker::capabilities::detect(None).await;
+    eprintln!(
+        "claude {}: title in {:?}: {title:?}",
+        caps["claude_code"]["version"],
+        started.elapsed()
+    );
+    assert!(!title.is_empty() && title.chars().count() <= 60);
+    assert!(!title.contains('\n') && !title.contains('"') && !title.contains('«'));
+
+    let slot = root.join("0");
+    assert!(!slot.exists(), "the run folder is removed");
+    let encoded = projects.join(paths::encode_project_dir(&slot.display().to_string()));
+    assert!(!encoded.exists(), "no transcript folder for the run");
+    let new: Vec<_> = jsonl(&projects).difference(&before).cloned().collect();
+    eprintln!("transcripts created meanwhile (other sessions of this machine): {new:?}");
+    assert!(new.iter().all(|p| !p.starts_with(&encoded)), "{new:?}");
+    let root_s = root.display().to_string();
+    let sessions = std::fs::read_dir(config_dir.join("sessions"));
+    for f in sessions.into_iter().flatten().flatten() {
+        let text = std::fs::read_to_string(f.path()).unwrap_or_default();
+        assert!(!text.contains(&root_s), "{}: {text}", f.path().display());
+    }
+    let state =
+        std::fs::read_to_string(config_dir.with_file_name(".claude.json")).unwrap_or_default();
+    eprintln!(
+        "~/.claude.json mentions the run folder: {}",
+        state.contains(&root_s)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

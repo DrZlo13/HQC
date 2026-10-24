@@ -495,6 +495,13 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'workspace_path');
     str(p, 'cwd');
   },
+  // T24: the worker titles a session on its Claude Code subscription.
+  'title.request': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    str(p, 'user_text');
+    str(p, 'agent_text');
+  },
   'mirror.event': (p) => {
     str(p, 'workspace_path');
     str(p, 'runtime_session_id');

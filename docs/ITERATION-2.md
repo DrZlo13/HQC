@@ -297,3 +297,29 @@ vscode_open`, освобождение после выхода процесса 
 client && npm test && npm run build` (`enroll.test.tsx` — предвыбор, `projects.test.tsx` —
 переключатель), `E2E_CLAUDE_BIN=/usr/bin/false tools/e2e-local.sh` → `PASS (rehearsal)`. Живых
 прогонов `claude` не было. Вопросы — `docs/notes/t21-questions.md`.
+
+## T24. Заголовки на подписке воркера, без провайдеров моделей в хабе (сделано, SPEC 0.25)
+
+Разделы: §3 Session, §5.3, §5.4, §8.1, §23. Правило пользователя: всё, у чего сейчас нет
+потребителя, удаляется, а не остаётся на будущее.
+- Хаб: удалены модуль `llm`, `HQC_TITLE_MODEL`, `HQC_TITLE_BASE_URL`, `HQC_TITLE_API_KEY`,
+  семафор вызовов модели, их тесты и фейковые серверы моделей (зависимости хаба не освободились:
+  `reqwest` с `json` нужен JWKS и push). После первого финального ответа сессии с `title_source:
+  default` — `title.request` воркеру сессии, ожидание `timing.title_request` (30 с); офлайн,
+  ошибка, пустой ответ и таймаут — заголовок из первого промпта. Импортированные сессии — так же.
+- hqc-proto (добавление): `HubFrame::TitleRequest {request_id, session_id, user_text,
+  agent_text}`, `ResultBody::Title {title}`, `MAX_TITLE`, `MAX_TITLE_INPUT`; примеры
+  `hub.title.request.json`, `worker.result.title.json`.
+- Воркер: `title.rs` — одноразовый `claude -p` с фиксированными флагами в `$HQC_HOME/titles/<слот>`,
+  не больше 2 одновременно, таймаут 25 с, очистка ответа.
+- Клиент: разбор кадра `title.request` в `proto.ts` (контрактный тест примеров).
+- Документация: SPEC 0.25; RUNBOOK §1.2 без `HQC_TITLE_*`, §2.2, §2.5; командная строка — в
+  `docs/notes/claude-control-protocol.md`; `docs/notes/t21-questions.md` — провайдеры удалены.
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (хаб: `tests/t21.rs` — `title.request` один раз после первого хода,
+ответ ставит заголовок, пользовательский и `ai-title` не перезаписываются, ошибка, пустой ответ,
+таймаут и офлайн дают заголовок из промпта, импортированная сессия; воркер: `title::tests` —
+командная строка, очистка ответа, лимит 2, папка удаляется и при ошибке и таймауте;
+`title_request_runs_claude_once` через фейковый хаб), `cd client && npm test && npm run build`,
+`E2E_CLAUDE_BIN=/usr/bin/false tools/e2e-local.sh` → `PASS (rehearsal)`. Живой прогон —
+`live_session_title` (`HQC_LIVE_CLAUDE=1`).

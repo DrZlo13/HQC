@@ -83,6 +83,7 @@ pub fn test_timing() -> Timing {
         enroll_ttl: Duration::from_secs(600),
         ask_timeout_s: 600,
         turn_watchdog: None,
+        title_request: Duration::from_millis(300),
     }
 }
 
@@ -239,7 +240,6 @@ impl TestHub {
             limits,
             artifacts: art,
             public_origins: vec![],
-            title_model: None,
         };
         configure(&mut config);
         std::fs::create_dir_all(&config.artifacts.dir).unwrap();
@@ -502,6 +502,10 @@ pub struct FakeWorker {
     /// The same for `session.cleanup` (T21): [`FakeWorker::see_cleanup`], `cleanups`.
     pub see_cleanup: bool,
     pub cleanups: Vec<Value>,
+    /// The same for `title.request` (T24): set aside unanswered, so the hub falls back to the
+    /// prompt after `timing.title_request`; [`FakeWorker::see_titles`] shows them.
+    pub see_titles: bool,
+    pub titles: Vec<Value>,
     /// `allowed_roots` of its `hello`; [`FakeWorker::fs_reply`] answers by them.
     pub roots: Vec<String>,
     /// From `hello.ack`.
@@ -524,6 +528,8 @@ impl FakeWorker {
                 mirror_sets: vec![],
                 see_cleanup: false,
                 cleanups: vec![],
+                see_titles: false,
+                titles: vec![],
                 roots: vec![],
                 worker_id: String::new(),
             }),
@@ -716,6 +722,10 @@ impl FakeWorker {
             }
             if f["type"] == "session.cleanup" && !self.see_cleanup {
                 self.cleanups.push(f);
+                continue;
+            }
+            if f["type"] == "title.request" && !self.see_titles {
+                self.titles.push(f);
                 continue;
             }
             return Some(f);

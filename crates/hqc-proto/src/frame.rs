@@ -6,7 +6,8 @@
 //!
 //! Typed here: the frames of iteration 1 (docs/ITERATION-1.md, T1) and the folder requests
 //! `fs.stat` / `fs.list_dirs` with their `result` (T14), confirmations outside a session
-//! `worker.approval.request` / `worker.approval.response` (T17). Later iterations: hub ->
+//! `worker.approval.request` / `worker.approval.response` (T17), `title.request` with its
+//! `result` (T24). Later iterations: hub ->
 //! worker `session.steer`, `workspace.*`, `mirror.set`, `model.proxy`, `mcp.result`; worker ->
 //! hub `mirror.event`, `mcp.call`, `mcp.cancel`.
 
@@ -109,7 +110,8 @@ pub enum WorkerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none", with = "maybe_null")]
         held_by: Option<Option<HeldBy>>,
     },
-    /// Reply to a hub request (`fs.stat`, `fs.list_dirs`): same `id` as the request.
+    /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
+    /// the request.
     #[serde(rename = "result")]
     Result(RequestResult),
     /// A confirmation the worker needs from its owner outside any session (SPEC §10.2); the
@@ -342,11 +344,37 @@ pub enum HubFrame {
     /// Remove the session's inbox folders or scratch folder (T21, SPEC §5.3, §17.4).
     #[serde(rename = "session.cleanup")]
     SessionCleanup(SessionCleanup),
+    /// Title a session on the worker's Claude Code subscription (T24, SPEC §3 Session, §5.3).
+    #[serde(rename = "title.request")]
+    TitleRequest(TitleRequest),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
     Error(WireError),
 }
+
+/// `title.request {request_id, session_id, user_text, agent_text}` -> `result {request_id,
+/// title}` [`TitleResult`] or `error` (T24, SPEC §3 Session, §5.3): the first prompt and the
+/// first final answer of the session, each cut by the hub to [`MAX_TITLE_INPUT`] characters.
+/// `request_id` equals the frame `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleRequest {
+    pub request_id: String,
+    pub session_id: Uuid,
+    pub user_text: String,
+    pub agent_text: String,
+}
+
+/// Result of `title.request`: one line of at most [`MAX_TITLE`] characters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleResult {
+    pub title: String,
+}
+
+/// Longest `title.request.user_text` / `agent_text`, in characters.
+pub const MAX_TITLE_INPUT: usize = 2000;
+/// Longest title the hub derives or the worker returns, in characters.
+pub const MAX_TITLE: usize = 60;
 
 /// `fs.stat {request_id, path}` -> `result` [`FsStatResult`]. `request_id` equals the frame
 /// `id`.
@@ -380,6 +408,7 @@ pub enum ResultBody {
     FsStat(FsStatResult),
     FsListDirs(FsListDirsResult),
     Candidates(CandidatesResult),
+    Title(TitleResult),
 }
 
 /// Result of `fs.stat`. `canonical` is the path with symlinks resolved, present when it
@@ -572,6 +601,7 @@ mod tests {
         "workspace.list_candidates",
         "mirror.set",
         "session.cleanup",
+        "title.request",
         "ack",
         "error",
     ];
@@ -653,6 +683,10 @@ mod tests {
             "session.cleanup",
             include_str!("../examples/wire/hub.session.cleanup.scratch.json"),
         ),
+        (
+            "title.request",
+            include_str!("../examples/wire/hub.title.request.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -692,6 +726,10 @@ mod tests {
             include_str!("../examples/wire/worker.result.candidates.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.title.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
         ),
@@ -723,6 +761,7 @@ mod tests {
             HubFrame::WorkspaceListCandidates(_) => "workspace.list_candidates",
             HubFrame::MirrorSet(_) => "mirror.set",
             HubFrame::SessionCleanup(_) => "session.cleanup",
+            HubFrame::TitleRequest(_) => "title.request",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -842,6 +881,10 @@ mod tests {
                 include_str!("../examples/wire/hub.workspace.list_candidates.json"),
                 include_str!("../examples/wire/worker.result.candidates.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.title.request.json"),
+                include_str!("../examples/wire/worker.result.title.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -850,6 +893,7 @@ mod tests {
                 HubFrame::FsStat(r) => (&r.request_id, 0),
                 HubFrame::FsListDirs(r) => (&r.request_id, 1),
                 HubFrame::WorkspaceListCandidates(r) => (&r.request_id, 2),
+                HubFrame::TitleRequest(r) => (&r.request_id, 3),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -861,6 +905,7 @@ mod tests {
                 ResultBody::FsStat(_) => 0,
                 ResultBody::FsListDirs(_) => 1,
                 ResultBody::Candidates(_) => 2,
+                ResultBody::Title(_) => 3,
             };
             assert_eq!(got, kind);
         }

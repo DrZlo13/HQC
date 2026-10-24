@@ -318,3 +318,27 @@ deny из `--settings` сильнее auto-режима. Вывод: `mode = "au
 «Settings files that fail validation are silently ignored». Если это относится и к
 `--settings`, одно плохое правило молча снимет весь deny — поэтому воркер проверяет
 правила при чтении `worker.toml` (SPEC §14).
+
+## Заголовок сессии одноразовым `claude -p`, 2.1.308 (T24)
+
+Так воркер выполняет `title.request` (SPEC §3 Session, §8.1; код — `hqc_worker::title`).
+Точная командная строка, рабочий каталог — пустая `$HQC_HOME/titles/<0|1>`:
+
+```
+claude -p --model claude-haiku-5-5 --max-turns 1 --no-session-persistence \
+  --strict-mcp-config --setting-sources "" --tools "" \
+  --system-prompt "Придумай короткий заголовок беседы, не больше 60 символов, на языке пользователя. Ответь только заголовком без кавычек и точки в конце." \
+  --output-format json
+```
+
+На stdin: `Сообщение пользователя:\n<user_text>\n\nОтвет агента:\n<agent_text>\n`. Окружение — как
+у адаптера (`child_env`), без `CLAUDE_CODE_ENTRYPOINT`. Ответ — один JSON
+`{"type":"result","subtype":"success","is_error":false,"result":"<заголовок>",…}`.
+
+Два живых прогона `live_session_title` (`HQC_LIVE_CLAUDE=1`, 2026-10-24, 2.1.308): заголовки
+«Сторожевой таймер: лимит 2,5 с» за 1,7 с и «Починка cargo test в hqc-hub: сторожевой таймер» за
+3,1 с. CLI принимает пустые `--setting-sources ""` и `--tools ""` (ошибки разбора нет, ход идёт
+без инструментов). После завершения: нового транскрипта в `~/.claude/projects` нет (папки для
+закодированного пути запуска нет, новых `.jsonl` за время прогона нет), ни один файл
+`~/.claude/sessions/*.json` не упоминает папку запуска, `~/.claude.json` её тоже не упоминает.
+Без `--no-session-persistence` транскрипт попал бы в зеркало и в историю VS Code.

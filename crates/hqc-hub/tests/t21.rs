@@ -1,19 +1,14 @@
 //! T21 with a fake worker: the mirror is on by default and switched by `PATCH`, `mirror.set`
 //! lists the hub's sessions with the time of their last event, migration `0011`; the machine
-//! fingerprint orders replaceable workers; titles from a model (fake Anthropic and OpenAI
-//! servers) or from the first prompt, never over the user's; the daily artifact cleanup;
+//! fingerprint orders replaceable workers; titles by `title.request` to the session's worker
+//! (T24) or from the first prompt, never over the user's; the daily artifact cleanup;
 //! `session.cleanup` on archive and delete.
 
 mod common;
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
-use axum::{http::HeaderMap, routing::post, Json, Router};
 use common::*;
-use hqc_hub::llm::{LlmConfig, Provider};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -319,161 +314,174 @@ async fn replaceable_workers_of_the_same_machine_come_first() {
 
 // ---------------------------------------------------------------- titles
 
-#[derive(Clone, Default)]
-struct Seen(Arc<Mutex<Vec<(String, HeaderMap, Value)>>>);
-
-/// A fake model server: `reply(body)` gives the response; returns its base URL.
-async fn model_server(seen: Seen, status: u16, delay: Duration, reply: Value) -> String {
-    let handler = move |path: &'static str| {
-        let (seen, reply) = (seen.clone(), reply.clone());
-        move |headers: HeaderMap, Json(body): Json<Value>| {
-            let (seen, reply) = (seen.clone(), reply.clone());
-            async move {
-                seen.0
-                    .lock()
-                    .unwrap()
-                    .push((path.to_string(), headers, body));
-                tokio::time::sleep(delay).await;
-                (
-                    axum::http::StatusCode::from_u16(status).unwrap(),
-                    Json(reply),
-                )
-            }
-        }
-    };
-    let app = Router::new()
-        .route("/v1/messages", post(handler("/v1/messages")))
-        .route("/chat/completions", post(handler("/chat/completions")));
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    format!("http://{addr}")
-}
-
-fn llm(provider: Provider, base: &str, key: Option<&str>, timeout: Duration) -> LlmConfig {
-    LlmConfig {
-        provider,
-        model: "test-model".into(),
-        base_url: base.into(),
-        api_key: key.map(String::from),
-        timeout,
+/// The worker's answers to `title.request` must arrive in this time in tests that answer.
+fn answering() -> hqc_hub::config::Timing {
+    hqc_hub::config::Timing {
+        title_request: Duration::from_secs(5),
+        ..test_timing()
     }
 }
 
-/// A session with the default title, a prompt and the first answer; returns it once its
-/// title changed (or after `wait` without a change).
-async fn titled(hub: &TestHub, w: &mut FakeWorker, prompt: &str, body: Value) -> Value {
+/// The next `title.request` the hub sent, set aside by `recv` or still on the way.
+async fn title_request(w: &mut FakeWorker) -> Value {
+    if !w.titles.is_empty() {
+        return w.titles.remove(0);
+    }
+    w.see_titles = true;
+    let f = w.expect("title.request").await;
+    w.see_titles = false;
+    f
+}
+
+/// A session with the default title, a prompt and the first answer.
+async fn answered(hub: &TestHub, w: &mut FakeWorker, prompt: &str, body: Value) -> String {
     let sid = new_session(hub, body).await;
-    let before = hub.session(&sid).await["title"].clone();
     input(hub, w, &sid, prompt, json!([])).await;
     answer(w, &sid, "Готово: сборка снова зелёная.").await;
-    if hub.session(&sid).await["title_source"] == "user" {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        return hub.session(&sid).await;
-    }
-    hub.wait_session(&sid, "a title", |s| s["title"] != before)
+    sid
+}
+
+async fn retitled(hub: &TestHub, sid: &str, before: &str) -> Value {
+    hub.wait_session(sid, "a title", |s| s["title"] != before)
         .await
 }
 
 #[tokio::test]
-async fn title_from_an_anthropic_model() {
-    let seen = Seen::default();
-    let base = model_server(
-        seen.clone(),
-        200,
-        Duration::ZERO,
-        json!({"content": [{"type": "text", "text": "\"Починка сборки\""}]}),
-    )
-    .await;
-    let cfg = llm(
-        Provider::Anthropic,
-        &base,
-        Some("sk-test"),
-        Duration::from_secs(5),
-    );
-    let hub = TestHub::start_config(|c| c.title_model = Some(cfg)).await;
+async fn title_from_the_worker() {
+    let hub = TestHub::start_timing(answering()).await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online(&hub, &token, WS).await;
     let long = "почини сборку ".repeat(300);
-    let s = titled(&hub, &mut w, &long, json!({})).await;
+    let sid = answered(&hub, &mut w, &long, json!({})).await;
+    let before = hub.session(&sid).await["title"].clone();
+    let f = title_request(&mut w).await;
+    let p = &f["payload"];
+    assert_eq!(p["request_id"], f["id"]);
+    assert_eq!(p["session_id"], json!(sid));
+    // Each text cut to 2000 characters.
+    assert_eq!(p["user_text"].as_str().unwrap().chars().count(), 2000);
+    assert_eq!(p["agent_text"], "Готово: сборка снова зелёная.");
+    w.reply(
+        &f["id"],
+        "result",
+        json!({"request_id": f["id"], "title": " Починка\nсборки "}),
+    )
+    .await;
+    let s = retitled(&hub, &sid, before.as_str().unwrap()).await;
     assert_eq!(
         (&s["title"], &s["title_source"]),
         (&json!("Починка сборки"), &json!("runtime"))
     );
-    let calls = seen.0.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
-    let (path, headers, body) = &calls[0];
-    assert_eq!(path, "/v1/messages");
-    assert_eq!(headers["x-api-key"], "sk-test");
-    assert_eq!(headers["anthropic-version"], "2023-06-01");
-    assert_eq!(body["model"], "test-model");
-    assert!(body["system"].as_str().unwrap().contains("60 characters"));
-    let user = body["messages"][0]["content"].as_str().unwrap();
-    assert!(user.contains("Готово: сборка снова зелёная."), "{user}");
-    // Each part cut to 2000 characters.
-    assert!(user.chars().count() < 2200, "{}", user.chars().count());
     // The next answer does not ask again.
-    let sid = s["id"].as_str().unwrap();
-    input(&hub, &mut w, sid, "ещё", json!([])).await;
-    answer(&mut w, sid, "ok").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(seen.0.lock().unwrap().len(), 1);
+    input(&hub, &mut w, &sid, "ещё", json!([])).await;
+    answer(&mut w, &sid, "ok").await;
+    w.see_titles = true;
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert!(w.titles.is_empty());
     hub.finish().await;
 }
 
 #[tokio::test]
-async fn title_from_an_openai_compatible_model() {
-    let seen = Seen::default();
-    let base = model_server(
-        seen.clone(),
-        200,
-        Duration::ZERO,
-        json!({"choices": [{"message": {"role": "assistant", "content": "«Кронштейн камеры»\n"}}]}),
-    )
-    .await;
-    // A local model: no key.
-    let cfg = llm(Provider::OpenAi, &base, None, Duration::from_secs(5));
-    let hub = TestHub::start_config(|c| c.title_model = Some(cfg)).await;
+async fn a_failing_worker_gives_the_prompt_title() {
+    let hub = TestHub::start_timing(answering()).await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online(&hub, &token, WS).await;
-    let s = titled(&hub, &mut w, "Сделай кронштейн для камеры", json!({})).await;
-    assert_eq!(s["title"], "Кронштейн камеры");
-    let calls = seen.0.lock().unwrap().clone();
-    let (path, headers, body) = &calls[0];
-    assert_eq!(path, "/chat/completions");
-    assert!(!headers.contains_key("authorization"));
-    assert_eq!(body["messages"][0]["role"], "system");
-    assert!(body["messages"][1]["content"]
-        .as_str()
-        .unwrap()
-        .contains("Сделай кронштейн для камеры"));
-    hub.finish().await;
-}
-
-#[tokio::test]
-async fn title_falls_back_to_the_first_prompt() {
-    // No model.
-    let hub = TestHub::start().await;
-    let (_, token) = hub.enroll("home-mac").await;
-    let (mut w, _) = FakeWorker::online(&hub, &token, WS).await;
-    let s = titled(
+    // `error` from the worker.
+    let sid = answered(
         &hub,
         &mut w,
         "## **Почини** сборку\nподробности ниже",
         json!({}),
     )
     .await;
+    let before = hub.session(&sid).await["title"].clone();
+    let f = title_request(&mut w).await;
+    w.reply(
+        &f["id"],
+        "error",
+        json!({"code": "internal", "message": "claude exited with 1", "retryable": false}),
+    )
+    .await;
+    let s = retitled(&hub, &sid, before.as_str().unwrap()).await;
     assert_eq!(
         (&s["title"], &s["title_source"]),
         (&json!("Почини сборку"), &json!("runtime"))
     );
-    // The user's title stays.
-    let s = titled(&hub, &mut w, "что-то", json!({"title": "Мой заголовок"})).await;
+    // An empty title.
+    let sid = answered(&hub, &mut w, "Fix the flaky test", json!({})).await;
+    let before = hub.session(&sid).await["title"].clone();
+    let f = title_request(&mut w).await;
+    w.reply(
+        &f["id"],
+        "result",
+        json!({"request_id": f["id"], "title": " \n "}),
+    )
+    .await;
+    let s = retitled(&hub, &sid, before.as_str().unwrap()).await;
+    assert_eq!(s["title"], "Fix the flaky test");
+    // A long prompt is cut at a word.
+    let long = "Сделай кронштейн для крепления камеры на трубу диаметром двадцать пять миллиметров";
+    let sid = answered(&hub, &mut w, long, json!({})).await;
+    let before = hub.session(&sid).await["title"].clone();
+    let f = title_request(&mut w).await;
+    w.reply(
+        &f["id"],
+        "error",
+        json!({"code": "busy", "message": "busy", "retryable": true}),
+    )
+    .await;
+    let s = retitled(&hub, &sid, before.as_str().unwrap()).await;
+    let t = s["title"].as_str().unwrap();
+    assert!(t.ends_with('…') && t.chars().count() <= 60, "{t}");
+    hub.finish().await;
+}
+
+#[tokio::test]
+async fn timeout_and_offline_give_the_prompt_title() {
+    // `title_request` is 300 ms in tests; the fake worker never answers.
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS).await;
+    let sid = answered(&hub, &mut w, "Fix the build", json!({})).await;
+    let before = hub.session(&sid).await["title"].clone();
+    let s = retitled(&hub, &sid, before.as_str().unwrap()).await;
+    assert_eq!(
+        (&s["title"], &s["title_source"]),
+        (&json!("Fix the build"), &json!("runtime"))
+    );
+    assert_eq!(
+        title_request(&mut w).await["payload"]["session_id"],
+        json!(sid)
+    );
+
+    // The worker goes offline right after the answer.
+    let sid = new_session(&hub, json!({})).await;
+    let before = hub.session(&sid).await["title"].clone();
+    input(&hub, &mut w, &sid, "Offline worker", json!([])).await;
+    answer(&mut w, &sid, "done").await;
+    w.close().await;
+    let s = retitled(&hub, &sid, before.as_str().unwrap()).await;
+    assert_eq!(s["title"], "Offline worker");
+    hub.finish().await;
+}
+
+#[tokio::test]
+async fn user_and_runtime_titles_stay() {
+    let hub = TestHub::start_timing(answering()).await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS).await;
+    // The user's title: nothing is asked.
+    let sid = answered(&hub, &mut w, "что-то", json!({"title": "Мой заголовок"})).await;
+    w.see_titles = true;
+    w.expect_silence(Duration::from_millis(300)).await;
+    w.see_titles = false;
+    assert!(w.titles.is_empty());
+    let s = hub.session(&sid).await;
     assert_eq!(
         (&s["title"], &s["title_source"]),
         (&json!("Мой заголовок"), &json!("user"))
     );
-    // So does a runtime's (`ai-title`) that came first.
+    // A runtime's (`ai-title`) that came first.
     let sid = new_session(&hub, json!({})).await;
     input(&hub, &mut w, &sid, "prompt text", json!([])).await;
     w.send(
@@ -484,14 +492,37 @@ async fn title_falls_back_to_the_first_prompt() {
     .await;
     w.expect("ack").await;
     answer(&mut w, &sid, "done").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    w.see_titles = true;
+    w.expect_silence(Duration::from_millis(300)).await;
     assert_eq!(hub.session(&sid).await["title"], "From the runtime");
-    let long = "Сделай кронштейн для крепления камеры на трубу диаметром двадцать пять миллиметров";
-    let s = titled(&hub, &mut w, long, json!({})).await;
-    let t = s["title"].as_str().unwrap();
-    assert!(t.ends_with('…') && t.chars().count() <= 60, "{t}");
+    // The user renames the session while the worker thinks: the late answer is dropped.
+    w.see_titles = false;
+    let sid = answered(&hub, &mut w, "slow worker", json!({})).await;
+    let f = title_request(&mut w).await;
+    let (s, v) = hub
+        .patch(&format!("/api/sessions/{sid}"), json!({"title": "Renamed"}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    w.reply(
+        &f["id"],
+        "result",
+        json!({"request_id": f["id"], "title": "Late title"}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let s = hub.session(&sid).await;
+    assert_eq!(
+        (&s["title"], &s["title_source"]),
+        (&json!("Renamed"), &json!("user"))
+    );
+    hub.finish().await;
+}
 
-    // An imported session is titled by its first records the same way.
+#[tokio::test]
+async fn an_imported_session_is_titled_the_same_way() {
+    let hub = TestHub::start_timing(answering()).await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS).await;
     let runtime = Uuid::new_v4();
     for (ty, payload) in [
         (
@@ -514,13 +545,24 @@ async fn title_falls_back_to_the_first_prompt() {
         let ack = w.expect("ack").await;
         assert_eq!(ack["id"], id);
     }
+    let f = title_request(&mut w).await;
+    assert_eq!(
+        (&f["payload"]["user_text"], &f["payload"]["agent_text"]),
+        (&json!("Импортированный вопрос"), &json!("ответ"))
+    );
+    w.reply(
+        &f["id"],
+        "result",
+        json!({"request_id": f["id"], "title": "Вопрос из VS Code"}),
+    )
+    .await;
     let pid = hub.personal_project().await;
     let deadline = tokio::time::Instant::now() + WAIT;
     loop {
         let (_, l) = hub.get(&format!("/api/projects/{pid}/sessions")).await;
         let found = l["sessions"].as_array().unwrap().iter().any(|s| {
             s["agent"]["runtime_session_id"] == json!(runtime.to_string())
-                && s["title"] == "Импортированный вопрос"
+                && s["title"] == "Вопрос из VS Code"
         });
         if found {
             break;
@@ -529,34 +571,6 @@ async fn title_falls_back_to_the_first_prompt() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     hub.finish().await;
-}
-
-#[tokio::test]
-async fn failing_or_slow_model_falls_back() {
-    for (status, delay) in [(500, Duration::ZERO), (200, Duration::from_secs(3))] {
-        let seen = Seen::default();
-        let base = model_server(
-            seen.clone(),
-            status,
-            delay,
-            json!({"content": [{"type": "text", "text": "late title"}],
-                   "error": {"message": "overloaded"}}),
-        )
-        .await;
-        let cfg = llm(
-            Provider::Anthropic,
-            &base,
-            Some("k"),
-            Duration::from_millis(300),
-        );
-        let hub = TestHub::start_config(|c| c.title_model = Some(cfg)).await;
-        let (_, token) = hub.enroll("home-mac").await;
-        let (mut w, _) = FakeWorker::online(&hub, &token, WS).await;
-        let s = titled(&hub, &mut w, "Fix the flaky test", json!({})).await;
-        assert_eq!(s["title"], "Fix the flaky test", "status {status}");
-        assert_eq!(seen.0.lock().unwrap().len(), 1);
-        hub.finish().await;
-    }
 }
 
 // ---------------------------------------------------------------- artifacts

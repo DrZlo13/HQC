@@ -86,9 +86,6 @@ createdb hqc
 | `HQC_DEV_USER` | с `HQC_DEV=1` | email пользователя dev-режима; без `HQC_DEV=1` игнорируется с предупреждением |
 | `HQC_ARTIFACT_DIR` | нет, `artifacts` (в Docker-образе `/var/lib/hqc/artifacts`) | каталог хранилища артефактов (SPEC §12): файлы по sha256, `<dir>/<первые 2 знака>/<sha256>`, и `tmp/` для загрузок. Хаб создаёт его при старте и не стартует, если не может. Бэкапить вместе с базой (SPEC §20). Неиспользуемые артефакты удаляет уборка раз в сутки (`HQC_ARTIFACT_RETENTION_DAYS`) |
 | `HQC_ARTIFACT_RETENTION_DAYS` | нет, `30` | уборка артефактов (SPEC §12, T21): раз в сутки (и сразу после старта) хаб удаляет записи артефактов, на которые не ссылается ни одно событие и которые не загружались и не прикладывались к вводу столько дней; файл с диска — когда на его sha256 не осталось записей. Целые дни, `0` — не удалять |
-| `HQC_TITLE_MODEL` | нет | модель для заголовков сессий (SPEC §3 Session, T21): `<provider>:<model>`, provider — `anthropic` (Messages API) или `openai` (любой OpenAI-совместимый: OpenAI, OpenRouter, локальная модель), например `anthropic:claude-haiku-5-5`, `openai:qwen3.8-27b`. После первого финального ответа сессии с заголовком «Сессия N» хаб в фоне просит у модели заголовок до 60 символов; ошибка или таймаут 15 с — только в лог, тогда заголовок — первая строка первого промпта. Не задана — всегда из промпта |
-| `HQC_TITLE_BASE_URL` | нет, `https://api.anthropic.com` / `https://api.openai.com/v1` | база API модели заголовков: для `anthropic` запрос идёт на `<база>/v1/messages`, для `openai` — на `<база>/chat/completions` (OpenRouter — `https://openrouter.ai/api/v1`, локальная модель на llm-server — `http://llm-server:8082/v1`) |
-| `HQC_TITLE_API_KEY` | нет | ключ API модели заголовков (`x-api-key` у Anthropic, `Authorization: Bearer` у OpenAI-совместимых); для локальной модели без ключа не задаётся. Хранить как секрет, в логи не пишется |
 | `HQC_ARTIFACT_PUBLIC_BASE` | нет | origin отдельного домена артефактов, `https://artifacts.<домен хаба>` без пути (`http://` — только loopback). Подписанные ссылки ведут туда, HTML рендерится в iframe только оттуда; хаб добавляет этот origin в `img-src`/`frame-src`/`connect-src` своей CSP, а на этом хосте отдаёт только `/artifacts/*` (остальное — `404`). Домен — тот же туннель на тот же хаб, **вне** Access (§1.6). Не задан — ссылки относительные, на домене хаба (за Access), HTML только скачивается |
 | `HQC_ARTIFACT_KEY` | нет | ключ HMAC подписанных ссылок, не короче 32 символов (`openssl rand -hex 32`). Не задан — случайный на каждый запуск: ссылки прошлого запуска перестают работать, клиент просто запрашивает новые. Нужен, только если ссылки должны переживать перезапуск |
 | `HQC_PUBLIC_ORIGINS` | нет | origin'ы, по которым браузеры открывают хаб, через запятую: `https://hqc.example.com`. Когда задано, `Origin` на `/api/*` (WebSocket и запись) сверяется с этим списком, а не с `Host` запроса. Нужно, если перед хабом стоит прокси, который переписывает `Host` в имя контейнера (Caddy с `header_up Host`, cloudflared с `httpHostHeader`) и не ставит `X-Forwarded-Host`; симптом — `WebSocket connection to wss://…/api/ws failed` в браузере и `Origin does not match the hub's host` в логе хаба |
@@ -583,6 +580,13 @@ deny = [
 2.1.309). В `--settings` воркер всегда кладёт `voiceEnabled: false`: иначе macOS спрашивает
 доступ к микрофону от имени `hqc-worker`.
 
+Заголовки сессий (SPEC §3 Session, §8.1, T24) придумывает воркер на той же подписке: после первого
+ответа сессии хаб присылает `title.request`, воркер запускает `claude -p --model
+claude-haiku-5-5 --max-turns 1 --no-session-persistence …` без инструментов в пустой папке
+`~/.hqc/titles/<0|1>` и удаляет её. Это один короткий ход haiku на сессию; транскрипта и следа в
+истории VS Code он не оставляет. Если `claude` не залогинен, в логе воркера `no session title:
+…`, а заголовок берётся из первой строки промпта.
+
 ### 2.3 Регистрация (`enroll`)
 
 ```sh
@@ -693,6 +697,7 @@ launchctl bootout gui/$(id -u)/local.hqc.worker        # остановка
 | токен | Keychain (`hqc-worker` / `hub_url`); в файловом режиме `~/.hqc/token` |
 | outbox (события, ещё не подтверждённые хабом) | `~/.hqc/outbox/outbox.sqlite3` (SQLite, WAL); `sqlite3 ~/.hqc/outbox/outbox.sqlite3 'select count(*) from outbox'` — сколько ждёт отправки |
 | логи воркера | stderr; под launchd — `~/Library/Logs/hqc-worker.log` (`tail -f`) |
+| папки запусков заголовков | `~/.hqc/titles/0`, `~/.hqc/titles/1` — есть только во время запуска |
 | транскрипты Claude Code | `~/.claude/projects/<путь workspace, где всё кроме букв и цифр заменено на ->/<runtime_session_id>.jsonl` |
 
 Что искать в логе: `connected to hub worker_id=…` — подключение есть; `hub rejected the

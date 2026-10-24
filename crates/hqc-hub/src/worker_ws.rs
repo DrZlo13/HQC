@@ -401,8 +401,12 @@ async fn handle_text(
         WorkerFrame::Event { event } => {
             let raw_event = raw["payload"]["event"].clone();
             match events::ingest_worker_event(app, conn, raw_event, &event).await {
-                Ok(ack) => {
+                Ok(events::Ingested::Ack(ack)) => {
                     conn.reply(&id, HubFrame::Ack(ack));
+                    Ok(())
+                }
+                Ok(events::Ingested::Refused(why)) => {
+                    conn.error(&id, error_code::INVALID_FRAME, why, false);
                     Ok(())
                 }
                 // Data the database refuses would be refused on every resend: the worker

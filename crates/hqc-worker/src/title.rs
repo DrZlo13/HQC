@@ -197,7 +197,14 @@ impl Titler {
         let mut stdin = child.stdin.take().expect("piped stdin");
         let text = input(user_text, agent_text);
         let run = async move {
-            stdin.write_all(text.as_bytes()).await?;
+            // A CLI that exits at once (not logged in, bad flags) closes its stdin before the
+            // prompt is written: that broken pipe is not the reason, its stderr and exit
+            // status are, so keep going and report those.
+            if let Err(e) = stdin.write_all(text.as_bytes()).await {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(e);
+                }
+            }
             drop(stdin);
             child.wait_with_output().await
         };
@@ -412,6 +419,18 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(!root.join("0").exists());
+        // Exits before reading a prompt larger than the pipe buffer: the broken pipe on
+        // stdin must not hide the CLI's own error (this raced on CI).
+        let t = Titler::new(
+            tmp.path().join("false-claude"),
+            root.clone(),
+            Duration::from_secs(10),
+        );
+        let big = "x".repeat(1 << 20);
+        match t.title(&big, &big).await {
+            Err(TitleError::Failed(e)) => assert!(e.contains("Not logged in"), "{e}"),
+            other => panic!("{other:?}"),
+        }
         // No such binary.
         let t = Titler::new(
             tmp.path().join("nope"),

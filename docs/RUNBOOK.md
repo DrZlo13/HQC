@@ -573,6 +573,12 @@ deny = [
 молча выбросил бы весь файл настроек вместе с `deny`. `Bash(rm -rf /*)` ловит любой
 абсолютный путь, в том числе внутри workspace — относительные (`rm -rf target`) проходят.
 
+`show_in_vscode` (по умолчанию `true`): воркер запускает Claude Code с
+`CLAUDE_CODE_ENTRYPOINT=claude-vscode`, иначе CLI пишет транскрипт с `entrypoint: sdk-cli`, а
+история бесед расширения VS Code показывает только свои сессии (проверено 2026-10-24 на
+2.1.309). В `--settings` воркер всегда кладёт `voiceEnabled: false`: иначе macOS спрашивает
+доступ к микрофону от имени `hqc-worker`.
+
 ### 2.3 Регистрация (`enroll`)
 
 ```sh

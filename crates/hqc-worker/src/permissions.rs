@@ -96,12 +96,16 @@ impl Permissions {
         Ok(p)
     }
 
-    /// The `--settings` JSON; `None` when both lists are empty.
+    /// The `--settings` JSON. Voice input is always off: a headless agent has no use for the
+    /// microphone, and macOS would ask for it on behalf of `hqc-worker`.
     pub fn settings_json(&self) -> Option<String> {
         if self.allow.is_empty() && self.deny.is_empty() {
-            return None;
+            return Some(json!({"voiceEnabled": false}).to_string());
         }
-        Some(json!({"permissions": {"allow": self.allow, "deny": self.deny}}).to_string())
+        Some(
+            json!({"voiceEnabled": false, "permissions": {"allow": self.allow, "deny": self.deny}})
+                .to_string(),
+        )
     }
 }
 
@@ -413,6 +417,7 @@ mod tests {
     fn settings_json() {
         let p = Permissions::default();
         let v: Value = serde_json::from_str(&p.settings_json().unwrap()).unwrap();
+        assert_eq!(v["voiceEnabled"], json!(false));
         assert_eq!(v["permissions"]["allow"], json!([]));
         assert_eq!(
             v["permissions"]["deny"].as_array().unwrap().len(),
@@ -423,6 +428,8 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        assert_eq!(none.settings_json(), None);
+        // Empty lists still carry voiceEnabled: false.
+        let v: Value = serde_json::from_str(&none.settings_json().unwrap()).unwrap();
+        assert_eq!(v, json!({"voiceEnabled": false}));
     }
 }

@@ -706,7 +706,7 @@ async fn command_line_carries_permissions() {
             .unwrap_or_else(|| panic!("--settings missing: {args:?}"));
         serde_json::from_str(&args[i + 1]).unwrap()
     };
-    let want = json!({"permissions": {
+    let want = json!({"voiceEnabled": false, "permissions": {
         "allow": ["Bash(cargo test:*)", "Read"],
         "deny": ["Bash(git push:*)"],
     }});
@@ -718,16 +718,14 @@ async fn command_line_carries_permissions() {
     assert_eq!(settings(1), want, "restricted keeps --settings");
     a.kill().await.unwrap();
 
-    // Both lists empty: no flag.
+    // Both lists empty: only voice off.
     let mut opts = options(config.path());
     opts.permissions.deny.clear();
     let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
     let (tx, _rx) = mpsc::channel(16);
     let mut a = factory.create(&s, tx);
     a.start(&s).await.unwrap();
-    assert!(!claude.commands()[2]
-        .args
-        .contains(&"--settings".to_string()));
+    assert_eq!(settings(2), json!({"voiceEnabled": false}));
     a.kill().await.unwrap();
 
     // The worker config: the CLI's ask mode unless `mode = "auto"`.
@@ -1446,4 +1444,30 @@ async fn takeover_records_are_registered_as_own() {
     assert_eq!(owned, [false, false, false, false, false, true, true]);
     a.kill().await.unwrap();
     assert!(!own.is_live(runtime));
+}
+
+/// `show_in_vscode` (the default from the worker config): the child gets
+/// `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, whatever the worker's own environment says;
+/// without it the variable is removed and the CLI writes its own `sdk-cli`.
+#[tokio::test]
+async fn entrypoint_for_the_vscode_history() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    for (entrypoint, want) in [(Some("claude-vscode"), Some("claude-vscode")), (None, None)] {
+        let claude = ScriptedClaude::new("");
+        let mut opts = options(config.path());
+        opts.entrypoint = entrypoint.map(str::to_string);
+        let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+        let s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+        let (tx, _rx) = mpsc::channel(16);
+        let mut a = factory.create(&s, tx);
+        a.start(&s).await.unwrap();
+        let env = claude.commands()[0].env.clone();
+        let got = env
+            .iter()
+            .find(|(k, _)| k == "CLAUDE_CODE_ENTRYPOINT")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(got, want);
+        a.kill().await.unwrap();
+    }
 }

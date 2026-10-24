@@ -46,7 +46,7 @@ export function activityLabel(state: SessionState, tool?: string): string | null
 
 /** `approval.request.policy_hint` (SPEC §8.1, §14). */
 export const POLICY_HINT_LABELS: Record<PolicyHint, string> = {
-  allow: 'разрешено политикой воркера',
+  allow: 'по правилу allow, но Claude Code спрашивает сам (например, путь вне рабочей папки)',
   deny: 'запрещено политикой воркера',
   unknown: 'есть правило в политике воркера',
 };

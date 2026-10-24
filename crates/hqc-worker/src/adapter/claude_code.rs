@@ -107,6 +107,9 @@ pub struct ClaudeOptions {
     pub config_dir: Option<PathBuf>,
     /// `--mcp-config` JSON. Unset in iteration 1 (MCP hqc is iteration 3).
     pub mcp_config: Option<String>,
+    /// `CLAUDE_CODE_ENTRYPOINT` for the child: `claude-vscode` makes the transcript show up in
+    /// the VS Code extension's history; `None` leaves the CLI's own `sdk-cli`.
+    pub entrypoint: Option<String>,
     /// Appended to the command line (tests: `--max-turns`).
     pub extra_args: Vec<String>,
     /// `--permission-mode`, always passed so that a `defaultMode` from settings
@@ -134,6 +137,7 @@ pub struct ClaudeOptions {
 impl Default for ClaudeOptions {
     fn default() -> Self {
         Self {
+            entrypoint: None,
             claude_bin: None,
             config_dir: paths::default_config_dir(),
             mcp_config: None,
@@ -178,6 +182,7 @@ impl ClaudeCodeAdapters {
         Self::new(
             ClaudeOptions {
                 claude_bin: cfg.claude_bin.clone(),
+                entrypoint: cfg.show_in_vscode.then(|| "claude-vscode".to_string()),
                 permission_mode: match cfg.permissions.mode {
                     PermissionMode::Ask => permission_mode,
                     PermissionMode::Auto => "auto".into(),
@@ -401,7 +406,15 @@ impl ClaudeCodeAdapter {
                 .unwrap_or_else(|| PathBuf::from("claude")),
             args,
             cwd: spec.workdir.clone(),
-            env: child_env(std::env::vars()),
+            env: {
+                let mut env = child_env(std::env::vars());
+                env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT");
+                if let Some(e) = &self.opts.entrypoint {
+                    env.push(("CLAUDE_CODE_ENTRYPOINT".into(), e.clone()));
+                    env.sort();
+                }
+                env
+            },
         }
     }
 

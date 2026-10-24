@@ -1442,6 +1442,9 @@ async fn takeover_records_are_registered_as_own() {
     let owned: Vec<bool> = main.iter().map(|u| own.is_own(runtime, *u)).collect();
     // prompt, tool_use, tool_result, thinking, text of `claude -p`; then the adapter's.
     assert_eq!(owned, [false, false, false, false, false, true, true]);
+    // T25: the input's text too, for a prompt record the stream does not name.
+    let unnamed = Uuid::new_v4();
+    assert!(own.claim(runtime, unnamed, Some("Reply with exactly: HQC-TURN")));
     a.kill().await.unwrap();
     assert!(!own.is_live(runtime));
 }

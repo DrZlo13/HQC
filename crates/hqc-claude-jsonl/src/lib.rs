@@ -332,6 +332,46 @@ mod tests {
         }
     }
 
+    /// T25, 2.1.308 (`resume-compact`): a session, a `--resume` with the adapter's flags and
+    /// one prompt (`stream-resume-prompt`), another `--resume` with `/compact`
+    /// (`stream-resume-compact`). The prompt echo after `--resume` carries the transcript
+    /// record's uuid. Of the `/compact` records the main chain gets only the command
+    /// (`<command-name>/compact</command-name>`, not in stream-json) and its output (the echo);
+    /// the summary is `isCompactSummary`, the caveat `isMeta`.
+    #[test]
+    fn t25_resume_prompt_and_compact() {
+        let transcript = include_str!("../fixtures/resume-compact-2.1.308.jsonl");
+        let (tr, bad) = parse_str(transcript);
+        assert_eq!(bad, 0);
+        let main = main_records(&tr);
+        let uuids = |s: &str| -> Vec<Uuid> {
+            main_records(&parse_str(s).0)
+                .iter()
+                .map(|m| m.uuid)
+                .collect()
+        };
+        let prompt = uuids(include_str!(
+            "../fixtures/stream-resume-prompt-2.1.308.jsonl"
+        ));
+        assert_eq!(prompt.len(), 2, "echo and answer");
+        assert!(prompt.iter().all(|u| main.iter().any(|m| m.uuid == *u)));
+        let echo = main.iter().find(|m| m.uuid == prompt[0]).unwrap();
+        assert_eq!(echo.blocks()[0]["text"], "Reply with exactly: TWO");
+
+        let compact = uuids(include_str!(
+            "../fixtures/stream-resume-compact-2.1.308.jsonl"
+        ));
+        let after = main.iter().position(|m| m.uuid == prompt[1]).unwrap() + 1;
+        let unknown: Vec<String> = main[after..]
+            .iter()
+            .filter(|m| !compact.contains(&m.uuid))
+            .map(|m| m.blocks()[0]["text"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(unknown.len(), 1, "{unknown:?}");
+        assert!(unknown[0].starts_with("<command-name>/compact</command-name>"));
+        assert_eq!(main.len() - after, 2, "the command and its output");
+    }
+
     /// T20, 2.1.308: `--resume --resume-session-at <uuid>` appends to the same file and hangs
     /// its prompt off that earlier record, which so gets a second child: a fork in one file.
     /// The adapter's turn (the stream) is the line the later prompt does not see.

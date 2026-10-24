@@ -593,6 +593,8 @@ impl Adapter for ClaudeCodeAdapter {
         let images = image_blocks(files).await;
         let p = self.running()?;
         let actions = lock(&p.core).input_with_images(input, images);
+        // Before the write: the mirror may read the prompt's record before its echo.
+        p.io.own.sent(p.io.runtime, &input.text);
         tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
         p.io.run(actions).await
     }

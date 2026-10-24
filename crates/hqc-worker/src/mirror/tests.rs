@@ -522,3 +522,198 @@ fn quota_refusal_reads_the_transcript_again_later() {
     let third = labels(&s.mirror.poll(later + QUOTA_RETRY, SystemTime::now()));
     assert_eq!(third, again);
 }
+
+const RESUME: &str =
+    include_str!("../../../hqc-claude-jsonl/fixtures/resume-compact-2.1.308.jsonl");
+const RESUME_PROMPT_STREAM: &str =
+    include_str!("../../../hqc-claude-jsonl/fixtures/stream-resume-prompt-2.1.308.jsonl");
+const RESUME_COMPACT_STREAM: &str =
+    include_str!("../../../hqc-claude-jsonl/fixtures/stream-resume-compact-2.1.308.jsonl");
+
+/// Fixture `resume-compact` in three parts: the first session's turn, the `--resume` turn
+/// `TWO`, the `--resume` with `/compact`.
+fn resume_parts() -> [String; 3] {
+    let lines: Vec<&str> = RESUME.lines().collect();
+    let at = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap();
+    let (two, compact) = (
+        at(r#""content": "Reply with exactly: TWO""#),
+        at(r#""content": "/compact""#),
+    );
+    [
+        lines[..two].join("\n") + "\n",
+        lines[two..compact].join("\n") + "\n",
+        lines[compact..].join("\n") + "\n",
+    ]
+}
+
+/// [`setup`] of `resume-compact` with the first part read; `registry`: Claude Code's
+/// `sessions` folder exists (empty).
+fn resume_setup(registry: bool) -> (Setup, PathBuf) {
+    let mut s = setup("resume-compact", RESUME);
+    let config = s.file.parent().unwrap().parent().unwrap().parent().unwrap();
+    let sessions = config.join("sessions");
+    if registry {
+        std::fs::create_dir_all(&sessions).unwrap();
+    }
+    s.mirror = Mirror::new(
+        config.join("projects"),
+        Arc::new(Store::memory()),
+        s.own.clone(),
+    )
+    .with_registry(sessions.clone(), Box::new(holders::System));
+    s.mirror
+        .set(PathBuf::from("/tmp/hqc-fixture"), true, vec![]);
+    append(&s.file, &resume_parts()[0]);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(
+        labels(&out),
+        ["user:Reply with exactly: ONE", "agent:ONE"],
+        "the session before hqc took it over"
+    );
+    (s, sessions)
+}
+
+/// The adapter's process of the session runs and has read `stream`; `inputs`: what it
+/// wrote to stdin.
+fn run_hqc(s: &Setup, stream: &str, inputs: &[&str]) {
+    s.own.begin(s.runtime, None);
+    for u in stream_uuids(stream) {
+        s.own.add(s.runtime, u);
+    }
+    for i in inputs {
+        s.own.sent(s.runtime, i);
+    }
+}
+
+/// T25, the field case of 2026-10-24 (fixture `resume-compact`, 2.1.308): `/compact` sent
+/// from hqc writes a command record stream-json does not repeat. With the registry and no
+/// holder that is no other writer, however long it stays unknown: the record goes out with
+/// `held_by: null` (the hub does not lock on it). A holder appearing then is reported, and
+/// that releases the session.
+#[test]
+fn registry_unknown_record_without_holder_keeps_the_session() {
+    let (mut s, sessions) = resume_setup(true);
+    run_hqc(&s, RESUME_PROMPT_STREAM, &[]);
+    append(&s.file, &resume_parts()[1]);
+    let t0 = Instant::now();
+    assert!(s.mirror.poll(t0, SystemTime::now()).is_empty(), "own turn");
+    s.own.end(s.runtime, None);
+
+    // `/compact` from hqc; the input's text is not known here (as with an older adapter).
+    run_hqc(&s, RESUME_COMPACT_STREAM, &[]);
+    append(&s.file, &resume_parts()[2]);
+    assert!(
+        s.mirror.poll(t0, SystemTime::now()).is_empty(),
+        "held while it may still be ours"
+    );
+    let out = s
+        .mirror
+        .poll(t0 + Duration::from_secs(6), SystemTime::now());
+    assert_eq!(labels(&out).len(), 1, "{:?}", labels(&out));
+    let Output::Event(e) = &out[0] else {
+        panic!("{:?}", labels(&out))
+    };
+    assert!(labels(&out)[0].starts_with("user:<command-name>/compact</command-name>"));
+    assert_eq!(e.held_by, Some(None), "registry data: no holder");
+    assert!(s
+        .mirror
+        .poll(t0 + Duration::from_secs(60), SystemTime::now())
+        .is_empty());
+
+    // VS Code opens the transcript while hqc still runs it: that is the release.
+    let pid = std::process::id();
+    std::fs::write(
+        sessions.join(format!("{pid}.json")),
+        serde_json::json!({"pid": pid, "sessionId": s.runtime, "entrypoint": "claude-vscode",
+            "status": "idle", "updatedAt": 1792779848554u64})
+        .to_string(),
+    )
+    .unwrap();
+    let out = s
+        .mirror
+        .poll(t0 + Duration::from_secs(62), SystemTime::now());
+    assert_eq!(
+        out,
+        [Output::Holder {
+            runtime_session_id: s.runtime,
+            held_by: Some(HeldBy {
+                entrypoint: "claude-vscode".into(),
+                status: "idle".into(),
+            })
+        }]
+    );
+}
+
+/// T25, point 1 of the field case: the prompt of the first input after `--resume` whose
+/// echo did not name the record's uuid (not reproduced on 2.1.308: there the uuids match).
+/// The adapter's input text claims it, with or without the registry; with the registry an
+/// unclaimed one is not another writer either.
+#[test]
+fn resume_prompt_without_its_echo_uuid() {
+    let echo = stream_uuids(RESUME_PROMPT_STREAM)[0];
+    let without_echo: String = RESUME_PROMPT_STREAM
+        .lines()
+        .filter(|l| !l.contains(&echo.to_string()))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    for registry in [false, true] {
+        let (mut s, _) = resume_setup(registry);
+        run_hqc(&s, &without_echo, &["Reply with exactly: TWO"]);
+        append(&s.file, &resume_parts()[1]);
+        let t0 = Instant::now();
+        for later in [0, 6, 60] {
+            let out = s
+                .mirror
+                .poll(t0 + Duration::from_secs(later), SystemTime::now());
+            assert!(out.is_empty(), "registry {registry}, {later} s: {out:?}");
+        }
+        assert!(s.own.is_own(s.runtime, echo));
+
+        // Not even the text: with the registry the prompt goes out, and only that.
+        let (mut s, _) = resume_setup(registry);
+        run_hqc(&s, &without_echo, &[]);
+        append(&s.file, &resume_parts()[1]);
+        assert!(s.mirror.poll(t0, SystemTime::now()).is_empty());
+        let out = s
+            .mirror
+            .poll(t0 + Duration::from_secs(6), SystemTime::now());
+        let want: &[&str] = if registry {
+            &["user:Reply with exactly: TWO"]
+        } else {
+            &["foreign"]
+        };
+        assert_eq!(labels(&out), want, "registry {registry}");
+    }
+}
+
+/// Without the registry (no `sessions` folder) the uuid check stays (SPEC §9.3): the
+/// `/compact` command record the adapter did not report is another writer after the grace
+/// period, unless the adapter's input `/compact` claims it.
+#[test]
+fn no_registry_keeps_the_uuid_check() {
+    for inputs in [&[][..], &["/compact"][..]] {
+        let (mut s, _) = resume_setup(false);
+        for u in stream_uuids(RESUME_PROMPT_STREAM) {
+            s.own.add(s.runtime, u);
+        }
+        append(&s.file, &resume_parts()[1]);
+        let t0 = Instant::now();
+        assert!(s.mirror.poll(t0, SystemTime::now()).is_empty(), "own turn");
+        run_hqc(&s, RESUME_COMPACT_STREAM, inputs);
+        append(&s.file, &resume_parts()[2]);
+        assert!(s.mirror.poll(t0, SystemTime::now()).is_empty());
+        let out = s
+            .mirror
+            .poll(t0 + Duration::from_secs(6), SystemTime::now());
+        if inputs.is_empty() {
+            assert_eq!(
+                out,
+                [Output::ForeignWriter {
+                    runtime_session_id: s.runtime
+                }]
+            );
+        } else {
+            assert!(out.is_empty(), "{:?}", labels(&out));
+        }
+    }
+}

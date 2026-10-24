@@ -1048,7 +1048,9 @@ async fn archive_cancels_and_fails() {
 /// N s", state `error` until the next input. Waiting for an answer does not count.
 #[tokio::test]
 async fn turn_watchdog_closes_a_silent_turn() {
-    let limit = Duration::from_millis(600);
+    // Generous enough for a slow CI runner: REST and WebSocket round trips between the
+    // steps below must stay well under it (it flaked at 600 ms on GitHub Actions).
+    let limit = Duration::from_millis(2500);
     let hub = TestHub::start_timing(hqc_hub::config::Timing {
         expiry_interval: Duration::from_millis(50),
         turn_watchdog: Some(limit),

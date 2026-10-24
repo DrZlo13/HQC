@@ -343,13 +343,17 @@ fn check_worker_request(
     now: chrono::DateTime<Utc>,
 ) -> Result<(), String> {
     if r.request_id.is_empty() || r.request_id.len() > MAX_WORKER_REQUEST_ID {
-        return Err(format!("request_id must be 1..{MAX_WORKER_REQUEST_ID} bytes"));
+        return Err(format!(
+            "request_id must be 1..{MAX_WORKER_REQUEST_ID} bytes"
+        ));
     }
     if r.kind.is_empty() || r.kind.len() > MAX_WORKER_KIND {
         return Err(format!("kind must be 1..{MAX_WORKER_KIND} bytes"));
     }
     if r.description.len() > MAX_WORKER_DESCRIPTION_BYTES {
-        return Err(format!("description is over {MAX_WORKER_DESCRIPTION_BYTES} bytes"));
+        return Err(format!(
+            "description is over {MAX_WORKER_DESCRIPTION_BYTES} bytes"
+        ));
     }
     if r.expires_at <= now {
         return Err("expires_at is in the past".into());

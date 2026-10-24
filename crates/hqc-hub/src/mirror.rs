@@ -130,8 +130,7 @@ pub async fn ingest(
         },
         None => {
             let limits = &app.config.limits;
-            let (today, in_workspace) =
-                db::imported_counts(&app.db, conn.worker_id, ws.id).await?;
+            let (today, in_workspace) = db::imported_counts(&app.db, conn.worker_id, ws.id).await?;
             if today >= limits.mirror_sessions_per_day
                 || in_workspace >= limits.mirror_sessions_per_workspace
             {

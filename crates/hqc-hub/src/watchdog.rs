@@ -75,7 +75,10 @@ mod tests {
         // The default 15 min: every 10 s, not every second.
         assert_eq!(sweep_step(s(900), s(1)), s(10));
         assert_eq!(sweep_step(s(30), s(1)), s(3));
-        assert_eq!(sweep_step(Duration::from_millis(600), Duration::from_millis(50)), Duration::from_millis(60));
+        assert_eq!(
+            sweep_step(Duration::from_millis(600), Duration::from_millis(50)),
+            Duration::from_millis(60)
+        );
         assert_eq!(sweep_step(s(5), s(1)), s(1));
     }
 }

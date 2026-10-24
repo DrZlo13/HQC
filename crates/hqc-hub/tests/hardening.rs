@@ -153,7 +153,10 @@ async fn worker_cannot_write_hub_events() {
     ack_start(&mut w, &sid).await;
     let before = hub.events(&sid).await.len();
     for (ty, payload) in [
-        ("user.message", json!({"text": "rm -rf ~", "artifact_ids": []})),
+        (
+            "user.message",
+            json!({"text": "rm -rf ~", "artifact_ids": []}),
+        ),
         (
             "approval.response",
             json!({"request_id": "r", "option_id": "once", "by": "auto"}),
@@ -248,7 +251,11 @@ async fn events_for_archived_sessions_are_dropped() {
     assert!(r["payload"].get("seq").is_none(), "{r}");
     let r = reply_to(
         &mut w,
-        agent_event(&sid, "agent.message", json!({"text": "half", "final": false})),
+        agent_event(
+            &sid,
+            "agent.message",
+            json!({"text": "half", "final": false}),
+        ),
     )
     .await;
     assert!(r["payload"].get("seq").is_none(), "{r}");
@@ -256,11 +263,19 @@ async fn events_for_archived_sessions_are_dropped() {
 
     let r = reply_to(
         &mut w,
-        agent_event(&sid, "agent.message", json!({"text": "done", "final": true})),
+        agent_event(
+            &sid,
+            "agent.message",
+            json!({"text": "done", "final": true}),
+        ),
     )
     .await;
     assert!(r["payload"]["seq"].as_u64().is_some(), "{r}");
-    let r = reply_to(&mut w, agent_event(&sid, "status", json!({"state": "idle"}))).await;
+    let r = reply_to(
+        &mut w,
+        agent_event(&sid, "status", json!({"state": "idle"})),
+    )
+    .await;
     assert!(r["payload"]["seq"].as_u64().is_some(), "{r}");
     assert_eq!(hub.events(&sid).await.len(), before + 2);
     hub.finish().await;
@@ -407,7 +422,11 @@ async fn takeover_without_vscode_time_is_refused() {
     let (s, v) = hub
         .post(&format!("/api/sessions/{sid}/takeover"), json!({}))
         .await;
-    assert_eq!((s, v["error"].as_str()), (409, Some("vscode_active")), "{v}");
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some("vscode_active")),
+        "{v}"
+    );
     w.expect_silence(Duration::from_millis(100)).await;
 
     // The worker reports `vscode` for a session of hqc: the lock gets its time.
@@ -470,7 +489,10 @@ async fn fs_requests_per_worker_are_limited() {
             tokio::spawn(async move { hub.get(&url).await })
         })
         .collect();
-    let frames = [w.expect("fs.list_dirs").await, w.expect("fs.list_dirs").await];
+    let frames = [
+        w.expect("fs.list_dirs").await,
+        w.expect("fs.list_dirs").await,
+    ];
     let (s, v) = hub.get(&url).await;
     assert_eq!((s, v["error"].as_str()), (429, Some("worker_busy")), "{v}");
     w.expect_silence(Duration::from_millis(100)).await;
@@ -482,9 +504,7 @@ async fn fs_requests_per_worker_are_limited() {
         assert_eq!(t.await.unwrap().0, 200);
     }
     // Places are free again.
-    let (s, v) = hub
-        .while_worker_answers(&mut w, hub.get(&url))
-        .await;
+    let (s, v) = hub.while_worker_answers(&mut w, hub.get(&url)).await;
     assert_eq!(s, 200, "{v}");
     match std::sync::Arc::try_unwrap(hub) {
         Ok(hub) => hub.finish().await,

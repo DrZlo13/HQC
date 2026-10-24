@@ -109,9 +109,7 @@ pub async fn ingest_worker_event(
             "`{kind_name}` is written by the hub only"
         )));
     }
-    if s.system
-        && !matches!(&ev.kind, EventKind::System { code, .. } if code == WORKER_LOG)
-    {
+    if s.system && !matches!(&ev.kind, EventKind::System { code, .. } if code == WORKER_LOG) {
         tracing::warn!(session_id = %s.id, worker_id = %conn.worker_id, kind = kind_name, "event in the service session refused");
         return Ok(Ingested::Refused(
             "the service session takes only `system worker_log` from the worker".into(),

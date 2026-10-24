@@ -77,7 +77,7 @@ export function App({ app }: { app: AppState }) {
       main = <Enroll app={app} initialCode={route.code} />;
       break;
     default:
-      main = <div class="placeholder">Выберите сессию слева или начните новую</div>;
+      main = <div class="placeholder">Pick a session on the left or start a new one</div>;
   }
   const current = route.name === 'session' ? route.id : undefined;
   // Phone: the list is the first screen, everything else replaces it (T26, Mobile-List).
@@ -95,7 +95,7 @@ export function App({ app }: { app: AppState }) {
   return (
     <div class={`layout route-${route.name}`}>
       <ProjectRail app={app} />
-      <aside class="sidebar" aria-label="Сессии проекта">
+      <aside class="sidebar" aria-label="Project sessions">
         <SessionList app={app} current={current} />
       </aside>
       <main class="main">{main}</main>

@@ -62,13 +62,13 @@ export class ArtifactStore {
         const len = Number(res.headers.get('content-length') ?? NaN);
         if (len > maxBytes) {
           void res.body?.cancel();
-          throw new Error('слишком большое вложение');
+          throw new Error('attachment too large');
         }
         return res.text();
       }
       if (res.status !== 403 && res.status !== 410) throw new Error(`HTTP ${res.status}`);
     }
-    throw new Error('ссылка на вложение не принята');
+    throw new Error('attachment link rejected');
   }
 
   /** The link points to a separate artifact domain (`HQC_ARTIFACT_PUBLIC_BASE`): only there
@@ -82,10 +82,10 @@ export class ArtifactStore {
   }
 }
 
-/** `48.2 КБ`. */
+/** `48.2 KB`. */
 export function formatSize(n: number): string {
-  if (n < 1024) return `${n} Б`;
-  const units = ['КБ', 'МБ', 'ГБ'];
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB'];
   let v = n / 1024;
   let i = 0;
   while (v >= 1024 && i < units.length - 1) {

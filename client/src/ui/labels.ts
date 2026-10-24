@@ -2,20 +2,20 @@ import type { ApprovalCanonical, ApprovalOption, CancelReason, SessionState } fr
 
 /** Button captions by `canonical` (SPEC §10.1); an unknown canonical keeps the agent's label. */
 export const CANONICAL_LABELS: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
-  once: 'Разрешить',
-  session: 'Всегда в этой сессии',
-  always: 'Разрешать всегда',
-  deny: 'Отклонить',
-  deny_always: 'Запрещать всегда',
+  once: 'Allow',
+  session: 'Always in this session',
+  always: 'Always allow',
+  deny: 'Deny',
+  deny_always: 'Always deny',
 };
 
 /** What became of a request after the answer, for its collapsed row. */
 export const CANONICAL_OUTCOMES: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
-  once: 'разрешено',
-  session: 'разрешено до конца сессии',
-  always: 'разрешено всегда',
-  deny: 'отклонено',
-  deny_always: 'запрещено всегда',
+  once: 'allowed',
+  session: 'allowed for the rest of the session',
+  always: 'always allowed',
+  deny: 'denied',
+  deny_always: 'always denied',
 };
 
 export function optionLabel(o: ApprovalOption): string {
@@ -28,23 +28,23 @@ export function isDeny(o: ApprovalOption): boolean {
 
 /** The state of a session in its header pill and in the session list. */
 export const STATE_LABELS: Record<SessionState, string> = {
-  archived: 'В архиве',
-  locked_vscode: 'Ведётся в VS Code',
-  worker_offline: 'Воркер офлайн',
-  waiting: 'Ждёт ответа',
-  error: 'Ошибка',
-  running: 'Работает',
-  queued: 'В очереди',
-  idle: 'Свободна',
-  unknown: 'Неизвестно',
+  archived: 'Archived',
+  locked_vscode: 'In VS Code',
+  worker_offline: 'Worker offline',
+  waiting: 'Waiting for reply',
+  error: 'Error',
+  running: 'Running',
+  queued: 'Queued',
+  idle: 'Idle',
+  unknown: 'Unknown',
 };
 
 /** `system.code` → caption before the text; other codes show the text alone (SPEC §4). */
 export const SYSTEM_CODE_LABELS: Record<string, string> = {
-  policy_denied: 'Запрещено политикой воркера',
-  session_taken_over: 'Подхвачена из VS Code',
-  session_released: 'Возвращена в VS Code',
-  session_forked: 'Развилка',
+  policy_denied: 'Blocked by worker policy',
+  session_taken_over: 'Taken over from VS Code',
+  session_released: 'Returned to VS Code',
+  session_forked: 'Fork',
 };
 
 /** `system.code`s drawn as a warning, with an icon (SPEC §9.3). */
@@ -52,40 +52,36 @@ export const SYSTEM_WARNING_CODES = new Set(['session_forked']);
 
 /** `level` of a worker log line (`system {code: worker_log}`, SPEC §10.2). */
 export const LOG_LEVEL_LABELS: Record<string, string> = {
-  warn: 'предупреждение',
-  error: 'ошибка',
+  warn: 'warning',
+  error: 'error',
 };
 
 /** `tool` of an `approval.request` in a worker's service session: the kind of
  *  `worker.approval.request` (SPEC §10.2). Other values are shown as they are. */
 export const WORKER_REQUEST_LABELS: Record<string, string> = {
-  'workspace.use': 'сессии в новой папке',
-  'workspace.create': 'создание workspace',
-  'workspace.delete': 'удаление workspace',
+  'workspace.use': 'sessions in a new folder',
+  'workspace.create': 'create a workspace',
+  'workspace.delete': 'delete a workspace',
 };
 
 export const CANCEL_LABELS: Record<CancelReason, string> = {
-  timeout: 'истёк срок',
-  stopped: 'ход остановлен',
-  worker_restart: 'воркер перезапущен',
-  archived: 'сессия в архиве',
-  unknown: 'отменён',
+  timeout: 'timed out',
+  stopped: 'turn stopped',
+  worker_restart: 'worker restarted',
+  archived: 'session archived',
+  unknown: 'cancelled',
 };
 
-/** Russian plural: `plural(2, ['команда', 'команды', 'команд'])` → `команды`. */
-export function plural(n: number, forms: [string, string, string]): string {
-  const a = Math.abs(n) % 100;
-  const b = a % 10;
-  if (a > 10 && a < 20) return forms[2];
-  if (b === 1) return forms[0];
-  if (b >= 2 && b <= 4) return forms[1];
-  return forms[2];
+/** A count with an English noun: `count(1, 'command')` → `1 command`, `count(2, 'command')` →
+ *  `2 commands`; `many` for irregular plurals. */
+export function count(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
 }
 
 export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.max(0, Math.round(ms))} мс`;
-  if (ms < 60_000) return `${Math.round(ms / 1000)} с`;
-  return `${Math.floor(ms / 60_000)} мин ${Math.round((ms % 60_000) / 1000)} с`;
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)} s`;
+  return `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`;
 }
 
 /** A running timer: `0:42`, `1:24`, `1:02:03`. */
@@ -101,13 +97,13 @@ export function formatTimer(ms: number): string {
 export function formatClock(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 }
 
 export function formatTime(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 }
 
 /** Whole days between the local dates of `ts` and `now` (0 — today, 1 — yesterday). */
@@ -118,34 +114,38 @@ export function daysAgo(ts: string, now: number): number {
   return Math.round((day(new Date(now)) - day(d)) / 86_400_000);
 }
 
-/** «сегодня в 16:18», «вчера в 9:05», «21 окт в 12:00». */
-export function formatDay(ts: string, now: number): string {
-  const days = daysAgo(ts, now);
-  const at = `в ${formatTime(ts)}`;
-  if (days === 0) return `сегодня ${at}`;
-  if (days === 1) return `вчера ${at}`;
-  const d = new Date(ts);
-  return `${d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }).replace('.', '')} ${at}`;
+/** A month and a day: `Oct 21`. */
+function shortDate(ts: string): string {
+  return new Date(ts).toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
 }
 
-/** When a session was last active, short: «сейчас», «4 мин», «16:18», «вчера», «21 окт». */
+/** "today at 16:18", "yesterday at 09:05", "Oct 21 at 12:00". */
+export function formatDay(ts: string, now: number): string {
+  const days = daysAgo(ts, now);
+  const at = `at ${formatTime(ts)}`;
+  if (days === 0) return `today ${at}`;
+  if (days === 1) return `yesterday ${at}`;
+  return `${shortDate(ts)} ${at}`;
+}
+
+/** When a session was last active, short: "now", "4 min", "16:18", "yesterday", "Oct 21". */
 export function formatWhen(ts: string, now: number): string {
   const t = Date.parse(ts);
   if (Number.isNaN(t)) return '';
   const min = Math.floor((now - t) / 60_000);
-  if (min < 1) return 'сейчас';
-  if (min < 60) return `${min} мин`;
+  if (min < 1) return 'now';
+  if (min < 60) return `${min} min`;
   const days = daysAgo(ts, now);
   if (days === 0) return formatTime(ts);
-  if (days === 1) return 'вчера';
-  return new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }).replace('.', '');
+  if (days === 1) return 'yesterday';
+  return shortDate(ts);
 }
 
-/** Token counts: `555`, `14,4k`, `1,2M`. */
+/** Token counts: `555`, `14.4k`, `1.2M`. */
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   const [v, unit] = n < 1_000_000 ? [n / 1000, 'k'] : [n / 1_000_000, 'M'];
-  return `${v.toFixed(v < 10 ? 1 : 0).replace('.', ',').replace(/,0$/, '')}${unit}`;
+  return `${v.toFixed(v < 10 ? 1 : 0).replace(/\.0$/, '')}${unit}`;
 }
 
 /** Cost in dollars: `$0.07` (from a cent up; below it three digits), `precise`: always three,

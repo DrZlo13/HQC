@@ -5,7 +5,7 @@ import { IconPlus, IconSettings } from './icons';
 import { newProject, projectName } from './SessionList';
 import { projectInitials } from './sessions';
 
-/** The project rail of a desktop (T26): letter icons with a «ждёт вас» badge, «+ проект»,
+/** The project rail of a desktop (T26): letter icons with a "needs you" badge, "+ project",
  *  settings and who is signed in. */
 export function ProjectRail({ app }: { app: AppState }) {
   useSubscription((fn) => app.onChange(fn), [app]);
@@ -13,7 +13,7 @@ export function ProjectRail({ app }: { app: AppState }) {
   const current = app.currentProjectId;
   const email = app.me?.email ?? '';
   return (
-    <nav class="rail" aria-label="Проекты">
+    <nav class="rail" aria-label="Projects">
       <a class="rail-logo" href="#/" title="hqc">
         hqc
       </a>
@@ -33,7 +33,7 @@ export function ProjectRail({ app }: { app: AppState }) {
               {projectInitials(name, p.is_personal)}
             </a>
             {waiting > 0 && (
-              <span class="rail-badge" aria-label={`ждёт вас: ${waiting}`}>
+              <span class="rail-badge" aria-label={`needs you: ${waiting}`}>
                 {waiting > 99 ? '99+' : waiting}
               </span>
             )}
@@ -43,15 +43,15 @@ export function ProjectRail({ app }: { app: AppState }) {
       <button
         type="button"
         class="rail-btn rail-new"
-        aria-label="Новый проект"
-        title={error ?? 'Новый проект'}
+        aria-label="New project"
+        title={error ?? 'New project'}
         disabled={!app.me}
         onClick={() => void newProject(app, setError)}
       >
         <IconPlus size={18} />
       </button>
       <div class="spacer" />
-      <a class="rail-btn" href="#/settings" aria-label="Настройки" title="Настройки">
+      <a class="rail-btn" href="#/settings" aria-label="Settings" title="Settings">
         <IconSettings size={18} />
       </a>
       {email && (

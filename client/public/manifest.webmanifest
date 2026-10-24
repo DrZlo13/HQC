@@ -1,8 +1,8 @@
 {
   "name": "hqc",
   "short_name": "hqc",
-  "description": "Чат с агентами на ваших машинах",
-  "lang": "ru",
+  "description": "Chat with agents on your machines",
+  "lang": "en",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

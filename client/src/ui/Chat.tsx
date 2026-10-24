@@ -40,7 +40,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
   const system = info?.system ?? false;
   const t = chat.timeline;
 
-  // The folder of the session, for the header and the requests' «вне рабочей папки».
+  // The folder of the session, for the header and the requests' "outside the working folder".
   useEffect(() => {
     if (info && !system && !app.workspaces.has(info.project_id)) app.loadWorkspaces(info.project_id).catch(() => {});
   }, [app, info?.project_id, system]);
@@ -86,7 +86,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
         .then((url) => (w ? (w.location.href = url) : window.open(url, '_blank')))
         .catch((e: Error) => {
           w?.close();
-          setNotice(`Вложение недоступно: ${e.message}`);
+          setNotice(`Attachment unavailable: ${e.message}`);
         });
     },
   };
@@ -99,7 +99,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
   const locked = state === 'locked_vscode';
   // SPEC §9.3: read-only while VS Code has it. Open there right now (`held_by`): it has to be
   // closed there first, the hub refuses takeover (`409 vscode_open`). Written from there
-  // recently but not held (or a worker without the registry): «Забрать сюда», which the hub
+  // recently but not held (or a worker without the registry): "Take over here", which the hub
   // may refuse until 30 s of silence (`409 vscode_active`).
   const held = locked && info?.held_by !== undefined;
   const takeover = () =>
@@ -115,8 +115,8 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
         }
         setNotice(
           e instanceof ApiError && e.code === 'vscode_active'
-            ? 'В VS Code ещё пишут в эту сессию; забрать можно через 30 с тишины.'
-            : `Не забрано: ${(e as Error).message}`,
+            ? 'VS Code is still writing to this session; you can take it over after 30 s of quiet.'
+            : `Not taken over: ${(e as Error).message}`,
         );
       },
     );
@@ -127,10 +127,10 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
 
-  const archive = () => act(() => app.api.archive(sessionId).then(() => app.refreshSessions()), 'Не заархивировано');
-  const unarchive = () => act(() => app.api.unarchive(sessionId).then(() => app.refreshSessions()), 'Не возвращено');
+  const archive = () => act(() => app.api.archive(sessionId).then(() => app.refreshSessions()), 'Not archived');
+  const unarchive = () => act(() => app.api.unarchive(sessionId).then(() => app.refreshSessions()), 'Not restored');
   const remove = () => {
-    if (!info || !confirm('Удалить сессию вместе с историей? Это нельзя отменить.')) return;
+    if (!info || !confirm('Delete the session with its history? This cannot be undone.')) return;
     const projectId = info.project_id;
     void act(
       () =>
@@ -138,13 +138,13 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
           app.removeSession(sessionId);
           location.hash = `#/p/${projectId}`;
         }),
-      'Не удалено',
+      'Not deleted',
     );
   };
-  const stop = () => act(() => chat.stop(), 'Не остановлено');
+  const stop = () => act(() => chat.stop(), 'Not stopped');
   const { model, cost } = t.usageTotals();
   const pill = <StatePill state={state} timeline={t} />;
-  const conn = app.conn !== 'open' && <span class="conn-lost">нет связи</span>;
+  const conn = app.conn !== 'open' && <span class="conn-lost">offline</span>;
 
   const disabled = state === 'archived' || locked;
   const sheet = sheetRequest && firstApproval?.type === 'approval.request' ? firstApproval : undefined;
@@ -168,15 +168,15 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
     >
       <header class="chat-head">
         {phone && (
-          <a class="icon-btn icon-btn-round back" href={info ? `#/p/${info.project_id}` : '#/'} aria-label="Назад к сессиям">
+          <a class="icon-btn icon-btn-round back" href={info ? `#/p/${info.project_id}` : '#/'} aria-label="Back to sessions">
             <IconBack />
           </a>
         )}
         <div class="chat-head-main">
-          <h1 class="chat-title">{info?.title || 'Сессия'}</h1>
+          <h1 class="chat-title">{info?.title || 'Session'}</h1>
           <div class="chat-meta">
             {pill}
-            {system && <span class="chat-system-note">служебная сессия воркера</span>}
+            {system && <span class="chat-system-note">the worker's service session</span>}
             {phone ? (
               <span class="chat-where mono">{[worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
             ) : (
@@ -187,7 +187,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
                     <span class="sep">/</span>
                     <span class="chat-path">
                       <span class="mono">{homePath(path)}</span>
-                      <CopyButton text={path} label="Скопировать путь" />
+                      <CopyButton text={path} label="Copy path" />
                     </span>
                   </>
                 )}
@@ -202,7 +202,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
                 {cost !== undefined && (
                   <>
                     <span class="sep">/</span>
-                    <span class="chat-cost">{formatCost(cost)} за сессию</span>
+                    <span class="chat-cost">{formatCost(cost)} this session</span>
                   </>
                 )}
                 {locked && (
@@ -223,23 +223,23 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
             aria-pressed={requestsOnly}
             onClick={() => setRequestsOnly(!requestsOnly)}
           >
-            Только запросы
+            Requests only
           </button>
         )}
         {showRetry && !phone && (
-          <button type="button" class="btn btn-small btn-outline btn-retry" onClick={() => act(() => chat.retry(), 'Повтор не удался')}>
-            Повторить
+          <button type="button" class="btn btn-small btn-outline btn-retry" onClick={() => act(() => chat.retry(), 'Retry failed')}>
+            Retry
           </button>
         )}
         {!system && STOPPABLE.has(state) &&
           (phone ? (
-            <button type="button" class="icon-btn icon-btn-round btn-stop" aria-label="Остановить агента" onClick={stop}>
+            <button type="button" class="icon-btn icon-btn-round btn-stop" aria-label="Stop the agent" onClick={stop}>
               <IconStop size={14} />
             </button>
           ) : (
             <button type="button" class="btn btn-small btn-outline btn-stop" onClick={stop}>
               <IconStop />
-              Остановить
+              Stop
             </button>
           ))}
         {!system && info && (
@@ -249,7 +249,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
             path={path}
             model={model}
             cost={cost}
-            onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Повтор не удался') : undefined}
+            onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
             onArchive={archive}
             onUnarchive={unarchive}
             onDelete={remove}
@@ -266,7 +266,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
       >
         <div class="feed">
           <ChatItems items={items} actions={actions} />
-          {requestsOnly && items.length === 0 && <div class="empty">Запросов нет</div>}
+          {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           {!system && <ActivityLine state={state} timeline={t} />}
         </div>
@@ -286,18 +286,18 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
               {held ? (
                 <>
                   <div class="handover-title">
-                    Сессия открыта в {info?.held_by?.entrypoint === 'claude-vscode' ? 'VS Code' : 'Claude Code'}
-                    {worker ? ` на ${worker}` : ''}.
+                    The session is open in {info?.held_by?.entrypoint === 'claude-vscode' ? 'VS Code' : 'Claude Code'}
+                    {worker ? ` on ${worker}` : ''}.
                   </div>
-                  <div class="handover-sub">Закройте её там, чтобы писать отсюда.</div>
+                  <div class="handover-sub">Close it there to write from here.</div>
                 </>
               ) : (
-                <div class="handover-title">Последней сессию вела VS Code{worker ? ` на ${worker}` : ''}.</div>
+                <div class="handover-title">VS Code was the last to run this session{worker ? ` on ${worker}` : ''}.</div>
               )}
             </div>
             {!held && (
               <button type="button" class="btn btn-primary btn-takeover" onClick={() => void takeover()}>
-                Забрать сюда
+                Take over here
               </button>
             )}
           </div>
@@ -338,7 +338,7 @@ function StatePill({ state, timeline }: { state: SessionState; timeline: Timelin
   let label = STATE_LABELS[state];
   if (state === 'waiting') {
     const r = timeline.openRequests()[0];
-    label = r?.type === 'approval.request' ? 'Ждёт разрешения' : 'Ждёт ответа';
+    label = r?.type === 'approval.request' ? 'Waiting for permission' : 'Waiting for reply';
   }
   return (
     <span class={`state pill state-${state}`}>
@@ -348,7 +348,7 @@ function StatePill({ state, timeline }: { state: SessionState; timeline: Timelin
   );
 }
 
-/** «Ещё»: archive, restore and delete; on a phone also the path, model and cost. */
+/** "More": archive, restore and delete; on a phone also the path, model and cost. */
 function MoreMenu({
   info,
   phone,
@@ -365,7 +365,7 @@ function MoreMenu({
   path?: string;
   model?: string;
   cost?: number;
-  /** On a phone «Повторить» lives here, not in the crowded header. */
+  /** On a phone "Retry" lives here, not in the crowded header. */
   onRetry?: () => void;
   onArchive: () => void;
   onUnarchive: () => void;
@@ -408,7 +408,7 @@ function MoreMenu({
       <button
         type="button"
         class={`icon-btn ${phone ? 'icon-btn-round' : ''} btn-more`}
-        aria-label="Ещё"
+        aria-label="More"
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
@@ -422,17 +422,17 @@ function MoreMenu({
               {path && (
                 <div class="menu-info-row">
                   <span class="mono">{homePath(path)}</span>
-                  <CopyButton text={path} label="Скопировать путь" />
+                  <CopyButton text={path} label="Copy path" />
                 </div>
               )}
               {model && <div class="menu-info-row">{modelName(model)}</div>}
-              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} за сессию</div>}
+              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} this session</div>}
             </div>
           )}
-          {onRetry && item('btn-retry', 'Повторить', onRetry)}
-          {!archived && item('btn-archive', 'В архив', onArchive, 'Убрать сессию в архив; агент останавливается')}
-          {archived && item('btn-unarchive', 'Вернуть', onUnarchive)}
-          {archived && item('btn-delete menu-danger', 'Удалить', onDelete)}
+          {onRetry && item('btn-retry', 'Retry', onRetry)}
+          {!archived && item('btn-archive', 'Archive', onArchive, 'Move the session to the archive; the agent stops')}
+          {archived && item('btn-unarchive', 'Restore', onUnarchive)}
+          {archived && item('btn-delete menu-danger', 'Delete', onDelete)}
         </div>
       )}
     </div>
@@ -534,8 +534,8 @@ export function Composer({
     <button
       type="button"
       class="icon-btn btn-attach"
-      aria-label="Приложить файлы"
-      title="Приложить файлы"
+      aria-label="Attach files"
+      title="Attach files"
       disabled={disabled}
       onClick={() => picker.current?.click()}
     >
@@ -543,7 +543,7 @@ export function Composer({
     </button>
   );
   const send = (
-    <button type="submit" class="btn-send" aria-label="Отправить" title="Отправить" disabled={!canSend}>
+    <button type="submit" class="btn-send" aria-label="Send" title="Send" disabled={!canSend}>
       <IconSend />
     </button>
   );
@@ -551,13 +551,13 @@ export function Composer({
     <textarea
       ref={area}
       class="composer-input"
-      aria-label="Сообщение"
+      aria-label="Message"
       aria-autocomplete={commands?.length ? 'list' : undefined}
       aria-expanded={commands?.length ? popup : undefined}
       aria-controls={popup ? 'composer-commands' : undefined}
       aria-activedescendant={popup ? `composer-command-${active}` : undefined}
       rows={phone ? 1 : 2}
-      placeholder={placeholder ?? (disabled ? 'Сессия в архиве' : 'Сообщение')}
+      placeholder={placeholder ?? (disabled ? 'Session archived' : 'Message')}
       disabled={disabled}
       value={text}
       onInput={(e) => edit((e.currentTarget as HTMLTextAreaElement).value)}
@@ -634,7 +634,7 @@ export function Composer({
                     {f.name} <span class="muted">{formatSize(f.file.size)}</span>
                   </span>
                 )}
-                <button type="button" class="composer-file-remove" aria-label={`Убрать ${f.name}`} onClick={() => onRemove(i)}>
+                <button type="button" class="composer-file-remove" aria-label={`Remove ${f.name}`} onClick={() => onRemove(i)}>
                   ×
                 </button>
               </span>
@@ -663,7 +663,7 @@ export function Composer({
             {textarea}
             <div class="composer-row">
               {attach}
-              <span class="composer-hint">{disabled ? '' : 'Enter — отправить, Shift+Enter — новая строка'}</span>
+              <span class="composer-hint">{disabled ? '' : 'Enter to send, Shift+Enter for a new line'}</span>
               {send}
             </div>
           </>

@@ -12,14 +12,14 @@ function addError(e: unknown, app: AppState): { text: string; link?: { href: str
     const c = parseWorkspaceConflict(e.body);
     if (c) {
       const p = app.projects.get(c.existing_project_id);
-      const name = p ? (p.is_personal ? 'Личный' : p.name) : 'другом';
+      const where = p ? `project “${p.is_personal ? 'Personal' : p.name}”` : 'another project';
       return {
-        text: `Эта папка уже в проекте «${name}»: ${c.existing_path}. Папка принадлежит одному проекту, вложенные папки тоже.`,
-        link: { href: `#/p/${c.existing_project_id}/workspaces`, label: 'Открыть проект' },
+        text: `This folder is already in ${where}: ${c.existing_path}. A folder belongs to one project, and so do its subfolders.`,
+        link: { href: `#/p/${c.existing_project_id}/workspaces`, label: 'Open the project' },
       };
     }
     if (e.code === 'worker_offline') {
-      return { text: 'Воркер офлайн: путь проверяет сам воркер, добавить папку можно, когда он подключён.' };
+      return { text: 'Worker offline: the worker checks the path itself, so the folder can be added once it is connected.' };
     }
   }
   return { text: (e as Error).message };
@@ -41,18 +41,18 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
   }, [app, projectId]);
 
   const remove = async (w: Workspace) => {
-    if (!confirm(`Убрать workspace ${w.path} из проекта? Папка на воркере останется.`)) return;
+    if (!confirm(`Remove workspace ${w.path} from the project? The folder on the worker stays.`)) return;
     setError(null);
     try {
       await app.api.deleteWorkspace(w.id);
       await app.workspacesChanged(projectId);
     } catch (e) {
       const busy = e instanceof ApiError && e.code === 'workspace_in_use';
-      setError(busy ? `${e.message}. Сначала архивируйте эти сессии.` : (e as Error).message);
+      setError(busy ? `${e.message}. Archive these sessions first.` : (e as Error).message);
     }
   };
 
-  // «Сессии VS Code» (T21, SPEC §9.2): the worker mirrors the folder's Claude Code sessions.
+  // "VS Code sessions" (T21, SPEC §9.2): the worker mirrors the folder's Claude Code sessions.
   const toggleMirror = async (w: Workspace, on: boolean) => {
     setError(null);
     try {
@@ -69,7 +69,7 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
   // The personal project keeps its name (SPEC §3 Project): no button for it.
   const rename = async () => {
     if (!project) return;
-    const name = prompt('Новое название проекта', project.name);
+    const name = prompt('New project name', project.name);
     if (!name?.trim() || name.trim() === project.name) return;
     setError(null);
     try {
@@ -82,7 +82,7 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
   const deleteProject = async () => {
     if (!project) return;
     const n = [...app.sessions.values()].filter((s) => s.project_id === projectId).length;
-    if (!confirm(`Удалить проект «${project.name}» и его сессии (${n})? Папки на воркерах останутся.`)) return;
+    if (!confirm(`Delete project “${project.name}” and its sessions (${n})? The folders on the workers stay.`)) return;
     try {
       await app.deleteProject(projectId);
       location.hash = '#/';
@@ -91,11 +91,11 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
     }
   };
 
-  const name = project ? (project.is_personal ? 'Личный' : project.name) : '';
+  const name = project ? (project.is_personal ? 'Personal' : project.name) : '';
   return (
     <section class="page workspaces">
       <header class="bar">
-        <a class="back icon-btn" href={`#/p/${projectId}`} aria-label="К проекту">
+        <a class="back icon-btn" href={`#/p/${projectId}`} aria-label="Back to the project">
           <IconBack />
         </a>
         <div class="bar-title">
@@ -105,10 +105,10 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
       </header>
       <div class="page-body">
         <p class="muted">
-          Папки на воркерах, в которых работают сессии проекта. Одна папка принадлежит одному проекту. Удаление убирает
-          только запись: папка на диске остаётся.
+          Folders on workers that the project's sessions work in. A folder belongs to one project. Removing one deletes
+          only the record: the folder on disk stays.
         </p>
-        {list && list.length === 0 && <p class="empty-inline">Пока нет ни одного workspace.</p>}
+        {list && list.length === 0 && <p class="empty-inline">No workspaces yet.</p>}
         {list && list.length > 0 && (
           <ul class="workspace-list">
             {list.map((w) => {
@@ -117,11 +117,11 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
                 <li key={w.id} class="workspace-row">
                   <div class="workspace-main">
                     <b>{workspaceTitle(w, workers ?? undefined)}</b>
-                    {isDefault && <span class="tag">по умолчанию</span>}
+                    {isDefault && <span class="tag">default</span>}
                   </div>
                   <label
                     class="choice mirror-toggle"
-                    title="Показывать в проекте сессии Claude Code этой папки (VS Code, терминал) и подхватывать их"
+                    title="Show this folder's Claude Code sessions (VS Code, terminal) in the project and take them over"
                   >
                     <input
                       type="checkbox"
@@ -129,16 +129,16 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
                       checked={w.mirror_enabled}
                       onChange={(e) => toggleMirror(w, (e.currentTarget as HTMLInputElement).checked)}
                     />
-                    <span>Сессии VS Code</span>
+                    <span>VS Code sessions</span>
                   </label>
                   <div class="row">
                     {!isDefault && (
                       <button type="button" class="btn btn-small btn-make-default" onClick={() => makeDefault(w)}>
-                        Сделать основным
+                        Make default
                       </button>
                     )}
                     <button type="button" class="btn btn-small btn-deny btn-remove-workspace" onClick={() => remove(w)}>
-                      Убрать
+                      Remove
                     </button>
                   </div>
                 </li>
@@ -164,22 +164,22 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
         ) : (
           <div class="row">
             <button type="button" class="btn btn-primary btn-add-workspace" onClick={() => setAdding(true)}>
-              Добавить workspace
+              Add a workspace
             </button>
             <button type="button" class="btn btn-import-claude" onClick={() => setImporting(true)}>
-              Импорт из Claude Code
+              Import from Claude Code
             </button>
           </div>
         )}
         {project && !project.is_personal && (
           <>
-            <h2>Проект</h2>
+            <h2>Project</h2>
             <div class="row">
               <button type="button" class="btn btn-rename-project" onClick={rename}>
-                Переименовать
+                Rename
               </button>
               <button type="button" class="btn btn-deny btn-delete-project" onClick={deleteProject}>
-                Удалить проект
+                Delete project
               </button>
             </div>
           </>
@@ -256,10 +256,10 @@ function ImportFromClaude({
     return (
       <div class="import-claude">
         <p class="muted">
-          Нет ни одного воркера. <a href="#/settings">Зарегистрируйте машину</a>.
+          No workers yet. <a href="#/settings">Enroll a machine</a>.
         </p>
         <button type="button" class="btn btn-small" onClick={onDone}>
-          Отмена
+          Cancel
         </button>
       </div>
     );
@@ -267,23 +267,23 @@ function ImportFromClaude({
   return (
     <div class="import-claude">
       <p class="muted small">
-        Папки, в которых на воркере есть сессии Claude Code (VS Code или терминал). Выбранные станут workspace этого
-        проекта: их сессии появятся здесь с историей, новые записи будут подтягиваться.
+        Folders on the worker that have Claude Code sessions (VS Code or terminal). The picked ones become workspaces of
+        this project: their sessions show up here with their history, and new records keep coming in.
       </p>
       <label class="field">
-        <span class="muted small">Воркер</span>
+        <span class="muted small">Worker</span>
         <select class="input" name="worker" value={worker} onChange={(e) => setWorker((e.target as HTMLSelectElement).value)}>
           {workers.map((w) => (
             <option key={w.id} value={w.id}>
               {w.name}
-              {w.status === 'online' ? '' : ' (офлайн)'}
+              {w.status === 'online' ? '' : ' (offline)'}
             </option>
           ))}
         </select>
       </label>
       {loadError && <div class="error-text">{loadError}</div>}
       {list === null && !loadError && <div class="muted small">…</div>}
-      {list && list.length === 0 && !loadError && <div class="muted small">Сессий Claude Code не найдено</div>}
+      {list && list.length === 0 && !loadError && <div class="muted small">No Claude Code sessions found</div>}
       {list && list.length > 0 && (
         <ul class="candidate-list">
           {list.map((c) => (
@@ -293,7 +293,7 @@ function ImportFromClaude({
                 <span class="candidate-path">{c.path}</span>
                 <span class="muted small">
                   {' '}
-                  · сессий: {c.sessions_count} · {new Date(c.last_active).toLocaleString('ru-RU')}
+                  · sessions: {c.sessions_count} · {new Date(c.last_active).toLocaleString('en-US', { hourCycle: 'h23' })}
                 </span>
               </label>
             </li>
@@ -307,10 +307,10 @@ function ImportFromClaude({
       ))}
       <div class="row">
         <button type="button" class="btn btn-small btn-primary btn-run-import" disabled={busy || picked.size === 0} onClick={run}>
-          Импортировать
+          Import
         </button>
         <button type="button" class="btn btn-small" onClick={onDone}>
-          Отмена
+          Cancel
         </button>
       </div>
     </div>
@@ -379,10 +379,10 @@ function AddWorkspace({
     return (
       <div class="add-workspace">
         <p class="muted">
-          Нет ни одного воркера. <a href="#/settings">Зарегистрируйте машину</a>, чтобы выбрать на ней папку.
+          No workers yet. <a href="#/settings">Enroll a machine</a> to pick a folder on it.
         </p>
         <button type="button" class="btn btn-small" onClick={onDone}>
-          Отмена
+          Cancel
         </button>
       </div>
     );
@@ -390,7 +390,7 @@ function AddWorkspace({
   return (
     <form class="add-workspace" onSubmit={add}>
       <label class="field">
-        <span class="muted small">Воркер</span>
+        <span class="muted small">Worker</span>
         <select
           class="input"
           name="worker"
@@ -403,28 +403,28 @@ function AddWorkspace({
           {workers.map((w) => (
             <option key={w.id} value={w.id}>
               {w.name}
-              {w.status === 'online' ? '' : ' (офлайн)'}
+              {w.status === 'online' ? '' : ' (offline)'}
             </option>
           ))}
         </select>
       </label>
       <div class="dir-browser">
         <div class="dir-path">
-          <span class="muted small">{dir ?? 'Разрешённые корни воркера'}</span>
+          <span class="muted small">{dir ?? "The worker's allowed roots"}</span>
           {dir !== null && (
             <button type="button" class="btn btn-small btn-ghost btn-dir-up" onClick={() => setDir(roots.includes(dir) ? null : parent)}>
-              ↑ Выше
+              ↑ Up
             </button>
           )}
           {dir !== null && (
             <button type="button" class="btn btn-small btn-pick-dir" onClick={() => setPath(dir)}>
-              Выбрать эту папку
+              Pick this folder
             </button>
           )}
         </div>
         {browseError && <div class="error-text">{browseError}</div>}
         {entries === null && !browseError && <div class="muted small">…</div>}
-        {entries && entries.length === 0 && !browseError && <div class="muted small">Подпапок нет</div>}
+        {entries && entries.length === 0 && !browseError && <div class="muted small">No subfolders</div>}
         {entries && entries.length > 0 && (
           <ul class="dir-list">
             {entries.map((d) => (
@@ -438,7 +438,7 @@ function AddWorkspace({
         )}
       </div>
       <label class="field">
-        <span class="muted small">Путь на воркере</span>
+        <span class="muted small">Path on the worker</span>
         <input
           class="input"
           name="path"
@@ -448,7 +448,7 @@ function AddWorkspace({
         />
       </label>
       <label class="field">
-        <span class="muted small">Метка (необязательно)</span>
+        <span class="muted small">Label (optional)</span>
         <input class="input" name="label" value={label} onInput={(e) => setLabel((e.target as HTMLInputElement).value)} />
       </label>
       {error && (
@@ -458,10 +458,10 @@ function AddWorkspace({
       )}
       <div class="row">
         <button type="submit" class="btn btn-small btn-primary" disabled={busy || !worker || !path.trim()}>
-          Добавить
+          Add
         </button>
         <button type="button" class="btn btn-small" onClick={onDone}>
-          Отмена
+          Cancel
         </button>
       </div>
     </form>

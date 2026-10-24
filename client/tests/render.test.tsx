@@ -107,7 +107,7 @@ describe('unknown and invalid events', () => {
     const card = root.querySelector('details.card-unknown')!;
     expect(card).not.toBeNull();
     expect(card.hasAttribute('open')).toBe(false);
-    expect(card.querySelector('summary')!.textContent).toContain('Неизвестное событие');
+    expect(card.querySelector('summary')!.textContent).toContain('Unknown event');
     expect(card.querySelector('summary')!.textContent).toContain('plan.update');
   });
 
@@ -133,7 +133,7 @@ describe('approval.request (T26 card)', () => {
       const b = buttons.find((x) => x.getAttribute('data-option') === o.id)!;
       expect(b.textContent).toContain(CANONICAL_LABELS[o.canonical as keyof typeof CANONICAL_LABELS]);
     }
-    // «Разрешить» first with ⏎, «Отклонить» with Esc.
+    // "Allow" first with ⏎, "Deny" with Esc.
     expect(buttons[0].getAttribute('data-canonical')).toBe('once');
     expect(buttons[0].querySelector('.kbd')!.textContent).toBe('⏎');
     expect(root.querySelector('[data-option="deny"] .kbd')!.textContent).toBe('Esc');
@@ -143,11 +143,11 @@ describe('approval.request (T26 card)', () => {
     const t = new Timeline();
     t.apply(ev('event.approval.request'));
     show(t);
-    expect(root.querySelector('.perm-title')!.textContent).toBe('Агент хочет выполнить команду');
+    expect(root.querySelector('.perm-title')!.textContent).toBe('The agent wants to run a command');
     expect(root.querySelector('.perm-sub')!.textContent).toBe('Bash');
     expect(root.querySelector('.perm-what')!.textContent).toBe('$ cargo test');
     // ts 10:00:00, now 10:30:00.
-    expect(root.querySelector('.perm-timer')!.textContent).toBe('ждёт 30:00');
+    expect(root.querySelector('.perm-timer')!.textContent).toBe('waiting 30:00');
   });
 
   it('explains policy_hint allow and a path outside the workspace, nothing otherwise', () => {
@@ -170,10 +170,10 @@ describe('approval.request (T26 card)', () => {
     expect(cards[0].querySelector('.perm-sub')!.textContent).toBe('Bash · List root directory');
     expect(cards[0].querySelector('.perm-what')!.textContent).toBe('$ ls /');
     expect(cards[0].querySelector('.perm-note')!.textContent).toBe(
-      'Правило воркера разрешает Bash, но Claude Code спросил сам: путь / вне рабочей папки ~/work/hqc.',
+      'A worker rule allows Bash, but Claude Code asked anyway: the path / is outside the working folder ~/work/hqc.',
     );
-    expect(cards[1].querySelector('.perm-note')!.textContent).toBe('Правило воркера разрешает Bash, но Claude Code спросил сам.');
-    expect(cards[2].querySelector('.perm-note')!.textContent).toBe('Путь ~/notes.txt вне рабочей папки ~/work/hqc.');
+    expect(cards[1].querySelector('.perm-note')!.textContent).toBe('A worker rule allows Bash, but Claude Code asked anyway.');
+    expect(cards[2].querySelector('.perm-note')!.textContent).toBe('The path ~/notes.txt is outside the working folder ~/work/hqc.');
     expect(cards[3].querySelector('.perm-note')).toBeNull();
   });
 
@@ -206,9 +206,9 @@ describe('approval.request (T26 card)', () => {
     expect(root.querySelector('.perm-card')).toBeNull();
     const row = root.querySelector('.perm-done-row')!;
     expect(row.textContent).toContain('$ cargo test');
-    expect(row.textContent).toContain('· разрешено до конца сессии');
-    await act(async () => buttonByText('Показать запрос снова')!.click());
-    expect(root.querySelector('.perm-card .outcome')!.textContent).toBe('Ответ: разрешено до конца сессии');
+    expect(row.textContent).toContain('· allowed for the rest of the session');
+    await act(async () => buttonByText('Show the request again')!.click());
+    expect(root.querySelector('.perm-card .outcome')!.textContent).toBe('Answer: allowed for the rest of the session');
     expect(optionButtons()).toHaveLength(0);
   });
 
@@ -218,7 +218,7 @@ describe('approval.request (T26 card)', () => {
     t.apply(ev('event.approval.cancel', withSeq(2)));
     show(t);
     expect(optionButtons()).toHaveLength(0);
-    expect(root.querySelector('.perm-done-row .outcome')!.textContent).toContain('воркер перезапущен');
+    expect(root.querySelector('.perm-done-row .outcome')!.textContent).toContain('worker restarted');
   });
 
   it('shows the error if the hub refuses the answer', async () => {
@@ -265,34 +265,34 @@ describe('approval.request (T26 card)', () => {
     const t = new Timeline();
     t.apply(ev('event.approval.request', withSeq(1)));
     const { actions, draw } = show(t, { hotkeyRequest: 'req-1' });
-    await act(async () => buttonByText('Ответить текстом вместо этого')!.click());
+    await act(async () => buttonByText('Reply with text instead')!.click());
     const area = root.querySelector<HTMLTextAreaElement>('.perm-reply textarea')!;
-    expect(root.querySelector('.perm-reply-hint')!.textContent).toBe('Ответ отклонит cargo test и уйдёт агенту');
+    expect(root.querySelector('.perm-reply-hint')!.textContent).toBe('The reply denies cargo test and goes to the agent');
     // The keys of the card do not fire while typing.
     area.focus();
     await key('Enter');
     expect(actions.approve).not.toHaveBeenCalled();
     await act(() => {
-      area.value = 'Сначала собери, тесты потом';
+      area.value = 'Build first, tests later';
       area.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await act(async () => buttonByText('Отклонить и отправить')!.click());
-    expect(actions.approve).toHaveBeenCalledWith('req-1', 'deny', 'Сначала собери, тесты потом');
+    await act(async () => buttonByText('Deny and send')!.click());
+    expect(actions.approve).toHaveBeenCalledWith('req-1', 'deny', 'Build first, tests later');
 
-    t.apply(ev('event.approval.response.message', (e) => ((e.seq = 2), (e.payload.message = 'Сначала собери, тесты потом'))));
+    t.apply(ev('event.approval.response.message', (e) => ((e.seq = 2), (e.payload.message = 'Build first, tests later'))));
     draw();
-    expect(root.querySelector('.perm-done-row .outcome')!.textContent).toBe('· отклонено, ответ текстом');
+    expect(root.querySelector('.perm-done-row .outcome')!.textContent).toBe('· denied, replied with text');
     const msg = root.querySelector('.msg-user.msg-answer')!;
-    expect(msg.querySelector('.msg-bubble')!.textContent).toBe('Сначала собери, тесты потом');
+    expect(msg.querySelector('.msg-bubble')!.textContent).toBe('Build first, tests later');
   });
 
-  it('«Вернуться к запросу» gives the buttons back', async () => {
+  it('"Back to the request" gives the buttons back', async () => {
     const t = new Timeline();
     t.apply(ev('event.approval.request', withSeq(1)));
     show(t);
-    await act(async () => buttonByText('Ответить текстом вместо этого')!.click());
+    await act(async () => buttonByText('Reply with text instead')!.click());
     expect(optionButtons()).toHaveLength(0);
-    await act(async () => buttonByText('Вернуться к запросу')!.click());
+    await act(async () => buttonByText('Back to the request')!.click());
     expect(optionButtons()).toHaveLength(5);
   });
 
@@ -328,11 +328,11 @@ describe('clarify.request', () => {
     await click('input[value="test"]');
     const text = qs[2].querySelector<HTMLInputElement>('input[type=text]')!;
     await act(() => {
-      text.value = 'нет';
+      text.value = 'no';
       text.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await act(async () => root.querySelector<HTMLButtonElement>('.card-clarify button[type=submit]')!.click());
-    expect(actions.answer).toHaveBeenCalledWith('req-2', { q1: 'Worker', q2: ['clippy', 'test'], q3: 'нет' });
+    expect(actions.answer).toHaveBeenCalledWith('req-2', { q1: 'Worker', q2: ['clippy', 'test'], q3: 'no' });
   });
 
   it('closes after clarify.response', () => {
@@ -379,28 +379,28 @@ describe('tool groups (T26)', () => {
 
   it('captions a group with the interim message before it, cut to one line', async () => {
     const t = new Timeline();
-    t.apply(agentText(1, 'Пересобираю проект.\nЗатем прогоню **тесты**.', false));
+    t.apply(agentText(1, 'Rebuilding the project.\nThen running the **tests**.', false));
     t.apply(call(2, 'a', 'Bash', { command: 'ninja -C build' }));
     t.apply(result(4, 'a'));
     t.apply(call(5, 'b', 'Bash', { command: 'ctest' }));
     t.apply(result(40, 'b'));
-    t.apply(agentText(41, 'Готово.', true));
+    t.apply(agentText(41, 'Done.', true));
     show(t);
     const g = root.querySelector('.tool-group')!;
-    expect(g.querySelector('.tool-caption')!.textContent).toBe('Пересобираю проект. Затем прогоню тесты .');
-    expect(g.querySelector('.tool-stats')!.textContent).toBe('· 2 команды · 38 с');
+    expect(g.querySelector('.tool-caption')!.textContent).toBe('Rebuilding the project. Then running the tests .');
+    expect(g.querySelector('.tool-stats')!.textContent).toBe('· 2 commands · 38 s');
     expect(g.querySelector('.mark-ok')).not.toBeNull();
     // The interim message is the caption, not a message of its own.
     expect(root.querySelectorAll('.msg-agent')).toHaveLength(1);
     await act(async () => g.querySelector<HTMLButtonElement>('.tool-group-head')!.click());
-    expect(g.querySelector('.tool-group-text strong')!.textContent).toBe('тесты');
+    expect(g.querySelector('.tool-group-text strong')!.textContent).toBe('tests');
     const rows = [...g.querySelectorAll('.tool-row summary')].map((s) => s.querySelector('.tool-line')!.textContent);
     expect(rows).toEqual(['ninja -C build', 'ctest']);
   });
 
-  it('without an interim message says «N команд · время»; other tools show their argument', async () => {
+  it('without an interim message says "N commands · time"; other tools show their argument', async () => {
     const t = new Timeline();
-    t.apply(agentText(1, 'Сделано.', true));
+    t.apply(agentText(1, 'Done.', true));
     t.apply(call(2, 'a', 'Read', { file_path: 'Cargo.toml' }));
     t.apply(result(3, 'a'));
     t.apply(call(4, 'b', 'Grep', { pattern: 'TODO' }));
@@ -408,7 +408,7 @@ describe('tool groups (T26)', () => {
     show(t);
     const g = root.querySelector('.tool-group')!;
     expect(g.querySelector('.tool-caption')).toBeNull();
-    expect(g.querySelector('.tool-stats')!.textContent).toBe('2 команды · 3 с');
+    expect(g.querySelector('.tool-stats')!.textContent).toBe('2 commands · 3 s');
     expect(g.classList.contains('tool-error')).toBe(true);
     await act(async () => g.querySelector<HTMLButtonElement>('.tool-group-head')!.click());
     const rows = [...g.querySelectorAll('.tool-row summary')];
@@ -421,13 +421,13 @@ describe('tool groups (T26)', () => {
     const t = new Timeline();
     t.apply(call(1, 'a', 'Bash', { command: 'ls' }));
     t.apply(result(2, 'a'));
-    t.apply(agentText(3, 'Смотрю дальше.', false));
+    t.apply(agentText(3, 'Looking further.', false));
     t.apply(call(4, 'b', 'Bash', { command: 'pwd' }));
     show(t);
     const groups = root.querySelectorAll('.tool-group');
     expect(groups).toHaveLength(2);
     expect(groups[0].querySelector('.tool-caption')).toBeNull();
-    expect(groups[1].querySelector('.tool-caption')!.textContent).toBe('Смотрю дальше.');
+    expect(groups[1].querySelector('.tool-caption')!.textContent).toBe('Looking further.');
     expect(groups[1].classList.contains('tool-running')).toBe(true);
   });
 });
@@ -450,7 +450,7 @@ describe('messages', () => {
     t.failPending('op-9', 'HTTP 502');
     const { actions } = show(t);
     expect(root.querySelector('.msg-failed')!.textContent).toContain('HTTP 502');
-    await act(async () => buttonByText('Ещё раз')!.click());
+    await act(async () => buttonByText('Retry')!.click());
     expect(actions.resend).toHaveBeenCalledWith('op-9');
   });
 
@@ -464,12 +464,12 @@ describe('messages', () => {
 
   it('puts the usage of a turn under its final answer, muted', () => {
     const t = new Timeline();
-    t.apply(agentText(1, 'Все тесты прошли.', true));
+    t.apply(agentText(1, 'All tests passed.', true));
     t.apply(ev('event.status', (e) => ((e.seq = 2), (e.payload = { state: 'idle' }))));
     t.apply(ev('event.usage', withSeq(3)));
     show(t);
     const meta = root.querySelector('.msg-final > .meta')!;
-    expect(meta.querySelector('.usage')!.textContent).toBe(' · 1,2k → 340 токенов · кэш 9k · $0.012');
+    expect(meta.querySelector('.usage')!.textContent).toBe(' · 1.2k → 340 tokens · cache 9k · $0.012');
     expect(root.querySelector('.line-usage')).toBeNull();
   });
 
@@ -518,8 +518,8 @@ describe('messages', () => {
     const lines = [...root.querySelectorAll('.line')].map((l) => l.textContent);
     expect(lines).toHaveLength(2);
     // session_created says when the session began (Main board).
-    expect(lines[0]).toMatch(/^Сессия начата сегодня в \d\d:\d\d$/);
-    expect(lines[1]).toBe('Ошибка · claude exited with code 1');
+    expect(lines[0]).toMatch(/^Session started today at \d\d:\d\d$/);
+    expect(lines[1]).toBe('Error · claude exited with code 1');
     expect(t.events()).toHaveLength(6);
   });
 
@@ -536,7 +536,7 @@ describe('messages', () => {
     );
     show(t);
     const line = root.querySelector('.line-system-policy_denied')!;
-    expect(line.textContent).toContain('Запрещено политикой воркера');
+    expect(line.textContent).toContain('Blocked by worker policy');
     expect(line.textContent).toContain('git push');
   });
 });
@@ -549,13 +549,13 @@ describe('turn indicator (T13, T26): from the session state, no events of its ow
     return root.querySelector('.activity');
   }
 
-  it('running: «Агент работает» with a pulse', () => {
+  it('running: "Agent is working" with a pulse', () => {
     const line = draw('running')!;
-    expect(line.textContent).toBe('Агент работает');
+    expect(line.textContent).toBe('Agent is working');
     expect(line.querySelector('.pulse-dot')).not.toBeNull();
   });
 
-  it('running with the last tool.call unanswered: «Выполняется <команда> <время>»', () => {
+  it('running with the last tool.call unanswered: "Running <command> <time>"', () => {
     const t = new Timeline();
     t.apply(call(1, 'a', 'Read', { file_path: 'a.rs' }));
     t.apply(result(2, 'a'));
@@ -567,18 +567,18 @@ describe('turn indicator (T13, T26): from the session state, no events of its ow
       }),
     );
     const line = draw('running', t)!;
-    expect(line.querySelector('.activity-label')!.textContent).toBe('Выполняется');
+    expect(line.querySelector('.activity-label')!.textContent).toBe('Running');
     expect(line.querySelector('.activity-what')!.textContent).toBe('cd build && ctest');
     expect(line.querySelector('.activity-timer')!.textContent).toBe('1:24');
     t.apply(result(4, 'b'));
     render(null, root);
-    expect(draw('running', t)!.textContent).toBe('Агент работает');
+    expect(draw('running', t)!.textContent).toBe('Agent is working');
   });
 
   it('queued and waiting: their line; waiting with its request on screen: none', () => {
-    expect(draw('queued')!.textContent).toBe('Ввод в очереди');
+    expect(draw('queued')!.textContent).toBe('Input queued');
     render(null, root);
-    expect(draw('waiting')!.textContent).toBe('Ждёт подтверждения');
+    expect(draw('waiting')!.textContent).toBe('Waiting for approval');
     render(null, root);
     const t = new Timeline();
     t.apply(ev('event.approval.request', withSeq(1)));
@@ -625,7 +625,7 @@ describe("worker's service session (T17, SPEC §10.2)", () => {
     const lines = [...root.querySelectorAll('.line-worker-log')];
     expect(lines).toHaveLength(2);
     expect(lines[0].classList.contains('level-warn')).toBe(true);
-    expect(lines[0].querySelector('.log-level')!.textContent).toBe('предупреждение');
+    expect(lines[0].querySelector('.log-level')!.textContent).toBe('warning');
     expect(lines[0].querySelector('.log-time')!.getAttribute('datetime')).toBe('2026-10-22T10:00:07Z');
     expect(lines[0].querySelector('.log-time')!.textContent).toMatch(/^\d\d:\d\d:\d\d$/);
     // Not Markdown: underscores and stars stay.
@@ -633,24 +633,24 @@ describe("worker's service session (T17, SPEC §10.2)", () => {
       'hqc_worker::connection: hub connection lost: closed_by_hub *x*',
     );
     expect(lines[1].classList.contains('level-error')).toBe(true);
-    expect(lines[1].querySelector('.log-level')!.textContent).toBe('ошибка');
+    expect(lines[1].querySelector('.log-level')!.textContent).toBe('error');
   });
 
   it('shows the confirmation of a new folder with once / deny, no text answer, and sends the answer', async () => {
     const t = new Timeline();
     t.apply(workerRequest(1));
     const { actions } = show(t);
-    expect(root.querySelector('.perm-title')!.textContent).toBe('Воркер спрашивает разрешения');
-    expect(root.querySelector('.perm-sub')!.textContent).toBe('сессии в новой папке');
+    expect(root.querySelector('.perm-title')!.textContent).toBe('The worker asks for permission');
+    expect(root.querySelector('.perm-sub')!.textContent).toBe('sessions in a new folder');
     expect(root.querySelector('.perm-what')!.textContent).toBe(raw('worker.worker.approval.request').payload.description);
     const buttons = optionButtons();
     expect(buttons.map((b) => b.childNodes[0].textContent)).toEqual([CANONICAL_LABELS.once, CANONICAL_LABELS.deny]);
-    expect(buttonByText('Ответить текстом вместо этого')).toBeUndefined();
+    expect(buttonByText('Reply with text instead')).toBeUndefined();
     await act(async () => buttons[0].click());
     expect(actions.approve).toHaveBeenCalledWith(raw('worker.worker.approval.request').payload.request_id, 'once');
   });
 
-  it('«только запросы» keeps the request cards only', () => {
+  it('"requests only" keeps the request cards only', () => {
     const t = new Timeline();
     t.apply(log(1, 'warn', 'a'));
     t.apply(workerRequest(2));
@@ -674,9 +674,9 @@ describe('fork of a transcript (T20, SPEC §9.3)', () => {
     show(t);
     const line = root.querySelector('.line-system-session_forked')!;
     expect(line.classList.contains('line-warning')).toBe(true);
-    expect(line.querySelector('.warn-icon')!.getAttribute('aria-label')).toBe('Внимание');
-    expect(line.querySelector('b')!.textContent).toBe('Развилка');
-    expect(line.textContent).toContain('1 ход из hqc не попал в его контекст');
+    expect(line.querySelector('.warn-icon')!.getAttribute('aria-label')).toBe('Warning');
+    expect(line.querySelector('b')!.textContent).toBe('Fork');
+    expect(line.textContent).toContain('1 turn from hqc is not in its context');
     // Other system lines stay plain.
     render(null, root);
     const t2 = new Timeline();

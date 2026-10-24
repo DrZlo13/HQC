@@ -38,5 +38,5 @@ function copyWithTextarea(text: string, doc: Document) {
       sel.addRange(saved);
     }
   }
-  if (!ok) throw new Error('буфер обмена недоступен');
+  if (!ok) throw new Error('clipboard unavailable');
 }

@@ -11,9 +11,9 @@
 // -> tool.call/tool.result (Read) -> tool.call (Bash) -> approval.request, wait for the
 // answer -> approval.response -> tool.result -> agent.delta -> agent.message (final) ->
 // usage -> status idle. A deny answer may carry `message` (a text answer, SPEC §10.1): the
-// final message quotes it. A message containing "вопрос" or "clarify" asks a clarify.request
-// instead of the approval; one containing "markdown" or "разметка" gets MARKDOWN_ANSWER
-// streamed and nothing else.
+// final message quotes it. A message containing "question" or "clarify" asks a clarify.request
+// instead of the approval; one containing "markdown" gets MARKDOWN_ANSWER streamed and
+// nothing else. The Russian words "вопрос" and "разметка" trigger the same.
 //
 // The worker home-mac has its service session (SPEC §10.2, `system: true`): log lines
 // (`system {code: worker_log, level}`) and an open confirmation of a new folder; input there
@@ -29,25 +29,25 @@ import { WebSocketServer } from 'ws';
 const WIRE = join(dirname(fileURLToPath(import.meta.url)), '../../crates/hqc-proto/examples/wire');
 const STATUS = Symbol('status');
 
-/** The answer to a message with "markdown" or "разметка": every element of T11 to look at. */
-export const MARKDOWN_ANSWER = `## Итоги прогона
+/** The answer to a message with "markdown": every element of T11 to look at. */
+export const MARKDOWN_ANSWER = `## Run summary
 
-Проверил **три** крейта, *один* с предупреждениями; подробности в [CI](https://example.com/ci/42).
-Вторая строка того же абзаца, \`cargo test --workspace\` прошёл.
+Checked **three** crates, *one* with warnings; details in [CI](https://example.com/ci/42).
+The second line of the same paragraph, \`cargo test --workspace\` passed.
 
-### Что сделано
+### What was done
 
-1. Обновил парсер
-   - добавил терпимость к новым полям
-   - [x] тесты на фикстуры
-   - [ ] фикстуры для 2.2
-2. Поправил ~~старый~~ вывод ошибок
+1. Updated the parser
+   - made it tolerate new fields
+   - [x] fixture tests
+   - [ ] fixtures for 2.2
+2. Fixed the ~~old~~ error output
 
-| крейт | тестов | статус |
+| crate | tests | status |
 |:------|-------:|:------:|
 | hqc-proto | 42 | ✓ |
 | hqc-hub | 117 | ✓ |
-| hqc-worker | 63 | предупреждения |
+| hqc-worker | 63 | warnings |
 
 \`\`\`rust
 fn main() {
@@ -55,12 +55,12 @@ fn main() {
 }
 \`\`\`
 
-> Цитата: незакрытые блоки кода в потоке не ломают вёрстку.
+> Quote: unclosed code blocks in the stream do not break the layout.
 
 ---
 
-HTML показывается текстом: <img src=x onerror=alert(1)> и <script>alert(1)</script>,
-ссылка [javascript:](javascript:alert(1)) тоже текст, картинка не грузится: ![схема](https://example.com/d.png).
+HTML is shown as text: <img src=x onerror=alert(1)> and <script>alert(1)</script>,
+the link [javascript:](javascript:alert(1)) is text too, the image is not loaded: ![diagram](https://example.com/d.png).
 `;
 
 /** Slash commands of every mock session: part of what Claude Code 2.1.308 lists (T27). */
@@ -275,6 +275,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       workspace_id: where.workspace_id ?? project.default_workspace_id,
       cwd: where.cwd ?? '.',
       title,
+      // Titles may be in Russian: Cyrillic letters stay in the slug.
       slug: title.toLowerCase().replace(/[^a-z0-9а-я]+/gi, '-').replace(/^-|-$/g, '') || 'session',
       archived: false,
       created_at: new Date().toISOString(),
@@ -292,7 +293,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
 
   // Session with a history that shows every card kind from examples/wire.
   {
-    const s = newSession('hqc: прогон тестов', ex['event.user.message'].session_id);
+    const s = newSession('hqc: test run', ex['event.user.message'].session_id);
     const u = store(s, mk(s, 'event.user.message', {}, {
       client_op_id: 'op-1', delivery: 'delivered', delivered_at: new Date().toISOString(),
     }));
@@ -308,8 +309,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     s.read_seq = 3;
   }
   {
-    const s = newSession('Ввод не доставлен');
-    store(s, mk(s, 'event.user.message', { text: 'Собери релиз', artifact_ids: [] }, {
+    const s = newSession('Input not delivered');
+    store(s, mk(s, 'event.user.message', { text: 'Build the release', artifact_ids: [] }, {
       client_op_id: randomUUID(), delivery: 'failed',
     }));
     store(s, mk(s, 'event.system', {
@@ -317,7 +318,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       code: 'agent_start_failed',
     }));
   }
-  newSession('Пустая сессия');
+  newSession('Empty session');
 
   // The service session of home-mac (SPEC §10.2): no workspace, no agent, no input.
   {
@@ -355,7 +356,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       policy_hint: undefined,
     }, { author: { kind: 'system' } }));
     s.open = { kind: 'approval', request_id: req.request_id, event: ev, resolve: () => {} };
-    log('warn', 'пропущено 3');
+    log('warn', 'skipped 3');
   }
 
   // ---- turns -------------------------------------------------------------------------
@@ -398,7 +399,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   }
 
   async function turn(s, input, t) {
-    const askClarify = /вопрос|clarify/i.test(input.payload.text);
+    const askClarify = /question|clarify|вопрос/i.test(input.payload.text);
     status(s, 'running');
     await step(t, 300);
 
@@ -409,7 +410,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       return;
     }
 
-    const intro = 'Сейчас посмотрю на проект и запущу тесты.';
+    const intro = 'Let me look at the project and run the tests.';
     await stream(s, t, intro);
     store(s, mk(s, 'event.agent.message', { text: intro, final: false, in_reply_to: input.event_id }));
 
@@ -429,8 +430,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       const request_id = `req-${randomUUID().slice(0, 8)}`;
       const answer = await request(s, t, 'clarify', mk(s, 'event.clarify.request', { request_id }));
       if (answer.cancel) return;
-      final = `Принято: ${Object.entries(answer.answers)
-        .map(([k, v]) => `${k} = ${Array.isArray(v) ? v.join(', ') : v}`).join('; ') || 'без ответов'}.`;
+      final = `Got it: ${Object.entries(answer.answers)
+        .map(([k, v]) => `${k} = ${Array.isArray(v) ? v.join(', ') : v}`).join('; ') || 'no answers'}.`;
     } else {
       const call_id = `toolu_${randomUUID().slice(0, 8)}`;
       store(s, mk(s, 'event.tool.call', { call_id }));
@@ -446,14 +447,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
           call_id, result_preview: '', error: true, error_text: 'Denied by user', duration_ms: 0,
           artifact_id: undefined,
         }));
-        final = answer.message ? `Хорошо, тесты не запускаю. Вы написали: «${answer.message}».` : 'Хорошо, тесты не запускаю.';
+        final = answer.message ? `OK, not running the tests. You wrote: “${answer.message}”.` : 'OK, not running the tests.';
       } else {
         await step(t, 800);
         store(s, mk(s, 'event.tool.result', {
           call_id, result_preview: 'test result: ok. 42 passed; 0 failed', error: false, duration_ms: 5120,
           error_text: undefined, artifact_id: undefined,
         }));
-        final = 'Все 42 теста прошли.';
+        final = 'All 42 tests passed.';
       }
     }
     await step(t, 200);
@@ -552,7 +553,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (!wsId) throw fail(409, 'no_workspace', 'the project has no workspace; add one first');
     if (!ws || ws.project_id !== pr.id) throw fail(400, 'bad_request', 'workspace_id is not a workspace of this project');
     const n = [...sessions.values()].filter((s) => s.project_id === pr.id).length + 1;
-    const s = newSession(String(body?.title || `Сессия ${n}`), randomUUID(), {
+    const s = newSession(String(body?.title || `Session ${n}`), randomUUID(), {
       project_id: pr.id, workspace_id: ws.id, cwd: String(body?.cwd || '.'),
     });
     return withStatus(201, info(s));
@@ -594,7 +595,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   // The import from Claude Code (SPEC §9.1): what the worker's mirror would send for the
   // folder: one session with its history, driven by VS Code, quiet for a minute.
   function importClaude(w) {
-    const s = newSession(`Из VS Code: ${w.path.split('/').at(-1)}`, randomUUID(), {
+    const s = newSession(`From VS Code: ${w.path.split('/').at(-1)}`, randomUUID(), {
       project_id: w.project_id, workspace_id: w.id,
     });
     const u = store(s, mk(s, 'event.user.message', { text: 'Run echo hqc-vscode', artifact_ids: [] }, {
@@ -606,7 +607,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     pushSummary(s);
     // T20 (SPEC §9.3): one more, open in VS Code right now, whose transcript forked: VS Code
     // continued from its own last record after hqc's turn.
-    const o = newSession(`Открыта в VS Code: ${w.path.split('/').at(-1)}`, randomUUID(), {
+    const o = newSession(`Open in VS Code: ${w.path.split('/').at(-1)}`, randomUUID(), {
       project_id: w.project_id, workspace_id: w.id,
     });
     const p = store(o, mk(o, 'event.user.message', { text: 'Reply with exactly: ONE', artifact_ids: [] }, {
@@ -615,7 +616,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     store(o, mk(o, 'event.agent.message', { text: 'ONE', final: true, in_reply_to: p.event_id }));
     store(o, mk(o, 'event.system', {
       code: 'session_forked',
-      text: 'VS Code продолжил с более ранней точки: 1 ход из hqc не попал в его контекст',
+      text: 'VS Code continued from an earlier point: 1 turn from hqc is not in its context',
       at_uuid: randomUUID(), branch_from: 'vscode', orphaned_turns: 1,
     }));
     store(o, mk(o, 'event.user.message', { text: 'Reply with exactly: VSCODE-TURN', artifact_ids: [] }, {
@@ -656,7 +657,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('POST', '/api/sessions/:id/takeover', (p) => {
     const s = sessionOr404(p.id);
     if (s.held_by) {
-      throw fail(409, 'vscode_open', 'сессия открыта в VS Code: закройте её там и подхватите снова', {
+      throw fail(409, 'vscode_open', 'the session is open in VS Code: close it there and take it over again', {
         held_by: s.held_by,
       });
     }
@@ -666,7 +667,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     s.locked = undefined;
     store(s, mk(s, 'event.system', {
       code: 'session_taken_over',
-      text: 'Сессию подхватил hqc. Если она открыта в VS Code, её контекст там устарел.',
+      text: 'hqc took over the session. If it is open in VS Code, its context there is stale: reopen the session in VS Code after you switch back.',
     }));
     return info(s);
   });

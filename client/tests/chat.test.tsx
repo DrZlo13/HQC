@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // T26: the chat screen — the header (state pill, worker, path, model and cost of the
-// session, «Остановить», «Ещё»), the two handover banners in place of the composer, the
+// session, "Stop", "More"), the two handover banners in place of the composer, the
 // request's hotkeys through the chat, and the phone's bottom sheet with the text answer.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -82,7 +82,7 @@ function setup(
     workspace_id: 'w1',
     worker_id: 'wk1',
     cwd: '.',
-    title: 'тест 12',
+    title: 'test 12',
     slug: 'test-12',
     state,
     queue_len: 0,
@@ -115,34 +115,34 @@ const $ = (sel: string) => root.querySelector<HTMLElement>(sel);
 const button = (text: string) => [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === text);
 
 describe('header', () => {
-  it('shows the state, worker, path, model and cost of the session, «Остановить» and «Ещё»', async () => {
+  it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
     const { app } = setup('waiting');
     await mount(app);
-    expect($('.chat-title')!.textContent).toBe('тест 12');
-    expect($('.pill')!.textContent).toBe('Ждёт разрешения');
+    expect($('.chat-title')!.textContent).toBe('test 12');
+    expect($('.pill')!.textContent).toBe('Waiting for permission');
     expect($('.pill .pulse')).toBeNull();
     const meta = $('.chat-meta')!.textContent!;
     expect(meta).toContain('drzlo-mac');
     expect($('.chat-path .mono')!.textContent).toBe('~/work/hqc');
-    expect($('.chat-path button')!.getAttribute('aria-label')).toBe('Скопировать путь');
+    expect($('.chat-path button')!.getAttribute('aria-label')).toBe('Copy path');
     // The model of the last usage that names one, the sum of cost_usd.
     expect($('.chat-model')!.textContent).toBe('Opus 5.5');
-    expect($('.chat-cost')!.textContent).toBe('$0.07 за сессию');
-    expect(button('Остановить')).toBeDefined();
+    expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
+    expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['В архив']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Archive']);
   });
 
-  it('pulses while a turn is on, no «Остановить» when idle', async () => {
+  it('pulses while a turn is on, no "Stop" when idle', async () => {
     let { app } = setup('running');
     await mount(app);
-    expect($('.pill')!.textContent).toBe('Работает');
+    expect($('.pill')!.textContent).toBe('Running');
     expect($('.pill .pulse')).not.toBeNull();
     render(null, root);
     ({ app } = setup('idle', { history: HISTORY.slice(0, 3) }));
     await mount(app);
-    expect($('.pill')!.textContent).toBe('Свободна');
-    expect(button('Остановить')).toBeUndefined();
+    expect($('.pill')!.textContent).toBe('Idle');
+    expect(button('Stop')).toBeUndefined();
   });
 });
 
@@ -153,9 +153,9 @@ describe('the request card through the chat', () => {
     expect($('.tool-group')).toBeNull();
     expect($('.perm-what')!.textContent).toBe('$ ls /');
     expect($('.perm-note')!.textContent).toBe(
-      'Правило воркера разрешает Bash, но Claude Code спросил сам: путь / вне рабочей папки ~/work/hqc.',
+      'A worker rule allows Bash, but Claude Code asked anyway: the path / is outside the working folder ~/work/hqc.',
     );
-    expect($('.perm-timer')!.textContent).toMatch(/^ждёт 0:4\d$/);
+    expect($('.perm-timer')!.textContent).toMatch(/^waiting 0:4\d$/);
     await act(async () => void document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
     expect(api.approve.mock.calls[0].slice(0, 3)).toEqual(['s1', 'req-1', 'allow']);
   });
@@ -163,7 +163,7 @@ describe('the request card through the chat', () => {
 
 describe('the focus when a request arrives', () => {
   it('leaves an empty field so Enter reaches the card, keeps a field with text', async () => {
-    for (const [text, blurred] of [['', true], ['пишу ответ', false]] as const) {
+    for (const [text, blurred] of [['', true], ['typing a reply', false]] as const) {
       const field = document.createElement('textarea');
       field.value = text;
       document.body.appendChild(field);
@@ -182,21 +182,21 @@ describe('handover banners instead of the composer (SPEC §9.3)', () => {
   it('open in VS Code right now: close it there, no button', async () => {
     const { app } = setup('locked_vscode', { held_by: { entrypoint: 'claude-vscode', status: 'idle' }, history: HISTORY.slice(0, 3) });
     await mount(app);
-    expect($('.handover.handover-held .handover-title')!.textContent).toBe('Сессия открыта в VS Code на drzlo-mac.');
-    expect($('.handover-sub')!.textContent).toBe('Закройте её там, чтобы писать отсюда.');
-    expect(button('Забрать сюда')).toBeUndefined();
+    expect($('.handover.handover-held .handover-title')!.textContent).toBe('The session is open in VS Code on drzlo-mac.');
+    expect($('.handover-sub')!.textContent).toBe('Close it there to write from here.');
+    expect(button('Take over here')).toBeUndefined();
     expect($('.composer')).toBeNull();
-    expect(root.textContent).not.toContain('только для чтения');
+    expect(root.textContent).not.toContain('read-only');
   });
 
-  it('last driven by VS Code, nobody holds it: «Забрать сюда»', async () => {
+  it('last driven by VS Code, nobody holds it: "Take over here"', async () => {
     const { api, app } = setup('locked_vscode', { history: HISTORY.slice(0, 3) });
     await mount(app);
     expect($('.handover')!.classList.contains('handover-held')).toBe(false);
-    expect($('.handover-title')!.textContent).toBe('Последней сессию вела VS Code на drzlo-mac.');
+    expect($('.handover-title')!.textContent).toBe('VS Code was the last to run this session on drzlo-mac.');
     expect($('.handover-sub')).toBeNull();
     expect($('.composer')).toBeNull();
-    await act(async () => button('Забрать сюда')!.click());
+    await act(async () => button('Take over here')!.click());
     expect(api.takeover).toHaveBeenCalledWith('s1');
   });
 
@@ -214,24 +214,24 @@ describe('phone (Mobile-Session)', () => {
     await mount(app, true);
     expect($('.feed .perm')).toBeNull();
     const sheet = $('.sheet-wrap .perm-sheet')!;
-    expect(sheet.querySelector('.perm-title')!.textContent).toBe('Выполнить команду?');
+    expect(sheet.querySelector('.perm-title')!.textContent).toBe('Run the command?');
     expect($('.composer')).toBeNull();
-    expect($('a[aria-label="Назад к сессиям"]')!.getAttribute('href')).toBe('#/p/p1');
-    expect($('button[aria-label="Остановить агента"]')).not.toBeNull();
-    // «Ещё» on a phone also has the path, the model and the cost.
+    expect($('a[aria-label="Back to sessions"]')!.getAttribute('href')).toBe('#/p/p1');
+    expect($('button[aria-label="Stop the agent"]')).not.toBeNull();
+    // "More" on a phone also has the path, the model and the cost.
     await act(async () => $('.btn-more')!.click());
     expect($('.menu-info')!.textContent).toContain('~/work/hqc');
     expect($('.menu-info')!.textContent).toContain('Opus 5.5');
     await act(async () => $('.btn-more')!.click());
 
-    await act(async () => button('Ответить текстом вместо этого')!.click());
+    await act(async () => button('Reply with text instead')!.click());
     const area = sheet.querySelector<HTMLTextAreaElement>('textarea')!;
     await act(() => {
-      area.value = 'Не трогай корень';
+      area.value = 'Leave the root alone';
       area.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    await act(async () => button('Отклонить и отправить')!.click());
-    expect(api.approve).toHaveBeenCalledWith('s1', 'req-1', 'deny', 'Не трогай корень');
+    await act(async () => button('Deny and send')!.click());
+    expect(api.approve).toHaveBeenCalledWith('s1', 'req-1', 'deny', 'Leave the root alone');
   });
 });
 
@@ -247,7 +247,7 @@ describe('cost (T27)', () => {
     ];
     const { app } = setup('idle', { history, commands: [] });
     await mount(app);
-    expect($('.chat-cost')!.textContent).toBe('$44.40 за сессию');
+    expect($('.chat-cost')!.textContent).toBe('$44.40 this session');
     const lines = [...root.querySelectorAll('.usage')].map((l) => l.textContent!);
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('$0.400');
@@ -257,7 +257,7 @@ describe('cost (T27)', () => {
   it('sums cost_usd when no usage has the session total (older events)', async () => {
     const { app } = setup('idle', { commands: [] });
     await mount(app);
-    expect($('.chat-cost')!.textContent).toBe('$0.07 за сессию');
+    expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
   });
 });
 

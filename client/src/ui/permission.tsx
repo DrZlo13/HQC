@@ -1,7 +1,7 @@
 // The permission request (T26, SPEC §10.1): one card instead of a tool row and a panel —
 // what the agent wants to run, how long it waits, why Claude Code asked, buttons by
 // `options[]`, Enter and Esc while the card is on screen, and a text answer instead of the
-// call. Answered or cancelled, it folds into a row «$ ls / · разрешено». On a phone the open
+// call. Answered or cancelled, it folds into a row "$ ls / · allowed". On a phone the open
 // request is a bottom sheet in place of the composer.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
@@ -21,14 +21,14 @@ import {
 } from './labels';
 
 const TITLES: Record<string, string> = {
-  Bash: 'Агент хочет выполнить команду',
-  Edit: 'Агент хочет изменить файл',
-  MultiEdit: 'Агент хочет изменить файл',
-  Write: 'Агент хочет записать файл',
-  NotebookEdit: 'Агент хочет изменить блокнот',
-  Read: 'Агент хочет прочитать файл',
-  WebFetch: 'Агент хочет открыть страницу',
-  WebSearch: 'Агент хочет поискать в интернете',
+  Bash: 'The agent wants to run a command',
+  Edit: 'The agent wants to edit a file',
+  MultiEdit: 'The agent wants to edit a file',
+  Write: 'The agent wants to write a file',
+  NotebookEdit: 'The agent wants to edit a notebook',
+  Read: 'The agent wants to read a file',
+  WebFetch: 'The agent wants to open a page',
+  WebSearch: 'The agent wants to search the web',
 };
 
 /** What a request is about: the command or path, the CLI's description, the paths touched. */
@@ -64,33 +64,33 @@ function noteText(event: EventOf<'approval.request'>, outside: string | undefine
   const where = (cap: string) =>
     outside && (
       <>
-        {cap} <code>{outside}</code> вне рабочей папки <code>{homePath(root!)}</code>
+        {cap} <code>{outside}</code> is outside the working folder <code>{homePath(root!)}</code>
       </>
     );
   if (p.policy_hint === 'allow') {
     return (
       <>
-        Правило воркера разрешает {p.tool}, но Claude Code спросил сам{outside ? <>: {where('путь')}.</> : '.'}
+        A worker rule allows {p.tool}, but Claude Code asked anyway{outside ? <>: {where('the path')}.</> : '.'}
       </>
     );
   }
-  if (p.policy_hint === 'deny') return <>Правило воркера запрещает {p.tool}.</>;
-  if (p.policy_hint === 'unknown') return <>На этот вызов есть правило в политике воркера.</>;
-  if (outside) return <>{where('Путь')}.</>;
+  if (p.policy_hint === 'deny') return <>A worker rule denies {p.tool}.</>;
+  if (p.policy_hint === 'unknown') return <>The worker policy has a rule for this call.</>;
+  if (outside) return <>{where('The path')}.</>;
   return null;
 }
 
 /** An answered or cancelled request: what became of it. */
 export function outcomeText(event: EventOf<'approval.request'>, actions: ChatActions): { ok: boolean; text: string } | null {
   const fate = actions.timeline.requestFate(event.payload.request_id);
-  if (fate.cancel) return { ok: false, text: `отменён: ${CANCEL_LABELS[fate.cancel.reason]}` };
+  if (fate.cancel) return { ok: false, text: `cancelled: ${CANCEL_LABELS[fate.cancel.reason]}` };
   const r = fate.response;
   if (!r || !('option_id' in r)) return null;
   const opt = event.payload.options.find((o) => o.id === r.option_id);
   const deny = opt ? isDeny(opt) : false;
   let text = opt ? (opt.canonical === 'unknown' ? opt.label : CANONICAL_OUTCOMES[opt.canonical]) : r.option_id;
-  if (r.message) text = 'отклонено, ответ текстом';
-  else if (r.by === 'auto') text = `${text} автоматически`;
+  if (r.message) text = 'denied, replied with text';
+  else if (r.by === 'auto') text = `${text} automatically`;
   return { ok: !deny, text };
 }
 
@@ -121,7 +121,7 @@ export function PermissionBlock({
         <span class="perm-done-outcome outcome">· {outcome.text}</span>
         <span class="spacer" />
         <button type="button" class="btn-link" aria-expanded={again} onClick={() => setAgain(!again)}>
-          {again ? 'Скрыть запрос' : 'Показать запрос снова'}
+          {again ? 'Hide the request' : 'Show the request again'}
         </button>
       </div>
       {again && <PermissionCard event={event} call={call} actions={actions} />}
@@ -202,10 +202,10 @@ function PermissionCard({
   }, [hotkeys, p.request_id]);
 
   const title = v.worker
-    ? 'Воркер спрашивает разрешения'
+    ? 'The worker asks for permission'
     : sheet && p.tool === 'Bash'
-      ? 'Выполнить команду?'
-      : TITLES[p.tool] ?? `Агент хочет использовать ${p.tool}`;
+      ? 'Run the command?'
+      : TITLES[p.tool] ?? `The agent wants to use ${p.tool}`;
   const subtitle = v.worker
     ? WORKER_REQUEST_LABELS[p.tool] ?? p.tool
     : [p.tool, v.description].filter(Boolean).join(' · ');
@@ -219,7 +219,7 @@ function PermissionCard({
     <section
       ref={card}
       class={`perm ${sheet ? 'perm-sheet' : 'perm-card'} ${live ? 'is-open' : 'is-closed'}`}
-      aria-label="Запрос разрешения"
+      aria-label="Permission request"
       data-request={p.request_id}
     >
       <div class="perm-head">
@@ -231,8 +231,8 @@ function PermissionCard({
           <div class="perm-sub">{subtitle}</div>
         </div>
         {live && (
-          <span class="perm-timer" title="Сколько ждёт ответа">
-            {sheet ? '' : 'ждёт '}
+          <span class="perm-timer" title="How long it has been waiting">
+            {sheet ? '' : 'waiting '}
             {formatTimer(now - Date.parse(event.ts))}
           </span>
         )}
@@ -301,7 +301,7 @@ function PermissionCard({
       )}
       {live && deny && !v.worker && !replying && (
         <button type="button" class="btn-link perm-reply-open" onClick={() => setReplying(true)}>
-          Ответить текстом вместо этого
+          Reply with text instead
         </button>
       )}
       {live && replying && (
@@ -313,13 +313,13 @@ function PermissionCard({
           }}
         >
           <div class="perm-reply-hint">
-            Ответ отклонит {v.shell ? <code>{v.what}</code> : 'запрос'} и уйдёт агенту
+            The reply denies {v.shell ? <code>{v.what}</code> : 'the request'} and goes to the agent
           </div>
           <textarea
             class="input"
             rows={2}
-            placeholder="Что сделать вместо этого?"
-            aria-label="Ответ агенту"
+            placeholder="What to do instead?"
+            aria-label="Reply to the agent"
             value={reply}
             disabled={busy}
             ref={field}
@@ -336,16 +336,16 @@ function PermissionCard({
           />
           <div class="perm-reply-actions">
             <button type="submit" class="btn btn-primary" disabled={busy || !reply.trim()}>
-              Отклонить и отправить
+              Deny and send
             </button>
             <button type="button" class="btn btn-ghost" onClick={() => setReplying(false)}>
-              Вернуться к запросу
+              Back to the request
             </button>
           </div>
         </form>
       )}
-      {open && expired && <div class="perm-status muted">Срок ответа истёк</div>}
-      {outcome && <div class="perm-status outcome">Ответ: {outcome.text}</div>}
+      {open && expired && <div class="perm-status muted">The time to answer has run out</div>}
+      {outcome && <div class="perm-status outcome">Answer: {outcome.text}</div>}
       {error && <div class="error-text">{error}</div>}
     </section>
   );

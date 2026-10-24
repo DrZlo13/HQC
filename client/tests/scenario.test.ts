@@ -53,7 +53,7 @@ describe('mock scenario', () => {
   it('runs a turn with an approval from open to final answer', async () => {
     const me = await api.me();
     const list = await api.sessions(me.personal_project_id);
-    const target = list.find((s) => s.title === 'Пустая сессия')!;
+    const target = list.find((s) => s.title === 'Empty session')!;
     expect(target.state).toBe('idle');
 
     const chat = new ChatSession(api, socket, target.id);
@@ -66,7 +66,7 @@ describe('mock scenario', () => {
     chat.timeline.onChange(() => {
       if (chat.timeline.streaming) deltas.push(chat.timeline.streaming);
     });
-    const op = chat.send('Запусти тесты');
+    const op = chat.send('Run the tests');
     expect(chat.timeline.items().some((i) => i.kind === 'pending' && i.pending.client_op_id === op)).toBe(true);
     const echo = await waitFor(chat, () => find(chat, 'user.message', start));
     expect(echo.client_op_id).toBe(op);
@@ -108,11 +108,11 @@ describe('mock scenario', () => {
     // The Read call in a group captioned by the interim message; the Bash call is the
     // approval card, folded after the answer.
     const group = el.querySelector('.tool-group')!;
-    expect(group.querySelector('.tool-caption')!.textContent).toBe('Сейчас посмотрю на проект и запущу тесты.');
-    expect(group.querySelector('.tool-stats')!.textContent).toMatch(/^· 1 команда/);
+    expect(group.querySelector('.tool-caption')!.textContent).toBe('Let me look at the project and run the tests.');
+    expect(group.querySelector('.tool-stats')!.textContent).toMatch(/^· 1 command\b/);
     expect(el.querySelector('.perm-done-row')!.textContent).toContain('$ cargo test');
-    expect(el.querySelector('.perm-done-row')!.textContent).toContain('· разрешено');
-    expect(el.textContent).toContain('Все 42 теста прошли.');
+    expect(el.querySelector('.perm-done-row')!.textContent).toContain('· allowed');
+    expect(el.textContent).toContain('All 42 tests passed.');
     expect(el.querySelectorAll('.perm button[data-option]').length).toBe(0);
     chat.close();
   });
@@ -124,25 +124,25 @@ describe('mock scenario', () => {
     await chat.open();
     await waitFor(chat, () => find(chat, 'system'));
     const start = chat.timeline.lastSeq;
-    chat.send('Запусти тесты');
+    chat.send('Run the tests');
     const req = await waitFor(chat, () => find(chat, 'approval.request', start));
     if (req.type !== 'approval.request') throw new Error('unreachable');
     const deny = req.payload.options.find((o) => o.canonical === 'deny')!;
     const once = req.payload.options.find((o) => o.canonical === 'once')!;
     // Text only goes with a deny option.
-    await expect(chat.approve(req.payload.request_id, once.id, 'нет')).rejects.toMatchObject({ status: 400 });
-    await chat.approve(req.payload.request_id, deny.id, 'Сначала собери проект');
+    await expect(chat.approve(req.payload.request_id, once.id, 'no')).rejects.toMatchObject({ status: 400 });
+    await chat.approve(req.payload.request_id, deny.id, 'Build the project first');
     const resp = await waitFor(chat, () => find(chat, 'approval.response', start));
-    expect(resp.type === 'approval.response' && resp.payload).toMatchObject({ option_id: deny.id, message: 'Сначала собери проект' });
+    expect(resp.type === 'approval.response' && resp.payload).toMatchObject({ option_id: deny.id, message: 'Build the project first' });
     const final = await waitFor(chat, () =>
       chat.timeline.events().find((e) => e.type === 'agent.message' && e.payload.final && e.seq! > start),
     );
-    expect(final.type === 'agent.message' && final.payload.text).toContain('Сначала собери проект');
+    expect(final.type === 'agent.message' && final.payload.text).toContain('Build the project first');
 
     const { renderChatToElement } = await import('./render-helpers');
     const el = renderChatToElement(chat);
-    expect(el.querySelector('.msg-answer .msg-bubble')!.textContent).toBe('Сначала собери проект');
-    expect(el.querySelector('.perm-done-row')!.textContent).toContain('отклонено, ответ текстом');
+    expect(el.querySelector('.msg-answer .msg-bubble')!.textContent).toBe('Build the project first');
+    expect(el.querySelector('.perm-done-row')!.textContent).toContain('denied, replied with text');
     chat.close();
   });
 
@@ -155,7 +155,7 @@ describe('mock scenario', () => {
     const before = chat.timeline.events().length;
 
     mock.dropClients();
-    await api.input(s.id, 'пока сокет лежит', 'op-offline');
+    await api.input(s.id, 'while the socket is down', 'op-offline');
     await new Promise<void>((r) => {
       const off = socket.onState((st) => st === 'open' && (off(), r()));
     });
@@ -176,8 +176,8 @@ describe('mock scenario', () => {
     const chat = new ChatSession(api, socket, s.id);
     await chat.open();
     // The first POST was stored, but the client saw it fail (reply lost).
-    await api.input(s.id, 'один раз', 'op-dup');
-    chat.timeline.addPending('op-dup', 'один раз');
+    await api.input(s.id, 'just once', 'op-dup');
+    chat.timeline.addPending('op-dup', 'just once');
     chat.timeline.failPending('op-dup', 'network');
     chat.resend('op-dup');
     await waitFor(chat, () => find(chat, 'approval.request'));
@@ -193,7 +193,7 @@ describe('mock scenario', () => {
     const s = await api.createSession(me.personal_project_id, 'stop');
     const chat = new ChatSession(api, socket, s.id);
     await chat.open();
-    chat.send('запусти');
+    chat.send('run it');
     const req = await waitFor(chat, () => find(chat, 'approval.request'));
     await chat.stop();
     const cancel = await waitFor(chat, () => find(chat, 'approval.cancel'));
@@ -208,10 +208,10 @@ describe('mock scenario', () => {
     const s = await api.createSession(me.personal_project_id, 'clarify');
     const chat = new ChatSession(api, socket, s.id);
     await chat.open();
-    chat.send('есть вопрос');
+    chat.send('I have a question');
     const req = await waitFor(chat, () => find(chat, 'clarify.request'));
     if (req.type !== 'clarify.request') throw new Error('unreachable');
-    await chat.answer(req.payload.request_id, { q1: 'Hub', q2: ['test'], q3: 'нет' });
+    await chat.answer(req.payload.request_id, { q1: 'Hub', q2: ['test'], q3: 'no' });
     await waitFor(chat, () => find(chat, 'clarify.response'));
     const final = await waitFor(chat, () =>
       chat.timeline.events().find((e) => e.type === 'agent.message' && e.payload.final),

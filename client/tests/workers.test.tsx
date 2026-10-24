@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// T19: revoked workers in «Настройки» get «Удалить» (with the hub's `409
-// worker_has_sessions` explained), and the «Воркеры» group lists only workers that are not
+// T19: revoked workers in "Settings" get "Delete" (with the hub's `409
+// worker_has_sessions` explained), and the "Workers" group lists only workers that are not
 // revoked (their service sessions are archived, SPEC §10.2).
 
 import { afterEach, expect, it, vi } from 'vitest';
@@ -35,7 +35,7 @@ function settingsApp(api: Partial<Api>) {
 const live: WorkerInfo = { id: 'w-live', name: 'home-mac', os: 'macos', status: 'online' };
 const gone: WorkerInfo = { id: 'w-gone', name: 'old-mac', os: 'macos', status: 'revoked', revoked_at: '2026-10-23T09:00:00Z' };
 
-it('lists revoked workers with «Удалить» and deletes them', async () => {
+it('lists revoked workers with "Delete" and deletes them', async () => {
   vi.stubGlobal('confirm', () => true);
   let list = [live, gone];
   const workers = vi.fn(async () => list);
@@ -50,19 +50,19 @@ it('lists revoked workers with «Удалить» and deletes them', async () =>
   expect(workers).toHaveBeenCalledWith({ includeRevoked: true });
   const rows = [...root.querySelectorAll('.plain-list li')];
   expect(rows.map((r) => r.textContent)).toEqual([
-    expect.stringContaining('Отозвать'),
-    expect.stringContaining('отозван'),
+    expect.stringContaining('Revoke'),
+    expect.stringContaining('revoked'),
   ]);
-  expect(rows[1].textContent).toContain('Удалить');
-  expect(rows[1].textContent).not.toContain('Отозвать');
+  expect(rows[1].textContent).toContain('Delete');
+  expect(rows[1].textContent).not.toContain('Revoke');
 
-  await act(async () => buttons('Удалить')[0].click());
+  await act(async () => buttons('Delete')[0].click());
   await act(async () => {});
   expect(purgeWorker).toHaveBeenCalledWith('w-gone');
   expect(revokeWorker).not.toHaveBeenCalled();
   expect(app.refreshSessions).toHaveBeenCalled();
   expect(root.querySelectorAll('.plain-list li')).toHaveLength(1);
-  expect(buttons('Удалить')).toHaveLength(0);
+  expect(buttons('Delete')).toHaveLength(0);
 });
 
 it('explains how to move sessions when the worker still has them', async () => {
@@ -78,12 +78,12 @@ it('explains how to move sessions when the worker still has them', async () => {
   const app = settingsApp({ workers: vi.fn(async () => [gone]), purgeWorker });
   await act(async () => render(<Settings app={app} />, root));
   await act(async () => {});
-  await act(async () => buttons('Удалить')[0].click());
+  await act(async () => buttons('Delete')[0].click());
   await act(async () => {});
   const err = root.querySelector('.error-text')!.textContent!;
-  expect(err).toContain('ещё 4 неархивных сессий');
-  expect(err).toContain('заменить «old-mac»');
-  expect(err).toContain('архивируйте');
+  expect(err).toContain('still has 4 unarchived sessions');
+  expect(err).toContain('replace “old-mac”');
+  expect(err).toContain('archive them');
 });
 
 it('revokes a worker and refreshes the sessions', async () => {
@@ -93,7 +93,7 @@ it('revokes a worker and refreshes the sessions', async () => {
   const app = settingsApp({ workers: vi.fn(async () => [live]), revokeWorker });
   await act(async () => render(<Settings app={app} />, root));
   await act(async () => {});
-  await act(async () => buttons('Отозвать')[0].click());
+  await act(async () => buttons('Revoke')[0].click());
   expect(revokeWorker).toHaveBeenCalledWith('w-live');
   expect(app.refreshSessions).toHaveBeenCalled();
 });
@@ -114,7 +114,7 @@ function serviceSession(id: string, title: string, archived: boolean): SessionIn
   } as unknown as SessionInfo;
 }
 
-it('leaves revoked workers out of the «Воркеры» group', async () => {
+it('leaves revoked workers out of the "Workers" group', async () => {
   const socket = { onState: () => {} } as unknown as HubSocket;
   const app = new AppState({} as Api, socket);
   app.sessions.set('s1', serviceSession('s1', 'home-mac', false));

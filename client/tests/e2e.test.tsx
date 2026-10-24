@@ -85,9 +85,9 @@ afterAll(async () => {
 it('runs the iteration 1 scenario through the UI', async () => {
   // Session list with state and unread.
   const row = await until('session list', () =>
-    $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')),
+    $$('.session-row').find((r) => r.textContent?.includes('Empty session')),
   );
-  expect(row.textContent).toContain('Свободна');
+  expect(row.textContent).toContain('Idle');
   expect($$('.session-row .badge').length).toBeGreaterThan(0);
 
   // Open the session.
@@ -97,12 +97,12 @@ it('runs the iteration 1 scenario through the UI', async () => {
 
   // Write.
   const area = $<HTMLTextAreaElement>('.chat textarea')!;
-  area.value = 'Запусти тесты';
+  area.value = 'Run the tests';
   area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
   await until('send enabled', () => !$<HTMLButtonElement>('.composer button[type=submit]')!.disabled);
   $<HTMLButtonElement>('.composer button[type=submit]')!.click();
   await until('optimistic or echoed message', () =>
-    $$('.msg-user').find((b) => b.textContent?.includes('Запусти тесты')),
+    $$('.msg-user').find((b) => b.textContent?.includes('Run the tests')),
   );
 
   // Deltas, then tool cards, then the approval with one button per option.
@@ -112,40 +112,40 @@ it('runs the iteration 1 scenario through the UI', async () => {
     const b = $$('.perm button[data-option]');
     return b.length ? b : null;
   });
-  // One button per option: «Разрешить» first, «Отклонить» last (T26).
+  // One button per option: "Allow" first, "Deny" last (T26).
   expect(buttons.map((b) => b.childNodes[0].textContent)).toEqual([
-    'Разрешить',
-    'Всегда в этой сессии',
-    'Разрешать всегда',
-    'Запрещать всегда',
-    'Отклонить',
+    'Allow',
+    'Always in this session',
+    'Always allow',
+    'Always deny',
+    'Deny',
   ]);
   expect($('.perm-what')!.textContent).toBe('$ cargo test');
-  expect($('.chat .state')!.textContent).toBe('Ждёт разрешения');
+  expect($('.chat .state')!.textContent).toBe('Waiting for permission');
   expect($('.msg-pending')).toBeNull();
 
   // Press "allow once": the response comes back as approval.response, the card folds.
   buttons[0].click();
   await until('approval.response', () => $('.perm-done-row'));
   expect($('.perm-done-row')!.textContent).toContain('$ cargo test');
-  expect($('.perm-done-row')!.textContent).toContain('· разрешено');
+  expect($('.perm-done-row')!.textContent).toContain('· allowed');
   expect($$('.perm button[data-option]')).toHaveLength(0);
 
   // Final answer.
-  await until('final answer', () => $$('.msg-final').find((b) => b.textContent?.includes('Все 42 теста прошли.')));
-  await until('idle', () => $('.chat .state')?.textContent?.includes('Свободна'));
+  await until('final answer', () => $$('.msg-final').find((b) => b.textContent?.includes('All 42 tests passed.')));
+  await until('idle', () => $('.chat .state')?.textContent?.includes('Idle'));
   expect($('.msg-streaming')).toBeNull();
   expect($$('.tool-group.tool-ok').length).toBeGreaterThanOrEqual(1);
   // The final answer carries the turn's usage, the header the model and the cost.
-  expect($$('.msg-final').at(-1)!.querySelector('.usage')!.textContent).toContain('токенов');
+  expect($$('.msg-final').at(-1)!.querySelector('.usage')!.textContent).toContain('tokens');
   expect($('.chat-model')!.textContent).toBe('Sonnet 5.5');
-  expect($('.chat-cost')!.textContent).toMatch(/^\$0\.\d+ за сессию$/);
+  expect($('.chat-cost')!.textContent).toMatch(/^\$0\.\d+ this session$/);
   expect($('.chat-path')!.textContent).toContain('~/work/hqc');
 });
 
 it('renders a markdown answer, streamed and final', async () => {
   const area = $<HTMLTextAreaElement>('.chat textarea')!;
-  area.value = 'Покажи markdown';
+  area.value = 'Show markdown';
   area.dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
   await until('send enabled', () => !$<HTMLButtonElement>('.composer button[type=submit]')!.disabled);
   $<HTMLButtonElement>('.composer button[type=submit]')!.click();
@@ -154,8 +154,8 @@ it('renders a markdown answer, streamed and final', async () => {
   const final = await until('final markdown answer', () =>
     $$('.msg-final').find((b) => b.querySelector('table')),
   );
-  await until('idle', () => $('.chat .state')?.textContent?.includes('Свободна'));
-  expect(final.querySelector('h2')!.textContent).toBe('Итоги прогона');
+  await until('idle', () => $('.chat .state')?.textContent?.includes('Idle'));
+  expect(final.querySelector('h2')!.textContent).toBe('Run summary');
   expect(final.querySelectorAll('table tbody tr')).toHaveLength(3);
   expect(final.querySelector('.md-code-lang')!.textContent).toBe('rust');
   expect(final.querySelector('a[href="https://example.com/ci/42"]')).not.toBeNull();
@@ -170,15 +170,15 @@ it('revokes a worker from the settings screen', async () => {
     $$('.plain-list li').find((li) => li.textContent?.includes('home-mac')),
   );
   row.querySelector<HTMLButtonElement>('.btn-revoke')!.click();
-  // T19: a revoked worker stays in the settings with «Удалить»; elsewhere it is gone, and
-  // its service session leaves the «Воркеры» group.
+  // T19: a revoked worker stays in the settings with "Delete"; elsewhere it is gone, and
+  // its service session leaves the "Workers" group.
   const revoked = await until('worker revoked', () =>
-    $$('.plain-list li').find((li) => li.textContent?.includes('home-mac') && li.textContent.includes('отозван')),
+    $$('.plain-list li').find((li) => li.textContent?.includes('home-mac') && li.textContent.includes('revoked')),
   );
   expect((await app.api.workers()).some((w) => w.name === 'home-mac')).toBe(false);
   await until('workers group gone', () => !$('.worker-list'));
   // Its sessions are still there: the hub refuses and the screen says what to do.
   revoked.querySelector<HTMLButtonElement>('.btn-purge')!.click();
   const err = await until('has sessions', () => $('.page-body .error-text'));
-  expect(err.textContent).toContain('ещё 3 неархивных сессий');
+  expect(err.textContent).toContain('still has 3 unarchived sessions');
 });

@@ -237,7 +237,7 @@ describe('messages', () => {
       ev('event.agent.message', (e) => ((e.payload.text = SRC), (e.payload.final = false))),
       ev('event.agent.message', (e) => (e.payload.text = SRC)),
       ev('event.peer.message', (e) => (e.payload.text = '_from_ a peer')),
-      // `session_created` is the divider «Сессия начата …»; other codes show their text.
+      // `session_created` is the divider "Session started …"; other codes show their text.
       ev('event.system', (e) => (e.payload = { text: 'worker `home-mac` is **offline**', code: 'agent_exited' })),
     ]);
     expect(root.querySelector('.msg-user strong')!.textContent).toBe('run');
@@ -265,7 +265,7 @@ describe('messages', () => {
       await act(async () => copy(sel).click());
       expect(writeText).toHaveBeenLastCalledWith(text);
     }
-    expect(copy('.msg-agent').textContent).toBe('Скопировано');
+    expect(copy('.msg-agent').textContent).toBe('Copied');
     // The code block's button copies only the block.
     await act(async () => root.querySelector<HTMLButtonElement>('.msg-agent .md-code .btn-copy')!.click());
     expect(writeText).toHaveBeenLastCalledWith('ls -la');

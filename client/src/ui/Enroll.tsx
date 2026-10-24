@@ -12,9 +12,9 @@ export function normalizeCode(s: string): string | null {
 type Info = { code: string; info: EnrollInfo } | { code: string; error: string } | null;
 
 function replaceableNote(w: ReplaceableWorker): string {
-  const parts = [w.os, w.status === 'revoked' ? 'отозван' : 'офлайн'];
-  if (w.last_seen) parts.push(`был на связи ${new Date(w.last_seen).toLocaleString()}`);
-  parts.push(`сессий: ${w.sessions_count}`);
+  const parts = [w.os, w.status === 'revoked' ? 'revoked' : 'offline'];
+  if (w.last_seen) parts.push(`last seen ${new Date(w.last_seen).toLocaleString()}`);
+  parts.push(`sessions: ${w.sessions_count}`);
   return parts.filter(Boolean).join(' · ');
 }
 
@@ -43,7 +43,7 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
         live &&
         setInfo({
           code: normalized,
-          error: (e as { status?: number }).status === 404 ? 'Код не найден или истёк.' : (e as Error).message,
+          error: (e as { status?: number }).status === 404 ? 'Code not found or expired.' : (e as Error).message,
         }),
     );
     return () => {
@@ -69,8 +69,8 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
       setResult({
         ok: true,
         text: r.replaced
-          ? `Воркер «${r.name}» заменил «${r.replaced}»: сессии и workspace остались на нём.`
-          : `Воркер «${r.name}» подключён.`,
+          ? `Worker “${r.name}” replaced “${r.replaced}”: the sessions and workspaces stay with it.`
+          : `Worker “${r.name}” connected.`,
       });
       setCode('');
     } catch (err) {
@@ -83,21 +83,21 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
   return (
     <section class="page">
       <header class="bar">
-        <a class="back icon-btn" href="#/settings" aria-label="Назад">
+        <a class="back icon-btn" href="#/settings" aria-label="Back">
           <IconBack />
         </a>
         <div class="bar-title">
-          <div class="title">Регистрация воркера</div>
+          <div class="title">Worker enrollment</div>
         </div>
       </header>
       <form class="page-body" onSubmit={confirm}>
         <p>
-          Запустите на машине <code>hqc-worker enroll &lt;адрес хаба&gt;</code> и введите код, который
-          он напечатал. Подтверждайте только код, который видите на своей машине: воркер получит
-          доступ к сессиям вашего аккаунта.
+          Run <code>hqc-worker enroll &lt;hub address&gt;</code> on the machine and enter the code it
+          printed. Only confirm a code you see on your own machine: the worker gets access to your
+          account's sessions.
         </p>
         <label class="field">
-          <span>Код</span>
+          <span>Code</span>
           <input
             class="input input-code"
             name="code"
@@ -111,15 +111,15 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
         </label>
         {loaded && (
           <dl class="enroll-info">
-            <dt>Машина</dt>
+            <dt>Machine</dt>
             <dd data-field="name">{loaded.name}</dd>
-            <dt>ОС</dt>
+            <dt>OS</dt>
             <dd data-field="os">{loaded.os || '—'}</dd>
-            <dt>Код создан</dt>
+            <dt>Code created</dt>
             <dd data-field="created_at">{new Date(loaded.created_at).toLocaleString()}</dd>
             {loaded.country && (
               <>
-                <dt>Страна запроса</dt>
+                <dt>Request country</dt>
                 <dd data-field="country">{loaded.country}</dd>
               </>
             )}
@@ -130,7 +130,7 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
         )}
         {loaded && loaded.replaceable.length > 0 && (
           <fieldset class="enroll-replace">
-            <legend>Это новая машина или перерегистрация?</legend>
+            <legend>Is this a new machine or a re-enrollment?</legend>
             <label class="choice">
               <input
                 type="radio"
@@ -139,7 +139,7 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
                 checked={replace === ''}
                 onChange={() => setReplace('')}
               />
-              <span>Новый воркер</span>
+              <span>New worker</span>
             </label>
             {loaded.replaceable.map((w) => (
               <label class="choice" key={w.id}>
@@ -151,23 +151,23 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
                   onChange={() => setReplace(w.id)}
                 />
                 <span>
-                  Это та же машина, заменить «{w.name}»
-                  {w.same_machine && <span class="badge"> та же машина</span>}
+                  The same machine, replace “{w.name}”
+                  {w.same_machine && <span class="badge"> same machine</span>}
                   <span class="muted small"> {replaceableNote(w)}</span>
                 </span>
               </label>
             ))}
             {replace && (
               <p class="muted small">
-                Новый воркер получит id, сессии, workspace и служебную сессию заменяемого; старый токен перестанет
-                работать.
+                The new worker gets the replaced worker's id, sessions, workspaces and service session; the
+                old token stops working.
               </p>
             )}
           </fieldset>
         )}
-        {loaded && <p class="muted">Это ваша машина и вы только что запустили на ней enroll?</p>}
+        {loaded && <p class="muted">Is this your machine, and did you just run enroll on it?</p>}
         <button type="submit" class="btn btn-primary" disabled={busy || !loaded}>
-          {replace ? 'Подтвердить замену' : 'Подтвердить'}
+          {replace ? 'Confirm replacement' : 'Confirm'}
         </button>
         {result && <div class={result.ok ? 'outcome ok' : 'error-text'}>{result.text}</div>}
       </form>

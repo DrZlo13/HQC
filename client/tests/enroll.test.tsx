@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // The enrollment screen (SPEC §5.1, §6): the worker's name, OS and time are shown before
-// "Подтвердить" can be pressed; the button stays disabled until they are loaded.
+// "Confirm" can be pressed; the button stays disabled until they are loaded.
 
 import { afterEach, expect, it, vi } from 'vitest';
 import { render } from 'preact';
@@ -83,17 +83,17 @@ it('offers to replace an offline or revoked worker and sends the choice (T19)', 
   // A new worker is the default.
   expect(radios[0].checked).toBe(true);
   const labels = [...root.querySelectorAll('.enroll-replace label')].map((l) => l.textContent);
-  expect(labels[1]).toContain('Это та же машина, заменить «home-mac-old»');
-  expect(labels[1]).toContain('сессий: 7');
-  expect(labels[2]).toContain('отозван');
+  expect(labels[1]).toContain('The same machine, replace “home-mac-old”');
+  expect(labels[1]).toContain('sessions: 7');
+  expect(labels[2]).toContain('revoked');
 
   await act(async () => {
     radios[1].click();
   });
-  expect(button().textContent).toBe('Подтвердить замену');
+  expect(button().textContent).toBe('Confirm replacement');
   await act(async () => button().click());
   expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234', 'w-old');
-  expect(root.querySelector('.outcome.ok')!.textContent).toContain('заменил «home-mac-old»');
+  expect(root.querySelector('.outcome.ok')!.textContent).toContain('replaced “home-mac-old”');
 });
 
 // T21: a worker of the same machine comes first and is preselected; "new worker" stays a choice.
@@ -113,13 +113,13 @@ it('preselects replacing the worker of the same machine', async () => {
   const radios = [...root.querySelectorAll<HTMLInputElement>('.enroll-replace input[type=radio]')];
   expect(radios.map((r) => r.checked)).toEqual([false, true, false]);
   const badges = [...root.querySelectorAll('.enroll-replace label')].map((l) => l.querySelector('.badge'));
-  expect(badges.map((b) => b?.textContent ?? null)).toEqual([null, ' та же машина', null]);
-  expect(button().textContent).toBe('Подтвердить замену');
+  expect(badges.map((b) => b?.textContent ?? null)).toEqual([null, ' same machine', null]);
+  expect(button().textContent).toBe('Confirm replacement');
   // The user may still say "new worker".
   await act(async () => {
     radios[0].click();
   });
-  expect(button().textContent).toBe('Подтвердить');
+  expect(button().textContent).toBe('Confirm');
   await act(async () => button().click());
   expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234', undefined);
 });
@@ -136,7 +136,7 @@ it('confirms a new worker when nothing is chosen', async () => {
   await act(async () => {});
   await act(async () => button().click());
   expect(enrollConfirm).toHaveBeenCalledWith('ABCD-1234', undefined);
-  expect(root.querySelector('.outcome.ok')!.textContent).toBe('Воркер «box» подключён.');
+  expect(root.querySelector('.outcome.ok')!.textContent).toBe('Worker “box” connected.');
 });
 
 it('shows no choice without replaceable workers', async () => {
@@ -153,7 +153,7 @@ it('keeps the button disabled for an unknown code', async () => {
   });
   mount({ enrollInfo, enrollConfirm: vi.fn() }, 'ZZZZ-9999');
   await act(async () => {});
-  expect(root.querySelector('.error-text')!.textContent).toContain('не найден');
+  expect(root.querySelector('.error-text')!.textContent).toContain('not found');
   expect(button().disabled).toBe(true);
   expect(root.querySelector('.enroll-info')).toBeNull();
 });

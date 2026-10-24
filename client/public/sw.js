@@ -13,13 +13,13 @@ function describe(d) {
   const p = (d.payload && d.payload.payload) || {};
   switch (d.type) {
     case 'approval.request':
-      return { title: `Разрешение: ${p.tool || 'инструмент'}`, body: p.description || '' };
+      return { title: `Permission: ${p.tool || 'tool'}`, body: p.description || '' };
     case 'clarify.request':
-      return { title: 'Агент задаёт вопрос', body: (p.questions && p.questions[0] && p.questions[0].text) || '' };
+      return { title: 'The agent asks a question', body: (p.questions && p.questions[0] && p.questions[0].text) || '' };
     case 'agent.message':
-      return { title: 'Ответ агента', body: p.text || '' };
+      return { title: 'Agent reply', body: p.text || '' };
     case 'peer.message':
-      return { title: 'Сообщение от другой сессии', body: p.text || '' };
+      return { title: 'Message from another session', body: p.text || '' };
     case 'system':
       return { title: 'hqc', body: p.text || '' };
     default:

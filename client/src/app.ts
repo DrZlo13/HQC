@@ -130,7 +130,7 @@ export class AppState {
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
-  /** Archived sessions of the project, newest first: the «Архив» view of the list. */
+  /** Archived sessions of the project, newest first: the "Archive" view of the list. */
   archivedSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
       .filter((s) => s.archived && !s.system && s.project_id === projectId)
@@ -142,7 +142,7 @@ export class AppState {
     if (this.sessions.delete(id)) this.changed();
   }
 
-  /** The workers' service sessions (SPEC §10.2), by worker name: the «Воркеры» group.
+  /** The workers' service sessions (SPEC §10.2), by worker name: the "Workers" group.
    *  Revoking a worker archives its service session, so revoked workers are not listed. */
   workerSessions(): SessionInfo[] {
     return [...this.sessions.values()]
@@ -151,7 +151,7 @@ export class AppState {
   }
 
   /** Sessions of the project that wait for the user (a request or an error), for the badge
-   *  «ждёт вас» on the project. */
+   *  "needs you" on the project. */
   projectWaiting(projectId: string): number {
     let n = 0;
     for (const s of this.sessions.values()) {

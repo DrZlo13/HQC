@@ -16,12 +16,12 @@ export interface AttachmentActions {
 }
 
 const KIND_LABELS: Record<ArtifactKind, string> = {
-  file: 'файл',
-  image: 'картинка',
-  diff: 'дифф',
+  file: 'file',
+  image: 'image',
+  diff: 'diff',
   html: 'HTML',
-  text: 'текст',
-  unknown: 'вложение',
+  text: 'text',
+  unknown: 'attachment',
 };
 
 export function AttachmentView({
@@ -52,11 +52,11 @@ export function AttachmentView({
     };
   }, [store, id]);
   const k = meta?.kind ?? kind ?? 'unknown';
-  const n = meta?.name ?? name ?? 'вложение';
+  const n = meta?.name ?? name ?? 'attachment';
   let body;
   if (store && k === 'image') body = <ImageView id={id} name={n} store={store} actions={actions} />;
   // The body of a diff is loaded only once its size is known (T22).
-  else if (store && k === 'diff' && !meta && !metaFailed) body = <div class="card card-attachment muted">{n} · загрузка…</div>;
+  else if (store && k === 'diff' && !meta && !metaFailed) body = <div class="card card-attachment muted">{n} · loading…</div>;
   else if (store && k === 'diff' && meta && meta.size <= MAX_INLINE_TEXT)
     body = <DiffView id={id} name={n} store={store} actions={actions} />;
   else if (store && k === 'html') body = <HtmlView id={id} name={n} meta={meta} store={store} actions={actions} />;
@@ -96,11 +96,11 @@ function FileCard({
       <div class="actions">
         {openable && (
           <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(id)}>
-            Открыть
+            Open
           </button>
         )}
         <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(id, true)}>
-          Скачать
+          Download
         </button>
       </div>
     </div>
@@ -155,19 +155,19 @@ function DiffView({ id, name, store, actions }: { id: string; name: string; stor
     };
   }, [store, id]);
   const download = (
-    <button type="button" class="btn-copy" title="Скачать" onClick={() => actions.openArtifact(id, true)}>
-      Скачать
+    <button type="button" class="btn-copy" title="Download" onClick={() => actions.openArtifact(id, true)}>
+      Download
     </button>
   );
   if (error) {
     return (
       <div class="card card-attachment">
         <div class="card-title">{name}</div>
-        <div class="error-text">Дифф не загрузился: {error}</div>
+        <div class="error-text">Diff failed to load: {error}</div>
       </div>
     );
   }
-  if (text === null) return <div class="card card-attachment muted">{name} · загрузка…</div>;
+  if (text === null) return <div class="card card-attachment muted">{name} · loading…</div>;
   return <CodeBlock code={text} lang="diff" title={name} extra={download} />;
 }
 
@@ -195,7 +195,7 @@ function HtmlView({
       <div class="card-title">
         <span class="attachment-name">{name}</span>{' '}
         <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(id)}>
-          Открыть
+          Open
         </button>
       </div>
       <iframe class="attachment-html" src={url} title={name} sandbox="allow-scripts" referrerpolicy="no-referrer" />

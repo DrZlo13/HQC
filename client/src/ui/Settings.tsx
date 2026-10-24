@@ -6,12 +6,12 @@ import { pushStatus, subscribePush, type PushStatus } from '../push';
 
 const PUSH_TEXT: Record<PushStatus, string> = {
   unsupported:
-    'Браузер не поддерживает Web Push. На iPhone уведомления работают только из приложения, добавленного на экран «Домой».',
-  insecure: 'Уведомления требуют HTTPS: откройте клиент через адрес хаба, а не по IP локальной сети.',
-  denied: 'Уведомления запрещены в настройках браузера для этого сайта.',
-  hub_off: 'На хабе не настроены ключи VAPID: уведомления выключены.',
-  subscribed: 'Уведомления включены на этом устройстве.',
-  available: 'Уведомления о запросах разрешений и ответах агента.',
+    'This browser does not support Web Push. On an iPhone notifications only work from the app added to the Home Screen.',
+  insecure: 'Notifications need HTTPS: open the client at the hub\'s address, not at a local network IP.',
+  denied: 'Notifications are blocked for this site in the browser settings.',
+  hub_off: 'The hub has no VAPID keys configured: notifications are off.',
+  subscribed: 'Notifications are on for this device.',
+  available: 'Notifications about permission requests and agent replies.',
 };
 
 export function Settings({ app }: { app: AppState }) {
@@ -26,12 +26,12 @@ export function Settings({ app }: { app: AppState }) {
   }, [app]);
 
   const revoke = async (w: WorkerInfo) => {
-    if (!confirm(`Отозвать токен воркера «${w.name}»? Машину придётся регистрировать заново.`)) return;
+    if (!confirm(`Revoke the token of worker “${w.name}”? The machine will have to be enrolled again.`)) return;
     setError(null);
     try {
       await app.api.revokeWorker(w.id);
       setWorkers(await app.api.workers({ includeRevoked: true }));
-      // Its service session is archived now: the «Воркеры» group drops it.
+      // Its service session is archived now: the "Workers" group drops it.
       await app.refreshSessions().catch(() => {});
     } catch (e) {
       setError((e as Error).message);
@@ -40,7 +40,7 @@ export function Settings({ app }: { app: AppState }) {
 
   /** Deletes a revoked worker (SPEC §6); sessions still on it have to be moved or archived. */
   const purge = async (w: WorkerInfo) => {
-    if (!confirm(`Удалить воркер «${w.name}» вместе с его служебной сессией и workspace?`)) return;
+    if (!confirm(`Delete worker “${w.name}” with its service session and workspaces?`)) return;
     setError(null);
     try {
       await app.api.purgeWorker(w.id);
@@ -50,9 +50,9 @@ export function Settings({ app }: { app: AppState }) {
       if (e instanceof ApiError && e.code === 'worker_has_sessions') {
         const n = (e.body as { sessions_count?: number } | undefined)?.sessions_count;
         setError(
-          `На воркере «${w.name}» ещё ${n ?? 'есть'} неархивных сессий. Перенесите их: запустите на машине ` +
-            `hqc-worker enroll и при подтверждении выберите «Это та же машина, заменить «${w.name}»», ` +
-            'или архивируйте их.',
+          `Worker “${w.name}” still has ${n ?? 'some'} unarchived sessions. Move them: run ` +
+            `hqc-worker enroll on the machine and, when confirming, choose “The same machine, replace “${w.name}””, ` +
+            'or archive them.',
         );
       } else {
         setError((e as Error).message);
@@ -75,40 +75,40 @@ export function Settings({ app }: { app: AppState }) {
   return (
     <section class="page">
       <header class="bar">
-        <a class="back icon-btn" href="#/" aria-label="К списку">
+        <a class="back icon-btn" href="#/" aria-label="Back to the list">
           <IconBack />
         </a>
         <div class="bar-title">
-          <div class="title">Настройки</div>
+          <div class="title">Settings</div>
           <div class="state">{app.me?.email}</div>
         </div>
       </header>
       <div class="page-body">
-        <h2>Уведомления</h2>
+        <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>
         {(push === 'available' || push === 'subscribed') && (
           <button type="button" class="btn btn-primary" disabled={busy} onClick={subscribe}>
-            {push === 'subscribed' ? 'Подписаться заново' : 'Подписаться на уведомления'}
+            {push === 'subscribed' ? 'Subscribe again' : 'Subscribe to notifications'}
           </button>
         )}
         {error && <div class="error-text">{error}</div>}
 
-        <h2>Воркеры</h2>
+        <h2>Workers</h2>
         {workers && workers.length > 0 && (
           <ul class="plain-list">
             {workers.map((w) => (
               <li key={w.id} class={w.status === 'revoked' ? 'worker-revoked' : undefined}>
                 <b>{w.name}</b>{' '}
                 <span class="muted">
-                  {[w.os, w.status === 'revoked' ? 'отозван' : w.status].filter(Boolean).join(' · ')}
+                  {[w.os, w.status === 'revoked' ? 'revoked' : w.status].filter(Boolean).join(' · ')}
                 </span>{' '}
                 {w.status === 'revoked' ? (
                   <button type="button" class="btn btn-revoke btn-purge" onClick={() => purge(w)}>
-                    Удалить
+                    Delete
                   </button>
                 ) : (
                   <button type="button" class="btn btn-revoke" onClick={() => revoke(w)}>
-                    Отозвать
+                    Revoke
                   </button>
                 )}
               </li>
@@ -116,7 +116,7 @@ export function Settings({ app }: { app: AppState }) {
           </ul>
         )}
         <a class="btn" href="#/enroll">
-          Подтвердить код воркера
+          Confirm a worker code
         </a>
       </div>
     </section>

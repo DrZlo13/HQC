@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-// T26: the session list — the «Состояние» and «Недавние» orders (kept in localStorage), the
+// T26: the session list — the "State" and "Recent" orders (kept in localStorage), the
 // search over title and path, the project's counters, workers with their active sessions,
-// the project rail with its «ждёт вас» badge.
+// the project rail with its "needs you" badge.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
@@ -48,11 +48,11 @@ function sess(id: string, title: string, state: SessionState, updated: string, m
 }
 
 const LIST = [
-  sess('stones', 'Текстуры камней', 'running', at(0.01)),
-  sess('det', 'Детерминизм шага', 'running', at(0.1), { worker_id: 'wk2', workspace_id: 'w2' }),
-  sess('net', 'Синхронизация по сети', 'waiting', at(0.2), { cwd: 'net' }),
-  sess('prof', 'Профилирование коллизий', 'idle', at(22)),
-  sess('cave', 'Порт сцены пещеры', 'idle', at(60)),
+  sess('stones', 'Stone textures', 'running', at(0.01)),
+  sess('det', 'Step determinism', 'running', at(0.1), { worker_id: 'wk2', workspace_id: 'w2' }),
+  sess('net', 'Network sync', 'waiting', at(0.2), { cwd: 'net' }),
+  sess('prof', 'Collision profiling', 'idle', at(22)),
+  sess('cave', 'Cave scene port', 'idle', at(60)),
 ];
 
 let root: HTMLElement;
@@ -79,50 +79,53 @@ describe('list logic', () => {
 
   it('groups by state and by recency, newest first, empty groups left out', () => {
     expect(groupSessions(LIST, 'state', NOW).map((g) => [g.label, g.items.map((s) => s.id)])).toEqual([
-      ['Ждёт вас', ['net']],
-      ['Работает', ['stones', 'det']],
-      ['Свободны', ['prof', 'cave']],
+      ['Needs you', ['net']],
+      ['Running', ['stones', 'det']],
+      ['Idle', ['prof', 'cave']],
     ]);
     expect(groupSessions(LIST, 'recent', NOW).map((g) => [g.label, g.items.map((s) => s.id)])).toEqual([
-      ['Сегодня', ['stones', 'det', 'net']],
-      ['Вчера', ['prof']],
-      ['Раньше', ['cave']],
+      ['Today', ['stones', 'det', 'net']],
+      ['Yesterday', ['prof']],
+      ['Earlier', ['cave']],
     ]);
-    expect(groupSessions(LIST.slice(3), 'state', NOW).map((g) => g.label)).toEqual(['Свободны']);
+    expect(groupSessions(LIST.slice(3), 'state', NOW).map((g) => g.label)).toEqual(['Idle']);
   });
 
-  it('counts for the header: waiting, working, and the free ones only when one of those is zero', () => {
-    expect(headCounts(LIST)).toBe('1 ждёт вас · 2 работают');
-    expect(headCounts(LIST.filter((s) => s.state !== 'running'))).toBe('1 ждёт вас · 2 свободны');
-    expect(headCounts(LIST.slice(3))).toBe('2 свободны');
-    expect(headCounts(LIST.slice(0, 1))).toBe('1 работает');
-    expect(headCounts([])).toBe('Сессий пока нет');
+  it('counts for the header: waiting, working, and the idle ones only when one of those is zero', () => {
+    expect(headCounts(LIST)).toBe('1 needs you · 2 running');
+    expect(headCounts(LIST.filter((s) => s.state !== 'running'))).toBe('1 needs you · 2 idle');
+    expect(headCounts(LIST.slice(3))).toBe('2 idle');
+    expect(headCounts(LIST.slice(0, 1))).toBe('1 running');
+    expect(headCounts([])).toBe('No sessions yet');
   });
 
   it('searches every word in the title or the path', () => {
     const s = LIST[2];
-    expect(matchesQuery(s, '~/work/games/phys-mp/net', 'сети')).toBe(true);
+    expect(matchesQuery(s, '~/work/games/phys-mp/net', 'network')).toBe(true);
     expect(matchesQuery(s, '~/work/games/phys-mp/net', 'PHYS-MP/NET')).toBe(true);
-    expect(matchesQuery(s, '~/work/games/phys-mp/net', 'синхр net')).toBe(true);
-    expect(matchesQuery(s, '~/work/games/phys-mp/net', 'синхр render')).toBe(false);
+    expect(matchesQuery(s, '~/work/games/phys-mp/net', 'sync net')).toBe(true);
+    expect(matchesQuery(s, '~/work/games/phys-mp/net', 'sync render')).toBe(false);
     expect(matchesQuery(s, '', '  ')).toBe(true);
   });
 
-  it('names: initials, plurals', () => {
+  it('names: initials, counts', () => {
     expect(projectInitials('physics-mp')).toBe('PM');
     expect(projectInitials('HQC')).toBe('HQ');
+    expect(projectInitials('Personal', true)).toBe('P');
+    // Projects may be named in Russian.
     expect(projectInitials('Личный', true)).toBe('Л');
+    expect(projectInitials('платы питания')).toBe('ПП');
     expect([0, 1, 2, 5, 11, 21].map(activeLabel)).toEqual([
-      'нет активных',
-      '1 активная',
-      '2 активные',
-      '5 активных',
-      '11 активных',
-      '21 активная',
+      'none active',
+      '1 active',
+      '2 active',
+      '5 active',
+      '11 active',
+      '21 active',
     ]);
   });
 
-  it('keeps the mode in localStorage, «Состояние» by default', () => {
+  it('keeps the mode in localStorage, "State" by default', () => {
     expect(loadMode()).toBe('state');
     saveMode('recent');
     expect(localStorage.getItem('hqc.sessionOrder')).toBe('recent');
@@ -136,7 +139,7 @@ function makeApp(list = LIST) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
   const app = new AppState({ workspaces: async () => [] } as unknown as Api, socket);
   app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0' };
-  app.projects.set('p0', { id: 'p0', name: 'Личный', slug: 'personal', description: '', is_personal: true, created_at: at(100) });
+  app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, created_at: at(90) });
   app.currentProjectId = 'p1';
   app.conn = 'open';
@@ -171,7 +174,7 @@ const groups = () =>
   ]);
 
 async function type(value: string) {
-  const input = root.querySelector<HTMLInputElement>('input[aria-label="Поиск сессий"]')!;
+  const input = root.querySelector<HTMLInputElement>('input[aria-label="Search sessions"]')!;
   await act(() => {
     input.value = value;
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -182,56 +185,56 @@ describe('SessionList (desktop column)', () => {
   it('shows the project, its counters and the groups by state', async () => {
     await mount(<SessionList app={makeApp()} current="net" />);
     expect(root.querySelector('.project-title')!.textContent).toBe('physics-mp');
-    expect(root.querySelector('.side-counts')!.textContent).toBe('1 ждёт вас · 2 работают');
+    expect(root.querySelector('.side-counts')!.textContent).toBe('1 needs you · 2 running');
     expect(groups()).toEqual([
-      ['Ждёт вас', '1', ['Синхронизация по сети']],
-      ['Работает', '2', ['Текстуры камней', 'Детерминизм шага']],
-      ['Свободны', '2', ['Профилирование коллизий', 'Порт сцены пещеры']],
+      ['Needs you', '1', ['Network sync']],
+      ['Running', '2', ['Stone textures', 'Step determinism']],
+      ['Idle', '2', ['Collision profiling', 'Cave scene port']],
     ]);
     const net = root.querySelector('.session-row.is-current')!;
     expect(net.getAttribute('aria-current')).toBe('page');
-    expect(net.querySelector('.session-sub')!.textContent).toBe('Ждёт ответа');
+    expect(net.querySelector('.session-sub')!.textContent).toBe('Waiting for reply');
     expect(net.querySelector('.session-where')!.textContent).toBe('home-mac · ~/work/games/phys-mp/net');
     expect(net.querySelector('.dot-wait')).not.toBeNull();
     expect(root.querySelector('.session-when')).toBeNull();
   });
 
-  it('switches to «Недавние» with times, and keeps the choice in this browser', async () => {
+  it('switches to "Recent" with times, and keeps the choice in this browser', async () => {
     await mount(<SessionList app={makeApp()} />);
-    const recent = [...root.querySelectorAll<HTMLButtonElement>('.seg')].find((b) => b.textContent === 'Недавние')!;
+    const recent = [...root.querySelectorAll<HTMLButtonElement>('.seg')].find((b) => b.textContent === 'Recent')!;
     await act(async () => recent.click());
-    expect(groups().map((g) => g[0])).toEqual(['Сегодня', 'Вчера', 'Раньше']);
+    expect(groups().map((g) => g[0])).toEqual(['Today', 'Yesterday', 'Earlier']);
     expect([...root.querySelectorAll('.session-when')].map((w) => w.textContent)).toEqual([
-      'сейчас',
-      '6 мин',
-      '12 мин',
-      'вчера',
-      '22 окт',
+      'now',
+      '6 min',
+      '12 min',
+      'yesterday',
+      'Oct 22',
     ]);
     expect(localStorage.getItem('hqc.sessionOrder')).toBe('recent');
     render(null, root);
     await mount(<SessionList app={makeApp()} />);
-    expect(root.querySelector('.seg[aria-pressed="true"]')!.textContent).toBe('Недавние');
-    expect(groups()[0][0]).toBe('Сегодня');
+    expect(root.querySelector('.seg[aria-pressed="true"]')!.textContent).toBe('Recent');
+    expect(groups()[0][0]).toBe('Today');
   });
 
   it('searches by title and by path', async () => {
     await mount(<SessionList app={makeApp()} />);
-    await type('пещер');
-    expect(groups()).toEqual([['Свободны', '1', ['Порт сцены пещеры']]]);
+    await type('scene');
+    expect(groups()).toEqual([['Idle', '1', ['Cave scene port']]]);
     await type('phys-det');
-    expect(groups()).toEqual([['Работает', '1', ['Детерминизм шага']]]);
-    await type('нет такого');
+    expect(groups()).toEqual([['Running', '1', ['Step determinism']]]);
+    await type('no such thing');
     expect(groups()).toEqual([]);
-    expect(root.querySelector('.empty')!.textContent).toBe('Ничего не найдено');
+    expect(root.querySelector('.empty')!.textContent).toBe('Nothing found');
   });
 
   it('lists the workers with their active sessions, offline ones grey', async () => {
     await mount(<SessionList app={makeApp()} />);
     const rows = [...root.querySelectorAll('.worker-list .worker-row')];
     expect(rows.map((r) => [r.querySelector('.worker-name')!.textContent, r.querySelector('.worker-state')!.textContent])).toEqual([
-      ['drzlo-mac', 'офлайн'],
-      ['home-mac', '2 активные'],
+      ['drzlo-mac', 'offline'],
+      ['home-mac', '2 active'],
     ]);
     expect(rows[0].querySelector('.dot-offline')).not.toBeNull();
     expect(rows[1].getAttribute('href')).toBe('#/s/sys1');
@@ -239,34 +242,34 @@ describe('SessionList (desktop column)', () => {
 });
 
 describe('ProjectRail', () => {
-  it('shows initials, the current project and a «ждёт вас» badge', async () => {
+  it('shows initials, the current project and a "needs you" badge', async () => {
     await mount(<ProjectRail app={makeApp()} />);
     const rows = [...root.querySelectorAll('.rail-project')];
     expect(rows.map((r) => [r.getAttribute('aria-label'), r.textContent])).toEqual([
-      ['Личный', 'Л'],
+      ['Personal', 'P'],
       ['physics-mp', 'PM'],
     ]);
     expect(root.querySelector('.rail-project.is-current')!.getAttribute('aria-label')).toBe('physics-mp');
     const badges = [...root.querySelectorAll('.rail-badge')];
     expect(badges.map((b) => b.textContent)).toEqual(['1']);
-    expect(badges[0].getAttribute('aria-label')).toBe('ждёт вас: 1');
+    expect(badges[0].getAttribute('aria-label')).toBe('needs you: 1');
     expect(root.querySelector('.avatar')!.getAttribute('title')).toBe('who@example.com');
   });
 });
 
 describe('SessionList (phone)', () => {
-  it('one screen: projects as chips, the same groups, a floating «Новая»', async () => {
+  it('one screen: projects as chips, the same groups, a floating "New"', async () => {
     await mount(<SessionList app={makeApp()} phone />);
-    expect(root.querySelector('.m-head h1')!.textContent).toBe('Сессии');
+    expect(root.querySelector('.m-head h1')!.textContent).toBe('Sessions');
     const chips = [...root.querySelectorAll('.chips .chip.project-row')];
-    expect(chips.map((c) => c.textContent)).toEqual(['Личный', 'physics-mp1']);
+    expect(chips.map((c) => c.textContent)).toEqual(['Personal', 'physics-mp1']);
     expect(root.querySelector('.chip.is-current .chip-badge')!.textContent).toBe('1');
-    expect(groups().map((g) => g[0])).toEqual(['Ждёт вас', 'Работает', 'Свободны']);
-    expect(root.querySelector('.fab')!.textContent).toBe('Новая');
+    expect(groups().map((g) => g[0])).toEqual(['Needs you', 'Running', 'Idle']);
+    expect(root.querySelector('.fab')!.textContent).toBe('New');
     // The search opens from its button.
-    expect(root.querySelector('input[aria-label="Поиск сессий"]')).toBeNull();
-    await act(async () => root.querySelector<HTMLButtonElement>('button[aria-label="Поиск по названию и пути"]')!.click());
-    await type('сети');
-    expect(groups()).toEqual([['Ждёт вас', '1', ['Синхронизация по сети']]]);
+    expect(root.querySelector('input[aria-label="Search sessions"]')).toBeNull();
+    await act(async () => root.querySelector<HTMLButtonElement>('button[aria-label="Search by title and path"]')!.click());
+    await type('network');
+    expect(groups()).toEqual([['Needs you', '1', ['Network sync']]]);
   });
 });

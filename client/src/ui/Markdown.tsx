@@ -171,7 +171,7 @@ function inlineToken(t: MarkedToken, key: number): ComponentChildren {
       const href = safeHref(t.href);
       return (
         <span key={key} class="md-image">
-          <span class="md-image-alt">{decodeEntities(t.text) || 'картинка'}</span>{' '}
+          <span class="md-image-alt">{decodeEntities(t.text) || 'image'}</span>{' '}
           {href ? (
             <a href={href} target="_blank" rel="noopener noreferrer">
               {t.href}
@@ -293,7 +293,7 @@ function FilePath({ path, children }: { path: string; children: ComponentChildre
     <button
       type="button"
       class="md-path"
-      title={`Скопировать путь ${path}`}
+      title={`Copy path ${path}`}
       onClick={(e) =>
         copyText(path, (e.currentTarget as HTMLElement).ownerDocument).then(
           () => setState('done'),
@@ -304,7 +304,7 @@ function FilePath({ path, children }: { path: string; children: ComponentChildre
       {children}
       {state !== 'idle' && (
         <span class="md-path-note" role="status">
-          {state === 'done' ? 'путь скопирован' : 'не скопировалось'}
+          {state === 'done' ? 'path copied' : 'copy failed'}
         </span>
       )}
     </button>
@@ -313,7 +313,7 @@ function FilePath({ path, children }: { path: string; children: ComponentChildre
 
 /** Puts `text` into the clipboard as is and says so for a moment. `withText`: the caption
  *  next to the icon (code blocks), otherwise the icon alone. */
-export function CopyButton({ text, label = 'Копировать', withText }: { text: string; label?: string; withText?: boolean }) {
+export function CopyButton({ text, label = 'Copy', withText }: { text: string; label?: string; withText?: boolean }) {
   const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle');
   useEffect(() => {
     if (state === 'idle') return;
@@ -334,9 +334,9 @@ export function CopyButton({ text, label = 'Копировать', withText }: {
       }
     >
       {state === 'done' ? (
-        'Скопировано'
+        'Copied'
       ) : state === 'failed' ? (
-        'Не скопировалось'
+        'Copy failed'
       ) : (
         <>
           <IconCopy />

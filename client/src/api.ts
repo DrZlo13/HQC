@@ -120,7 +120,7 @@ export class Api {
     return parseSessionList(await this.req('GET', `/api/projects/${enc(projectId)}/sessions`));
   }
 
-  /** No `title`: the hub's default «Сессия N», which the runtime's title may replace. No
+  /** No `title`: the hub's default "Session N", which the runtime's title may replace. No
    *  `workspace_id`: the project's default workspace; `cwd` is relative to it (SPEC §13.4). */
   async createSession(projectId: string, title?: string, opts: NewSessionOptions = {}): Promise<SessionInfo> {
     const body: Record<string, string> = {};
@@ -170,7 +170,7 @@ export class Api {
     return parseWorkspace(await this.req('POST', '/api/workspaces', w));
   }
 
-  /** `PATCH /api/workspaces/{id}`: the label, or the switch «Сессии VS Code» (T21). */
+  /** `PATCH /api/workspaces/{id}`: the label, or the switch "VS Code sessions" (T21). */
   async patchWorkspace(id: string, patch: { label?: string; mirror_enabled?: boolean }): Promise<Workspace> {
     return parseWorkspace(await this.req('PATCH', `/api/workspaces/${enc(id)}`, patch));
   }

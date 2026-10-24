@@ -18,10 +18,10 @@ import {
   type ListMode,
 } from './sessions';
 
-/** «+ проект»: asks for the name, then opens the new project's workspaces — a new project
+/** "+ project": asks for the name, then opens the new project's workspaces — a new project
  *  has none yet, and that is the first thing to add. */
 export async function newProject(app: AppState, onError: (m: string) => void): Promise<void> {
-  const name = prompt('Название проекта', '');
+  const name = prompt('Project name', '');
   if (!name?.trim()) return;
   try {
     const p = await app.createProject(name.trim());
@@ -32,7 +32,7 @@ export async function newProject(app: AppState, onError: (m: string) => void): P
 }
 
 export function projectName(p: { name: string; is_personal: boolean }): string {
-  return p.is_personal ? 'Личный' : p.name;
+  return p.is_personal ? 'Personal' : p.name;
 }
 
 /** The sessions of the current project (SPEC §1: projects, in projects sessions), T26: a
@@ -59,14 +59,14 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
   const now = Date.now();
   const groups = showArchived
     ? list.length
-      ? [{ id: 'archive', label: 'Архив', items: list }]
+      ? [{ id: 'archive', label: 'Archive', items: list }]
       : []
     : groupSessions(list, mode, now);
   const pick = (m: ListMode) => {
     setMode(m);
     saveMode(m);
   };
-  const conn = app.conn !== 'open' ? ' · нет связи' : '';
+  const conn = app.conn !== 'open' ? ' · offline' : '';
   const counts = headCounts(app.sortedSessions());
 
   const search = (
@@ -74,15 +74,15 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
       <IconSearch size={14} />
       <input
         type="search"
-        aria-label="Поиск сессий"
-        placeholder="Поиск по названию и пути"
+        aria-label="Search sessions"
+        placeholder="Search by title and path"
         value={query}
         onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
       />
     </label>
   );
   const modes = (
-    <div class="seg-group" role="group" aria-label="Порядок сессий">
+    <div class="seg-group" role="group" aria-label="Session order">
       {LIST_MODES.map((m) => (
         <button
           type="button"
@@ -105,21 +105,21 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
       {phone ? (
         <header class="m-head">
           <div class="m-head-row">
-            <h1>Сессии</h1>
+            <h1>Sessions</h1>
             <button
               type="button"
               class="icon-btn icon-btn-round"
-              aria-label="Поиск по названию и пути"
+              aria-label="Search by title and path"
               aria-pressed={searching}
               onClick={() => setSearching(!searching)}
             >
               <IconSearch size={20} />
             </button>
-            <a class="icon-btn icon-btn-round" href="#/settings" aria-label="Аккаунт и настройки">
+            <a class="icon-btn icon-btn-round" href="#/settings" aria-label="Account and settings">
               <span class="avatar">{(app.me?.email ?? '?').slice(0, 1).toUpperCase()}</span>
             </a>
           </div>
-          {(app.error || conn) && <div class="m-head-state">{app.error ? 'Хаб недоступен' : 'нет связи'}</div>}
+          {(app.error || conn) && <div class="m-head-state">{app.error ? 'Hub unavailable' : 'offline'}</div>}
           <ProjectChips app={app} onError={setError} />
           {searching && search}
           {modes}
@@ -137,12 +137,12 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
             <button
               type="button"
               class="btn btn-primary btn-small btn-new-session"
-              aria-label="Новая сессия"
+              aria-label="New session"
               disabled={creating || !app.me}
               onClick={() => setCreating(true)}
             >
               <IconPlus size={14} />
-              Новая
+              New
             </button>
           </header>
           <div class="side-tools">
@@ -151,7 +151,7 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
           </div>
         </>
       )}
-      {app.error && <div class="notice">Хаб недоступен: {app.error}</div>}
+      {app.error && <div class="notice">Hub unavailable: {app.error}</div>}
       {error && <div class="notice">{error}</div>}
       {creating && project && <NewSession key={project.id} app={app} projectId={project.id} onDone={() => setCreating(false)} />}
       <div class="session-scroll">
@@ -175,20 +175,20 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
           </div>
         ))}
         {app.me && groups.length === 0 && (
-          <div class="empty">{query ? 'Ничего не найдено' : showArchived ? 'Архив пуст' : 'Сессий пока нет'}</div>
+          <div class="empty">{query ? 'Nothing found' : showArchived ? 'The archive is empty' : 'No sessions yet'}</div>
         )}
         {project && (
           <div class="list-foot">
-            <a href={`#/p/${project.id}/workspaces`}>Workspaces проекта</a>
+            <a href={`#/p/${project.id}/workspaces`}>Project workspaces</a>
             {(archived.length > 0 || showArchived) && (
               <button
                 type="button"
                 class={`btn-link btn-archive-toggle ${showArchived ? 'is-on' : ''}`}
                 aria-pressed={showArchived}
-                title="Показать архивные сессии"
+                title="Show archived sessions"
                 onClick={() => setShowArchived(!showArchived)}
               >
-                {showArchived ? 'Скрыть архив' : `Архив ${archived.length}`}
+                {showArchived ? 'Hide archive' : `Archive ${archived.length}`}
               </button>
             )}
           </div>
@@ -200,12 +200,12 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
         <button
           type="button"
           class="fab btn-new-session"
-          aria-label="Новая сессия"
+          aria-label="New session"
           disabled={creating || !app.me}
           onClick={() => setCreating(true)}
         >
           <IconPlus size={20} />
-          Новая
+          New
         </button>
       )}
     </section>
@@ -223,7 +223,7 @@ function SessionRow({ s, current, when, where }: { s: SessionInfo; current: bool
             <span class={`session-title ${bucket === 'idle' ? 'is-idle' : ''}`}>{s.title || s.slug || s.id.slice(-8)}</span>
             {when && <span class="session-when">{when}</span>}
             {s.unread > 0 && (
-              <span class="badge" aria-label={`непрочитанных: ${s.unread}`}>
+              <span class="badge" aria-label={`unread: ${s.unread}`}>
                 {s.unread > 99 ? '99+' : s.unread}
               </span>
             )}
@@ -240,11 +240,11 @@ function SessionRow({ s, current, when, where }: { s: SessionInfo; current: bool
   );
 }
 
-/** Projects as chips on a phone (the rail's job on a desktop), with «ждёт вас» counts. */
+/** Projects as chips on a phone (the rail's job on a desktop), with "needs you" counts. */
 function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) => void }) {
   const current = app.currentProjectId;
   return (
-    <nav class="chips" aria-label="Проекты">
+    <nav class="chips" aria-label="Projects">
       {app.sortedProjects().map((p) => {
         const waiting = app.projectWaiting(p.id);
         return (
@@ -257,43 +257,43 @@ function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) =>
           >
             {projectName(p)}
             {waiting > 0 && (
-              <span class="chip-badge" aria-label={`ждёт вас: ${waiting}`}>
+              <span class="chip-badge" aria-label={`needs you: ${waiting}`}>
                 {waiting}
               </span>
             )}
           </a>
         );
       })}
-      <button type="button" class="chip chip-new" aria-label="Новый проект" disabled={!app.me} onClick={() => void newProject(app, onError)}>
+      <button type="button" class="chip chip-new" aria-label="New project" disabled={!app.me} onClick={() => void newProject(app, onError)}>
         <IconPlus />
       </button>
     </nav>
   );
 }
 
-/** «Воркеры»: each worker with its online dot and how many sessions are active on it; a
+/** "Workers": each worker with its online dot and how many sessions are active on it; a
  *  click opens its service session (SPEC §10.2). Listed by their service sessions:
  *  revoking a worker archives it, so revoked workers are not here. */
 function WorkerList({ app, current }: { app: AppState; current?: string }) {
   const list = app.workerSessions();
   if (list.length === 0) return null;
   return (
-    <nav class="worker-list" aria-label="Воркеры">
-      <div class="group-title">Воркеры</div>
+    <nav class="worker-list" aria-label="Workers">
+      <div class="group-title">Workers</div>
       {list.map((s) => {
         const offline = s.state === 'worker_offline';
         const asks = s.state === 'waiting';
         return (
-          <a key={s.id} class={`worker-row ${s.id === current ? 'is-current' : ''}`} href={`#/s/${s.id}`} title="Служебная сессия воркера">
+          <a key={s.id} class={`worker-row ${s.id === current ? 'is-current' : ''}`} href={`#/s/${s.id}`} title="The worker's service session">
             <span class={`dot ${offline ? 'dot-offline' : 'dot-online'}`} aria-hidden="true" />
             <span class="worker-name">{s.title}</span>
             {asks ? (
-              <span class="worker-asks">ждёт ответа</span>
+              <span class="worker-asks">waiting for reply</span>
             ) : (
-              <span class="worker-state">{offline ? 'офлайн' : activeLabel(app.workerActive(s.worker_id))}</span>
+              <span class="worker-state">{offline ? 'offline' : activeLabel(app.workerActive(s.worker_id))}</span>
             )}
             {s.unread > 0 && (
-              <span class="badge" aria-label={`непрочитанных: ${s.unread}`}>
+              <span class="badge" aria-label={`unread: ${s.unread}`}>
                 {s.unread > 99 ? '99+' : s.unread}
               </span>
             )}
@@ -311,7 +311,7 @@ export function workspaceTitle(w: Workspace, workers?: WorkerInfo[]): string {
   return `${name} — ${worker ? `${worker}:` : ''}${w.path}`;
 }
 
-/** New session: title (empty — «Сессия N», SPEC §3), workspace (the project's default
+/** New session: title (empty — "Session N", SPEC §3), workspace (the project's default
  *  preselected, SPEC §13.4) and an optional `cwd` inside it. */
 function NewSession({ app, projectId, onDone }: { app: AppState; projectId: string; onDone: () => void }) {
   const [list, setList] = useState<Workspace[] | null>(app.workspaces.get(projectId) ?? null);
@@ -348,11 +348,11 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
     return (
       <div class="new-session">
         <p class="muted">
-          В проекте нет ни одного workspace: сессии нужна папка на воркере.{' '}
-          <a href={`#/p/${projectId}/workspaces`}>Добавить workspace</a>
+          The project has no workspaces: a session needs a folder on a worker.{' '}
+          <a href={`#/p/${projectId}/workspaces`}>Add a workspace</a>
         </p>
         <button type="button" class="btn btn-small" onClick={onDone}>
-          Отмена
+          Cancel
         </button>
       </div>
     );
@@ -360,7 +360,7 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
   return (
     <form class="new-session" onSubmit={create}>
       <label class="field">
-        <span class="field-label">Название (можно оставить пустым)</span>
+        <span class="field-label">Title (optional)</span>
         <input class="input" value={title} onInput={(e) => setTitle((e.target as HTMLInputElement).value)} />
       </label>
       <label class="field">
@@ -375,13 +375,13 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
           {(list ?? []).map((w) => (
             <option key={w.id} value={w.id}>
               {workspaceTitle(w, workers)}
-              {w.id === project?.default_workspace_id ? ' (по умолчанию)' : ''}
+              {w.id === project?.default_workspace_id ? ' (default)' : ''}
             </option>
           ))}
         </select>
       </label>
       <label class="field">
-        <span class="field-label">Папка внутри workspace (необязательно)</span>
+        <span class="field-label">Folder inside the workspace (optional)</span>
         <input
           class="input"
           name="cwd"
@@ -393,10 +393,10 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
       {error && <div class="error-text">{error}</div>}
       <div class="row">
         <button type="submit" class="btn btn-small btn-primary" disabled={busy || !chosen}>
-          Создать
+          Create
         </button>
         <button type="button" class="btn btn-small" onClick={onDone}>
-          Отмена
+          Cancel
         </button>
       </div>
     </form>

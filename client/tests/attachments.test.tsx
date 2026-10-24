@@ -114,7 +114,7 @@ describe('ArtifactStore', () => {
   });
 
   it('sizes', () => {
-    expect([formatSize(12), formatSize(48213), formatSize(5 * 1024 * 1024)]).toEqual(['12 Б', '47 КБ', '5.0 МБ']);
+    expect([formatSize(12), formatSize(48213), formatSize(5 * 1024 * 1024)]).toEqual(['12 B', '47 KB', '5.0 MB']);
   });
 });
 
@@ -254,11 +254,11 @@ describe('rendering attachments', () => {
       [
         ev('event.user.message', (e) => {
           e.seq = 1;
-          e.payload = { text: 'Смотри', artifact_ids: ['img', 'dif', 'txt'] };
+          e.payload = { text: 'Look', artifact_ids: ['img', 'dif', 'txt'] };
         }),
         ev('event.attachment', (e) => {
           e.seq = 2;
-          e.payload = { artifact_id: 'bin', kind: 'file', name: 'data.bin', caption: 'дамп' };
+          e.payload = { artifact_id: 'bin', kind: 'file', name: 'data.bin', caption: 'dump' };
         }),
       ],
       store,
@@ -278,14 +278,14 @@ describe('rendering attachments', () => {
 
     const cards = [...el.querySelectorAll('.card-attachment')];
     expect(cards.map((c) => c.querySelector('.card-title')!.textContent)).toEqual([
-      'notes.txt текст · 2.0 КБ',
-      'data.bin файл · 5 Б',
+      'notes.txt text · 2.0 KB',
+      'data.bin file · 5 B',
     ]);
-    expect(el.querySelector('.attachment-caption')!.textContent).toBe('дамп');
+    expect(el.querySelector('.attachment-caption')!.textContent).toBe('dump');
     // A file has only "download"; text can be opened too.
     const buttons = (c: Element) => [...c.querySelectorAll('button')].map((b) => b.textContent);
-    expect(buttons(cards[0])).toEqual(['Открыть', 'Скачать']);
-    expect(buttons(cards[1])).toEqual(['Скачать']);
+    expect(buttons(cards[0])).toEqual(['Open', 'Download']);
+    expect(buttons(cards[1])).toEqual(['Download']);
     await act(async () => cards[1].querySelector('button')!.click());
     expect(actions.openArtifact).toHaveBeenLastCalledWith('bin', true);
     await act(async () => img.parentElement!.click());
@@ -306,7 +306,7 @@ describe('rendering attachments', () => {
       [
         ev('event.user.message', (e) => {
           e.seq = 1;
-          e.payload = { text: 'Смотри', artifact_ids: ['slow', 'big', 'mid', 'txt'] };
+          e.payload = { text: 'Look', artifact_ids: ['slow', 'big', 'mid', 'txt'] };
         }),
       ],
       store,
@@ -320,10 +320,10 @@ describe('rendering attachments', () => {
       const card = [...el.querySelectorAll('.card-attachment')].find((c) => c.textContent!.includes(name))!;
       return [...card.querySelectorAll('button')].map((b) => b.textContent);
     };
-    expect(buttons('huge.patch')).toEqual(['Скачать']);
-    expect(buttons('log.txt')).toEqual(['Скачать']);
+    expect(buttons('huge.patch')).toEqual(['Download']);
+    expect(buttons('log.txt')).toEqual(['Download']);
     // Over the inline limit but under 2 MB: a card that still opens.
-    expect(buttons('mid.patch')).toEqual(['Открыть', 'Скачать']);
+    expect(buttons('mid.patch')).toEqual(['Open', 'Download']);
 
     await act(async () => release(meta('slow', 'diff', 'small.patch', 40)));
     await flush();
@@ -336,7 +336,7 @@ describe('rendering attachments', () => {
     const src = fakeSource([meta('d', 'diff', 'd.patch')]);
     const fetchImpl = vi.fn(async () => new Response('x', { headers: { 'content-length': String(600 * 1024) } }));
     const store = new ArtifactStore(src as never, fetchImpl as never);
-    await expect(store.text('d')).rejects.toThrow('слишком большое');
+    await expect(store.text('d')).rejects.toThrow('too large');
   });
 
   it('a broken image link is renewed once, then the image becomes a card', async () => {
@@ -360,7 +360,7 @@ describe('rendering attachments', () => {
     const onHub = chatWith([ev('event.attachment', (e) => (e.payload = { artifact_id: 'h', kind: 'html', name: 'report.html' }))], new ArtifactStore(fakeSource([html]) as never));
     await flush();
     expect(onHub.el.querySelector('iframe')).toBeNull();
-    expect(onHub.el.querySelector('.card-attachment button')!.textContent).toBe('Открыть');
+    expect(onHub.el.querySelector('.card-attachment button')!.textContent).toBe('Open');
     render(null, root!);
 
     const separate = new ArtifactStore(fakeSource([html], 'https://artifacts.example.com') as never, undefined, undefined, 'https://hqc.example.com');
@@ -389,7 +389,7 @@ describe('rendering attachments', () => {
       />,
     );
     expect(el.querySelector<HTMLImageElement>('.msg-pending img')!.alt).toBe('a.png');
-    expect(el.querySelector('.msg-pending .attachment-chip')!.textContent).toBe('b.txt 2.0 КБ');
+    expect(el.querySelector('.msg-pending .attachment-chip')!.textContent).toBe('b.txt 2.0 KB');
   });
 });
 
@@ -418,7 +418,7 @@ describe('paths of the working copy', () => {
     await act(async () => paths[0].click());
     await flush();
     expect(writeText).toHaveBeenLastCalledWith('src/main.rs:42');
-    expect(paths[0].querySelector('.md-path-note')!.textContent).toBe('путь скопирован');
+    expect(paths[0].querySelector('.md-path-note')!.textContent).toBe('path copied');
     await act(async () => paths[1].click());
     expect(writeText).toHaveBeenLastCalledWith('docs/SPEC.md');
     // No link to the hub is made of it.

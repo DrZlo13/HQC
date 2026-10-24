@@ -750,7 +750,7 @@ export interface SessionInfo {
   archived: boolean;
   updated_at: string;
   /** The service session of worker `worker_id` (SPEC §10.2): no input, listed under
-   *  «Воркеры», titled with the worker's name. */
+   *  "Workers", titled with the worker's name. */
   system: boolean;
   /** Open in VS Code (or another Claude Code outside hqc) right now (SPEC §9.3). */
   held_by?: HeldBy;

@@ -64,7 +64,7 @@ const button = (text: string, scope = '') =>
 /** A project in the rail, by its name (the rail shows initials, the name is the label). */
 const projectRow = (name: string) => $$('.project-row').find((r) => r.getAttribute('aria-label')?.includes(name));
 
-/** An item of the chat's «Ещё» menu, opening the menu first. */
+/** An item of the chat's "More" menu, opening the menu first. */
 async function menuItem(cls: string): Promise<HTMLButtonElement | null> {
   if (!$('.menu')) {
     $<HTMLButtonElement>('.btn-more')!.click();
@@ -117,15 +117,15 @@ afterAll(async () => {
 });
 
 it('lists projects and the sessions of the current one', async () => {
-  await until('personal project', () => projectRow('Личный'));
-  expect($('.project-row.is-current')!.getAttribute('aria-label')).toBe('Личный');
-  expect($('.project-row.is-current')!.textContent).toBe('Л');
-  await until('its sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
+  await until('personal project', () => projectRow('Personal'));
+  expect($('.project-row.is-current')!.getAttribute('aria-label')).toBe('Personal');
+  expect($('.project-row.is-current')!.textContent).toBe('P');
+  await until('its sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Empty session')));
 });
 
 it('creates a project, adds a workspace from the folder tree and starts a session there', async () => {
   promptAnswer = 'KiCad';
-  $<HTMLButtonElement>('button[aria-label="Новый проект"]')!.click();
+  $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
   await until('workspaces screen', () => $('.workspaces'));
   expect(location.hash).toMatch(/^#\/p\/[^/]+\/workspaces$/);
   const pid = location.hash.split('/')[2];
@@ -136,40 +136,40 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   await until('no workspaces yet', () => $('.workspaces .empty-inline'));
 
   // Folder tree of the online worker: roots, then down to kicad/power-board.
-  button('Добавить workspace')!.click();
+  button('Add a workspace')!.click();
   const entry = (name: string) => $$('.dir-entry').find((b) => b.textContent?.includes(name));
   (await until('roots', () => entry('work')))!.click();
   (await until('work/', () => entry('kicad')))!.click();
   (await until('kicad/', () => entry('power-board')))!.click();
-  await until('power-board/', () => $('.dir-browser')?.textContent?.includes('Подпапок нет'));
-  button('Выбрать эту папку')!.click();
+  await until('power-board/', () => $('.dir-browser')?.textContent?.includes('No subfolders'));
+  button('Pick this folder')!.click();
   await until('path picked', () => $<HTMLInputElement>('input[name=path]')?.value.endsWith('/kicad/power-board'));
-  button('↑ Выше')!.click();
+  button('↑ Up')!.click();
   await until('back up', () => entry('power-board'));
   await settle();
   submit('.add-workspace');
   await until('workspace listed', () => $$('.workspace-row').find((r) => r.textContent?.includes('/kicad/power-board')));
-  expect($('.workspace-row .tag')!.textContent).toBe('по умолчанию');
+  expect($('.workspace-row .tag')!.textContent).toBe('default');
   expect(app.projects.get(pid)!.default_workspace_id).toBe(app.workspaces.get(pid)![0].id);
 
   // A folder that is already in the personal project: the message names it, with a link.
-  button('Добавить workspace')!.click();
+  button('Add a workspace')!.click();
   await until('add form', () => $('.add-workspace input[name=path]'));
   type('.add-workspace input[name=path]', '/Users/home-mac/work/hqc/crates');
-  await until('add enabled', () => !button('Добавить', '.add-workspace')?.disabled);
+  await until('add enabled', () => !button('Add', '.add-workspace')?.disabled);
   submit('.add-workspace');
   const err = await until('conflict', () => $('.add-workspace .error-text'));
-  expect(err.textContent).toContain('Эта папка уже в проекте «Личный»');
+  expect(err.textContent).toContain('This folder is already in project “Personal”');
   expect(err.querySelector('a')!.getAttribute('href')).toBe(`#/p/${app.me!.personal_project_id}/workspaces`);
-  button('Отмена', '.add-workspace')!.click();
+  button('Cancel', '.add-workspace')!.click();
 
   // A session in that workspace, in a subfolder.
   location.hash = `#/p/${pid}`;
   await until('project route', () => !$('.workspaces'));
-  button('Новая')!.click();
+  button('New')!.click();
   await until('new session form', () => $('.new-session select[name=workspace]'));
   await until('workspaces loaded', () => $$('.new-session option').length === 1);
-  expect($('.new-session option')!.textContent).toContain('(по умолчанию)');
+  expect($('.new-session option')!.textContent).toContain('(default)');
   choose('.new-session select[name=workspace]', app.workspaces.get(pid)![0].id);
   type('.new-session input[name=cwd]', 'pcb');
   await settle();
@@ -180,18 +180,18 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   expect(s).toMatchObject({ project_id: pid, workspace_id: app.workspaces.get(pid)![0].id, cwd: 'pcb' });
   await until('listed in the project', () => $$('.session-row').find((r) => r.getAttribute('href') === `#/s/${sid}`));
   // The personal project's sessions are not shown here.
-  expect($$('.session-row').some((r) => r.textContent?.includes('Пустая сессия'))).toBe(false);
+  expect($$('.session-row').some((r) => r.textContent?.includes('Empty session'))).toBe(false);
 
   // Its workspace stays while the session lives.
   location.hash = `#/p/${pid}/workspaces`;
   (await until('remove button', () => $('.btn-remove-workspace') as HTMLButtonElement | null))!.click();
-  await until('in use', () => $('.workspaces .error-text')?.textContent?.includes('архивируйте'));
+  await until('in use', () => $('.workspaces .error-text')?.textContent?.includes('Archive these sessions first'));
 });
 
 it('switches projects from the left column and deletes a project', async () => {
-  const personal = projectRow('Личный')!;
+  const personal = projectRow('Personal')!;
   location.hash = personal.getAttribute('href')!;
-  await until('personal sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
+  await until('personal sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Empty session')));
   // The personal project has no delete button.
   location.hash = `#/p/${app.me!.personal_project_id}/workspaces`;
   await until('personal workspaces', () => $$('.workspace-row').length === 1);
@@ -210,54 +210,55 @@ it('switches projects from the left column and deletes a project', async () => {
   expect((await app.api.projects()).some((p) => p.id === kicad.id)).toBe(false);
 });
 
-it("lists the worker's service session apart: no input, request cards, «только запросы» (T17)", async () => {
-  const personal = projectRow('Личный')!;
+it(`lists the worker's service session apart: no input, request cards, "requests only" (T17)`, async () => {
+  const personal = projectRow('Personal')!;
   location.hash = personal.getAttribute('href')!;
   const row = await until('workers group', () =>
     $$('.worker-list .worker-row').find((r) => r.textContent?.includes('home-mac')),
   );
-  expect($('.worker-list .group-title')!.textContent).toBe('Воркеры');
-  expect(row.textContent).toContain('ждёт ответа');
+  expect($('.worker-list .group-title')!.textContent).toBe('Workers');
+  expect(row.textContent).toContain('waiting for reply');
   // Not among the sessions of the personal project, where it lives.
-  await until('personal sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
+  await until('personal sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Empty session')));
   expect($$('.session-row').some((r) => r.getAttribute('href') === row.getAttribute('href'))).toBe(false);
 
   location.hash = row.getAttribute('href')!;
   await until('log lines', () => $$('.line-worker-log').length === 3);
   expect($('.chat textarea')).toBeNull();
-  expect($('.chat .chat-system-note')!.textContent).toBe('служебная сессия воркера');
+  expect($('.chat .chat-system-note')!.textContent).toBe("the worker's service session");
   expect($('.line-worker-log.level-error .log-text')!.textContent).toContain('known folders not saved');
-  button('Только запросы')!.click();
+  button('Requests only')!.click();
   await until('filtered', () => $$('.line-worker-log').length === 0 && $('.chat .perm'));
-  expect($('.perm-title')!.textContent).toBe('Воркер спрашивает разрешения');
+  expect($('.perm-title')!.textContent).toBe('The worker asks for permission');
   $<HTMLButtonElement>('.perm button[data-canonical="once"]')!.click();
-  await until('answered', () => $('.perm-done-row .outcome')?.textContent?.includes('разрешено'));
-  button('Только запросы')!.click();
+  await until('answered', () => $('.perm-done-row .outcome')?.textContent?.includes('allowed'));
+  button('Requests only')!.click();
   await until('unfiltered', () => $$('.line-worker-log').length === 3);
 });
 
 // T15 (SPEC §9): import a folder with Claude Code sessions, see the session read-only as
-// «ведётся в VS Code», take it over and write.
+// "In VS Code", take it over and write.
 it('imports from Claude Code and takes a session over', async () => {
+  // A project named in Russian, as users may name theirs.
   promptAnswer = 'Платы';
-  $<HTMLButtonElement>('button[aria-label="Новый проект"]')!.click();
+  $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
   await until('workspaces screen', () => $('.workspaces'));
   const pid = location.hash.split('/')[2];
-  button('Импорт из Claude Code')!.click();
+  button('Import from Claude Code')!.click();
   const row = await until('candidates', () =>
     $$('.candidate').find((r) => r.textContent?.includes('/kicad/power-board')),
   );
-  expect(row.textContent).toContain('сессий: 1');
+  expect(row.textContent).toContain('sessions: 1');
   expect($$('.candidate')).toHaveLength(2);
-  expect(button('Импортировать')!.disabled).toBe(true);
+  expect(button('Import')!.disabled).toBe(true);
   row.querySelector<HTMLInputElement>('input[type=checkbox]')!.click();
-  await until('import enabled', () => !button('Импортировать')?.disabled);
-  button('Импортировать')!.click();
+  await until('import enabled', () => !button('Import')?.disabled);
+  button('Import')!.click();
   const ws = await until('workspace listed', () =>
     $$('.workspace-row').find((r) => r.textContent?.includes('/kicad/power-board')),
   );
   const toggle = ws.querySelector<HTMLInputElement>('.mirror-toggle input')!;
-  expect(ws.querySelector('.mirror-toggle')!.textContent).toBe('Сессии VS Code');
+  expect(ws.querySelector('.mirror-toggle')!.textContent).toBe('VS Code sessions');
   expect(toggle.checked).toBe(true);
   expect(app.workspaces.get(pid)![0].mirror_enabled).toBe(true);
   // T21: the switch goes to the hub (PATCH) and back.
@@ -269,51 +270,51 @@ it('imports from Claude Code and takes a session over', async () => {
 
   location.hash = `#/p/${pid}`;
   const link = await until('imported session', () =>
-    $$('.session-row').find((r) => r.textContent?.includes('Из VS Code: power-board')),
+    $$('.session-row').find((r) => r.textContent?.includes('From VS Code: power-board')),
   );
   location.hash = link.getAttribute('href')!;
   await until('history', () => $('.chat')?.textContent?.includes('VSCODE-DONE'));
   // Last driven by VS Code, nobody holds it now: the banner instead of the composer, with
-  // «Забрать сюда».
+  // "Take over here".
   const banner = await until('locked', () => $('.handover'));
   expect(banner.classList.contains('handover-held')).toBe(false);
-  expect(banner.querySelector('.handover-title')!.textContent).toBe('Последней сессию вела VS Code на home-mac.');
-  expect(banner.textContent).not.toContain('только для чтения');
-  expect($('.chat .state')!.textContent).toBe('Ведётся в VS Code');
+  expect(banner.querySelector('.handover-title')!.textContent).toBe('VS Code was the last to run this session on home-mac.');
+  expect(banner.textContent).not.toContain('read-only');
+  expect($('.chat .state')!.textContent).toBe('In VS Code');
   expect($('.chat textarea')).toBeNull();
 
-  button('Забрать сюда')!.click();
+  button('Take over here')!.click();
   await until('taken over', () => !$('.handover'));
-  await until('system line', () => $('.chat')?.textContent?.includes('Подхвачена из VS Code'));
+  await until('system line', () => $('.chat')?.textContent?.includes('Taken over from VS Code'));
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
 
 // T20 (SPEC §9.3): the import brought a session that is open in VS Code right now and whose
-// transcript forked. No «Подхватить» until it is closed there; a takeover the hub refuses
+// transcript forked. No "Take over" until it is closed there; a takeover the hub refuses
 // (`409 vscode_open`) shows its text; closed in VS Code, it is free at once.
 it('does not take over a session open in VS Code', async () => {
   const link = await until('open session', () =>
-    $$('.session-row').find((r) => r.textContent?.includes('Открыта в VS Code: power-board')),
+    $$('.session-row').find((r) => r.textContent?.includes('Open in VS Code: power-board')),
   );
   location.hash = link.getAttribute('href')!;
   const sid = location.hash.split('/').pop()!;
   // Open in VS Code right now: no button, close it there first.
   const banner = await until('open banner', () => $('.handover.handover-held'));
-  expect(banner.querySelector('.handover-title')!.textContent).toBe('Сессия открыта в VS Code на home-mac.');
-  expect(banner.querySelector('.handover-sub')!.textContent).toBe('Закройте её там, чтобы писать отсюда.');
-  expect(button('Забрать сюда')).toBeUndefined();
+  expect(banner.querySelector('.handover-title')!.textContent).toBe('The session is open in VS Code on home-mac.');
+  expect(banner.querySelector('.handover-sub')!.textContent).toBe('Close it there to write from here.');
+  expect(button('Take over here')).toBeUndefined();
   expect($('.chat textarea')).toBeNull();
   const fork = await until('fork line', () => $('.line-system-session_forked'));
   expect(fork.querySelector('.warn-icon')).not.toBeNull();
-  expect(fork.textContent).toContain('не попал в его контекст');
+  expect(fork.textContent).toContain('is not in its context');
 
-  // The client has not heard of the holder yet (its summaries do not mention it): «Подхватить»
+  // The client has not heard of the holder yet (its summaries do not mention it): "Take over"
   // is offered and the hub refuses it with its text.
   mock.hideHolder(sid, true);
   await until('plain banner', () => $('.handover') && !$('.handover-held'));
-  button('Забрать сюда')!.click();
+  button('Take over here')!.click();
   const notice = await until('notice', () => $('.notice'));
-  expect(notice.textContent).toBe('сессия открыта в VS Code: закройте её там и подхватите снова');
+  expect(notice.textContent).toBe('the session is open in VS Code: close it there and take it over again');
   mock.hideHolder(sid, false);
   await until('open banner again', () => $('.handover.handover-held'));
 
@@ -322,34 +323,34 @@ it('does not take over a session open in VS Code', async () => {
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
 
-// Archive from the chat header, find the session under «Архив», bring it back, delete it.
+// Archive from the chat header, find the session under "Archive", bring it back, delete it.
 it('archives, restores and deletes a session', async () => {
-  const personal = projectRow('Личный')!;
+  const personal = projectRow('Personal')!;
   location.hash = personal.getAttribute('href')!;
-  const row = await until('a session', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
+  const row = await until('a session', () => $$('.session-row').find((r) => r.textContent?.includes('Empty session')));
   const href = row.getAttribute('href')!;
   const sid = href.split('/').pop()!;
   const pid = app.sessions.get(sid)!.project_id;
   location.hash = href;
   await until('chat with the menu', () => $('.chat') && $('.btn-more'));
-  // «В архив», «Вернуть», «Удалить» live in the «Ещё» menu (T26).
+  // "Archive", "Restore", "Delete" live in the "More" menu (T26).
   expect(await menuItem('.btn-unarchive')).toBeNull();
   (await menuItem('.btn-archive'))!.click();
-  await until('archived', () => $('.chat .state')?.textContent?.includes('В архиве'));
+  await until('archived', () => $('.chat .state')?.textContent?.includes('Archived'));
   await until('gone from the list', () => !$$('.session-row').some((r) => r.getAttribute('href') === href));
   expect($('.menu')).toBeNull();
   expect(await menuItem('.btn-archive')).toBeNull();
 
   $<HTMLButtonElement>('.btn-archive-toggle')!.click();
-  await until('listed under Архив', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
+  await until('listed under Archive', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
 
   (await menuItem('.btn-unarchive'))!.click();
-  await until('restored', () => $('.chat .state')?.textContent === 'Свободна');
+  await until('restored', () => $('.chat .state')?.textContent === 'Idle');
   $<HTMLButtonElement>('.btn-archive-toggle')!.click();
   await until('back in the list', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
 
   (await menuItem('.btn-archive'))!.click();
-  await until('archived again', () => $('.chat .state')?.textContent?.includes('В архиве'));
+  await until('archived again', () => $('.chat .state')?.textContent?.includes('Archived'));
   (await menuItem('.btn-delete'))!.click(); // confirm() is stubbed to true
   await until('deleted', () => !app.sessions.has(sid));
   expect(location.hash).toBe(`#/p/${pid}`);

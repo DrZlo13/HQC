@@ -1879,7 +1879,7 @@ select.input {
   gap: 8px;
 }
 
-/* Desktop: one row — «Разрешить», the others, then «Отклонить» on the right. */
+/* Desktop: one row — "Allow", the others, then "Deny" on the right. */
 .perm-card .perm-more {
   display: contents;
 }

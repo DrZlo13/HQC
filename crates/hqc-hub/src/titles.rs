@@ -1,69 +1,52 @@
-//! Session titles the hub derives itself (T21, SPEC §3 Session).
+//! Session titles (T21, T24, SPEC §3 Session).
 //!
 //! After the first final `agent.message` of a session whose title is still the default
 //! «Сессия N» (from a worker or from the mirror: an imported session the same way, by its
-//! first records), the hub asks the title model ([`crate::llm`], `HQC_TITLE_MODEL`) in the
-//! background for a title of at most [`MAX_TITLE`] characters in the user's language, from
-//! the first prompt and the first answer (each cut to [`MAX_INPUT`] characters). Without a
-//! model, or when the call fails or times out (15 s; only logged), the title is the first
+//! first records), the hub sends `title.request` to the session's worker in the background:
+//! the first prompt and the first answer, each cut to [`MAX_TITLE_INPUT`] characters. The
+//! worker asks Claude Code on its subscription and answers with a title of at most
+//! [`MAX_TITLE`] characters. When the worker is offline, answers `error` or an empty title, or
+//! does not answer within `timing.title_request` (30 s; only logged), the title is the first
 //! line of the first prompt without markdown, cut at a word to [`MAX_TITLE`] characters with
 //! «…». Either way `title_source` becomes `runtime`, and only a `default` title is replaced:
 //! a user's or runtime's title is never overwritten.
 
+use hqc_proto::frame::{HubFrame, ResultBody, TitleRequest, MAX_TITLE, MAX_TITLE_INPUT};
 use uuid::Uuid;
 
-use crate::{app::AppState, db};
+use crate::{app::AppState, db, worker_ws::RequestError};
 
-/// Longest derived title, in characters.
-pub const MAX_TITLE: usize = 60;
-/// Title model calls in flight at once; the rest wait.
-pub const MAX_CALLS: usize = 4;
-/// How much of the first prompt and the first answer the model sees, in characters.
-pub const MAX_INPUT: usize = 2000;
-
-const SYSTEM: &str = "You name chat sessions between a user and a coding agent. Reply with the \
-    title only: at most 60 characters, in the language of the user's message, no quotes, no \
-    markdown, no trailing period.";
-
-/// The first final answer of `session_id` was stored: derive its title in the background if
+/// The first final answer of session `s` was stored: derive its title in the background if
 /// it still has the default one. Once per session per hub process.
-pub fn after_first_answer(app: &AppState, session_id: Uuid, title_source: &str, system: bool) {
-    if title_source != "default" || system {
+pub fn after_first_answer(app: &AppState, s: &db::SessionRow) {
+    if s.title_source != "default" || s.system {
         return;
     }
-    if !app.titling.lock().unwrap().insert(session_id) {
+    if !app.titling.lock().unwrap().insert(s.id) {
         return;
     }
-    let app = app.clone();
+    let (app, session_id, worker_id) = (app.clone(), s.id, s.worker_id);
     tokio::spawn(async move {
-        if let Err(e) = derive(&app, session_id).await {
+        if let Err(e) = derive(&app, session_id, worker_id).await {
             tracing::warn!(%session_id, "session title: {e:#}");
         }
     });
 }
 
-async fn derive(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
+async fn derive(app: &AppState, session_id: Uuid, worker_id: Option<Uuid>) -> anyhow::Result<()> {
     let Some(prompt) = db::first_text(&app.db, session_id, "user.message").await? else {
         return Ok(());
     };
     let answer = db::first_text(&app.db, session_id, "agent.message")
         .await?
         .unwrap_or_default();
-    let mut title = None;
-    if let Some(llm) = &app.titles {
-        let _slot = app.title_calls.acquire().await?;
-        let user = format!(
-            "First message of the user:\n{}\n\nFirst answer of the agent:\n{}",
-            cut(&prompt, MAX_INPUT),
-            cut(&answer, MAX_INPUT)
-        );
-        match llm.complete(SYSTEM, &user, 64).await {
-            Ok(t) => title = from_model(&t),
-            Err(e) => {
-                tracing::warn!(%session_id, model = %llm.config().model, "title model failed, title from the prompt: {e:#}")
-            }
+    let title = match from_worker(app, session_id, worker_id, &prompt, &answer).await {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::info!(%session_id, "no title from the worker, title from the prompt: {e}");
+            None
         }
-    }
+    };
     let Some(title) = title.or_else(|| from_prompt(&prompt)) else {
         return Ok(());
     };
@@ -75,24 +58,39 @@ async fn derive(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cut(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
+/// `title.request` to the session's worker; its title as one line of at most [`MAX_TITLE`].
+async fn from_worker(
+    app: &AppState,
+    session_id: Uuid,
+    worker_id: Option<Uuid>,
+    prompt: &str,
+    answer: &str,
+) -> Result<String, String> {
+    let conn = worker_id
+        .and_then(|w| app.workers.get(w))
+        .ok_or("the worker is offline")?;
+    let build = |request_id| {
+        HubFrame::TitleRequest(TitleRequest {
+            request_id,
+            session_id,
+            user_text: cut(prompt, MAX_TITLE_INPUT),
+            agent_text: cut(answer, MAX_TITLE_INPUT),
+        })
+    };
+    match conn.request(build, app.config.timing.title_request).await {
+        Ok(ResultBody::Title(t)) => {
+            let line = t.title.split_whitespace().collect::<Vec<_>>().join(" ");
+            shorten(&line, MAX_TITLE).ok_or_else(|| "the worker returned an empty title".into())
+        }
+        Ok(other) => Err(format!("unexpected result {other:?}")),
+        Err(RequestError::Offline) => Err("the worker went offline".into()),
+        Err(RequestError::Timeout) => Err("the worker did not answer in time".into()),
+        Err(RequestError::Worker(e)) => Err(format!("{}: {}", e.code, e.message)),
+    }
 }
 
-/// The model's answer as a title: its first non-empty line without quotes and markdown.
-pub fn from_model(text: &str) -> Option<String> {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let line = line
-        .strip_prefix("Title:")
-        .or_else(|| line.strip_prefix("Заголовок:"))
-        .unwrap_or(line);
-    let line = plain(line);
-    let line = line
-        .trim_matches(|c: char| matches!(c, '"' | '\'' | '«' | '»' | '“' | '”' | '`'))
-        .trim()
-        .trim_end_matches('.')
-        .trim();
-    shorten(line, MAX_TITLE)
+fn cut(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
 }
 
 /// The fallback: the first non-empty line of the prompt without markdown, cut at a word.
@@ -212,20 +210,5 @@ mod tests {
         let word = "a".repeat(100);
         let t = from_prompt(&word).unwrap();
         assert_eq!(t.chars().count(), MAX_TITLE);
-    }
-
-    #[test]
-    fn model_titles() {
-        assert_eq!(
-            from_model("\"Починка сборки\"\n").as_deref(),
-            Some("Починка сборки")
-        );
-        assert_eq!(from_model("Title: **Fix CI.**").as_deref(), Some("Fix CI"));
-        assert_eq!(
-            from_model("  \n«Кронштейн камеры»\nexplanation").as_deref(),
-            Some("Кронштейн камеры")
-        );
-        assert_eq!(from_model(" \n "), None);
-        assert!(from_model(&"word ".repeat(40)).unwrap().chars().count() <= MAX_TITLE);
     }
 }

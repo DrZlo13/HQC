@@ -305,7 +305,7 @@ async fn after_store(
             db::set_turn(&app.db, s.id, false, false).await?;
             if source != Source::Hub {
                 // «Сессия N» gets a real title (T21).
-                crate::titles::after_first_answer(app, s.id, &s.title_source, s.system);
+                crate::titles::after_first_answer(app, s);
             }
         }
         EventKind::Status { state, .. } => match state {

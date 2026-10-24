@@ -23,7 +23,6 @@ pub mod db;
 pub mod delivery;
 pub mod error;
 pub mod events;
-pub mod llm;
 pub mod mirror;
 pub mod push;
 pub mod requests;

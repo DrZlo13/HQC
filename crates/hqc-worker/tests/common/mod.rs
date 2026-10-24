@@ -448,6 +448,7 @@ pub fn start_worker_logs(
         logs,
         conn: fast_conn(),
         shutdown_timeout: Duration::from_secs(5),
+        machine_id: None,
         mirror: env
             .mirror
             .clone()

@@ -424,6 +424,20 @@ impl Supervisor {
                 self.mirror_set(&id, m);
                 return;
             }
+            HubFrame::SessionCleanup(c) => {
+                // Acked at once: the hub does not wait for it (T21).
+                self.link.reply(&id, ack(None));
+                let cfg = self.cfg.clone();
+                tokio::task::spawn_blocking(move || match crate::cleanup::session(&cfg, &c) {
+                    Ok(n) => {
+                        tracing::info!(session_id = %c.session_id, removed = n, "session cleaned up")
+                    }
+                    Err(e) => {
+                        tracing::warn!(session_id = %c.session_id, "session.cleanup refused: {e:#}")
+                    }
+                });
+                return;
+            }
             other => {
                 tracing::debug!(?other, "frame not for the supervisor");
                 return;
@@ -578,9 +592,15 @@ impl Supervisor {
             _ if !m.enabled => path.to_path_buf(),
             _ => return refuse("workspace_path is not a folder inside allowed_roots"),
         };
+        let since = m
+            .sessions
+            .iter()
+            .filter_map(|s| Some((s.runtime_session_id.parse().ok()?, s.since_ts)))
+            .collect();
         let _ = mirror.cmds.send(MirrorCmd::Set {
             path: canonical,
             enabled: m.enabled,
+            since,
         });
         self.link.reply(id, ack(None));
     }

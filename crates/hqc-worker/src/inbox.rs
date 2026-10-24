@@ -65,6 +65,9 @@ pub struct ArtifactClient {
     http: reqwest::Client,
     hub_url: String,
     token: Secret,
+    /// Where the working directories with an inbox are remembered, for the sweep at start
+    /// ([`crate::cleanup::sweep`], T21).
+    inboxes: Option<std::sync::Arc<crate::known_paths::KnownPaths>>,
 }
 
 impl ArtifactClient {
@@ -80,7 +83,13 @@ impl ArtifactClient {
             http,
             hub_url: hub_url.trim_end_matches('/').to_string(),
             token,
+            inboxes: None,
         }
+    }
+
+    pub fn with_inboxes(mut self, k: std::sync::Arc<crate::known_paths::KnownPaths>) -> Self {
+        self.inboxes = Some(k);
+        self
     }
 
     /// Streams the artifact into a new temporary file in `dir`; returns it with the name,
@@ -169,6 +178,11 @@ pub async fn prepare(
         return Ok((input.clone(), vec![]));
     }
     let dir = inbox_dir(spec, input.event_id)?;
+    if let Some(k) = &client.inboxes {
+        if let Err(e) = k.insert(&spec.workdir) {
+            tracing::warn!(workdir = %spec.workdir.display(), "inbox folder not remembered: {e:#}");
+        }
+    }
     if let Err(e) = exclude_hqc(&spec.workspace, allowed_roots) {
         tracing::warn!(workspace = %spec.workspace.display(), "cannot add .hqc/ to .git/info/exclude: {e:#}");
     }

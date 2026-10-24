@@ -31,6 +31,12 @@
 //! reported to the supervisor ([`Output::Holder`]), at most once per [`POLL`] per transcript,
 //! and every `mirror.event` carries the current holder (`held_by`).
 //!
+//! Sessions hqc already has (T21, SPEC §9.1). `mirror.set` lists the hub's sessions of the
+//! workspace with the time of their last event; the first pass over such a transcript (one
+//! the mirror has never read, offset 0) skips records not newer than that time, so enabling
+//! the mirror on a workspace where hqc sessions ran brings no duplicate prompts. Transcripts
+//! the hub does not know are imported whole.
+//!
 //! Forks (SPEC §9.3, T20). The mirror keeps the tree of each transcript's records
 //! ([`fork::Tree`]); a prompt that starts a second line of turns from an earlier record
 //! gives `system session_forked` through `mirror.event`.
@@ -108,6 +114,10 @@ pub struct Mirror {
     reported_at: HashMap<Uuid, Instant>,
     /// Record trees of the transcripts read in this process, for forks.
     trees: HashMap<PathBuf, fork::Tree>,
+    /// From `mirror.set`: transcript -> the time of the hub's last event of its session.
+    since: HashMap<Uuid, DateTime<Utc>>,
+    /// Transcripts in their first pass with a `since` limit, until read to the end.
+    skipping: HashMap<PathBuf, DateTime<Utc>>,
 }
 
 impl Mirror {
@@ -129,6 +139,8 @@ impl Mirror {
             reported: HashMap::new(),
             reported_at: HashMap::new(),
             trees: HashMap::new(),
+            since: HashMap::new(),
+            skipping: HashMap::new(),
         }
     }
 
@@ -144,9 +156,11 @@ impl Mirror {
         self
     }
 
-    /// `mirror.set`: `path` is canonical and inside `allowed_roots` (the supervisor checked).
-    pub fn set(&mut self, path: PathBuf, enabled: bool) {
-        tracing::info!(path = %path.display(), enabled, "mirror.set");
+    /// `mirror.set`: `path` is canonical and inside `allowed_roots` (the supervisor checked);
+    /// `since` — the hub's sessions there and the time of their last event.
+    pub fn set(&mut self, path: PathBuf, enabled: bool, since: Vec<(Uuid, DateTime<Utc>)>) {
+        tracing::info!(path = %path.display(), enabled, sessions = since.len(), "mirror.set");
+        self.since.extend(since);
         if enabled {
             self.workspaces.insert(path);
         } else {
@@ -318,6 +332,13 @@ impl Mirror {
         if size == row.offset {
             return Ok(());
         }
+        if row.offset == 0 {
+            if let Some(t) = self.since.get(&runtime) {
+                tracing::info!(path = %path.display(), since = %t, "first pass over a transcript hqc has: older records skipped");
+                self.skipping.insert(path.to_path_buf(), *t);
+            }
+        }
+        let skip_until = self.skipping.get(path).copied();
         if !self.trees.contains_key(path) {
             // First read in this process: the records already handled shape the tree, and
             // forks among them were reported before.
@@ -411,11 +432,18 @@ impl Mirror {
             }
             let events = map::record_events(&rec, row.last_prompt);
             row.last_prompt = map::prompt_id(&events).or(row.last_prompt);
-            for event in events {
-                out.push(wrap(event, row.title.clone()));
+            // The hub has this part already (T21).
+            let old = skip_until.is_some_and(|t| record_ts(&rec).is_some_and(|ts| ts <= t));
+            if !old {
+                for event in events {
+                    out.push(wrap(event, row.title.clone()));
+                }
             }
             self.held.remove(&uuid);
             pos = end;
+        }
+        if pos == size {
+            self.skipping.remove(path);
         }
         row.offset = pos;
         self.save(path, row)
@@ -450,6 +478,18 @@ pub fn transcripts(projects: &Path) -> Vec<(PathBuf, Uuid)> {
     }
     out.sort();
     out
+}
+
+/// The record's own `timestamp`, if it has one.
+fn record_ts(rec: &Record) -> Option<DateTime<Utc>> {
+    match rec {
+        Record::User(m) | Record::Assistant(m) => m
+            .timestamp
+            .as_deref()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc)),
+        _ => None,
+    }
 }
 
 /// A prompt a person typed: what counts as a turn in a line of the tree.
@@ -540,7 +580,11 @@ pub fn candidates(
 /// `mirror.set` from the supervisor.
 #[derive(Debug)]
 pub enum MirrorCmd {
-    Set { path: PathBuf, enabled: bool },
+    Set {
+        path: PathBuf,
+        enabled: bool,
+        since: Vec<(Uuid, DateTime<Utc>)>,
+    },
 }
 
 /// What the supervisor needs of the mirror: its commands and, for candidates, the state.
@@ -567,7 +611,7 @@ pub async fn run(
         tokio::select! {
             _ = stop.cancelled() => break,
             c = cmds.recv() => match c {
-                Some(MirrorCmd::Set { path, enabled }) => mirror.set(path, enabled),
+                Some(MirrorCmd::Set { path, enabled, since }) => mirror.set(path, enabled, since),
                 None => break,
             },
             _ = tick.tick() => {}

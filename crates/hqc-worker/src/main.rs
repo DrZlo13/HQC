@@ -151,6 +151,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
         logs: Some(logs),
         conn: ConnOptions::default(),
         shutdown_timeout: Duration::from_secs(10),
+        machine_id: hqc_worker::machine::fingerprint(config::hqc_home().ok().as_deref()),
     };
 
     let shutdown = CancellationToken::new();

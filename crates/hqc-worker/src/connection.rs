@@ -533,6 +533,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::WorkerApprovalResponse { .. } => "worker.approval.response",
         HubFrame::WorkspaceListCandidates(_) => "workspace.list_candidates",
         HubFrame::MirrorSet(_) => "mirror.set",
+        HubFrame::SessionCleanup(_) => "session.cleanup",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

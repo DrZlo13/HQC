@@ -45,6 +45,13 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
     if (info && !system && !app.workspaces.has(info.project_id)) app.loadWorkspaces(info.project_id).catch(() => {});
   }, [app, info?.project_id, system]);
   const path = info && !system ? app.sessionPath(info) : undefined;
+
+  // The runtime's slash commands come with the session object (T27), which the summary does
+  // not refresh: fetch it when an idle session has no list yet (after its first process).
+  const fetchCommands = !system && info !== undefined && info.commands === undefined && state === 'idle';
+  useEffect(() => {
+    if (fetchCommands) void app.refreshSession(sessionId);
+  }, [app, sessionId, fetchCommands]);
   const worker = app.workerName(info?.worker_id);
 
   // Read cursor: whatever is on screen while the tab is visible counts as read.
@@ -305,6 +312,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
         <Composer
           disabled={disabled}
           phone={phone}
+          commands={info?.commands}
           files={files}
           onFiles={addFiles}
           onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
@@ -431,6 +439,21 @@ function MoreMenu({
   );
 }
 
+/** The slash command being typed: the text is `/` and a name so far, nothing after it. */
+export function commandQuery(text: string): string | undefined {
+  return /^\/(\S*)$/.exec(text)?.[1];
+}
+
+/** The commands the popup offers for `text`: those starting with what is typed (ignoring
+ *  case), in the runtime's order; none when the only one is typed in full already. */
+export function matchCommands(commands: string[] | undefined, text: string): string[] {
+  const q = commandQuery(text);
+  if (q === undefined || !commands?.length) return [];
+  const lq = q.toLowerCase();
+  const out = commands.filter((c) => c.toLowerCase().startsWith(lq));
+  return out.length === 1 && out[0] === q ? [] : out;
+}
+
 const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 
 /** Images up to this size get a preview before sending. */
@@ -455,6 +478,7 @@ export function Composer({
   disabled,
   placeholder,
   phone = false,
+  commands,
   files = [],
   onFiles = () => {},
   onRemove = () => {},
@@ -463,6 +487,8 @@ export function Composer({
   disabled: boolean;
   placeholder?: string;
   phone?: boolean;
+  /** The runtime's slash commands: `/` at the start of the text opens a list of them. */
+  commands?: string[];
   files?: OutgoingFile[];
   onFiles?: (files: FileList | File[]) => void;
   onRemove?: (index: number) => void;
@@ -471,6 +497,27 @@ export function Composer({
   const area = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const canSend = !disabled && (text.trim() !== '' || files.length > 0);
+  // The slash command popup (T27): the matches, the highlighted one, and the text Esc closed
+  // it at (typing on reopens it).
+  const [pick, setPick] = useState(0);
+  const [closedAt, setClosedAt] = useState<string | null>(null);
+  const matches = disabled || closedAt === text ? [] : matchCommands(commands, text);
+  const popup = matches.length > 0;
+  const active = Math.min(pick, matches.length - 1);
+  const list = useRef<HTMLUListElement>(null);
+  useLayoutEffect(() => {
+    list.current?.children[active]?.scrollIntoView?.({ block: 'nearest' });
+  }, [active, popup]);
+  const edit = (t: string) => {
+    // In the same update as the text: a key right after typing moves from the first match.
+    setPick(0);
+    setText(t);
+  };
+  const insert = (c: string) => {
+    edit(`/${c} `);
+    setClosedAt(null);
+    area.current?.focus();
+  };
   const submit = () => {
     if (!canSend) return;
     onSend(text.trim());
@@ -505,11 +552,15 @@ export function Composer({
       ref={area}
       class="composer-input"
       aria-label="Сообщение"
+      aria-autocomplete={commands?.length ? 'list' : undefined}
+      aria-expanded={commands?.length ? popup : undefined}
+      aria-controls={popup ? 'composer-commands' : undefined}
+      aria-activedescendant={popup ? `composer-command-${active}` : undefined}
       rows={phone ? 1 : 2}
       placeholder={placeholder ?? (disabled ? 'Сессия в архиве' : 'Сообщение')}
       disabled={disabled}
       value={text}
-      onInput={(e) => setText((e.currentTarget as HTMLTextAreaElement).value)}
+      onInput={(e) => edit((e.currentTarget as HTMLTextAreaElement).value)}
       onPaste={(e) => {
         const pasted = [...(e.clipboardData?.files ?? [])];
         if (pasted.length === 0) return;
@@ -517,6 +568,25 @@ export function Composer({
         onFiles(pasted);
       }}
       onKeyDown={(e) => {
+        if (popup) {
+          const n = matches.length;
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            setPick((active + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
+            return;
+          }
+          if ((e.key === 'Tab' || e.key === 'Enter') && !e.shiftKey && !e.isComposing) {
+            e.preventDefault();
+            insert(matches[active]);
+            return;
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            setClosedAt(text);
+            return;
+          }
+        }
         // On a phone Enter is a newline; on desktop Enter sends, Shift+Enter is a newline.
         if (e.key === 'Enter' && !e.shiftKey && !coarse && !e.isComposing) {
           e.preventDefault();
@@ -534,6 +604,25 @@ export function Composer({
           submit();
         }}
       >
+        {popup && (
+          <ul class="cmd-popup" id="composer-commands" role="listbox" aria-label="Commands" ref={list}>
+            {matches.map((c, i) => (
+              <li
+                key={c}
+                id={`composer-command-${i}`}
+                role="option"
+                aria-selected={i === active}
+                class={`cmd-item ${i === active ? 'is-active' : ''}`}
+                // Keep the focus (and a phone's keyboard) in the field.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => insert(c)}
+              >
+                <span class="cmd-slash">/</span>
+                {c}
+              </li>
+            ))}
+          </ul>
+        )}
         {files.length > 0 && (
           <div class="composer-files">
             {files.map((f, i) => (

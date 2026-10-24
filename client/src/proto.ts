@@ -170,7 +170,10 @@ export interface Usage {
   output_tokens: number;
   cache_read?: number;
   cache_write?: number;
+  /** This turn's cost. */
   cost_usd?: number;
+  /** The runtime's running total of the whole session after this turn (T27). */
+  session_cost_usd?: number;
   model?: string;
 }
 export interface Status {
@@ -270,6 +273,10 @@ function arr(o: Obj, k: string): unknown[] {
   const v = o[k];
   if (!Array.isArray(v)) throw new ProtoError(`${k}: expected an array`);
   return v;
+}
+
+function optStrArr(o: Obj, k: string): string[] | undefined {
+  return present(o, k) ? strArr(o, k) : undefined;
 }
 
 function strArr(o: Obj, k: string): string[] {
@@ -381,6 +388,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     cache_read: optNum(p, 'cache_read'),
     cache_write: optNum(p, 'cache_write'),
     cost_usd: optNum(p, 'cost_usd'),
+    session_cost_usd: optNum(p, 'session_cost_usd'),
     model: optStr(p, 'model'),
   }),
   status: (p) => ({ state: tolerantEnum(p, 'state', SESSION_STATES), detail: optStr(p, 'detail') }),
@@ -577,6 +585,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'runtime_session_id');
     strictEnum(p, 'locked_by', LOCKED_BY);
     optStr(p, 'title');
+    optStrArr(p, 'commands');
   },
 };
 
@@ -745,6 +754,9 @@ export interface SessionInfo {
   system: boolean;
   /** Open in VS Code (or another Claude Code outside hqc) right now (SPEC §9.3). */
   held_by?: HeldBy;
+  /** The runtime's slash commands without `/`, for completing `/` in the composer (T27);
+   *  absent until a process of the session reported them. */
+  commands?: string[];
 }
 
 export function parseMe(v: unknown): Me {
@@ -776,6 +788,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     updated_at: str(o, 'updated_at'),
     system: optBool(o, 'system') ?? false,
     held_by: optHeldBy(o),
+    commands: optStrArr(o, 'commands'),
   };
 }
 

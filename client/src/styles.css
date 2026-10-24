@@ -200,10 +200,14 @@ button {
 
 /* ---- layout ---- */
 
+/* T27: the session column narrows with the window (300px at 1200px and wider, 225px at the
+   phone breakpoint) so the chat keeps its share; the chat column has no minimum, its
+   content wraps or scrolls inside itself. Below 900px the phone layout takes over
+   (useIsPhone). */
 .layout {
   height: 100%;
   display: grid;
-  grid-template-columns: 68px minmax(250px, 300px) minmax(0, 1fr);
+  grid-template-columns: 68px clamp(220px, 25vw, 300px) minmax(0, 1fr);
 }
 
 .layout-phone {
@@ -2032,6 +2036,8 @@ select.input {
 }
 
 .composer {
+  position: relative;
+  min-width: 0;
   width: 100%;
   max-width: 760px;
   display: flex;
@@ -2041,6 +2047,49 @@ select.input {
   border-radius: 12px;
   background: var(--panel);
   border: 1px solid #2a2f3a;
+}
+
+/* Slash command completion (T27): above the field, as wide as the composer. */
+.cmd-popup {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border-radius: 10px;
+  background: #1a1d24;
+  border: 1px solid var(--line-3);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.cmd-item {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font: 13px var(--mono);
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmd-item:hover,
+.cmd-item.is-active {
+  background: var(--active);
+  color: var(--strong);
+}
+
+.cmd-slash {
+  color: var(--faint);
+}
+
+.composer-phone .cmd-item {
+  padding: 10px 12px;
+  font-size: 15px;
 }
 
 .chat-dragging .composer {
@@ -2636,8 +2685,16 @@ select.input {
   font-size: inherit;
 }
 
+/* A wide table scrolls inside itself: its cells keep words whole (the message's
+   `overflow-wrap: anywhere` would split them letter by letter instead, T27). */
 .md-table {
   overflow-x: auto;
+  max-width: 100%;
+}
+.md-table th,
+.md-table td {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .md table {

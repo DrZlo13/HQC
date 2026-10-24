@@ -111,7 +111,13 @@ describe('examples/wire', () => {
     const sys = parseSessionInfo(load('api.session.system.json'));
     expect(sys).toMatchObject({ system: true, title: 'home-mac', state: 'waiting' });
     expect(sys.workspace_id).toBeUndefined();
-    const sum = (load('client.session.summary.json') as { session: Record<string, unknown> }).session;
+    // T27: the runtime's slash commands; absent until a process reported them.
+    expect(s.commands).toEqual(['compact', 'context', 'review', 'code-review']);
+    expect(sys.commands).toBeUndefined();
+    expect(() => parseSessionInfo({ ...(load('api.session.json') as object), commands: [1] })).toThrow();
+    const usage = parseEvent(load('event.usage.json'));
+    expect(usage.type === 'usage' && [usage.payload.cost_usd, usage.payload.session_cost_usd]).toEqual([0.0123, 0.4567]);
+    const sum =(load('client.session.summary.json') as { session: Record<string, unknown> }).session;
     for (const k of ['project_id', 'title', 'state', 'queue_len', 'unread', 'last_seq', 'last_read_seq']) {
       expect((s as unknown as Record<string, unknown>)[k], k).toEqual(sum[k]);
     }

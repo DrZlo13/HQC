@@ -43,9 +43,14 @@ const HISTORY = [
   ev('event.usage', 7, (e) => (e.payload = { input_tokens: 1, output_tokens: 2, cost_usd: 0.02 })),
 ];
 
-function setup(state: SessionState, opts: { held_by?: HeldBy; history?: HqcEvent[] } = {}) {
+function setup(
+  state: SessionState,
+  opts: { held_by?: HeldBy; history?: HqcEvent[]; commands?: string[]; fetched?: string[] } = {},
+) {
   const history = opts.history ?? HISTORY;
   const api = {
+    // GET /api/sessions/{id}: the session object with the commands the hub has by now.
+    session: vi.fn(async () => ({ ...info, commands: opts.fetched })),
     events: vi.fn(async (_id: string, after: number) => {
       const events = history.filter((e) => e.seq! > after);
       return { events, invalid: [], maxSeq: Math.max(after, ...events.map((e) => e.seq!)), count: events.length };
@@ -88,6 +93,7 @@ function setup(state: SessionState, opts: { held_by?: HeldBy; history?: HqcEvent
     updated_at: '2026-10-24T19:47:00Z',
     system: false,
     held_by: opts.held_by,
+    commands: opts.commands,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -226,5 +232,118 @@ describe('phone (Mobile-Session)', () => {
     });
     await act(async () => button('Отклонить и отправить')!.click());
     expect(api.approve).toHaveBeenCalledWith('s1', 'req-1', 'deny', 'Не трогай корень');
+  });
+});
+
+describe('cost (T27)', () => {
+  it('shows the runtime’s session total in the header and each turn’s own cost under it', async () => {
+    const history = [
+      ev('event.user.message', 1, (e) => (e.payload.artifact_ids = [])),
+      ev('event.agent.message', 2),
+      ev('event.usage', 3, (e) => (e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 0.4, session_cost_usd: 44.0 })),
+      ev('event.user.message', 4, (e) => ((e.event_id = '0199f3a2-7c10-7000-8000-0000000001c4'), (e.payload.artifact_ids = []))),
+      ev('event.agent.message', 5, (e) => (e.event_id = '0199f3a2-7c10-7000-8000-0000000001c5')),
+      ev('event.usage', 6, (e) => (e.payload = { input_tokens: 2, output_tokens: 5, cost_usd: 0.401, session_cost_usd: 44.401 })),
+    ];
+    const { app } = setup('idle', { history, commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$44.40 за сессию');
+    const lines = [...root.querySelectorAll('.usage')].map((l) => l.textContent!);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('$0.400');
+    expect(lines[1]).toContain('$0.401');
+  });
+
+  it('sums cost_usd when no usage has the session total (older events)', async () => {
+    const { app } = setup('idle', { commands: [] });
+    await mount(app);
+    expect($('.chat-cost')!.textContent).toBe('$0.07 за сессию');
+  });
+});
+
+describe('slash command completion (T27)', () => {
+  const COMMANDS = ['compact', 'context', 'code-review', 'review', 'anthropic-skills:pdf'];
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const type = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  const press = async (key: string, init: KeyboardEventInit = {}) => {
+    const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+    await act(() => void area().dispatchEvent(e));
+    return e;
+  };
+  const options = () => [...root.querySelectorAll('.cmd-item')].map((o) => o.textContent);
+  const active = () => root.querySelector('.cmd-item.is-active')?.textContent;
+
+  it('lists the commands matching what follows «/», moves with the arrows, inserts with Enter', async () => {
+    const { app } = setup('idle', { commands: COMMANDS });
+    await mount(app);
+    await type('/co');
+    expect(options()).toEqual(['/compact', '/context', '/code-review']);
+    expect(active()).toBe('/compact');
+    expect(area().getAttribute('aria-expanded')).toBe('true');
+    expect(area().getAttribute('aria-activedescendant')).toBe('composer-command-0');
+    await press('ArrowDown');
+    await press('ArrowDown');
+    expect(active()).toBe('/code-review');
+    await press('ArrowDown');
+    expect(active(), 'wraps around').toBe('/compact');
+    await press('ArrowUp');
+    expect(active()).toBe('/code-review');
+    const enter = await press('Enter');
+    expect(enter.defaultPrevented).toBe(true);
+    expect(area().value).toBe('/code-review ');
+    expect(options(), 'closed once a command is chosen').toEqual([]);
+  });
+
+  it('Tab inserts, Esc closes until the text changes, other text has no popup', async () => {
+    const { app } = setup('idle', { commands: COMMANDS });
+    await mount(app);
+    await type('/AN');
+    expect(options(), 'case does not matter').toEqual(['/anthropic-skills:pdf']);
+    await press('Tab');
+    expect(area().value).toBe('/anthropic-skills:pdf ');
+
+    await type('/re');
+    expect(options()).toEqual(['/review']);
+    await press('Escape');
+    expect(options()).toEqual([]);
+    await type('/rev');
+    expect(options(), 'typing on reopens it').toEqual(['/review']);
+    await type('/review');
+    expect(options(), 'typed in full').toEqual([]);
+    await type('please /review');
+    expect(options()).toEqual([]);
+    await type('/nothing');
+    expect(options()).toEqual([]);
+  });
+
+  it('a click (a tap on a phone) inserts the command', async () => {
+    // Without the open request of HISTORY: on a phone it would take the composer's place.
+    const { app } = setup('idle', { commands: COMMANDS, history: HISTORY.slice(0, 3) });
+    await mount(app, true);
+    await type('/');
+    expect(options()).toHaveLength(COMMANDS.length);
+    const item = [...root.querySelectorAll<HTMLElement>('.cmd-item')].find((o) => o.textContent === '/review')!;
+    await act(() => item.click());
+    expect(area().value).toBe('/review ');
+  });
+
+  it('no list, no popup; an idle session without a list fetches the session again', async () => {
+    const { api, app } = setup('idle', { fetched: ['compact'] });
+    await mount(app);
+    expect(api.session).toHaveBeenCalledTimes(1);
+    await type('/c');
+    expect(options()).toEqual(['/compact']);
+
+    const empty = setup('running');
+    await act(async () => render(null, root));
+    await mount(empty.app);
+    expect(empty.api.session).not.toHaveBeenCalled();
+    await type('/c');
+    expect(options()).toEqual([]);
+    expect(area().hasAttribute('aria-expanded')).toBe(false);
   });
 });

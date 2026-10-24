@@ -63,6 +63,21 @@ HTML показывается текстом: <img src=x onerror=alert(1)> и <s
 ссылка [javascript:](javascript:alert(1)) тоже текст, картинка не грузится: ![схема](https://example.com/d.png).
 `;
 
+/** Slash commands of every mock session: part of what Claude Code 2.1.308 lists (T27). */
+export const MOCK_COMMANDS = [
+  'clear',
+  'compact',
+  'context',
+  'code-review',
+  'config',
+  'init',
+  'model',
+  'review',
+  'security-review',
+  'simplify',
+  'usage',
+];
+
 export function loadExamples(dir = WIRE) {
   const out = {};
   for (const f of readdirSync(dir)) {
@@ -242,6 +257,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       created_at: s.created_at,
       updated_at: s.events.at(-1)?.ts ?? s.created_at,
       ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
+      // As if a process of the session had reported them (T27): `/` completes them.
+      commands: MOCK_COMMANDS,
     };
   }
 

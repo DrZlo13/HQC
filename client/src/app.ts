@@ -70,6 +70,17 @@ export class AppState {
     return this.refreshing;
   }
 
+  /** One session from the hub again: its `commands` (T27) are not in the summary. Errors are
+   *  dropped; the next refresh brings it. */
+  async refreshSession(id: string): Promise<void> {
+    try {
+      this.sessions.set(id, await this.api.session(id));
+      this.changed();
+    } catch {
+      // Offline or gone: the list and the summary still have the session.
+    }
+  }
+
   mergeSummary(list: SessionSummary[]): void {
     let unknown = false;
     for (const s of list) {

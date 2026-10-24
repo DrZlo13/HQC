@@ -197,16 +197,20 @@ export class Timeline {
       .sort((a, b) => a.seq! - b.seq!);
   }
 
-  /** Model of the last `usage` that names one, and the sum of `cost_usd` over the session. */
+  /** Model of the last `usage` that names one, and the session's cost: the runtime's own
+   *  running total of the last `usage` that has one (`session_cost_usd`, T27), else the sum
+   *  of `cost_usd` over the loaded history. */
   usageTotals(): { model?: string; cost?: number } {
     let model: string | undefined;
-    let cost: number | undefined;
+    let sum: number | undefined;
+    let total: number | undefined;
     for (const e of this.events()) {
       if (e.type !== 'usage') continue;
       if (e.payload.model) model = e.payload.model;
-      if (e.payload.cost_usd !== undefined) cost = (cost ?? 0) + e.payload.cost_usd;
+      if (e.payload.cost_usd !== undefined) sum = (sum ?? 0) + e.payload.cost_usd;
+      if (e.payload.session_cost_usd !== undefined) total = e.payload.session_cost_usd;
     }
-    return { model, cost };
+    return { model, cost: total ?? sum };
   }
 
   /** Results whose call is in the timeline are shown inside the call's card. */

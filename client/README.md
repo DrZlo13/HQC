@@ -53,10 +53,17 @@ marked в сборку тоже попадают (пакет — один фай
 - `src/ui/` — интерфейс по макетам T26 (`docs/design/redesign-2026-10-24`, тёмная тема):
   - `App.tsx` — раскладка: на десктопе полоса проектов (`ProjectRail`), колонка сессий
     (`SessionList`) и экран; на телефоне (уже 900px, `useIsPhone`) один экран за раз;
+    widths (T27): the rail is 68px, the session column `clamp(220px, 25vw, 300px)` (narrows
+    with the window), the chat `minmax(0, 1fr)` with no minimum; nothing may set a width, a
+    minimum width or a flex basis of 300px or more (`tests/layout.test.ts`); long code
+    (`.md-code pre`) and wide tables (`.md-table`) scroll inside themselves, everything else
+    wraps;
   - `SessionList.tsx` + `sessions.ts` — колонка сессий: режимы «Состояние»/«Недавние» (выбор в
     `localStorage`, ключ `hqc.sessionOrder`), поиск по заголовку и пути, счётчики проекта,
     воркеры с числом активных сессий (клик — служебная сессия), форма новой сессии; на телефоне
     проекты чипами и кнопка «Новая» внизу;
+  - `Chat.tsx` — the composer completes `/` from the session's `commands` (T27: arrows, Tab or
+    Enter, Esc, a tap);
   - `Chat.tsx` — шапка (пилюля состояния, воркер, путь, модель и стоимость из `usage`,
     «Остановить», меню «Ещё»), лента, плашки подхвата VS Code вместо поля ввода, поле ввода; на
     телефоне открытый запрос — bottom sheet вместо поля ввода;

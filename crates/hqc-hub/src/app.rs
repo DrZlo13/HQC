@@ -42,6 +42,8 @@ pub struct Inner {
     pub titles: Option<crate::llm::Llm>,
     /// Sessions whose title the hub has started to derive in this process ([`crate::titles`]).
     pub titling: Mutex<std::collections::HashSet<Uuid>>,
+    /// Title model calls at once: an import brings many sessions at the same time.
+    pub title_calls: Semaphore,
 }
 
 impl Deref for AppState {
@@ -88,6 +90,7 @@ impl AppState {
             turn_activity: Mutex::new(HashMap::new()),
             titles: config.title_model.clone().map(crate::llm::Llm::new),
             titling: Mutex::new(Default::default()),
+            title_calls: Semaphore::new(crate::titles::MAX_CALLS),
             config,
         }))
     }

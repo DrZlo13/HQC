@@ -16,6 +16,8 @@ use crate::{app::AppState, db};
 
 /// Longest derived title, in characters.
 pub const MAX_TITLE: usize = 60;
+/// Title model calls in flight at once; the rest wait.
+pub const MAX_CALLS: usize = 4;
 /// How much of the first prompt and the first answer the model sees, in characters.
 pub const MAX_INPUT: usize = 2000;
 
@@ -49,6 +51,7 @@ async fn derive(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
         .unwrap_or_default();
     let mut title = None;
     if let Some(llm) = &app.titles {
+        let _slot = app.title_calls.acquire().await?;
         let user = format!(
             "First message of the user:\n{}\n\nFirst answer of the agent:\n{}",
             cut(&prompt, MAX_INPUT),

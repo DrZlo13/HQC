@@ -109,6 +109,11 @@ pub enum WorkerFrame {
         /// `runtime_session_id` and ignores `process_state` and `locked_by`.
         #[serde(default, skip_serializing_if = "Option::is_none", with = "maybe_null")]
         held_by: Option<Option<HeldBy>>,
+        /// Slash commands the runtime offers, without the `/` (Claude Code: `slash_commands`
+        /// of `system/init`, SPEC §8.1). Absent — not known yet; the worker repeats the last
+        /// list in every following `session.state`, like `title`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commands: Option<Vec<String>>,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -1004,6 +1009,13 @@ mod tests {
         };
         assert_eq!(of(&old), None);
         assert_eq!(of(&gone), Some(None));
+        // `commands` (T27): additive, absent in older frames.
+        let commands = |f: &Envelope<WorkerFrame>| match &f.body {
+            WorkerFrame::SessionState { commands, .. } => commands.clone(),
+            other => panic!("not session.state: {other:?}"),
+        };
+        assert_eq!(commands(&old).unwrap()[0], "compact");
+        assert_eq!(commands(&held), None);
         assert_eq!(
             of(&held),
             Some(Some(HeldBy {

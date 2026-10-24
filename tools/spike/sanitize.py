@@ -15,7 +15,9 @@ SAFE_USER = "user"
 SAFE_EMAIL = "user@example.com"
 STRIPPED = {"stripped": True}
 INIT_KEYS = ["type", "subtype", "cwd", "session_id", "model", "permissionMode",
-             "claude_code_version", "mcp_servers", "uuid"]
+             "claude_code_version", "mcp_servers", "uuid",
+             # T27: what the adapter reports as the session's slash commands.
+             "slash_commands", "terminal_slash_commands"]
 
 
 def parse_args():

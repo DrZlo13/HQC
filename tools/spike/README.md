@@ -13,7 +13,7 @@ Starts `claude -p` in stream-json mode with `--permission-prompts host
 policy and closes stdin after `result`.
 
 ```
-tools/spike/driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+tools/spike/driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] [--then PROMPT ...] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 ```
 
 - `--resume UUID` (or `SPIKE_RESUME`): continue that session with `--resume` instead of a new
@@ -21,6 +21,9 @@ tools/spike/driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] 
 - `--arg-prompt` (or `SPIKE_ARG_PROMPT=1`): plain `claude -p PROMPT --model claude-haiku-5-5
   --max-turns 2`, the prompt as an argument and text output in `stdout.txt`, the way a person
   runs it in a terminal (T15: the "VS Code" side); `POLICY` is ignored.
+
+- `--then PROMPT` (repeatable): after each `result` send the next prompt in the same process
+  instead of closing stdin (T27: several turns of one process).
 
 - `POLICY`: `once` (allow), `deny`, `always` (allow + every `permission_suggestions` entry
   as `updatedPermissions`), `ask_answer` (answer `AskUserQuestion` with the first option of
@@ -77,7 +80,8 @@ and `stdin-<NAME>-<ver>.jsonl`. On the way it:
 - replaces `attachment` and `rendered` of attachment records and the file-history snapshot
   with `{"stripped":true}`;
 - drops every key containing `hook` (`hookInfos` and the like) and `system` hook events;
-- trims `system/init` to a few fields;
+- trims `system/init` to a few fields (since T27 `slash_commands` and
+  `terminal_slash_commands` stay);
 - rewrites the run's cwd (and its `/private` and folder-name forms) to
   `/tmp/hqc-fixture/<NAME>`, then applies `--replace`, then `/Users/<name>` and
   `/home/<name>` to `/Users/user`, `/home/user`, and emails to `user@example.com`.

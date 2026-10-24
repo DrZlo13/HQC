@@ -437,6 +437,7 @@ async fn handle_text(
             locked_by,
             title,
             held_by,
+            commands,
         } => {
             let st = StateFrame {
                 session_id,
@@ -445,6 +446,7 @@ async fn handle_text(
                 locked_by,
                 title,
                 held_by,
+                commands,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -607,6 +609,7 @@ struct StateFrame {
     locked_by: hqc_proto::frame::LockedBy,
     title: Option<String>,
     held_by: Option<Option<hqc_proto::frame::HeldBy>>,
+    commands: Option<Vec<String>>,
 }
 
 async fn on_session_state(
@@ -622,6 +625,7 @@ async fn on_session_state(
         locked_by,
         title,
         held_by,
+        commands,
     } = st;
     if session_id.is_nil() {
         // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
@@ -663,6 +667,9 @@ async fn on_session_state(
     if let Some(t) = title.as_deref().and_then(runtime_title) {
         db::set_runtime_title(&app.db, session_id, &t).await?;
     }
+    if let Some(c) = commands {
+        db::set_commands(&app.db, session_id, &runtime_commands(c)).await?;
+    }
     conn.reply(id, HubFrame::Ack(Ack::default()));
 
     if process_state == ProcessState::Stopped {
@@ -689,6 +696,32 @@ async fn on_session_state(
     }
     app.session_changed(session_id);
     Ok(())
+}
+
+/// At most this many slash commands are kept, each at most [`MAX_COMMAND`] characters.
+pub(crate) const MAX_COMMANDS: usize = 500;
+pub(crate) const MAX_COMMAND: usize = 100;
+
+/// Slash commands as stored (T27): names without the leading `/`, without whitespace or
+/// control characters, unique, in the worker's order, cut to [`MAX_COMMANDS`]; longer or
+/// empty names are dropped. The worker is trusted for the list, not for its size.
+pub(crate) fn runtime_commands(list: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in list {
+        let c = c.trim().trim_start_matches('/');
+        if c.is_empty()
+            || c.chars().count() > MAX_COMMAND
+            || c.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+            || out.iter().any(|o| o == c)
+        {
+            continue;
+        }
+        out.push(c.to_string());
+        if out.len() == MAX_COMMANDS {
+            break;
+        }
+    }
+    out
 }
 
 /// A runtime title as stored: one line, at most `MAX_TITLE` characters (SPEC §6), U+0000

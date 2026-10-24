@@ -260,8 +260,13 @@ pub enum EventKind {
         cache_read: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_write: Option<u64>,
+        /// Cost of this turn (SPEC §4); Claude Code: the growth of `total_cost_usd`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
+        /// The runtime's cumulative cost of the whole runtime session after this turn
+        /// (Claude Code: `result.total_cost_usd`, carried over `--resume`), if it reports one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_cost_usd: Option<f64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },

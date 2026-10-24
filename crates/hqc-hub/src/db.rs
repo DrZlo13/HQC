@@ -993,6 +993,8 @@ pub struct SessionRow {
     /// (SPEC §9.3), and since when.
     pub held_by: Option<Value>,
     pub vscode_held_at: Option<DateTime<Utc>>,
+    /// The runtime's slash commands (`session.state.commands`, SPEC §5.4): a JSON array.
+    pub commands: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1001,7 +1003,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.title, s.title_source, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
-    s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.created_at, \
+    s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
     s.updated_at";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
@@ -1104,6 +1106,21 @@ pub async fn set_user_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<
     )
     .bind(id)
     .bind(title)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// The runtime's slash commands (`session.state.commands`, T27); written only when they
+/// changed, so a `session.state` without a new list does not touch `updated_at`.
+pub async fn set_commands(db: &PgPool, id: Uuid, commands: &[String]) -> sqlx::Result<()> {
+    let v = serde_json::to_value(commands).unwrap_or(Value::Null);
+    sqlx::query(
+        "UPDATE sessions SET commands = $2
+         WHERE id = $1 AND commands IS DISTINCT FROM $2",
+    )
+    .bind(id)
+    .bind(v)
     .execute(db)
     .await?;
     Ok(())

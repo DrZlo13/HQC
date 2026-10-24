@@ -116,6 +116,22 @@ pub fn last_ai_title(s: &str) -> Option<String> {
         })
 }
 
+/// `totalCostUSD` of the last `cost-state` record of a transcript: the session's cumulative
+/// cost the CLI writes when its process ends and starts from again on `--resume` (checked on
+/// 2.1.308, T27; SPEC §8.1). Cheap like [`last_ai_title`].
+pub fn last_cost_total(s: &str) -> Option<f64> {
+    s.lines()
+        .rev()
+        .filter(|l| l.contains("\"cost-state\""))
+        .find_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).ok()?;
+            (v["type"] == "cost-state")
+                .then(|| v["totalCostUSD"].as_f64())
+                .flatten()
+                .filter(|c| c.is_finite() && *c >= 0.0)
+        })
+}
+
 /// Where a record hangs in the transcript's tree: every record with a `uuid` (messages,
 /// attachments, system records) names its `parentUuid`. Two lines of turns from one record
 /// are a fork (SPEC §9.3).
@@ -213,6 +229,22 @@ mod tests {
             last_ai_title(include_str!("../fixtures/permission-allow-2.1.307.jsonl")),
             None
         );
+    }
+
+    /// T27: the baseline of a resumed process is the last `cost-state`; the transcript before
+    /// the resume (up to the first `cost-state`) has the first process's total.
+    #[test]
+    fn last_cost_total_from_fixture() {
+        let full = include_str!("../fixtures/cost-resume-2.1.308.jsonl");
+        assert_eq!(last_cost_total(full), Some(0.0043361));
+        let cut = full.find("\"cost-state\"").unwrap();
+        let before_resume = &full[..full[cut..].find('\n').unwrap() + cut];
+        assert_eq!(last_cost_total(before_resume), Some(0.00398629));
+        assert_eq!(last_cost_total(FIXTURE), Some(0.00393462));
+        let first_turn = &full[..full.find("\"cost-state\"").unwrap()];
+        assert_eq!(last_cost_total(first_turn), None, "process still running");
+        let broken = format!("{full}{}\n", r#"{"type":"cost-state","totalCostUSD":"x"}"#);
+        assert_eq!(last_cost_total(&broken), Some(0.0043361));
     }
 
     /// T0 fixtures: (transcript, stream-json stdout) of the same run.

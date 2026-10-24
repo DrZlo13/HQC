@@ -1,5 +1,5 @@
 {
   "id": "w-3",
   "type": "session.state",
-  "payload": { "session_id": "0199f3a2-7c10-7000-8000-000000000001", "process_state": "running", "runtime_session_id": "36c72c19-b4ad-4d95-a482-ce4e281952cb", "locked_by": "hqc", "title": "Run the test suite" }
+  "payload": { "session_id": "0199f3a2-7c10-7000-8000-000000000001", "process_state": "running", "runtime_session_id": "36c72c19-b4ad-4d95-a482-ce4e281952cb", "locked_by": "hqc", "title": "Run the test suite", "commands": ["compact", "context", "review", "code-review"] }
 }

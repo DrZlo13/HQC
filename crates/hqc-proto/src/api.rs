@@ -50,6 +50,11 @@ pub struct Session {
     /// `locked_vscode` and cannot be taken over until it is closed there. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_by: Option<HeldBy>,
+    /// Slash commands of the session's runtime, without the `/`, as the worker last reported
+    /// them (`session.state.commands`, SPEC §5.4); the client completes `/` with them. Absent
+    /// until a process of the session has reported a list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<String>>,
 }
 
 impl Session {
@@ -517,6 +522,11 @@ mod tests {
         assert_eq!(held.summary().held_by, held.held_by);
         assert_eq!(held.held_by.unwrap().entrypoint, "claude-vscode");
         assert!(s.held_by.is_none());
+        assert_eq!(s.commands.as_deref().map(<[_]>::len), Some(4));
+        assert_eq!(
+            held.commands, None,
+            "absent until a process reported a list"
+        );
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));
         roundtrip::<InputRequest>(include_str!("../examples/wire/api.input.request.json"));
         let r: InputResponse = roundtrip(include_str!("../examples/wire/api.input.json"));

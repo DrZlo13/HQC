@@ -360,3 +360,23 @@ Permission, Mobile-List, Mobile-Session).
 `deny_with_message_reaches_control_response`), `cd client && npm run typecheck && npm test && npm
 run build`, `tools/e2e-local.sh` с `E2E_CLAUDE_BIN=/usr/bin/false`. Вопросы и расхождения с
 макетами — `docs/notes/t26-questions.md`.
+
+## T27. Per-turn cost, slash command completion, shrinking layout (done, SPEC 0.28)
+
+Sections: §4, §5.4, §6, §8.1, §23. Three problems reported by the user.
+- Cost: `result.total_cost_usd` of Claude Code is the session's running total (live runs on
+  2.1.308, fixtures `cost-turns`, `cost-resume`); the adapter emits the turn's share in
+  `usage.cost_usd` (baseline: the previous `result`, or the transcript's last `cost-state` after
+  `--resume`) and the total in the new `usage.session_cost_usd`; the header shows the latest total.
+- Slash commands: `slash_commands` of `system/init` (without the terminal-only and internal
+  ones) go to the hub in `session.state.commands`, the hub keeps them on the session (migration
+  0013) and in the session object; the composer completes `/` from that list.
+- Layout: the session column narrows with the window, markdown tables scroll inside themselves;
+  measured in Chrome from 1440 to 390 px.
+Acceptance: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (worker: `turn_cost_is_the_growth_of_the_session_total`,
+`resumed_turn_cost_starts_from_the_last_cost_state`, `adapter_resumes_with_the_transcript_cost`,
+`command_list_is_reported_when_it_changes`, `runtime_commands_go_in_session_state`; hub:
+`runtime_commands_are_kept_on_the_session`), `cd client && npm run typecheck && npm test && npm
+run build` (`chat.test.tsx` cost and completion, `layout.test.ts`), `tools/e2e-local.sh` with
+`E2E_CLAUDE_BIN=/usr/bin/false`. Notes — `docs/notes/t27-questions.md`.

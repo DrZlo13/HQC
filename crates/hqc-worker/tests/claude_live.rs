@@ -45,6 +45,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::Exited { error } => format!("exited:{error:?}"),
         AdapterEvent::RuntimeSessionId(s) => format!("runtime_session_id:{s}"),
         AdapterEvent::Title(t) => format!("title:{t}"),
+        AdapterEvent::Commands(c) => format!("commands:{}", c.len()),
     }
 }
 

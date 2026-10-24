@@ -8,7 +8,11 @@
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`;
 //! - `assistant` `tool_use` → `tool.call`; non-empty `thinking` → `agent.thinking`;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
-//! - `result` → `usage`, `status idle`, end of turn;
+//! - `result` → `usage`, `status idle`, end of turn; `usage.cost_usd` is the growth of the
+//!   CLI's cumulative `total_cost_usd` since the previous `result` of the session (or since
+//!   the transcript's last `cost-state` after `--resume`), `session_cost_usd` the total itself;
+//! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
+//!   differ from what this process reported (the CLI sends `init` before every turn);
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint`) /
 //!   `clarify.request`, an immediate allow by a `session` rule, or an immediate deny plus
 //!   `system policy_denied` when a deny rule of `[permissions]` matches;
@@ -96,6 +100,11 @@ pub struct Core {
     /// rule matches.
     policy: Arc<Policy>,
     model: Option<String>,
+    /// The session's cumulative cost as of the last `result` (or the transcript's last
+    /// `cost-state` when resumed): the baseline of the next turn's cost.
+    cost_total: Option<f64>,
+    /// The slash commands last reported by this process.
+    commands: Option<Vec<String>>,
     /// Message uuids read since the last [`Core::take_seen`].
     seen: Vec<Uuid>,
 }
@@ -120,12 +129,22 @@ impl Core {
             rules: SessionRules::default(),
             policy: Arc::default(),
             model: None,
+            cost_total: None,
+            commands: None,
             seen: Vec::new(),
         }
     }
 
     pub fn with_policy(mut self, policy: Arc<Policy>) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// The session's cumulative cost before this process: `totalCostUSD` of the
+    /// transcript's last `cost-state` when the process resumes it (the CLI starts its
+    /// `total_cost_usd` from there, checked on 2.1.308, T27).
+    pub fn with_cost_baseline(mut self, total: Option<f64>) -> Self {
+        self.cost_total = total;
         self
     }
 
@@ -335,7 +354,7 @@ impl Core {
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
                     self.model = v["model"].as_str().map(str::to_owned);
-                    vec![]
+                    self.on_init(&v)
                 }
                 Some("permission_denied") => {
                     let mut out: Vec<Action> = self.flush(false).into_iter().collect();
@@ -346,6 +365,47 @@ impl Core {
             },
             _ => vec![],
         }
+    }
+
+    /// `slash_commands` of `system/init` without those that only work in the terminal UI
+    /// (`terminal_slash_commands`) and the CLI's internal ones (`__name`); reported once per
+    /// process and again only when the list changes (`/reload-plugins`, a new skill).
+    fn on_init(&mut self, v: &Value) -> Vec<Action> {
+        // An older CLI without the list: nothing to report.
+        if !v["slash_commands"].is_array() {
+            return vec![];
+        }
+        let names = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.as_str())
+                .map(|c| text(c.trim().trim_start_matches('/')))
+                .collect()
+        };
+        let terminal = names(&v["terminal_slash_commands"]);
+        let mut list: Vec<String> = Vec::new();
+        for c in names(&v["slash_commands"]) {
+            if !c.is_empty() && !c.starts_with('_') && !terminal.contains(&c) && !list.contains(&c)
+            {
+                list.push(c);
+            }
+        }
+        if self.commands.as_ref() == Some(&list) {
+            return vec![];
+        }
+        tracing::info!(session_id = %self.session_id, commands = list.len(), "slash commands");
+        self.commands = Some(list.clone());
+        vec![Action::Emit(AdapterEvent::Commands(list))]
+    }
+
+    /// This turn's share of the CLI's cumulative `total_cost_usd`: never negative, and a total
+    /// below the baseline (a CLI that did not carry the cost over) does not lower it.
+    fn turn_cost(&mut self, total: f64) -> f64 {
+        let base = self.cost_total.unwrap_or(0.0);
+        self.cost_total = Some(base.max(total));
+        // Rounded to 1e-10 USD: the difference of two decimals is not one in binary.
+        ((total - base).max(0.0) * 1e10).round() / 1e10
     }
 
     fn on_stream_event(&mut self, v: &Value) -> Vec<Action> {
@@ -441,12 +501,17 @@ impl Core {
         let mut out: Vec<Action> = self.flush(true).into_iter().collect();
         let usage = &v["usage"];
         let num = |k: &str| usage[k].as_u64();
+        let total = v["total_cost_usd"]
+            .as_f64()
+            .filter(|c| c.is_finite() && *c >= 0.0);
+        let cost_usd = total.map(|t| self.turn_cost(t));
         out.push(self.emit_new(EventKind::Usage {
             input_tokens: num("input_tokens").unwrap_or(0),
             output_tokens: num("output_tokens").unwrap_or(0),
             cache_read: num("cache_read_input_tokens"),
             cache_write: num("cache_creation_input_tokens"),
-            cost_usd: v["total_cost_usd"].as_f64(),
+            cost_usd,
+            session_cost_usd: total,
             model: self.model.clone().or_else(|| {
                 v["modelUsage"]
                     .as_object()

@@ -233,6 +233,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::Exited { .. } => "exited".into(),
             AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
             AdapterEvent::Title(_) => "title".into(),
+            AdapterEvent::Commands(_) => "commands".into(),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -415,7 +416,7 @@ async fn permission_allow_once() {
     )));
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
-        EventKind::Usage { input_tokens: 4, output_tokens: 96, cache_read: Some(36251), cache_write: Some(12206), cost_usd: Some(_), model: Some(m) }
+        EventKind::Usage { input_tokens: 4, output_tokens: 96, cache_read: Some(36251), cache_write: Some(12206), cost_usd: Some(_), session_cost_usd: Some(_), model: Some(m) }
             if m == "claude-haiku-5-5"
     )));
     assert!(evs.iter().any(|e| matches!(
@@ -1493,4 +1494,147 @@ async fn local_command_without_echo_is_taken() {
     assert!(events
         .iter()
         .any(|e| matches!(e, AdapterEvent::InputAccepted { event_id } if *event_id == id)));
+}
+
+/// `(cost_usd, session_cost_usd)` of every `usage` and every command list, in order.
+fn costs_and_commands(actions: &[Action]) -> (Vec<(f64, f64)>, Vec<Vec<String>>) {
+    let (mut costs, mut commands) = (vec![], vec![]);
+    for a in actions {
+        match a {
+            Action::Emit(AdapterEvent::Event(e)) => {
+                if let EventKind::Usage {
+                    cost_usd: Some(c),
+                    session_cost_usd: Some(t),
+                    ..
+                } = e.kind
+                {
+                    costs.push((c, t));
+                }
+            }
+            Action::Emit(AdapterEvent::Commands(c)) => commands.push(c.clone()),
+            _ => {}
+        }
+    }
+    (costs, commands)
+}
+
+fn play(core: &mut Core, stream: &str) -> Vec<Action> {
+    stream.lines().flat_map(|l| core.on_line(l)).collect()
+}
+
+/// The transcript as it was when the first process ended: up to its `cost-state`.
+fn before_resume(transcript: &str) -> &str {
+    let at = transcript.find("\"cost-state\"").unwrap();
+    &transcript[..at + transcript[at..].find('\n').unwrap() + 1]
+}
+
+/// T27 (SPEC §4, §8.1): `result.total_cost_usd` is the session's running total (checked
+/// live on 2.1.308): the second turn of a process reports 0.00398629, of which 0.0018188
+/// is its own. `system/init` comes before every turn; the command list goes out once,
+/// without the terminal-only and internal commands.
+#[test]
+fn turn_cost_is_the_growth_of_the_session_total() {
+    // The set has no transcript of its own: it is `cost-resume`'s first process.
+    let stream =
+        include_str!("../../../../hqc-claude-jsonl/fixtures/stream-cost-turns-2.1.308.jsonl");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let (costs, commands) = costs_and_commands(&play(&mut core, stream));
+    assert_eq!(costs, [(0.00216749, 0.00216749), (0.0018188, 0.00398629)]);
+    assert_eq!(commands.len(), 1, "init twice, one report");
+    let list = &commands[0];
+    for c in ["compact", "context", "code-review", "anthropic-skills:pdf"] {
+        assert!(list.contains(&c.to_string()), "{c} in {list:?}");
+    }
+    for c in [
+        "doctor",
+        "color",
+        "focus",
+        "reload-plugins",
+        "__remote-workflow",
+    ] {
+        assert!(!list.contains(&c.to_string()), "{c} in {list:?}");
+    }
+}
+
+/// After `--resume` the CLI starts from the transcript's last `cost-state`: the resumed
+/// turn costs 0.0043361 - 0.00398629. Without the baseline the whole total would be counted
+/// again (the "$44.401" of every line in T27's report).
+#[test]
+fn resumed_turn_cost_starts_from_the_last_cost_state() {
+    let fx = fixture!("cost-resume", "2.1.308");
+    let baseline = hqc_claude_jsonl::last_cost_total(before_resume(fx.transcript));
+    assert_eq!(baseline, Some(0.00398629));
+    let mut core = Core::new(Uuid::now_v7(), false).with_cost_baseline(baseline);
+    let (costs, _) = costs_and_commands(&play(&mut core, fx.stream));
+    assert_eq!(costs, [(0.00034981, 0.0043361)]);
+
+    // A total below the baseline (a CLI that did not carry the cost over) is not negative,
+    // and the next turn is counted from the higher of the two.
+    let mut core = Core::new(Uuid::now_v7(), false).with_cost_baseline(Some(1.0));
+    let (costs, _) = costs_and_commands(&play(&mut core, fx.stream));
+    assert_eq!(costs, [(0.0, 0.0043361)]);
+    let result = fx
+        .stream
+        .lines()
+        .find(|l| l.contains("\"total_cost_usd\""))
+        .unwrap();
+    let mut v: Value = serde_json::from_str(result).unwrap();
+    v["total_cost_usd"] = json!(1.25);
+    let (costs, _) = costs_and_commands(&core.on_line(&v.to_string()));
+    assert_eq!(costs, [(0.25, 1.25)]);
+}
+
+/// The adapter takes the baseline from the transcript on disk when it resumes.
+#[tokio::test]
+async fn adapter_resumes_with_the_transcript_cost() {
+    let fx = fixture!("cost-resume", "2.1.308");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    h.adapter.kill().await.unwrap();
+    let spec = spec(h.session_id, h._dirs.0.path(), fx.claude_session());
+    let t = super::paths::transcript_path(h._dirs.1.path(), &spec.workdir, &fx.claude_session());
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, before_resume(fx.transcript)).unwrap();
+    h.adapter.start(&spec).await.unwrap();
+    assert!(h.claude.commands()[1]
+        .args
+        .contains(&"--resume".to_string()));
+    let evs = h
+        .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    let usage: Vec<_> = events(&evs)
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Usage {
+                cost_usd,
+                session_cost_usd,
+                ..
+            } => Some((cost_usd, session_cost_usd)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usage, [(Some(0.00034981), Some(0.0043361))]);
+    assert_eq!(shape(&evs)[..2], ["commands", "accepted"]);
+}
+
+/// The list is reported again only when it changes (`/reload-plugins`, a new skill); an
+/// `init` without `slash_commands` (an older CLI) reports nothing.
+#[test]
+fn command_list_is_reported_when_it_changes() {
+    let fx = fixture!("cost-resume", "2.1.308");
+    let init = fx.stream.lines().find(|l| l.contains("\"init\"")).unwrap();
+    let mut core = Core::new(Uuid::now_v7(), false);
+    assert_eq!(costs_and_commands(&core.on_line(init)).1.len(), 1);
+    assert!(
+        core.on_line(init).is_empty(),
+        "same list: not reported again"
+    );
+    let mut v: Value = serde_json::from_str(init).unwrap();
+    v["slash_commands"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("/new-skill"));
+    let (_, commands) = costs_and_commands(&core.on_line(&v.to_string()));
+    assert_eq!(commands[0].last().map(String::as_str), Some("new-skill"));
+    v.as_object_mut().unwrap().remove("slash_commands");
+    assert!(core.on_line(&v.to_string()).is_empty(), "no list: nothing");
 }

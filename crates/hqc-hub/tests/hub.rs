@@ -1239,3 +1239,61 @@ async fn runtime_title_does_not_override_the_user() {
     assert_eq!(hub.session(&sid).await["title"], "Named");
     hub.finish().await;
 }
+
+/// T27 (SPEC §5.4, §6): `session.state.commands` is stored on the session and shown in the
+/// session object; a frame without it keeps the list, names are cleaned and deduplicated.
+#[tokio::test]
+async fn runtime_commands_are_kept_on_the_session() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Commands").await;
+    ack_start(&mut w, &sid).await;
+    assert!(
+        hub.session(&sid).await.get("commands").is_none(),
+        "no list yet"
+    );
+    let state = |commands: Value| {
+        let mut v = json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"});
+        if !commands.is_null() {
+            v["commands"] = commands;
+        }
+        v
+    };
+
+    let long = "x".repeat(101);
+    let sent = json!([
+        "compact",
+        "/review",
+        "compact",
+        "",
+        "two words",
+        long,
+        "a:b"
+    ]);
+    w.send("session.state", state(sent)).await;
+    w.expect("ack").await;
+    let v = hub.session(&sid).await;
+    assert_eq!(v["commands"], json!(["compact", "review", "a:b"]), "{v}");
+
+    w.send("session.state", state(Value::Null)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["commands"][1], "review", "kept");
+    let pid = hub.personal_project().await;
+    let (_, list) = hub.get(&format!("/api/projects/{pid}/sessions")).await;
+    let listed = list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == sid.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["commands"][0], "compact", "in the list too");
+
+    let many: Vec<String> = (0..600).map(|i| format!("c{i}")).collect();
+    w.send("session.state", state(json!(many))).await;
+    w.expect("ack").await;
+    let v = hub.session(&sid).await;
+    assert_eq!(v["commands"].as_array().unwrap().len(), 500);
+    hub.finish().await;
+}

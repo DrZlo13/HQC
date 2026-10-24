@@ -1,6 +1,6 @@
 # hqc — техническое задание
 
-Версия 0.27, 2026-10-24. Статус: согласованная архитектура после шести ревью и обзора
+Версия 0.28, 2026-10-24. Статус: согласованная архитектура после шести ревью и обзора
 аналогов (§22), до начала реализации. Изменения — в §23, старые версии —
 в `SPEC-CHANGELOG.md`. Пометки: **[решение]** — принято, требует подтверждения;
 **[проверить]** — требует проверки на реальной сборке.
@@ -268,7 +268,7 @@ name)`: тот же файл тем же пользователем под те�
 | `clarify.cancel` | `request_id`, `reason` (тот же набор, что у `approval.cancel`) | адаптер, воркер или хаб |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | агент через `hqc_attach` (итерация 3); файлы пользователя идут в `user.message.artifact_ids` (правило ниже) |
 | `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id?` (для ask) | хаб по `hqc_send`/`hqc_ask` |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `model?` | адаптер Claude Code по `result`; у ACP-агентов необязательно и без `cost_usd` (стандартного usage в ACP v1 нет) |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | адаптер Claude Code по `result`; у ACP-агентов необязательно и без `cost_usd` (стандартного usage в ACP v1 нет). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?` | воркер или хаб |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, только у `worker_log`) | хаб или воркер; коды — ниже |
 
@@ -590,7 +590,7 @@ MCP-вызовы (worker → hub → worker):
   больше не читает): workspace создаются в хабе (§3, §6) и проверяются воркером по
   `allowed_roots`.
 - `event` {event} → `ack` (`session_id` внутри события)
-- `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?, held_by?}
+- `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?, held_by?, commands?}
   — `title`: заголовок, который дал сессии рантайм (§8.1); воркер повторяет последний во
   всех следующих `session.state`, хаб применяет его по правилу `title_source` (§3 Session),
   приводя к одной строке до 200 символов. `held_by` — держатель транскрипта (§9.3): поля нет —
@@ -599,6 +599,12 @@ MCP-вызовы (worker → hub → worker):
   `held_by` (`process_state: stopped`, `locked_by: none` — хаб их не читает): хаб ищет сессию
   по воркеру и `runtime_session_id` (нет такой — только `ack`) и применяет `held_by` по §9.3.
   Отчёты идут через outbox в одном порядке с `mirror.event`, ответ — `ack {}`.
+  `commands` (since 0.28, T27) — the slash commands the runtime offers, names without `/`
+  (Claude Code: from `system/init`, §8.1). Absent — not known yet; like `title`, the worker
+  repeats the last list in every following `session.state`. The hub stores it on the session
+  (only when it changed) and shows it in the session object (§6): names are trimmed, a
+  leading `/` dropped, names with whitespace or control characters or longer than 100
+  characters dropped, duplicates removed, at most 500 kept.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — события из
   зеркала (§9.1, §9.2), через outbox, ответ — `ack {event_id, seq}` как на `event` (дубль —
   `seq` сохранённого, папка не под зеркалом этого воркера или `cwd` вне неё и прочие отказы
@@ -740,12 +746,18 @@ HTTP API (итерация 1 и проекты с workspace из итераци�
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
-updated_at}`. `held_by` (`{entrypoint, status}`) — сессию сейчас держит открытой Claude Code вне
+updated_at, commands?}`. `held_by` (`{entrypoint, status}`) — сессию сейчас держит открытой Claude Code вне
 hqc (§9.3): `state: locked_vscode`, подхват — `409 vscode_open`, пока её не закроют там.
 `system: true` — служебная сессия воркера (§10.2): ввод, `stop`, `retry`, `takeover`,
 `archive` и `DELETE` — `409 system_session`, `PATCH auto_approve: true` — `403`.
 `state`, `queue_len` (§17.1), `last_read_seq` и `unread` вычисляются для запросившего
 пользователя.
+`commands` (since 0.28, T27) — the session's slash commands as the worker last reported them
+(`session.state.commands`, §5.4), absent until a process of the session has reported a list. It
+is not in `session.summary`: the client fetches the session object when it opens an idle chat
+without a list. When the composer text is `/` followed by a name so far, the client lists the
+commands starting with that name (ignoring case): arrows move, Tab or Enter insert `/<name> `,
+Esc closes, a click or tap inserts. No list — no popup; only commands from the list are offered.
 
 WebSocket `/api/ws` (апгрейд только с `Origin` хаба, §20; сообщения до 1 МиБ): клиент шлёт `subscribe {session_id, after_seq}` и получает
 события с `seq > after_seq`, затем живой поток; `agent.delta` без `seq`. Событие,
@@ -1018,6 +1030,27 @@ allow|deny`. Варианты для клиента: `once`, `session`, `always`
 CLI повторяет в stdout каждый `control_response`, который адаптер отправил в stdin;
 адаптер такие строки пропускает. `in_reply_to` = `event_id` ввода, который адаптер
 отправил последним.
+
+Cost (since 0.28, T27; checked live on 2.1.308, fixtures `cost-turns`, `cost-resume`):
+`result.total_cost_usd` is the cumulative cost of the whole Claude Code session, not of the turn:
+in one process it grows from turn to turn (0.00216749, then 0.00398629), and after `--resume`
+it starts from `totalCostUSD` of the transcript's last `cost-state` record (written when a
+process ends) — the resumed turn reported 0.0043361 = 0.00398629 + its own cost. `modelUsage`
+is cumulative the same way; the token counts in `result.usage` are the turn's. The adapter emits
+`usage.cost_usd` = this `total_cost_usd` minus the previous total of the same session: the
+previous `result` of the process or, for the first turn after `--resume`, the last `cost-state`
+of the transcript read when the process starts (none — 0). The difference is never negative,
+and a total below that baseline does not lower it. `usage.session_cost_usd` is
+`total_cost_usd` itself.
+
+Slash commands (since 0.28, T27): `system/init` comes before every turn of a process and lists
+`slash_commands` (built-in commands, skills and plugin commands, e.g. `compact`, `context`,
+`code-review`, `anthropic-skills:pdf`; skills are also listed in `skills`, subagent types in
+`agents`, which are not commands) and `terminal_slash_commands` (those that only work in the
+terminal UI: `doctor`, `color`, `focus`, `reload-plugins` on 2.1.308). The adapter reports
+`slash_commands` without the terminal-only ones and the CLI's internal `__name` ones to the hub
+in `session.state.commands` (§5.4): once per process start, and again only when the list
+changes.
 
 Не каждый вызов инструмента спрашивает разрешение: команды только для чтения (например,
 `echo`) CLI разрешает сам, без `can_use_tool`, поэтому `approval.request` приходит не на
@@ -2098,6 +2131,18 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
 без хаба каждую из этих вещей пришлось бы делать peer-to-peer.
 
 ## 23. История изменений
+
+### 0.27 → 0.28 (T27, per-turn cost, slash command completion, shrinking layout)
+§4: `usage.cost_usd` is the turn's cost; new optional `usage.session_cost_usd`, the runtime's
+running total. In a resumed session every turn showed the session's total ("$44.401") as its
+cost and the header summed those totals. §8.1: `result.total_cost_usd` of Claude Code is
+cumulative over the session and over `--resume` (from the transcript's last `cost-state`),
+checked live on 2.1.308; the adapter subtracts the previous total. §5.4, §6: additive
+`session.state.commands` and `commands` in the session object — the runtime's slash commands
+from `system/init`, stored by the hub (migration `0013_session_commands.sql`); §8.1: what the
+adapter takes from `system/init`. Client: `/` completion in the composer, the header shows the
+latest `session_cost_usd`; the session column narrows with the window
+(`clamp(220px, 25vw, 300px)`), markdown tables scroll inside themselves.
 
 ### 0.26 → 0.27 (T26, редизайн клиента и ответ текстом на запрос)
 §4, §5.3, §6, §10.1: у `approval.response` (событие, фрейм воркеру и тело `POST

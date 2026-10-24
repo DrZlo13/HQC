@@ -771,6 +771,38 @@ async fn runtime_title_goes_in_session_state() {
     }
 }
 
+// T27 (SPEC §5.4): the runtime's slash commands go in `session.state`, once per change, and
+// stay in the later ones like the title.
+#[tokio::test]
+async fn runtime_commands_go_in_session_state() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let list = vec!["compact".to_string(), "review".to_string()];
+    adapters
+        .emit(sid, AdapterEvent::Commands(list.clone()))
+        .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["commands"] == serde_json::json!(list) {
+            break;
+        }
+    }
+    w.shutdown.cancel();
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["process_state"] == "stopped" {
+            assert_eq!(st["payload"]["commands"], serde_json::json!(list));
+            break;
+        }
+    }
+}
+
 // Graceful shutdown: agents are killed, `session.state stopped` is sent, the outbox is
 // flushed while the hub acks.
 #[tokio::test]

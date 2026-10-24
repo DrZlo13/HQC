@@ -47,6 +47,20 @@ Claude Code 2.1.308, the first input after `--resume` and `/compact` (T25, SPEC 
   is the file after all three runs. The command record `<command-name>/compact</command-name>`
   is in the transcript only.
 
+Claude Code 2.1.308, cost and slash commands (T27, SPEC §4, §8.1; `driver.py --then` in
+`tmp/spike-t27-cost`, the adapter's flags without `--permission-prompt-tool`):
+
+- `cost-turns` — a new session with two turns in one process (`Reply with exactly: ONE`, then
+  `TWO`): stream and stdin only. `result.total_cost_usd` grows from turn to turn (0.00216749,
+  then 0.00398629): it is the session's total, not the turn's;
+- `cost-resume` — `--resume` of that session and `Reply with exactly: THREE`. The transcript
+  is the file after both runs: a `cost-state` record (`totalCostUSD` 0.00398629) is written when
+  the first process ends, the second one after the resumed process; the resumed turn's
+  `total_cost_usd` is 0.0043361 = the first `cost-state` plus that turn.
+
+Their `system/init` keeps `slash_commands` and `terminal_slash_commands` (sanitize.py keeps
+them since T27); `system/init` comes again before every turn of a process.
+
 In the stream files of the T12 sets the `input_json_delta` fragments of a tool input whose
 path had to be rewritten are joined into the first fragment (sanitizing split paths).
 

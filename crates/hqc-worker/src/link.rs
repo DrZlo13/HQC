@@ -90,6 +90,7 @@ impl HubLink {
             locked_by: hqc_proto::frame::LockedBy::None,
             title: None,
             held_by: Some(held_by),
+            commands: None,
         };
         let payload = serde_json::to_value(&frame)?["payload"].take();
         self.outbox

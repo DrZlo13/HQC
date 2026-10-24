@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Drive `claude -p` in stream-json mode, log every stdin/stdout frame, answer can_use_tool.
 
-usage: driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+usage: driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] [--then PROMPT ...] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 POLICY: once | deny | always | ask_answer | none
+--then PROMPT (repeatable): after each `result`, send the next prompt in the same process
+instead of closing stdin (several turns of one process).
 --deny-message-file FILE (or SPIKE_DENY_MESSAGE): the `message` of a deny answer.
 --resume UUID (or SPIKE_RESUME): continue that session with --resume instead of a new
 --session-id.
@@ -14,8 +16,12 @@ import json, os, subprocess, sys, threading, time, uuid
 args = sys.argv[1:]
 # `--resume UUID` / `--arg-prompt` before the positional arguments: the same as the
 # variables, for shells where setting the environment is awkward.
-while args and args[0] in ("--resume", "--arg-prompt", "--deny-message-file"):
-    if args[0] == "--resume":
+then = []
+while args and args[0] in ("--resume", "--arg-prompt", "--deny-message-file", "--then"):
+    if args[0] == "--then":
+        then.append(args[1])
+        args = args[2:]
+    elif args[0] == "--resume":
         os.environ["SPIKE_RESUME"] = args[1]
         args = args[2:]
     elif args[0] == "--deny-message-file":
@@ -46,6 +52,7 @@ cmd = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stre
        "--replay-user-messages", "--verbose", "--model", "claude-haiku-5-5",
        "--max-turns", "2"] + session + extra
 json.dump({"cmd": cmd, "cwd": os.path.abspath(cwd), "session_id": sid, "policy": policy,
+           "prompts": [prompt] + then,
            "env": {k: v for k, v in os.environ.items() if k.startswith("MCP_")}},
           open(f"{out}/run.json", "w"), indent=1)
 
@@ -99,7 +106,10 @@ for line in p.stdout:
         if req.get("subtype") == "can_use_tool" and policy != "none":
             answer(msg.get("request_id"), req)
     if msg.get("type") == "result":
-        p.stdin.close()
+        if then:
+            send({"type": "user", "message": {"role": "user", "content": then.pop(0)}})
+        else:
+            p.stdin.close()
 timer.cancel()
 p.wait()
 print(f"session={sid} rc={p.returncode} elapsed={time.time() - t0:.1f}s")

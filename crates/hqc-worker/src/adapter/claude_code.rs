@@ -444,8 +444,19 @@ impl ClaudeCodeAdapter {
             "claude started"
         );
 
+        // The CLI carries the session's cost over `--resume` from the transcript's last
+        // `cost-state`; per-turn costs are counted from there (T27).
+        let cost_baseline = match transcript.as_ref().filter(|_| resume) {
+            Some(p) => tokio::fs::read_to_string(p)
+                .await
+                .ok()
+                .and_then(|t| hqc_claude_jsonl::last_cost_total(&t)),
+            None => None,
+        };
         let core = Arc::new(Mutex::new(
-            Core::new(self.session_id, spec.restricted).with_policy(self.policy.clone()),
+            Core::new(self.session_id, spec.restricted)
+                .with_policy(self.policy.clone())
+                .with_cost_baseline(cost_baseline),
         ));
         let io = Arc::new(Io {
             session_id: self.session_id,

@@ -41,6 +41,9 @@ pub enum AdapterEvent {
     /// The runtime named the session (Claude Code: `ai-title` in the transcript, read when
     /// a turn ends, SPEC §8.1); sent as `session.state.title`. Reported when it changes.
     Title(String),
+    /// The runtime's slash commands, without `/` (Claude Code: `system/init`, SPEC §8.1);
+    /// sent as `session.state.commands`. Reported when the list changes.
+    Commands(Vec<String>),
     /// The process ended by itself. Not required after `kill`.
     Exited { error: Option<String> },
 }

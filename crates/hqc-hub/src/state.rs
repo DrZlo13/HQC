@@ -149,6 +149,7 @@ pub async fn views(
                 created_at: s.created_at,
                 updated_at: s.updated_at,
                 held_by: s.held_by.and_then(|v| serde_json::from_value(v).ok()),
+                commands: s.commands.and_then(|v| serde_json::from_value(v).ok()),
                 system: s.system,
             })
         })

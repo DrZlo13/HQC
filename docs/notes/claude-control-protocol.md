@@ -353,3 +353,26 @@ claude -p --model claude-haiku-5-5 --max-turns 1 --no-session-persistence \
 закодированного пути запуска нет, новых `.jsonl` за время прогона нет), ни один файл
 `~/.claude/sessions/*.json` не упоминает папку запуска, `~/.claude.json` её тоже не упоминает.
 Без `--no-session-persistence` транскрипт попал бы в зеркало и в историю VS Code.
+
+## Cost and slash commands, 2.1.308 (T27)
+
+Two `tools/spike/driver.py` runs in `tmp/spike-t27-cost` (haiku, no tools): a new session with
+two turns in one process (`--then`), then `--resume` and one turn. Fixtures `cost-turns`,
+`cost-resume` (`crates/hqc-claude-jsonl/fixtures/README.md`).
+
+| run | `result.total_cost_usd` | `cost-state.totalCostUSD` in the transcript |
+|---|---|---|
+| new, turn 1 | 0.00216749 | — |
+| new, turn 2 | 0.00398629 | 0.00398629, written when the process ended |
+| `--resume`, turn 3 | 0.0043361 | 0.0043361, written when that process ended |
+
+- `total_cost_usd` is the session's running total; after `--resume` it continues from the last
+  `cost-state` (`startTime` of the record stays the first process's). `modelUsage[*].costUSD`
+  and its token counts are cumulative too; `result.usage` tokens are the turn's.
+- A local command after `--resume` (`/compact` in `resume-compact`) reports the running total as
+  well, not 0.
+- `system/init` comes before every turn of a process, not once. It has `slash_commands`
+  (built-ins, skills, plugin commands: 66 names here), `skills` (a subset of them), `agents`
+  (subagent types, not commands), `terminal_slash_commands` (`doctor`, `color`, `focus`,
+  `reload-plugins`: terminal UI only) and `plugins`. One internal name starts with `__`
+  (`__remote-workflow`).

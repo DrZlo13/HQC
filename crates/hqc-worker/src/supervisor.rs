@@ -677,6 +677,7 @@ impl Supervisor {
             state: ProcessState::Stopped,
             runtime_session_id: None,
             title: None,
+            commands: None,
             release_pending: false,
             released: false,
             started_once: false,
@@ -741,6 +742,8 @@ struct Session {
     runtime_session_id: Option<String>,
     /// The runtime's title of the session, repeated in every `session.state`.
     title: Option<String>,
+    /// The runtime's slash commands, repeated in every `session.state` like `title`.
+    commands: Option<Vec<String>>,
     /// Another writer continues the transcript: stop when the turn ends (SPEC §9.3).
     release_pending: bool,
     /// Stopped for that writer: `locked_by: vscode` until the next `session.start`.
@@ -1035,6 +1038,12 @@ impl Session {
                     self.send_state();
                 }
             }
+            AdapterEvent::Commands(c) => {
+                if self.commands.as_ref() != Some(&c) {
+                    self.commands = Some(c);
+                    self.send_state();
+                }
+            }
             AdapterEvent::Exited { error } => {
                 if self.state == ProcessState::Stopped {
                     return;
@@ -1185,6 +1194,7 @@ impl Session {
             },
             title: self.title.clone(),
             held_by: None,
+            commands: self.commands.clone(),
         });
     }
 

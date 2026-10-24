@@ -183,6 +183,12 @@ function PermissionCard({
     if (!hotkeys) return;
     const doc = card.current?.ownerDocument;
     if (!doc) return;
+    // A request arrived while the focus sits in an empty field (the composer after sending):
+    // let the keys reach the card. A field with text keeps the focus, so typing is not lost.
+    const active = doc.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+    if (isTyping(active) && !card.current?.contains(active) && !(active?.value ?? '').trim()) {
+      (active as HTMLElement).blur();
+    }
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       if (isTyping(doc.activeElement) || !card.current || !onScreen(card.current)) return;

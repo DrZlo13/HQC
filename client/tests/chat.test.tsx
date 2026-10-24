@@ -155,6 +155,23 @@ describe('the request card through the chat', () => {
   });
 });
 
+describe('the focus when a request arrives', () => {
+  it('leaves an empty field so Enter reaches the card, keeps a field with text', async () => {
+    for (const [text, blurred] of [['', true], ['пишу ответ', false]] as const) {
+      const field = document.createElement('textarea');
+      field.value = text;
+      document.body.appendChild(field);
+      field.focus();
+      expect(document.activeElement).toBe(field);
+      const { app } = setup('waiting');
+      await mount(app);
+      expect(document.activeElement === field).toBe(!blurred);
+      render(null, root);
+      field.remove();
+    }
+  });
+});
+
 describe('handover banners instead of the composer (SPEC §9.3)', () => {
   it('open in VS Code right now: close it there, no button', async () => {
     const { app } = setup('locked_vscode', { held_by: { entrypoint: 'claude-vscode', status: 'idle' }, history: HISTORY.slice(0, 3) });

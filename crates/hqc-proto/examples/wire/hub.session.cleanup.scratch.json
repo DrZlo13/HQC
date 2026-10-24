@@ -1,0 +1,10 @@
+{
+  "id": "h-15",
+  "type": "session.cleanup",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000002",
+    "workspace_path": null,
+    "cwd": ".",
+    "event_ids": []
+  }
+}

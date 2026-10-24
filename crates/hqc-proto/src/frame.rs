@@ -227,6 +227,34 @@ pub struct ListCandidates {
 pub struct MirrorSet {
     pub workspace_path: String,
     pub enabled: bool,
+    /// The hub's sessions of this workspace with a transcript (T21, SPEC §9.1): the worker's
+    /// first pass over such a transcript skips records not newer than `since_ts`, the last
+    /// event the hub has, so enabling the mirror on a workspace with hqc sessions brings no
+    /// duplicates. Absent when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<MirrorSince>,
+}
+
+/// One element of [`MirrorSet::sessions`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorSince {
+    pub runtime_session_id: String,
+    pub since_ts: DateTime<Utc>,
+}
+
+/// `session.cleanup {session_id, workspace_path | null, cwd, event_ids[]}` -> `ack` (T21, SPEC
+/// §5.3, §17.4): the session was archived or deleted. The worker removes
+/// `<workspace>/<cwd>/.hqc/inbox/<event_id>` of the listed inputs (only inside `allowed_roots`
+/// and the workspace), or, for a session without workspace (`null`), its scratch folder
+/// `<scratch_root>/<session_id>`. Nothing else is deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCleanup {
+    pub session_id: Uuid,
+    pub workspace_path: Option<String>,
+    pub cwd: String,
+    /// Inputs of the session that carried artifacts (their inbox folders).
+    #[serde(default)]
+    pub event_ids: Vec<Uuid>,
 }
 
 /// Result of `workspace.list_candidates`: working directories (from the records' `cwd`)
@@ -308,6 +336,9 @@ pub enum HubFrame {
     /// Mirror the transcripts of a workspace, or stop (SPEC §5.3, §9.2).
     #[serde(rename = "mirror.set")]
     MirrorSet(MirrorSet),
+    /// Remove the session's inbox folders or scratch folder (T21, SPEC §5.3, §17.4).
+    #[serde(rename = "session.cleanup")]
+    SessionCleanup(SessionCleanup),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -399,6 +430,10 @@ pub struct Hello {
     pub share_local_models: bool,
     #[serde(default)]
     pub local_models: Vec<serde_json::Value>,
+    /// Fingerprint of the machine (T21, SPEC §5.1): hex sha256 of a stable machine id with
+    /// the salt `hqc`; the id itself never leaves the machine. Absent from older workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +568,7 @@ mod tests {
         "worker.approval.response",
         "workspace.list_candidates",
         "mirror.set",
+        "session.cleanup",
         "ack",
         "error",
     ];
@@ -602,6 +638,18 @@ mod tests {
             "mirror.set",
             include_str!("../examples/wire/hub.mirror.set.json"),
         ),
+        (
+            "mirror.set",
+            include_str!("../examples/wire/hub.mirror.set.sessions.json"),
+        ),
+        (
+            "session.cleanup",
+            include_str!("../examples/wire/hub.session.cleanup.json"),
+        ),
+        (
+            "session.cleanup",
+            include_str!("../examples/wire/hub.session.cleanup.scratch.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -611,6 +659,10 @@ mod tests {
     ];
     const WORKER_EXAMPLES: &[(&str, &str)] = &[
         ("hello", include_str!("../examples/wire/worker.hello.json")),
+        (
+            "hello",
+            include_str!("../examples/wire/worker.hello.machine.json"),
+        ),
         ("event", include_str!("../examples/wire/worker.event.json")),
         (
             "session.state",
@@ -667,6 +719,7 @@ mod tests {
             HubFrame::WorkerApprovalResponse { .. } => "worker.approval.response",
             HubFrame::WorkspaceListCandidates(_) => "workspace.list_candidates",
             HubFrame::MirrorSet(_) => "mirror.set",
+            HubFrame::SessionCleanup(_) => "session.cleanup",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }

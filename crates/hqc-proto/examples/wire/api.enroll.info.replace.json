@@ -10,7 +10,8 @@
       "os": "macos",
       "status": "offline",
       "last_seen": "2026-10-21T18:30:00Z",
-      "sessions_count": 7
+      "sessions_count": 7,
+      "same_machine": true
     },
     {
       "id": "0199f3a2-7c10-7000-8000-0000000000b2",

@@ -1,0 +1,14 @@
+{
+  "id": "h-11",
+  "type": "mirror.set",
+  "payload": {
+    "workspace_path": "/Users/home-mac/work/cad",
+    "enabled": true,
+    "sessions": [
+      {
+        "runtime_session_id": "6c1f0a52-1d7e-4c3b-9a0e-2b8f5d4e7a10",
+        "since_ts": "2026-10-23T09:14:02.511Z"
+      }
+    ]
+  }
+}

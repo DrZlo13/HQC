@@ -200,6 +200,10 @@ pub struct CreateWorkspace {
 pub struct PatchWorkspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Switch the mirror of the workspace's Claude Code sessions (T21, SPEC §9.2); the hub
+    /// sends the worker `mirror.set`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_enabled: Option<bool>,
 }
 
 /// `409 workspace_conflict`: on one worker a folder belongs to one project, so the new path
@@ -221,14 +225,19 @@ pub type DirList = crate::frame::FsListDirsResult;
 pub type CandidateList = crate::frame::CandidatesResult;
 
 /// `POST /api/workspaces` as the hub reads it (SPEC §9.1): [`CreateWorkspace`] plus
-/// `mirror_enabled`, which the import from Claude Code sets. With it the hub sends the worker
-/// `mirror.set` and the worker imports the folder's transcripts.
+/// `mirror_enabled`, on by default since T21 (`false` turns it off). With it the hub sends the
+/// worker `mirror.set` and the worker imports the folder's transcripts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateWorkspaceImport {
     #[serde(flatten)]
     pub workspace: CreateWorkspace,
-    #[serde(default)]
+    #[serde(default = "mirror_by_default")]
     pub mirror_enabled: bool,
+}
+
+/// New workspaces are mirrored unless the request says otherwise (T21).
+fn mirror_by_default() -> bool {
+    true
 }
 
 /// `GET /api/sessions/{id}/events`: stored events as raw JSON, oldest first.
@@ -369,6 +378,11 @@ pub struct ReplaceableWorker {
     pub last_seen: Option<DateTime<Utc>>,
     /// Sessions on the worker that are neither archived nor its service session.
     pub sessions_count: i64,
+    /// The worker last reported the same machine fingerprint as the enrolling one (T21, SPEC
+    /// §5.1): such workers come first, and the client preselects replacing one. Sent only
+    /// when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_machine: bool,
 }
 
 /// Reply to `POST /api/workers/enroll/confirm`.
@@ -390,6 +404,9 @@ pub struct EnrollRequest {
     /// The worker's [`crate::PROTOCOL_VERSION`]; informational, `hello` decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<u32>,
+    /// Machine fingerprint, as in `hello.machine_id` (T21, SPEC §5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
 }
 
 /// Reply to `POST /worker/enroll`.
@@ -465,6 +482,11 @@ mod tests {
             "../examples/wire/api.enroll.info.replace.json"
         ));
         assert_eq!(r.replaceable.len(), 2);
+        assert!(r.replaceable[0].same_machine && !r.replaceable[1].same_machine);
+        let m: EnrollRequest = roundtrip(include_str!(
+            "../examples/wire/api.enroll.request.machine.json"
+        ));
+        assert_eq!(m.machine_id.unwrap().len(), 64);
         let r: EnrollConfirmed = roundtrip(include_str!(
             "../examples/wire/api.enroll.confirm.replace.json"
         ));
@@ -538,6 +560,10 @@ mod tests {
         roundtrip::<PatchWorkspace>(include_str!(
             "../examples/wire/api.workspace.patch.request.json"
         ));
+        let pm: PatchWorkspace = roundtrip(include_str!(
+            "../examples/wire/api.workspace.patch.mirror.request.json"
+        ));
+        assert_eq!(pm.mirror_enabled, Some(false));
         let conflict: WorkspaceConflict =
             roundtrip(include_str!("../examples/wire/api.workspace.conflict.json"));
         assert_eq!(conflict.error, "workspace_conflict");
@@ -557,11 +583,11 @@ mod tests {
             "../examples/wire/api.workspace.import.request.json"
         ));
         assert!(i.mirror_enabled);
-        // A plain `CreateWorkspace` body is an import without the mirror.
+        // A plain `CreateWorkspace` body is mirrored too (T21).
         let plain: CreateWorkspaceImport =
             serde_json::from_str(include_str!("../examples/wire/api.workspace.request.json"))
                 .unwrap();
-        assert_eq!((plain.workspace, plain.mirror_enabled), (c, false));
+        assert_eq!((plain.workspace, plain.mirror_enabled), (c, true));
         let s: CreateSessionRequest =
             roundtrip(include_str!("../examples/wire/api.session.request.json"));
         assert_eq!(s.workspace_id, Some(w.id));

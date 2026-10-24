@@ -1,0 +1,10 @@
+{
+  "id": "h-14",
+  "type": "session.cleanup",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "workspace_path": "/Users/home-mac/work/cad",
+    "cwd": ".",
+    "event_ids": ["0199f3a2-7c10-7000-8000-0000000000e1"]
+  }
+}

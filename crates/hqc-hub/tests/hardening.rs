@@ -265,3 +265,123 @@ async fn events_for_archived_sessions_are_dropped() {
     assert_eq!(hub.events(&sid).await.len(), before + 2);
     hub.finish().await;
 }
+
+const MIRROR_ROOT: &str = "/w";
+const MIRROR_WS: &str = "/w/proj";
+
+/// A project with a mirrored workspace `MIRROR_WS` on `w`'s worker; its id.
+async fn mirrored_project(hub: &TestHub, w: &mut FakeWorker) -> String {
+    let (s, p) = hub.post("/api/projects", json!({"name": "cad"})).await;
+    assert_eq!(s, 201, "{p}");
+    let pid = p["id"].as_str().unwrap().to_string();
+    let body = json!({"project_id": pid, "worker_id": w.worker_id, "path": MIRROR_WS,
+                      "mirror_enabled": true});
+    let (res, _) = tokio::join!(hub.post("/api/workspaces", body), async {
+        w.answer_fs().await;
+        let set = w.expect("mirror.set").await;
+        w.reply(&set["id"], "ack", json!({})).await;
+    });
+    assert_eq!(res.0, 201, "{}", res.1);
+    pid
+}
+
+/// `mirror.event` of one record; the `ack` payload.
+async fn mirror(w: &mut FakeWorker, runtime: &str, cwd: &str) -> Value {
+    let event = json!({
+        "session_id": uuid::Uuid::nil(),
+        "event_id": uuid::Uuid::new_v4(),
+        "ts": "2026-10-23T00:10:15.931Z",
+        "author": {"kind": "agent", "id": uuid::Uuid::nil()},
+        "type": "agent.message",
+        "payload": {"text": "hi", "final": false},
+    });
+    let p = json!({"workspace_path": MIRROR_WS, "runtime_session_id": runtime, "cwd": cwd,
+                   "event": event, "recent": false});
+    let id = w.send("mirror.event", p).await;
+    let ack = w.expect("ack").await;
+    assert_eq!(ack["id"], id);
+    ack["payload"].clone()
+}
+
+async fn project_sessions(hub: &TestHub, pid: &str) -> usize {
+    let (s, v) = hub.get(&format!("/api/projects/{pid}/sessions")).await;
+    assert_eq!(s, 200, "{v}");
+    v["sessions"].as_array().unwrap().len()
+}
+
+/// A transcript id that is not a uuid and a `cwd` over 4096 bytes are dropped with `ack`.
+#[tokio::test]
+async fn mirror_checks_transcript_id_and_cwd() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, MIRROR_ROOT, hub.boot_id).await;
+    let pid = mirrored_project(&hub, &mut w).await;
+    let ok = uuid::Uuid::new_v4().to_string();
+    for (runtime, cwd) in [
+        ("not-a-uuid", MIRROR_WS.to_string()),
+        (&ok.to_uppercase(), MIRROR_WS.to_string()),
+        (&ok, format!("{MIRROR_WS}/{}", "a".repeat(4096))),
+    ] {
+        let ack = mirror(&mut w, runtime, &cwd).await;
+        assert!(ack.get("seq").is_none(), "{runtime}: {ack}");
+    }
+    assert_eq!(project_sessions(&hub, &pid).await, 0);
+    let ack = mirror(&mut w, &ok, MIRROR_WS).await;
+    assert!(ack["seq"].as_u64().is_some(), "{ack}");
+    assert_eq!(project_sessions(&hub, &pid).await, 1);
+    hub.finish().await;
+}
+
+/// The mirror creates at most `mirror_sessions_per_day` sessions per worker and
+/// `mirror_sessions_per_workspace` per workspace; over that, records of new transcripts are
+/// dropped with `ack`, known transcripts go on.
+#[tokio::test]
+async fn mirror_sessions_are_limited() {
+    let hub = TestHub::start_limited(Limits {
+        mirror_sessions_per_day: 2,
+        ..Limits::default()
+    })
+    .await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, MIRROR_ROOT, hub.boot_id).await;
+    let pid = mirrored_project(&hub, &mut w).await;
+    let ids: Vec<String> = (0..3).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+    for r in &ids[..2] {
+        assert!(mirror(&mut w, r, MIRROR_WS).await["seq"].as_u64().is_some());
+    }
+    let ack = mirror(&mut w, &ids[2], MIRROR_WS).await;
+    assert!(ack.get("seq").is_none(), "{ack}");
+    assert!(mirror(&mut w, &ids[0], MIRROR_WS).await["seq"]
+        .as_u64()
+        .is_some());
+    assert_eq!(project_sessions(&hub, &pid).await, 2);
+    // A day later the per-day limit lets the next one through.
+    sqlx::query("UPDATE sessions SET created_at = now() - interval '25 hours' WHERE imported")
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    assert!(mirror(&mut w, &ids[2], MIRROR_WS).await["seq"]
+        .as_u64()
+        .is_some());
+    hub.finish().await;
+
+    let hub = TestHub::start_limited(Limits {
+        mirror_sessions_per_workspace: 1,
+        ..Limits::default()
+    })
+    .await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, MIRROR_ROOT, hub.boot_id).await;
+    let pid = mirrored_project(&hub, &mut w).await;
+    assert!(mirror(&mut w, &ids[0], MIRROR_WS).await["seq"]
+        .as_u64()
+        .is_some());
+    sqlx::query("UPDATE sessions SET created_at = now() - interval '25 hours' WHERE imported")
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let ack = mirror(&mut w, &ids[1], MIRROR_WS).await;
+    assert!(ack.get("seq").is_none(), "{ack}");
+    assert_eq!(project_sessions(&hub, &pid).await, 1);
+    hub.finish().await;
+}

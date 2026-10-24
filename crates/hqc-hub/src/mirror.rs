@@ -64,6 +64,14 @@ pub fn release_reason(s: &SessionRow) -> &'static str {
     }
 }
 
+/// Longest `cwd` of a mirrored record, in bytes (SPEC §20).
+const MAX_CWD: usize = 4096;
+
+/// A transcript's id as Claude Code writes it: a lowercase hyphenated uuid (SPEC §9.2, §20).
+fn is_transcript_id(s: &str) -> bool {
+    uuid::Uuid::try_parse(s).is_ok_and(|u| u.hyphenated().to_string() == s)
+}
+
 /// `cwd` of the record relative to the workspace, `.` for the workspace itself; `None`
 /// when it lies outside.
 fn relative_cwd(workspace: &str, cwd: &str) -> Option<String> {
@@ -95,6 +103,14 @@ pub async fn ingest(
             return Ok(dropped);
         }
     };
+    if !is_transcript_id(&m.runtime_session_id) {
+        tracing::warn!(worker_id = %conn.worker_id, runtime_session_id = %m.runtime_session_id, "mirror.event with a runtime_session_id that is not a uuid, dropped");
+        return Ok(dropped);
+    }
+    if m.cwd.len() > MAX_CWD {
+        tracing::warn!(worker_id = %conn.worker_id, len = m.cwd.len(), "mirror.event with a cwd over {MAX_CWD} bytes, dropped");
+        return Ok(dropped);
+    }
     let Some(cwd) = relative_cwd(&ws.path, &m.cwd) else {
         tracing::warn!(worker_id = %conn.worker_id, cwd = %m.cwd, workspace = %ws.path, "mirror.event outside its workspace, dropped");
         return Ok(dropped);
@@ -113,6 +129,15 @@ pub async fn ingest(
             None => s,
         },
         None => {
+            let limits = &app.config.limits;
+            let (today, in_workspace) =
+                db::imported_counts(&app.db, conn.worker_id, ws.id).await?;
+            if today >= limits.mirror_sessions_per_day
+                || in_workspace >= limits.mirror_sessions_per_workspace
+            {
+                tracing::warn!(worker_id = %conn.worker_id, workspace = %ws.path, today, in_workspace, runtime_session_id = %m.runtime_session_id, "mirror: too many imported sessions, event dropped");
+                return Ok(dropped);
+            }
             let id = db::create_session(
                 &app.db,
                 db::NewSession {
@@ -355,6 +380,15 @@ mod tests {
         assert_eq!(relative_cwd("/a/b", "/a/b/c/d").as_deref(), Some("c/d"));
         assert_eq!(relative_cwd("/a/b", "/a/bc"), None);
         assert_eq!(relative_cwd("/a/b", "/x"), None);
+    }
+
+    #[test]
+    fn transcript_ids() {
+        assert!(is_transcript_id("0f6a3c1e-8a59-4bb4-9a51-3f0f6c3c2b11"));
+        assert!(!is_transcript_id("0F6A3C1E-8A59-4BB4-9A51-3F0F6C3C2B11"));
+        assert!(!is_transcript_id("0f6a3c1e8a594bb49a513f0f6c3c2b11"));
+        assert!(!is_transcript_id("../../x"));
+        assert!(!is_transcript_id(""));
     }
 
     #[test]

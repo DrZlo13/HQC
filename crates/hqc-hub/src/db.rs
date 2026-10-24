@@ -1319,7 +1319,7 @@ pub async fn adopt_transcript(
     locked_by: &str,
 ) -> sqlx::Result<()> {
     sqlx::query(
-        "UPDATE sessions SET runtime_session_id = $2, locked_by = $3,
+        "UPDATE sessions SET runtime_session_id = $2, locked_by = $3, imported = true,
             vscode_active_at = CASE WHEN $3 = 'vscode' THEN now() END, updated_at = now()
          WHERE id = $1",
     )
@@ -1329,6 +1329,25 @@ pub async fn adopt_transcript(
     .execute(db)
     .await?;
     Ok(())
+}
+
+/// Sessions the mirror created: of the worker in the last 24 h, and in the workspace in
+/// total (SPEC §20).
+pub async fn imported_counts(
+    db: &PgPool,
+    worker_id: Uuid,
+    workspace_id: Uuid,
+) -> sqlx::Result<(i64, i64)> {
+    sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM sessions WHERE imported AND worker_id = $1
+                AND created_at > now() - interval '24 hours'),
+            (SELECT count(*) FROM sessions WHERE imported AND workspace_id = $2)",
+    )
+    .bind(worker_id)
+    .bind(workspace_id)
+    .fetch_one(db)
+    .await
 }
 
 pub async fn set_locked_by(db: &PgPool, id: Uuid, locked_by: &str) -> sqlx::Result<()> {

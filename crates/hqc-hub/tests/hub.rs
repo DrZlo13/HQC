@@ -444,7 +444,7 @@ async fn failed_start_with_state_frames_waits_between_retries() {
     hub.finish().await;
 }
 
-/// T26: «ответить текстом вместо этого» — a deny answer with `message` stores it in
+/// T26: "Reply with text instead" — a deny answer with `message` stores it in
 /// `approval.response` and carries it in the frame to the worker; with an allow option, blank
 /// or too long it is refused and the request stays open.
 #[tokio::test]
@@ -474,7 +474,7 @@ async fn approval_deny_with_message() {
         let (s, r) = hub.post(&path, bad).await;
         assert_eq!(s, 400, "{r}");
     }
-    let text = "Не трогай корень, посмотри только ~/work/hqc";
+    let text = "Leave the root alone, look only at ~/work/hqc";
     let (s, r) = hub
         .post(&path, json!({"option_id": "deny", "message": text}))
         .await;
@@ -1187,7 +1187,7 @@ async fn turn_watchdog_closes_a_silent_turn() {
     hub.finish().await;
 }
 
-/// T13: a session without a title is «Сессия N»; the runtime's title (`session.state.title`)
+/// T13: a session without a title is "Session N"; the runtime's title (`session.state.title`)
 /// replaces a default or runtime title, never one the user set (SPEC §3 Session).
 #[tokio::test]
 async fn runtime_title_does_not_override_the_user() {
@@ -1201,7 +1201,7 @@ async fn runtime_title_does_not_override_the_user() {
             .post(&format!("/api/projects/{pid}/sessions"), json!({}))
             .await;
         assert_eq!(s, 201, "{v}");
-        assert_eq!(v["title"], format!("Сессия {n}"));
+        assert_eq!(v["title"], format!("Session {n}"));
         assert_eq!(v["title_source"], "default");
         assert_eq!(v["slug"], format!("session-{n}"));
         ack_start(&mut w, v["id"].as_str().unwrap()).await;

@@ -441,7 +441,7 @@ pub async fn patch_workspace(
         }
         ws = db::set_workspace_label(&app.db, id, &hqc_proto::replace_nul(label)).await?;
     }
-    // The switch «Сессии VS Code» (T21, SPEC §9.2). An offline worker learns it after `hello`.
+    // The switch "VS Code sessions" (T21, SPEC §9.2). An offline worker learns it after `hello`.
     if let Some(on) = b.mirror_enabled.filter(|on| *on != ws.mirror_enabled) {
         ws = db::set_workspace_mirror(&app.db, id, on).await?;
         if let Some(conn) = app.workers.get(ws.worker_id) {
@@ -664,7 +664,7 @@ pub async fn create_session(
             "cwd must be a relative path inside the workspace".into(),
         ));
     }
-    // No title: «Сессия N» (SPEC §3 Session), which the runtime's title may replace.
+    // No title: "Session N" (SPEC §3 Session), which the runtime's title may replace.
     let title = b.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
     if let Some(t) = title {
         check_title(t)?;
@@ -850,7 +850,7 @@ pub async fn input(
         ));
     }
     if s.locked_by == "vscode" {
-        // No silent queue (SPEC §9.3): the client offers «Подхватить», or asks to close the
+        // No silent queue (SPEC §9.3): the client offers "Take over", or asks to close the
         // session in VS Code first while it holds it.
         let mut extra = serde_json::Map::new();
         extra.insert("hint".into(), json!("takeover"));
@@ -1175,7 +1175,7 @@ pub async fn enroll_confirm(
             json!({"kind": "system"}),
             "system",
             json!({
-                "text": format!("Воркер перерегистрирован: «{old_name}» → «{name}»"),
+                "text": format!("Worker re-enrolled: “{old_name}” → “{name}”"),
                 "code": "worker_replaced",
                 "old_name": old_name,
                 "new_name": name,
@@ -1230,7 +1230,7 @@ pub async fn delete_worker(
             &app,
             &s,
             "worker_revoked",
-            &format!("Токен воркера «{}» отозван", s.title),
+            &format!("Token of worker “{}” revoked", s.title),
         )
         .await?;
         db::archive_system_session(&app.db, s.id).await?;

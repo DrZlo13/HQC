@@ -462,7 +462,7 @@ pub async fn purge_worker(db: &PgPool, id: Uuid) -> sqlx::Result<WorkerPurge> {
     Ok(WorkerPurge::Deleted)
 }
 
-/// Archives the service session of a revoked worker (SPEC §10.2), so the «Воркеры» group
+/// Archives the service session of a revoked worker (SPEC §10.2), so the "Workers" group
 /// leaves it out; its history stays.
 pub async fn archive_system_session(db: &PgPool, session_id: Uuid) -> sqlx::Result<()> {
     sqlx::query(
@@ -1021,7 +1021,7 @@ pub struct NewSession<'a> {
     pub workspace_id: Option<Uuid>,
     pub worker_id: Option<Uuid>,
     pub cwd: &'a str,
-    /// `None`: the default title «Сессия N», N = the session's number in the project (the
+    /// `None`: the default title "Session N", N = the session's number in the project (the
     /// service sessions of workers do not count, SPEC §10.2).
     pub title: Option<&'a str>,
     pub model: Option<&'a str>,
@@ -1041,7 +1041,7 @@ pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid
             .fetch_one(db)
             .await?;
             (
-                format!("Сессия {num}"),
+                format!("Session {num}"),
                 TitleSource::Default,
                 format!("session-{num}"),
             )
@@ -1139,7 +1139,7 @@ pub async fn set_runtime_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Resu
     Ok(())
 }
 
-/// A title the hub derived itself (T21, SPEC §3 Session): only over the default «Сессия N»,
+/// A title the hub derived itself (T21, SPEC §3 Session): only over the default "Session N",
 /// never over the user's or the runtime's. `false` if the session has another title by now.
 pub async fn set_generated_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<bool> {
     let r = sqlx::query(

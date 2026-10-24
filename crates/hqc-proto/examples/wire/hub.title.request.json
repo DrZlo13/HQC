@@ -4,7 +4,7 @@
   "payload": {
     "request_id": "h-14",
     "session_id": "0199f3a2-7c10-7000-8000-000000000001",
-    "user_text": "Почини сборку: cargo test падает на hqc-hub",
-    "agent_text": "Готово: тест ждал 600 мс, на CI нужно больше — поднял лимит до 2,5 с."
+    "user_text": "Fix the build: cargo test fails on hqc-hub",
+    "agent_text": "Done: the test waited 600 ms, CI needs more, so I raised the limit to 2.5 s."
   }
 }

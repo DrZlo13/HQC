@@ -72,15 +72,12 @@ impl Tree {
     }
 }
 
-/// «N ходов» with the Russian plural of «ход» and the verb «попасть» agreeing with it.
+/// "N turns" and the verb agreeing with it.
 pub fn turns_phrase(n: u32) -> (String, &'static str) {
-    let (m10, m100) = (n % 10, n % 100);
-    if m10 == 1 && m100 != 11 {
-        (format!("{n} ход"), "не попал")
-    } else if (2..=4).contains(&m10) && !(12..=14).contains(&m100) {
-        (format!("{n} хода"), "не попали")
+    if n == 1 {
+        (format!("{n} turn"), "is")
     } else {
-        (format!("{n} ходов"), "не попали")
+        (format!("{n} turns"), "are")
     }
 }
 
@@ -89,9 +86,13 @@ pub fn turns_phrase(n: u32) -> (String, &'static str) {
 pub fn fork_text(branch_from_hqc: bool, orphaned: u32) -> String {
     let (turns, verb) = turns_phrase(orphaned);
     if branch_from_hqc {
-        format!("hqc продолжил с более ранней точки: {turns} из VS Code {verb} в его контекст")
+        format!(
+            "hqc continued from an earlier point: {turns} from VS Code {verb} not in its context"
+        )
     } else {
-        format!("VS Code продолжил с более ранней точки: {turns} из hqc {verb} в его контекст")
+        format!(
+            "VS Code continued from an earlier point: {turns} from hqc {verb} not in its context"
+        )
     }
 }
 
@@ -151,15 +152,15 @@ mod tests {
     }
 
     #[test]
-    fn russian_plurals() {
+    fn plurals() {
         assert_eq!(
             fork_text(false, 1),
-            "VS Code продолжил с более ранней точки: 1 ход из hqc не попал в его контекст"
+            "VS Code continued from an earlier point: 1 turn from hqc is not in its context"
         );
-        assert_eq!(turns_phrase(3).0, "3 хода");
-        assert_eq!(turns_phrase(11).0, "11 ходов");
-        assert_eq!(turns_phrase(21), ("21 ход".into(), "не попал"));
-        assert_eq!(turns_phrase(37).0, "37 ходов");
-        assert!(fork_text(true, 2).starts_with("hqc продолжил"));
+        assert_eq!(turns_phrase(3), ("3 turns".into(), "are"));
+        assert_eq!(turns_phrase(11).0, "11 turns");
+        assert_eq!(turns_phrase(21), ("21 turns".into(), "are"));
+        assert_eq!(turns_phrase(37).0, "37 turns");
+        assert!(fork_text(true, 2).starts_with("hqc continued"));
     }
 }

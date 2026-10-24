@@ -28,8 +28,10 @@ pub const MAX_CONCURRENT: usize = 2;
 /// The whole `claude -p` run.
 pub const TIMEOUT: Duration = Duration::from_secs(25);
 pub const MODEL: &str = "claude-haiku-5-5";
-pub const SYSTEM_PROMPT: &str = "Придумай короткий заголовок беседы, не больше 60 символов, \
-    на языке пользователя. Ответь только заголовком без кавычек и точки в конце.";
+pub const SYSTEM_PROMPT: &str =
+    "Write a short title for this conversation, at most 60 characters, \
+    in the language the user writes in. Reply with the title only, without quotes or a \
+    trailing period.";
 
 /// The command line after the program; the texts go to stdin ([`input`]).
 pub fn args() -> Vec<String> {
@@ -56,7 +58,7 @@ pub fn args() -> Vec<String> {
 
 /// What the model reads: the first prompt and the first answer of the session.
 pub fn input(user_text: &str, agent_text: &str) -> String {
-    format!("Сообщение пользователя:\n{user_text}\n\nОтвет агента:\n{agent_text}\n")
+    format!("User message:\n{user_text}\n\nAgent answer:\n{agent_text}\n")
 }
 
 /// The model's answer as a title: one line without quotes and a trailing period, at most

@@ -57,7 +57,7 @@ describe('examples/wire', () => {
 
   it('reads the text answer of approval.response (T26)', () => {
     const ev = parseEvent(load('event.approval.response.message.json'));
-    expect(ev.type === 'approval.response' && ev.payload.message).toBe('Не трогай корень, посмотри только ~/work/hqc');
+    expect(ev.type === 'approval.response' && ev.payload.message).toBe('Leave the root alone, look only at ~/work/hqc');
     const plain = parseEvent(load('event.approval.response.json'));
     expect(plain.type === 'approval.response' && plain.payload.message).toBeUndefined();
   });

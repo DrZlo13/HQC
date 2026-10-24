@@ -298,7 +298,7 @@ fn fork_is_reported_once() {
             at,
             "vscode".to_string(),
             1,
-            "VS Code продолжил с более ранней точки: 1 ход из hqc не попал в его контекст"
+            "VS Code continued from an earlier point: 1 turn from hqc is not in its context"
                 .to_string()
         )]
     );

@@ -1,6 +1,6 @@
-Посмотри скриншот и патч
+Look at the screenshot and the patch
 
-Вложения:
+Attachments:
 - .hqc/inbox/0199f3a2-7c10-7000-8000-000000000201/screen.png
 - .hqc/inbox/0199f3a2-7c10-7000-8000-000000000201/fix_1.patch
 - .hqc/inbox/0199f3a2-7c10-7000-8000-000000000201/notes.txt

@@ -684,6 +684,8 @@ async fn live_session_title() {
     );
     assert!(!title.is_empty() && title.chars().count() <= 60);
     assert!(!title.contains('\n') && !title.contains('"') && !title.contains('«'));
+    // The prompt is in English; the title follows the language of the conversation.
+    assert!(title.chars().any(|c| matches!(c, 'А'..='я')), "{title}");
 
     let slot = root.join("0");
     assert!(!slot.exists(), "the run folder is removed");

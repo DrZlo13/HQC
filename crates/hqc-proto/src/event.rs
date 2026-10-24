@@ -209,7 +209,7 @@ pub enum EventKind {
         option_id: String,
         /// A user id or `auto`.
         by: String,
-        /// The user's text with a deny option: «ответить текстом вместо этого» (T26). It
+        /// The user's text with a deny option: "Reply with text instead" (T26). It
         /// goes to the runtime with the denial; the client shows it as the user's message.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
@@ -524,7 +524,7 @@ mod tests {
         };
         assert_eq!(
             message.as_deref(),
-            Some("Не трогай корень, посмотри только ~/work/hqc")
+            Some("Leave the root alone, look only at ~/work/hqc")
         );
         assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }

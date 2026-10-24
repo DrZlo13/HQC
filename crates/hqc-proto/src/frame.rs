@@ -497,7 +497,7 @@ pub enum ProcessState {
 }
 
 /// Who set the session title (SPEC §3 Session): `default` — the hub at creation
-/// («Сессия N»), `runtime` — the agent (`session.state.title`), `user` — `PATCH`. The hub
+/// ("Session N"), `runtime` — the agent (`session.state.title`), `user` — `PATCH`. The hub
 /// replaces a `default` or `runtime` title with the runtime's, never a `user` one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

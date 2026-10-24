@@ -43,7 +43,7 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// The service session of worker `worker_id` (SPEC §10.2): no agent (`runtime: none`),
-    /// no input, not archived; the client lists it under «Воркеры». Sent only when true.
+    /// no input, not archived; the client lists it under "Workers". Sent only when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub system: bool,
     /// A live process outside hqc holds the transcript open (SPEC §9.3): the session is

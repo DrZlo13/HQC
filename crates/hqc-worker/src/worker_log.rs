@@ -8,7 +8,7 @@
 //!
 //! Rate limit ([`RateLimit`]): the same text at most once a second, at most
 //! [`PER_MINUTE`] lines a minute in total; what is dropped is counted and reported by one
-//! line «пропущено N» as soon as the limit allows.
+//! line "skipped N" as soon as the limit allows.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -31,7 +31,7 @@ use crate::link::HubLink;
 
 /// `system.code` of a log line (SPEC §4, §10.2).
 pub const CODE: &str = "worker_log";
-/// Lines a minute, the «пропущено N» line included.
+/// Lines a minute, the "skipped N" line included.
 pub const PER_MINUTE: u32 = 60;
 /// The same text is sent at most once per this interval.
 pub const SAME_TEXT_INTERVAL: Duration = Duration::from_secs(1);
@@ -163,7 +163,7 @@ pub struct RateLimit {
     last: HashMap<String, Instant>,
     window_start: Option<Instant>,
     in_window: u32,
-    /// Dropped since the last «пропущено N».
+    /// Dropped since the last "skipped N".
     pub suppressed: u64,
 }
 
@@ -214,7 +214,7 @@ impl RateLimit {
         true
     }
 
-    /// `Some(N)` when «пропущено N» is due and fits the limit; the count starts again.
+    /// `Some(N)` when "skipped N" is due and fits the limit; the count starts again.
     pub fn summary(&mut self, now: Instant) -> Option<u64> {
         self.roll(now);
         if self.suppressed == 0 || self.in_window >= PER_MINUTE {
@@ -251,7 +251,7 @@ pub fn event(session_id: Uuid, line: &LogLine) -> serde_json::Value {
 fn skipped(n: u64) -> LogLine {
     LogLine {
         level: "warn",
-        text: format!("пропущено {n}"),
+        text: format!("skipped {n}"),
         ts: Utc::now(),
     }
 }
@@ -340,7 +340,7 @@ mod tests {
         // No room for the summary in this minute.
         assert_eq!(l.summary(t0 + Duration::from_secs(30)), None);
         assert!(!l.check("late", t0 + Duration::from_secs(59)));
-        // The next minute starts with «пропущено N», which counts against it.
+        // The next minute starts with "skipped N", which counts against it.
         assert_eq!(l.summary(t0 + Duration::from_secs(61)), Some(41));
         for i in 0..100u64 {
             l.check(&format!("next {i}"), t0 + Duration::from_secs(62));

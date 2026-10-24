@@ -6,9 +6,9 @@ and the file in `artifacts/`). Two artifacts share the name `notes.txt`; one nam
 path and a reserved character.
 
 - `expected-text.txt` — the text the runtime gets: the input text and the block
-  "Вложения:" with paths relative to the working directory.
+  "Attachments:" with paths relative to the working directory.
 - `expected-stdin.json` — the stream-json user message of Claude Code: a text block and the
-  image as a base64 image block (format of the Messages API; **[проверить]** on a real CLI
+  image as a base64 image block (format of the Messages API; **[verify]** on a real CLI
   run, SPEC §8.1).
 
 Read by `tests/worker.rs` (`inbox_scenario`) and `src/adapter/claude_code/tests.rs`.

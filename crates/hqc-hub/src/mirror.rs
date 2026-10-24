@@ -44,12 +44,12 @@ pub const TAKEN_OVER: &str = "session_taken_over";
 /// `system.code` written when the session goes back to VS Code (SPEC §9.3).
 pub const RELEASED: &str = "session_released";
 
-const TAKEN_OVER_TEXT: &str = "Сессию подхватил hqc. Если она открыта в VS Code, её контекст \
-    там устарел: после возврата переоткройте сессию в VS Code.";
-const RELEASED_TEXT: &str = "Сессию продолжили в VS Code: hqc остановил агента после хода. \
-    Чтобы вести её отсюда, подхватите её снова.";
-const RELEASED_OPEN_TEXT: &str = "Сессию открыли в VS Code: hqc остановил агента после хода. \
-    Чтобы вести её отсюда, закройте её в VS Code и подхватите снова.";
+const TAKEN_OVER_TEXT: &str = "hqc took over the session. If it is open in VS Code, its context \
+    there is stale: reopen the session in VS Code after you switch back.";
+const RELEASED_TEXT: &str = "The session was continued in VS Code: hqc stopped the agent after \
+    the turn. To drive it from here, take it over again.";
+const RELEASED_OPEN_TEXT: &str = "The session was opened in VS Code: hqc stopped the agent after \
+    the turn. To drive it from here, close it in VS Code and take it over again.";
 
 /// `reason` of `session_released` and `error` of the takeover refusal: a live process
 /// outside hqc holds the transcript (SPEC §4, §9.3).
@@ -194,7 +194,7 @@ pub async fn ingest(
                 app,
                 &s,
                 "session_created",
-                "Сессия импортирована из Claude Code",
+                "Session imported from Claude Code",
             )
             .await?;
             s
@@ -339,7 +339,7 @@ pub async fn takeover(app: &AppState, s: &SessionRow) -> ApiResult<()> {
         extra.insert("held_by".into(), h.clone());
         return Err(ApiError::ConflictWith(
             VSCODE_OPEN,
-            "сессия открыта в VS Code: закройте её там и подхватите снова".into(),
+            "the session is open in VS Code: close it there and take it over again".into(),
             extra,
         ));
     }

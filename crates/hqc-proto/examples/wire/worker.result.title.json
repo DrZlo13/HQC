@@ -1,5 +1,5 @@
 {
   "id": "h-14",
   "type": "result",
-  "payload": { "request_id": "h-14", "title": "Починка теста hqc-hub на CI" }
+  "payload": { "request_id": "h-14", "title": "Fix the hqc-hub test on CI" }
 }

@@ -189,7 +189,7 @@ async fn waiting_request_is_sent_again_after_reconnect() {
 
 /// Log lines go to the service session named in `hello.ack` as `system {code: worker_log,
 /// level}`, through the outbox; the same text at most once a second, the rest reported as
-/// «пропущено N». Lines logged before `hello.ack` wait for it.
+/// "skipped N". Lines logged before `hello.ack` wait for it.
 #[tokio::test]
 async fn log_lines_reach_the_service_session_rate_limited() {
     let env = Env::new();
@@ -236,7 +236,7 @@ async fn log_lines_reach_the_service_session_rate_limited() {
     c.ack_event(&ev, 3).await;
     assert_eq!(
         ev["payload"]["event"]["payload"],
-        json!({"text": "пропущено 4", "code": "worker_log", "level": "warn"})
+        json!({"text": "skipped 4", "code": "worker_log", "level": "warn"})
     );
     assert!(c
         .maybe("event", Duration::from_millis(1500))

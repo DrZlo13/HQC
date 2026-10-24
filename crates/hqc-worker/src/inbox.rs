@@ -1,7 +1,7 @@
 //! `.hqc/inbox` (SPEC §5.3 `session.input`, §8.1, §12): the artifacts of an input are
 //! downloaded from the hub with the worker token into
 //! `<workspace>/<cwd>/.hqc/inbox/<event_id>/<name>` before the input goes to the runtime;
-//! their paths are appended to the text as a block "Вложения:", and `.hqc/` is added to the
+//! their paths are appended to the text as a block "Attachments:", and `.hqc/` is added to the
 //! workspace's `.git/info/exclude`.
 //!
 //! The hub is not trusted with the file system (SPEC §2.1): names are sanitized here, the
@@ -26,7 +26,7 @@ pub const HQC_DIR: &str = ".hqc";
 /// Longest file name written, in bytes.
 const MAX_NAME: usize = 120;
 /// Heading of the block of paths appended to the input text.
-pub const BLOCK_HEADING: &str = "Вложения:";
+pub const BLOCK_HEADING: &str = "Attachments:";
 /// Largest artifact downloaded, as the hub's own limit (SPEC §12, §20).
 pub const MAX_ARTIFACT_BYTES: u64 = 100 * 1000 * 1000;
 /// Largest sum of the artifacts of one input (SPEC §20).
@@ -298,7 +298,7 @@ fn inbox_dir(spec: &StartSpec, event_id: Uuid) -> Result<PathBuf, InboxError> {
     Ok(dir)
 }
 
-/// The text followed by "Вложения:" and one path per line.
+/// The text followed by "Attachments:" and one path per line.
 pub fn with_block(text: &str, files: &[InboxFile]) -> String {
     if files.is_empty() {
         return text.to_string();
@@ -622,9 +622,9 @@ mod tests {
                 "look\n",
                 &[f(".hqc/inbox/e/a.png"), f(".hqc/inbox/e/b.txt")]
             ),
-            "look\n\nВложения:\n- .hqc/inbox/e/a.png\n- .hqc/inbox/e/b.txt"
+            "look\n\nAttachments:\n- .hqc/inbox/e/a.png\n- .hqc/inbox/e/b.txt"
         );
-        assert_eq!(with_block("  ", &[f("x")]), "Вложения:\n- x");
+        assert_eq!(with_block("  ", &[f("x")]), "Attachments:\n- x");
     }
 
     #[test]

@@ -307,7 +307,7 @@ async fn quiet_import_and_live_release() {
     let list = sessions(&hub, &pid).await;
     let sid = list[0]["id"].as_str().unwrap().to_string();
     assert_eq!(list[0]["locked_by"], "none");
-    assert_eq!(list[0]["title"], "Сессия 1");
+    assert_eq!(list[0]["title"], "Session 1");
 
     let (st, _) = hub
         .post(
@@ -427,7 +427,7 @@ async fn holder_blocks_takeover_until_closed() {
     assert_eq!((st, e["error"].as_str()), (409, Some("vscode_open")), "{e}");
     assert_eq!(
         e["message"],
-        "сессия открыта в VS Code: закройте её там и подхватите снова"
+        "the session is open in VS Code: close it there and take it over again"
     );
     assert_eq!(e["held_by"], vscode_idle());
     let (st, e) = hub
@@ -555,7 +555,7 @@ async fn holder_releases_hqc() {
     assert!(rel[0]["payload"]["text"]
         .as_str()
         .unwrap()
-        .contains("закройте её в VS Code"));
+        .contains("close it in VS Code"));
     let q = evs
         .iter()
         .find(|e| e["event_id"] == queued["event"]["event_id"])
@@ -620,7 +620,7 @@ async fn forked_event_is_stored() {
     let forked = json!({
         "session_id": Uuid::nil(), "event_id": Uuid::new_v4(), "ts": "2026-10-23T18:20:41Z",
         "author": {"kind": "system"}, "type": "system",
-        "payload": {"text": "VS Code продолжил с более ранней точки: 37 ходов из hqc не попали в его контекст",
+        "payload": {"text": "VS Code continued from an earlier point: 37 turns from hqc are not in its context",
                     "code": "session_forked", "at_uuid": at, "branch_from": "vscode",
                     "orphaned_turns": 37}
     });

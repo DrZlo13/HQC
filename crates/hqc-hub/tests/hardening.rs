@@ -207,7 +207,7 @@ async fn service_session_takes_only_worker_log() {
         ),
         (
             "system",
-            json!({"text": "Воркер заменён", "code": "worker_replaced"}),
+            json!({"text": "Worker replaced", "code": "worker_replaced"}),
         ),
         (
             "approval.cancel",

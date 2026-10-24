@@ -179,7 +179,7 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
     w.stop().await;
 }
 
-/// T26: «ответить текстом вместо этого». The hub's `approval.response` with the deny option
+/// T26: "Reply with text instead". The hub's `approval.response` with the deny option
 /// and `message` reaches Claude Code as `control_response` `deny` whose `message` carries the
 /// user's text (the model gets it as the tool result, SPEC §10.1).
 #[tokio::test]
@@ -209,7 +209,7 @@ async fn deny_with_message_reaches_control_response() {
     )
     .await;
 
-    let text = "Не создавай файл, просто скажи DONE";
+    let text = "Don't create the file, just say DONE";
     let mut seq = 0;
     let answer = loop {
         let f = c.recv().await;

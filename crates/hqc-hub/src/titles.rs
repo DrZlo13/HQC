@@ -1,7 +1,7 @@
 //! Session titles (T21, T24, SPEC §3 Session).
 //!
 //! After the first final `agent.message` of a session whose title is still the default
-//! «Сессия N» (from a worker or from the mirror: an imported session the same way, by its
+//! "Session N" (from a worker or from the mirror: an imported session the same way, by its
 //! first records), the hub sends `title.request` to the session's worker in the background:
 //! the first prompt and the first answer, each cut to [`MAX_TITLE_INPUT`] characters. The
 //! worker asks Claude Code on its subscription and answers with a title of at most

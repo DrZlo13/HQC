@@ -12,7 +12,7 @@
       "author": { "kind": "system" },
       "type": "system",
       "payload": {
-        "text": "VS Code продолжил с более ранней точки: 1 ход из hqc не попал в его контекст",
+        "text": "VS Code continued from an earlier point: 1 turn from hqc is not in its context",
         "code": "session_forked",
         "at_uuid": "d6e6a091-03a1-463f-bfbf-d19775f04f96",
         "branch_from": "vscode",

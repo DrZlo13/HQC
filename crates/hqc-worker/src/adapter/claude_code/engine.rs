@@ -459,6 +459,13 @@ impl Core {
             // `error_max_turns`, `error_during_execution`, ...: why the turn ended early.
             detail: (subtype != "success" || v["is_error"] == true).then(|| subtype.to_owned()),
         }));
+        // The CLI answered the input without echoing it: a local slash command (`/name`,
+        // `/cost`, ...) runs without a model turn and without `--replay-user-messages`. The
+        // result still means the input was taken; without this the supervisor resends it.
+        while let Some(event_id) = self.awaiting_echo.pop_front() {
+            tracing::info!(session_id = %self.session_id, %event_id, "input taken without an echo (local command)");
+            out.push(Action::Emit(AdapterEvent::InputAccepted { event_id }));
+        }
         out.push(Action::Emit(AdapterEvent::TurnEnded));
         if !self.pending.is_empty() {
             tracing::warn!(session_id = %self.session_id, open = self.pending.len(), "turn ended with open requests; dropped");

@@ -1474,3 +1474,23 @@ async fn entrypoint_for_the_vscode_history() {
         a.kill().await.unwrap();
     }
 }
+
+/// A local slash command (`/name x`): the CLI answers with a `result` and no replay echo.
+/// The input still counts as taken, otherwise the supervisor resends it forever.
+#[tokio::test]
+async fn local_command_without_echo_is_taken() {
+    let stream = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":15,"result":"Session renamed to: x","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#;
+    let mut h = Harness::start(stream, Uuid::new_v4()).await;
+    let id = Uuid::now_v7();
+    let events = h.turn("/name x", id, "once", BTreeMap::new()).await;
+    let s = shape(&events);
+    let accepted = s
+        .iter()
+        .position(|e| e == "accepted")
+        .expect("input not taken");
+    let ended = s.iter().position(|e| e == "turn_ended").unwrap();
+    assert!(accepted < ended, "{s:?}");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AdapterEvent::InputAccepted { event_id } if *event_id == id)));
+}

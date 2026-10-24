@@ -53,6 +53,9 @@ use crate::config::{Config, StartSpec};
 use crate::inbox::{self, ArtifactClient};
 use crate::known_paths::KnownPaths;
 use crate::link::HubLink;
+
+/// An input that ends this many turns without being taken is given up (see `end_turn`).
+const MAX_REQUEUES: u8 = 2;
 use crate::mirror::{MirrorCmd, MirrorHandle};
 
 /// `error.code` for input to a session another writer continues (SPEC §9.3).
@@ -707,12 +710,15 @@ struct Queued {
     /// Id of the latest `session.input` frame carrying this input; the ack answers it.
     frame_id: String,
     input: SessionInput,
+    /// Times this input ended a turn without being taken and went back to the queue.
+    requeued: u8,
 }
 
 struct Turn {
     frame_id: String,
     input: SessionInput,
     accepted: bool,
+    requeued: u8,
 }
 
 struct Session {
@@ -927,6 +933,7 @@ impl Session {
         self.queue.push_back(Queued {
             frame_id: id,
             input,
+            requeued: 0,
         });
         if self.state == ProcessState::Stopped {
             if let Err(e) = self.ensure_running().await {
@@ -972,6 +979,7 @@ impl Session {
                         frame_id: q.frame_id,
                         input: q.input,
                         accepted: false,
+                        requeued: q.requeued,
                     })
                 }
                 Err(e) => {
@@ -1057,10 +1065,26 @@ impl Session {
     fn end_turn(&mut self) {
         if let Some(t) = self.turn.take() {
             if !t.accepted {
+                if t.requeued >= MAX_REQUEUES {
+                    // The runtime keeps ending turns without taking this input: give it up
+                    // instead of resending it forever (the hub marks it failed after the
+                    // retries of SPEC §5.2).
+                    tracing::error!(session_id = %self.id, event_id = %t.input.event_id, "input never taken by the runtime; giving up");
+                    self.link.reply(
+                        &t.frame_id,
+                        wire_error(
+                            error_code::INTERNAL,
+                            "the runtime ended its turns without taking this input".to_string(),
+                            false,
+                        ),
+                    );
+                    return;
+                }
                 tracing::warn!(session_id = %self.id, event_id = %t.input.event_id, "turn ended before the input was accepted; requeued");
                 self.queue.push_front(Queued {
                     frame_id: t.frame_id,
                     input: t.input,
+                    requeued: t.requeued + 1,
                 });
             }
         }

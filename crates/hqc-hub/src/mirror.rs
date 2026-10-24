@@ -17,14 +17,16 @@
 //! - `POST /takeover` ([`takeover`]): refused while a holder lives (`409 vscode_open`);
 //!   without registry data, after 30 s of silence. The session becomes `locked_by: hqc` and
 //!   the worker gets `session.start` with `mode: resume`.
-//! - After `hello` the worker gets `mirror.set` for every mirrored workspace of its own.
+//! - After `hello` the worker gets `mirror.set` for every mirrored workspace of its own, with
+//!   the hub's sessions of the workspace and the time of their last event (T21): the
+//!   worker's first pass over those transcripts skips what the hub already has.
 
 use std::path::Path;
 
 use chrono::Utc;
 use hqc_proto::{
     event::EventKind,
-    frame::{Ack, HeldBy, HubFrame, MirrorEvent, MirrorSet, MIRROR_RECENT_S},
+    frame::{Ack, HeldBy, HubFrame, MirrorEvent, MirrorSet, MirrorSince, MIRROR_RECENT_S},
 };
 use serde_json::{json, Value};
 
@@ -333,15 +335,38 @@ pub async fn takeover(app: &AppState, s: &SessionRow) -> ApiResult<()> {
 /// After `hello`: the worker learns which of its folders are mirrored.
 pub async fn after_hello(app: &AppState, conn: &WorkerConn) -> anyhow::Result<()> {
     for ws in db::mirrored_workspaces(&app.db, conn.worker_id).await? {
-        set(conn, &ws.path, true);
+        enable(app, conn, &ws).await?;
     }
     Ok(())
 }
 
-pub fn set(conn: &WorkerConn, path: &str, enabled: bool) {
+/// `mirror.set` with `enabled: true` for `ws` and the hub's sessions in it (SPEC §9.1, T21).
+pub async fn enable(
+    app: &AppState,
+    conn: &WorkerConn,
+    ws: &db::WorkspaceRow,
+) -> anyhow::Result<()> {
+    let sessions = db::mirror_since(&app.db, ws.id)
+        .await?
+        .into_iter()
+        .map(|(runtime_session_id, since_ts)| MirrorSince {
+            runtime_session_id,
+            since_ts,
+        })
+        .collect();
+    conn.send(HubFrame::MirrorSet(MirrorSet {
+        workspace_path: ws.path.clone(),
+        enabled: true,
+        sessions,
+    }));
+    Ok(())
+}
+
+pub fn disable(conn: &WorkerConn, path: &str) {
     conn.send(HubFrame::MirrorSet(MirrorSet {
         workspace_path: path.to_string(),
-        enabled,
+        enabled: false,
+        sessions: vec![],
     }));
 }
 

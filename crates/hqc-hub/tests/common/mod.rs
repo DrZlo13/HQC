@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use std::{
+    collections::VecDeque,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -144,6 +145,11 @@ impl TestHub {
 
     /// Dev auth with a fresh user; `f` adjusts the artifact store (in a fresh temp dir).
     pub async fn start_artifacts(f: impl FnOnce(&mut ArtifactConfig)) -> Self {
+        Self::start_config(|c| f(&mut c.artifacts)).await
+    }
+
+    /// Dev auth with a fresh user; `f` adjusts the config.
+    pub async fn start_config(f: impl FnOnce(&mut Config)) -> Self {
         let email = format!("user-{}@example.com", Uuid::new_v4().simple());
         Self::start_upgraded(
             AuthConfig::Dev {
@@ -183,7 +189,7 @@ impl TestHub {
         limits: Limits,
         timing: Timing,
         upgrade: Option<(i64, String)>,
-        artifacts: impl FnOnce(&mut ArtifactConfig),
+        configure: impl FnOnce(&mut Config),
     ) -> Self {
         let url = db_url();
         let admin = PgPoolOptions::new()
@@ -220,12 +226,10 @@ impl TestHub {
         }
         MIGRATOR.run(&pool).await.unwrap();
 
-        let mut art = ArtifactConfig::new(
+        let art = ArtifactConfig::new(
             std::env::temp_dir().join(format!("hqc-artifacts-{}", Uuid::new_v4().simple())),
         );
-        artifacts(&mut art);
-        std::fs::create_dir_all(&art.dir).unwrap();
-        let config = Config {
+        let mut config = Config {
             database_url: url,
             listen: "127.0.0.1:0".into(),
             auth,
@@ -235,7 +239,10 @@ impl TestHub {
             limits,
             artifacts: art,
             public_origins: vec![],
+            title_model: None,
         };
+        configure(&mut config);
+        std::fs::create_dir_all(&config.artifacts.dir).unwrap();
         let push = Arc::new(RecordingPush::default());
         let app = hqc_hub::start(pool, config, push.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -413,6 +420,11 @@ impl TestHub {
             tokio::select! {
                 r = &mut req => return r,
                 Some(f) = recv_json(&mut w.ws, WAIT) => {
+                    if f["type"] == "mirror.set" {
+                        // Every workspace is mirrored by default (T21).
+                        w.queue.push_back(f);
+                        continue;
+                    }
                     let (ty, payload) = w.fs_reply(&f);
                     w.reply(&f["id"], ty, payload).await;
                 }
@@ -476,9 +488,20 @@ async fn recv_json(ws: &mut Ws, timeout: Duration) -> Option<Value> {
 }
 
 /// A worker speaking SPEC §5 by hand.
+///
+/// `mirror.set` frames (every workspace is mirrored by default since T21) are set aside in
+/// [`FakeWorker::mirror_sets`] unless [`FakeWorker::see_mirror_set`] is on, so tests that
+/// are not about the mirror see the frames they expect.
 pub struct FakeWorker {
     ws: Ws,
     next: u64,
+    /// Frames read ahead of [`FakeWorker::recv`].
+    queue: VecDeque<Value>,
+    pub see_mirror_set: bool,
+    pub mirror_sets: Vec<Value>,
+    /// The same for `session.cleanup` (T21): [`FakeWorker::see_cleanup`], `cleanups`.
+    pub see_cleanup: bool,
+    pub cleanups: Vec<Value>,
     /// `allowed_roots` of its `hello`; [`FakeWorker::fs_reply`] answers by them.
     pub roots: Vec<String>,
     /// From `hello.ack`.
@@ -496,6 +519,11 @@ impl FakeWorker {
             Ok((ws, _)) => Ok(Self {
                 ws,
                 next: 1,
+                queue: VecDeque::new(),
+                see_mirror_set: false,
+                mirror_sets: vec![],
+                see_cleanup: false,
+                cleanups: vec![],
                 roots: vec![],
                 worker_id: String::new(),
             }),
@@ -667,9 +695,31 @@ impl FakeWorker {
     }
 
     pub async fn recv(&mut self) -> Value {
-        recv_json(&mut self.ws, WAIT)
+        self.recv_within(WAIT)
             .await
             .expect("worker: no frame from hub")
+    }
+
+    async fn recv_within(&mut self, d: Duration) -> Option<Value> {
+        let deadline = tokio::time::Instant::now() + d;
+        loop {
+            let f = match self.queue.pop_front() {
+                Some(f) => f,
+                None => {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    recv_json(&mut self.ws, left).await?
+                }
+            };
+            if f["type"] == "mirror.set" && !self.see_mirror_set {
+                self.mirror_sets.push(f);
+                continue;
+            }
+            if f["type"] == "session.cleanup" && !self.see_cleanup {
+                self.cleanups.push(f);
+                continue;
+            }
+            return Some(f);
+        }
     }
 
     /// The next frame, which must have type `ty`.
@@ -680,7 +730,7 @@ impl FakeWorker {
     }
 
     pub async fn expect_silence(&mut self, d: Duration) {
-        if let Some(f) = recv_json(&mut self.ws, d).await {
+        if let Some(f) = self.recv_within(d).await {
             panic!("worker: unexpected frame {f}");
         }
     }

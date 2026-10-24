@@ -38,6 +38,10 @@ pub struct Inner {
     /// Session -> the last sign of life of its turn: an event from the worker, or the moment
     /// the watchdog first saw the session `running` (SPEC §17.3, [`crate::watchdog`]).
     pub turn_activity: Mutex<HashMap<Uuid, Instant>>,
+    /// The title model (`HQC_TITLE_MODEL`, T21); `None`: titles come from the first prompt.
+    pub titles: Option<crate::llm::Llm>,
+    /// Sessions whose title the hub has started to derive in this process ([`crate::titles`]).
+    pub titling: Mutex<std::collections::HashSet<Uuid>>,
 }
 
 impl Deref for AppState {
@@ -82,6 +86,8 @@ impl AppState {
             limiter: RateLimiter::default(),
             ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),
             turn_activity: Mutex::new(HashMap::new()),
+            titles: config.title_model.clone().map(crate::llm::Llm::new),
+            titling: Mutex::new(Default::default()),
             config,
         }))
     }

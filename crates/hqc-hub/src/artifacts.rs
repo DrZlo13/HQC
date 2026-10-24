@@ -12,6 +12,9 @@
 //! - `GET /worker/artifacts/{id}`: the content for a worker token, if a session of that
 //!   worker was given the artifact in its input (SPEC §5.3).
 //!
+//! Cleanup (T21, [`cleanup`]): once a day artifacts no event refers to and not used for
+//! `HQC_ARTIFACT_RETENTION_DAYS` are deleted; a file goes when no row has its sha256 any more.
+//!
 //! Every content response carries [`content_headers`]: a `sandbox` CSP, `nosniff` and a
 //! `Content-Disposition` by kind. HTML is inline only on a separate artifact domain;
 //! on the hub's own domain it is always an attachment.
@@ -118,8 +121,10 @@ async fn insert_artifact(db: &PgPool, a: &ArtifactRow) -> sqlx::Result<(Artifact
     if let Some(r) = new {
         return Ok((r, true));
     }
+    // Used again: the cleanup counts its age from now.
     let old = sqlx::query_as(&format!(
-        "SELECT {COLS} FROM artifacts WHERE owner_id = $1 AND sha256 = $2 AND name = $3"
+        "UPDATE artifacts SET updated_at = now()
+         WHERE owner_id = $1 AND sha256 = $2 AND name = $3 RETURNING {COLS}"
     ))
     .bind(a.owner_id)
     .bind(&a.sha256)
@@ -166,11 +171,14 @@ pub async fn attach_to_session(
     .bind(session_id)
     .execute(db)
     .await?;
-    sqlx::query("UPDATE artifacts SET session_id = $2 WHERE id = ANY($1) AND session_id IS NULL")
-        .bind(ids)
-        .bind(session_id)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE artifacts SET session_id = coalesce(session_id, $2), updated_at = now()
+         WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .bind(session_id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -279,6 +287,25 @@ impl Drop for TempFile {
 struct Stored {
     sha256: String,
     size: u64,
+    /// The content, until [`place`] moves it into the store.
+    tmp: TempFile,
+}
+
+/// Moves the uploaded content to `<dir>/<sha[0..2]>/<sha>` unless it is there. Called after
+/// the row is stored: a cleanup that removed the file meanwhile ([`remove_blob`] checks rows
+/// after taking the file away) is undone here.
+async fn place(cfg: &ArtifactConfig, mut s: Stored) -> ApiResult<()> {
+    let dest = blob_path(cfg, &s.sha256);
+    if tokio::fs::metadata(&dest).await.is_ok() {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(dest.parent().unwrap())
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    let tmp = s.tmp.0.take().expect("content of an upload");
+    tokio::fs::rename(&tmp, &dest)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))
 }
 
 /// Streams one multipart field into the store. Over the limit: `413 too_large`.
@@ -321,16 +348,86 @@ async fn store_field(
         .map_err(|e| ApiError::Internal(e.into()))?;
     drop(f);
     let sha256: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    let dest = blob_path(cfg, &sha256);
-    if tokio::fs::metadata(&dest).await.is_err() {
-        tokio::fs::create_dir_all(dest.parent().unwrap())
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-        tokio::fs::rename(&path, &dest)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
+    Ok(Stored { sha256, size, tmp })
+}
+
+// ---------------------------------------------------------------- cleanup
+
+/// Daily [`cleanup`], the first right after start.
+pub async fn cleanup_loop(app: AppState, keep: std::time::Duration) {
+    loop {
+        match cleanup(&app, keep).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(removed = n, "artifact cleanup"),
+            Err(e) => tracing::error!(error = %e, "artifact cleanup"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(86_400)).await;
     }
-    Ok(Stored { sha256, size })
+}
+
+/// Deletes artifacts that no event refers to (`user.message.artifact_ids`, `attachment` and
+/// `tool.result` `artifact_id`) and that were not uploaded or used for `keep`; their files go
+/// when no row has the sha256 any more. Returns how many rows went.
+pub async fn cleanup(app: &AppState, keep: std::time::Duration) -> anyhow::Result<usize> {
+    let shas: Vec<String> = sqlx::query_scalar(
+        "WITH refs AS (
+            SELECT jsonb_array_elements_text(payload->'artifact_ids') AS id FROM events
+             WHERE jsonb_typeof(payload->'artifact_ids') = 'array'
+            UNION
+            SELECT payload->>'artifact_id' FROM events
+             WHERE jsonb_typeof(payload->'artifact_id') = 'string')
+         DELETE FROM artifacts a
+         WHERE a.updated_at < now() - $1 * interval '1 second'
+           AND NOT EXISTS (SELECT 1 FROM refs r WHERE r.id = a.id::text)
+         RETURNING a.storage_key",
+    )
+    .bind(keep.as_secs() as f64)
+    .fetch_all(&app.db)
+    .await?;
+    let n = shas.len();
+    let mut shas = shas;
+    shas.sort();
+    shas.dedup();
+    for sha in shas {
+        if let Err(e) = remove_blob(&app.config.artifacts, &app.db, &sha).await {
+            tracing::warn!(%sha, "artifact cleanup: {e:#}");
+        }
+    }
+    Ok(n)
+}
+
+async fn blob_used(db: &PgPool, sha: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM artifacts WHERE storage_key = $1)")
+        .bind(sha)
+        .fetch_one(db)
+        .await
+}
+
+/// Removes the content of `sha` when no artifact row has it. The file is first moved aside,
+/// then the rows are counted: an upload of the same content that stored its row meanwhile
+/// gets it back (and [`place`] puts its own copy in if this one is already gone).
+async fn remove_blob(cfg: &ArtifactConfig, db: &PgPool, sha: &str) -> anyhow::Result<()> {
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("not a sha256: {sha:?}");
+    }
+    if blob_used(db, sha).await? {
+        return Ok(());
+    }
+    let dest = blob_path(cfg, sha);
+    let tmp_dir = cfg.dir.join("tmp");
+    tokio::fs::create_dir_all(&tmp_dir).await?;
+    let aside = tmp_dir.join(format!("{sha}.removed-{}", Uuid::new_v4()));
+    match tokio::fs::rename(&dest, &aside).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    if blob_used(db, sha).await? && tokio::fs::metadata(&dest).await.is_err() {
+        tokio::fs::rename(&aside, &dest).await?;
+    } else {
+        tokio::fs::remove_file(&aside).await?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- signing
@@ -569,10 +666,11 @@ pub async fn upload(
         size: stored.size as i64,
         sha256: stored.sha256.clone(),
         name,
-        storage_key: stored.sha256,
+        storage_key: stored.sha256.clone(),
         created_at: Utc::now(),
     };
     let (row, created) = insert_artifact(&app.db, &row).await?;
+    place(cfg, stored).await?;
     let status = if created {
         StatusCode::CREATED
     } else {

@@ -89,6 +89,7 @@ async fn takeover_and_release() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
     let pid = project(&hub, "cad").await;
 
     // Candidates come from the worker.
@@ -279,6 +280,7 @@ async fn takeover_and_release() {
     // A reconnect: mirror.set again for the mirrored workspace.
     w.close().await;
     let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
     let set = w.expect("mirror.set").await;
     assert_eq!(set["payload"]["workspace_path"], WS);
     hub.finish().await;
@@ -292,6 +294,7 @@ async fn quiet_import_and_live_release() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
     let pid = project(&hub, "cad").await;
     import_workspace(&hub, &mut w, &pid).await;
     let runtime = Uuid::new_v4().to_string();
@@ -393,6 +396,7 @@ async fn holder_blocks_takeover_until_closed() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
     with_registry(&hub, &w).await;
     let pid = project(&hub, "cad").await;
     import_workspace(&hub, &mut w, &pid).await;
@@ -491,6 +495,7 @@ async fn holder_releases_hqc() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
     let pid = project(&hub, "cad").await;
     import_workspace(&hub, &mut w, &pid).await;
     let runtime = Uuid::new_v4().to_string();
@@ -584,6 +589,7 @@ async fn holder_releases_hqc() {
     holder_report(&mut w, &runtime, vscode_idle()).await;
     w.close().await;
     let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
     w.expect("mirror.set").await;
     let s = hub.session(&sid).await;
     assert_eq!(s["locked_by"], "vscode");
@@ -600,6 +606,7 @@ async fn forked_event_is_stored() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
     let pid = project(&hub, "cad").await;
     import_workspace(&hub, &mut w, &pid).await;
     let runtime = Uuid::new_v4().to_string();

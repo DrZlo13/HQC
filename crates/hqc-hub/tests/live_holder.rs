@@ -103,6 +103,7 @@ async fn live_holder_blocks_takeover() {
         outbox_dir: run.join("home/outbox"),
         conn: ConnOptions::default(),
         shutdown_timeout: Duration::from_secs(10),
+        machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
         logs: None,
         mirror: Some(MirrorOptions {

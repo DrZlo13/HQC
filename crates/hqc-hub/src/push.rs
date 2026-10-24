@@ -159,6 +159,10 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
         _ => None,
     };
     let approval_like = request_id.is_some();
+    if s.system && approval_like && s.worker_id.is_some_and(|w| !worker_push_due(app, w)) {
+        tracing::debug!(session_id = %s.id, "worker request: push skipped, one was sent less than 10 s ago");
+        return;
+    }
     let payload = message(s, row, request_id.map(String::as_str), body);
     let app = app.clone();
     let session_owner = s.owner_id;
@@ -183,6 +187,23 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
             send_to_user(&app, u, &payload).await;
         }
     });
+}
+
+/// A worker's own requests push at most once per this interval (SPEC §20): a worker cannot
+/// flood its owner's phone.
+pub const WORKER_PUSH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Whether a request of `worker_id` may push now; counts the push if so.
+fn worker_push_due(app: &AppState, worker_id: Uuid) -> bool {
+    let now = tokio::time::Instant::now();
+    let mut m = app.worker_pushes.lock().unwrap();
+    match m.get(&worker_id) {
+        Some(t) if now.duration_since(*t) < WORKER_PUSH_INTERVAL => false,
+        _ => {
+            m.insert(worker_id, now);
+            true
+        }
+    }
 }
 
 /// Web Push carries at most 4096 bytes after encryption; keep the plaintext under this.

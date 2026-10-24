@@ -1741,6 +1741,17 @@ pub async fn undelivered_worker_results(
     .await
 }
 
+/// Open `worker_approval` requests of a worker (SPEC §20).
+pub async fn open_worker_requests(db: &PgPool, worker_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pending_requests
+         WHERE kind = 'worker_approval' AND worker_id = $1 AND closed_at IS NULL",
+    )
+    .bind(worker_id)
+    .fetch_one(db)
+    .await
+}
+
 pub async fn request_exists(db: &PgPool, session_id: Uuid, request_id: &str) -> sqlx::Result<bool> {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pending_requests WHERE session_id = $1 AND request_id = $2)",

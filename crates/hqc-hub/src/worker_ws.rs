@@ -449,9 +449,13 @@ async fn handle_text(
         }
         WorkerFrame::WorkerApprovalRequest(r) => {
             match requests::worker_approval(app, conn.worker_id, &r).await {
+                Ok(requests::WorkerApproval::Refused(why)) => {
+                    conn.error(&id, error_code::INVALID_FRAME, why, false);
+                    Ok(())
+                }
                 Ok(answered) => {
                     conn.reply(&id, HubFrame::Ack(Ack::default()));
-                    if let Some(p) = answered {
+                    if let requests::WorkerApproval::Answered(p) = answered {
                         requests::deliver_result(app, &p).await;
                     }
                     Ok(())

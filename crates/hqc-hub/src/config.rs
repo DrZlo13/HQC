@@ -98,6 +98,14 @@ pub struct Limits {
     pub ws_auth_concurrency: usize,
     /// Push subscriptions per user.
     pub push_subs_per_user: i64,
+    /// Open `worker.approval.request` per worker; more get `error invalid_frame` (SPEC §20).
+    pub worker_approvals_open: i64,
+    /// Sessions the mirror may create per worker in 24 h (SPEC §9.2, §20).
+    pub mirror_sessions_per_day: i64,
+    /// Sessions of a workspace created by the mirror, in total (SPEC §9.2, §20).
+    pub mirror_sessions_per_workspace: i64,
+    /// `fs.*` requests in flight per worker; more get `429 worker_busy` (SPEC §20).
+    pub worker_fs_concurrency: usize,
 }
 
 impl Default for Limits {
@@ -110,6 +118,10 @@ impl Default for Limits {
             ws_auth_failures_per_min: 20,
             ws_auth_concurrency: 16,
             push_subs_per_user: 10,
+            worker_approvals_open: 20,
+            mirror_sessions_per_day: 200,
+            mirror_sessions_per_workspace: 2000,
+            worker_fs_concurrency: 4,
         }
     }
 }

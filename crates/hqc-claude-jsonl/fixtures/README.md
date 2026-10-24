@@ -38,6 +38,15 @@ Claude Code 2.1.308, a fork in one transcript (T20, SPEC §9.3; `driver.py` in
   last turn hangs off the `ONE` answer, which so has two children, the way VS Code continued
   from its own last record in the case of 2026-10-23. The stdin file is the adapter run's.
 
+Claude Code 2.1.308, the first input after `--resume` and `/compact` (T25, SPEC §9.3;
+`driver.py` in `tmp/spike-t25-a` with the adapter's flags):
+
+- `resume-compact` — a new session (`Reply with exactly: ONE`), then `--resume` and `Reply
+  with exactly: TWO` (stream and stdin: `stream-resume-prompt`, `stdin-resume-prompt`), then
+  `--resume` and `/compact` (`stream-resume-compact`, `stdin-resume-compact`). The transcript
+  is the file after all three runs. The command record `<command-name>/compact</command-name>`
+  is in the transcript only.
+
 In the stream files of the T12 sets the `input_json_delta` fragments of a tool input whose
 path had to be rewritten are joined into the first fragment (sanitizing split paths).
 

@@ -2,15 +2,22 @@
 //!
 //! The adapter adds the `uuid` of every main-chain `user`/`assistant` message it reads from
 //! stream-json, the `--replay-user-messages` echo of its own prompts included; stream-json
-//! and the transcript share these uuids (checked on 2.1.307 and 2.1.308). The mirror asks
-//! the registry whether a record is the adapter's and whether a process of the session runs
-//! right now. Keyed by `runtime_session_id` (the transcript's uuid); in memory only: after a
+//! and the transcript share these uuids (checked on 2.1.307 and 2.1.308, after `--resume`
+//! too). It also adds the text of every input it writes to stdin: a prompt record the stream
+//! did not name (a slash command such as `/compact` is written as `<command-name>`, T25; an
+//! echo with another uuid, seen in the field and not reproduced on 2.1.308) is the adapter's
+//! when its typed text matches an input not yet matched ([`OwnRecords::claim`]). The mirror
+//! asks the registry whether a record is the adapter's and whether a process of the session
+//! runs right now. Keyed by `runtime_session_id` (the transcript's uuid); in memory only: after a
 //! worker restart the mirror's offsets on disk say what was already handled.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use uuid::Uuid;
+
+/// Inputs kept per transcript until a record matches them: older ones are dropped.
+const INPUTS: usize = 32;
 
 #[derive(Debug, Default)]
 pub struct OwnRecords {
@@ -26,6 +33,8 @@ struct Entry {
     /// Their pids, when known: their entries in Claude Code's session registry are not
     /// another holder (SPEC §9.3).
     pids: Vec<u32>,
+    /// Texts of the inputs written to stdin (trimmed) that no record has matched yet.
+    inputs: VecDeque<String>,
 }
 
 impl OwnRecords {
@@ -58,6 +67,34 @@ impl OwnRecords {
     /// The adapter saw record `uuid` of transcript `session` in stream-json.
     pub fn add(&self, session: Uuid, uuid: Uuid) {
         self.lock().entry(session).or_default().uuids.insert(uuid);
+    }
+
+    /// The adapter wrote input `text` to the stdin of transcript `session`'s process.
+    pub fn sent(&self, session: Uuid, text: &str) {
+        let mut m = self.lock();
+        let e = m.entry(session).or_default();
+        e.inputs.push_back(text.trim().to_string());
+        if e.inputs.len() > INPUTS {
+            e.inputs.pop_front();
+        }
+    }
+
+    /// Whether record `uuid` of transcript `session` is the adapter's: its uuid came in
+    /// stream-json, or `typed` (what a prompt record stands for, `None` for other records)
+    /// matches an input not yet matched; then the record is the adapter's from now on. A
+    /// matching input is used up either way.
+    pub fn claim(&self, session: Uuid, uuid: Uuid, typed: Option<&str>) -> bool {
+        let mut m = self.lock();
+        let Some(e) = m.get_mut(&session) else {
+            return false;
+        };
+        let input = typed.and_then(|t| e.inputs.iter().position(|i| i == t.trim()));
+        if let Some(i) = input {
+            e.inputs.remove(i);
+            e.uuids.insert(uuid);
+            return true;
+        }
+        e.uuids.contains(&uuid)
     }
 
     pub fn is_own(&self, session: Uuid, uuid: Uuid) -> bool {
@@ -97,5 +134,29 @@ mod tests {
         assert!(!r.is_live(s));
         assert!(r.pids().is_empty());
         assert!(r.is_own(s, u), "own uuids outlive the process");
+    }
+
+    /// T25: a prompt record whose uuid the stream did not name is claimed by its text, once.
+    #[test]
+    fn claim_by_text() {
+        let r = OwnRecords::default();
+        let s = Uuid::new_v4();
+        let (echoed, other, again) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        assert!(!r.claim(s, other, Some("x")), "unknown session");
+        r.sent(s, " Reply with exactly: TWO\n");
+        r.sent(s, "/compact");
+        r.add(s, echoed);
+        // The echoed record uses up its input.
+        assert!(r.claim(s, echoed, Some("Reply with exactly: TWO")));
+        assert!(!r.claim(s, other, Some("Reply with exactly: TWO")));
+        assert!(r.claim(s, other, Some("/compact")));
+        assert!(r.is_own(s, other));
+        assert!(!r.claim(s, again, Some("/compact")), "used up");
+        assert!(!r.claim(s, again, None));
+        for i in 0..=INPUTS {
+            r.sent(s, &i.to_string());
+        }
+        assert!(!r.claim(s, again, Some("0")), "dropped as the oldest");
+        assert!(r.claim(s, again, Some("1")));
     }
 }

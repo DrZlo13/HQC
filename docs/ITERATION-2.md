@@ -323,3 +323,21 @@ client && npm test && npm run build` (`enroll.test.tsx` — предвыбор, 
 `title_request_runs_claude_once` через фейковый хаб), `cd client && npm test && npm run build`,
 `E2E_CLAUDE_BIN=/usr/bin/false tools/e2e-local.sh` → `PASS (rehearsal)`. Живой прогон —
 `live_session_title` (`HQC_LIVE_CLAUDE=1`).
+
+## T25. Ложное освобождение сессии во время работы hqc (сделано, SPEC 0.26)
+
+Разделы: §9.2, §9.3, §23. Боевой лог 2026-10-24 (drzlo-mac): первый ввод после `--resume` и
+`/compact` из hqc дали «чужого писателя» без чужого держателя, сессия освободилась посреди работы.
+- Воркер, зеркало: при доступном реестре держателей запись с незнакомым `uuid` во время работы
+  hqc-процесса — не чужой писатель; после 5 с она эмитится с `held_by`. Освобождает только чужой
+  живой держатель (T20). Без реестра — прежняя проверка по `uuid`; без hqc-процесса правила
+  прежние.
+- Воркер, `OwnRecords`: адаптер кладёт тексты вводов; запись-промпт с незнакомым `uuid` своя по
+  тексту (для `<command-name>` — команда с аргументами).
+- Фикстура `resume-compact-2.1.308` (три живых прогона `driver.py`).
+- Хаб не менялся.
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (воркер: `registry_unknown_record_without_holder_keeps_the_session`,
+`resume_prompt_without_its_echo_uuid`, `no_registry_keeps_the_uuid_check`, `claim_by_text`,
+`typed_text_of_prompts_and_commands`; `hqc-claude-jsonl`: `t25_resume_prompt_and_compact`).
+Вопросы — `docs/notes/t25-questions.md`.

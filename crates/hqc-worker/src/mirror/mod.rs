@@ -15,13 +15,14 @@
 //! rescan to be safe; a 2 s delay is well under the 30 s that matter for takeover.
 //!
 //! Who writes (SPEC §9.2, §9.3). Records the worker's own Claude Code process produced are
-//! known by uuid ([`OwnRecords`], fed by the adapter) and skipped: the adapter sent them.
-//! Any other main-chain record is someone else's:
+//! known by uuid or, for prompts, by the input's text ([`OwnRecords`], fed by the adapter) and
+//! skipped: the adapter sent them. Any other main-chain record is someone else's:
 //! - while a process of this worker runs the session (`locked_by: hqc`) the mirror does not
-//!   emit it and does not move past it; once it has been foreign for [`GRACE`] (stream-json
-//!   may lag behind the file) the supervisor is told ([`Output::ForeignWriter`]), stops the
-//!   agent after its turn and reports `locked_by: vscode`; then the process is gone and the
-//!   held records go out;
+//!   emit it and does not move past it for [`GRACE`] (stream-json may lag behind the file).
+//!   Then, with Claude Code's registry of live sessions (below), it goes out like any other
+//!   record: only a holder releases a session hqc runs (T25). Without the registry the
+//!   supervisor is told ([`Output::ForeignWriter`]), stops the agent after its turn and
+//!   reports `locked_by: vscode`; then the process is gone and the held records go out;
 //! - otherwise it is emitted at once with `recent` set when the file was written within the
 //!   last 30 s; the hub turns such a session into `locked_by: vscode`.
 //!
@@ -464,7 +465,8 @@ impl Mirror {
                 pos = end;
                 continue;
             };
-            if self.own.is_own(runtime, uuid) {
+            let typed = map::typed_text(&rec);
+            if self.own.claim(runtime, uuid, typed.as_deref()) {
                 if let Some(f) = self.track(path, runtime, link, &rec) {
                     out.push(wrap(f, row.title.clone()));
                 }
@@ -476,13 +478,23 @@ impl Mirror {
             }
             if live {
                 let first = *self.held.entry(uuid).or_insert(now);
-                if now.duration_since(first) >= self.grace && self.signalled.insert(runtime) {
-                    tracing::info!(runtime_session_id = %runtime, record = %uuid, "another writer continues a session the worker runs");
-                    out.push(Output::ForeignWriter {
-                        runtime_session_id: runtime,
-                    });
+                if now.duration_since(first) < self.grace {
+                    break; // may still turn out ours
                 }
-                break;
+                // With the registry only a holder releases the session (T25): the CLI writes
+                // records of its own that stream-json does not repeat (`/compact`), so an
+                // unknown uuid is no evidence of another writer; the record goes out as any
+                // other, with `held_by`, which keeps the hub from locking.
+                if !self.registry {
+                    if self.signalled.insert(runtime) {
+                        tracing::info!(runtime_session_id = %runtime, record = %uuid, "another writer continues a session the worker runs");
+                        out.push(Output::ForeignWriter {
+                            runtime_session_id: runtime,
+                        });
+                    }
+                    break;
+                }
+                tracing::info!(runtime_session_id = %runtime, record = %uuid, "record the worker's process did not report; no holder, so not another writer");
             }
             if let Some(f) = self.track(path, runtime, link, &rec) {
                 out.push(wrap(f, row.title.clone()));

@@ -150,6 +150,40 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
     out
 }
 
+/// What a person typed to get prompt record `record`, to match it with the adapter's inputs
+/// ([`crate::mirror::OwnRecords::claim`]): the text of its first text block, and for a slash
+/// command, which 2.1.308 writes as `<command-name>/compact</command-name>
+/// <command-message>…</command-message> <command-args>…</command-args>`, the command and its
+/// arguments. `None` for records that are not a main-chain `user` prompt.
+pub fn typed_text(record: &Record) -> Option<String> {
+    let Record::User(m) = record else {
+        return None;
+    };
+    if !m.is_main() {
+        return None;
+    }
+    let blocks = m.blocks();
+    let t = blocks
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .find_map(|b| b["text"].as_str())?
+        .trim();
+    let tag = |name: &str| {
+        let (open, close) = (format!("<{name}>"), format!("</{name}>"));
+        let rest = &t[t.find(&open)? + open.len()..];
+        Some(rest[..rest.find(&close)?].trim())
+    };
+    Some(
+        match tag("command-name").filter(|_| t.starts_with("<command-name>")) {
+            Some(name) => match tag("command-args").filter(|a| !a.is_empty()) {
+                Some(args) => format!("{name} {args}"),
+                None => name.to_string(),
+            },
+            None => t.to_string(),
+        },
+    )
+}
+
 /// `uuid` of a record that counts for the foreign-writer check (SPEC §9.3): a main-chain
 /// `user`/`assistant` record that maps to at least one event. A signature-only thinking
 /// record, which stream-json may not repeat, is not evidence of another writer.
@@ -226,6 +260,28 @@ mod tests {
             all[1].event_id,
             crate::adapter::claude_code::engine::record_event_id(&m.uuid, 0)
         );
+    }
+
+    /// T25, fixture `resume-compact`: prompts stand for their text, the `/compact` command
+    /// record for `/compact`; answers and tool results for nothing.
+    #[test]
+    fn typed_text_of_prompts_and_commands() {
+        let (records, _) = parse_str(include_str!(
+            "../../../hqc-claude-jsonl/fixtures/resume-compact-2.1.308.jsonl"
+        ));
+        let typed: Vec<String> = records.iter().filter_map(typed_text).collect();
+        assert_eq!(
+            typed,
+            [
+                "Reply with exactly: ONE",
+                "Reply with exactly: TWO",
+                "/compact",
+                "<local-command-stdout>Compacted </local-command-stdout>"
+            ]
+        );
+        let line = r#"{"type":"user","uuid":"5fb160d6-592d-4780-a2b6-ebdcb33e8070","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>haiku</command-args>"}}"#;
+        let rec = hqc_claude_jsonl::parse_line(line).unwrap();
+        assert_eq!(typed_text(&rec).as_deref(), Some("/model haiku"));
     }
 
     #[test]

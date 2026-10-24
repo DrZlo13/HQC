@@ -131,6 +131,8 @@ export interface ApprovalResponse {
   request_id: string;
   option_id: string;
   by: string;
+  /** The user's text instead of the call, with a deny option (SPEC §10.1). */
+  message?: string;
 }
 export interface RequestCancel {
   request_id: string;
@@ -341,6 +343,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     request_id: str(p, 'request_id'),
     option_id: str(p, 'option_id'),
     by: str(p, 'by'),
+    message: optStr(p, 'message'),
   }),
   'approval.cancel': cancel,
   'clarify.request': (p) => ({
@@ -551,6 +554,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'request_id');
     str(p, 'option_id');
+    optStr(p, 'message');
   },
   'clarify.response': (p) => {
     str(p, 'session_id');

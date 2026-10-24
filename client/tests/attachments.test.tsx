@@ -265,11 +265,11 @@ describe('rendering attachments', () => {
     );
     await flush();
     await flush();
-    const img = el.querySelector<HTMLImageElement>('.bubble-user .attachment-image img')!;
+    const img = el.querySelector<HTMLImageElement>('.msg-user .attachment-image img')!;
     expect(img.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
     expect(img.alt).toBe('screen.png');
 
-    const diff = el.querySelector('.bubble-user .md-code-diff')!;
+    const diff = el.querySelector('.msg-user .md-code-diff')!;
     expect(diff.querySelector('.md-code-lang')!.textContent).toBe('fix.patch');
     expect(diff.querySelector('.diff-add')!.textContent).toBe('+new\n');
     expect(diff.querySelector('.diff-del')!.textContent).toBe('-old\n');
@@ -388,8 +388,8 @@ describe('rendering attachments', () => {
         actions={{ timeline: t, approve: vi.fn(), answer: vi.fn(), resend: vi.fn(), discard: vi.fn(), openArtifact: vi.fn() }}
       />,
     );
-    expect(el.querySelector<HTMLImageElement>('.bubble-pending img')!.alt).toBe('a.png');
-    expect(el.querySelector('.bubble-pending .attachment-chip')!.textContent).toBe('b.txt 2.0 КБ');
+    expect(el.querySelector<HTMLImageElement>('.msg-pending img')!.alt).toBe('a.png');
+    expect(el.querySelector('.msg-pending .attachment-chip')!.textContent).toBe('b.txt 2.0 КБ');
   });
 });
 

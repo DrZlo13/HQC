@@ -341,3 +341,22 @@ client && npm test && npm run build` (`enroll.test.tsx` — предвыбор, 
 `resume_prompt_without_its_echo_uuid`, `no_registry_keeps_the_uuid_check`, `claim_by_text`,
 `typed_text_of_prompts_and_commands`; `hqc-claude-jsonl`: `t25_resume_prompt_and_compact`).
 Вопросы — `docs/notes/t25-questions.md`.
+
+## T26. Редизайн клиента по макетам (сделано, SPEC 0.27)
+
+Разделы: §4, §5.3, §6, §10.1, §17.1, §23. Макеты — `docs/design/redesign-2026-10-24` (Main,
+Permission, Mobile-List, Mobile-Session).
+- Протокол (добавлением): `approval.response.message` — ответ текстом вместо вызова, только с
+  вариантом deny; хаб проверяет и передаёт воркеру, адаптер Claude Code кладёт текст в `message`
+  ответа `deny` с формулировкой Claude Code (два живых прогона `driver.py`, 2.1.308).
+- Клиент: полоса проектов, колонка сессий с режимами «Состояние»/«Недавние» (localStorage) и
+  поиском, воркеры с активными сессиями; шапка сессии (пилюля, воркер, путь, модель, стоимость,
+  «Остановить», «Ещё»); лента без пузырей у агента, группы вызовов инструментов с подписью,
+  строка «Выполняется … таймер»; карточка разрешения с Enter/Esc и ответом текстом; две плашки
+  подхвата вместо поля ввода; телефон — список одним экраном и bottom sheet запроса; шрифты Inter
+  и JetBrains Mono с хаба.
+Приёмка: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (хаб: `approval_deny_with_message`; воркер:
+`deny_with_message_reaches_control_response`), `cd client && npm run typecheck && npm test && npm
+run build`, `tools/e2e-local.sh` с `E2E_CLAUDE_BIN=/usr/bin/false`. Вопросы и расхождения с
+макетами — `docs/notes/t26-questions.md`.

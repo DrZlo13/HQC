@@ -1,146 +1,305 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { WorkerInfo } from '../api';
 import type { AppState } from '../app';
-import type { Workspace } from '../proto';
+import type { SessionInfo, Workspace } from '../proto';
 import { useSubscription } from './hooks';
-import { STATE_LABELS } from './labels';
+import { IconPlus, IconSearch } from './icons';
+import { formatWhen, homePath } from './labels';
+import {
+  LIST_MODES,
+  activeLabel,
+  bucketOf,
+  groupSessions,
+  headCounts,
+  loadMode,
+  matchesQuery,
+  saveMode,
+  subLabel,
+  type ListMode,
+} from './sessions';
 
-/** The left column: projects, and the sessions of the current one (SPEC §1: projects, in
- *  projects sessions). */
-export function SessionList({ app, current }: { app: AppState; current?: string }) {
+/** «+ проект»: asks for the name, then opens the new project's workspaces — a new project
+ *  has none yet, and that is the first thing to add. */
+export async function newProject(app: AppState, onError: (m: string) => void): Promise<void> {
+  const name = prompt('Название проекта', '');
+  if (!name?.trim()) return;
+  try {
+    const p = await app.createProject(name.trim());
+    location.hash = `#/p/${p.id}/workspaces`;
+  } catch (e) {
+    onError((e as Error).message);
+  }
+}
+
+export function projectName(p: { name: string; is_personal: boolean }): string {
+  return p.is_personal ? 'Личный' : p.name;
+}
+
+/** The sessions of the current project (SPEC §1: projects, in projects sessions), T26: a
+ *  column next to the project rail on a desktop, the whole first screen on a phone, with
+ *  the projects as chips above. */
+export function SessionList({ app, current, phone }: { app: AppState; current?: string; phone?: boolean }) {
   useSubscription((fn) => app.onChange(fn), [app]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const project = app.currentProject();
+  const [mode, setMode] = useState<ListMode>(loadMode);
+  const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const project = app.currentProject();
   const archived = app.archivedSessions();
-  const list = showArchived ? archived : app.sortedSessions();
 
-  const newProject = async () => {
-    const name = prompt('Название проекта', '');
-    if (!name?.trim()) return;
-    setError(null);
-    try {
-      const p = await app.createProject(name.trim());
-      // A new project has no workspace yet: that is the first thing to add.
-      location.hash = `#/p/${p.id}/workspaces`;
-    } catch (e) {
-      setError((e as Error).message);
-    }
+  useEffect(() => {
+    if (project && !app.workspaces.has(project.id)) app.loadWorkspaces(project.id).catch(() => {});
+  }, [app, project?.id]);
+
+  const pathOf = (s: SessionInfo) => homePath(app.sessionPath(s) ?? '');
+  const all = showArchived ? archived : app.sortedSessions();
+  const list = all.filter((s) => matchesQuery(s, pathOf(s), query));
+  const now = Date.now();
+  const groups = showArchived
+    ? list.length
+      ? [{ id: 'archive', label: 'Архив', items: list }]
+      : []
+    : groupSessions(list, mode, now);
+  const pick = (m: ListMode) => {
+    setMode(m);
+    saveMode(m);
   };
+  const conn = app.conn !== 'open' ? ' · нет связи' : '';
+  const counts = headCounts(app.sortedSessions());
+
+  const search = (
+    <label class="search">
+      <IconSearch size={14} />
+      <input
+        type="search"
+        aria-label="Поиск сессий"
+        placeholder="Поиск по названию и пути"
+        value={query}
+        onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
+      />
+    </label>
+  );
+  const modes = (
+    <div class="seg-group" role="group" aria-label="Порядок сессий">
+      {LIST_MODES.map((m) => (
+        <button
+          type="button"
+          key={m.id}
+          class={`seg ${mode === m.id && !showArchived ? 'is-on' : ''}`}
+          aria-pressed={mode === m.id && !showArchived}
+          onClick={() => {
+            setShowArchived(false);
+            pick(m.id);
+          }}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
 
   return (
-    <section class="sessions">
-      <header class="bar">
-        <div class="bar-title">
-          <div class="title">hqc</div>
-          <div class="state">
-            {app.me?.email ?? ''}
-            {app.conn !== 'open' && ' · нет связи'}
-          </div>
-        </div>
-        <a class="btn btn-small btn-ghost btn-icon" href="#/settings" aria-label="Настройки" title="Настройки">
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1.1z" />
-          </svg>
-        </a>
-      </header>
-      {app.error && <div class="notice">Хаб недоступен: {app.error}</div>}
-      {error && <div class="notice">{error}</div>}
-      <nav class="project-list" aria-label="Проекты">
-        {app.sortedProjects().map((p) => {
-          const unread = app.projectUnread(p.id);
-          return (
-            <a key={p.id} class={`project-row ${p.id === project?.id ? 'is-current' : ''}`} href={`#/p/${p.id}`}>
-              <span class="project-name">{p.is_personal ? 'Личный' : p.name}</span>
-              {unread > 0 && p.id !== project?.id && (
-                <span class="badge" aria-label={`непрочитанных: ${unread}`}>
-                  {unread > 99 ? '99+' : unread}
-                </span>
-              )}
-            </a>
-          );
-        })}
-        <button type="button" class="btn btn-small btn-ghost btn-new-project" disabled={!app.me} onClick={newProject}>
-          + Проект
-        </button>
-      </nav>
-      <WorkerList app={app} current={current} />
-      {project && (
-        <div class="project-head">
-          <div class="project-title">{project.is_personal ? 'Личный' : project.name}</div>
-          <a class="btn btn-small" href={`#/p/${project.id}/workspaces`}>
-            Workspaces
-          </a>
-          {(archived.length > 0 || showArchived) && (
+    <section class={`sessions ${phone ? 'sessions-phone' : ''}`}>
+      {phone ? (
+        <header class="m-head">
+          <div class="m-head-row">
+            <h1>Сессии</h1>
             <button
               type="button"
-              class={`btn btn-small btn-ghost btn-archive-toggle ${showArchived ? 'is-on' : ''}`}
-              aria-pressed={showArchived}
-              title="Показать архивные сессии"
-              onClick={() => setShowArchived(!showArchived)}
+              class="icon-btn icon-btn-round"
+              aria-label="Поиск по названию и пути"
+              aria-pressed={searching}
+              onClick={() => setSearching(!searching)}
             >
-              Архив {archived.length}
+              <IconSearch size={20} />
             </button>
-          )}
-          <button
-            type="button"
-            class="btn btn-small btn-primary btn-new-session"
-            disabled={creating || !app.me}
-            onClick={() => setCreating(true)}
-          >
-            Новая
-          </button>
-        </div>
-      )}
-      {creating && project && <NewSession key={project.id} app={app} projectId={project.id} onDone={() => setCreating(false)} />}
-      <ul class="session-list">
-        {list.map((s) => (
-          <li key={s.id}>
-            <a class={`session-row ${s.id === current ? 'is-current' : ''}`} href={`#/s/${s.id}`}>
-              <span class={`dot state-${s.state}`} aria-hidden="true" />
-              <span class="session-main">
-                <span class="session-title">{s.title || s.slug || s.id.slice(-8)}</span>
-                <span class={`session-state state-${s.state}`}>
-                  {STATE_LABELS[s.state]}
-                  {s.queue_len > 0 && ` · в очереди ${s.queue_len}`}
-                </span>
-              </span>
-              {s.unread > 0 && (
-                <span class="badge" aria-label={`непрочитанных: ${s.unread}`}>
-                  {s.unread > 99 ? '99+' : s.unread}
-                </span>
-              )}
+            <a class="icon-btn icon-btn-round" href="#/settings" aria-label="Аккаунт и настройки">
+              <span class="avatar">{(app.me?.email ?? '?').slice(0, 1).toUpperCase()}</span>
             </a>
-          </li>
+          </div>
+          {(app.error || conn) && <div class="m-head-state">{app.error ? 'Хаб недоступен' : 'нет связи'}</div>}
+          <ProjectChips app={app} onError={setError} />
+          {searching && search}
+          {modes}
+        </header>
+      ) : (
+        <>
+          <header class="side-head">
+            <div class="side-title">
+              <div class="project-title">{project ? projectName(project) : 'hqc'}</div>
+              <div class="side-counts">
+                {counts}
+                {conn}
+              </div>
+            </div>
+            <button
+              type="button"
+              class="btn btn-primary btn-small btn-new-session"
+              aria-label="Новая сессия"
+              disabled={creating || !app.me}
+              onClick={() => setCreating(true)}
+            >
+              <IconPlus size={14} />
+              Новая
+            </button>
+          </header>
+          <div class="side-tools">
+            {search}
+            {modes}
+          </div>
+        </>
+      )}
+      {app.error && <div class="notice">Хаб недоступен: {app.error}</div>}
+      {error && <div class="notice">{error}</div>}
+      {creating && project && <NewSession key={project.id} app={app} projectId={project.id} onDone={() => setCreating(false)} />}
+      <div class="session-scroll">
+        {groups.map((g) => (
+          <div key={g.id} class={`session-group group-${g.id}`}>
+            <div class="group-head">
+              <span class="group-label">{g.label}</span>
+              <span class="group-count">{g.items.length}</span>
+            </div>
+            <ul class="session-list">
+              {g.items.map((s) => (
+                <SessionRow
+                  key={s.id}
+                  s={s}
+                  current={s.id === current}
+                  when={mode === 'recent' || showArchived ? formatWhen(s.updated_at, now) : undefined}
+                  where={[app.workerName(s.worker_id), pathOf(s)].filter(Boolean).join(' · ')}
+                />
+              ))}
+            </ul>
+          </div>
         ))}
-        {app.me && list.length === 0 && <li class="empty">{showArchived ? 'Архив пуст' : 'Сессий пока нет'}</li>}
-      </ul>
+        {app.me && groups.length === 0 && (
+          <div class="empty">{query ? 'Ничего не найдено' : showArchived ? 'Архив пуст' : 'Сессий пока нет'}</div>
+        )}
+        {project && (
+          <div class="list-foot">
+            <a href={`#/p/${project.id}/workspaces`}>Workspaces проекта</a>
+            {(archived.length > 0 || showArchived) && (
+              <button
+                type="button"
+                class={`btn-link btn-archive-toggle ${showArchived ? 'is-on' : ''}`}
+                aria-pressed={showArchived}
+                title="Показать архивные сессии"
+                onClick={() => setShowArchived(!showArchived)}
+              >
+                {showArchived ? 'Скрыть архив' : `Архив ${archived.length}`}
+              </button>
+            )}
+          </div>
+        )}
+        {phone && <WorkerList app={app} current={current} />}
+      </div>
+      {!phone && <WorkerList app={app} current={current} />}
+      {phone && (
+        <button
+          type="button"
+          class="fab btn-new-session"
+          aria-label="Новая сессия"
+          disabled={creating || !app.me}
+          onClick={() => setCreating(true)}
+        >
+          <IconPlus size={20} />
+          Новая
+        </button>
+      )}
     </section>
   );
 }
 
-/** «Воркеры»: the service session of each worker, by its name (SPEC §10.2). */
+function SessionRow({ s, current, when, where }: { s: SessionInfo; current: boolean; when?: string; where: string }) {
+  const bucket = bucketOf(s);
+  return (
+    <li>
+      <a class={`session-row ${current ? 'is-current' : ''}`} href={`#/s/${s.id}`} aria-current={current ? 'page' : undefined}>
+        <span class={`dot dot-${bucket} state-${s.state}`} aria-hidden="true" />
+        <span class="session-main">
+          <span class="session-top">
+            <span class={`session-title ${bucket === 'idle' ? 'is-idle' : ''}`}>{s.title || s.slug || s.id.slice(-8)}</span>
+            {when && <span class="session-when">{when}</span>}
+            {s.unread > 0 && (
+              <span class="badge" aria-label={`непрочитанных: ${s.unread}`}>
+                {s.unread > 99 ? '99+' : s.unread}
+              </span>
+            )}
+          </span>
+          <span class={`session-sub state-${s.state}`}>{subLabel(s)}</span>
+          {where && (
+            <span class="session-where mono" title={where}>
+              {where}
+            </span>
+          )}
+        </span>
+      </a>
+    </li>
+  );
+}
+
+/** Projects as chips on a phone (the rail's job on a desktop), with «ждёт вас» counts. */
+function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) => void }) {
+  const current = app.currentProjectId;
+  return (
+    <nav class="chips" aria-label="Проекты">
+      {app.sortedProjects().map((p) => {
+        const waiting = app.projectWaiting(p.id);
+        return (
+          <a
+            key={p.id}
+            class={`chip project-row ${p.id === current ? 'is-current' : ''}`}
+            href={`#/p/${p.id}`}
+            aria-label={projectName(p)}
+            aria-current={p.id === current ? 'true' : undefined}
+          >
+            {projectName(p)}
+            {waiting > 0 && (
+              <span class="chip-badge" aria-label={`ждёт вас: ${waiting}`}>
+                {waiting}
+              </span>
+            )}
+          </a>
+        );
+      })}
+      <button type="button" class="chip chip-new" aria-label="Новый проект" disabled={!app.me} onClick={() => void newProject(app, onError)}>
+        <IconPlus />
+      </button>
+    </nav>
+  );
+}
+
+/** «Воркеры»: each worker with its online dot and how many sessions are active on it; a
+ *  click opens its service session (SPEC §10.2). Listed by their service sessions:
+ *  revoking a worker archives it, so revoked workers are not here. */
 function WorkerList({ app, current }: { app: AppState; current?: string }) {
   const list = app.workerSessions();
   if (list.length === 0) return null;
   return (
     <nav class="worker-list" aria-label="Воркеры">
       <div class="group-title">Воркеры</div>
-      {list.map((s) => (
-        <a key={s.id} class={`project-row worker-row ${s.id === current ? 'is-current' : ''}`} href={`#/s/${s.id}`}>
-          <span class={`dot state-${s.state}`} aria-hidden="true" />
-          <span class="project-name">{s.title}</span>
-          {s.state === 'waiting' && <span class="worker-asks">ждёт ответа</span>}
-          {s.state === 'worker_offline' && <span class="worker-asks muted">офлайн</span>}
-          {s.unread > 0 && (
-            <span class="badge" aria-label={`непрочитанных: ${s.unread}`}>
-              {s.unread > 99 ? '99+' : s.unread}
-            </span>
-          )}
-        </a>
-      ))}
+      {list.map((s) => {
+        const offline = s.state === 'worker_offline';
+        const asks = s.state === 'waiting';
+        return (
+          <a key={s.id} class={`worker-row ${s.id === current ? 'is-current' : ''}`} href={`#/s/${s.id}`} title="Служебная сессия воркера">
+            <span class={`dot ${offline ? 'dot-offline' : 'dot-online'}`} aria-hidden="true" />
+            <span class="worker-name">{s.title}</span>
+            {asks ? (
+              <span class="worker-asks">ждёт ответа</span>
+            ) : (
+              <span class="worker-state">{offline ? 'офлайн' : activeLabel(app.workerActive(s.worker_id))}</span>
+            )}
+            {s.unread > 0 && (
+              <span class="badge" aria-label={`непрочитанных: ${s.unread}`}>
+                {s.unread > 99 ? '99+' : s.unread}
+              </span>
+            )}
+          </a>
+        );
+      })}
     </nav>
   );
 }
@@ -201,11 +360,11 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
   return (
     <form class="new-session" onSubmit={create}>
       <label class="field">
-        <span class="muted small">Название (можно оставить пустым)</span>
+        <span class="field-label">Название (можно оставить пустым)</span>
         <input class="input" value={title} onInput={(e) => setTitle((e.target as HTMLInputElement).value)} />
       </label>
       <label class="field">
-        <span class="muted small">Workspace</span>
+        <span class="field-label">Workspace</span>
         <select
           class="input"
           name="workspace"
@@ -222,7 +381,7 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
         </select>
       </label>
       <label class="field">
-        <span class="muted small">Папка внутри workspace (необязательно)</span>
+        <span class="field-label">Папка внутри workspace (необязательно)</span>
         <input
           class="input"
           name="cwd"

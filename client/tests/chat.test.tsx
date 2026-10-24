@@ -1,0 +1,213 @@
+// @vitest-environment happy-dom
+// T26: the chat screen — the header (state pill, worker, path, model and cost of the
+// session, «Остановить», «Ещё»), the two handover banners in place of the composer, the
+// request's hotkeys through the chat, and the phone's bottom sheet with the text answer.
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'preact';
+import { act } from 'preact/test-utils';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { Api } from '../src/api';
+import { AppState } from '../src/app';
+import { parseEvent, type HeldBy, type HqcEvent, type SessionInfo, type SessionState } from '../src/proto';
+import type { HubSocket } from '../src/ws';
+import { Chat } from '../src/ui/Chat';
+
+const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
+const ev = (name: string, seq: number, patch: (e: any) => void = () => {}): HqcEvent => {
+  const e = JSON.parse(readFileSync(join(WIRE, `${name}.json`), 'utf8'));
+  e.seq = seq;
+  e.session_id = 's1';
+  patch(e);
+  return parseEvent(e);
+};
+
+let root: HTMLElement;
+afterEach(() => {
+  if (root) render(null, root);
+  document.body.innerHTML = '';
+});
+
+const HISTORY = [
+  ev('event.user.message', 1, (e) => (e.payload.artifact_ids = [])),
+  ev('event.agent.message', 2),
+  ev('event.usage', 3, (e) => (e.payload = { input_tokens: 2, output_tokens: 555, cost_usd: 0.05, model: 'claude-opus-5-5' })),
+  ev('event.user.message', 4, (e) => ((e.event_id = '0199f3a2-7c10-7000-8000-0000000001c4'), (e.payload.artifact_ids = []))),
+  ev('event.tool.call', 5, (e) => (e.payload.args_preview = '{"command":"ls /"}')),
+  ev('event.approval.request', 6, (e) => {
+    e.ts = new Date(Date.now() - 42_000).toISOString();
+    e.payload.description = 'List root directory\nls /';
+    delete e.payload.expires_at;
+  }),
+  ev('event.usage', 7, (e) => (e.payload = { input_tokens: 1, output_tokens: 2, cost_usd: 0.02 })),
+];
+
+function setup(state: SessionState, opts: { held_by?: HeldBy; history?: HqcEvent[] } = {}) {
+  const history = opts.history ?? HISTORY;
+  const api = {
+    events: vi.fn(async (_id: string, after: number) => {
+      const events = history.filter((e) => e.seq! > after);
+      return { events, invalid: [], maxSeq: Math.max(after, ...events.map((e) => e.seq!)), count: events.length };
+    }),
+    readCursor: vi.fn(async () => {}),
+    approve: vi.fn(async () => {}),
+    takeover: vi.fn(async () => ({})),
+    sessions: vi.fn(async () => []),
+    projects: vi.fn(async () => []),
+    workspaces: vi.fn(async () => [
+      {
+        id: 'w1',
+        project_id: 'p1',
+        worker_id: 'wk1',
+        path: '/Users/me/work/hqc',
+        label: '',
+        kind: 'dir',
+        mirror_enabled: true,
+        created_at: '2026-10-20T10:00:00Z',
+      },
+    ]),
+  };
+  const socket = { onState: () => () => {}, subscribe: () => () => {} } as unknown as HubSocket;
+  const app = new AppState(api as unknown as Api, socket);
+  app.conn = 'open';
+  const info: SessionInfo = {
+    id: 's1',
+    project_id: 'p1',
+    workspace_id: 'w1',
+    worker_id: 'wk1',
+    cwd: '.',
+    title: 'тест 12',
+    slug: 'test-12',
+    state,
+    queue_len: 0,
+    unread: 0,
+    last_seq: 7,
+    last_read_seq: 7,
+    archived: false,
+    updated_at: '2026-10-24T19:47:00Z',
+    system: false,
+    held_by: opts.held_by,
+  };
+  app.sessions.set('s1', info);
+  app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
+  return { api, app };
+}
+
+async function mount(app: AppState, phone = false) {
+  root = document.createElement('div');
+  document.body.appendChild(root);
+  // History over REST and the workspaces load inside act, so the effects of the renders
+  // they cause run before the test looks.
+  await act(async () => {
+    render(<Chat app={app} sessionId="s1" phone={phone} />, root);
+    await new Promise((r) => setTimeout(r, 50));
+  });
+}
+
+const $ = (sel: string) => root.querySelector<HTMLElement>(sel);
+const button = (text: string) => [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === text);
+
+describe('header', () => {
+  it('shows the state, worker, path, model and cost of the session, «Остановить» and «Ещё»', async () => {
+    const { app } = setup('waiting');
+    await mount(app);
+    expect($('.chat-title')!.textContent).toBe('тест 12');
+    expect($('.pill')!.textContent).toBe('Ждёт разрешения');
+    expect($('.pill .pulse')).toBeNull();
+    const meta = $('.chat-meta')!.textContent!;
+    expect(meta).toContain('drzlo-mac');
+    expect($('.chat-path .mono')!.textContent).toBe('~/work/hqc');
+    expect($('.chat-path button')!.getAttribute('aria-label')).toBe('Скопировать путь');
+    // The model of the last usage that names one, the sum of cost_usd.
+    expect($('.chat-model')!.textContent).toBe('Opus 5.5');
+    expect($('.chat-cost')!.textContent).toBe('$0.07 за сессию');
+    expect(button('Остановить')).toBeDefined();
+    await act(async () => $('.btn-more')!.click());
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['В архив']);
+  });
+
+  it('pulses while a turn is on, no «Остановить» when idle', async () => {
+    let { app } = setup('running');
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Работает');
+    expect($('.pill .pulse')).not.toBeNull();
+    render(null, root);
+    ({ app } = setup('idle', { history: HISTORY.slice(0, 3) }));
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Свободна');
+    expect(button('Остановить')).toBeUndefined();
+  });
+});
+
+describe('the request card through the chat', () => {
+  it('folds the tool call into the card, explains, and takes Enter', async () => {
+    const { api, app } = setup('waiting');
+    await mount(app);
+    expect($('.tool-group')).toBeNull();
+    expect($('.perm-what')!.textContent).toBe('$ ls /');
+    expect($('.perm-note')!.textContent).toBe(
+      'Правило воркера разрешает Bash, но Claude Code спросил сам: путь / вне рабочей папки ~/work/hqc.',
+    );
+    expect($('.perm-timer')!.textContent).toMatch(/^ждёт 0:4\d$/);
+    await act(async () => void document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(api.approve.mock.calls[0].slice(0, 3)).toEqual(['s1', 'req-1', 'allow']);
+  });
+});
+
+describe('handover banners instead of the composer (SPEC §9.3)', () => {
+  it('open in VS Code right now: close it there, no button', async () => {
+    const { app } = setup('locked_vscode', { held_by: { entrypoint: 'claude-vscode', status: 'idle' }, history: HISTORY.slice(0, 3) });
+    await mount(app);
+    expect($('.handover.handover-held .handover-title')!.textContent).toBe('Сессия открыта в VS Code на drzlo-mac.');
+    expect($('.handover-sub')!.textContent).toBe('Закройте её там, чтобы писать отсюда.');
+    expect(button('Забрать сюда')).toBeUndefined();
+    expect($('.composer')).toBeNull();
+    expect(root.textContent).not.toContain('только для чтения');
+  });
+
+  it('last driven by VS Code, nobody holds it: «Забрать сюда»', async () => {
+    const { api, app } = setup('locked_vscode', { history: HISTORY.slice(0, 3) });
+    await mount(app);
+    expect($('.handover')!.classList.contains('handover-held')).toBe(false);
+    expect($('.handover-title')!.textContent).toBe('Последней сессию вела VS Code на drzlo-mac.');
+    expect($('.handover-sub')).toBeNull();
+    expect($('.composer')).toBeNull();
+    await act(async () => button('Забрать сюда')!.click());
+    expect(api.takeover).toHaveBeenCalledWith('s1');
+  });
+
+  it('a session hqc drives has the composer', async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app);
+    expect($('.handover')).toBeNull();
+    expect($('.composer textarea')).not.toBeNull();
+  });
+});
+
+describe('phone (Mobile-Session)', () => {
+  it('the open request is a bottom sheet in place of the composer, with the text answer', async () => {
+    const { api, app } = setup('waiting');
+    await mount(app, true);
+    expect($('.feed .perm')).toBeNull();
+    const sheet = $('.sheet-wrap .perm-sheet')!;
+    expect(sheet.querySelector('.perm-title')!.textContent).toBe('Выполнить команду?');
+    expect($('.composer')).toBeNull();
+    expect($('a[aria-label="Назад к сессиям"]')!.getAttribute('href')).toBe('#/p/p1');
+    expect($('button[aria-label="Остановить агента"]')).not.toBeNull();
+    // «Ещё» on a phone also has the path, the model and the cost.
+    await act(async () => $('.btn-more')!.click());
+    expect($('.menu-info')!.textContent).toContain('~/work/hqc');
+    expect($('.menu-info')!.textContent).toContain('Opus 5.5');
+    await act(async () => $('.btn-more')!.click());
+
+    await act(async () => button('Ответить текстом вместо этого')!.click());
+    const area = sheet.querySelector<HTMLTextAreaElement>('textarea')!;
+    await act(() => {
+      area.value = 'Не трогай корень';
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => button('Отклонить и отправить')!.click());
+    expect(api.approve).toHaveBeenCalledWith('s1', 'req-1', 'deny', 'Не трогай корень');
+  });
+});

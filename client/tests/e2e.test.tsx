@@ -87,7 +87,7 @@ it('runs the iteration 1 scenario through the UI', async () => {
   const row = await until('session list', () =>
     $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')),
   );
-  expect(row.textContent).toContain('свободна');
+  expect(row.textContent).toContain('Свободна');
   expect($$('.session-row .badge').length).toBeGreaterThan(0);
 
   // Open the session.
@@ -102,37 +102,45 @@ it('runs the iteration 1 scenario through the UI', async () => {
   await until('send enabled', () => !$<HTMLButtonElement>('.composer button[type=submit]')!.disabled);
   $<HTMLButtonElement>('.composer button[type=submit]')!.click();
   await until('optimistic or echoed message', () =>
-    $$('.bubble-user').find((b) => b.textContent?.includes('Запусти тесты')),
+    $$('.msg-user').find((b) => b.textContent?.includes('Запусти тесты')),
   );
 
   // Deltas, then tool cards, then the approval with one button per option.
-  await until('streaming', () => $('.bubble-streaming'));
-  await until('tool card', () => $('.card-tool'));
+  await until('streaming', () => $('.msg-streaming'));
+  await until('tool group', () => $('.tool-group'));
   const buttons = await until('approval buttons', () => {
-    const b = $$('.card-approval button');
+    const b = $$('.perm button[data-option]');
     return b.length ? b : null;
   });
-  expect(buttons.map((b) => b.textContent)).toEqual([
+  // One button per option: «Разрешить» first, «Отклонить» last (T26).
+  expect(buttons.map((b) => b.childNodes[0].textContent)).toEqual([
     'Разрешить',
-    'Разрешить в сессии',
+    'Всегда в этой сессии',
     'Разрешать всегда',
-    'Отклонить',
     'Запрещать всегда',
+    'Отклонить',
   ]);
-  expect($('.chat .state')!.textContent).toContain('ждёт ответа');
-  expect($('.bubble-pending')).toBeNull();
+  expect($('.perm-what')!.textContent).toBe('$ cargo test');
+  expect($('.chat .state')!.textContent).toBe('Ждёт разрешения');
+  expect($('.msg-pending')).toBeNull();
 
-  // Press "allow once": the response comes back as approval.response, buttons go away.
+  // Press "allow once": the response comes back as approval.response, the card folds.
   buttons[0].click();
-  await until('approval.response', () => $('.line-approval'));
-  expect($('.line-approval')!.textContent).toContain('Bash: Разрешить');
-  expect($$('.card-approval button')).toHaveLength(0);
+  await until('approval.response', () => $('.perm-done-row'));
+  expect($('.perm-done-row')!.textContent).toContain('$ cargo test');
+  expect($('.perm-done-row')!.textContent).toContain('· разрешено');
+  expect($$('.perm button[data-option]')).toHaveLength(0);
 
   // Final answer.
-  await until('final answer', () => $$('.bubble-final').find((b) => b.textContent?.includes('Все 42 теста прошли.')));
-  await until('idle', () => $('.chat .state')?.textContent?.includes('свободна'));
-  expect($('.bubble-streaming')).toBeNull();
-  expect($$('.card-tool.tool-ok').length).toBeGreaterThanOrEqual(2);
+  await until('final answer', () => $$('.msg-final').find((b) => b.textContent?.includes('Все 42 теста прошли.')));
+  await until('idle', () => $('.chat .state')?.textContent?.includes('Свободна'));
+  expect($('.msg-streaming')).toBeNull();
+  expect($$('.tool-group.tool-ok').length).toBeGreaterThanOrEqual(1);
+  // The final answer carries the turn's usage, the header the model and the cost.
+  expect($$('.msg-final').at(-1)!.querySelector('.usage')!.textContent).toContain('токенов');
+  expect($('.chat-model')!.textContent).toBe('Sonnet 5.5');
+  expect($('.chat-cost')!.textContent).toMatch(/^\$0\.\d+ за сессию$/);
+  expect($('.chat-path')!.textContent).toContain('~/work/hqc');
 });
 
 it('renders a markdown answer, streamed and final', async () => {
@@ -142,11 +150,11 @@ it('renders a markdown answer, streamed and final', async () => {
   await until('send enabled', () => !$<HTMLButtonElement>('.composer button[type=submit]')!.disabled);
   $<HTMLButtonElement>('.composer button[type=submit]')!.click();
 
-  await until('streamed heading', () => $('.bubble-streaming h2'));
+  await until('streamed heading', () => $('.msg-streaming h2'));
   const final = await until('final markdown answer', () =>
-    $$('.bubble-final').find((b) => b.querySelector('table')),
+    $$('.msg-final').find((b) => b.querySelector('table')),
   );
-  await until('idle', () => $('.chat .state')?.textContent?.includes('свободна'));
+  await until('idle', () => $('.chat .state')?.textContent?.includes('Свободна'));
   expect(final.querySelector('h2')!.textContent).toBe('Итоги прогона');
   expect(final.querySelectorAll('table tbody tr')).toHaveLength(3);
   expect(final.querySelector('.md-code-lang')!.textContent).toBe('rust');

@@ -10,7 +10,8 @@
 // Scenario of a turn: status running -> agent.delta stream -> agent.message (final: false)
 // -> tool.call/tool.result (Read) -> tool.call (Bash) -> approval.request, wait for the
 // answer -> approval.response -> tool.result -> agent.delta -> agent.message (final) ->
-// usage -> status idle. A message containing "вопрос" or "clarify" asks a clarify.request
+// usage -> status idle. A deny answer may carry `message` (a text answer, SPEC §10.1): the
+// final message quotes it. A message containing "вопрос" or "clarify" asks a clarify.request
 // instead of the approval; one containing "markdown" or "разметка" gets MARKDOWN_ANSWER
 // streamed and nothing else.
 //
@@ -428,7 +429,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
           call_id, result_preview: '', error: true, error_text: 'Denied by user', duration_ms: 0,
           artifact_id: undefined,
         }));
-        final = 'Хорошо, тесты не запускаю.';
+        final = answer.message ? `Хорошо, тесты не запускаю. Вы написали: «${answer.message}».` : 'Хорошо, тесты не запускаю.';
       } else {
         await step(t, 800);
         store(s, mk(s, 'event.tool.result', {
@@ -769,11 +770,20 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     }
     let ev;
     if (o.kind === 'approval') {
-      const ok = o.event.payload.options.some((x) => x.id === body?.option_id);
-      if (!ok) throw fail(400, 'bad_request', `unknown option \`${body?.option_id}\``);
+      const opt = o.event.payload.options.find((x) => x.id === body?.option_id);
+      if (!opt) throw fail(400, 'bad_request', `unknown option \`${body?.option_id}\``);
+      // A text answer instead of the call (SPEC §10.1): only with a deny option.
+      const message = body?.message;
+      if (message !== undefined) {
+        if (s.system) throw fail(400, 'bad_request', 'a worker request takes no message');
+        if (!['deny', 'deny_always'].includes(opt.canonical)) throw fail(400, 'bad_request', 'message goes only with a deny option');
+        if (typeof message !== 'string' || !message.trim()) throw fail(400, 'bad_request', 'message must not be blank');
+      }
       s.open = null;
-      ev = store(s, mk(s, 'event.approval.response', { request_id: o.request_id, option_id: body.option_id, by: userId }));
-      o.resolve({ option_id: body.option_id });
+      ev = store(s, mk(s, 'event.approval.response', {
+        request_id: o.request_id, option_id: body.option_id, by: userId, message,
+      }));
+      o.resolve({ option_id: body.option_id, message });
     } else {
       const answers = body?.answers;
       if (typeof answers !== 'object' || answers === null || !Object.keys(answers).length) {

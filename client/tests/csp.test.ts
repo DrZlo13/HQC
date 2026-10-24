@@ -20,6 +20,25 @@ it('index.html has no inline scripts, handlers or remote assets', () => {
   expect(html).not.toMatch(/(src|href)="(https?:)?\/\//i);
 });
 
+// T26: Inter and JetBrains Mono come from the hub itself (`font-src 'self'`), not Google Fonts.
+it('fonts are same-origin files that exist, with their licenses', () => {
+  const css = readFileSync(join(ROOT, 'src/styles.css'), 'utf8');
+  const urls = [...css.matchAll(/url\(([^)]+)\)/g)].map((m) => m[1].replace(/['"]/g, ''));
+  expect(urls.length).toBeGreaterThan(0);
+  expect(css).not.toMatch(/@import|googleapis|gstatic/);
+  const fonts = join(ROOT, 'public/fonts');
+  for (const u of urls) {
+    expect(u, u).toMatch(/^\/fonts\/[\w.-]+\.woff2$/);
+    expect(existsSync(join(fonts, u.slice('/fonts/'.length))), u).toBe(true);
+  }
+  const files = readdirSync(fonts);
+  expect(files.filter((f) => f.endsWith('.woff2')).sort()).toEqual(
+    [...new Set(urls.map((u) => u.slice('/fonts/'.length)))].sort(),
+  );
+  expect(files).toContain('OFL-Inter.txt');
+  expect(files).toContain('OFL-JetBrainsMono.txt');
+});
+
 it('the build (if present) has no inline scripts', () => {
   const dist = join(ROOT, 'dist');
   if (!existsSync(join(dist, 'index.html'))) return;

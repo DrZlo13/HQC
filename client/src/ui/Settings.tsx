@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
+import { IconBack } from './icons';
 import type { AppState } from '../app';
 import { ApiError, type WorkerInfo } from '../api';
 import { pushStatus, subscribePush, type PushStatus } from '../push';
@@ -74,8 +75,8 @@ export function Settings({ app }: { app: AppState }) {
   return (
     <section class="page">
       <header class="bar">
-        <a class="back" href="#/" aria-label="К списку">
-          ‹
+        <a class="back icon-btn" href="#/" aria-label="К списку">
+          <IconBack />
         </a>
         <div class="bar-title">
           <div class="title">Настройки</div>

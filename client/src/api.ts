@@ -268,9 +268,11 @@ export class Api {
     await this.req('DELETE', `/api/sessions/${enc(id)}`);
   }
 
-  async approve(id: string, requestId: string, optionId: string): Promise<void> {
+  /** `message`: a text answer instead of the call, with a deny option (SPEC §10.1). */
+  async approve(id: string, requestId: string, optionId: string, message?: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/requests/${enc(requestId)}`, {
       option_id: optionId,
+      ...(message !== undefined ? { message } : {}),
     });
   }
 

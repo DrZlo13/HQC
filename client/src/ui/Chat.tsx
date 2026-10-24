@@ -2,14 +2,20 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { ApiError } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize } from '../artifacts';
+import type { SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
-import { ActivityLine, BusyIndicator, ChatItems, StreamingBubble, onlyRequests, type ChatActions } from './cards';
+import type { Timeline } from '../timeline';
+import { ActivityLine, ChatItems, StreamingMessage, onlyRequests, type ChatActions } from './cards';
+import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
-import { STATE_LABELS } from './labels';
+import { IconAttach, IconBack, IconCode, IconMore, IconSend, IconStop } from './icons';
+import { STATE_LABELS, formatCost, homePath, modelName } from './labels';
+import { CopyButton } from './Markdown';
+import { PermissionBlock } from './permission';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 
-export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
+export function Chat({ app, sessionId, phone = false }: { app: AppState; sessionId: string; phone?: boolean }) {
   const chat = useMemo(() => new ChatSession(app.api, app.socket, sessionId), [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
   const [requestsOnly, setRequestsOnly] = useState(false);
@@ -34,6 +40,13 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
   const system = info?.system ?? false;
   const t = chat.timeline;
 
+  // The folder of the session, for the header and the requests' «вне рабочей папки».
+  useEffect(() => {
+    if (info && !system && !app.workspaces.has(info.project_id)) app.loadWorkspaces(info.project_id).catch(() => {});
+  }, [app, info?.project_id, system]);
+  const path = info && !system ? app.sessionPath(info) : undefined;
+  const worker = app.workerName(info?.worker_id);
+
   // Read cursor: whatever is on screen while the tab is visible counts as read.
   useEffect(() => {
     const mark = () => {
@@ -46,13 +59,19 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
     return () => document.removeEventListener('visibilitychange', mark);
   }, [chat, t.lastSeq]);
 
+  const open = t.openRequests();
+  const firstApproval = open.find((r) => r.type === 'approval.request');
+  const sheetRequest = phone && !requestsOnly ? firstApproval?.payload.request_id : undefined;
   const actions: ChatActions = {
     timeline: t,
-    approve: (r, o) => chat.approve(r, o),
+    approve: (r, o, m) => chat.approve(r, o, m),
     answer: (r, a) => chat.answer(r, a),
     resend: (op) => chat.resend(op),
     discard: (op) => chat.discard(op),
     artifacts,
+    workspaceRoot: path,
+    hotkeyRequest: firstApproval?.payload.request_id,
+    sheetRequest,
     openArtifact: (id, download) => {
       // Open the window synchronously, or mobile browsers block it as a popup.
       const w = window.open('about:blank', '_blank');
@@ -73,9 +92,9 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
   const locked = state === 'locked_vscode';
   // SPEC §9.3: read-only while VS Code has it. Open there right now (`held_by`): it has to be
   // closed there first, the hub refuses takeover (`409 vscode_open`). Written from there
-  // recently but not held (or a worker without the registry): «Подхватить», which the hub
+  // recently but not held (or a worker without the registry): «Забрать сюда», which the hub
   // may refuse until 30 s of silence (`409 vscode_active`).
-  const open = locked && info?.held_by !== undefined;
+  const held = locked && info?.held_by !== undefined;
   const takeover = () =>
     app.api.takeover(sessionId).then(
       () => {
@@ -89,8 +108,8 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
         }
         setNotice(
           e instanceof ApiError && e.code === 'vscode_active'
-            ? 'В VS Code ещё пишут в эту сессию; подхватить можно через 30 с тишины.'
-            : `Не подхвачено: ${(e as Error).message}`,
+            ? 'В VS Code ещё пишут в эту сессию; забрать можно через 30 с тишины.'
+            : `Не забрано: ${(e as Error).message}`,
         );
       },
     );
@@ -101,10 +120,30 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
 
+  const archive = () => act(() => app.api.archive(sessionId).then(() => app.refreshSessions()), 'Не заархивировано');
+  const unarchive = () => act(() => app.api.unarchive(sessionId).then(() => app.refreshSessions()), 'Не возвращено');
+  const remove = () => {
+    if (!info || !confirm('Удалить сессию вместе с историей? Это нельзя отменить.')) return;
+    const projectId = info.project_id;
+    void act(
+      () =>
+        app.api.deleteSession(sessionId).then(() => {
+          app.removeSession(sessionId);
+          location.hash = `#/p/${projectId}`;
+        }),
+      'Не удалено',
+    );
+  };
+  const stop = () => act(() => chat.stop(), 'Не остановлено');
+  const { model, cost } = t.usageTotals();
+  const pill = <StatePill state={state} timeline={t} />;
+  const conn = app.conn !== 'open' && <span class="conn-lost">нет связи</span>;
+
   const disabled = state === 'archived' || locked;
+  const sheet = sheetRequest && firstApproval?.type === 'approval.request' ? firstApproval : undefined;
   return (
     <section
-      class={dragging ? 'chat chat-dragging' : 'chat'}
+      class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''}`}
       onDragOver={(e) => {
         if (disabled || !e.dataTransfer?.types.includes('Files')) return;
         e.preventDefault();
@@ -120,78 +159,94 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
         addFiles(e.dataTransfer.files);
       }}
     >
-      <header class="bar">
-        <a class="back" href="#/" aria-label="К списку">
-          ‹
-        </a>
-        <div class="bar-title">
-          <div class="title">{info?.title || 'Сессия'}</div>
-          {system && <div class="muted small">служебная сессия воркера</div>}
-          <div class={`state state-${state}`}>
-            <BusyIndicator state={state} />
-            {STATE_LABELS[state]}
-            {info && info.queue_len > 0 && ` · в очереди ${info.queue_len}`}
-            {app.conn !== 'open' && ' · нет связи'}
+      <header class="chat-head">
+        {phone && (
+          <a class="icon-btn icon-btn-round back" href={info ? `#/p/${info.project_id}` : '#/'} aria-label="Назад к сессиям">
+            <IconBack />
+          </a>
+        )}
+        <div class="chat-head-main">
+          <h1 class="chat-title">{info?.title || 'Сессия'}</h1>
+          <div class="chat-meta">
+            {pill}
+            {system && <span class="chat-system-note">служебная сессия воркера</span>}
+            {phone ? (
+              <span class="chat-where mono">{[worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
+            ) : (
+              <>
+                {worker && !system && <span>{worker}</span>}
+                {path && (
+                  <>
+                    <span class="sep">/</span>
+                    <span class="chat-path">
+                      <span class="mono">{homePath(path)}</span>
+                      <CopyButton text={path} label="Скопировать путь" />
+                    </span>
+                  </>
+                )}
+                {model && (
+                  <>
+                    <span class="sep">/</span>
+                    <span class="chat-model" title={model}>
+                      {modelName(model)}
+                    </span>
+                  </>
+                )}
+                {cost !== undefined && (
+                  <>
+                    <span class="sep">/</span>
+                    <span class="chat-cost">{formatCost(cost)} за сессию</span>
+                  </>
+                )}
+                {locked && (
+                  <>
+                    <span class="sep">/</span>
+                    <span>VS Code</span>
+                  </>
+                )}
+              </>
+            )}
+            {conn}
           </div>
         </div>
         {system && (
           <button
             type="button"
-            class={`btn btn-small btn-filter ${requestsOnly ? 'is-on' : ''}`}
+            class={`btn btn-small btn-outline btn-filter ${requestsOnly ? 'is-on' : ''}`}
             aria-pressed={requestsOnly}
             onClick={() => setRequestsOnly(!requestsOnly)}
           >
             Только запросы
           </button>
         )}
-        {!system && STOPPABLE.has(state) && (
-          <button type="button" class="btn btn-deny btn-small" onClick={() => act(() => chat.stop(), 'Не остановлено')}>
-            Стоп
-          </button>
-        )}
-        {showRetry && (
-          <button type="button" class="btn btn-small" onClick={() => act(() => chat.retry(), 'Повтор не удался')}>
+        {showRetry && !phone && (
+          <button type="button" class="btn btn-small btn-outline btn-retry" onClick={() => act(() => chat.retry(), 'Повтор не удался')}>
             Повторить
           </button>
         )}
-        {!system && info && state !== 'archived' && (
-          <button
-            type="button"
-            class="btn btn-small btn-ghost btn-archive"
-            title="Убрать сессию в архив; агент останавливается"
-            onClick={() => act(() => app.api.archive(sessionId).then(() => app.refreshSessions()), 'Не заархивировано')}
-          >
-            В архив
-          </button>
-        )}
-        {!system && info && state === 'archived' && (
-          <>
-            <button
-              type="button"
-              class="btn btn-small btn-unarchive"
-              onClick={() => act(() => app.api.unarchive(sessionId).then(() => app.refreshSessions()), 'Не возвращено')}
-            >
-              Вернуть
+        {!system && STOPPABLE.has(state) &&
+          (phone ? (
+            <button type="button" class="icon-btn icon-btn-round btn-stop" aria-label="Остановить агента" onClick={stop}>
+              <IconStop size={14} />
             </button>
-            <button
-              type="button"
-              class="btn btn-deny btn-small btn-delete"
-              onClick={() => {
-                if (!confirm('Удалить сессию вместе с историей? Это нельзя отменить.')) return;
-                const projectId = info.project_id;
-                void act(
-                  () =>
-                    app.api.deleteSession(sessionId).then(() => {
-                      app.removeSession(sessionId);
-                      location.hash = `#/p/${projectId}`;
-                    }),
-                  'Не удалено',
-                );
-              }}
-            >
-              Удалить
+          ) : (
+            <button type="button" class="btn btn-small btn-outline btn-stop" onClick={stop}>
+              <IconStop />
+              Остановить
             </button>
-          </>
+          ))}
+        {!system && info && (
+          <MoreMenu
+            info={info}
+            phone={phone}
+            path={path}
+            model={model}
+            cost={cost}
+            onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Повтор не удался') : undefined}
+            onArchive={archive}
+            onUnarchive={unarchive}
+            onDelete={remove}
+          />
         )}
       </header>
       <div
@@ -202,37 +257,54 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        <ChatItems items={items} actions={actions} />
-        {requestsOnly && items.length === 0 && <div class="empty">Запросов нет</div>}
-        {t.streaming && <StreamingBubble text={t.streaming} />}
-        {!system && <ActivityLine state={state} timeline={t} />}
+        <div class="feed">
+          <ChatItems items={items} actions={actions} />
+          {requestsOnly && items.length === 0 && <div class="empty">Запросов нет</div>}
+          {t.streaming && <StreamingMessage text={t.streaming} />}
+          {!system && <ActivityLine state={state} timeline={t} />}
+        </div>
       </div>
       {notice && (
         <div class="notice" role="alert" onClick={() => setNotice(null)}>
           {notice}
         </div>
       )}
-      {open && (
-        <div class="locked-banner locked-open">
-          <span>
-            Сессия открыта в {info?.held_by?.entrypoint === 'claude-vscode' ? 'VS Code' : 'Claude Code вне hqc'}
-            {info?.held_by?.status === 'busy' ? ' и работает' : ''}. Чтобы писать отсюда, закройте её там — подхватить
-            можно будет сразу.
-          </span>
+      {locked && (
+        <div class="composer-wrap">
+          <div class={`handover ${held ? 'handover-held' : ''}`}>
+            <span class="handover-icon">
+              <IconCode />
+            </span>
+            <div class="handover-text">
+              {held ? (
+                <>
+                  <div class="handover-title">
+                    Сессия открыта в {info?.held_by?.entrypoint === 'claude-vscode' ? 'VS Code' : 'Claude Code'}
+                    {worker ? ` на ${worker}` : ''}.
+                  </div>
+                  <div class="handover-sub">Закройте её там, чтобы писать отсюда.</div>
+                </>
+              ) : (
+                <div class="handover-title">Последней сессию вела VS Code{worker ? ` на ${worker}` : ''}.</div>
+              )}
+            </div>
+            {!held && (
+              <button type="button" class="btn btn-primary btn-takeover" onClick={() => void takeover()}>
+                Забрать сюда
+              </button>
+            )}
+          </div>
         </div>
       )}
-      {locked && !open && (
-        <div class="locked-banner">
-          <span>Сессия ведётся в VS Code. Чтобы писать отсюда, подхватите её.</span>
-          <button type="button" class="btn btn-primary btn-small btn-takeover" onClick={() => void takeover()}>
-            Подхватить
-          </button>
+      {sheet && (
+        <div class="sheet-wrap">
+          <PermissionBlock event={sheet} call={approvalCall(items, t, sheet.payload.request_id)} actions={actions} sheet />
         </div>
       )}
-      {!system && (
+      {!system && !locked && !sheet && (
         <Composer
           disabled={disabled}
-          placeholder={open ? 'Открыта в VS Code' : locked ? 'Ведётся в VS Code' : undefined}
+          phone={phone}
           files={files}
           onFiles={addFiles}
           onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
@@ -244,6 +316,118 @@ export function Chat({ app, sessionId }: { app: AppState; sessionId: string }) {
         />
       )}
     </section>
+  );
+}
+
+/** The `tool.call` an approval card shows (feed.ts), for the sheet. */
+function approvalCall(items: ReturnType<Timeline['items']>, t: Timeline, requestId: string) {
+  const b = buildFeed(items, t).find((x) => x.kind === 'approval' && x.event.payload.request_id === requestId);
+  return b?.kind === 'approval' ? b.call : undefined;
+}
+
+/** The state in the header: a pill, pulsing while a turn is on. */
+function StatePill({ state, timeline }: { state: SessionState; timeline: Timeline }) {
+  let label = STATE_LABELS[state];
+  if (state === 'waiting') {
+    const r = timeline.openRequests()[0];
+    label = r?.type === 'approval.request' ? 'Ждёт разрешения' : 'Ждёт ответа';
+  }
+  return (
+    <span class={`state pill state-${state}`}>
+      <span class={`pill-dot ${state === 'running' ? 'pulse' : ''}`} aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+/** «Ещё»: archive, restore and delete; on a phone also the path, model and cost. */
+function MoreMenu({
+  info,
+  phone,
+  path,
+  model,
+  cost,
+  onRetry,
+  onArchive,
+  onUnarchive,
+  onDelete,
+}: {
+  info: SessionInfo;
+  phone: boolean;
+  path?: string;
+  model?: string;
+  cost?: number;
+  /** On a phone «Повторить» lives here, not in the crowded header. */
+  onRetry?: () => void;
+  onArchive: () => void;
+  onUnarchive: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const doc = box.current?.ownerDocument;
+    if (!doc) return;
+    const away = (e: Event) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    doc.addEventListener('pointerdown', away);
+    doc.addEventListener('keydown', esc);
+    return () => {
+      doc.removeEventListener('pointerdown', away);
+      doc.removeEventListener('keydown', esc);
+    };
+  }, [open]);
+  const item = (cls: string, label: string, fn: () => void, title?: string) => (
+    <button
+      type="button"
+      role="menuitem"
+      class={`menu-item ${cls}`}
+      title={title}
+      onClick={() => {
+        setOpen(false);
+        fn();
+      }}
+    >
+      {label}
+    </button>
+  );
+  const archived = info.state === 'archived';
+  return (
+    <div class="menu-box" ref={box}>
+      <button
+        type="button"
+        class={`icon-btn ${phone ? 'icon-btn-round' : ''} btn-more`}
+        aria-label="Ещё"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+      >
+        <IconMore />
+      </button>
+      {open && (
+        <div class="menu" role="menu">
+          {phone && (path || model || cost !== undefined) && (
+            <div class="menu-info">
+              {path && (
+                <div class="menu-info-row">
+                  <span class="mono">{homePath(path)}</span>
+                  <CopyButton text={path} label="Скопировать путь" />
+                </div>
+              )}
+              {model && <div class="menu-info-row">{modelName(model)}</div>}
+              {cost !== undefined && <div class="menu-info-row">{formatCost(cost)} за сессию</div>}
+            </div>
+          )}
+          {onRetry && item('btn-retry', 'Повторить', onRetry)}
+          {!archived && item('btn-archive', 'В архив', onArchive, 'Убрать сессию в архив; агент останавливается')}
+          {archived && item('btn-unarchive', 'Вернуть', onUnarchive)}
+          {archived && item('btn-delete menu-danger', 'Удалить', onDelete)}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -270,6 +454,7 @@ export function Composer({
   onSend,
   disabled,
   placeholder,
+  phone = false,
   files = [],
   onFiles = () => {},
   onRemove = () => {},
@@ -277,6 +462,7 @@ export function Composer({
   onSend: (text: string) => void;
   disabled: boolean;
   placeholder?: string;
+  phone?: boolean;
   files?: OutgoingFile[];
   onFiles?: (files: FileList | File[]) => void;
   onRemove?: (index: number) => void;
@@ -297,80 +483,103 @@ export function Composer({
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, [text]);
-  return (
-    <form
-      class="composer"
-      onSubmit={(e) => {
-        e.preventDefault();
-        submit();
-      }}
+  const attach = (
+    <button
+      type="button"
+      class="icon-btn btn-attach"
+      aria-label="Приложить файлы"
+      title="Приложить файлы"
+      disabled={disabled}
+      onClick={() => picker.current?.click()}
     >
-      {files.length > 0 && (
-        <div class="composer-files">
-          {files.map((f, i) => (
-            <span key={i} class="composer-file">
-              {f.preview ? (
-                <img class="attachment-thumb" src={f.preview} alt={f.name} title={f.name} />
-              ) : (
-                <span class="attachment-chip">
-                  {f.name} <span class="muted">{formatSize(f.file.size)}</span>
-                </span>
-              )}
-              <button type="button" class="composer-file-remove" aria-label={`Убрать ${f.name}`} onClick={() => onRemove(i)}>
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <input
-        ref={picker}
-        type="file"
-        multiple
-        hidden
-        onChange={(e) => {
-          const el = e.currentTarget as HTMLInputElement;
-          if (el.files) onFiles(el.files);
-          el.value = '';
-        }}
-      />
-      <button
-        type="button"
-        class="btn btn-attach"
-        aria-label="Приложить файлы"
-        title="Приложить файлы"
-        disabled={disabled}
-        onClick={() => picker.current?.click()}
-      >
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9" />
-        </svg>
-      </button>
-      <textarea
-        ref={area}
-        class="input"
-        rows={1}
-        placeholder={placeholder ?? (disabled ? 'Сессия в архиве' : 'Сообщение')}
-        disabled={disabled}
-        value={text}
-        onInput={(e) => setText((e.currentTarget as HTMLTextAreaElement).value)}
-        onPaste={(e) => {
-          const pasted = [...(e.clipboardData?.files ?? [])];
-          if (pasted.length === 0) return;
+      <IconAttach />
+    </button>
+  );
+  const send = (
+    <button type="submit" class="btn-send" aria-label="Отправить" title="Отправить" disabled={!canSend}>
+      <IconSend />
+    </button>
+  );
+  const textarea = (
+    <textarea
+      ref={area}
+      class="composer-input"
+      aria-label="Сообщение"
+      rows={phone ? 1 : 2}
+      placeholder={placeholder ?? (disabled ? 'Сессия в архиве' : 'Сообщение')}
+      disabled={disabled}
+      value={text}
+      onInput={(e) => setText((e.currentTarget as HTMLTextAreaElement).value)}
+      onPaste={(e) => {
+        const pasted = [...(e.clipboardData?.files ?? [])];
+        if (pasted.length === 0) return;
+        e.preventDefault();
+        onFiles(pasted);
+      }}
+      onKeyDown={(e) => {
+        // On a phone Enter is a newline; on desktop Enter sends, Shift+Enter is a newline.
+        if (e.key === 'Enter' && !e.shiftKey && !coarse && !e.isComposing) {
           e.preventDefault();
-          onFiles(pasted);
+          submit();
+        }
+      }}
+    />
+  );
+  return (
+    <div class="composer-wrap">
+      <form
+        class={`composer ${phone ? 'composer-phone' : ''}`}
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
         }}
-        onKeyDown={(e) => {
-          // On a phone Enter is a newline; on desktop Enter sends, Shift+Enter is a newline.
-          if (e.key === 'Enter' && !e.shiftKey && !coarse && !e.isComposing) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-      />
-      <button type="submit" class="btn btn-primary" disabled={!canSend}>
-        Отправить
-      </button>
-    </form>
+      >
+        {files.length > 0 && (
+          <div class="composer-files">
+            {files.map((f, i) => (
+              <span key={i} class="composer-file">
+                {f.preview ? (
+                  <img class="attachment-thumb" src={f.preview} alt={f.name} title={f.name} />
+                ) : (
+                  <span class="attachment-chip">
+                    {f.name} <span class="muted">{formatSize(f.file.size)}</span>
+                  </span>
+                )}
+                <button type="button" class="composer-file-remove" aria-label={`Убрать ${f.name}`} onClick={() => onRemove(i)}>
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <input
+          ref={picker}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            const el = e.currentTarget as HTMLInputElement;
+            if (el.files) onFiles(el.files);
+            el.value = '';
+          }}
+        />
+        {phone ? (
+          <div class="composer-row">
+            {attach}
+            {textarea}
+            {send}
+          </div>
+        ) : (
+          <>
+            {textarea}
+            <div class="composer-row">
+              {attach}
+              <span class="composer-hint">{disabled ? '' : 'Enter — отправить, Shift+Enter — новая строка'}</span>
+              {send}
+            </div>
+          </>
+        )}
+      </form>
+    </div>
   );
 }

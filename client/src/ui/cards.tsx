@@ -1,33 +1,39 @@
-// Rendering of chat items: one component per event type of SPEC §4.
-// Unknown and invalid events render as a collapsed card and never throw.
+// The feed of a chat (T26): agent messages as text without a bubble, the user's in a bubble
+// on the right, runs of tool calls folded into groups, request cards, service lines. One
+// component per event type of SPEC §4; unknown and invalid events render as a collapsed
+// row and never throw.
 
 import { useState } from 'preact/hooks';
 import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
+import type { ArtifactStore } from '../artifacts';
+import { AttachmentView, PendingAttachments } from './attachments';
+import { buildFeed, callLine, callRows, captionText, groupDuration, groupState, type Block, type ToolRow } from './feed';
+import { useAction, useNow } from './hooks';
+import { IconCheck, IconChevron, IconCross, IconWarn } from './icons';
 import {
   CANCEL_LABELS,
   LOG_LEVEL_LABELS,
-  POLICY_HINT_LABELS,
-  WORKER_REQUEST_LABELS,
-  activityLabel,
   STATE_LABELS,
   SYSTEM_CODE_LABELS,
   SYSTEM_WARNING_CODES,
   formatClock,
+  formatCost,
+  formatDay,
   formatDuration,
   formatTime,
-  isDeny,
+  formatTimer,
+  formatTokens,
   oneLine,
-  optionLabel,
+  plural,
 } from './labels';
 import { CopyButton, Markdown } from './Markdown';
-import type { ArtifactStore } from '../artifacts';
-import { AttachmentView, PendingAttachments } from './attachments';
+import { PermissionBlock } from './permission';
 
 /** What cards need from the chat: lookups and actions. */
 export interface ChatActions {
   timeline: Timeline;
-  approve(requestId: string, optionId: string): Promise<void>;
+  approve(requestId: string, optionId: string, message?: string): Promise<void>;
   answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
   resend(clientOpId: string): void;
   discard(clientOpId: string): void;
@@ -37,23 +43,41 @@ export interface ChatActions {
   artifacts?: ArtifactStore;
   /** Wall clock, injectable for tests. */
   now?: () => number;
+  /** The session's folder on the worker (absolute): a request touching a path outside it
+   *  says so. */
+  workspaceRoot?: string;
+  /** The request whose card takes Enter and Esc. */
+  hotkeyRequest?: string;
+  /** The request shown as the bottom sheet on a phone: not drawn in the feed. */
+  sheetRequest?: string;
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
-  return (
-    <>
-      {items.map((it) => {
-        switch (it.kind) {
-          case 'event':
-            return <EventView key={it.key} event={it.event} actions={actions} />;
-          case 'invalid':
-            return <InvalidCard key={it.key} invalid={it.invalid} />;
-          case 'pending':
-            return <PendingBubble key={it.key} pending={it.pending} actions={actions} />;
-        }
-      })}
-    </>
-  );
+  const blocks = buildFeed(items, actions.timeline);
+  return <>{blocks.map((b) => <BlockView key={b.key} block={b} actions={actions} />)}</>;
+}
+
+function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
+  switch (block.kind) {
+    case 'agent':
+      return <AgentMessage event={block.event} usage={block.usage} />;
+    case 'tools':
+      return <ToolGroup block={block} actions={actions} />;
+    case 'approval':
+      if (block.event.payload.request_id === actions.sheetRequest) return null;
+      return <PermissionBlock event={block.event} call={block.call} actions={actions} />;
+    case 'item': {
+      const it = block.item;
+      switch (it.kind) {
+        case 'event':
+          return <EventView event={it.event} actions={actions} />;
+        case 'invalid':
+          return <InvalidCard invalid={it.invalid} />;
+        case 'pending':
+          return <PendingBubble pending={it.pending} actions={actions} />;
+      }
+    }
+  }
 }
 
 /** The «только запросы» filter of the service session (SPEC §10.2): the request cards,
@@ -64,20 +88,31 @@ export function onlyRequests(items: Item[]): Item[] {
   );
 }
 
-/** A turn is on: shown in the session header next to the state. */
-export function BusyIndicator({ state }: { state: SessionState }) {
-  if (state !== 'running') return null;
-  return <span class="busy" role="img" aria-label="ход идёт" />;
-}
-
-/** The last line of the chat while a turn is on or input waits (SPEC §17.1). */
-export function ActivityLine({ state, timeline }: { state: SessionState; timeline: Timeline }) {
-  const label = activityLabel(state, state === 'running' ? timeline.runningTool() : undefined);
+/** The last line of the feed while a turn is on or input waits (SPEC §17.1): the running
+ *  command with its timer, or what the session is doing. */
+export function ActivityLine({ state, timeline, now }: { state: SessionState; timeline: Timeline; now?: () => number }) {
+  const call = state === 'running' ? timeline.runningCall() : undefined;
+  const t = useNow(1000, !!call, now);
+  if (call) {
+    const line = callLine(call.payload.tool, call.payload.args_preview);
+    return (
+      <div class="activity activity-running" role="status" aria-live="polite">
+        <span class="pulse-dot" aria-hidden="true" />
+        <span class="activity-label">Выполняется</span>
+        <span class="activity-what mono">{line.text ? (line.shell ? line.text : `${call.payload.tool} ${line.text}`) : call.payload.tool}</span>
+        <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
+      </div>
+    );
+  }
+  let label: string | null = null;
+  if (state === 'running') label = 'Агент работает';
+  else if (state === 'queued') label = 'Ввод в очереди';
+  else if (state === 'waiting' && timeline.openRequests().length === 0) label = 'Ждёт подтверждения';
   if (!label) return null;
   return (
     <div class={`activity activity-${state}`} role="status" aria-live="polite">
-      {state === 'running' && <span class="busy" aria-hidden="true" />}
-      {label}
+      {state === 'running' && <span class="pulse-dot" aria-hidden="true" />}
+      <span class="activity-label">{label}</span>
     </div>
   );
 }
@@ -85,42 +120,30 @@ export function ActivityLine({ state, timeline }: { state: SessionState; timelin
 export function EventView({ event, actions }: { event: HqcEvent; actions: ChatActions }) {
   switch (event.type) {
     case 'user.message':
-      return <UserBubble event={event} actions={actions} />;
+      return <UserMessage event={event} actions={actions} />;
     case 'agent.delta':
-      return <StreamingBubble text={event.payload.text} />;
+      return <StreamingMessage text={event.payload.text} />;
     case 'agent.message':
-      return <AgentBubble event={event} />;
+      return <AgentMessage event={event} />;
     case 'agent.thinking':
-      return (
-        <details class="card card-thinking">
-          <summary>Размышления · {oneLine(event.payload.text, 60)}</summary>
-          <pre class="pre">{event.payload.text}</pre>
-        </details>
-      );
+      return <Thinking event={event} />;
     case 'tool.call':
-      return <ToolCard call={event} result={actions.timeline.resultFor(event.payload.call_id)} actions={actions} />;
     case 'tool.result':
-      // Shown inside its call's card; a result without a call gets its own card.
-      return actions.timeline.hasCall(event.payload.call_id) ? null : <ToolCard result={event} actions={actions} />;
+      // Drawn in tool groups (feed.ts).
+      return null;
     case 'approval.request':
-      return <ApprovalCard event={event} actions={actions} />;
+      return <PermissionBlock event={event} actions={actions} />;
     case 'approval.response': {
-      const req = actions.timeline.request(event.payload.request_id);
-      const opt =
-        req?.type === 'approval.request'
-          ? req.payload.options.find((o) => o.id === event.payload.option_id)
-          : undefined;
-      const by = event.payload.by === 'auto' ? ' (автоматически)' : '';
-      return (
-        <Line kind="approval">
-          {req?.type === 'approval.request' ? `${req.payload.tool}: ` : ''}
-          {opt ? optionLabel(opt) : event.payload.option_id}
-          {by}
-        </Line>
-      );
+      const p = event.payload;
+      // A text answer is the user's message (SPEC §10.1).
+      if (p.message) return <TextAnswer event={event} />;
+      // Otherwise the request's row says it; alone (its request not loaded) it is a line.
+      if (actions.timeline.request(p.request_id)) return null;
+      return <Line kind="approval">Ответ на запрос: {p.option_id}</Line>;
     }
     case 'approval.cancel':
     case 'clarify.cancel':
+      if (actions.timeline.request(event.payload.request_id)) return null;
       return (
         <Line kind="cancel">
           {event.type === 'approval.cancel' ? 'Запрос разрешения' : 'Вопрос'} отменён:{' '}
@@ -130,6 +153,7 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
     case 'clarify.request':
       return <ClarifyCard event={event} actions={actions} />;
     case 'clarify.response':
+      if (actions.timeline.request(event.payload.request_id)) return null;
       return <Line kind="approval">Ответы отправлены</Line>;
     case 'attachment':
       return (
@@ -151,20 +175,16 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
           <Markdown class="text" text={event.payload.text} />
           <div class="meta">
             <CopyButton text={event.payload.text} />
+            {formatTime(event.ts)}
           </div>
         </div>
       );
-    case 'usage': {
-      const p = event.payload;
+    case 'usage':
       return (
-        <Line kind="usage">
-          {p.input_tokens} → {p.output_tokens} токенов
-          {p.cache_read ? ` · кэш ${p.cache_read}` : ''}
-          {p.cost_usd !== undefined ? ` · $${p.cost_usd.toFixed(4)}` : ''}
-          {p.model ? ` · ${p.model}` : ''}
-        </Line>
+        <div class="line line-usage">
+          <UsageParts usage={event} />
+        </div>
       );
-    }
     case 'status':
       // The state is in the header and the activity line; only an error with a reason
       // is worth a line of its own.
@@ -174,22 +194,8 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
           {STATE_LABELS.error} · {event.payload.detail}
         </Line>
       );
-    case 'system': {
-      if (event.payload.code === 'worker_log') return <WorkerLogLine event={event} />;
-      const caption = SYSTEM_CODE_LABELS[event.payload.code];
-      const warning = SYSTEM_WARNING_CODES.has(event.payload.code);
-      return (
-        <Line kind={caption ? `system line-system-${event.payload.code}${warning ? ' line-warning' : ''}` : 'system'}>
-          {warning && (
-            <span class="warn-icon" role="img" aria-label="Внимание">
-              ⚠
-            </span>
-          )}
-          {caption && <b>{caption}</b>}
-          <Markdown text={event.payload.text} />
-        </Line>
-      );
-    }
+    case 'system':
+      return <SystemLine event={event} now={actions.now} />;
     case 'unknown':
       return (
         <details class="card card-unknown">
@@ -200,12 +206,41 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
   }
 }
 
+/** A service line between hairlines; the creation of the session says when; a warning
+ *  (a forked transcript, SPEC §9.3) gets an icon. */
+function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => number }) {
+  const p = event.payload;
+  if (p.code === 'worker_log') return <WorkerLogLine event={event} />;
+  const caption = SYSTEM_CODE_LABELS[p.code];
+  const warning = SYSTEM_WARNING_CODES.has(p.code);
+  const kind = `system line-system-${p.code}${warning ? ' line-warning' : ''}`;
+  if (p.code === 'session_created') {
+    const when = formatDay(event.ts, now?.() ?? Date.now());
+    return (
+      <Line kind={kind}>
+        {p.text === 'Session created' ? `Сессия начата ${when}` : `${p.text} · ${when}`}
+      </Line>
+    );
+  }
+  return (
+    <Line kind={caption ? kind : 'system'}>
+      {warning && (
+        <span class="warn-icon" role="img" aria-label="Внимание">
+          <IconWarn />
+        </span>
+      )}
+      {caption && <b>{caption}</b>}
+      <Markdown text={p.text} />
+    </Line>
+  );
+}
+
 /** A warn/error line of the worker's own log in its service session (SPEC §10.2): time,
  *  level and the text as is (log text, not Markdown). */
 function WorkerLogLine({ event }: { event: EventOf<'system'> }) {
   const level = event.payload.level ?? 'warn';
   return (
-    <div class={`line line-worker-log level-${level}`}>
+    <div class={`line-worker-log level-${level}`}>
       <time class="log-time" dateTime={event.ts}>
         {formatClock(event.ts)}
       </time>{' '}
@@ -216,22 +251,28 @@ function WorkerLogLine({ event }: { event: EventOf<'system'> }) {
 }
 
 function Line({ kind, children }: { kind: string; children: preact.ComponentChildren }) {
-  return <div class={`line line-${kind}`}>{children}</div>;
+  return (
+    <div class={`line line-${kind}`}>
+      <span class="line-text">{children}</span>
+    </div>
+  );
 }
 
-function UserBubble({ event, actions }: { event: EventOf<'user.message'>; actions: ChatActions }) {
+function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actions: ChatActions }) {
   const d = event.delivery;
   const ids = event.payload.artifact_ids;
   return (
-    <div class="bubble bubble-user">
-      {event.payload.text && <Markdown class="text" text={event.payload.text} />}
-      {ids.length > 0 && (
-        <div class="attachments">
-          {ids.map((id) => (
-            <AttachmentView key={id} id={id} actions={actions} />
-          ))}
-        </div>
-      )}
+    <div class="msg-user">
+      <div class="msg-bubble">
+        {event.payload.text && <Markdown class="text" text={event.payload.text} />}
+        {ids.length > 0 && (
+          <div class="attachments">
+            {ids.map((id) => (
+              <AttachmentView key={id} id={id} actions={actions} />
+            ))}
+          </div>
+        )}
+      </div>
       <div class="meta">
         {event.payload.text && <CopyButton text={event.payload.text} />}
         {formatTime(event.ts)}
@@ -242,11 +283,29 @@ function UserBubble({ event, actions }: { event: EventOf<'user.message'>; action
   );
 }
 
+/** «Ответить текстом вместо этого»: the user's text went to the agent with the denial. */
+function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
+  const text = event.payload.message!;
+  return (
+    <div class="msg-user msg-answer">
+      <div class="msg-bubble">
+        <Markdown class="text" text={text} />
+      </div>
+      <div class="meta">
+        <CopyButton text={text} />
+        {formatTime(event.ts)} · вместо запроса
+      </div>
+    </div>
+  );
+}
+
 function PendingBubble({ pending, actions }: { pending: PendingMessage; actions: ChatActions }) {
   return (
-    <div class={`bubble bubble-user bubble-pending ${pending.status === 'failed' ? 'bubble-failed' : ''}`}>
-      {pending.text && <Markdown class="text" text={pending.text} />}
-      {pending.attachments && <PendingAttachments files={pending.attachments} />}
+    <div class={`msg-user msg-pending ${pending.status === 'failed' ? 'msg-failed' : ''}`}>
+      <div class="msg-bubble">
+        {pending.text && <Markdown class="text" text={pending.text} />}
+        {pending.attachments && <PendingAttachments files={pending.attachments} />}
+      </div>
       <div class="meta">
         {pending.status === 'sending' ? (
           'отправка…'
@@ -266,129 +325,161 @@ function PendingBubble({ pending, actions }: { pending: PendingMessage; actions:
   );
 }
 
-function AgentBubble({ event }: { event: EventOf<'agent.message'> }) {
+/** Tokens, cache and cost of a turn: `2 → 555 токенов · кэш 14,4k · $0.073`. */
+function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
+  const p = usage.payload;
+  const parts = [`${formatTokens(p.input_tokens)} → ${formatTokens(p.output_tokens)} токенов`];
+  if (p.cache_read) parts.push(`кэш ${formatTokens(p.cache_read)}`);
+  if (p.cost_usd !== undefined) parts.push(formatCost(p.cost_usd, true));
   return (
-    <div class={`bubble bubble-agent ${event.payload.final ? 'bubble-final' : 'bubble-interim'}`}>
+    <>
+      {parts.map((s, i) => (
+        <span key={i} class="usage-part">
+          {i > 0 && ' · '}
+          {s}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function AgentMessage({ event, usage }: { event: EventOf<'agent.message'>; usage?: EventOf<'usage'> }) {
+  return (
+    <article class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}`}>
       <Markdown class="text" text={event.payload.text} />
       <div class="meta">
         <CopyButton text={event.payload.text} />
         {formatTime(event.ts)}
+        {usage && (
+          <span class="usage">
+            {' · '}
+            <UsageParts usage={usage} />
+          </span>
+        )}
       </div>
-    </div>
+    </article>
   );
 }
 
-export function StreamingBubble({ text }: { text: string }) {
+export function StreamingMessage({ text }: { text: string }) {
   return (
-    <div class="bubble bubble-agent bubble-streaming" aria-live="polite">
+    <article class="msg-agent msg-streaming" aria-live="polite">
       {/* The cursor is drawn by CSS after the last block. */}
       <Markdown class="text" text={text} />
-    </div>
+    </article>
   );
 }
 
-function ToolCard({
-  call,
-  result,
-  actions,
-}: {
-  call?: EventOf<'tool.call'>;
-  result?: EventOf<'tool.result'>;
-  actions: ChatActions;
-}) {
-  const r = result?.payload;
-  const state = !r ? 'running' : r.error ? 'error' : 'ok';
-  const mark = { running: '…', error: '✕', ok: '✓' }[state];
-  const name = call?.payload.tool ?? 'Результат инструмента';
-  const preview = call ? oneLine(call.payload.args_preview, 60) : oneLine(r?.result_preview ?? '', 60);
+function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
   return (
-    <details class={`card card-tool tool-${state}`}>
+    <details class="thinking">
       <summary>
-        <span class="tool-mark" aria-label={state}>
-          {mark}
-        </span>{' '}
-        <b>{name}</b> <span class="muted">{preview}</span>
-        {r?.duration_ms !== undefined && <span class="muted"> · {formatDuration(r.duration_ms)}</span>}
+        <IconChevron size={12} />
+        Размышления · {oneLine(event.payload.text, 60)}
       </summary>
-      {call && (
-        <>
-          <div class="label">Аргументы</div>
-          <pre class="pre">{call.payload.args_preview}</pre>
-        </>
-      )}
-      {r && (
-        <>
-          <div class="label">{r.error ? 'Ошибка' : 'Результат'}</div>
-          {r.error_text && <div class="error-text">{r.error_text}</div>}
-          {r.result_preview && <pre class="pre">{r.result_preview}</pre>}
-          {r.artifact_id && (
-            <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(r.artifact_id!)}>
-              Полный результат
-            </button>
-          )}
-        </>
-      )}
+      <pre class="pre">{event.payload.text}</pre>
     </details>
   );
 }
 
-function useAction() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const run = (fn: () => Promise<void>) => {
-    setBusy(true);
-    setError(null);
-    fn()
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setBusy(false));
-  };
-  return { busy, error, run };
-}
-
-export function ApprovalCard({ event, actions }: { event: EventOf<'approval.request'>; actions: ChatActions }) {
-  const p = event.payload;
-  const fate = actions.timeline.requestFate(p.request_id);
-  const { busy, error, run } = useAction();
-  const now = actions.now?.() ?? Date.now();
-  const expired = p.expires_at !== undefined && Date.parse(p.expires_at) <= now;
-  const chosen =
-    fate.response && 'option_id' in fate.response
-      ? p.options.find((o) => o.id === (fate.response as { option_id: string }).option_id)
-      : undefined;
-  const open = !fate.response && !fate.cancel;
+/** A run of tool calls, collapsed: the interim message before it as the caption, else
+ *  «N команд · время»; open, a row per call (T26). */
+function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }>; actions: ChatActions }) {
+  const [open, setOpen] = useState(false);
+  const calls = callRows(block.rows);
+  const state = groupState(block.rows);
+  const ms = groupDuration(block.rows);
+  const count = `${calls.length} ${plural(calls.length, ['команда', 'команды', 'команд'])}`;
+  const stats = ms !== undefined ? `${count} · ${formatDuration(ms)}` : count;
   return (
-    <div class={`card card-approval ${open ? 'is-open' : 'is-closed'}`}>
-      <div class="card-title">
-        Разрешение · <b>{WORKER_REQUEST_LABELS[p.tool] ?? p.tool}</b>
-        {p.policy_hint && <span class={`policy-hint policy-${p.policy_hint}`}> · {POLICY_HINT_LABELS[p.policy_hint]}</span>}
-      </div>
-      <pre class="pre">{p.description}</pre>
-      {open && !expired && (
-        <div class="actions">
-          {p.options.map((o) => (
-            <button
-              type="button"
-              key={o.id}
-              class={`btn ${isDeny(o) ? 'btn-deny' : o.canonical === 'once' ? 'btn-primary' : ''}`}
-              data-option={o.id}
-              data-canonical={o.canonical}
-              title={o.label}
-              disabled={busy}
-              onClick={() => run(() => actions.approve(p.request_id, o.id))}
-            >
-              {optionLabel(o)}
-            </button>
+    <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
+      <button type="button" class="tool-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span class="chevron">
+          <IconChevron />
+        </span>
+        <StateMark state={state} />
+        {block.caption ? (
+          <>
+            <span class="tool-caption">{captionText(block.caption)}</span>
+            <span class="tool-stats">· {stats}</span>
+          </>
+        ) : (
+          <span class="tool-stats">{stats}</span>
+        )}
+      </button>
+      {open && (
+        <div class="tool-group-body">
+          {block.caption && !fitsCaption(block.caption) && (
+            <div class="tool-group-text">
+              <Markdown class="text" text={block.caption.payload.text} />
+            </div>
+          )}
+          {block.rows.map((r) => (
+            <ToolRowView key={r.key} row={r} actions={actions} />
           ))}
         </div>
       )}
-      {open && expired && <div class="muted">Срок ответа истёк</div>}
-      {open && !expired && p.expires_at && <div class="muted small">до {formatTime(p.expires_at)}</div>}
-      {fate.response && (
-        <div class="outcome">Ответ: {chosen ? optionLabel(chosen) : (fate.response as { option_id?: string }).option_id}</div>
-      )}
-      {fate.cancel && <div class="outcome">Отменён: {CANCEL_LABELS[fate.cancel.reason]}</div>}
-      {error && <div class="error-text">{error}</div>}
     </div>
+  );
+}
+
+/** The caption already says all of a short one-line message: no need to repeat it inside. */
+function fitsCaption(m: EventOf<'agent.message'>): boolean {
+  const t = m.payload.text.trim();
+  return !t.includes('\n') && !/[#*_`>[\]]/.test(t) && captionText(m) === t;
+}
+
+function StateMark({ state }: { state: 'running' | 'error' | 'ok' }) {
+  if (state === 'running') return <span class="pulse-dot" role="img" aria-label="выполняется" />;
+  return (
+    <span class={`mark mark-${state}`} role="img" aria-label={state === 'ok' ? 'готово' : 'ошибка'}>
+      {state === 'ok' ? <IconCheck size={13} /> : <IconCross size={13} />}
+    </span>
+  );
+}
+
+/** One call: `$ command` for Bash, else the tool and its main argument; open, the arguments
+ *  and the result. */
+function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
+  if (row.kind === 'thinking') return <Thinking event={row.event} />;
+  const { call } = row;
+  const result = call ? actions.timeline.resultFor(call.payload.call_id) ?? row.result : row.result;
+  const r = result?.payload;
+  const state = !r ? 'running' : r.error ? 'error' : 'ok';
+  const line = call ? callLine(call.payload.tool, call.payload.args_preview) : undefined;
+  return (
+    <details class={`tool-row tool-${state}`}>
+      <summary>
+        {line?.shell ? (
+          <span class="tool-prompt">$</span>
+        ) : (
+          <span class="tool-name">{call?.payload.tool ?? 'Результат инструмента'}</span>
+        )}
+        <span class="tool-line mono">{line ? line.text : oneLine(r?.result_preview ?? '', 80)}</span>
+        {r?.duration_ms !== undefined && <span class="tool-time">{formatDuration(r.duration_ms)}</span>}
+        <StateMark state={state} />
+      </summary>
+      <div class="tool-row-body">
+        {call && (
+          <>
+            <div class="label">Аргументы</div>
+            <pre class="pre">{call.payload.args_preview}</pre>
+          </>
+        )}
+        {r && (
+          <>
+            <div class="label">{r.error ? 'Ошибка' : 'Результат'}</div>
+            {r.error_text && <div class="error-text">{r.error_text}</div>}
+            {r.result_preview && <pre class="pre">{r.result_preview}</pre>}
+            {r.artifact_id && (
+              <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(r.artifact_id!)}>
+                Полный результат
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -416,7 +507,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         if (open) run(() => actions.answer(p.request_id, answers));
       }}
     >
-      <div class="card-title">Вопрос агента</div>
+      <div class="card-title">Агент спрашивает</div>
       {p.questions.map((q) => (
         <fieldset key={q.id} class="question" disabled={!open || busy}>
           <legend>{q.text}</legend>
@@ -451,6 +542,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           </button>
         </div>
       )}
+      {fate.response && <div class="outcome">Ответы отправлены</div>}
       {fate.cancel && <div class="outcome">Отменён: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>

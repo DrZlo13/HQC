@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEvent, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
-import { ChatItems, StreamingBubble, type ChatActions } from '../src/ui/cards';
+import { ChatItems, StreamingMessage, type ChatActions } from '../src/ui/cards';
 import { Markdown, decodeEntities, parseMarkdown, safeHref } from '../src/ui/Markdown';
 import { copyText } from '../src/clipboard';
 
@@ -237,11 +237,12 @@ describe('messages', () => {
       ev('event.agent.message', (e) => ((e.payload.text = SRC), (e.payload.final = false))),
       ev('event.agent.message', (e) => (e.payload.text = SRC)),
       ev('event.peer.message', (e) => (e.payload.text = '_from_ a peer')),
-      ev('event.system', (e) => (e.payload.text = 'worker `home-mac` is **offline**')),
+      // `session_created` is the divider «Сессия начата …»; other codes show their text.
+      ev('event.system', (e) => (e.payload = { text: 'worker `home-mac` is **offline**', code: 'agent_exited' })),
     ]);
-    expect(root.querySelector('.bubble-user strong')!.textContent).toBe('run');
-    expect(root.querySelector('.bubble-interim h2')!.textContent).toBe('Plan');
-    expect(root.querySelector('.bubble-final .md-code code')!.textContent).toBe('ls -la');
+    expect(root.querySelector('.msg-user strong')!.textContent).toBe('run');
+    expect(root.querySelector('.msg-interim h2')!.textContent).toBe('Plan');
+    expect(root.querySelector('.msg-final .md-code code')!.textContent).toBe('ls -la');
     expect(root.querySelector('.card-peer em')!.textContent).toBe('from');
     expect(root.querySelector('.line-system code')!.textContent).toBe('home-mac');
   });
@@ -257,16 +258,16 @@ describe('messages', () => {
     ]);
     const copy = (sel: string) => root.querySelector<HTMLButtonElement>(`${sel} > .meta .btn-copy`)!;
     for (const [sel, text] of [
-      ['.bubble-user', 'user *md*'],
-      ['.bubble-agent', SRC],
+      ['.msg-user', 'user *md*'],
+      ['.msg-agent', SRC],
       ['.card-peer', 'peer **md**'],
     ]) {
       await act(async () => copy(sel).click());
       expect(writeText).toHaveBeenLastCalledWith(text);
     }
-    expect(copy('.bubble-agent').textContent).toBe('Скопировано');
+    expect(copy('.msg-agent').textContent).toBe('Скопировано');
     // The code block's button copies only the block.
-    await act(async () => root.querySelector<HTMLButtonElement>('.bubble-agent .md-code .btn-copy')!.click());
+    await act(async () => root.querySelector<HTMLButtonElement>('.msg-agent .md-code .btn-copy')!.click());
     expect(writeText).toHaveBeenLastCalledWith('ls -la');
   });
 
@@ -310,7 +311,7 @@ describe('messages', () => {
     const text = Array.from({ length: 500 }, (_, i) => section(i)).join('');
     expect(text.length).toBeGreaterThan(100_000);
     const root = chat([ev('event.agent.message'), ev('event.agent.message', (e) => (e.payload.text = text))]);
-    const bubbles = root.querySelectorAll('.bubble-agent');
+    const bubbles = root.querySelectorAll('.msg-agent');
     expect(bubbles[0].querySelector('.md')!.textContent).toBe('All tests pass.');
     const long = bubbles[1];
     expect(long.querySelectorAll('h2').length).toBe(500);
@@ -325,7 +326,7 @@ describe('delta stream', () => {
     const t = new Timeline();
     root = document.createElement('div');
     document.body.appendChild(root);
-    const draw = () => act(() => render(t.streaming ? <StreamingBubble text={t.streaming} /> : null, root!));
+    const draw = () => act(() => render(t.streaming ? <StreamingMessage text={t.streaming} /> : null, root!));
     for (const c of chunks) {
       t.apply(ev('event.agent.delta', (e) => (e.payload.text = c)));
       draw();
@@ -342,7 +343,7 @@ describe('delta stream', () => {
 
   it('an unclosed code block or emphasis at the end does not break', () => {
     const { root } = stream(['Text **bold', ' still\n\n```py\nprint(1)\n', 'x = [', '']);
-    const md = root.querySelector('.bubble-streaming .md')!;
+    const md = root.querySelector('.msg-streaming .md')!;
     expect(md.querySelector('.md-code code')!.textContent).toBe('print(1)\nx = [');
     expect(md.querySelector('.md-code-lang')!.textContent).toBe('py');
     expect(md.querySelector('p')!.textContent).toBe('Text **bold still');

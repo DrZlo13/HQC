@@ -177,14 +177,36 @@ export class Timeline {
     return this.results.get(callId);
   }
 
-  /** The tool of the last `tool.call` while it has no `tool.result`. */
-  runningTool(): string | undefined {
+  /** The last `tool.call` while it has no `tool.result`. */
+  runningCall(): EventOf<'tool.call'> | undefined {
     const evs = this.events();
     for (let i = evs.length - 1; i >= 0; i--) {
       const e = evs[i];
-      if (e.type === 'tool.call') return this.results.has(e.payload.call_id) ? undefined : e.payload.tool;
+      if (e.type === 'tool.call') return this.results.has(e.payload.call_id) ? undefined : e;
     }
     return undefined;
+  }
+
+  /** Requests with neither an answer nor a cancellation, oldest first. */
+  openRequests(): EventOf<'approval.request' | 'clarify.request'>[] {
+    return [...this.requests.values()]
+      .filter((r) => {
+        const f = this.fates.get(r.payload.request_id);
+        return !f?.response && !f?.cancel;
+      })
+      .sort((a, b) => a.seq! - b.seq!);
+  }
+
+  /** Model of the last `usage` that names one, and the sum of `cost_usd` over the session. */
+  usageTotals(): { model?: string; cost?: number } {
+    let model: string | undefined;
+    let cost: number | undefined;
+    for (const e of this.events()) {
+      if (e.type !== 'usage') continue;
+      if (e.payload.model) model = e.payload.model;
+      if (e.payload.cost_usd !== undefined) cost = (cost ?? 0) + e.payload.cost_usd;
+    }
+    return { model, cost };
   }
 
   /** Results whose call is in the timeline are shown inside the call's card. */

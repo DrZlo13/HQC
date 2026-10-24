@@ -1,6 +1,6 @@
 import { render } from 'preact';
 import { Window } from 'happy-dom';
-import { ChatItems, StreamingBubble, type ChatActions } from '../src/ui/cards';
+import { ChatItems, StreamingMessage, type ChatActions } from '../src/ui/cards';
 import type { ChatSession } from '../src/session';
 
 /** Renders a chat's timeline into a detached happy-dom document (Preact creates nodes
@@ -11,7 +11,7 @@ export function renderChatToElement(chat: ChatSession, overrides: Partial<ChatAc
   win.document.body.appendChild(el as never);
   const actions: ChatActions = {
     timeline: chat.timeline,
-    approve: (r, o) => chat.approve(r, o),
+    approve: (r, o, m) => chat.approve(r, o, m),
     answer: (r, a) => chat.answer(r, a),
     resend: (op) => chat.resend(op),
     discard: (op) => chat.discard(op),
@@ -21,7 +21,7 @@ export function renderChatToElement(chat: ChatSession, overrides: Partial<ChatAc
   render(
     <>
       <ChatItems items={chat.timeline.items()} actions={actions} />
-      {chat.timeline.streaming && <StreamingBubble text={chat.timeline.streaming} />}
+      {chat.timeline.streaming && <StreamingMessage text={chat.timeline.streaming} />}
     </>,
     el,
   );

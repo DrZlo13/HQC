@@ -139,13 +139,40 @@ export class AppState {
       .sort((a, b) => a.title.localeCompare(b.title));
   }
 
-  /** Unread over the project's sessions, for its badge. */
-  projectUnread(projectId: string): number {
+  /** Sessions of the project that wait for the user (a request or an error), for the badge
+   *  «ждёт вас» on the project. */
+  projectWaiting(projectId: string): number {
     let n = 0;
     for (const s of this.sessions.values()) {
-      if (s.project_id === projectId && !s.archived && !s.system) n += s.unread;
+      if (s.project_id === projectId && !s.archived && !s.system && (s.state === 'waiting' || s.state === 'error')) n++;
     }
     return n;
+  }
+
+  /** A worker's name: the title of its service session (SPEC §10.2). */
+  workerName(workerId: string | undefined): string | undefined {
+    if (!workerId) return undefined;
+    for (const s of this.sessions.values()) if (s.system && s.worker_id === workerId) return s.title;
+    return undefined;
+  }
+
+  /** Sessions on the worker with a turn on, input queued or a request open. */
+  workerActive(workerId: string | undefined): number {
+    let n = 0;
+    for (const s of this.sessions.values()) {
+      if (s.system || s.archived || s.worker_id !== workerId) continue;
+      if (s.state === 'running' || s.state === 'waiting' || s.state === 'queued') n++;
+    }
+    return n;
+  }
+
+  /** The session's folder on its worker: the workspace path and `cwd` inside it; undefined
+   *  until the project's workspaces are loaded. */
+  sessionPath(s: SessionInfo): string | undefined {
+    const w = this.workspaces.get(s.project_id)?.find((x) => x.id === s.workspace_id);
+    if (!w) return undefined;
+    const cwd = s.cwd.replace(/^\.\/?/, '').replace(/\/+$/, '');
+    return cwd ? `${w.path.replace(/\/+$/, '')}/${cwd}` : w.path;
   }
 
   async createSession(title?: string, opts: NewSessionOptions = {}, projectId = this.currentProjectId): Promise<SessionInfo> {

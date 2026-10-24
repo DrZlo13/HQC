@@ -48,10 +48,19 @@ describe('examples/wire', () => {
       } else {
         expect(isKnownType(raw.type)).toBe(true);
         expect(ev.type).toBe(raw.type);
-        expect(`event.${ev.type}.json`).toBe(f);
+        // `event.<type>.json`, or a variant `event.<type>.<variant>.json`.
+        expect(f.startsWith(`event.${ev.type}.`)).toBe(true);
+        expect(f.slice(`event.${ev.type}.`.length)).toMatch(/^([a-z_]+\.)?json$/);
       }
     });
   }
+
+  it('reads the text answer of approval.response (T26)', () => {
+    const ev = parseEvent(load('event.approval.response.message.json'));
+    expect(ev.type === 'approval.response' && ev.payload.message).toBe('Не трогай корень, посмотри только ~/work/hqc');
+    const plain = parseEvent(load('event.approval.response.json'));
+    expect(plain.type === 'approval.response' && plain.payload.message).toBeUndefined();
+  });
 
   for (const f of files.filter((f) => f.startsWith('hub.') || f.startsWith('worker.'))) {
     it(`parses frame ${f}`, () => {

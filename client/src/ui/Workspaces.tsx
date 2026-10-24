@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
+import { IconBack } from './icons';
 import { ApiError, type WorkerInfo } from '../api';
 import type { AppState } from '../app';
 import { parseWorkspaceConflict, type Candidate, type DirEntry, type Workspace } from '../proto';
@@ -94,8 +95,8 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
   return (
     <section class="page workspaces">
       <header class="bar">
-        <a class="back" href={`#/p/${projectId}`} aria-label="К проекту">
-          ‹
+        <a class="back icon-btn" href={`#/p/${projectId}`} aria-label="К проекту">
+          <IconBack />
         </a>
         <div class="bar-title">
           <div class="title">Workspaces</div>

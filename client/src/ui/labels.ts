@@ -1,12 +1,21 @@
-import type { ApprovalCanonical, ApprovalOption, CancelReason, PolicyHint, SessionState } from '../proto';
+import type { ApprovalCanonical, ApprovalOption, CancelReason, SessionState } from '../proto';
 
 /** Button captions by `canonical` (SPEC §10.1); an unknown canonical keeps the agent's label. */
 export const CANONICAL_LABELS: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
   once: 'Разрешить',
-  session: 'Разрешить в сессии',
+  session: 'Всегда в этой сессии',
   always: 'Разрешать всегда',
   deny: 'Отклонить',
   deny_always: 'Запрещать всегда',
+};
+
+/** What became of a request after the answer, for its collapsed row. */
+export const CANONICAL_OUTCOMES: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
+  once: 'разрешено',
+  session: 'разрешено до конца сессии',
+  always: 'разрешено всегда',
+  deny: 'отклонено',
+  deny_always: 'запрещено всегда',
 };
 
 export function optionLabel(o: ApprovalOption): string {
@@ -17,38 +26,17 @@ export function isDeny(o: ApprovalOption): boolean {
   return o.canonical === 'deny' || o.canonical === 'deny_always';
 }
 
+/** The state of a session in its header pill and in the session list. */
 export const STATE_LABELS: Record<SessionState, string> = {
-  archived: 'в архиве',
-  locked_vscode: 'ведётся в VS Code',
-  worker_offline: 'воркер офлайн',
-  waiting: 'ждёт ответа',
-  error: 'ошибка',
-  running: 'работает',
-  queued: 'в очереди',
-  idle: 'свободна',
-  unknown: 'неизвестно',
-};
-
-/** The line under the chat while a turn is on. There is no event for it: it follows the
- *  session `state` (SPEC §17.1) and, while running, the last `tool.call` without a result. */
-export function activityLabel(state: SessionState, tool?: string): string | null {
-  switch (state) {
-    case 'running':
-      return tool ? `выполняет ${tool}` : 'агент работает';
-    case 'queued':
-      return 'ввод в очереди';
-    case 'waiting':
-      return 'ждёт подтверждения';
-    default:
-      return null;
-  }
-}
-
-/** `approval.request.policy_hint` (SPEC §8.1, §14). */
-export const POLICY_HINT_LABELS: Record<PolicyHint, string> = {
-  allow: 'по правилу allow, но Claude Code спрашивает сам (например, путь вне рабочей папки)',
-  deny: 'запрещено политикой воркера',
-  unknown: 'есть правило в политике воркера',
+  archived: 'В архиве',
+  locked_vscode: 'Ведётся в VS Code',
+  worker_offline: 'Воркер офлайн',
+  waiting: 'Ждёт ответа',
+  error: 'Ошибка',
+  running: 'Работает',
+  queued: 'В очереди',
+  idle: 'Свободна',
+  unknown: 'Неизвестно',
 };
 
 /** `system.code` → caption before the text; other codes show the text alone (SPEC §4). */
@@ -84,10 +72,29 @@ export const CANCEL_LABELS: Record<CancelReason, string> = {
   unknown: 'отменён',
 };
 
+/** Russian plural: `plural(2, ['команда', 'команды', 'команд'])` → `команды`. */
+export function plural(n: number, forms: [string, string, string]): string {
+  const a = Math.abs(n) % 100;
+  const b = a % 10;
+  if (a > 10 && a < 20) return forms[2];
+  if (b === 1) return forms[0];
+  if (b >= 2 && b <= 4) return forms[1];
+  return forms[2];
+}
+
 export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms} мс`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} с`;
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))} мс`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)} с`;
   return `${Math.floor(ms / 60_000)} мин ${Math.round((ms % 60_000) / 1000)} с`;
+}
+
+/** A running timer: `0:42`, `1:24`, `1:02:03`. */
+export function formatTimer(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
 }
 
 /** Time with seconds, for log lines. */
@@ -103,8 +110,65 @@ export function formatTime(ts: string): string {
   return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 }
 
+/** Whole days between the local dates of `ts` and `now` (0 — today, 1 — yesterday). */
+export function daysAgo(ts: string, now: number): number {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return Infinity;
+  const day = (t: Date) => new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  return Math.round((day(new Date(now)) - day(d)) / 86_400_000);
+}
+
+/** «сегодня в 16:18», «вчера в 9:05», «21 окт в 12:00». */
+export function formatDay(ts: string, now: number): string {
+  const days = daysAgo(ts, now);
+  const at = `в ${formatTime(ts)}`;
+  if (days === 0) return `сегодня ${at}`;
+  if (days === 1) return `вчера ${at}`;
+  const d = new Date(ts);
+  return `${d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }).replace('.', '')} ${at}`;
+}
+
+/** When a session was last active, short: «сейчас», «4 мин», «16:18», «вчера», «21 окт». */
+export function formatWhen(ts: string, now: number): string {
+  const t = Date.parse(ts);
+  if (Number.isNaN(t)) return '';
+  const min = Math.floor((now - t) / 60_000);
+  if (min < 1) return 'сейчас';
+  if (min < 60) return `${min} мин`;
+  const days = daysAgo(ts, now);
+  if (days === 0) return formatTime(ts);
+  if (days === 1) return 'вчера';
+  return new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }).replace('.', '');
+}
+
+/** Token counts: `555`, `14,4k`, `1,2M`. */
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  const [v, unit] = n < 1_000_000 ? [n / 1000, 'k'] : [n / 1_000_000, 'M'];
+  return `${v.toFixed(v < 10 ? 1 : 0).replace('.', ',').replace(/,0$/, '')}${unit}`;
+}
+
+/** Cost in dollars: `$0.07` (from a cent up; below it three digits), `precise`: always three,
+ *  as under an answer (`$0.073`). */
+export function formatCost(usd: number, precise = false): string {
+  return `$${usd.toFixed(precise || usd < 0.01 ? 3 : 2)}`;
+}
+
+/** `claude-opus-5-5` → `Opus 5.5`; other names as they are. */
+export function modelName(model: string): string {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(model);
+  if (!m) return model;
+  const family = m[1][0].toUpperCase() + m[1].slice(1);
+  return `${family} ${m[2]}${m[3] ? `.${m[3]}` : ''}`;
+}
+
 /** First line, cut to `max` characters, for collapsed previews. */
 export function oneLine(s: string, max = 80): string {
   const line = s.replace(/\s+/g, ' ').trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/** A path with the home folder as `~`: `/Users/me/work/hqc` → `~/work/hqc`. */
+export function homePath(p: string): string {
+  return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~');
 }

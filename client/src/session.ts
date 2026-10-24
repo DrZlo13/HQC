@@ -123,8 +123,8 @@ export class ChatSession {
     return o.ids as string[];
   }
 
-  approve(requestId: string, optionId: string): Promise<void> {
-    return this.api.approve(this.id, requestId, optionId);
+  approve(requestId: string, optionId: string, message?: string): Promise<void> {
+    return this.api.approve(this.id, requestId, optionId, message);
   }
 
   answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void> {

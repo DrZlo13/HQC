@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
-// Rendering of chat cards from examples/wire (SPEC §4, §10.1).
+// Rendering of the chat feed from examples/wire (SPEC §4, §10.1), T26 markup: tool groups,
+// the permission card with its hotkeys and text answer, messages, service lines.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
@@ -8,8 +9,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEvent, parseServerFrame, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
-import { ActivityLine, BusyIndicator, ChatItems, onlyRequests, type ChatActions } from '../src/ui/cards';
-import { CANONICAL_LABELS, POLICY_HINT_LABELS } from '../src/ui/labels';
+import { ActivityLine, ChatItems, onlyRequests, type ChatActions } from '../src/ui/cards';
+import { CANONICAL_LABELS } from '../src/ui/labels';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const raw = (name: string): any => JSON.parse(readFileSync(join(WIRE, `${name}.json`), 'utf8'));
@@ -25,6 +26,8 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
+const NOW = Date.parse('2026-10-22T10:30:00Z');
+
 function show(timeline: Timeline, over: Partial<ChatActions> = {}) {
   const actions: ChatActions = {
     timeline,
@@ -33,7 +36,7 @@ function show(timeline: Timeline, over: Partial<ChatActions> = {}) {
     resend: vi.fn(),
     discard: vi.fn(),
     openArtifact: vi.fn(),
-    now: () => Date.parse('2026-10-22T10:30:00Z'),
+    now: () => NOW,
     ...over,
   };
   root = document.createElement('div');
@@ -46,6 +49,30 @@ function show(timeline: Timeline, over: Partial<ChatActions> = {}) {
 const withSeq = (seq: number) => (e: any) => {
   e.seq = seq;
 };
+
+const optionButtons = () => [...root.querySelectorAll<HTMLButtonElement>('.perm button[data-option]')];
+const buttonByText = (text: string) =>
+  [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === text);
+const key = (k: string) => act(() => void document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true })));
+
+const call = (seq: number, call_id: string, tool: string, args: object) =>
+  ev('event.tool.call', (e) => {
+    e.seq = seq;
+    e.ts = new Date(Date.parse('2026-10-22T10:00:00Z') + seq * 1000).toISOString();
+    e.payload = { call_id, tool, args_preview: JSON.stringify(args) };
+  });
+const result = (seq: number, call_id: string, error = false) =>
+  ev('event.tool.result', (e) => {
+    e.seq = seq;
+    e.ts = new Date(Date.parse('2026-10-22T10:00:00Z') + seq * 1000).toISOString();
+    e.payload = { ...e.payload, call_id, error, result_preview: `out ${call_id}`, duration_ms: 1000 };
+    if (!error) delete e.payload.error_text;
+  });
+const agentText = (seq: number, text: string, final: boolean) =>
+  ev('event.agent.message', (e) => {
+    e.seq = seq;
+    e.payload = { text, final };
+  });
 
 describe('every example event renders', () => {
   const names = readdirSync(WIRE)
@@ -94,45 +121,60 @@ describe('unknown and invalid events', () => {
   });
 });
 
-describe('approval.request', () => {
+describe('approval.request (T26 card)', () => {
   it('has exactly one button per option, captioned by canonical', () => {
     const t = new Timeline();
     t.apply(ev('event.approval.request'));
     show(t);
-    const buttons = [...root.querySelectorAll('.card-approval button')];
     const options = raw('event.approval.request').payload.options;
-    expect(buttons.map((b) => b.getAttribute('data-option'))).toEqual(options.map((o: any) => o.id));
-    expect(buttons.map((b) => b.textContent)).toEqual(
-      options.map((o: any) => CANONICAL_LABELS[o.canonical as keyof typeof CANONICAL_LABELS]),
-    );
+    const buttons = optionButtons();
+    expect(buttons.map((b) => b.getAttribute('data-option')).sort()).toEqual(options.map((o: any) => o.id).sort());
+    for (const o of options) {
+      const b = buttons.find((x) => x.getAttribute('data-option') === o.id)!;
+      expect(b.textContent).toContain(CANONICAL_LABELS[o.canonical as keyof typeof CANONICAL_LABELS]);
+    }
+    // «Разрешить» first with ⏎, «Отклонить» with Esc.
+    expect(buttons[0].getAttribute('data-canonical')).toBe('once');
+    expect(buttons[0].querySelector('.kbd')!.textContent).toBe('⏎');
+    expect(root.querySelector('[data-option="deny"] .kbd')!.textContent).toBe('Esc');
   });
 
-  it('captions the card with policy_hint, and nothing without it', () => {
+  it('says what is asked, for how long, and shows the command', () => {
     const t = new Timeline();
-    t.apply(ev('event.approval.request', withSeq(1)));
-    t.apply(
-      ev('event.approval.request', (e) => {
-        e.seq = 2;
-        e.event_id = '0199f3a2-7c10-7000-8000-0000000001a1';
-        e.payload.request_id = 'req-2';
-        e.payload.policy_hint = 'deny';
-      }),
-    );
-    t.apply(
-      ev('event.approval.request', (e) => {
-        e.seq = 3;
-        e.event_id = '0199f3a2-7c10-7000-8000-0000000001a2';
-        e.payload.request_id = 'req-3';
-        delete e.payload.policy_hint;
-      }),
-    );
+    t.apply(ev('event.approval.request'));
     show(t);
-    const titles = [...root.querySelectorAll('.card-approval .card-title')].map((c) => c.textContent);
-    expect(titles).toEqual([
-      `Разрешение · Bash · ${POLICY_HINT_LABELS.allow}`,
-      `Разрешение · Bash · ${POLICY_HINT_LABELS.deny}`,
-      'Разрешение · Bash',
-    ]);
+    expect(root.querySelector('.perm-title')!.textContent).toBe('Агент хочет выполнить команду');
+    expect(root.querySelector('.perm-sub')!.textContent).toBe('Bash');
+    expect(root.querySelector('.perm-what')!.textContent).toBe('$ cargo test');
+    // ts 10:00:00, now 10:30:00.
+    expect(root.querySelector('.perm-timer')!.textContent).toBe('ждёт 30:00');
+  });
+
+  it('explains policy_hint allow and a path outside the workspace, nothing otherwise', () => {
+    const req = (seq: number, id: string, description: string, hint?: string) =>
+      ev('event.approval.request', (e) => {
+        e.seq = seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-0000000001b${seq}`;
+        e.payload.request_id = id;
+        e.payload.description = description;
+        if (hint) e.payload.policy_hint = hint;
+        else delete e.payload.policy_hint;
+      });
+    const t = new Timeline();
+    t.apply(req(1, 'r1', 'List root directory\nls /', 'allow'));
+    t.apply(req(2, 'r2', 'cargo test', 'allow'));
+    t.apply(req(3, 'r3', 'Show a file\ncat ~/notes.txt'));
+    t.apply(req(4, 'r4', 'ls src'));
+    show(t, { workspaceRoot: '/Users/me/work/hqc' });
+    const cards = [...root.querySelectorAll('.perm')];
+    expect(cards[0].querySelector('.perm-sub')!.textContent).toBe('Bash · List root directory');
+    expect(cards[0].querySelector('.perm-what')!.textContent).toBe('$ ls /');
+    expect(cards[0].querySelector('.perm-note')!.textContent).toBe(
+      'Правило воркера разрешает Bash, но Claude Code спросил сам: путь / вне рабочей папки ~/work/hqc.',
+    );
+    expect(cards[1].querySelector('.perm-note')!.textContent).toBe('Правило воркера разрешает Bash, но Claude Code спросил сам.');
+    expect(cards[2].querySelector('.perm-note')!.textContent).toBe('Путь ~/notes.txt вне рабочей папки ~/work/hqc.');
+    expect(cards[3].querySelector('.perm-note')).toBeNull();
   });
 
   it("uses the agent's label for an unknown canonical and keeps the agent's option set", () => {
@@ -146,11 +188,11 @@ describe('approval.request', () => {
       }),
     );
     show(t);
-    const buttons = [...root.querySelectorAll('.card-approval button')].map((b) => b.textContent);
+    const buttons = optionButtons().map((b) => b.childNodes[0].textContent);
     expect(buttons).toEqual(['Proceed with edits', CANONICAL_LABELS.deny]);
   });
 
-  it('sends the option id on click, then shows the answer instead of buttons', async () => {
+  it('sends the option id on click, then folds into a row that can show the request again', async () => {
     const t = new Timeline();
     t.apply(ev('event.approval.request', withSeq(1)));
     const { actions, draw } = show(t);
@@ -160,9 +202,14 @@ describe('approval.request', () => {
 
     t.apply(ev('event.approval.response', (e) => ((e.seq = 2), (e.payload.option_id = 'allow_session'))));
     draw();
-    expect(root.querySelectorAll('.card-approval button').length).toBe(0);
-    expect(root.querySelector('.card-approval .outcome')!.textContent).toContain(CANONICAL_LABELS.session);
-    expect(root.querySelector('.line-approval')!.textContent).toContain('Bash');
+    expect(optionButtons()).toHaveLength(0);
+    expect(root.querySelector('.perm-card')).toBeNull();
+    const row = root.querySelector('.perm-done-row')!;
+    expect(row.textContent).toContain('$ cargo test');
+    expect(row.textContent).toContain('· разрешено до конца сессии');
+    await act(async () => buttonByText('Показать запрос снова')!.click());
+    expect(root.querySelector('.perm-card .outcome')!.textContent).toBe('Ответ: разрешено до конца сессии');
+    expect(optionButtons()).toHaveLength(0);
   });
 
   it('removes the buttons on approval.cancel', () => {
@@ -170,17 +217,97 @@ describe('approval.request', () => {
     t.apply(ev('event.approval.request', withSeq(1)));
     t.apply(ev('event.approval.cancel', withSeq(2)));
     show(t);
-    expect(root.querySelectorAll('.card-approval button').length).toBe(0);
-    expect(root.querySelector('.card-approval .outcome')!.textContent).toContain('воркер перезапущен');
+    expect(optionButtons()).toHaveLength(0);
+    expect(root.querySelector('.perm-done-row .outcome')!.textContent).toContain('воркер перезапущен');
   });
 
   it('shows the error if the hub refuses the answer', async () => {
     const t = new Timeline();
     t.apply(ev('event.approval.request'));
     show(t, { approve: async () => Promise.reject(new Error('request is not open')) });
-    await act(async () => root.querySelector<HTMLButtonElement>('.card-approval button')!.click());
+    await act(async () => optionButtons()[0].click());
     await act(async () => {});
-    expect(root.querySelector('.card-approval .error-text')!.textContent).toContain('request is not open');
+    expect(root.querySelector('.perm .error-text')!.textContent).toContain('request is not open');
+  });
+
+  it('Enter allows once and Esc denies while the card has the keys and no field has the focus', async () => {
+    const t = new Timeline();
+    t.apply(ev('event.approval.request', withSeq(1)));
+    const { actions } = show(t, { hotkeyRequest: 'req-1' });
+    await key('Enter');
+    expect(actions.approve).toHaveBeenLastCalledWith('req-1', 'allow');
+    await act(async () => {});
+    await key('Escape');
+    expect(actions.approve).toHaveBeenLastCalledWith('req-1', 'deny');
+    await act(async () => {});
+    expect(actions.approve).toHaveBeenCalledTimes(2);
+
+    // Typing somewhere: the keys belong to the field.
+    const input = document.createElement('textarea');
+    document.body.appendChild(input);
+    input.focus();
+    await key('Enter');
+    await key('Escape');
+    expect(actions.approve).toHaveBeenCalledTimes(2);
+    input.remove();
+  });
+
+  it('a card without the keys ignores Enter and Esc', async () => {
+    const t = new Timeline();
+    t.apply(ev('event.approval.request', withSeq(1)));
+    const { actions } = show(t);
+    await key('Enter');
+    await key('Escape');
+    expect(actions.approve).not.toHaveBeenCalled();
+  });
+
+  it('answers with text instead: a denial with message, then shown as the user\'s message', async () => {
+    const t = new Timeline();
+    t.apply(ev('event.approval.request', withSeq(1)));
+    const { actions, draw } = show(t, { hotkeyRequest: 'req-1' });
+    await act(async () => buttonByText('Ответить текстом вместо этого')!.click());
+    const area = root.querySelector<HTMLTextAreaElement>('.perm-reply textarea')!;
+    expect(root.querySelector('.perm-reply-hint')!.textContent).toBe('Ответ отклонит cargo test и уйдёт агенту');
+    // The keys of the card do not fire while typing.
+    area.focus();
+    await key('Enter');
+    expect(actions.approve).not.toHaveBeenCalled();
+    await act(() => {
+      area.value = 'Сначала собери, тесты потом';
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => buttonByText('Отклонить и отправить')!.click());
+    expect(actions.approve).toHaveBeenCalledWith('req-1', 'deny', 'Сначала собери, тесты потом');
+
+    t.apply(ev('event.approval.response.message', (e) => ((e.seq = 2), (e.payload.message = 'Сначала собери, тесты потом'))));
+    draw();
+    expect(root.querySelector('.perm-done-row .outcome')!.textContent).toBe('· отклонено, ответ текстом');
+    const msg = root.querySelector('.msg-user.msg-answer')!;
+    expect(msg.querySelector('.msg-bubble')!.textContent).toBe('Сначала собери, тесты потом');
+  });
+
+  it('«Вернуться к запросу» gives the buttons back', async () => {
+    const t = new Timeline();
+    t.apply(ev('event.approval.request', withSeq(1)));
+    show(t);
+    await act(async () => buttonByText('Ответить текстом вместо этого')!.click());
+    expect(optionButtons()).toHaveLength(0);
+    await act(async () => buttonByText('Вернуться к запросу')!.click());
+    expect(optionButtons()).toHaveLength(5);
+  });
+
+  it('takes over the tool.call right before it: one card, the command from the call', () => {
+    const t = new Timeline();
+    t.apply(call(1, 'c1', 'Bash', { command: 'ls /', description: 'List root directory' }));
+    t.apply(
+      ev('event.approval.request', (e) => {
+        e.seq = 2;
+        e.payload.description = 'List root directory\nls /';
+      }),
+    );
+    show(t);
+    expect(root.querySelector('.tool-group')).toBeNull();
+    expect(root.querySelector('.perm-what')!.textContent).toBe('$ ls /');
   });
 });
 
@@ -218,31 +345,90 @@ describe('clarify.request', () => {
   });
 });
 
-describe('tool cards', () => {
-  it('folds the result into the call card, collapsed, with a preview', () => {
+describe('tool groups (T26)', () => {
+  it('folds the result into the call row, collapsed, opened shows the result', async () => {
     const t = new Timeline();
     t.apply(ev('event.tool.call', withSeq(1)));
     show(t);
-    let card = root.querySelector('details.card-tool')!;
-    expect(card.classList.contains('tool-running')).toBe(true);
+    expect(root.querySelector('.tool-group')!.classList.contains('tool-running')).toBe(true);
 
     t.apply(ev('event.tool.result', withSeq(2)));
     show(t);
-    const cards = root.querySelectorAll('details.card-tool');
-    expect(cards.length).toBe(1);
-    card = cards[0];
-    expect(card.hasAttribute('open')).toBe(false);
-    expect(card.classList.contains('tool-error')).toBe(true);
-    expect(card.querySelector('summary')!.textContent).toContain('Bash');
-    expect(card.querySelector('summary')!.textContent).toContain('cargo test');
-    expect(card.textContent).toContain('1 test failed');
+    const groups = root.querySelectorAll('.tool-group');
+    expect(groups).toHaveLength(1);
+    const g = groups[0];
+    expect(g.classList.contains('tool-error')).toBe(true);
+    expect(g.querySelector('.tool-group-head')!.getAttribute('aria-expanded')).toBe('false');
+    expect(g.querySelector('.tool-row')).toBeNull();
+    await act(async () => g.querySelector<HTMLButtonElement>('.tool-group-head')!.click());
+    const row = g.querySelector('details.tool-row')!;
+    expect(row.hasAttribute('open')).toBe(false);
+    expect(row.classList.contains('tool-error')).toBe(true);
+    expect(row.querySelector('summary')!.textContent).toContain('$');
+    expect(row.querySelector('summary')!.textContent).toContain('cargo test');
+    expect(row.querySelector('.mark-error')).not.toBeNull();
+    expect(row.textContent).toContain('1 test failed');
   });
 
-  it('shows a result without its call as its own card', () => {
+  it('shows a result without its call as a group of its own', () => {
     const t = new Timeline();
     t.apply(ev('event.tool.result'));
     show(t);
-    expect(root.querySelectorAll('details.card-tool').length).toBe(1);
+    expect(root.querySelectorAll('.tool-group')).toHaveLength(1);
+  });
+
+  it('captions a group with the interim message before it, cut to one line', async () => {
+    const t = new Timeline();
+    t.apply(agentText(1, 'Пересобираю проект.\nЗатем прогоню **тесты**.', false));
+    t.apply(call(2, 'a', 'Bash', { command: 'ninja -C build' }));
+    t.apply(result(4, 'a'));
+    t.apply(call(5, 'b', 'Bash', { command: 'ctest' }));
+    t.apply(result(40, 'b'));
+    t.apply(agentText(41, 'Готово.', true));
+    show(t);
+    const g = root.querySelector('.tool-group')!;
+    expect(g.querySelector('.tool-caption')!.textContent).toBe('Пересобираю проект. Затем прогоню тесты .');
+    expect(g.querySelector('.tool-stats')!.textContent).toBe('· 2 команды · 38 с');
+    expect(g.querySelector('.mark-ok')).not.toBeNull();
+    // The interim message is the caption, not a message of its own.
+    expect(root.querySelectorAll('.msg-agent')).toHaveLength(1);
+    await act(async () => g.querySelector<HTMLButtonElement>('.tool-group-head')!.click());
+    expect(g.querySelector('.tool-group-text strong')!.textContent).toBe('тесты');
+    const rows = [...g.querySelectorAll('.tool-row summary')].map((s) => s.querySelector('.tool-line')!.textContent);
+    expect(rows).toEqual(['ninja -C build', 'ctest']);
+  });
+
+  it('without an interim message says «N команд · время»; other tools show their argument', async () => {
+    const t = new Timeline();
+    t.apply(agentText(1, 'Сделано.', true));
+    t.apply(call(2, 'a', 'Read', { file_path: 'Cargo.toml' }));
+    t.apply(result(3, 'a'));
+    t.apply(call(4, 'b', 'Grep', { pattern: 'TODO' }));
+    t.apply(result(5, 'b', true));
+    show(t);
+    const g = root.querySelector('.tool-group')!;
+    expect(g.querySelector('.tool-caption')).toBeNull();
+    expect(g.querySelector('.tool-stats')!.textContent).toBe('2 команды · 3 с');
+    expect(g.classList.contains('tool-error')).toBe(true);
+    await act(async () => g.querySelector<HTMLButtonElement>('.tool-group-head')!.click());
+    const rows = [...g.querySelectorAll('.tool-row summary')];
+    expect(rows[0].querySelector('.tool-name')!.textContent).toBe('Read');
+    expect(rows[0].querySelector('.tool-line')!.textContent).toBe('Cargo.toml');
+    expect(rows[1].querySelector('.mark-error')).not.toBeNull();
+  });
+
+  it('a final answer is not a caption, and the next message closes the group', () => {
+    const t = new Timeline();
+    t.apply(call(1, 'a', 'Bash', { command: 'ls' }));
+    t.apply(result(2, 'a'));
+    t.apply(agentText(3, 'Смотрю дальше.', false));
+    t.apply(call(4, 'b', 'Bash', { command: 'pwd' }));
+    show(t);
+    const groups = root.querySelectorAll('.tool-group');
+    expect(groups).toHaveLength(2);
+    expect(groups[0].querySelector('.tool-caption')).toBeNull();
+    expect(groups[1].querySelector('.tool-caption')!.textContent).toBe('Смотрю дальше.');
+    expect(groups[1].classList.contains('tool-running')).toBe(true);
   });
 });
 
@@ -251,11 +437,11 @@ describe('messages', () => {
     const t = new Timeline();
     t.addPending('op-1', 'Run the tests');
     show(t);
-    expect(root.querySelector('.bubble-pending')!.textContent).toContain('Run the tests');
+    expect(root.querySelector('.msg-pending')!.textContent).toContain('Run the tests');
     t.apply(ev('event.user.message'));
     show(t);
-    expect(root.querySelector('.bubble-pending')).toBeNull();
-    expect(root.querySelectorAll('.bubble-user').length).toBe(1);
+    expect(root.querySelector('.msg-pending')).toBeNull();
+    expect(root.querySelectorAll('.msg-user')).toHaveLength(1);
   });
 
   it('offers resend for a message the hub did not accept', async () => {
@@ -263,8 +449,8 @@ describe('messages', () => {
     t.addPending('op-9', 'hi');
     t.failPending('op-9', 'HTTP 502');
     const { actions } = show(t);
-    expect(root.querySelector('.bubble-failed')!.textContent).toContain('HTTP 502');
-    await act(async () => root.querySelector<HTMLButtonElement>('.bubble-failed button')!.click());
+    expect(root.querySelector('.msg-failed')!.textContent).toContain('HTTP 502');
+    await act(async () => buttonByText('Ещё раз')!.click());
     expect(actions.resend).toHaveBeenCalledWith('op-9');
   });
 
@@ -274,6 +460,17 @@ describe('messages', () => {
     show(t);
     expect(root.querySelector('.delivery-failed')).not.toBeNull();
     expect(t.hasFailedDelivery()).toBe(true);
+  });
+
+  it('puts the usage of a turn under its final answer, muted', () => {
+    const t = new Timeline();
+    t.apply(agentText(1, 'Все тесты прошли.', true));
+    t.apply(ev('event.status', (e) => ((e.seq = 2), (e.payload = { state: 'idle' }))));
+    t.apply(ev('event.usage', withSeq(3)));
+    show(t);
+    const meta = root.querySelector('.msg-final > .meta')!;
+    expect(meta.querySelector('.usage')!.textContent).toBe(' · 1,2k → 340 токенов · кэш 9k · $0.012');
+    expect(root.querySelector('.line-usage')).toBeNull();
   });
 
   it('updates delivery from a delivery frame, not from the same event again', () => {
@@ -319,7 +516,10 @@ describe('messages', () => {
     t.apply(status(6, 'error', 'claude exited with code 1'));
     show(t);
     const lines = [...root.querySelectorAll('.line')].map((l) => l.textContent);
-    expect(lines).toEqual(['Session created', 'ошибка · claude exited with code 1']);
+    expect(lines).toHaveLength(2);
+    // session_created says when the session began (Main board).
+    expect(lines[0]).toMatch(/^Сессия начата сегодня в \d\d:\d\d$/);
+    expect(lines[1]).toBe('Ошибка · claude exited with code 1');
     expect(t.events()).toHaveLength(6);
   });
 
@@ -341,74 +541,53 @@ describe('messages', () => {
   });
 });
 
-describe('turn indicator (T13): from the session state, no events of its own', () => {
-  const call = (seq: number, call_id: string, tool: string) =>
-    ev('event.tool.call', (e) => {
-      e.seq = seq;
-      e.payload = { ...e.payload, call_id, tool };
-    });
-  const result = (seq: number, call_id: string) =>
-    ev('event.tool.result', (e) => {
-      e.seq = seq;
-      e.payload = { ...e.payload, call_id };
-    });
-
+describe('turn indicator (T13, T26): from the session state, no events of its own', () => {
   function draw(state: any, timeline = new Timeline()) {
     root = document.createElement('div');
     document.body.appendChild(root);
-    act(() =>
-      render(
-        <>
-          <header>
-            <BusyIndicator state={state} />
-          </header>
-          <ActivityLine state={state} timeline={timeline} />
-        </>,
-        root,
-      ),
-    );
-    return {
-      busy: root.querySelector('header .busy'),
-      line: root.querySelector('.activity')?.textContent ?? null,
-    };
+    act(() => render(<ActivityLine state={state} timeline={timeline} now={() => NOW} />, root));
+    return root.querySelector('.activity');
   }
 
-  it('running: spinner in the header and "агент работает"', () => {
-    const r = draw('running');
-    expect(r.busy).not.toBeNull();
-    expect(r.line).toBe('агент работает');
+  it('running: «Агент работает» with a pulse', () => {
+    const line = draw('running')!;
+    expect(line.textContent).toBe('Агент работает');
+    expect(line.querySelector('.pulse-dot')).not.toBeNull();
   });
 
-  it('running with the last tool.call unanswered: "выполняет <tool>"', () => {
+  it('running with the last tool.call unanswered: «Выполняется <команда> <время>»', () => {
     const t = new Timeline();
-    t.apply(call(1, 'a', 'Read'));
+    t.apply(call(1, 'a', 'Read', { file_path: 'a.rs' }));
     t.apply(result(2, 'a'));
-    t.apply(call(3, 'b', 'Bash'));
-    expect(draw('running', t).line).toBe('выполняет Bash');
+    t.apply(
+      ev('event.tool.call', (e) => {
+        e.seq = 3;
+        e.ts = '2026-10-22T10:28:36Z';
+        e.payload = { call_id: 'b', tool: 'Bash', args_preview: '{"command":"cd build && ctest"}' };
+      }),
+    );
+    const line = draw('running', t)!;
+    expect(line.querySelector('.activity-label')!.textContent).toBe('Выполняется');
+    expect(line.querySelector('.activity-what')!.textContent).toBe('cd build && ctest');
+    expect(line.querySelector('.activity-timer')!.textContent).toBe('1:24');
     t.apply(result(4, 'b'));
     render(null, root);
-    expect(draw('running', t).line).toBe('агент работает');
+    expect(draw('running', t)!.textContent).toBe('Агент работает');
   });
 
-  it('queued and waiting: their line, no spinner in the header', () => {
-    for (const [state, text] of [
-      ['queued', 'ввод в очереди'],
-      ['waiting', 'ждёт подтверждения'],
-    ]) {
-      const t = new Timeline();
-      t.apply(call(1, 'a', 'Bash'));
-      const r = draw(state, t);
-      expect(r.busy).toBeNull();
-      expect(r.line).toBe(text);
-      render(null, root);
-    }
+  it('queued and waiting: their line; waiting with its request on screen: none', () => {
+    expect(draw('queued')!.textContent).toBe('Ввод в очереди');
+    render(null, root);
+    expect(draw('waiting')!.textContent).toBe('Ждёт подтверждения');
+    render(null, root);
+    const t = new Timeline();
+    t.apply(ev('event.approval.request', withSeq(1)));
+    expect(draw('waiting', t)).toBeNull();
   });
 
   it('nothing in other states', () => {
     for (const state of ['idle', 'error', 'archived', 'worker_offline', 'locked_vscode', 'unknown']) {
-      const r = draw(state);
-      expect(r.busy).toBeNull();
-      expect(r.line).toBeNull();
+      expect(draw(state)).toBeNull();
       render(null, root);
     }
   });
@@ -457,13 +636,16 @@ describe("worker's service session (T17, SPEC §10.2)", () => {
     expect(lines[1].querySelector('.log-level')!.textContent).toBe('ошибка');
   });
 
-  it('shows the confirmation of a new folder with once / deny and sends the answer', async () => {
+  it('shows the confirmation of a new folder with once / deny, no text answer, and sends the answer', async () => {
     const t = new Timeline();
     t.apply(workerRequest(1));
     const { actions } = show(t);
-    expect(root.querySelector('.card-approval .card-title')!.textContent).toContain('сессии в новой папке');
-    const buttons = [...root.querySelectorAll<HTMLButtonElement>('.card-approval button')];
-    expect(buttons.map((b) => b.textContent)).toEqual([CANONICAL_LABELS.once, CANONICAL_LABELS.deny]);
+    expect(root.querySelector('.perm-title')!.textContent).toBe('Воркер спрашивает разрешения');
+    expect(root.querySelector('.perm-sub')!.textContent).toBe('сессии в новой папке');
+    expect(root.querySelector('.perm-what')!.textContent).toBe(raw('worker.worker.approval.request').payload.description);
+    const buttons = optionButtons();
+    expect(buttons.map((b) => b.childNodes[0].textContent)).toEqual([CANONICAL_LABELS.once, CANONICAL_LABELS.deny]);
+    expect(buttonByText('Ответить текстом вместо этого')).toBeUndefined();
     await act(async () => buttons[0].click());
     expect(actions.approve).toHaveBeenCalledWith(raw('worker.worker.approval.request').payload.request_id, 'once');
   });

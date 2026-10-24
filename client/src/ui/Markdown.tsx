@@ -9,6 +9,7 @@ import { Lexer, getDefaults, type MarkedToken, type Token, type Tokens } from 'm
 import type { ComponentChildren } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { copyText } from '../clipboard';
+import { IconCopy } from './icons';
 
 /** GFM with single newlines as <br>, as chat messages are written. */
 export function parseMarkdown(src: string): Token[] {
@@ -225,7 +226,7 @@ export function CodeBlock({
       <div class="md-code-bar">
         <span class="md-code-lang">{title ?? lang}</span>
         {extra}
-        <CopyButton text={code} />
+        <CopyButton text={code} withText />
       </div>
       <pre>
         <code>{diff ? diffLines(code) : code}</code>
@@ -310,8 +311,9 @@ function FilePath({ path, children }: { path: string; children: ComponentChildre
   );
 }
 
-/** Puts `text` into the clipboard as is and says so for a moment. */
-export function CopyButton({ text, label = 'Копировать' }: { text: string; label?: string }) {
+/** Puts `text` into the clipboard as is and says so for a moment. `withText`: the caption
+ *  next to the icon (code blocks), otherwise the icon alone. */
+export function CopyButton({ text, label = 'Копировать', withText }: { text: string; label?: string; withText?: boolean }) {
   const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle');
   useEffect(() => {
     if (state === 'idle') return;
@@ -321,7 +323,7 @@ export function CopyButton({ text, label = 'Копировать' }: { text: str
   return (
     <button
       type="button"
-      class={`btn-copy ${state === 'idle' ? 'btn-copy-idle' : ''}`}
+      class={`btn-copy ${state === 'idle' && !withText ? 'btn-copy-idle' : ''}`}
       aria-label={label}
       title={label}
       onClick={(e) =>
@@ -336,10 +338,10 @@ export function CopyButton({ text, label = 'Копировать' }: { text: str
       ) : state === 'failed' ? (
         'Не скопировалось'
       ) : (
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="11" height="11" rx="2" />
-          <path d="M5 15V5a2 2 0 0 1 2-2h10" />
-        </svg>
+        <>
+          <IconCopy />
+          {withText && label}
+        </>
       )}
     </button>
   );

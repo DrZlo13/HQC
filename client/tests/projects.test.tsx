@@ -61,6 +61,18 @@ const $$ = (sel: string) => [...root.querySelectorAll<HTMLElement>(sel)];
 const button = (text: string, scope = '') =>
   $$(`${scope} button`).find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
 
+/** A project in the rail, by its name (the rail shows initials, the name is the label). */
+const projectRow = (name: string) => $$('.project-row').find((r) => r.getAttribute('aria-label')?.includes(name));
+
+/** An item of the chat's «Ещё» menu, opening the menu first. */
+async function menuItem(cls: string): Promise<HTMLButtonElement | null> {
+  if (!$('.menu')) {
+    $<HTMLButtonElement>('.btn-more')!.click();
+    await until('menu', () => $('.menu'));
+  }
+  return $<HTMLButtonElement>(`.menu ${cls}`);
+}
+
 function type(sel: string, value: string) {
   const el = $<HTMLInputElement>(sel)!;
   el.value = value;
@@ -105,18 +117,21 @@ afterAll(async () => {
 });
 
 it('lists projects and the sessions of the current one', async () => {
-  await until('personal project', () => $$('.project-row').find((r) => r.textContent?.includes('Личный')));
-  expect($('.project-row.is-current')!.textContent).toContain('Личный');
+  await until('personal project', () => projectRow('Личный'));
+  expect($('.project-row.is-current')!.getAttribute('aria-label')).toBe('Личный');
+  expect($('.project-row.is-current')!.textContent).toBe('Л');
   await until('its sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
 });
 
 it('creates a project, adds a workspace from the folder tree and starts a session there', async () => {
   promptAnswer = 'KiCad';
-  button('+ Проект')!.click();
+  $<HTMLButtonElement>('button[aria-label="Новый проект"]')!.click();
   await until('workspaces screen', () => $('.workspaces'));
   expect(location.hash).toMatch(/^#\/p\/[^/]+\/workspaces$/);
   const pid = location.hash.split('/')[2];
-  await until('current project', () => $('.project-row.is-current')?.textContent?.includes('KiCad'));
+  await until('current project', () => $('.project-row.is-current')?.getAttribute('aria-label') === 'KiCad');
+  expect($('.project-row.is-current')!.textContent).toBe('KI');
+  expect($('.side-head .project-title')!.textContent).toBe('KiCad');
   expect($$('.session-row')).toHaveLength(0);
   await until('no workspaces yet', () => $('.workspaces .empty-inline'));
 
@@ -174,7 +189,7 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
 });
 
 it('switches projects from the left column and deletes a project', async () => {
-  const personal = $$('.project-row').find((r) => r.textContent?.includes('Личный'))!;
+  const personal = projectRow('Личный')!;
   location.hash = personal.getAttribute('href')!;
   await until('personal sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
   // The personal project has no delete button.
@@ -188,15 +203,15 @@ it('switches projects from the left column and deletes a project', async () => {
   location.hash = `#/p/${kicad.id}/workspaces`;
   promptAnswer = 'KiCad boards';
   (await until('rename button', () => $('.btn-rename-project') as HTMLButtonElement | null))!.click();
-  await until('renamed', () => $$('.project-row').find((r) => r.textContent?.includes('KiCad boards')));
+  await until('renamed', () => projectRow('KiCad boards'));
   expect((await app.api.projects()).find((p) => p.id === kicad.id)!.slug).toBe('kicad');
   $<HTMLButtonElement>('.btn-delete-project')!.click();
-  await until('gone', () => !$$('.project-row').some((r) => r.textContent?.includes('KiCad')));
+  await until('gone', () => !projectRow('KiCad'));
   expect((await app.api.projects()).some((p) => p.id === kicad.id)).toBe(false);
 });
 
 it("lists the worker's service session apart: no input, request cards, «только запросы» (T17)", async () => {
-  const personal = $$('.project-row').find((r) => r.textContent?.includes('Личный'))!;
+  const personal = projectRow('Личный')!;
   location.hash = personal.getAttribute('href')!;
   const row = await until('workers group', () =>
     $$('.worker-list .worker-row').find((r) => r.textContent?.includes('home-mac')),
@@ -210,12 +225,13 @@ it("lists the worker's service session apart: no input, request cards, «тол�
   location.hash = row.getAttribute('href')!;
   await until('log lines', () => $$('.line-worker-log').length === 3);
   expect($('.chat textarea')).toBeNull();
-  expect($('.chat .muted.small')!.textContent).toBe('служебная сессия воркера');
+  expect($('.chat .chat-system-note')!.textContent).toBe('служебная сессия воркера');
   expect($('.line-worker-log.level-error .log-text')!.textContent).toContain('known folders not saved');
   button('Только запросы')!.click();
-  await until('filtered', () => $$('.line-worker-log').length === 0 && $('.chat .card-approval'));
-  button('Разрешить', '.card-approval')!.click();
-  await until('answered', () => $('.card-approval .outcome')?.textContent?.includes('Разрешить'));
+  await until('filtered', () => $$('.line-worker-log').length === 0 && $('.chat .perm'));
+  expect($('.perm-title')!.textContent).toBe('Воркер спрашивает разрешения');
+  $<HTMLButtonElement>('.perm button[data-canonical="once"]')!.click();
+  await until('answered', () => $('.perm-done-row .outcome')?.textContent?.includes('разрешено'));
   button('Только запросы')!.click();
   await until('unfiltered', () => $$('.line-worker-log').length === 3);
 });
@@ -224,7 +240,7 @@ it("lists the worker's service session apart: no input, request cards, «тол�
 // «ведётся в VS Code», take it over and write.
 it('imports from Claude Code and takes a session over', async () => {
   promptAnswer = 'Платы';
-  button('+ Проект')!.click();
+  $<HTMLButtonElement>('button[aria-label="Новый проект"]')!.click();
   await until('workspaces screen', () => $('.workspaces'));
   const pid = location.hash.split('/')[2];
   button('Импорт из Claude Code')!.click();
@@ -257,13 +273,17 @@ it('imports from Claude Code and takes a session over', async () => {
   );
   location.hash = link.getAttribute('href')!;
   await until('history', () => $('.chat')?.textContent?.includes('VSCODE-DONE'));
-  await until('locked', () => $('.locked-banner'));
-  expect($('.chat .state')!.textContent).toContain('ведётся в VS Code');
-  expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(true);
-  expect($<HTMLTextAreaElement>('.chat textarea')!.placeholder).toBe('Ведётся в VS Code');
+  // Last driven by VS Code, nobody holds it now: the banner instead of the composer, with
+  // «Забрать сюда».
+  const banner = await until('locked', () => $('.handover'));
+  expect(banner.classList.contains('handover-held')).toBe(false);
+  expect(banner.querySelector('.handover-title')!.textContent).toBe('Последней сессию вела VS Code на home-mac.');
+  expect(banner.textContent).not.toContain('только для чтения');
+  expect($('.chat .state')!.textContent).toBe('Ведётся в VS Code');
+  expect($('.chat textarea')).toBeNull();
 
-  button('Подхватить')!.click();
-  await until('taken over', () => !$('.locked-banner'));
+  button('Забрать сюда')!.click();
+  await until('taken over', () => !$('.handover'));
   await until('system line', () => $('.chat')?.textContent?.includes('Подхвачена из VS Code'));
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
@@ -277,11 +297,12 @@ it('does not take over a session open in VS Code', async () => {
   );
   location.hash = link.getAttribute('href')!;
   const sid = location.hash.split('/').pop()!;
-  const banner = await until('open banner', () => $('.locked-banner.locked-open'));
-  expect(banner.textContent).toContain('Сессия открыта в VS Code');
-  expect(banner.textContent).toContain('закройте её там');
-  expect(button('Подхватить')).toBeUndefined();
-  expect($<HTMLTextAreaElement>('.chat textarea')!.placeholder).toBe('Открыта в VS Code');
+  // Open in VS Code right now: no button, close it there first.
+  const banner = await until('open banner', () => $('.handover.handover-held'));
+  expect(banner.querySelector('.handover-title')!.textContent).toBe('Сессия открыта в VS Code на home-mac.');
+  expect(banner.querySelector('.handover-sub')!.textContent).toBe('Закройте её там, чтобы писать отсюда.');
+  expect(button('Забрать сюда')).toBeUndefined();
+  expect($('.chat textarea')).toBeNull();
   const fork = await until('fork line', () => $('.line-system-session_forked'));
   expect(fork.querySelector('.warn-icon')).not.toBeNull();
   expect(fork.textContent).toContain('не попал в его контекст');
@@ -289,45 +310,47 @@ it('does not take over a session open in VS Code', async () => {
   // The client has not heard of the holder yet (its summaries do not mention it): «Подхватить»
   // is offered and the hub refuses it with its text.
   mock.hideHolder(sid, true);
-  await until('plain banner', () => $('.locked-banner') && !$('.locked-open'));
-  button('Подхватить')!.click();
+  await until('plain banner', () => $('.handover') && !$('.handover-held'));
+  button('Забрать сюда')!.click();
   const notice = await until('notice', () => $('.notice'));
   expect(notice.textContent).toBe('сессия открыта в VS Code: закройте её там и подхватите снова');
   mock.hideHolder(sid, false);
-  await until('open banner again', () => $('.locked-banner.locked-open'));
+  await until('open banner again', () => $('.handover.handover-held'));
 
   mock.closeVsCode(sid);
-  await until('free', () => !$('.locked-banner'));
+  await until('free', () => !$('.handover'));
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
 
 // Archive from the chat header, find the session under «Архив», bring it back, delete it.
 it('archives, restores and deletes a session', async () => {
-  const personal = $$('.project-row').find((r) => r.textContent?.includes('Личный'))!;
+  const personal = projectRow('Личный')!;
   location.hash = personal.getAttribute('href')!;
   const row = await until('a session', () => $$('.session-row').find((r) => r.textContent?.includes('Пустая сессия')));
   const href = row.getAttribute('href')!;
   const sid = href.split('/').pop()!;
   const pid = app.sessions.get(sid)!.project_id;
   location.hash = href;
-  await until('chat with archive button', () => $('.chat') && $('.btn-archive'));
-
-  $<HTMLButtonElement>('.btn-archive')!.click();
-  await until('archived', () => $('.chat .state')?.textContent?.includes('в архиве'));
+  await until('chat with the menu', () => $('.chat') && $('.btn-more'));
+  // «В архив», «Вернуть», «Удалить» live in the «Ещё» menu (T26).
+  expect(await menuItem('.btn-unarchive')).toBeNull();
+  (await menuItem('.btn-archive'))!.click();
+  await until('archived', () => $('.chat .state')?.textContent?.includes('В архиве'));
   await until('gone from the list', () => !$$('.session-row').some((r) => r.getAttribute('href') === href));
-  expect($('.btn-archive')).toBeNull();
+  expect($('.menu')).toBeNull();
+  expect(await menuItem('.btn-archive')).toBeNull();
 
   $<HTMLButtonElement>('.btn-archive-toggle')!.click();
   await until('listed under Архив', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
 
-  $<HTMLButtonElement>('.btn-unarchive')!.click();
-  await until('restored', () => $('.btn-archive'));
+  (await menuItem('.btn-unarchive'))!.click();
+  await until('restored', () => $('.chat .state')?.textContent === 'Свободна');
   $<HTMLButtonElement>('.btn-archive-toggle')!.click();
   await until('back in the list', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
 
-  $<HTMLButtonElement>('.btn-archive')!.click();
-  await until('archived again', () => $('.btn-delete'));
-  $<HTMLButtonElement>('.btn-delete')!.click(); // confirm() is stubbed to true
+  (await menuItem('.btn-archive'))!.click();
+  await until('archived again', () => $('.chat .state')?.textContent?.includes('В архиве'));
+  (await menuItem('.btn-delete'))!.click(); // confirm() is stubbed to true
   await until('deleted', () => !app.sessions.has(sid));
   expect(location.hash).toBe(`#/p/${pid}`);
 });

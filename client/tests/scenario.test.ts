@@ -105,9 +105,44 @@ describe('mock scenario', () => {
     // What the user sees: render the timeline and look for the cards.
     const { renderChatToElement } = await import('./render-helpers');
     const el = renderChatToElement(chat);
-    expect(el.querySelectorAll('.card-tool').length).toBeGreaterThanOrEqual(2);
+    // The Read call in a group captioned by the interim message; the Bash call is the
+    // approval card, folded after the answer.
+    const group = el.querySelector('.tool-group')!;
+    expect(group.querySelector('.tool-caption')!.textContent).toBe('Сейчас посмотрю на проект и запущу тесты.');
+    expect(group.querySelector('.tool-stats')!.textContent).toMatch(/^· 1 команда/);
+    expect(el.querySelector('.perm-done-row')!.textContent).toContain('$ cargo test');
+    expect(el.querySelector('.perm-done-row')!.textContent).toContain('· разрешено');
     expect(el.textContent).toContain('Все 42 теста прошли.');
-    expect(el.querySelectorAll('.card-approval button').length).toBe(0);
+    expect(el.querySelectorAll('.perm button[data-option]').length).toBe(0);
+    chat.close();
+  });
+
+  it('answers a request with text instead: the denial carries it, the agent reads it (T26)', async () => {
+    const me = await api.me();
+    const s = await api.createSession(me.personal_project_id, 'text answer');
+    const chat = new ChatSession(api, socket, s.id);
+    await chat.open();
+    await waitFor(chat, () => find(chat, 'system'));
+    const start = chat.timeline.lastSeq;
+    chat.send('Запусти тесты');
+    const req = await waitFor(chat, () => find(chat, 'approval.request', start));
+    if (req.type !== 'approval.request') throw new Error('unreachable');
+    const deny = req.payload.options.find((o) => o.canonical === 'deny')!;
+    const once = req.payload.options.find((o) => o.canonical === 'once')!;
+    // Text only goes with a deny option.
+    await expect(chat.approve(req.payload.request_id, once.id, 'нет')).rejects.toMatchObject({ status: 400 });
+    await chat.approve(req.payload.request_id, deny.id, 'Сначала собери проект');
+    const resp = await waitFor(chat, () => find(chat, 'approval.response', start));
+    expect(resp.type === 'approval.response' && resp.payload).toMatchObject({ option_id: deny.id, message: 'Сначала собери проект' });
+    const final = await waitFor(chat, () =>
+      chat.timeline.events().find((e) => e.type === 'agent.message' && e.payload.final && e.seq! > start),
+    );
+    expect(final.type === 'agent.message' && final.payload.text).toContain('Сначала собери проект');
+
+    const { renderChatToElement } = await import('./render-helpers');
+    const el = renderChatToElement(chat);
+    expect(el.querySelector('.msg-answer .msg-bubble')!.textContent).toBe('Сначала собери проект');
+    expect(el.querySelector('.perm-done-row')!.textContent).toContain('отклонено, ответ текстом');
     chat.close();
   });
 

@@ -2,7 +2,8 @@ import { useEffect, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import { Chat } from './Chat';
 import { Enroll } from './Enroll';
-import { useSubscription } from './hooks';
+import { useIsPhone, useSubscription } from './hooks';
+import { ProjectRail } from './ProjectRail';
 import { SessionList } from './SessionList';
 import { Settings } from './Settings';
 import { Workspaces } from './Workspaces';
@@ -30,11 +31,12 @@ export function parseRoute(hash: string): Route {
   return { name: 'list' };
 }
 
-/** Routes whose screen is the left column (on a phone, one screen at a time). */
+/** Routes whose screen is the session list (on a phone, one screen at a time). */
 const SIDEBAR_ROUTES = new Set<Route['name']>(['list', 'project']);
 
 export function App({ app }: { app: AppState }) {
   const [route, setRoute] = useState(() => parseRoute(location.hash));
+  const phone = useIsPhone();
   useSubscription((fn) => app.onChange(fn), [app]);
   useEffect(() => {
     const on = () => setRoute(parseRoute(location.hash));
@@ -63,7 +65,7 @@ export function App({ app }: { app: AppState }) {
   let main;
   switch (route.name) {
     case 'session':
-      main = <Chat key={route.id} app={app} sessionId={route.id} />;
+      main = <Chat key={route.id} app={app} sessionId={route.id} phone={phone} />;
       break;
     case 'workspaces':
       main = <Workspaces key={route.projectId} app={app} projectId={route.projectId} />;
@@ -75,13 +77,26 @@ export function App({ app }: { app: AppState }) {
       main = <Enroll app={app} initialCode={route.code} />;
       break;
     default:
-      main = <div class="placeholder muted">Выберите сессию</div>;
+      main = <div class="placeholder">Выберите сессию слева или начните новую</div>;
   }
-  const sidebar = SIDEBAR_ROUTES.has(route.name) ? 'route-list' : '';
+  const current = route.name === 'session' ? route.id : undefined;
+  // Phone: the list is the first screen, everything else replaces it (T26, Mobile-List).
+  if (phone) {
+    return (
+      <div class={`layout layout-phone route-${route.name}`}>
+        {SIDEBAR_ROUTES.has(route.name) ? (
+          <SessionList app={app} current={current} phone />
+        ) : (
+          <main class="main">{main}</main>
+        )}
+      </div>
+    );
+  }
   return (
-    <div class={`layout route-${route.name} ${sidebar}`}>
-      <aside class="sidebar">
-        <SessionList app={app} current={route.name === 'session' ? route.id : undefined} />
+    <div class={`layout route-${route.name}`}>
+      <ProjectRail app={app} />
+      <aside class="sidebar" aria-label="Сессии проекта">
+        <SessionList app={app} current={current} />
       </aside>
       <main class="main">{main}</main>
     </div>

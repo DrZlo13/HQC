@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
+import { IconBack } from './icons';
 import type { AppState } from '../app';
 import type { EnrollInfo, ReplaceableWorker } from '../proto';
 
@@ -82,8 +83,8 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
   return (
     <section class="page">
       <header class="bar">
-        <a class="back" href="#/settings" aria-label="Назад">
-          ‹
+        <a class="back icon-btn" href="#/settings" aria-label="Назад">
+          <IconBack />
         </a>
         <div class="bar-title">
           <div class="title">Регистрация воркера</div>

@@ -51,6 +51,17 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
     }
   };
 
+  // «Сессии VS Code» (T21, SPEC §9.2): the worker mirrors the folder's Claude Code sessions.
+  const toggleMirror = async (w: Workspace, on: boolean) => {
+    setError(null);
+    try {
+      await app.api.patchWorkspace(w.id, { mirror_enabled: on });
+      await app.workspacesChanged(projectId);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const makeDefault = (w: Workspace) =>
     app.setDefaultWorkspace(projectId, w.id).catch((e: Error) => setError(e.message));
 
@@ -106,8 +117,19 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
                   <div class="workspace-main">
                     <b>{workspaceTitle(w, workers ?? undefined)}</b>
                     {isDefault && <span class="tag">по умолчанию</span>}
-                    {w.mirror_enabled && <span class="tag tag-mirror">сессии VS Code</span>}
                   </div>
+                  <label
+                    class="choice mirror-toggle"
+                    title="Показывать в проекте сессии Claude Code этой папки (VS Code, терминал) и подхватывать их"
+                  >
+                    <input
+                      type="checkbox"
+                      name="mirror"
+                      checked={w.mirror_enabled}
+                      onChange={(e) => toggleMirror(w, (e.currentTarget as HTMLInputElement).checked)}
+                    />
+                    <span>Сессии VS Code</span>
+                  </label>
                   <div class="row">
                     {!isDefault && (
                       <button type="button" class="btn btn-small btn-make-default" onClick={() => makeDefault(w)}>

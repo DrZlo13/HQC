@@ -564,12 +564,13 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     }
     const w = {
       ...ex['api.workspace'], id: randomUUID(), project_id: pr.id, worker_id: body.worker_id, path,
-      label: String(body?.label ?? ''), mirror_enabled: body?.mirror_enabled === true,
+      // Mirrored by default (T21); only the explicit import brings sessions in the mock.
+      label: String(body?.label ?? ''), mirror_enabled: body?.mirror_enabled !== false,
       created_at: now(), updated_at: now(),
     };
     workspaces.set(w.id, w);
     pr.default_workspace_id ??= w.id;
-    if (w.mirror_enabled) importClaude(w);
+    if (body?.mirror_enabled === true) importClaude(w);
     return withStatus(201, w);
   });
   // The import from Claude Code (SPEC §9.1): what the worker's mirror would send for the
@@ -655,6 +656,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const w = workspaces.get(p.id);
     if (!w) throw fail(404, 'not_found', 'unknown workspace');
     if (typeof body?.label === 'string') w.label = body.label.trim();
+    if (typeof body?.mirror_enabled === 'boolean') w.mirror_enabled = body.mirror_enabled;
     return w;
   });
   route('DELETE', '/api/workspaces/:id', (p) => {

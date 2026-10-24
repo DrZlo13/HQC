@@ -21,7 +21,8 @@ function replaceableNote(w: ReplaceableWorker): string {
  *  enabled the screen shows what the worker said about itself (name, OS, when, country):
  *  a link with a code may come from someone else's machine. If the user has offline or
  *  revoked workers, the screen offers "the same machine, replace <name>": the new worker
- *  then keeps that worker's id, sessions and workspaces. A new worker is the default. */
+ *  then keeps that worker's id, sessions and workspaces. A new worker is the default,
+ *  unless the hub marks one of them `same_machine` (T21): that one is preselected. */
 export function Enroll({ app, initialCode }: { app: AppState; initialCode: string }) {
   const [code, setCode] = useState(initialCode);
   const [info, setInfo] = useState<Info>(null);
@@ -50,6 +51,12 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
   }, [app, normalized]);
 
   const loaded = info && 'info' in info && info.code === normalized ? info.info : null;
+
+  // A worker of the same machine (T21) is the likely answer: preselected, still a choice.
+  useEffect(() => {
+    const same = loaded?.replaceable.find((w) => w.same_machine);
+    if (same) setReplace(same.id);
+  }, [loaded]);
 
   const confirm = async (e: Event) => {
     e.preventDefault();
@@ -144,6 +151,7 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
                 />
                 <span>
                   Это та же машина, заменить «{w.name}»
+                  {w.same_machine && <span class="badge"> та же машина</span>}
                   <span class="muted small"> {replaceableNote(w)}</span>
                 </span>
               </label>

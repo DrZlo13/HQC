@@ -316,20 +316,71 @@ fn worker_response(request_id: &str, option_id: &str) -> Value {
 
 /// Longest `description` of a worker request kept, in characters.
 const MAX_WORKER_DESCRIPTION: usize = 2000;
-/// A worker request lives at most this long, whatever `expires_at` it asks for.
+/// Longest `description` accepted, in bytes (SPEC §20); longer is refused, not cut.
+pub const MAX_WORKER_DESCRIPTION_BYTES: usize = 4096;
+/// Longest `request_id` of a worker request, in bytes (SPEC §20).
+pub const MAX_WORKER_REQUEST_ID: usize = 128;
+/// Longest `kind` of a worker request, in bytes (SPEC §20).
+pub const MAX_WORKER_KIND: usize = 64;
+/// A worker request lives at most this long (SPEC §10.2, §20).
 const MAX_WORKER_REQUEST_TTL: chrono::TimeDelta = chrono::TimeDelta::days(1);
+
+/// What became of a `worker.approval.request`.
+#[derive(Debug)]
+pub enum WorkerApproval {
+    /// Stored (or a resend of a request still open): `ack`.
+    Stored,
+    /// A resend of an answered request: `ack`, then the answer again.
+    Answered(PendingRow),
+    /// Over a limit of SPEC §20: `error invalid_frame`, nothing stored.
+    Refused(String),
+}
+
+/// The limits of SPEC §20 on a new `worker.approval.request`, except the number of open
+/// ones; `Err` says why it is refused.
+fn check_worker_request(
+    r: &WorkerApprovalRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), String> {
+    if r.request_id.is_empty() || r.request_id.len() > MAX_WORKER_REQUEST_ID {
+        return Err(format!(
+            "request_id must be 1..{MAX_WORKER_REQUEST_ID} bytes"
+        ));
+    }
+    if r.kind.is_empty() || r.kind.len() > MAX_WORKER_KIND {
+        return Err(format!("kind must be 1..{MAX_WORKER_KIND} bytes"));
+    }
+    if r.description.len() > MAX_WORKER_DESCRIPTION_BYTES {
+        return Err(format!(
+            "description is over {MAX_WORKER_DESCRIPTION_BYTES} bytes"
+        ));
+    }
+    if r.expires_at <= now {
+        return Err("expires_at is in the past".into());
+    }
+    if r.expires_at > now + MAX_WORKER_REQUEST_TTL {
+        return Err("expires_at is more than 24 h ahead".into());
+    }
+    Ok(())
+}
 
 /// `worker.approval.request` (SPEC §5.4, §10.2): an `approval.request` in the worker's
 /// service session with the options `once` / `deny` and a `worker_approval`
 /// PendingRequest, so it is answered, expires and pushes like any approval. The worker
 /// sends it again after a reconnect while it still waits: a known `request_id` is not
 /// stored twice, and an answered one is returned, for the caller to send the answer again
-/// after its `ack`.
+/// after its `ack`. A new request over the limits of SPEC §20 (lengths, `expires_at`,
+/// open requests of the worker) is refused.
 pub async fn worker_approval(
     app: &AppState,
     worker_id: Uuid,
     r: &WorkerApprovalRequest,
-) -> anyhow::Result<Option<PendingRow>> {
+) -> anyhow::Result<WorkerApproval> {
+    if r.request_id.len() > MAX_WORKER_REQUEST_ID {
+        return Ok(WorkerApproval::Refused(format!(
+            "request_id must be 1..{MAX_WORKER_REQUEST_ID} bytes"
+        )));
+    }
     let Some(sid) = db::ensure_system_session(&app.db, worker_id).await? else {
         anyhow::bail!("worker {worker_id} has no service session");
     };
@@ -337,10 +388,24 @@ pub async fn worker_approval(
         anyhow::bail!("service session {sid} is gone");
     };
     if let Some(p) = db::request_by_id(&app.db, s.id, "worker_approval", &r.request_id).await? {
-        return Ok(p.result.is_some().then_some(p));
+        return Ok(match p.result {
+            Some(_) => WorkerApproval::Answered(p),
+            None => WorkerApproval::Stored,
+        });
+    }
+    if let Err(why) = check_worker_request(r, Utc::now()) {
+        tracing::warn!(%worker_id, request_id = %r.request_id, "worker request refused: {why}");
+        return Ok(WorkerApproval::Refused(why));
+    }
+    let max_open = app.config.limits.worker_approvals_open;
+    if db::open_worker_requests(&app.db, worker_id).await? >= max_open {
+        tracing::warn!(%worker_id, request_id = %r.request_id, "worker request refused: {max_open} open already");
+        return Ok(WorkerApproval::Refused(format!(
+            "{max_open} requests of this worker are open already"
+        )));
     }
     let description: String = r.description.chars().take(MAX_WORKER_DESCRIPTION).collect();
-    let expires_at = r.expires_at.min(Utc::now() + MAX_WORKER_REQUEST_TTL);
+    let expires_at = r.expires_at;
     let payload = json!({
         "request_id": r.request_id,
         "tool": r.kind,
@@ -364,7 +429,7 @@ pub async fn worker_approval(
     )
     .await?
     {
-        return Ok(None);
+        return Ok(WorkerApproval::Stored);
     }
     tracing::info!(%worker_id, request_id = %r.request_id, kind = %r.kind, "worker asks its owner");
     events::store_hub_event(
@@ -377,7 +442,7 @@ pub async fn worker_approval(
         None,
     )
     .await?;
-    Ok(None)
+    Ok(WorkerApproval::Stored)
 }
 
 /// Send the stored result frame if the worker is connected; it stays undelivered until

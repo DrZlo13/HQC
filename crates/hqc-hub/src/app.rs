@@ -38,6 +38,8 @@ pub struct Inner {
     /// Session -> the last sign of life of its turn: an event from the worker, or the moment
     /// the watchdog first saw the session `running` (SPEC §17.3, [`crate::watchdog`]).
     pub turn_activity: Mutex<HashMap<Uuid, Instant>>,
+    /// Worker -> the last push on one of its own requests (SPEC §10.2, §20: one per 10 s).
+    pub worker_pushes: Mutex<HashMap<Uuid, Instant>>,
 }
 
 impl Deref for AppState {
@@ -82,6 +84,7 @@ impl AppState {
             limiter: RateLimiter::default(),
             ws_auth: Arc::new(Semaphore::new(config.limits.ws_auth_concurrency)),
             turn_activity: Mutex::new(HashMap::new()),
+            worker_pushes: Mutex::new(HashMap::new()),
             config,
         }))
     }

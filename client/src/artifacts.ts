@@ -11,6 +11,8 @@ type Source = Pick<Api, 'artifact' | 'artifactLink'>;
 const MARGIN_MS = 30_000;
 /** Larger text is not loaded into the chat; it can still be downloaded. */
 export const MAX_INLINE_TEXT = 512 * 1024;
+/** Larger text and diffs are only offered for download, not opened (T22). */
+export const MAX_OPEN_TEXT = 2 * 1024 * 1024;
 
 export class ArtifactStore {
   private readonly metas = new Map<string, Promise<Artifact>>();
@@ -51,11 +53,19 @@ export class ArtifactStore {
     return `${u}${u.includes('?') ? '&' : '?'}dl=1`;
   }
 
-  /** The content as text; an expired or refused link is renewed once (403/410). */
-  async text(id: string): Promise<string> {
+  /** The content as text; an expired or refused link is renewed once (403/410). A body
+   *  announced larger than `maxBytes` is not read. */
+  async text(id: string, maxBytes = MAX_INLINE_TEXT): Promise<string> {
     for (const fresh of [false, true]) {
       const res = await this.fetchImpl(await this.url(id, fresh));
-      if (res.ok) return res.text();
+      if (res.ok) {
+        const len = Number(res.headers.get('content-length') ?? NaN);
+        if (len > maxBytes) {
+          void res.body?.cancel();
+          throw new Error('слишком большое вложение');
+        }
+        return res.text();
+      }
       if (res.status !== 403 && res.status !== 410) throw new Error(`HTTP ${res.status}`);
     }
     throw new Error('ссылка на вложение не принята');

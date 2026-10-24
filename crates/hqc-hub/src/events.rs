@@ -42,25 +42,81 @@ pub async fn after_mirror_store(
     after_store(app, s, row, kind, Source::Mirror).await
 }
 
+/// `system.code` of the worker's log lines in its service session (SPEC §10.2).
+pub const WORKER_LOG: &str = "worker_log";
+
+/// What became of an `event` frame from a worker.
+#[derive(Debug)]
+pub enum Ingested {
+    /// `ack`: with `seq` when stored, without when dropped.
+    Ack(Ack),
+    /// An event the worker may not write (SPEC §5.2, §20): `error invalid_frame`.
+    Refused(String),
+}
+
+/// Event types only the hub writes (SPEC §4): input of users, answers to requests and
+/// messages between sessions. A worker sending one is refused.
+fn hub_only(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::UserMessage { .. }
+            | EventKind::ApprovalResponse { .. }
+            | EventKind::ClarifyResponse { .. }
+            | EventKind::PeerMessage { .. }
+    )
+}
+
+/// The event closes the current turn (SPEC §17.1): the final `agent.message` or `status`
+/// `idle` / `error`.
+fn ends_turn(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::AgentMessage { r#final: true, .. }
+            | EventKind::Status {
+                state: SessionState::Idle | SessionState::Error,
+                ..
+            }
+    )
+}
+
 /// An `event` frame from a worker: `ack {event_id, seq}`; a duplicate gets the stored
 /// `seq`; an event for a session the hub does not know (or that is not this worker's)
-/// gets `ack` without `seq` and is dropped (SPEC §5.2).
+/// gets `ack` without `seq` and is dropped (SPEC §5.2). So is an event for an archived
+/// session, unless it closes the turn. Events only the hub writes, and in the worker's
+/// service session anything but `system worker_log`, are refused (SPEC §10.2, §20).
 pub async fn ingest_worker_event(
     app: &AppState,
     conn: &WorkerConn,
     raw: Value,
     ev: &Event,
-) -> anyhow::Result<Ack> {
-    let dropped = Ack {
+) -> anyhow::Result<Ingested> {
+    let dropped = Ingested::Ack(Ack {
         event_id: Some(ev.event_id),
         seq: None,
-    };
+    });
     let Some(s) = db::session(&app.db, ev.session_id).await? else {
         tracing::debug!(session_id = %ev.session_id, "event for unknown session dropped");
         return Ok(dropped);
     };
     if s.worker_id != Some(conn.worker_id) {
         tracing::warn!(session_id = %ev.session_id, worker_id = %conn.worker_id, "event for another worker's session dropped");
+        return Ok(dropped);
+    }
+    let kind_name = raw.get("type").and_then(Value::as_str).unwrap_or_default();
+    if hub_only(&ev.kind) {
+        tracing::warn!(session_id = %s.id, worker_id = %conn.worker_id, kind = kind_name, "event only the hub writes refused");
+        return Ok(Ingested::Refused(format!(
+            "`{kind_name}` is written by the hub only"
+        )));
+    }
+    if s.system && !matches!(&ev.kind, EventKind::System { code, .. } if code == WORKER_LOG) {
+        tracing::warn!(session_id = %s.id, worker_id = %conn.worker_id, kind = kind_name, "event in the service session refused");
+        return Ok(Ingested::Refused(
+            "the service session takes only `system worker_log` from the worker".into(),
+        ));
+    }
+    if s.archived && !ends_turn(&ev.kind) {
+        tracing::debug!(session_id = %s.id, kind = kind_name, "event for an archived session dropped");
         return Ok(dropped);
     }
     app.worker_activity(s.id);
@@ -97,15 +153,15 @@ pub async fn ingest_worker_event(
                     requests::auto_approve(app, &s, request_id).await?;
                 }
             }
-            Ok(Ack {
+            Ok(Ingested::Ack(Ack {
                 event_id: Some(ev.event_id),
                 seq: Some(seq as u64),
-            })
+            }))
         }
-        Inserted::Duplicate(seq) => Ok(Ack {
+        Inserted::Duplicate(seq) => Ok(Ingested::Ack(Ack {
             event_id: Some(ev.event_id),
             seq: Some(seq as u64),
-        }),
+        })),
         Inserted::UnknownSession => Ok(dropped),
     }
 }

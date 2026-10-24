@@ -292,6 +292,53 @@ describe('rendering attachments', () => {
     expect(actions.openArtifact).toHaveBeenLastCalledWith('img');
   });
 
+  it('a diff body waits for its size; large text and diffs only download (T22)', async () => {
+    const MB = 1024 * 1024;
+    let release!: (m: Artifact) => void;
+    const slow = new Promise<Artifact>((r) => (release = r));
+    const metas = [meta('big', 'diff', 'huge.patch', 3 * MB), meta('mid', 'diff', 'mid.patch', MB), meta('txt', 'text', 'log.txt', 3 * MB)];
+    const src = fakeSource(metas);
+    const plain = src.artifact.getMockImplementation()!;
+    src.artifact.mockImplementation((id: string) => (id === 'slow' ? slow : plain(id)));
+    const fetchImpl = vi.fn(async () => new Response(DIFF));
+    const store = new ArtifactStore(src as never, fetchImpl as never);
+    const { el } = chatWith(
+      [
+        ev('event.user.message', (e) => {
+          e.seq = 1;
+          e.payload = { text: 'Смотри', artifact_ids: ['slow', 'big', 'mid', 'txt'] };
+        }),
+      ],
+      store,
+    );
+    await flush();
+    await flush();
+    // Nothing is fetched: one size is unknown, the others are too large to show.
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(el.querySelector('.md-code-diff')).toBeNull();
+    const buttons = (name: string) => {
+      const card = [...el.querySelectorAll('.card-attachment')].find((c) => c.textContent!.includes(name))!;
+      return [...card.querySelectorAll('button')].map((b) => b.textContent);
+    };
+    expect(buttons('huge.patch')).toEqual(['Скачать']);
+    expect(buttons('log.txt')).toEqual(['Скачать']);
+    // Over the inline limit but under 2 MB: a card that still opens.
+    expect(buttons('mid.patch')).toEqual(['Открыть', 'Скачать']);
+
+    await act(async () => release(meta('slow', 'diff', 'small.patch', 40)));
+    await flush();
+    await flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(el.querySelector('.md-code-diff .md-code-lang')!.textContent).toBe('small.patch');
+  });
+
+  it('a body announced over the limit is not read', async () => {
+    const src = fakeSource([meta('d', 'diff', 'd.patch')]);
+    const fetchImpl = vi.fn(async () => new Response('x', { headers: { 'content-length': String(600 * 1024) } }));
+    const store = new ArtifactStore(src as never, fetchImpl as never);
+    await expect(store.text('d')).rejects.toThrow('слишком большое');
+  });
+
   it('a broken image link is renewed once, then the image becomes a card', async () => {
     const src = fakeSource([meta('img', 'image', 'screen.png')]);
     const store = new ArtifactStore(src as never);

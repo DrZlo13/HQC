@@ -4,7 +4,7 @@
 // are signed and short-lived: asked for when shown or clicked, renewed on 403/410.
 
 import { useEffect, useState } from 'preact/hooks';
-import { formatSize, MAX_INLINE_TEXT, type ArtifactStore } from '../artifacts';
+import { formatSize, MAX_INLINE_TEXT, MAX_OPEN_TEXT, type ArtifactStore } from '../artifacts';
 import type { Artifact, ArtifactKind } from '../proto';
 import type { PendingAttachment } from '../timeline';
 import { CodeBlock } from './Markdown';
@@ -39,12 +39,13 @@ export function AttachmentView({
 }) {
   const store = actions.artifacts;
   const [meta, setMeta] = useState<Artifact | null>(null);
+  const [metaFailed, setMetaFailed] = useState(false);
   useEffect(() => {
     if (!store) return;
     let live = true;
     store.meta(id).then(
       (m) => live && setMeta(m),
-      () => {},
+      () => live && setMetaFailed(true),
     );
     return () => {
       live = false;
@@ -54,7 +55,9 @@ export function AttachmentView({
   const n = meta?.name ?? name ?? 'вложение';
   let body;
   if (store && k === 'image') body = <ImageView id={id} name={n} store={store} actions={actions} />;
-  else if (store && k === 'diff' && (!meta || meta.size <= MAX_INLINE_TEXT))
+  // The body of a diff is loaded only once its size is known (T22).
+  else if (store && k === 'diff' && !meta && !metaFailed) body = <div class="card card-attachment muted">{n} · загрузка…</div>;
+  else if (store && k === 'diff' && meta && meta.size <= MAX_INLINE_TEXT)
     body = <DiffView id={id} name={n} store={store} actions={actions} />;
   else if (store && k === 'html') body = <HtmlView id={id} name={n} meta={meta} store={store} actions={actions} />;
   else body = <FileCard id={id} name={n} kind={k} meta={meta} actions={actions} />;
@@ -79,6 +82,8 @@ function FileCard({
   meta: Artifact | null;
   actions: AttachmentActions;
 }) {
+  // Large text and diffs are only downloaded: a browser tab would hold all of it (T22).
+  const openable = kind !== 'file' && !((kind === 'text' || kind === 'diff') && meta && meta.size > MAX_OPEN_TEXT);
   return (
     <div class="card card-attachment">
       <div class="card-title">
@@ -89,7 +94,7 @@ function FileCard({
         </span>
       </div>
       <div class="actions">
-        {kind !== 'file' && (
+        {openable && (
           <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(id)}>
             Открыть
           </button>

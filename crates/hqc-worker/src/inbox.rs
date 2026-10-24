@@ -27,6 +27,10 @@ pub const HQC_DIR: &str = ".hqc";
 const MAX_NAME: usize = 120;
 /// Heading of the block of paths appended to the input text.
 pub const BLOCK_HEADING: &str = "Вложения:";
+/// Largest artifact downloaded, as the hub's own limit (SPEC §12, §20).
+pub const MAX_ARTIFACT_BYTES: u64 = 100 * 1000 * 1000;
+/// Largest sum of the artifacts of one input (SPEC §20).
+pub const MAX_INPUT_BYTES: u64 = 500 * 1000 * 1000;
 
 /// One downloaded artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +52,10 @@ pub enum InboxError {
     /// The hub will not give the artifact (`404`, `401`): retrying does not help.
     #[error("artifact {0} is not available: {1}")]
     Unavailable(Uuid, String),
+    /// Over [`MAX_ARTIFACT_BYTES`] or, with the artifacts before it, [`MAX_INPUT_BYTES`]:
+    /// it would be too large again.
+    #[error("artifact {0} is too large: {1} bytes are left for it (SPEC §20)")]
+    TooLarge(Uuid, u64),
     /// Network or local I/O: worth another try.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -65,6 +73,8 @@ pub struct ArtifactClient {
     http: reqwest::Client,
     hub_url: String,
     token: Secret,
+    max_artifact: u64,
+    max_input: u64,
 }
 
 impl ArtifactClient {
@@ -80,12 +90,24 @@ impl ArtifactClient {
             http,
             hub_url: hub_url.trim_end_matches('/').to_string(),
             token,
+            max_artifact: MAX_ARTIFACT_BYTES,
+            max_input: MAX_INPUT_BYTES,
         }
     }
 
+    /// Other limits per artifact and per input than [`MAX_ARTIFACT_BYTES`] and
+    /// [`MAX_INPUT_BYTES`]; tests.
+    pub fn with_limits(mut self, max_artifact: u64, max_input: u64) -> Self {
+        self.max_artifact = max_artifact;
+        self.max_input = max_input;
+        self
+    }
+
     /// Streams the artifact into a new temporary file in `dir`; returns it with the name,
-    /// kind and type the hub gave.
-    async fn download(&self, id: Uuid, dir: &Path) -> Result<Downloaded, InboxError> {
+    /// kind and type the hub gave. At most `budget` bytes (and [`Self::max_artifact`]) are
+    /// written: beyond that the download stops and the partial file is removed.
+    async fn download(&self, id: Uuid, dir: &Path, budget: u64) -> Result<Downloaded, InboxError> {
+        let limit = self.max_artifact.min(budget);
         let url = format!("{}/worker/artifacts/{id}", self.hub_url);
         let mut resp = self
             .http
@@ -112,6 +134,10 @@ impl ArtifactClient {
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase();
+        // A hub that announces too much is not read at all.
+        if resp.content_length().is_some_and(|n| n > limit) {
+            return Err(InboxError::TooLarge(id, limit));
+        }
         let tmp = dir.join(format!(".part-{}", Uuid::new_v4()));
         let mut f = tokio::fs::OpenOptions::new()
             .write(true)
@@ -120,18 +146,25 @@ impl ArtifactClient {
             .await
             .with_context(|| format!("create {}", tmp.display()))?;
         let mut size = 0u64;
-        let r: anyhow::Result<()> = async {
-            while let Some(chunk) = resp.chunk().await? {
+        let r: Result<(), InboxError> = async {
+            while let Some(chunk) = resp.chunk().await.map_err(anyhow::Error::from)? {
                 size += chunk.len() as u64;
-                f.write_all(&chunk).await?;
+                if size > limit {
+                    return Err(InboxError::TooLarge(id, limit));
+                }
+                f.write_all(&chunk).await.map_err(anyhow::Error::from)?;
             }
-            f.flush().await?;
+            f.flush().await.map_err(anyhow::Error::from)?;
             Ok(())
         }
         .await;
         if let Err(e) = r {
+            drop(f);
             let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(e.context(format!("download artifact {id}")).into());
+            return Err(match e {
+                InboxError::Other(e) => e.context(format!("download artifact {id}")).into(),
+                e => e,
+            });
         }
         Ok(Downloaded {
             tmp,
@@ -194,8 +227,11 @@ async fn fetch_all(
 ) -> Result<Vec<InboxFile>, InboxError> {
     let mut files = Vec::new();
     let mut taken: Vec<String> = Vec::new();
+    let mut total = 0u64;
     for id in ids {
-        let d = client.download(id, dir).await?;
+        let budget = client.max_input.saturating_sub(total);
+        let d = client.download(id, dir, budget).await?;
+        total += d.size;
         let name = unique(&sanitize_name(&d.name), &taken);
         taken.push(name.clone());
         let path = dir.join(&name);
@@ -423,6 +459,121 @@ mod tests {
         let long = format!("{}.png", "я".repeat(100));
         let s = sanitize_name(&long);
         assert!(s.len() <= MAX_NAME && s.ends_with(".png"), "{s}");
+    }
+
+    /// A hub on loopback serving `/worker/artifacts/{id}`: `(id, size, chunked)` — a body of
+    /// `size` bytes, without `Content-Length` when `chunked`.
+    async fn fake_hub(arts: Vec<(Uuid, usize, bool)>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut c, _)) = l.accept().await {
+                let arts = arts.clone();
+                tokio::spawn(async move {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = c.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        req.extend_from_slice(&buf[..n]);
+                    }
+                    let line = String::from_utf8_lossy(&req)
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .to_string();
+                    let id: Uuid = line
+                        .split(' ')
+                        .nth(1)
+                        .unwrap()
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    let (_, size, chunked) = *arts.iter().find(|a| a.0 == id).unwrap();
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nx-hqc-artifact-name: a.txt\r\nx-hqc-artifact-kind: text\r\nconnection: close\r\n";
+                    let body = vec![b'x'; size];
+                    let r = if chunked {
+                        let mut out =
+                            format!("{head}transfer-encoding: chunked\r\n\r\n").into_bytes();
+                        for part in body.chunks(1000) {
+                            out.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+                            out.extend_from_slice(part);
+                            out.extend_from_slice(b"\r\n");
+                        }
+                        out.extend_from_slice(b"0\r\n\r\n");
+                        out
+                    } else {
+                        let mut out = format!("{head}content-length: {size}\r\n\r\n").into_bytes();
+                        out.extend_from_slice(&body);
+                        out
+                    };
+                    let _ = c.write_all(&r).await;
+                });
+            }
+        });
+        url
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// An artifact over the per-artifact limit, announced or streamed, and artifacts over the
+    /// per-input sum are refused without retry; nothing partial stays on disk.
+    #[tokio::test]
+    async fn downloads_are_limited() {
+        let (small, big, chunked, a, b) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let url = fake_hub(vec![
+            (small, 900, false),
+            (big, 5000, false),
+            (chunked, 5000, true),
+            (a, 1500, true),
+            (b, 1500, true),
+        ])
+        .await;
+        let client = ArtifactClient::new(&url, Secret::new("hqcw_test")).with_limits(2000, 2500);
+        let d = tempfile::tempdir().unwrap();
+
+        let files = fetch_all(&client, d.path(), Uuid::nil(), vec![small])
+            .await
+            .unwrap();
+        assert_eq!(files[0].size, 900);
+        std::fs::remove_file(&files[0].path).unwrap();
+
+        for id in [big, chunked] {
+            let e = fetch_all(&client, d.path(), Uuid::nil(), vec![id])
+                .await
+                .unwrap_err();
+            assert!(matches!(e, InboxError::TooLarge(i, 2000) if i == id), "{e}");
+            assert!(!e.retryable());
+            assert!(entries(d.path()).is_empty(), "{:?}", entries(d.path()));
+        }
+
+        // 1500 + 1500 is over the 2500 of one input: the second stops at the 1000 left.
+        let e = fetch_all(&client, d.path(), Uuid::nil(), vec![a, b])
+            .await
+            .unwrap_err();
+        assert!(matches!(e, InboxError::TooLarge(i, 1000) if i == b), "{e}");
+        assert!(!e.retryable());
+        assert!(
+            entries(d.path()).iter().all(|n| !n.starts_with(".part-")),
+            "{:?}",
+            entries(d.path())
+        );
     }
 
     #[test]

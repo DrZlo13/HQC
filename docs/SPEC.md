@@ -351,9 +351,9 @@ system_session_id?}` (служебная сессия воркера, §10.2)
 
 Регистрация по HTTP (маршрут `/worker/*`, без Access, с rate limit; тела —
 `hqc_proto::api`, примеры `examples/wire/api.enroll*.json`):
-- `POST /worker/enroll {name, os, protocol_version}` → `{code, poll_token, expires_at,
-  poll_interval_s}`; `protocol_version` справочный (решает `hello`), неизвестные поля
-  тела хаб игнорирует; `code` — 8 символов `XXXX-XXXX` без похожих букв, живёт 10 минут;
+- `POST /worker/enroll {name, os, protocol_version, machine_id?}` → `{code, poll_token,
+  expires_at, poll_interval_s}`; `protocol_version` справочный (решает `hello`), `machine_id` —
+  отпечаток машины (ниже, с 0.23), неизвестные поля тела хаб игнорирует; `code` — 8 символов `XXXX-XXXX` без похожих букв, живёт 10 минут;
   `poll_token` — секрет воркера, передаётся только в теле (не в URL), в базе только хэш.
   Хаб сохраняет при коде `CF-IPCountry` и адрес запроса (лимиты, §20).
 - Пользователь вводит код в вебе. Сначала `GET /api/workers/enroll/{code}` →
@@ -521,6 +521,10 @@ MCP-вызовы (worker → hub → worker):
 - `session.steer` {session_id, text} — вмешаться в ход без прерывания, если рантайм
   умеет (Hermes: `/steer`, §8.2.1); иначе `error`.
 - `session.kill` {session_id} — завершить процесс агента.
+- `session.cleanup` {session_id, workspace_path | null, cwd, event_ids[]} → `ack` (с 0.23) —
+  после `session.kill` при архивации и удалении сессии или её проекта: убрать inbox-папки
+  вводов `event_ids` (у сессии без workspace — её scratch-папку); проверки путей и подробности —
+  §17.4.
 - `approval.response` {session_id, request_id, option_id},
   `clarify.response` {session_id, request_id, answers}; поля `by` во фреймах нет, оно
   только в событиях. Фрейма `approval.cancel` нет: отменяя запрос сам (таймаут, `stop`,
@@ -551,11 +555,14 @@ MCP-вызовы (worker → hub → worker):
   записей, только внутри `allowed_roots`, сортировка по пути; `last_active` — время изменения
   самого свежего файла. `request_id` равен `id` кадра, ждёт хаб 10 с, как `fs.*`. Воркер без
   зеркала отвечает `error {invalid_frame}`.
-- `mirror.set` {workspace_path, enabled} → `ack` — следить за транскриптами папки (§9.2) или
-  перестать. Хаб шлёт после каждого `hello` для всех workspace воркера с `mirror_enabled`, при
-  создании такого workspace и с `enabled: false` при его удалении. Воркер с `enabled: true`
-  принимает только существующую папку внутри `allowed_roots` (после раскрытия симлинков),
-  иначе `error {invalid_frame}`; список держит в памяти.
+- `mirror.set` {workspace_path, enabled, sessions?[{runtime_session_id, since_ts}]} → `ack` —
+  следить за транскриптами папки (§9.2) или перестать. Хаб шлёт после каждого `hello` для всех
+  workspace воркера с `mirror_enabled`, при создании такого workspace, при `PATCH
+  /api/workspaces/{id} {mirror_enabled}` (§6) и с `enabled: false` при удалении или
+  выключении. `sessions` (с 0.23, только при `enabled: true`) — сессии хаба в папке и время их
+  последнего события: первый проход по этим транскриптам не шлёт то, что у хаба уже есть
+  (§9.1). Воркер с `enabled: true` принимает только существующую папку внутри `allowed_roots`
+  (после раскрытия симлинков), иначе `error {invalid_frame}`; список держит в памяти.
 - `model.proxy` {request_id, model, body} → поток `model.proxy.chunk {request_id, data}`
   и `model.proxy.end {request_id, error?}`
 - `worker.approval.response` {request_id, option_id} → `ack` — ответ владельца воркера на
@@ -566,9 +573,9 @@ MCP-вызовы (worker → hub → worker):
 
 ### 5.4 Фреймы worker → hub
 - `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
-  allowed_roots[], allow_foreign_sessions, share_local_models, local_models[]}
+  allowed_roots[], allow_foreign_sessions, share_local_models, local_models[], machine_id?}
   — `boot_id`: uuid, новый на каждый запуск процесса воркера, одинаковый во всех `hello`
-  этого процесса (§5.2, §17.3). `capabilities` — `{claude_code?: {version,
+  этого процесса (§5.2, §17.3); `machine_id` — отпечаток машины (с 0.23, §5.1). `capabilities` — `{claude_code?: {version,
   sessions_registry?}, acp_agents[]}`; `sessions_registry: true` — воркер читает реестр живых
   сессий Claude Code и сообщает держателей (§9.3).
   Workspace воркер не сообщает (с 0.16; поле итерации 1 `capabilities.workspace_path` хаб
@@ -586,7 +593,9 @@ MCP-вызовы (worker → hub → worker):
   Отчёты идут через outbox в одном порядке с `mirror.event`, ответ — `ack {}`.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — события из
   зеркала (§9.1, §9.2), через outbox, ответ — `ack {event_id, seq}` как на `event` (дубль —
-  `seq` сохранённого, папка не под зеркалом этого воркера или `cwd` вне неё — без `seq`).
+  `seq` сохранённого, папка не под зеркалом этого воркера или `cwd` вне неё и прочие отказы
+  §20 — без `seq`); запись нового транскрипта сверх суточного лимита — `error mirror_quota`,
+  `retryable: true` (с 0.24, §9.1).
   `workspace_path` — путь из `mirror.set`, `cwd` — абсолютный путь из записи, `title` —
   последний `ai-title` файла, `recent` — файл изменён меньше 30 с назад, когда воркер читал
   запись, `held_by` — держатель транскрипта в момент чтения, как в `session.state`. Хаб ищет
@@ -1462,10 +1471,15 @@ once / session / always / deny, у ACP-агентов — то, что пред�
   §13); список открытый. Хаб пишет в служебную сессию событие `approval.request {request_id,
   tool: <kind>, description, options: [{id: once, canonical: once}, {id: deny, canonical:
   deny}], expires_at}` с `author: {kind: system}` и открывает `PendingRequest` с `kind:
-  worker_approval`, `worker_id` воркера; `description` обрезается до 2000 символов,
-  `expires_at` — не дальше суток. Повтор кадра с тем же `request_id` (воркер шлёт его снова
-  после каждого переподключения, пока ждёт) нового события не пишет; если ответ уже есть,
-  хаб после `ack` шлёт его ещё раз.
+  worker_approval`, `worker_id` воркера; `description` хранится до 2000 символов. Повтор кадра
+  с тем же `request_id` (воркер шлёт его снова после каждого переподключения, пока ждёт) нового
+  события не пишет; если ответ уже есть, хаб после `ack` шлёт его ещё раз. Повтор проверяется
+  раньше лимитов. Новый запрос с `expires_at` в прошлом или дальше 24 ч от времени хаба (с 0.23
+  отклоняется, а не обрезается до суток; допуска на расхождение часов нет — воркер просит
+  10 минут), с `description` больше 4096 байт, `request_id` или `kind` не той длины или сверх
+  20 открытых запросов на воркер — `error invalid_frame`, ничего не пишется (таблица §20).
+  Push на такие запросы — не чаще раза в 10 с на воркер (запрос пишется, уведомление
+  пропускается).
 - hub → worker `worker.approval.response {request_id, option_id}` — ответ владельца или
   `deny` при отмене хабом; воркер отвечает `ack` и тогда, когда запроса у него уже нет. Ответ
   хранится в `PendingRequest.result` до `ack`; не подтверждённый воркером ответ хаб
@@ -1943,7 +1957,7 @@ Web Push на события: `approval.request`, `clarify.request`, `worker.app
   | `worker.approval.request` (§10.2): открытых на воркер | 20 | `error invalid_frame`, ничего не пишется |
   | … `request_id` / `kind` | 1–128 / 1–64 байт | `error invalid_frame` |
   | … `description` | до 4096 байт (хранится до 2000 символов, как в §10.2) | `error invalid_frame` |
-  | … `expires_at` | в будущем, не дальше 24 ч (§10.2: раньше обрезалось до суток) | `error invalid_frame` |
+  | … `expires_at` | в будущем, не дальше 24 ч (до 0.23 обрезалось до суток; §10.2 выровнен в 0.24) | `error invalid_frame` |
   | push на запросы воркера (§16) | 1 в 10 с на воркер | запрос пишется, push пропускается |
   | `mirror.event` (§9.2): новых сессий на воркер | 200 за 24 ч (скользящее окно) | запись нового транскрипта не принимается: `error mirror_quota`, `retryable: true`, warn в логе хаба; воркер убирает её из outbox и перечитывает транскрипт с начала не раньше чем через час (§9.1, с 0.24) |
   | … сессий зеркала на workspace | 2000 всего | событие отбрасывается, `ack` без `seq`, warn в логе хаба |
@@ -2027,6 +2041,11 @@ T21 и T22 сделаны параллельно от 0.22, каждая под�
 убирает её из outbox и перечитывает транскрипт с начала не чаще раза в час. Лимит 2000 на
 workspace и проверки `runtime_session_id`/`cwd` по-прежнему отбрасывают с `ack`. Миграции `0011`
 и `0012` независимы (разные таблицы и столбцы) и применяются после `0010` в любом порядке.
+Переносы, оставленные обеими задачами: в перечни кадров §5.3 и §5.4 добавлены `session.cleanup`,
+`mirror.set.sessions`, `hello.machine_id`, в §5.1 — `machine_id` в `POST /worker/enroll`,
+`mirror_quota` — в ответ на `mirror.event`; §10.2 выровнен с таблицей §20 (`expires_at` в
+прошлом или дальше 24 ч отклоняется, лимиты длин и открытых запросов, push раз в 10 с); §9.1
+ссылается на лимиты зеркала §20.
 Вне веток, на master между 0.22 и слиянием (685997d, описано в RUNBOOK §2.2, текст спеки не
 менялся): сессии, запущенные hqc, видны в истории VS Code (`CLAUDE_CODE_ENTRYPOINT=claude-vscode`,
 параметр воркера `show_in_vscode`, по умолчанию `true`), в `--settings` всегда `voiceEnabled:

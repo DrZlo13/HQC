@@ -153,7 +153,8 @@ describe("delivery after a dropped socket", () => {
   it("a copy the hub sends again updates the delivery the reply left pending", () => {
     const t = new Timeline();
     t.applyReply(input("pending"));
-    expect(t.resumeSeq()).toBe(6);
+    // The reply does not move lastSeq: the resubscription replays seq 7 anyway.
+    expect(t.resumeSeq()).toBe(0);
     t.apply(input("delivered", "2026-10-25T20:28:45.3Z"));
     expect(status(t)).toBe("delivered");
     expect(t.resumeSeq()).toBe(7);
@@ -664,7 +665,7 @@ describe("messages", () => {
     expect(root.querySelector(".line-usage")).toBeNull();
   });
 
-  it("updates delivery from a delivery frame, not from the same event again", () => {
+  it("updates delivery from a delivery frame and from a copy the hub sent again", () => {
     const t = new Timeline();
     t.apply(
       ev(
@@ -672,9 +673,17 @@ describe("messages", () => {
         (e) => ((e.delivery = "pending"), delete e.delivered_at),
       ),
     );
-    // The same seq again (REST page and backlog overlap) changes nothing.
+    // The same seq again (REST page and backlog overlap) is the same event; only its
+    // delivery may be newer (a frame lost while the socket was down).
     t.apply(ev("event.user.message"));
     expect(t.events()).toHaveLength(1);
+    expect(t.events()[0].delivery).toBe("delivered");
+    t.apply(
+      ev(
+        "event.user.message",
+        (e) => ((e.delivery = "pending"), delete e.delivered_at),
+      ),
+    );
     expect(t.events()[0].delivery).toBe("pending");
     const d = parseServerFrame(
       JSON.parse(readFileSync(join(WIRE, "client.delivery.json"), "utf8")),

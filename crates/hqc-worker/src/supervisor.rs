@@ -798,6 +798,10 @@ impl Session {
         match c {
             Cmd::Start { id, spec, mode } => {
                 if self.state != ProcessState::Stopped {
+                    // The hub issued a new token with this start (SPEC §5.3): the running
+                    // agent's MCP calls carry it from now on, and so does its next process.
+                    self.link.mcp().set_hub_token(self.id, &spec.session_token);
+                    self.spec.session_token = spec.session_token.clone();
                     if *spec != self.spec {
                         tracing::warn!(session_id = %self.id, "session.start for a running agent; keeping the running one");
                     }
@@ -1092,6 +1096,8 @@ impl Session {
             }
         }
         self.set_state(ProcessState::Starting);
+        // Its MCP server may connect as soon as the process runs (SPEC §7.2).
+        self.link.mcp().bind(self.id, &self.spec.session_token);
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
         let r = if self.started_once || self.resume_requested {
@@ -1152,6 +1158,8 @@ impl Session {
     fn set_state(&mut self, s: ProcessState) {
         if s == ProcessState::Stopped {
             self.slot = None;
+            // Its MCP server is gone with it; a call still open fails.
+            self.link.mcp().unbind(self.id);
         }
         if self.state != s {
             self.state = s;

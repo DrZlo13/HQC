@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use hqc_worker::adapter::claude_code::McpLaunch;
 use hqc_worker::adapter::BuiltinAdapters;
 use hqc_worker::config::{self, Config};
 use hqc_worker::connection::{ConnOptions, Status};
@@ -34,8 +35,13 @@ enum Cmd {
     },
     /// Run the daemon (SPEC §2).
     Run,
-    /// Serve the hqc MCP server over stdio for one session (SPEC §7); spawned by runtimes.
-    Mcp,
+    /// Serve the hqc MCP server over stdio for one session (SPEC §7.2); spawned by runtimes,
+    /// with the session token in `HQC_SESSION_TOKEN`.
+    Mcp {
+        /// The daemon's socket; `$HQC_HOME/mcp.sock` by default.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
     /// Manage local environments and bindings (SPEC §14).
     Env,
 }
@@ -104,7 +110,16 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Run => run(logs).await,
-        Cmd::Mcp => anyhow::bail!("mcp: not implemented (iteration 3)"),
+        Cmd::Mcp { socket } => {
+            let socket = match socket {
+                Some(s) => s,
+                None => hqc_worker::mcp::socket_path(&config::hqc_home()?),
+            };
+            let token = std::env::var(hqc_worker::mcp::TOKEN_ENV).ok();
+            hqc_worker::mcp::server::McpServer::new(token, socket)
+                .serve(tokio::io::stdin(), tokio::io::stdout())
+                .await
+        }
         Cmd::Env => anyhow::bail!("env: not implemented (iteration 5)"),
     }
 }
@@ -127,7 +142,14 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     if p.mode == hqc_worker::permissions::PermissionMode::Auto {
         tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call");
     }
-    let adapters = Arc::new(BuiltinAdapters::from_config(&config, permission_mode));
+    // The agents' hqc MCP server is this binary (SPEC §7.2).
+    let mcp_socket = hqc_worker::mcp::socket_path(&config::hqc_home()?);
+    let adapters = Arc::new(
+        BuiltinAdapters::from_config(&config, permission_mode).with_mcp(McpLaunch {
+            program: std::env::current_exe().context("the worker's own binary")?,
+            socket: mcp_socket.clone(),
+        }),
+    );
     // The mirror reads the same config dir as the adapter (SPEC §9).
     let mirror = hqc_worker::adapter::claude_code::paths::default_config_dir().map(|d| {
         hqc_worker::MirrorOptions {
@@ -153,6 +175,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
         conn: ConnOptions::default(),
         shutdown_timeout: Duration::from_secs(10),
         machine_id: hqc_worker::machine::fingerprint(config::hqc_home().ok().as_deref()),
+        mcp_socket: Some(mcp_socket),
     };
 
     let shutdown = CancellationToken::new();

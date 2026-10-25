@@ -32,7 +32,7 @@ pub struct Entry {
     pub event_id: Uuid,
     /// The event as JSON, sent as `event {event}`; for a `mirror.event` its whole payload.
     pub event: serde_json::Value,
-    /// [`FRAME_EVENT`], [`FRAME_MIRROR_EVENT`] or [`FRAME_SESSION_STATE`].
+    /// [`FRAME_EVENT`], [`FRAME_MIRROR_EVENT`], [`FRAME_SESSION_STATE`] or [`FRAME_MCP_CALL`].
     pub frame: String,
 }
 
@@ -42,6 +42,10 @@ pub const FRAME_MIRROR_EVENT: &str = "mirror.event";
 /// A holder report, `session.state` with the nil `session_id` (SPEC §5.4, §9.3): through the
 /// outbox so that it reaches the hub in order with the `mirror.event`s, keyed by a fresh id.
 pub const FRAME_SESSION_STATE: &str = "session.state";
+/// `mcp.call` (SPEC §5.2, §7.2), keyed by its `request_id`. Stored without `session_token`:
+/// the token is never written to disk; the connection adds it when sending, and drops a
+/// call that is no longer open.
+pub const FRAME_MCP_CALL: &str = "mcp.call";
 
 impl Outbox {
     /// Opens (creating if needed) `<dir>/outbox.sqlite3`. The directory is 0700 and the

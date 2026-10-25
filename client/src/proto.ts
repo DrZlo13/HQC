@@ -513,6 +513,27 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'user_text');
     str(p, 'agent_text');
   },
+  // T30: an agent's hqc MCP tool call and its answer (SPEC §5.2).
+  'mcp.call': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_token');
+    str(p, 'tool');
+    obj(p.args, 'args');
+  },
+  'mcp.cancel': (p) => {
+    str(p, 'request_id');
+    str(p, 'reason');
+  },
+  'mcp.result': (p) => {
+    str(p, 'request_id');
+    if (p.error !== undefined) {
+      const e = obj(p.error, 'error');
+      str(e, 'code');
+      str(e, 'message');
+    } else if (p.result === undefined) {
+      throw new ProtoError('mcp.result: result or error');
+    }
+  },
   'mirror.event': (p) => {
     str(p, 'workspace_path');
     str(p, 'runtime_session_id');

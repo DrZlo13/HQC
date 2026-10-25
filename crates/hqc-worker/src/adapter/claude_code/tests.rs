@@ -624,6 +624,61 @@ async fn command_line_new_then_resume() {
     assert!(rx.try_recv().is_err());
 }
 
+/// T30 (SPEC §7.1, §7.2, §8.1): the hqc MCP server goes in `--mcp-config` with the session
+/// token in its own `env`, never in the CLI's environment; the CLI gets `MCP_TOOL_TIMEOUT`.
+#[tokio::test]
+async fn command_line_carries_the_hqc_mcp_server() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let launch = super::McpLaunch {
+        program: "/opt/hqc/hqc-worker".into(),
+        socket: "/home/u/.hqc/mcp.sock".into(),
+    };
+    let factory =
+        ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone())).with_mcp(launch);
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    s.session_token = crate::token::Secret::new("hqcs_the_token");
+    s.ask_timeout_s = 600;
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let cmd = claude.commands()[0].clone();
+    let i = cmd.args.iter().position(|a| a == "--mcp-config").unwrap();
+    let cfg: serde_json::Value = serde_json::from_str(&cmd.args[i + 1]).unwrap();
+    assert_eq!(
+        cfg,
+        json!({"mcpServers": {"hqc": {
+            "type": "stdio",
+            "command": "/opt/hqc/hqc-worker",
+            "args": ["mcp", "--socket", "/home/u/.hqc/mcp.sock"],
+            "env": {"HQC_SESSION_TOKEN": "hqcs_the_token"},
+        }}})
+    );
+    assert!(cmd.args.contains(&"--strict-mcp-config".to_string()));
+    assert!(cmd
+        .args
+        .windows(2)
+        .any(|w| w == ["--allowedTools", "mcp__hqc"]));
+    assert!(cmd
+        .env
+        .contains(&("MCP_TOOL_TIMEOUT".to_string(), "660000".to_string())));
+    assert!(
+        !cmd.env
+            .iter()
+            .any(|(k, v)| k.starts_with("HQC_") || v.contains("hqcs_")),
+        "{:?}",
+        cmd.env
+    );
+    a.kill().await.unwrap();
+
+    // The token of a later `session.start` goes to the next process.
+    s.session_token = crate::token::Secret::new("hqcs_next");
+    a.resume(&s).await.unwrap();
+    assert!(claude.commands()[1].args[i + 1].contains("hqcs_next"));
+    a.kill().await.unwrap();
+}
+
 /// SPEC §8.1, §8.4: session restrictions reach the CLI; nothing is dropped silently.
 #[tokio::test]
 async fn command_line_carries_session_restrictions() {

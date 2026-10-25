@@ -7,9 +7,8 @@
 //! Typed here: the frames of iteration 1 (docs/ITERATION-1.md, T1) and the folder requests
 //! `fs.stat` / `fs.list_dirs` with their `result` (T14), confirmations outside a session
 //! `worker.approval.request` / `worker.approval.response` (T17), `title.request` with its
-//! `result` (T24). Later iterations: hub ->
-//! worker `session.steer`, `workspace.*`, `mirror.set`, `model.proxy`, `mcp.result`; worker ->
-//! hub `mirror.event`, `mcp.call`, `mcp.cancel`.
+//! `result` (T24), the MCP calls `mcp.call` / `mcp.cancel` and `mcp.result` (T30). Later
+//! iterations: hub -> worker `session.steer`, `workspace.*`, `model.proxy`.
 
 use std::collections::BTreeMap;
 
@@ -127,10 +126,95 @@ pub enum WorkerFrame {
     /// through the outbox and is answered like `event`.
     #[serde(rename = "mirror.event")]
     MirrorEvent(MirrorEvent),
+    /// A tool call of an agent's hqc MCP server (SPEC §5.2, §7); answered with `mcp.result`.
+    #[serde(rename = "mcp.call")]
+    McpCall(McpCall),
+    /// The runtime gave up a call (`notifications/cancelled`) or the MCP process exited with
+    /// it open (SPEC §5.2, §7.2); answered with `ack {}`.
+    #[serde(rename = "mcp.cancel")]
+    McpCancel(McpCancel),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
     Error(WireError),
+}
+
+/// `mcp.call {request_id, session_token, tool, args}` (SPEC §5.2, §7). `request_id` is a
+/// uuid the worker makes up per call; `session_token` is the one of the session's latest
+/// `session.start`, which the hub checks together with the worker that runs the session. A
+/// fast tool is answered at once with `mcp.result` under the same frame `id`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpCall {
+    pub request_id: String,
+    pub session_token: String,
+    /// One of [`crate::mcp::TOOLS`].
+    pub tool: String,
+    /// The tool's arguments as the agent gave them, at most [`crate::mcp::MAX_ARGS`] bytes.
+    pub args: serde_json::Value,
+}
+
+/// `mcp.cancel {request_id, reason}` (SPEC §5.2, §7.2): one of [`crate::mcp::cancel_reason`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpCancel {
+    pub request_id: String,
+    pub reason: String,
+}
+
+/// `mcp.result {request_id, result | error}` (SPEC §5.2, §5.3): exactly one of the two.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpResult {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<McpError>,
+}
+
+impl McpResult {
+    pub fn ok(request_id: impl Into<String>, result: serde_json::Value) -> Self {
+        Self {
+            request_id: request_id.into(),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn err(request_id: impl Into<String>, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            request_id: request_id.into(),
+            result: None,
+            error: Some(McpError::new(code, message)),
+        }
+    }
+
+    /// The result, or the error (also for a frame that carries neither).
+    pub fn outcome(self) -> Result<serde_json::Value, McpError> {
+        match (self.result, self.error) {
+            (_, Some(e)) => Err(e),
+            (Some(r), None) => Ok(r),
+            (None, None) => Err(McpError::new(
+                crate::mcp::error_code::INTERNAL,
+                "mcp.result without result or error",
+            )),
+        }
+    }
+}
+
+/// The one shape of every tool error (SPEC §7): `code` is one of
+/// [`crate::mcp::error_code`], the list is open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpError {
+    pub code: String,
+    pub message: String,
+}
+
+impl McpError {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 /// `worker.approval.request {request_id, kind, description, expires_at}` (SPEC §5.4, §10.2).
@@ -356,6 +440,10 @@ pub enum HubFrame {
     /// Title a session on the worker's Claude Code subscription (T24, SPEC §3 Session, §5.3).
     #[serde(rename = "title.request")]
     TitleRequest(TitleRequest),
+    /// The answer to `mcp.call` (SPEC §5.2): under the call's frame `id` for a tool answered
+    /// at once; a deferred one (`hqc_ask`) comes as a frame of its own, which the worker acks.
+    #[serde(rename = "mcp.result")]
+    McpResult(McpResult),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -611,6 +699,7 @@ mod tests {
         "mirror.set",
         "session.cleanup",
         "title.request",
+        "mcp.result",
         "ack",
         "error",
     ];
@@ -621,6 +710,8 @@ mod tests {
         "result",
         "worker.approval.request",
         "mirror.event",
+        "mcp.call",
+        "mcp.cancel",
         "ack",
         "error",
     ];
@@ -700,6 +791,14 @@ mod tests {
             "title.request",
             include_str!("../examples/wire/hub.title.request.json"),
         ),
+        (
+            "mcp.result",
+            include_str!("../examples/wire/hub.mcp.result.json"),
+        ),
+        (
+            "mcp.result",
+            include_str!("../examples/wire/hub.mcp.result.error.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -754,6 +853,14 @@ mod tests {
             "mirror.event",
             include_str!("../examples/wire/worker.mirror.event.forked.json"),
         ),
+        (
+            "mcp.call",
+            include_str!("../examples/wire/worker.mcp.call.json"),
+        ),
+        (
+            "mcp.cancel",
+            include_str!("../examples/wire/worker.mcp.cancel.json"),
+        ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         ("error", include_str!("../examples/wire/worker.error.json")),
     ];
@@ -775,6 +882,7 @@ mod tests {
             HubFrame::MirrorSet(_) => "mirror.set",
             HubFrame::SessionCleanup(_) => "session.cleanup",
             HubFrame::TitleRequest(_) => "title.request",
+            HubFrame::McpResult(_) => "mcp.result",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -788,6 +896,8 @@ mod tests {
             WorkerFrame::Result(_) => "result",
             WorkerFrame::WorkerApprovalRequest(_) => "worker.approval.request",
             WorkerFrame::MirrorEvent(_) => "mirror.event",
+            WorkerFrame::McpCall(_) => "mcp.call",
+            WorkerFrame::McpCancel(_) => "mcp.cancel",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }
@@ -980,6 +1090,48 @@ mod tests {
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["requested_by_owner"], true);
         assert_eq!(serde_json::to_value(Runtime::None).unwrap(), "none");
+    }
+
+    /// T30: a call and its answer share the frame `id` and `request_id`; an error has the one
+    /// shape `{code, message}`; the call names a tool of the list.
+    #[test]
+    fn mcp_call_and_result() {
+        let call: Envelope<WorkerFrame> =
+            serde_json::from_str(include_str!("../examples/wire/worker.mcp.call.json")).unwrap();
+        let WorkerFrame::McpCall(c) = &call.body else {
+            panic!("not mcp.call");
+        };
+        assert!(crate::mcp::TOOLS.iter().any(|t| t.name == c.tool));
+        assert!(c.request_id.parse::<Uuid>().is_ok());
+        for (src, ok) in [
+            (include_str!("../examples/wire/hub.mcp.result.json"), true),
+            (
+                include_str!("../examples/wire/hub.mcp.result.error.json"),
+                false,
+            ),
+        ] {
+            let res: Envelope<HubFrame> = serde_json::from_str(src).unwrap();
+            let HubFrame::McpResult(r) = res.body else {
+                panic!("not mcp.result");
+            };
+            assert_eq!((&res.id, &r.request_id), (&call.id, &c.request_id));
+            assert_eq!(r.outcome().is_ok(), ok);
+        }
+        let neither = McpResult {
+            request_id: "x".into(),
+            result: None,
+            error: None,
+        };
+        assert_eq!(
+            neither.outcome().unwrap_err().code,
+            crate::mcp::error_code::INTERNAL
+        );
+        let cancel: Envelope<WorkerFrame> =
+            serde_json::from_str(include_str!("../examples/wire/worker.mcp.cancel.json")).unwrap();
+        let WorkerFrame::McpCancel(x) = cancel.body else {
+            panic!("not mcp.cancel");
+        };
+        assert!(crate::mcp::cancel_reason::ALL.contains(&x.reason.as_str()));
     }
 
     #[test]

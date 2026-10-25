@@ -127,6 +127,12 @@ impl BuiltinAdapters {
         }
     }
 
+    /// Every Claude Code session gets the hqc MCP server (SPEC §7.2).
+    pub fn with_mcp(mut self, mcp: claude_code::McpLaunch) -> Self {
+        self.claude = self.claude.with_mcp(mcp);
+        self
+    }
+
     /// What the Claude Code processes wrote, for the mirror (SPEC §9.3).
     pub fn own_records(&self) -> std::sync::Arc<crate::mirror::OwnRecords> {
         self.claude.own_records()

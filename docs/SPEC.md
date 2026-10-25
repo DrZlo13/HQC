@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.32, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.33, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -421,7 +421,8 @@ not replace the owner's confirmation.
 Worker → hub:
 - The worker keeps an **outbox** on disk: an event is first written to the outbox, then sent.
   The outbox carries `event`, `mirror.event`, holder reports (`session.state` with a nil
-  `session_id`, §5.4, §9.3) and `mcp.call`.
+  `session_id`, §5.4, §9.3) and `mcp.call` (stored without `session_token`, see "MCP calls"
+  below).
 - The hub answers `ack {event_id, seq}`; until the ack the worker resends after reconnecting.
 - Duplicates are dropped by `event_id` (unique index) and get an `ack` with the `seq` of the
   already stored event. Events for sessions the hub does not know (deleted) get an
@@ -498,16 +499,41 @@ Hub → worker:
 
 MCP calls (worker → hub → worker):
 - `mcp.call {request_id, session_token, tool, args}` → `mcp.result {request_id,
-  result | error}`. Fast tools (`attach`, `list`, `search`, `schedule`, `send`,
-  `spawn`) are answered at once. `ask` is deferred: the hub creates a `PendingRequest`
-  with `worker_id` and answers `mcp.result` only when the answer has arrived or the timeout has
+  result | error}`. `request_id` is a uuid the worker makes up per call. Fast tools (`attach`,
+  `list`, `search`, `schedule`, `send`, `spawn`) are answered at once: `mcp.result` comes as
+  the reply to the call frame, under its `id`. `ask` is deferred: the hub answers the call
+  frame with `ack {}`, creates a `PendingRequest`
+  with `worker_id` and sends `mcp.result` as a frame of its own only when the answer has arrived or the timeout has
   expired. If the worker is offline at that moment, the result waits in `PendingRequest.result`
-  and is sent after `hello`; a worker that no longer has the blocking call
-  (it restarted) answers `ack` and drops it.
-- `mcp.cancel {request_id, reason}` — the worker reports that a deferred call died on its
-  side (§7.2). On receiving it the hub closes the `PendingRequest` with an error and writes a
+  and is sent after `hello`; the worker answers such a frame with `ack`, also when it no
+  longer has the blocking call (it restarted) and drops it.
+- Since 0.33 (T30): `mcp.call` goes through the outbox keyed by its `request_id`, but the
+  outbox stores it **without** `session_token`: the token is never written to disk (§7.2).
+  The connection adds the token when it sends the frame and drops instead of sending a call
+  that is no longer open: answered, cancelled, or left by a previous run of the worker, whose
+  caller died with it. So a call survives a dropped connection (it is sent again after the
+  next `hello`) but not a worker restart. A call sent again after its answer was lost runs
+  again on the hub; a tool with side effects (from T31 on) must tolerate a repeated
+  `request_id`.
+- The token (since 0.33). The hub issues a new token with every `session.start`, also for an
+  agent the worker keeps running (after a reconnect), and keeps the hashes of the latest and
+  the previous one (`sessions.session_token_hash`, `prev_session_token_hash`, migration
+  `0014`). The worker sends the latest token it got; a call already on its way when the next
+  `session.start` arrives still carries the previous one, which the hub accepts. The hub
+  authenticates `mcp.call` by these two hashes **and** the worker the session belongs to; an
+  unknown token, a token of another worker's session and a token of the wrong shape all get
+  `mcp.result` with `error {code: unauthorized}`, never a frame `error`. The worker's
+  service session has no token.
+- Errors of a tool have one shape, `error {code, message}`; `code` ∈ `unauthorized`,
+  `unknown_tool`, `invalid_args`, `not_found`, `unavailable` (the worker lost the call: the
+  agent stopped, the hub refused the frame), `internal`; the list is open. `args` is at most
+  64 KB serialized (§20), else `invalid_args`.
+- `mcp.cancel {request_id, reason}` → `ack {}` — the worker reports that a call died on its
+  side (§7.2), `reason` ∈ `cancelled` (`notifications/cancelled`), `eof` (the MCP process
+  exited with the call open). It is sent directly, not through the outbox; a call the hub has
+  not received yet leaves the outbox instead. For a deferred call the hub closes the `PendingRequest` with an error and writes a
   `system` event with the code `ask_cancelled` to the sending session; it sends nothing to the
-  target session, whose turn continues.
+  target session, whose turn continues. For a fast call it only acks (T30).
 
 ### 5.3 Hub → worker frames
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
@@ -589,7 +615,9 @@ MCP calls (worker → hub → worker):
   `worker.approval.request`, or `deny` when the hub cancels it (expiry); the worker answers `ack`
   even when it no longer has the request. The hub resends an unacknowledged answer after `hello`
   (without `session.start`, §10.2).
-- `mcp.result` {request_id, result | error}
+- `mcp.result` {request_id, result | error} — `error` is `{code, message}` (§5.2); the
+  reply to `mcp.call` under its `id`, or, for a deferred call, a frame of its own that the
+  worker acks (since 0.33, T30).
 
 ### 5.4 Worker → hub frames
 - `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
@@ -635,8 +663,10 @@ MCP calls (worker → hub → worker):
   `workspace.delete`; the list is open). The hub writes an `approval.request` to the worker's
   service session; a repeat with the same `request_id` after a reconnect writes no new event
   (§10.2).
-- `mcp.call` {request_id, session_token, tool, args}
-- `mcp.cancel` {request_id, reason} — cancelling a deferred call (§5.2, §7.2)
+- `mcp.call` {request_id, session_token, tool, args} → `mcp.result` (fast tools) or `ack {}`
+  (deferred, §5.2); through the outbox without the token (since 0.33, T30)
+- `mcp.cancel` {request_id, reason} → `ack {}` — a call that died on the worker's side
+  (§5.2, §7.2)
 - `result` {request_id, ...} / `error` to the hub's requests (`fs.stat`, `fs.list_dirs`,
   `workspace.list_candidates`, `title.request`, §5.3), with the request's `id`.
 - Artifact upload: HTTP PUT `/worker/artifacts` with the worker's token, not over WebSocket.
@@ -840,14 +870,31 @@ The worker runs the hqc MCP server and connects it to the runtime of every sessi
 Identification: the MCP server is a stdio process the runtime starts itself (via
 `--mcp-config` for Claude Code, the JSON passed as a string, no file; via the
 `mcpServers` field of `session/new` for ACP agents); the worker passes it the `session_token`
-from `session.start` in an environment variable, and the MCP process talks to the worker
-daemon over a local socket with this token; the daemon forwards the call to the hub in an
-`mcp.call` frame (§5.2). The hub issues the token; it does not reach the agent's context or the
-transcript: Hermes keeps `mcpServers` from `session/new` only in the running agent's memory and
-does not write them to its session database (checked in the source). Limitation: another
-process of the same OS user can read the process environment; this is the same soft boundary
-as in §14. The bare model on the hub gets the same tools directly. hqc tools are called
-without confirmation: Claude Code is started with `--allowedTools mcp__hqc` (§8.1).
+from `session.start` in the environment variable `HQC_SESSION_TOKEN` of that server only, and
+the MCP process talks to the worker daemon over a local socket with this token (§7.2); the
+daemon forwards the call to the hub in an `mcp.call` frame (§5.2). The hub issues the token.
+Hermes keeps `mcpServers` from `session/new` only in the running agent's memory and does not
+write them to its session database (checked in the source).
+
+How the token reaches the MCP process (since 0.33; checked on 2026-10-25 with Claude Code
+2.1.308 on macOS 26.6, live test `crates/hqc-hub/tests/live_mcp.rs`, notes in
+`docs/notes/t30-questions.md`): in the `env` of the server `hqc` inside the `--mcp-config` JSON.
+The CLI starts the server with its own environment plus that `env`; the token is not in the
+CLI's environment (the worker's `HQC_*` never are, §8.1), so the agent's Bash tool does not see
+it (`env | grep -c '^HQC_'` in the agent's Bash gave `0`), and it was not in the transcript,
+`~/.claude.json`, the CLI's stream-json output, the hub's events or the worker's outbox. The
+JSON is on the CLI's command line: on macOS another, non-root OS user cannot read a process's
+argv or environment (`sysctl KERN_PROCARGS2` fails with `EINVAL` for 116 of 118 processes of
+other users; the two it read were the login session's), but on Linux `/proc/<pid>/cmdline` is
+readable by every user, so there the token is visible to other local users — who still cannot
+use it: the socket is 0600 and the hub accepts the token only from the worker that runs the
+session (§5.2). Rejected: `${VAR}` expansion in the MCP config and plain inheritance (the
+variable would have to be in the CLI's environment, which Bash inherits), a config file (a
+file holding the token). Limitation: another process of the same OS user (the agents of other
+sessions on the worker included) can read the CLI's command line and the MCP process's
+environment; this is the same soft boundary as in §14. The bare model on the hub gets the same
+tools directly. hqc tools are called without confirmation: Claude Code is started with
+`--allowedTools mcp__hqc` (§8.1).
 
 Tools act with the session owner's rights; the agent has no rights of its own.
 
@@ -859,12 +906,25 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   session: an immediate error.
 - `hqc_spawn(project, workspace, runtime?, model?, prompt)` — create a session and an agent,
   return the address. `workspace` is required if the project has no `default_workspace_id`.
-- `hqc_list_sessions(project?)` — addresses, titles, statuses.
+- `hqc_list_sessions(project?)` — addresses, titles, statuses. Since 0.33 (T30): `project` is
+  a slug or an id of the owner's project (another owner's or an unknown one: `not_found`); the
+  result is `{sessions: [{address, title, status, current?}], truncated}`: the owner's
+  sessions, the most recently active first, at most 200 (`truncated: true` beyond), archived
+  sessions and the workers' service sessions left out; `status` is the session's `state`
+  (§17.1); `current: true` marks the calling session.
 - `hqc_search_history(query, project?, fuzzy?)` — history search, respecting grants.
 - `hqc_schedule(session, at|cron, message)` — the hub's cron (§16).
 
 Session address: `<project-slug>/<session-slug>` or the id. A slug is unique within the project
 and does not change on rename.
+
+A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
+since 0.33, T30); the list is shared by the worker's MCP server and the hub
+(`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
+(`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
+server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
+Until grants (iteration 6) every tool works only on the calling session's owner's own
+projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
 
@@ -917,13 +977,25 @@ Chains:
   chain. A deadlock (A waits for B, B waits for A) is resolved by the timeout.
 
 ### 7.2 Requirements for the hqc MCP server
-- A stdio process `hqc-worker mcp` that the runtime starts itself: Claude Code via
-  `--mcp-config` as a JSON string, ACP agents via `mcpServers` in `session/new` (§7).
-- Gets `session_token` only from an environment variable; does not write it to tool
+- A stdio process `hqc-worker mcp [--socket <path>]` that the runtime starts itself: Claude
+  Code via `--mcp-config` as a JSON string, ACP agents via `mcpServers` in `session/new` (§7).
+  JSON-RPC 2.0, one message per line; it implements `initialize` (it answers the runtime's
+  `protocolVersion` if it knows it — `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05` —
+  else the newest; Claude Code 2.1.308 asks for `2025-11-25`), `ping`, `tools/list`,
+  `tools/call`, `notifications/cancelled`; another method gets `-32601`, an unlisted tool
+  `-32602`. Hand-written (no MCP SDK crate) since 0.33, T30.
+- Gets `session_token` only from `HQC_SESSION_TOKEN`; does not write it to tool
   results, runtime logs or files (§7).
-- Forwards every call to the worker daemon over a local socket with this token; the daemon
-  sends it to the hub in an `mcp.call` frame (§5.2). Keeps no state of its own except the
+- Forwards every call to the worker daemon over a Unix socket `$HQC_HOME/mcp.sock` (mode
+  0600, one per daemon: a second daemon with the same `HQC_HOME` does not start; a peer of
+  another OS user is refused) with this token; the daemon sends it to the hub in an
+  `mcp.call` frame (§5.2). Keeps no state of its own except its open calls and the
   `chain` of the current turn (§7.1).
+- The daemon accepts on the socket only the token a running agent of one of its sessions was
+  started with, checks it again on every call (the agent may have stopped since), and sends
+  `mcp.call` with the session's latest token from the hub (§5.2): an agent that keeps running
+  across a reconnect's `session.start` keeps its MCP process and its token. When the agent
+  stops, its open calls fail with `unavailable`.
 - The server name in the runtime config is `hqc`, the tools are `hqc_*`; in Claude Code they
   are allowed up front via `--allowedTools mcp__hqc` (§8.1).
 - While a call waits for a reply (`hqc_ask`), sends `notifications/progress` with the
@@ -931,8 +1003,11 @@ Chains:
   cuts the call off after 30 minutes of idleness (§7.1); the server gets no
   `notifications/cancelled` in that case.
 - If the runtime cancelled the call (`notifications/cancelled`, e.g. on `MCP_TOOL_TIMEOUT`)
-  or the MCP process exited with an open call (EOF on stdio), the worker daemon closes
+  or the MCP process exited with an open call (EOF on stdio: the process exits and the daemon
+  sees its socket close), the worker daemon closes
   the corresponding ask `PendingRequest` with an `mcp.cancel {request_id, reason}` frame (§5.4);
+  it sends `mcp.cancel` for every call open at that moment, fast ones included, and the
+  cancelled call gets no response (MCP);
   the idle cutoff without a notification is prevented by the progress notifications, so
   there is no separate detection for it.
 
@@ -966,6 +1041,18 @@ jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
 `allow_local_mcp`). In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
 1e8 ms, minimum 1000 ms (checked on 2.1.307).
+
+The hqc MCP server (since 0.33, T30): `--mcp-config '{"mcpServers": {"hqc": {"type": "stdio",
+"command": "<the worker's own binary>", "args": ["mcp", "--socket", "<$HQC_HOME/mcp.sock>"],
+"env": {"HQC_SESSION_TOKEN": "<session_token>"}}}}'`, built per process start with the
+session's latest token (§7, §7.2), and `MCP_TOOL_TIMEOUT = (ask_timeout_s + 60) * 1000` in
+the CLI's environment on every start. Checked live on 2.1.308 (`live_mcp`): `system/init`
+lists `mcp_servers: [{name: hqc, status: connected, source: dynamic}]` and nothing else — with
+`--strict-mcp-config` neither the user's servers nor the claude.ai connectors of the logged-in
+account reach the session — and the tool shows as `mcp__hqc__hqc_list_sessions`; the model
+loads it with `ToolSearch` first (one model turn), then calls it, so a turn that calls an hqc
+tool needs at least two model turns. With `--allowedTools mcp__hqc` the call runs without
+`can_use_tool`. The title runs (`title.request`) get no `--mcp-config`.
 
 Session restrictions are never dropped silently **[decision]**: `disallowed_tools` → `--disallowedTools`
 (each rule as a separate argument), `system_prompt` → `--append-system-prompt`,
@@ -2146,6 +2233,10 @@ with `write` share the same queue.
   | turn watchdog (§17.3) | a pass every `limit / 10`, at least every 10 s, over the partial index `turn_open` | — |
   | attachment download by the worker (§12, `.hqc/inbox`) | 100 MB per artifact, 500 MB per input; streamed to disk | the download is aborted, the partial file is deleted, `error` on `session.input` without retry |
   | attachment display by the client (§12) | a diff body is fetched only once `size` is known; text and diffs over 2 MB get "Download" only; a body with `Content-Length` over the display limit is not read | — |
+  | `mcp.call.args` (§5.2, since 0.33) | 64 KB serialized; the worker refuses a bigger call before sending it, the hub checks again | `mcp.result` `error invalid_args` |
+  | `mcp.call.session_token` (§5.2) | `hqcs_` + 43 base64url characters, checked before the database | `mcp.result` `error unauthorized` |
+  | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
+  | the worker's MCP socket (§7.2) | a line up to 64 KB + 4 KB; peers of the same OS user only | the connection is closed |
 - Push: the hub POSTs to the subscription's `endpoint`, so only `https://` without
   userinfo and without a non-standard port on push service hosts is accepted: `fcm.googleapis.com`,
   `updates.push.services.mozilla.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
@@ -2206,6 +2297,23 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.32 → 0.33 (T30, the MCP pipe and `hqc_list_sessions`)
+§5.2, §5.3, §5.4: `mcp.call` goes through the outbox without `session_token` (the token is added
+when sent; a call no longer open, e.g. from a previous run, is dropped, not sent); a fast tool's
+`mcp.result` is the reply under the call's frame `id`, a deferred one is acked by the hub and
+answered by a frame of its own; `mcp.cancel` is answered with `ack {}`, sent for every call open
+when the runtime cancels it or the MCP process exits; the hub accepts the latest and the previous
+session token (migration `0014`, `prev_session_token_hash`) and only from the session's worker;
+errors in the one shape `{code, message}` with the codes listed in §5.2. §7: the token is passed
+in the `env` of the server `hqc` inside `--mcp-config` — the claim that it "does not reach the
+agent's context or the transcript" replaced by what was checked on 2.1.308 / macOS 26.6
+(`live_mcp`, `docs/notes/t30-questions.md`), including that Linux exposes the command line to
+other users; the tool list is shared by worker and hub, a tool appears only when its task lands;
+`hqc_list_sessions` result defined. §7.2: the socket `$HQC_HOME/mcp.sock`, the protocol versions,
+the daemon's token check. §8.1: the `--mcp-config` JSON, `MCP_TOOL_TIMEOUT` on every start,
+`--strict-mcp-config` checked live (only `hqc`, no claude.ai connectors). §20: limits of the MCP
+path.
 
 ### 0.31 → 0.32 (iteration 3 planned)
 §19: iteration 3 also gets `hqc_spawn`; the personal assistant session moves to iteration 4

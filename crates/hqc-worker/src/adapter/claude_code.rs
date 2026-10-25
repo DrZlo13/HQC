@@ -105,8 +105,9 @@ pub struct ClaudeOptions {
     pub claude_bin: Option<PathBuf>,
     /// Claude Code's config dir (`$CLAUDE_CONFIG_DIR` or `~/.claude`), for transcripts.
     pub config_dir: Option<PathBuf>,
-    /// `--mcp-config` JSON. Unset in iteration 1 (MCP hqc is iteration 3).
-    pub mcp_config: Option<String>,
+    /// The hqc MCP server the CLI starts for each session (SPEC §7.2); `None`: no
+    /// `--mcp-config`, the agent has no hqc tools (tests).
+    pub mcp: Option<McpLaunch>,
     /// `CLAUDE_CODE_ENTRYPOINT` for the child: `claude-vscode` makes the transcript show up in
     /// the VS Code extension's history; `None` leaves the CLI's own `sdk-cli`.
     pub entrypoint: Option<String>,
@@ -140,7 +141,7 @@ impl Default for ClaudeOptions {
             entrypoint: None,
             claude_bin: None,
             config_dir: paths::default_config_dir(),
-            mcp_config: None,
+            mcp: None,
             extra_args: vec![],
             permission_mode: "default".into(),
             always_disallowed: NATIVE_MESSAGING_TOOLS
@@ -153,6 +154,40 @@ impl Default for ClaudeOptions {
             own_records: Arc::default(),
         }
     }
+}
+
+/// How the CLI starts the hqc MCP server (SPEC §7.2): `<program> mcp --socket <socket>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpLaunch {
+    /// The worker's own binary.
+    pub program: PathBuf,
+    /// The daemon's socket ([`crate::mcp::socket_path`]).
+    pub socket: PathBuf,
+}
+
+impl McpLaunch {
+    /// The `--mcp-config` JSON: the server `hqc` with the session token in its own `env`.
+    /// The token is thereby on the CLI's command line, which on macOS other users cannot
+    /// read (T30, SPEC §7), and not in the CLI's environment, which the agent's Bash tool
+    /// inherits.
+    pub fn config(&self, token: &crate::token::Secret) -> String {
+        serde_json::json!({
+            "mcpServers": {
+                "hqc": {
+                    "type": "stdio",
+                    "command": self.program,
+                    "args": ["mcp", "--socket", self.socket],
+                    "env": { (crate::mcp::TOKEN_ENV): token.expose() },
+                }
+            }
+        })
+        .to_string()
+    }
+}
+
+/// `MCP_TOOL_TIMEOUT` for a session (SPEC §7.1): a minute more than `ask_timeout_s`, in ms.
+pub fn mcp_tool_timeout_ms(ask_timeout_s: u32) -> u64 {
+    (u64::from(ask_timeout_s) + 60) * 1000
 }
 
 /// Factory for [`ClaudeCodeAdapter`]s.
@@ -170,6 +205,12 @@ impl ClaudeCodeAdapters {
             opts: Arc::new(opts),
             spawner,
         }
+    }
+
+    /// Give every session the hqc MCP server (SPEC §7.2).
+    pub fn with_mcp(mut self, mcp: McpLaunch) -> Self {
+        Arc::make_mut(&mut self.opts).mcp = Some(mcp);
+        self
     }
 
     /// The registry of own transcript records, for the mirror.
@@ -359,8 +400,8 @@ impl ClaudeCodeAdapter {
         ]
         .map(String::from)
         .into();
-        if let Some(m) = &self.opts.mcp_config {
-            args.extend(["--mcp-config".into(), m.clone()]);
+        if let Some(m) = &self.opts.mcp {
+            args.extend(["--mcp-config".into(), m.config(&spec.session_token)]);
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);
         let mut disallowed: Vec<String> = spec.disallowed_tools.clone();
@@ -411,8 +452,12 @@ impl ClaudeCodeAdapter {
                 env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT");
                 if let Some(e) = &self.opts.entrypoint {
                     env.push(("CLAUDE_CODE_ENTRYPOINT".into(), e.clone()));
-                    env.sort();
                 }
+                env.push((
+                    "MCP_TOOL_TIMEOUT".into(),
+                    mcp_tool_timeout_ms(spec.ask_timeout_s).to_string(),
+                ));
+                env.sort();
                 env
             },
         }

@@ -508,6 +508,19 @@ async fn handle_text(
                 }
             }
         }
+        // Answered at once under the call's frame id (SPEC §5.2): T30's tools are all fast.
+        WorkerFrame::McpCall(c) => {
+            let r = crate::mcp::call(app, conn.worker_id, &c).await;
+            conn.reply(&id, HubFrame::McpResult(r));
+            Ok(())
+        }
+        WorkerFrame::McpCancel(c) => {
+            // Only a deferred call (`hqc_ask`) has anything on the hub to close; a fast one
+            // was answered already.
+            tracing::info!(worker_id = %conn.worker_id, request_id = %c.request_id, reason = %c.reason, "mcp call cancelled by the worker");
+            conn.reply(&id, HubFrame::Ack(Ack::default()));
+            Ok(())
+        }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
     };

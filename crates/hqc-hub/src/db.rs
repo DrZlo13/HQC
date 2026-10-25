@@ -1258,13 +1258,36 @@ pub async fn mark_start_sent(db: &PgPool, id: Uuid) -> sqlx::Result<bool> {
     .await
 }
 
+/// A new token for the session's next `session.start`; the one before stays valid for the
+/// `mcp.call`s already on their way (SPEC §5.2).
 pub async fn set_session_token_hash(db: &PgPool, id: Uuid, hash: &str) -> sqlx::Result<()> {
-    sqlx::query("UPDATE sessions SET session_token_hash = $2 WHERE id = $1")
-        .bind(id)
-        .bind(hash)
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE sessions SET prev_session_token_hash = session_token_hash, session_token_hash = $2
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(hash)
+    .execute(db)
+    .await?;
     Ok(())
+}
+
+/// The session of `worker_id` whose latest or previous token hashes to `hash` (SPEC §5.2,
+/// `mcp.call`); the service session has no agent and never matches.
+pub async fn session_by_token_hash(
+    db: &PgPool,
+    worker_id: Uuid,
+    hash: &str,
+) -> sqlx::Result<Option<SessionRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {SESSION_COLS} FROM sessions s
+         WHERE (s.session_token_hash = $2 OR s.prev_session_token_hash = $2)
+           AND s.worker_id = $1 AND NOT s.system"
+    ))
+    .bind(worker_id)
+    .bind(hash)
+    .fetch_optional(db)
+    .await
 }
 
 pub async fn bump_start_failures(db: &PgPool, id: Uuid) -> sqlx::Result<i32> {

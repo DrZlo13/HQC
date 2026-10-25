@@ -15,6 +15,7 @@ pub mod inbox;
 pub mod known_paths;
 pub mod link;
 pub mod machine;
+pub mod mcp;
 pub mod mirror;
 pub mod outbox;
 pub mod permissions;
@@ -66,6 +67,9 @@ pub struct Worker {
     pub mirror: Option<MirrorOptions>,
     /// The machine fingerprint for `hello` ([`machine::fingerprint`], T21).
     pub machine_id: Option<String>,
+    /// The socket of the hqc MCP servers (`$HQC_HOME/mcp.sock`, SPEC §7.2); `None`: not
+    /// served.
+    pub mcp_socket: Option<PathBuf>,
 }
 
 pub struct MirrorOptions {
@@ -134,6 +138,16 @@ impl Worker {
             });
         }
         let (link, direct) = HubLink::new(outbox);
+        // Bound before anything can start an agent whose MCP server would connect to it.
+        let mcp_stop = CancellationToken::new();
+        let mcp_task = match &self.mcp_socket {
+            Some(path) => {
+                let socket = mcp::daemon::McpSocket::bind(path)?;
+                tracing::info!(path = %socket.path().display(), "mcp socket ready");
+                Some(tokio::spawn(socket.run(link.clone(), mcp_stop.clone())))
+            }
+            None => None,
+        };
         let log_stop = CancellationToken::new();
         let log_task = self
             .logs
@@ -197,6 +211,10 @@ impl Worker {
         }
 
         // Agents are down and their last events are in the outbox: flush and close.
+        mcp_stop.cancel();
+        if let Some(t) = mcp_task {
+            let _ = t.await;
+        }
         mirror_stop.cancel();
         if let Some(t) = mirror_task {
             let _ = t.await;

@@ -344,6 +344,11 @@ impl Env {
         self.dir.path().join("known_workspaces.json")
     }
 
+    /// The daemon's MCP socket (SPEC §7.2).
+    pub fn mcp_socket(&self) -> PathBuf {
+        self.dir.path().join("mcp.sock")
+    }
+
     pub fn config_toml(&self, hub_url: &str) -> String {
         format!(
             "hub_url = {:?}\nallowed_roots = [{:?}]\nidle_timeout = 0\nallow_foreign_sessions = false\n\
@@ -449,6 +454,7 @@ pub fn start_worker_logs(
         conn: fast_conn(),
         shutdown_timeout: Duration::from_secs(5),
         machine_id: None,
+        mcp_socket: Some(env.mcp_socket()),
         mirror: env
             .mirror
             .clone()

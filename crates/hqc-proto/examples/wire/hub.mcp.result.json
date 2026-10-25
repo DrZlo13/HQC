@@ -1,0 +1,19 @@
+{
+  "id": "w-31",
+  "type": "mcp.result",
+  "payload": {
+    "request_id": "0199f3a2-7c10-7000-8000-0000000000c1",
+    "result": {
+      "sessions": [
+        {
+          "address": "hqc/fix-the-build",
+          "title": "Fix the build",
+          "status": "running",
+          "current": true
+        },
+        { "address": "hqc/session-2", "title": "Session 2", "status": "idle" }
+      ],
+      "truncated": false
+    }
+  }
+}

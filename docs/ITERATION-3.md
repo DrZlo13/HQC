@@ -15,7 +15,7 @@ Each task is self-contained: it can be handed to a separate agent together with 
 and the listed sections of `docs/SPEC.md`. Dependencies are stated; T31, T32, T33 and T35 can
 run in parallel after T30; T36 closes the iteration.
 
-## T30. The MCP pipe and `hqc_list_sessions` (blocks the rest)
+## T30. The MCP pipe and `hqc_list_sessions` (done, SPEC 0.33)
 
 Sections: §5.2 (MCP calls), §5.3, §5.4, §7, §7.2, §8.1, §2.1. The whole path of one tool call,
 proven on the simplest tool.

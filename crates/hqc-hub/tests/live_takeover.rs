@@ -129,6 +129,7 @@ async fn live_vscode_import_takeover_release() {
         shutdown_timeout: Duration::from_secs(10),
         machine_id: None,
         known_paths_file: run.join("home/known_workspaces.json"),
+        mcp_socket: None,
         logs: None,
         mirror: Some(MirrorOptions {
             projects_dir: claude_dir.join("projects"),

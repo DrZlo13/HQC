@@ -410,7 +410,22 @@ impl Connection {
             .outbox
             .after(*sent_upto)
             .map_err(|e| format!("reading outbox: {e:#}"))?;
-        for e in entries {
+        for mut e in entries {
+            *sent_upto = e.seq;
+            if e.frame == crate::outbox::FRAME_MCP_CALL {
+                // The token is added only now (SPEC §7.2); a call nobody waits for any more
+                // is not sent at all.
+                match self.link.mcp.token_for(e.event_id) {
+                    Some(t) => e.event["session_token"] = json!(t.expose()),
+                    None => {
+                        tracing::info!(request_id = %e.event_id, "mcp.call no longer open, not sent");
+                        if let Err(err) = self.link.outbox.remove(e.event_id) {
+                            tracing::error!(request_id = %e.event_id, "outbox delete failed: {err:#}");
+                        }
+                        continue;
+                    }
+                }
+            }
             let id = self.frame_id();
             let frame = if e.frame == crate::outbox::FRAME_EVENT {
                 json!({"id": id, "type": "event", "payload": {"event": e.event}})
@@ -421,7 +436,6 @@ impl Connection {
                 .await
                 .map_err(|e| format!("send: {e}"))?;
             in_flight.insert(id, e.event_id);
-            *sent_upto = e.seq;
         }
         Ok(())
     }
@@ -501,6 +515,7 @@ impl Connection {
                 Some(eid) if !e.retryable => {
                     tracing::error!(event_id = %eid, code = %e.code, "hub rejected an event, dropping it: {}", e.message);
                     let _ = self.link.outbox.remove(eid);
+                    self.call_refused(eid, &e);
                 }
                 Some(eid) => match self.link.outbox.failed(eid) {
                     Ok(Some(n)) if n >= MAX_EVENT_ATTEMPTS => {
@@ -508,6 +523,7 @@ impl Connection {
                         if let Err(e) = self.link.outbox.remove(eid) {
                             tracing::error!(event_id = %eid, "outbox delete failed: {e:#}");
                         }
+                        self.call_refused(eid, &e);
                     }
                     Ok(n) => {
                         tracing::warn!(event_id = %eid, code = %e.code, attempts = ?n, "hub error on an event, will resend after reconnect: {}", e.message);
@@ -518,6 +534,29 @@ impl Connection {
                 },
                 None => tracing::warn!(id = %f.id, code = %e.code, "hub error: {}", e.message),
             },
+            HubFrame::McpResult(r) => {
+                // The answer to a call in flight comes under its frame id; a deferred one
+                // (SPEC §5.2) comes on its own and is acked, also when nobody waits for it.
+                let reply_to = in_flight.remove(&f.id);
+                if let Some(eid) = reply_to {
+                    if let Err(e) = self.link.outbox.remove(eid) {
+                        tracing::error!(request_id = %eid, "outbox delete failed: {e:#}");
+                    }
+                }
+                let rid = r.request_id.clone();
+                match rid.parse::<Uuid>() {
+                    Ok(id) if self.link.mcp.finish(id, r.outcome()) => {}
+                    _ => tracing::info!(request_id = %rid, "mcp.result for no open call"),
+                }
+                if reply_to.is_none() {
+                    send_json(
+                        ws,
+                        &Envelope::new(f.id, WorkerFrame::Ack(Default::default())),
+                    )
+                    .await
+                    .map_err(|e| format!("send: {e}"))?;
+                }
+            }
             HubFrame::HelloAck { .. } => tracing::warn!("unexpected hello.ack"),
             body if dispatch => {
                 if self
@@ -532,6 +571,19 @@ impl Connection {
             body => tracing::debug!(frame = frame_type(&body), "frame ignored during shutdown"),
         }
         Ok(())
+    }
+}
+
+impl Connection {
+    /// An outbox entry the hub refused for good: if it was an MCP call, its caller learns.
+    fn call_refused(&self, eid: Uuid, e: &hqc_proto::frame::WireError) {
+        self.link.mcp.finish(
+            eid,
+            Err(hqc_proto::frame::McpError::new(
+                hqc_proto::mcp::error_code::UNAVAILABLE,
+                format!("the hub refused the call: {} ({})", e.message, e.code),
+            )),
+        );
     }
 }
 
@@ -559,6 +611,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::MirrorSet(_) => "mirror.set",
         HubFrame::SessionCleanup(_) => "session.cleanup",
         HubFrame::TitleRequest(_) => "title.request",
+        HubFrame::McpResult(_) => "mcp.result",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

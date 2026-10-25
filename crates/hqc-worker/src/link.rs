@@ -1,17 +1,19 @@
 //! The path from sessions to the hub connection.
 //!
-//! Stored events go through the outbox (SPEC §5.2): written first, then the connection is
-//! woken to send them. Everything else (`agent.delta`, replies to hub frames,
-//! `session.state`) is sent directly when connected and dropped otherwise: the hub resends
-//! pending inputs after `hello` and the supervisor resends `session.state` on connect.
+//! Stored events and `mcp.call` go through the outbox (SPEC §5.2): written first, then the
+//! connection is woken to send them. Everything else (`agent.delta`, replies to hub frames,
+//! `session.state`, `mcp.cancel`) is sent directly when connected and dropped otherwise: the
+//! hub resends pending inputs after `hello` and the supervisor resends `session.state` on
+//! connect.
 
 use std::sync::Arc;
 
 use hqc_proto::event::{Event, EventKind};
-use hqc_proto::frame::WorkerFrame;
-use tokio::sync::{mpsc, watch, Notify};
+use hqc_proto::frame::{McpCancel, WorkerFrame};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use uuid::Uuid;
 
+use crate::mcp::{McpCalls, Outcome};
 use crate::outbox::Outbox;
 
 /// A frame to send without the outbox; `id: None` gets a fresh worker frame id.
@@ -28,6 +30,8 @@ pub struct HubLink {
     direct: mpsc::UnboundedSender<Direct>,
     /// The worker's service session from `hello.ack` (SPEC §10.2), for its log lines.
     system_session: Arc<watch::Sender<Option<Uuid>>>,
+    /// Session tokens and MCP calls waiting for `mcp.result` (SPEC §7.2).
+    pub(crate) mcp: Arc<McpCalls>,
 }
 
 impl HubLink {
@@ -38,8 +42,52 @@ impl HubLink {
             outbox_ready: Arc::new(Notify::new()),
             direct,
             system_session: Arc::new(watch::channel(None).0),
+            mcp: Arc::default(),
         };
         (link, rx)
+    }
+
+    pub fn mcp(&self) -> &McpCalls {
+        &self.mcp
+    }
+
+    /// Queue `mcp.call` for a tool call of `session_id` (SPEC §5.2): through the outbox,
+    /// keyed by its `request_id`, without the session token, which the connection adds when
+    /// it sends the frame. `None`: the session's agent does not run.
+    pub fn mcp_call(
+        &self,
+        session_id: Uuid,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<Option<(Uuid, oneshot::Receiver<Outcome>)>> {
+        let Some((request_id, rx)) = self.mcp.open(session_id) else {
+            return Ok(None);
+        };
+        let payload = serde_json::json!({"request_id": request_id, "tool": tool, "args": args});
+        if let Err(e) = self
+            .outbox
+            .push_frame(request_id, crate::outbox::FRAME_MCP_CALL, &payload)
+        {
+            self.mcp.forget(request_id);
+            return Err(e);
+        }
+        self.outbox_ready.notify_one();
+        Ok(Some((request_id, rx)))
+    }
+
+    /// The caller gave the call up (SPEC §7.2): a call the hub has not taken yet leaves the
+    /// outbox, and the hub learns of it with `mcp.cancel`.
+    pub fn mcp_cancel(&self, request_id: Uuid, reason: &str) {
+        if !self.mcp.forget(request_id) {
+            return;
+        }
+        if let Err(e) = self.outbox.remove(request_id) {
+            tracing::error!(%request_id, "outbox delete failed: {e:#}");
+        }
+        self.send(WorkerFrame::McpCancel(McpCancel {
+            request_id: request_id.to_string(),
+            reason: reason.into(),
+        }));
     }
 
     /// Queue an event for the hub. Fails only if the outbox cannot be written.

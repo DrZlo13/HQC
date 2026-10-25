@@ -12,6 +12,7 @@ import { IconAttach, IconBack, IconCode, IconMore, IconSend, IconStop } from './
 import { STATE_LABELS, formatCost, homePath, modelName } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
+import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
@@ -310,6 +311,7 @@ export function Chat({
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           {!system && <ActivityLine state={state} timeline={t} />}
+          {!system && <WaitedRequests app={app} sessionId={sessionId} />}
         </div>
       </div>
       {notice && (

@@ -2,8 +2,8 @@
 // `state`/`queue_len`/unread from `subscribe_summary` (SPEC §6, §17.1), and the workspaces
 // of the projects that have been looked at.
 
-import { Api, type NewSessionOptions } from './api';
-import type { Me, Project, SessionInfo, SessionSummary, Workspace } from './proto';
+import { Api, ApiError, type NewSessionOptions } from './api';
+import type { ClarifyAnswer, Me, OpenRequest, Project, SessionInfo, SessionSummary, Workspace } from './proto';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
 export class AppState {
@@ -16,6 +16,8 @@ export class AppState {
   /** The project shown in the left column; the personal one until another is picked. */
   currentProjectId: string | null = null;
   conn: ConnState = 'closed';
+  /** Every open request of the user, oldest first, as the hub last sent it (T37). */
+  requests: OpenRequest[] = [];
   private readonly listeners = new Set<() => void>();
   private refreshing: Promise<void> | null = null;
 
@@ -48,6 +50,7 @@ export class AppState {
     } catch (e) {
       this.error = (e as Error).message;
     }
+    this.socket.onRequests((list) => this.setRequests(list));
     this.socket.onSummary((list) => this.mergeSummary(list));
     this.socket.start();
     this.changed();
@@ -116,6 +119,44 @@ export class AppState {
     // A session created elsewhere: fetch the list again for its title.
     if (unknown) void this.refreshSessions().catch(() => {});
     this.changed();
+  }
+
+  setRequests(list: OpenRequest[]): void {
+    this.requests = list;
+    this.changed();
+  }
+
+  /** The open requests of the sessions `sessionId` waits on through its asks, along the
+   *  chain (SPEC §10.1): shown and answered in its feed. */
+  waitedRequests(sessionId: string): OpenRequest[] {
+    return this.requests.filter((r) => r.waiting.some((w) => w.session_id === sessionId));
+  }
+
+  /** Answers an approval wherever it is shown: the request's own session gets the answer,
+   *  as from its feed. Once the hub took it, it leaves every list at once; the hub's next
+   *  `requests` says the same. */
+  approveRequest(r: OpenRequest, optionId: string, message?: string): Promise<void> {
+    return this.closing(r, this.api.approve(r.session_id, r.request_id, optionId, message));
+  }
+
+  answerRequest(r: OpenRequest, answers: Record<string, ClarifyAnswer>): Promise<void> {
+    return this.closing(r, this.api.clarify(r.session_id, r.request_id, answers));
+  }
+
+  /** An answer taken, or the request closed elsewhere first (`409 request_closed`): it is
+   *  gone either way. */
+  private async closing(r: OpenRequest, answer: Promise<void>): Promise<void> {
+    try {
+      await answer;
+    } catch (e) {
+      if (!(e instanceof ApiError && e.code === 'request_closed')) throw e;
+    }
+    this.dropRequest(r);
+  }
+
+  private dropRequest(r: OpenRequest): void {
+    const left = this.requests.filter((x) => x.session_id !== r.session_id || x.request_id !== r.request_id);
+    if (left.length !== this.requests.length) this.setRequests(left);
   }
 
   /** Projects in the hub's order (the personal one first, it is the oldest). */

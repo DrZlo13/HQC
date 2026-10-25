@@ -2,7 +2,7 @@
 // the hub, and a stale cached build talking to a newer hub is worse than a network error.
 //
 // Push body (SPEC §16, hqc_proto::api::PushMessage, examples/wire/api.push.json):
-//   { session_id, type, title?, body?, tag?, payload? }
+//   { session_id, type, title?, body?, tag?, payload?, open_session_id? }
 // `payload` is the event of SPEC §4 (absent if it would not fit a push); without
 // title/body they are derived from `type` and the event's payload.
 
@@ -38,7 +38,10 @@ self.addEventListener('push', (event) => {
   const title = d.title || derived.title;
   const body = (d.body || derived.body || '').slice(0, 300);
   const sessionId = d.session_id;
-  const hash = sessionId ? `#/s/${encodeURIComponent(sessionId)}` : '#/';
+  // A request of a session another one waits on opens where the user waits (T37); the tag
+  // stays the request's own.
+  const target = d.open_session_id || sessionId;
+  const hash = target ? `#/s/${encodeURIComponent(target)}` : '#/';
   event.waitUntil(
     self.registration.showNotification(title, {
       body,

@@ -4,6 +4,7 @@ import { Chat } from './Chat';
 import { Enroll } from './Enroll';
 import { useIsPhone, useSubscription } from './hooks';
 import { ProjectRail } from './ProjectRail';
+import { RequestsScreen } from './requests';
 import { SearchScreen } from './Search';
 import { SessionList } from './SessionList';
 import { Settings } from './Settings';
@@ -15,12 +16,14 @@ export type Route =
   | { name: 'workspaces'; projectId: string }
   | { name: 'session'; id: string; seq?: number }
   | { name: 'search' }
+  | { name: 'requests' }
   | { name: 'settings' }
   | { name: 'enroll'; code: string };
 
 /** Hash routes, so the hub can serve the client as static files: `#/p/<project>`,
  *  `#/p/<project>/workspaces`, `#/s/<session>` (`?seq=<seq>`: scrolled to that event, a
- *  search hit), `#/search` (the phone's search screen), `#/settings`,
+ *  search hit), `#/search` (the phone's search screen), `#/requests` (every open request,
+ *  T37), `#/settings`,
  *  `#/enroll?code=ABCD-1234`. */
 export function parseRoute(hash: string): Route {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
@@ -31,6 +34,7 @@ export function parseRoute(hash: string): Route {
     return Number.isInteger(seq) && seq > 0 ? { name: 'session', id, seq } : { name: 'session', id };
   }
   if (parts[0] === 'search') return { name: 'search' };
+  if (parts[0] === 'requests') return { name: 'requests' };
   if (parts[0] === 'p' && parts[1]) {
     const id = decodeURIComponent(parts[1]);
     return parts[2] === 'workspaces' ? { name: 'workspaces', projectId: id } : { name: 'project', id };
@@ -80,6 +84,9 @@ export function App({ app }: { app: AppState }) {
       // A phone screen; a desktop has the search in the left column.
       main = phone ? <SearchScreen app={app} /> : <div class="placeholder">Search from the field on the left</div>;
       break;
+    case 'requests':
+      main = <RequestsScreen app={app} phone={phone} />;
+      break;
     case 'workspaces':
       main = <Workspaces key={route.projectId} app={app} projectId={route.projectId} />;
       break;
@@ -109,7 +116,7 @@ export function App({ app }: { app: AppState }) {
     <div class={`layout route-${route.name}`}>
       <ProjectRail app={app} />
       <aside class="sidebar" aria-label="Project sessions">
-        <SessionList app={app} current={current} />
+        <SessionList app={app} current={current} requests={route.name === 'requests'} />
       </aside>
       <main class="main">{main}</main>
     </div>

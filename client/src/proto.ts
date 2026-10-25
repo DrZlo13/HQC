@@ -665,6 +665,61 @@ export interface SessionSummary {
   held_by?: HeldBy;
 }
 
+/** A session waiting on another through an open `hqc_ask`, directly or along a chain. */
+export interface WaitingSession {
+  session_id: Uuid;
+  address: string;
+  title: string;
+}
+
+/** An open request of the user (SPEC §6 `GET /api/requests`, the `requests` frame, T37). */
+export interface OpenRequest {
+  session_id: Uuid;
+  request_id: string;
+  /** `approval` | `clarify` | `worker_approval`; open. */
+  kind: string;
+  address: string;
+  title: string;
+  worker_id?: Uuid;
+  worker_name?: string;
+  /** In a worker's service session (SPEC §10.2). */
+  system: boolean;
+  event: EventOf<'approval.request' | 'clarify.request'>;
+  /** Who waits on it, the nearest first; the last is the top of the chain. */
+  waiting: WaitingSession[];
+}
+
+/** `{requests[]}`; an item whose event is not a request event this build reads is left out. */
+export function parseRequestList(v: unknown): OpenRequest[] {
+  const out: OpenRequest[] = [];
+  for (const x of arr(obj(v, 'requests'), 'requests')) {
+    const o = obj(x, 'request');
+    let event: HqcEvent;
+    try {
+      event = parseEvent(o.event);
+    } catch {
+      continue;
+    }
+    if (event.type !== 'approval.request' && event.type !== 'clarify.request') continue;
+    out.push({
+      session_id: str(o, 'session_id'),
+      request_id: str(o, 'request_id'),
+      kind: str(o, 'kind'),
+      address: str(o, 'address'),
+      title: str(o, 'title'),
+      worker_id: optStr(o, 'worker_id'),
+      worker_name: optStr(o, 'worker_name'),
+      system: optBool(o, 'system') ?? false,
+      event,
+      waiting: (present(o, 'waiting') ? arr(o, 'waiting') : []).map((w) => {
+        const ws = obj(w, 'waiting');
+        return { session_id: str(ws, 'session_id'), address: str(ws, 'address'), title: str(ws, 'title') };
+      }),
+    });
+  }
+  return out;
+}
+
 /** A change of `delivery` of a stored input (SPEC §6); the event is not sent again. */
 export interface DeliveryChange {
   session_id: Uuid;
@@ -681,6 +736,7 @@ export type ServerFrame =
   | ({ type: 'delivery' } & DeliveryChange)
   | { type: 'summary'; sessions: SessionSummary[] }
   | { type: 'session.summary'; session: SessionSummary }
+  | { type: 'requests'; requests: OpenRequest[] }
   | { type: 'pong' }
   | { type: 'error'; code: string; message: string; session_id?: Uuid }
   | { type: 'other'; wire_type: string };
@@ -741,6 +797,8 @@ export function parseServerFrame(json: unknown): ServerFrame {
       return { type, sessions: arr(f, 'sessions').map(parseSummary) };
     case 'session.summary':
       return { type, session: parseSummary(f.session) };
+    case 'requests':
+      return { type, requests: parseRequestList(f) };
     case 'pong':
       return { type };
     case 'error':
@@ -1120,6 +1178,8 @@ export interface PushMessage {
   body?: string;
   tag?: string;
   payload?: HqcEvent;
+  /** The session a click opens instead of `session_id`: the top of a chain of asks (T37). */
+  open_session_id?: Uuid;
 }
 
 export function parsePushMessage(v: unknown): PushMessage {
@@ -1131,6 +1191,7 @@ export function parsePushMessage(v: unknown): PushMessage {
     body: optStr(o, 'body'),
     tag: optStr(o, 'tag'),
     payload: present(o, 'payload') ? parseEvent(o.payload) : undefined,
+    open_session_id: optStr(o, 'open_session_id'),
   };
 }
 

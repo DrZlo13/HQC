@@ -3001,3 +3001,88 @@ select.input {
   display: flex;
   gap: 8px;
 }
+
+/* ---- another session's request (T37): its own card inside a frame naming it ---- */
+
+.waited-requests {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.foreign-request {
+  border: 1px dashed var(--accent);
+  border-radius: 14px;
+  background: var(--accent-soft);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.requests-screen .foreign-request + .foreign-request {
+  margin-top: 12px;
+}
+
+.req-head {
+  padding: 4px 8px 2px;
+  font-size: 13px;
+  color: var(--accent-text);
+  min-width: 0;
+}
+.req-from {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.req-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.req-session {
+  font-weight: 600;
+  color: var(--strong);
+}
+.req-address {
+  color: var(--muted);
+  font-size: 12px;
+}
+.req-worker {
+  color: var(--accent-text);
+}
+.req-waiting {
+  font-size: 12px;
+}
+
+.requests-link {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  text-decoration: none;
+}
+.requests-link .requests-label {
+  flex: 1;
+}
+.requests-link.is-current,
+.requests-link:hover {
+  background: var(--active);
+}
+.requests-link-phone {
+  flex: none;
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: 16px;
+}
+.requests-link-phone .requests-label {
+  flex: none;
+}

@@ -1,5 +1,5 @@
 // WebSocket /api/ws (SPEC §6): `subscribe {session_id, after_seq}` per open chat,
-// `subscribe_summary` for the session list. Frames are flat JSON (crates/hqc-proto
+// `subscribe_summary` for the session list and the open requests. Frames are flat JSON (crates/hqc-proto
 // client_frame). On every (re)connect the client repeats each subscription from the last
 // `seq` it has seen.
 
@@ -8,6 +8,7 @@ import {
   type ClientFrame,
   type DeliveryChange,
   type HqcEvent,
+  type OpenRequest,
   type SessionSummary,
 } from './proto';
 
@@ -37,6 +38,7 @@ export class HubSocket {
   private ws: WebSocket | null = null;
   private readonly subs = new Map<string, SessionSubscriber>();
   private readonly summaryListeners = new Set<(s: SessionSummary[]) => void>();
+  private readonly requestListeners = new Set<(r: OpenRequest[]) => void>();
   private readonly stateListeners = new Set<(s: ConnState) => void>();
   private attempt = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -84,6 +86,13 @@ export class HubSocket {
     this.summaryListeners.add(fn);
     if (this.summaryListeners.size === 1) this.send({ type: 'subscribe_summary' });
     return () => this.summaryListeners.delete(fn);
+  }
+
+  /** The user's open requests, whole each time (T37); they come with the summary
+   *  subscription, so a listener also needs `onSummary`. */
+  onRequests(fn: (r: OpenRequest[]) => void): () => void {
+    this.requestListeners.add(fn);
+    return () => this.requestListeners.delete(fn);
   }
 
   onState(fn: (s: ConnState) => void): () => void {
@@ -171,6 +180,9 @@ export class HubSocket {
         break;
       case 'session.summary':
         for (const fn of this.summaryListeners) fn([frame.session]);
+        break;
+      case 'requests':
+        for (const fn of this.requestListeners) fn(frame.requests);
         break;
       case 'error':
         console.warn('hub ws error', frame.code, frame.message, frame.session_id ?? '');

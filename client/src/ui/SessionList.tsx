@@ -5,6 +5,7 @@ import type { SessionInfo, Workspace } from '../proto';
 import { useSubscription } from './hooks';
 import { IconPlus, IconSearch } from './icons';
 import { formatWhen, homePath } from './labels';
+import { RequestsLink } from './requests';
 import { SearchHits } from './Search';
 import {
   LIST_MODES,
@@ -39,7 +40,18 @@ export function projectName(p: { name: string; is_personal: boolean }): string {
 /** The sessions of the current project (SPEC §1: projects, in projects sessions), T26: a
  *  column next to the project rail on a desktop, the whole first screen on a phone, with
  *  the projects as chips above. */
-export function SessionList({ app, current, phone }: { app: AppState; current?: string; phone?: boolean }) {
+export function SessionList({
+  app,
+  current,
+  phone,
+  requests,
+}: {
+  app: AppState;
+  current?: string;
+  phone?: boolean;
+  /** The "Requests" screen is open (T37). */
+  requests?: boolean;
+}) {
   useSubscription((fn) => app.onChange(fn), [app]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +119,7 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
         <header class="m-head">
           <div class="m-head-row">
             <h1>Sessions</h1>
+            <RequestsLink app={app} phone />
             <a class="icon-btn icon-btn-round" href="#/search" aria-label="Search sessions and messages">
               <IconSearch size={20} />
             </a>
@@ -190,6 +203,7 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
         )}
         {phone && <WorkerList app={app} current={current} />}
       </div>
+      {!phone && <RequestsLink app={app} current={requests} />}
       {!phone && <WorkerList app={app} current={current} />}
       {phone && (
         <button

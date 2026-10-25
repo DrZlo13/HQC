@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.39, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.40, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -909,7 +909,11 @@ events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`.
 stored from a client input carries its `client_op_id`, so the client shows the message at
 once and matches it with the echo (a technique from Agent Host Protocol, §22). A separate
 subscription, `subscribe_summary`, gives `state`, `queue_len` and unread counts per session.
-After a reconnect the client repeats `subscribe` with the last `seq` it has seen.
+After a reconnect the client repeats `subscribe` with the last `seq` it has seen, or from
+before its first input still `pending` if that is earlier (since 0.40): a `delivery` frame sent
+while the socket was down is lost, and an event sent again carries its current `delivery`,
+which the client takes over the stored copy (the reply to `POST /input` never overrides a
+newer copy).
 
 `/api/ws` frames are flat JSON objects `{type, ...}` with no `id` and no `payload` wrapper:
 - client → hub: `{type: subscribe, session_id, after_seq?}`, `{type: unsubscribe,
@@ -2619,6 +2623,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.39 → 0.40 (a delivery lost while the socket was down)
+§6: a resubscription starts before the first input still `pending`, and an event sent again
+updates the client's copy's `delivery`. Before, a message sent while the hub restarted stayed
+at "awaiting delivery" until a reload: its `delivery` frame went out while the browser was
+reconnecting, and the copy the hub sent again was dropped as already seen (2026-10-25).
 
 ### 0.38 → 0.39 (T36, hardening of the MCP surface; iteration 3 closed)
 §2.1: what a prompt-injected or compromised agent can spend, the MCP socket bound to the

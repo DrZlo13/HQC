@@ -508,18 +508,22 @@ async fn handle_text(
                 }
             }
         }
-        // Answered at once under the call's frame id (SPEC §5.2): T30's tools are all fast.
+        // A fast tool is answered under the call's frame id, a deferred one (`hqc_ask`) is
+        // acked and answered later by a frame of its own (SPEC §5.2).
         WorkerFrame::McpCall(c) => {
-            let r = crate::mcp::call(app, conn.worker_id, &c).await;
-            conn.reply(&id, HubFrame::McpResult(r));
+            match crate::mcp::call(app, conn.worker_id, &c).await {
+                Some(r) => conn.reply(&id, HubFrame::McpResult(r)),
+                None => conn.reply(&id, HubFrame::Ack(Ack::default())),
+            }
             Ok(())
         }
         WorkerFrame::McpCancel(c) => {
             // Only a deferred call (`hqc_ask`) has anything on the hub to close; a fast one
             // was answered already.
             tracing::info!(worker_id = %conn.worker_id, request_id = %c.request_id, reason = %c.reason, "mcp call cancelled by the worker");
+            let r = crate::peers::cancelled(app, conn.worker_id, &c).await;
             conn.reply(&id, HubFrame::Ack(Ack::default()));
-            Ok(())
+            r
         }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
@@ -592,6 +596,8 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
             for p in db::open_requests_of_worker(&app.db, conn.worker_id).await? {
                 requests::cancel_without_frame(app, &p, CancelReason::WorkerRestart).await?;
             }
+            // Its `hqc_ask` calls died with it (SPEC §7.1).
+            crate::peers::worker_restarted(app, conn.worker_id).await?;
             db::worker_restarted(&app.db, conn.worker_id).await?;
             for sid in db::sessions_of_worker(&app.db, conn.worker_id).await? {
                 events::turn_lost(app, sid).await?;
@@ -605,6 +611,8 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         for p in db::undelivered_worker_results(&app.db, conn.worker_id).await? {
             requests::deliver_result(app, &p).await;
         }
+        // Nor do the answers to its asks that came while it was away (SPEC §5.2).
+        crate::peers::after_hello(app, conn.worker_id).await?;
         crate::mirror::after_hello(app, conn).await?;
         Ok(())
     }

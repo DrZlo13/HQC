@@ -45,6 +45,8 @@ export const SYSTEM_CODE_LABELS: Record<string, string> = {
   session_taken_over: 'Taken over from VS Code',
   session_released: 'Returned to VS Code',
   session_forked: 'Fork',
+  ask_cancelled: 'Question cancelled',
+  peer_evicted: 'Messages dropped',
 };
 
 /** `system.code`s drawn as a warning, with an icon (SPEC §9.3). */

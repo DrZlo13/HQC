@@ -575,6 +575,29 @@ describe('turn indicator (T13, T26): from the session state, no events of its ow
     expect(draw('running', t)!.textContent).toBe('Agent is working');
   });
 
+  it('a waiting hqc_ask (T32): "Waiting for a reply from <session> <time>"', () => {
+    const t = new Timeline();
+    t.apply(
+      ev('event.tool.call', (e) => {
+        e.seq = 1;
+        e.ts = '2026-10-22T10:28:36Z';
+        e.payload = {
+          call_id: 'q',
+          tool: 'mcp__hqc__hqc_ask',
+          args_preview: '{"text":"Is the build green?","session":"hqc/build-bot"}',
+        };
+      }),
+    );
+    const line = draw('running', t)!;
+    expect(line.classList.contains('activity-ask')).toBe(true);
+    expect(line.querySelector('.activity-label')!.textContent).toBe('Waiting for a reply');
+    expect(line.querySelector('.activity-what')!.textContent).toBe('from hqc/build-bot');
+    expect(line.querySelector('.activity-timer')!.textContent).toBe('1:24');
+    t.apply(result(2, 'q'));
+    render(null, root);
+    expect(draw('running', t)!.textContent).toBe('Agent is working');
+  });
+
   it('queued and waiting: their line; waiting with its request on screen: none', () => {
     expect(draw('queued')!.textContent).toBe('Input queued');
     render(null, root);

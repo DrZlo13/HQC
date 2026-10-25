@@ -167,7 +167,7 @@ async fn a_call_goes_to_the_hub_and_back() {
         .collect();
     assert_eq!(
         names,
-        ["hqc_list_sessions", "hqc_attach"],
+        ["hqc_list_sessions", "hqc_attach", "hqc_send", "hqc_ask"],
         "only tools that landed"
     );
     assert_eq!(
@@ -234,7 +234,7 @@ async fn a_call_goes_to_the_hub_and_back() {
     let r = rt.request(5, "resources/list", json!({})).await;
     assert_eq!(r["error"]["code"], -32601);
     rt.send(json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-                   "params": {"name": "hqc_send", "arguments": {}}}))
+                   "params": {"name": "hqc_spawn", "arguments": {}}}))
         .await;
     let r = rt.recv().await;
     assert_eq!(r["error"]["code"], -32602, "no stubs: {r}");
@@ -373,6 +373,61 @@ async fn a_call_waits_in_the_outbox_across_a_reconnect() {
         json!({"n": 2})
     );
     let _ = sid;
+    w.stop().await;
+}
+
+/// T32: a deferred call (`hqc_ask`) is acked by the hub, leaves the outbox and waits; its
+/// `mcp.result` comes later as a frame of its own, also on a new connection, and reaches the
+/// runtime.
+#[tokio::test]
+async fn a_deferred_answer_comes_after_a_reconnect() {
+    let (env, mut hub, w, mut c, _sid) = setup().await;
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+    rt.send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                   "params": {"name": "hqc_ask",
+                              "arguments": {"text": "green?", "session": "hqc/ci"}}}))
+        .await;
+    let f = c.expect("mcp.call").await;
+    assert_eq!(f["payload"]["tool"], "hqc_ask");
+    let rid = f["payload"]["request_id"].clone();
+    c.send(json!({"id": f["id"], "type": "ack", "payload": {}}))
+        .await;
+    let ob = Outbox::open(&env.outbox()).unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while !ob.is_empty().unwrap() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "acked call left the outbox"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    c.close().await;
+
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    assert!(
+        c.maybe("mcp.call", Duration::from_millis(300))
+            .await
+            .is_none(),
+        "not sent again"
+    );
+    let id = c
+        .frame(
+            "mcp.result",
+            json!({"request_id": rid, "result": {"from": "hqc/ci", "reply": "yes"}}),
+        )
+        .await;
+    let ack = c.expect("ack").await;
+    assert_eq!(ack["id"], id.as_str());
+    let r = rt.recv().await;
+    assert_eq!(r["id"], 2);
+    let (is_err, text) = result_text(&r);
+    assert!(!is_err, "{r}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap(),
+        json!({"from": "hqc/ci", "reply": "yes"})
+    );
     w.stop().await;
 }
 

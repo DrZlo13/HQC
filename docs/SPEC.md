@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.34, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.35, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -245,6 +245,14 @@ Open requests that survive a hub restart: `kind`
 (for ask and mcp_call: whom to give the result to), `result` (filled in when the answer has
 been received but not yet delivered to the worker).
 
+An `ask` (since 0.35, T32) is a row of the **asking** session: `session_id` — the asking
+session, `request_id` — the `mcp.call`'s, `worker_id` — the asking session's worker,
+`payload` — `{target_session_id, event_id, to}` (`event_id` — the `peer.message` it put
+into the target, `to` — the target's address), `expires_at` — the ask's timeout, `result` —
+the `mcp.result` frame once it is answered, timed out or closed by a worker restart (§7.1).
+`from_session_id`/`from_event_id` stay unused; `mcp_call` is not used: `hqc_send` keeps no
+row of its own (§5.2).
+
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
 `timezone`, `message`, `enabled`, `last_run`, `catch_up`.
@@ -271,7 +279,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id?` (for ask) | the hub on `hqc_send`/`hqc_ask` |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s) | the hub on `hqc_send`/`hqc_ask`; `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result`; for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?` | worker or hub |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
@@ -286,7 +294,8 @@ the client renders only them. The "source" column is the component that produces
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
 | `agent_start_failed` | hub | the agent failed to start 3 times in a row (or non-retryably); `pending` inputs became `failed` (§5.2) |
 | `input_rejected` | hub | the worker rejected an input other than as a failed start; the input became `failed` (§5.2) |
-| `ask_cancelled` | hub | a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), iteration 3 |
+| `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
+| `peer_evicted` | hub | in the target session: the send buffer was over its limit and its oldest messages were dropped unread (§7.1), since 0.35 |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
@@ -514,11 +523,21 @@ MCP calls (worker → hub → worker):
   that is no longer open: answered, cancelled, or left by a previous run of the worker, whose
   caller died with it. So a call survives a dropped connection (it is sent again after the
   next `hello`) but not a worker restart. A call sent again after its answer was lost runs
-  again on the hub, so a tool with side effects acts once per `request_id` (since 0.34, T31):
-  what it writes gets the id `uuid v5(<hqc namespace>, "<tool>\n<calling session id>\n<request_id>")`
+  again on the hub, so a tool with side effects acts once per `request_id` (since 0.34, T31;
+  0.35, T32): what it writes gets the id `uuid v5(<hqc namespace>, "<tool>\n<calling session id>\n<request_id>")`
   (`once_id` in `crates/hqc-hub/src/mcp.rs`), and a call that finds it already written
   answers from it — the same result, nothing written twice. `hqc_attach` keys its
-  `attachment` event so; the same `request_id` from another session is another call.
+  `attachment` event so, `hqc_send`/`hqc_ask` their `peer.message` (with `peer.message` as
+  the tool); a repeated `hqc_send` answers the same `{to, delivery}` from that event, a
+  repeated `hqc_ask` finds its `PendingRequest`: still open — `ack {}` again, closed — its
+  stored `mcp.result` under the repeat's frame `id`. The same `request_id` from another
+  session is another call.
+- A deferred answer (since 0.35): the hub keeps the `mcp.result` frame in
+  `PendingRequest.result` and sends it to the asking session's worker, now if it is
+  connected, else after its next `hello` (no `session.start` is needed: the connection routes
+  `mcp.result` itself), until the worker acks it. A worker restart (a new `boot_id`) closes
+  the worker's open asks with `error {code: worker_restart}` and drops their unsent answers:
+  the blocking calls died with the old process.
 - The token (since 0.33). The hub issues a new token with every `session.start`, also for an
   agent the worker keeps running (after a reconnect), and keeps the hashes of the latest and
   the previous one (`sessions.session_token_hash`, `prev_session_token_hash`, migration
@@ -535,8 +554,8 @@ MCP calls (worker → hub → worker):
 - `mcp.cancel {request_id, reason}` → `ack {}` — the worker reports that a call died on its
   side (§7.2), `reason` ∈ `cancelled` (`notifications/cancelled`), `eof` (the MCP process
   exited with the call open). It is sent directly, not through the outbox; a call the hub has
-  not received yet leaves the outbox instead. For a deferred call the hub closes the `PendingRequest` with an error and writes a
-  `system` event with the code `ask_cancelled` to the sending session; it sends nothing to the
+  not received yet leaves the outbox instead. For a deferred call the hub closes the `PendingRequest` (without a result: nobody waits for one) and writes a
+  `system` event with the code `ask_cancelled` to the sending session before it acks; it sends nothing to the
   target session, whose turn continues. For a fast call it only acks (T30).
 
 ### 5.3 Hub → worker frames
@@ -557,7 +576,9 @@ MCP calls (worker → hub → worker):
   the worker downloads the artifacts via `GET /worker/artifacts/{id}` with its token
   (no TTL) into `<workspace>/<cwd>/.hqc/inbox/<event_id>/` and substitutes the paths; the
   `.hqc/` folder is added to the workspace's `.git/info/exclude`. `peer_prefix` — accumulated
-  `send` messages (§7.1).
+  `send` messages (§7.1). `peer?` {from, mode, request_id?} (since 0.35) — only for a
+  `peer.message`: the sender's address, `send`/`ask` and the ask's `request_id`, from which
+  the worker writes the header (§7.1); `text` is the message's text without it.
 - `session.stop` {session_id} — interrupt the current turn.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
@@ -928,9 +949,14 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   artifact_id, name, kind}`. Checked live on Claude Code 2.1.308 (`crates/hqc-hub/tests/
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
-  without `session`, to the owner's personal assistant session.
+  without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
+  is required until the personal session exists (iteration 4); the result is `{to,
+  delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
+  target wakes on sends) or `buffered` (the send buffer, §7.1).
 - `hqc_ask(text, session, timeout_s?)` — a message that waits for a reply. To the agent's own
-  session: an immediate error.
+  session: an immediate error. Since 0.35 (T32): the result is `{from, reply}` — the
+  target's address and the text of its final answer; `timeout_s` is at least 1 and at most
+  `ask_timeout_s` (a larger value is cut to it), by default `ask_timeout_s`.
 - `hqc_spawn(project, workspace, runtime?, model?, prompt)` — create a session and an agent,
   return the address. `workspace` is required if the project has no `default_workspace_id`.
 - `hqc_list_sessions(project?)` — addresses, titles, statuses. Since 0.33 (T30): `project` is
@@ -946,10 +972,12 @@ Session address: `<project-slug>/<session-slug>` or the id. A slug is unique wit
 and does not change on rename.
 
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
-since 0.33, T30; `hqc_attach` since 0.34, T31); the list is shared by the worker's MCP server and the hub
+since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32); the list is shared by the worker's MCP server and the hub
 (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
 (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
+Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
+`worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
 Until grants (iteration 6) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
@@ -964,8 +992,20 @@ Delivery:
   in **all** the text it passes to the runtime: the user's text, the text of a peer message
   from an agent and the `peer_prefix` block; the real header is added after escaping. The
   history on the hub is not rewritten.
+- The runtime's text (since 0.35, T32; the worker builds it from `session.input`, §5.3): the
+  "Messages from other sessions" block if `peer_prefix` is not empty, then the header line if
+  `peer` is set, then the escaped `text` (with the inbox paths of §12). The block is
+  `Messages from other sessions (they await no reply):`, an empty line, then per message
+  `[hqc peer from <address> | mode=send | sent=<ts, UTC, seconds>]`, its escaped text and an
+  empty line, closed by `---` and an empty line. The sender's address and `request_id` are
+  escaped as well.
 - Rights: `hqc_send`/`hqc_ask` to someone else's session require the owner of the sending
   session to have a `write` grant on the target.
+- The target (since 0.35): an address or an id of a session of the caller's owner, not
+  archived, not a worker's service session, else `not_found`. The calling session itself
+  (`invalid_args`) and a target with `locked_by: vscode` (`unavailable`) are refused at once,
+  for `send` as well as `ask`: there is no silent queue for a session driven from VS Code
+  (§9.3). An empty (blank) `text` is `invalid_args`.
 
 Queues (two different ones):
 - The session's **input queue** (§17.2): `user.message` and `peer.message` with `mode=ask`.
@@ -976,6 +1016,14 @@ Queues (two different ones):
   sessions" block. The buffer is cleared by the `ack` of the input that carried it. Buffer
   limit: 50 messages or 64 KB; the oldest are evicted with a `system` event. With
   `wake_on_send: true`, a send goes to the input queue like an ask that waits for no reply.
+  Since 0.35 (T32): a buffered send is stored without `delivery` and kept in the table
+  `peer_buffer` (migration `0015`; 64 KB is the sum of the texts in bytes); the eviction event
+  is `system peer_evicted` in the target. When the hub sends an input it marks the buffered
+  messages not carried by another input still `pending` as carried by this one and puts them
+  in its `peer_prefix`, oldest first; the input's `ack` removes them from the buffer (their
+  events keep no `delivery`), a send that arrives meanwhile waits for the next input. The
+  input queue takes `wake_on_send` as it is when the message is sent; there is no API to set
+  it yet.
 
 The reply to an ask:
 - The reply is the `agent.message` with `final: true` and `in_reply_to` equal to the
@@ -993,14 +1041,26 @@ The reply to an ask:
   ACP agents — per their documentation **[verify]**.
 - Open `ask`s are stored in `PendingRequest`; after the sending worker restarts, the
   blocking call is lost and the `ask` is closed with an error (§5.2).
+- Since 0.35 (T32): the reply counts from any final `agent.message` the worker or its
+  mirror stores in the target; it closes the ask with `{from, reply}` (§7). The timeout gives
+  `error {code: timeout}`; a reply after it, or after `mcp.cancel`, goes nowhere. A target
+  whose turn on the question is lost or stopped without a final message gives no reply: the
+  ask waits for its timeout. The asking session's turn stays `running` while it waits; the
+  turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
+  waiting call as "Waiting for a reply from <session>" with its timer (the runtime's
+  `tool.call` of `hqc_ask`, no event of its own).
 
 Chains:
 - `chain_id` is created on the first `ask`/`send` from a turn started by a human; `depth`
   grows on every `ask` (limit 3), `hops` on every `peer.message` in the chain
-  (limit 20). The hub stores the `chain` of the input that started the current turn and gives
-  it to the MCP server in the reply to the session's first `mcp.call`, so it sets it on outgoing
-  messages.
-- When a limit is exceeded, the tool returns an error; only a human's turn can continue the
+  (limit 20). The hub keeps the `chain` on the input that started each turn and sets it on
+  outgoing messages itself (since 0.35, T32; the MCP server is not involved): the chain of a
+  call is that of the calling session's last `delivered` input (inputs reach the agent one
+  turn at a time, in `seq` order, so that input started the current turn). A `user.message`
+  has no chain: a new one starts with `depth` = 1 for an ask, 0 for a send, and `hops` = 1;
+  otherwise the chain goes on with `hops` + 1 and, for an ask, `depth` + 1. Buffered sends
+  carried in `peer_prefix` do not start a turn and lend it no chain.
+- When a limit is exceeded, the tool returns an error (`limit_exceeded`, since 0.35); only a human's turn can continue the
   chain. A deadlock (A waits for B, B waits for A) is resolved by the timeout.
 
 ### 7.2 Requirements for the hqc MCP server
@@ -1016,8 +1076,8 @@ Chains:
 - Forwards every call to the worker daemon over a Unix socket `$HQC_HOME/mcp.sock` (mode
   0600, one per daemon: a second daemon with the same `HQC_HOME` does not start; a peer of
   another OS user is refused) with this token; the daemon sends it to the hub in an
-  `mcp.call` frame (§5.2). Keeps no state of its own except its open calls and the
-  `chain` of the current turn (§7.1).
+  `mcp.call` frame (§5.2). Keeps no state of its own except its open calls (since 0.35 not
+  the `chain` either: the hub sets it, §7.1).
 - The daemon accepts on the socket only the token a running agent of one of its sessions was
   started with, checks it again on every call (the agent may have stopped since), and sends
   `mcp.call` with the session's latest token from the hub (§5.2): an agent that keeps running
@@ -1028,7 +1088,9 @@ Chains:
 - While a call waits for a reply (`hqc_ask`), sends `notifications/progress` with the
   `progressToken` from the call's `params._meta` at least once a minute. Without it Claude Code
   cuts the call off after 30 minutes of idleness (§7.1); the server gets no
-  `notifications/cancelled` in that case.
+  `notifications/cancelled` in that case. Since 0.35 (T32): every 30 s for every open call
+  that has a `progressToken`, with `progress` 1, 2, … and the message "waiting for the hub",
+  until the answer or the cancel.
 - If the runtime cancelled the call (`notifications/cancelled`, e.g. on `MCP_TOOL_TIMEOUT`)
   or the MCP process exited with an open call (EOF on stdio: the process exits and the daemon
   sees its socket close), the worker daemon closes
@@ -2142,7 +2204,8 @@ with `write` share the same queue.
   (the input stays `delivered`), writes `system turn_lost` with the text "no events for N s",
   and the session shows `error` until the next input. The countdown runs from the worker's last
   event or from the moment the session became `running` again: waiting for the user's
-  answer (`waiting`) and the worker being offline (`worker_offline`) do not count. The hub keeps
+  answer (`waiting`), waiting for the reply to its own `hqc_ask` (an open ask of the session,
+  since 0.35) and the worker being offline (`worker_offline`) do not count. The hub keeps
   event times in memory; after a hub restart every open turn gets the full
   period. The hub sends nothing to the worker: the process and its input queue are left alone.
 
@@ -2267,6 +2330,9 @@ with `write` share the same queue.
   | attachment display by the client (§12) | a diff body is fetched only once `size` is known; text and diffs over 2 MB get "Download" only; a body with `Content-Length` over the display limit is not read | — |
   | `mcp.call.args` (§5.2, since 0.33) | 64 KB serialized; the worker refuses a bigger call before sending it, the hub checks again | `mcp.result` `error invalid_args` |
   | `mcp.call.session_token` (§5.2) | `hqcs_` + 43 base64url characters, checked before the database | `mcp.result` `error unauthorized` |
+  | send buffer of a session (§7.1, since 0.35) | the newest 50 messages and 64 KB of their texts | the oldest dropped, `system peer_evicted` in the target |
+  | chain of peer messages (§7.1) | `depth` ≤ 3 nested asks, `hops` ≤ 20 messages | `mcp.result` `error limit_exceeded` |
+  | `hqc_ask.timeout_s` (§7) | 1 … `ask_timeout_s` (600 s), larger cut to it | `0`: `error invalid_args` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
   | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
@@ -2331,6 +2397,26 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.34 → 0.35 (T32, `hqc_send` and `hqc_ask`)
+§3 PendingRequest: an `ask` is a row of the asking session with the target and the
+`peer.message` in `payload`. §4: `peer.message` gets `from?` (the sender's address), is
+authored by the sending agent and carries the chain; buffered sends have no `delivery`; new
+`system` code `peer_evicted`. §5.2: repeated calls act once (the message's `event_id` is T31's
+key with `peer.message` as the tool; a repeated ask finds its `PendingRequest`);
+deferred answers are sent after `hello` without `session.start`; a worker restart closes its
+open asks with `worker_restart`; `mcp.cancel` is acked after the ask is closed. §5.3:
+`session.input.peer {from, mode, request_id?}` for the header. §7: results of `hqc_send`
+(`{to, delivery}`) and `hqc_ask` (`{from, reply}`), `session` required until iteration 4,
+`timeout_s` bounds, error codes `timeout`, `limit_exceeded`, `worker_restart`. §7.1: the
+runtime text (block, header, escaping of the address too); the target rules (own session,
+`locked_vscode` refused for `send` too); the send buffer in `peer_buffer` (migration `0015`)
+and how an input carries it; the hub sets the chain from the calling session's last delivered
+input — the plan of giving the chain to the MCP server is dropped, the MCP process cannot
+tell turns apart; a lost target turn leaves the ask to its timeout; the client's "Waiting
+for a reply" line. §7.2: progress every 30 s; the MCP server keeps no chain. §17.3: an open
+ask is not silence for the turn watchdog. §20: limits of the buffer, chains and
+`timeout_s`. Notes: `docs/notes/t32-questions.md`.
 
 ### 0.33 → 0.34 (T31, `hqc_attach`)
 §7: `hqc_attach(path, name?, kind?, caption?)` defined and listed; the worker resolves the path

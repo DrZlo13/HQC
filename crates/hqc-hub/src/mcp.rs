@@ -13,6 +13,8 @@
 //! - A call whose answer was lost is sent again with the same `request_id` (SPEC §5.2). A
 //!   tool with side effects acts once per `request_id`: what it writes is keyed by it
 //!   ([`once_id`]) and a repeat answers from what the first call wrote.
+//! - A deferred tool (`hqc_ask`) answers [`Answer::Later`]: the hub acks the call frame and
+//!   sends `mcp.result` on its own later.
 //!
 //! [`REGISTRY`] is the hub's half of [`hqc_proto::mcp::TOOLS`]: a tool lands in both at once.
 
@@ -35,23 +37,48 @@ use crate::{
 
 type ToolResult = Result<Value, McpError>;
 
-/// A tool's implementation: the calling session, the call's `request_id` and the arguments.
-pub type Handler =
-    for<'a> fn(&'a AppState, &'a SessionRow, &'a str, Value) -> BoxFuture<'a, ToolResult>;
+/// What a tool answers.
+#[derive(Debug)]
+pub enum Answer {
+    /// `mcp.result` under the call's frame id.
+    Now(Value),
+    /// Deferred: `ack {}` now, `mcp.result` as a frame of its own later (SPEC §5.2).
+    Later,
+}
+
+/// A tool's implementation: the calling session and the call (its `request_id`, `args`).
+pub type Handler = for<'a> fn(
+    &'a AppState,
+    &'a SessionRow,
+    &'a McpCall,
+) -> BoxFuture<'a, Result<Answer, McpError>>;
 
 pub struct HubTool {
     pub name: &'static str,
     pub run: Handler,
 }
 
+/// A tool that answers at once.
+async fn now(r: impl std::future::Future<Output = ToolResult>) -> Result<Answer, McpError> {
+    r.await.map(Answer::Now)
+}
+
 pub const REGISTRY: &[HubTool] = &[
     HubTool {
         name: hqc_proto::mcp::LIST_SESSIONS,
-        run: |app, caller, _, args| Box::pin(list_sessions(app, caller, args)),
+        run: |app, caller, c| Box::pin(now(list_sessions(app, caller, c.args.clone()))),
     },
     HubTool {
         name: hqc_proto::mcp::ATTACH,
-        run: |app, caller, request_id, args| Box::pin(attach(app, caller, request_id, args)),
+        run: |app, caller, c| Box::pin(now(attach(app, caller, &c.request_id, c.args.clone()))),
+    },
+    HubTool {
+        name: hqc_proto::mcp::SEND,
+        run: |app, caller, c| Box::pin(crate::peers::send(app, caller, c)),
+    },
+    HubTool {
+        name: hqc_proto::mcp::ASK,
+        run: |app, caller, c| Box::pin(crate::peers::ask(app, caller, c)),
     },
 ];
 
@@ -69,13 +96,13 @@ fn err(code: &str, message: impl Into<String>) -> McpError {
     McpError::new(code, message)
 }
 
-fn internal(e: impl std::fmt::Display) -> McpError {
+pub(crate) fn internal(e: impl std::fmt::Display) -> McpError {
     tracing::error!(error = %e, "mcp tool failed");
     err(error_code::INTERNAL, "internal error")
 }
 
-/// `mcp.call` from `worker_id`; the answer is always an `mcp.result`.
-pub async fn call(app: &AppState, worker_id: Uuid, c: &McpCall) -> McpResult {
+/// `mcp.call` from `worker_id`: the `mcp.result`, or `None` for a deferred call (`ack {}`).
+pub async fn call(app: &AppState, worker_id: Uuid, c: &McpCall) -> Option<McpResult> {
     let outcome = run(app, worker_id, c).await;
     match &outcome {
         Ok(_) => {
@@ -86,16 +113,17 @@ pub async fn call(app: &AppState, worker_id: Uuid, c: &McpCall) -> McpResult {
         }
     }
     match outcome {
-        Ok(v) => McpResult::ok(&c.request_id, v),
-        Err(e) => McpResult {
+        Ok(Answer::Now(v)) => Some(McpResult::ok(&c.request_id, v)),
+        Ok(Answer::Later) => None,
+        Err(e) => Some(McpResult {
             request_id: c.request_id.clone(),
             result: None,
             error: Some(e),
-        },
+        }),
     }
 }
 
-async fn run(app: &AppState, worker_id: Uuid, c: &McpCall) -> ToolResult {
+async fn run(app: &AppState, worker_id: Uuid, c: &McpCall) -> Result<Answer, McpError> {
     let size = serde_json::to_vec(&c.args).map_err(internal)?.len();
     if size > MAX_ARGS {
         return Err(err(
@@ -122,11 +150,11 @@ async fn run(app: &AppState, worker_id: Uuid, c: &McpCall) -> ToolResult {
             format!("the hub has no tool {}", c.tool),
         )
     })?;
-    (tool.run)(app, &caller, &c.request_id, c.args.clone()).await
+    (tool.run)(app, &caller, c).await
 }
 
 /// The arguments as `T`; absent arguments read as `{}`.
-fn args<T: DeserializeOwned>(v: Value) -> Result<T, McpError> {
+pub(crate) fn args<T: DeserializeOwned>(v: Value) -> Result<T, McpError> {
     let v = if v.is_null() { json!({}) } else { v };
     serde_json::from_value(v).map_err(|e| err(error_code::INVALID_ARGS, e.to_string()))
 }

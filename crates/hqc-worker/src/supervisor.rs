@@ -920,6 +920,8 @@ impl Session {
         }
         if let Some(q) = self.queue.iter_mut().find(|q| q.input.event_id == eid) {
             q.frame_id = id;
+            // The hub's latest frame: its `peer_prefix` is what the hub clears on the ack.
+            q.input = input;
             return;
         }
         self.queue.push_back(Queued {
@@ -965,6 +967,8 @@ impl Session {
                     continue;
                 }
             };
+            // Messages from other sessions: headers and escaping (SPEC §7.1).
+            let input = crate::peer::runtime_input(&input);
             match self.adapter.input_with(&input, &files).await {
                 Ok(()) => {
                     self.turn = Some(Turn {

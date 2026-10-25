@@ -8,7 +8,7 @@ import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } 
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import { AttachmentView, PendingAttachments } from './attachments';
-import { buildFeed, callLine, callRows, captionText, groupDuration, groupState, type Block, type ToolRow } from './feed';
+import { askTarget, buildFeed, callLine, callRows, captionText, groupDuration, groupState, type Block, type ToolRow } from './feed';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconChevron, IconCross, IconWarn } from './icons';
 import {
@@ -94,6 +94,18 @@ export function ActivityLine({ state, timeline, now }: { state: SessionState; ti
   const call = state === 'running' ? timeline.runningCall() : undefined;
   const t = useNow(1000, !!call, now);
   if (call) {
+    const asked = askTarget(call.payload.tool, call.payload.args_preview);
+    if (asked !== undefined) {
+      // `hqc_ask` waits for another session's final answer (SPEC §7.1).
+      return (
+        <div class="activity activity-running activity-ask" role="status" aria-live="polite">
+          <span class="pulse-dot" aria-hidden="true" />
+          <span class="activity-label">Waiting for a reply</span>
+          <span class="activity-what mono">{asked ? `from ${asked}` : ''}</span>
+          <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
+        </div>
+      );
+    }
     const line = callLine(call.payload.tool, call.payload.args_preview);
     return (
       <div class="activity activity-running" role="status" aria-live="polite">
@@ -169,8 +181,14 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
       return (
         <div class="card card-peer">
           <div class="card-title">
-            {event.payload.mode === 'ask' ? 'Question' : 'Message'} from session{' '}
-            <code>{event.payload.from_session_id.slice(-8)}</code>
+            {event.payload.mode === 'ask' ? 'Question' : 'Message'} from{' '}
+            {event.payload.from ? (
+              <code>{event.payload.from}</code>
+            ) : (
+              <>
+                session <code>{event.payload.from_session_id.slice(-8)}</code>
+              </>
+            )}
           </div>
           <Markdown class="text" text={event.payload.text} />
           <div class="meta">

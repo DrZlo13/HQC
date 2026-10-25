@@ -246,6 +246,9 @@ pub enum EventKind {
     #[serde(rename = "peer.message")]
     PeerMessage {
         from_session_id: Uuid,
+        /// The sender's address `<project-slug>/<session-slug>` when it sent (since 0.34).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
         text: String,
         mode: PeerMode,
         /// Only for `mode: ask`.

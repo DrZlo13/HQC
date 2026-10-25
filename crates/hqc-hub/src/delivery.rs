@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use hqc_proto::{
     client_frame::ServerFrame,
+    event::PeerMode,
     frame::{
-        error_code, HubFrame, PeerPrefix, Runtime, SessionInput, SessionStart, StartMode, WireError,
+        error_code, HubFrame, PeerHeader, Runtime, SessionInput, SessionStart, StartMode, WireError,
     },
 };
 use serde_json::Value;
@@ -63,12 +64,13 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
         StartState::Starting => {}
         StartState::Started => {
             for p in pending {
-                if !sc.inflight.insert(p.event_id) {
+                if sc.inflight.contains(&p.event_id) {
                     continue;
                 }
-                let id = conn.send(HubFrame::SessionInput(input_frame(
-                    session_id, p.event_id, &p.payload,
-                )));
+                let mut frame = input_frame(session_id, p.event_id, &p.payload);
+                frame.peer_prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
+                sc.inflight.insert(p.event_id);
+                let id = conn.send(HubFrame::SessionInput(frame));
                 replies.insert(
                     id,
                     Reply::Input {
@@ -82,7 +84,22 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
     Ok(())
 }
 
+/// The input without `peer_prefix`; `peer` for a `peer.message` (SPEC §7.1).
 fn input_frame(session_id: Uuid, event_id: Uuid, payload: &Value) -> SessionInput {
+    let peer = match (
+        payload.get("from").and_then(Value::as_str),
+        payload.get("mode"),
+    ) {
+        (Some(from), Some(mode)) => Some(PeerHeader {
+            from: from.to_string(),
+            mode: serde_json::from_value(mode.clone()).unwrap_or(PeerMode::Unknown),
+            request_id: payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        _ => None,
+    };
     SessionInput {
         session_id,
         event_id,
@@ -95,8 +112,8 @@ fn input_frame(session_id: Uuid, event_id: Uuid, payload: &Value) -> SessionInpu
             .get("artifact_ids")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
-        // The send buffer arrives with MCP hqc (SPEC §7.1, iteration 3).
-        peer_prefix: Vec::<PeerPrefix>::new(),
+        peer_prefix: Vec::new(),
+        peer,
     }
 }
 
@@ -208,6 +225,8 @@ pub async fn on_input_ack(
     }
     if let Some(row) = db::mark_delivered(&app.db, event_id).await? {
         notify_delivery(app, &row);
+        // The send buffer it carried reached the agent (SPEC §7.1).
+        crate::peers::delivered(app, event_id).await?;
         // The worker hands input to the runtime one turn at a time (SPEC §17.2), so a
         // delivered input means its turn has started. The ack bypasses the worker's outbox
         // and may come after the turn's own events (SPEC §5.2): a turn that already has

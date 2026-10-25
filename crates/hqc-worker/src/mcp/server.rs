@@ -18,11 +18,15 @@
 //!   whatever was still open.
 //! - The daemon connection is opened on the first `tools/call` and kept; if it breaks, the
 //!   open calls fail and the next call connects again.
+//! - While a call waits (`hqc_ask` waits for another session's reply), the server sends
+//!   `notifications/progress` with the call's `progressToken` every [`PROGRESS_EVERY`]:
+//!   without them Claude Code cuts a stdio call off after 30 minutes of silence (SPEC §7.2).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use hqc_proto::frame::McpError;
 use hqc_proto::mcp::{error_code, MAX_ARGS, TOOLS};
@@ -41,9 +45,13 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
+/// How often a waiting call reports progress; SPEC §7.2 asks for at least once a minute.
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(30);
+
 pub struct McpServer {
     token: Option<String>,
     socket: PathBuf,
+    progress_every: Duration,
 }
 
 /// The waiting `tools/call`s of one daemon connection, by the connection's call id.
@@ -59,7 +67,17 @@ struct Daemon {
 impl McpServer {
     /// `token`: the value of [`super::TOKEN_ENV`], `None` if unset.
     pub fn new(token: Option<String>, socket: PathBuf) -> Self {
-        Self { token, socket }
+        Self {
+            token,
+            socket,
+            progress_every: PROGRESS_EVERY,
+        }
+    }
+
+    /// Another progress period (tests).
+    pub fn with_progress_every(mut self, every: Duration) -> Self {
+        self.progress_every = every;
+        self
     }
 
     /// Serves until EOF on `input`.
@@ -239,9 +257,32 @@ impl Session<'_> {
         let key = id.to_string();
         self.calls.lock().unwrap().insert(key.clone(), call_id);
         let (out, calls) = (self.out.clone(), self.calls.clone());
+        let progress_token = params
+            .get("_meta")
+            .and_then(|m| m.get("progressToken"))
+            .filter(|t| t.is_string() || t.is_number())
+            .cloned();
+        let every = self.server.progress_every;
         tokio::spawn(async move {
+            let mut rx = rx;
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            let mut progress = 0u64;
+            let answer = loop {
+                tokio::select! {
+                    r = &mut rx => break r,
+                    _ = tick.tick() => {
+                        let Some(t) = &progress_token else { continue };
+                        progress += 1;
+                        let _ = out.send(json!({
+                            "jsonrpc": "2.0",
+                            "method": "notifications/progress",
+                            "params": {"progressToken": t, "progress": progress, "message": "waiting for the hub"},
+                        }));
+                    }
+                }
+            };
             // Dropped without an answer: cancelled, no response (MCP).
-            let Ok(outcome) = rx.await else { return };
+            let Ok(outcome) = answer else { return };
             calls.lock().unwrap().remove(&key);
             let _ = out.send(json!({"jsonrpc": "2.0", "id": id, "result": tool_result(outcome)}));
         });

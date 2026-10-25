@@ -18,6 +18,7 @@ pub mod machine;
 pub mod mcp;
 pub mod mirror;
 pub mod outbox;
+pub mod peer;
 pub mod permissions;
 pub mod supervisor;
 pub mod title;

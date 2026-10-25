@@ -539,5 +539,8 @@ pub async fn expiry_loop(app: AppState) {
             }
             Err(e) => tracing::error!(error = %e, "expired requests query"),
         }
+        if let Err(e) = crate::peers::expire(&app).await {
+            tracing::error!(error = %e, "expired asks");
+        }
     }
 }

@@ -233,6 +233,45 @@ async fn store_hub_event_as(
     }
 }
 
+/// A `peer.message` (SPEC §7.1) under `event_id`, with the sender's `chain`. A repeat of
+/// the same `event_id` (a call sent again, SPEC §5.2) stores nothing and returns the row
+/// stored the first time.
+pub async fn store_peer_message(
+    app: &AppState,
+    s: &SessionRow,
+    event_id: Uuid,
+    author: Value,
+    mut payload: Value,
+    chain: Value,
+    delivery: Option<&str>,
+) -> anyhow::Result<EventRow> {
+    hqc_proto::replace_nul_json(&mut payload);
+    let typed: EventKind =
+        serde_json::from_value(json!({"type": "peer.message", "payload": payload}))?;
+    let new = NewEvent {
+        event_id,
+        session_id: s.id,
+        ts: Utc::now(),
+        author,
+        kind: "peer.message".into(),
+        payload,
+        chain: Some(chain),
+        client_op_id: None,
+        delivery: delivery.map(str::to_string),
+        delivered_at: None,
+    };
+    match db::insert_event(&app.db, &new).await? {
+        Inserted::New(row) => {
+            after_store(app, s, &row, &typed, Source::Hub).await?;
+            Ok(*row)
+        }
+        Inserted::Duplicate(_) => db::event_by_id(&app.db, event_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("peer message {event_id} vanished")),
+        Inserted::UnknownSession => anyhow::bail!("peer message not stored: no session {}", s.id),
+    }
+}
+
 /// `system {text, code}` authored by the hub (SPEC §4).
 pub async fn system(
     app: &AppState,
@@ -333,11 +372,19 @@ async fn after_store(
         {
             db::close_request_by_worker(&app.db, s.id, "clarify", request_id).await?;
         }
-        EventKind::AgentMessage { r#final: true, .. } => {
+        EventKind::AgentMessage {
+            r#final: true,
+            text,
+            in_reply_to,
+        } => {
             db::set_turn(&app.db, s.id, false, false).await?;
             if source != Source::Hub {
                 // "Session N" gets a real title (T21).
                 crate::titles::after_first_answer(app, s);
+                // The reply to an `hqc_ask` (SPEC §7.1).
+                if let Some(input) = in_reply_to {
+                    crate::peers::on_final(app, s, *input, text).await?;
+                }
             }
         }
         EventKind::Status { state, .. } => match state {

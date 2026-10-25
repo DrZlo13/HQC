@@ -132,6 +132,7 @@ async fn live_repo_settings_ignored() {
             text: PROMPT.into(),
             artifact_ids: vec![],
             peer_prefix: vec![],
+            peer: None,
         })
         .await
         .unwrap();
@@ -232,6 +233,7 @@ async fn live_bash_turn_with_approval() {
             text: PROMPT.into(),
             artifact_ids: vec![],
             peer_prefix: vec![],
+            peer: None,
         })
         .await
         .unwrap();
@@ -462,6 +464,7 @@ async fn live_permission_policy() {
                 .into(),
             artifact_ids: vec![],
             peer_prefix: vec![],
+            peer: None,
         })
         .await
         .unwrap();
@@ -584,6 +587,7 @@ async fn live_ai_title() {
                 .into(),
             artifact_ids: vec![],
             peer_prefix: vec![],
+            peer: None,
         })
         .await
         .unwrap();

@@ -112,6 +112,71 @@ impl ArtifactClient {
         self
     }
 
+    /// Largest artifact downloaded or uploaded.
+    pub fn max_artifact(&self) -> u64 {
+        self.max_artifact
+    }
+
+    /// Streams the first `size` bytes of `file` to `PUT /worker/artifacts` for `session_id`
+    /// (an agent's `hqc_attach`, SPEC §7, §12); the artifact's id.
+    pub async fn upload(
+        &self,
+        session_id: Uuid,
+        file: std::fs::File,
+        size: u64,
+        name: &str,
+        kind: Option<ArtifactKind>,
+    ) -> Result<Uuid, hqc_proto::frame::McpError> {
+        use hqc_proto::frame::McpError;
+        use hqc_proto::mcp::error_code;
+        use tokio::io::AsyncReadExt;
+        let body = tokio::fs::File::from_std(file).take(size);
+        let mut req = self
+            .http
+            .put(format!("{}/worker/artifacts", self.hub_url))
+            .bearer_auth(self.token.expose())
+            .header("x-hqc-session-id", session_id.to_string())
+            .header("x-hqc-artifact-name", pct_encode(name))
+            .header(reqwest::header::CONTENT_LENGTH, size)
+            .body(reqwest::Body::wrap_stream(
+                tokio_util::io::ReaderStream::new(body),
+            ));
+        if let Some(k) = kind {
+            if let Some(k) = serde_json::to_value(k)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+            {
+                req = req.header("x-hqc-artifact-kind", k);
+            }
+        }
+        let unavailable = |m: String| McpError::new(error_code::UNAVAILABLE, m);
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| unavailable(format!("upload to the hub: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let code = match status.as_u16() {
+                413 | 400 => error_code::INVALID_ARGS,
+                401 | 404 => error_code::UNAUTHORIZED,
+                _ => error_code::UNAVAILABLE,
+            };
+            return Err(McpError::new(
+                code,
+                format!("the hub refused the upload: {status} {}", text.trim()),
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct Uploaded {
+            id: Uuid,
+        }
+        resp.json::<Uploaded>()
+            .await
+            .map(|u| u.id)
+            .map_err(|e| unavailable(format!("the hub's answer to the upload: {e}")))
+    }
+
     /// Streams the artifact into a new temporary file in `dir`; returns it with the name,
     /// kind and type the hub gave. At most `budget` bytes (and [`Self::max_artifact`]) are
     /// written: beyond that the download stops and the partial file is removed.
@@ -428,6 +493,19 @@ pub fn exclude_hqc(workspace: &Path, allowed_roots: &[PathBuf]) -> anyhow::Resul
     out.push('\n');
     std::fs::write(&exclude, out)?;
     Ok(())
+}
+
+/// Percent-encoding of `x-hqc-artifact-name`: everything but RFC 3986 unreserved characters.
+pub fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Percent-decoding of `x-hqc-artifact-name`; invalid UTF-8 is replaced.

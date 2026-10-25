@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.33, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.34, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -69,7 +69,8 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   in events and the push subscriptions. The protection is the hub itself: Access, tunnel only,
   no open ports (§20). Signing input and answers with device keys registered on the worker
   locally is iteration 3+.
-- The hub **cannot**: go outside the worker's `allowed_roots`, pick an environment or a
+- The hub **cannot**: go outside the worker's `allowed_roots` (also not through an agent's
+  `hqc_attach`: the worker resolves and reads the path itself, §7), pick an environment or a
   Hermes profile for a path the worker owner has not bound locally, or enable
   the machine's MCP servers. These are set only by the worker's local config (§14); the worker
   ignores diverging values from `session.start` and answers with an error.
@@ -269,7 +270,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.request` | `request_id`, `questions[{id, text, options?: [string], multi?: bool}]` | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). ACP agents have no source for it |
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
-| `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (iteration 3); the user's files go into `user.message.artifact_ids` (rule below) |
+| `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `text`, `mode` (send/ask), `request_id?` (for ask) | the hub on `hqc_send`/`hqc_ask` |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result`; for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?` | worker or hub |
@@ -305,7 +306,7 @@ Rules:
 - The user's files always go into `user.message.artifact_ids[]`, including without text
   (`text` empty): this is input, and the agent receives them (§8.1, §12) **[decision]** (T16). An
   `attachment` event is not delivered to the agent — it is a file shown in the feed (`hqc_attach`,
-  iteration 3); the client does not write `attachment` events of its own.
+  §7); the client does not write `attachment` events of its own.
 - `*_preview` fields are cut by the worker to 4 KB; the full tool result is not sent to the hub,
   except diffs and results saved as artifacts.
 - `agent.delta` goes to clients over WebSocket and is not saved; `agent.message` is saved.
@@ -513,8 +514,11 @@ MCP calls (worker → hub → worker):
   that is no longer open: answered, cancelled, or left by a previous run of the worker, whose
   caller died with it. So a call survives a dropped connection (it is sent again after the
   next `hello`) but not a worker restart. A call sent again after its answer was lost runs
-  again on the hub; a tool with side effects (from T31 on) must tolerate a repeated
-  `request_id`.
+  again on the hub, so a tool with side effects acts once per `request_id` (since 0.34, T31):
+  what it writes gets the id `uuid v5(<hqc namespace>, "<tool>\n<calling session id>\n<request_id>")`
+  (`once_id` in `crates/hqc-hub/src/mcp.rs`), and a call that finds it already written
+  answers from it — the same result, nothing written twice. `hqc_attach` keys its
+  `attachment` event so; the same `request_id` from another session is another call.
 - The token (since 0.33). The hub issues a new token with every `session.start`, also for an
   agent the worker keeps running (after a reconnect), and keeps the hashes of the latest and
   the previous one (`sessions.session_token_hash`, `prev_session_token_hash`, migration
@@ -670,7 +674,13 @@ MCP calls (worker → hub → worker):
 - `result` {request_id, ...} / `error` to the hub's requests (`fs.stat`, `fs.list_dirs`,
   `workspace.list_candidates`, `title.request`, §5.3), with the request's `id`.
 - Artifact upload: HTTP PUT `/worker/artifacts` with the worker's token, not over WebSocket.
-  Artifact limit **100 MB**, no chunking.
+  Artifact limit **100 MB**, no chunking. Since 0.34 (T31), for `hqc_attach` (§7, §12): the
+  body is the file, streamed, with `Content-Length`; `x-hqc-session-id` — the session it is
+  for, which must be one the hub has on this worker (else `404`; the service session too);
+  `x-hqc-artifact-name` — the name, percent-encoded as in the download; `x-hqc-artifact-kind?`
+  and `Content-Type` as in `POST /api/artifacts`. The answer is the artifact (§6), `201`, or
+  `200` for the same content under the same name. A bad token `401`, over the limit `413
+  too_large`, an unknown `kind` `400`.
 
 ## 6. Client ↔ Hub protocol
 
@@ -900,6 +910,23 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
+  Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
+  `content` comes with the bare model (iteration 4) and is refused until then
+  (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
+  the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
+  its canonical form (symlinks resolved) must lie inside the session's workspace and inside
+  `allowed_roots`; only a regular file of at most 100 MB, opened without following a symlink
+  in the last component and checked again on the open handle, and exactly the size seen there
+  is sent. Refusals come from the worker: `invalid_args` (outside, not a regular file, over the
+  limit, a bad `kind`), `not_found` (no such file). Then the daemon uploads it (`PUT
+  /worker/artifacts`, §5.4) and only then sends the `mcp.call`, whose `args` are `{artifact_id,
+  caption?}` (`hqc_proto::mcp::AttachCall`) — the hub never sees the path. A cancel or EOF of
+  the MCP process during the upload stops it, and no `mcp.call` is sent. The hub accepts only
+  an artifact of the session's owner uploaded for this session (else `not_found`) and writes
+  the `attachment` event (§4) once per `request_id` (§5.2); `name` absent — the last component
+  of `path`; `kind` absent — by type and extension (§12). The result is `{event_id,
+  artifact_id, name, kind}`. Checked live on Claude Code 2.1.308 (`crates/hqc-hub/tests/
+  live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session.
 - `hqc_ask(text, session, timeout_s?)` — a message that waits for a reply. To the agent's own
@@ -919,7 +946,7 @@ Session address: `<project-slug>/<session-slug>` or the id. A slug is unique wit
 and does not change on rename.
 
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
-since 0.33, T30); the list is shared by the worker's MCP server and the hub
+since 0.33, T30; `hqc_attach` since 0.34, T31); the list is shared by the worker's MCP server and the hub
 (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
 (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
@@ -1877,9 +1904,13 @@ what is already uploaded. The worker puts them into `.hqc/inbox/` and substitute
 of `user.message` and `attachment` events render the same way: image — inline, diff — a code
 block with added and removed lines highlighted (up to 512 KB, larger as a card), html — an
 iframe from the artifacts domain or an "Open" link, text and file — a card with the name,
-size and "Open" (except file) and "Download" buttons. Agent → user: `hqc_attach` (iteration
-3); diffs of ACP agents are saved as artifacts by the adapter itself (§8.2).
-Upload by the worker (`PUT /worker/artifacts`, §5.4) comes together with `hqc_attach`.
+size and "Open" (except file) and "Download" buttons. Agent → user: `hqc_attach` (§7, since
+0.34): the worker uploads the file with `PUT /worker/artifacts` (§5.4) under the worker token
+for one of its sessions; the owner is the session's owner, dedup and `kind` as for the client's
+upload; the artifact is linked to the session in `artifact_sessions`, which is what the tool
+checks (and the session's worker may download it back). The `attachment` event renders like a
+user's attachment, standing in the feed after the tool group of its call; diffs of ACP agents
+are saved as artifacts by the adapter itself (§8.2).
 
 **Cleanup** (since 0.23, T21). Once a day (the first time right after start) the hub deletes
 artifact records that no event references (`user.message.artifact_ids`, `artifact_id` of
@@ -1932,7 +1963,8 @@ an error (`409 no_workspace` in REST, §6).
 The worker's local config is the only source of truth for:
 
 - `allowed_roots[]` — the only thing the worker knows about workspaces: every workspace from
-  `session.start` and every `fs.*` path must lie inside (§5.3). Since 0.16 `worker.toml` has no
+  `session.start`, every `fs.*` path and every file of an agent's `hqc_attach` (§7, also
+  inside the session's workspace) must lie inside (§5.3). Since 0.16 `worker.toml` has no
   `[workspace]` block: workspaces are created in the hub (§3, §13.1); the iteration 1 block in an
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments;
@@ -2236,6 +2268,8 @@ with `write` share the same queue.
   | `mcp.call.args` (§5.2, since 0.33) | 64 KB serialized; the worker refuses a bigger call before sending it, the hub checks again | `mcp.result` `error invalid_args` |
   | `mcp.call.session_token` (§5.2) | `hqcs_` + 43 base64url characters, checked before the database | `mcp.result` `error unauthorized` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
+  | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
+  | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
   | the worker's MCP socket (§7.2) | a line up to 64 KB + 4 KB; peers of the same OS user only | the connection is closed |
 - Push: the hub POSTs to the subscription's `endpoint`, so only `https://` without
   userinfo and without a non-standard port on push service hosts is accepted: `fcm.googleapis.com`,
@@ -2297,6 +2331,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.33 → 0.34 (T31, `hqc_attach`)
+§7: `hqc_attach(path, name?, kind?, caption?)` defined and listed; the worker resolves the path
+itself (working directory, canonical inside the workspace and `allowed_roots`, regular file,
+100 MB, opened with `O_NOFOLLOW` and checked on the handle), uploads, then sends `mcp.call
+{artifact_id, caption?}`; `content` refused until the bare model; checked live on 2.1.308.
+§5.2: a tool with side effects acts once per `request_id` — its writes are keyed by `uuid
+v5(tool, calling session, request_id)` and a repeat answers from them. §5.4, §12: `PUT
+/worker/artifacts` defined (headers, owner = the session's owner, the client's dedup and
+`kind`, linked to the session). §4: `attachment` written by the hub with the agent as author.
+§2.1, §14, §20: the path rules and limits of `hqc_attach`. Notes in
+`docs/notes/t31-questions.md`.
 
 ### 0.32 → 0.33 (T30, the MCP pipe and `hqc_list_sessions`)
 §5.2, §5.3, §5.4: `mcp.call` goes through the outbox without `session_token` (the token is added

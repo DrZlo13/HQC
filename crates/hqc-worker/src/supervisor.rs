@@ -1097,7 +1097,14 @@ impl Session {
         }
         self.set_state(ProcessState::Starting);
         // Its MCP server may connect as soon as the process runs (SPEC §7.2).
-        self.link.mcp().bind(self.id, &self.spec.session_token);
+        self.link.mcp().bind(
+            self.id,
+            &self.spec.session_token,
+            crate::mcp::attach::Folders {
+                workspace: self.spec.workspace.clone(),
+                workdir: self.spec.workdir.clone(),
+            },
+        );
         // `mode: resume` from the hub, or this process ran the agent before (kill, idle
         // timeout, crash). The Claude Code adapter checks for the transcript either way.
         let r = if self.started_once || self.resume_requested {

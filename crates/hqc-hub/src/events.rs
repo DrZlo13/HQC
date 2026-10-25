@@ -170,18 +170,49 @@ pub async fn ingest_worker_event(
 pub async fn store_hub_event(
     app: &AppState,
     s: &SessionRow,
+    author: Value,
+    kind: &str,
+    payload: Value,
+    client_op_id: Option<String>,
+    delivery: Option<&str>,
+) -> anyhow::Result<EventRow> {
+    let id = db::new_id();
+    match store_hub_event_as(app, s, id, author, kind, payload, client_op_id, delivery).await? {
+        Some(row) => Ok(row),
+        None => anyhow::bail!("hub event {id} not stored: a duplicate"),
+    }
+}
+
+/// [`store_hub_event`] under a given `event_id`; `None` if an event with it is stored
+/// already (a repeated `mcp.call`, SPEC §5.2).
+pub async fn store_hub_event_once(
+    app: &AppState,
+    s: &SessionRow,
+    event_id: Uuid,
+    author: Value,
+    kind: &str,
+    payload: Value,
+) -> anyhow::Result<Option<EventRow>> {
+    store_hub_event_as(app, s, event_id, author, kind, payload, None, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn store_hub_event_as(
+    app: &AppState,
+    s: &SessionRow,
+    event_id: Uuid,
     mut author: Value,
     kind: &str,
     mut payload: Value,
     client_op_id: Option<String>,
     delivery: Option<&str>,
-) -> anyhow::Result<EventRow> {
+) -> anyhow::Result<Option<EventRow>> {
     hqc_proto::replace_nul_json(&mut author);
     hqc_proto::replace_nul_json(&mut payload);
     let client_op_id = client_op_id.map(|c| hqc_proto::replace_nul(&c).into_owned());
     let typed: EventKind = serde_json::from_value(json!({"type": kind, "payload": payload}))?;
     let new = NewEvent {
-        event_id: db::new_id(),
+        event_id,
         session_id: s.id,
         ts: Utc::now(),
         author,
@@ -195,8 +226,9 @@ pub async fn store_hub_event(
     match db::insert_event(&app.db, &new).await? {
         Inserted::New(row) => {
             after_store(app, s, &row, &typed, Source::Hub).await?;
-            Ok(*row)
+            Ok(Some(*row))
         }
+        Inserted::Duplicate(_) => Ok(None),
         other => anyhow::bail!("hub event not stored: {other:?}"),
     }
 }

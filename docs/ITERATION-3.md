@@ -41,7 +41,7 @@ stdio, the socket and the token check, cancel on EOF; hub: token auth, a foreign
 list tool); live `HQC_LIVE_CLAUDE=1` test: a Claude Code turn calls `hqc_list_sessions` and
 sees its own session (`--max-turns 2`, haiku).
 
-## T31. `hqc_attach` (after T30)
+## T31. `hqc_attach` (done, SPEC 0.34)
 
 Sections: §7, §12, §4 `attachment`, §2.1, §14.
 - Worker: `hqc_attach(path, name?, kind?, caption?)` reads `path` itself (relative to the

@@ -11,6 +11,8 @@
 //!   `410`.
 //! - `GET /worker/artifacts/{id}`: the content for a worker token, if a session of that
 //!   worker was given the artifact in its input (SPEC §5.3).
+//! - `PUT /worker/artifacts`: a worker uploads the file of an agent's `hqc_attach` for one of
+//!   its sessions (SPEC §5.4, §7); the owner is the session's owner.
 //!
 //! Cleanup (T21, [`cleanup`]): once a day artifacts no event refers to and not used for
 //! `HQC_ARTIFACT_RETENTION_DAYS` are deleted; a file goes when no row has its sha256 any more.
@@ -308,47 +310,100 @@ async fn place(cfg: &ArtifactConfig, mut s: Stored) -> ApiResult<()> {
         .map_err(|e| ApiError::Internal(e.into()))
 }
 
+/// An upload being written to a temporary file while it is hashed.
+struct Writer {
+    f: tokio::fs::File,
+    hash: Sha256,
+    size: u64,
+    max: u64,
+    tmp: TempFile,
+}
+
+impl Writer {
+    async fn new(cfg: &ArtifactConfig) -> ApiResult<Self> {
+        let tmp_dir = cfg.dir.join("tmp");
+        tokio::fs::create_dir_all(&tmp_dir)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        let tmp = TempFile(Some(tmp_dir.join(Uuid::new_v4().to_string())));
+        let f = tokio::fs::File::create(tmp.0.as_ref().unwrap())
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        Ok(Self {
+            f,
+            hash: Sha256::new(),
+            size: 0,
+            max: cfg.max_bytes,
+            tmp,
+        })
+    }
+
+    /// Over the limit: `413 too_large`.
+    async fn write(&mut self, chunk: &[u8]) -> ApiResult<()> {
+        self.size += chunk.len() as u64;
+        if self.size > self.max {
+            return Err(too_large(self.max));
+        }
+        self.hash.update(chunk);
+        self.f
+            .write_all(chunk)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))
+    }
+
+    async fn finish(self) -> ApiResult<Stored> {
+        self.f
+            .sync_all()
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        let sha256: String = self
+            .hash
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Ok(Stored {
+            sha256,
+            size: self.size,
+            tmp: self.tmp,
+        })
+    }
+}
+
+fn too_large(max: u64) -> ApiError {
+    ApiError::TooLarge(format!("an artifact is at most {max} bytes"))
+}
+
 /// Streams one multipart field into the store. Over the limit: `413 too_large`.
 async fn store_field(
     cfg: &ArtifactConfig,
     field: &mut axum::extract::multipart::Field<'_>,
 ) -> ApiResult<Stored> {
-    let tmp_dir = cfg.dir.join("tmp");
-    tokio::fs::create_dir_all(&tmp_dir)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    let tmp = TempFile(Some(tmp_dir.join(Uuid::new_v4().to_string())));
-    let path = tmp.0.clone().unwrap();
-    let mut f = tokio::fs::File::create(&path)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    let mut hash = Sha256::new();
-    let mut size: u64 = 0;
-    let too_large =
-        || ApiError::TooLarge(format!("an artifact is at most {} bytes", cfg.max_bytes));
+    let mut w = Writer::new(cfg).await?;
     loop {
-        let chunk = match field.chunk().await {
-            Ok(Some(c)) => c,
+        match field.chunk().await {
+            Ok(Some(c)) => w.write(&c).await?,
             Ok(None) => break,
             // The body limit cuts the stream: the upload was too large.
-            Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => return Err(too_large()),
+            Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                return Err(too_large(cfg.max_bytes))
+            }
             Err(e) => return Err(ApiError::BadRequest(format!("multipart: {e}"))),
-        };
-        size += chunk.len() as u64;
-        if size > cfg.max_bytes {
-            return Err(too_large());
         }
-        hash.update(&chunk);
-        f.write_all(&chunk)
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
     }
-    f.sync_all()
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    drop(f);
-    let sha256: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    Ok(Stored { sha256, size, tmp })
+    w.finish().await
+}
+
+/// Streams a request body into the store. Over the limit: `413 too_large`.
+async fn store_body(cfg: &ArtifactConfig, body: Body) -> ApiResult<Stored> {
+    use futures_util::StreamExt;
+    let mut w = Writer::new(cfg).await?;
+    let mut stream = body.into_data_stream();
+    while let Some(c) = stream.next().await {
+        let c = c.map_err(|e| ApiError::BadRequest(format!("body: {e}")))?;
+        w.write(&c).await?;
+    }
+    w.finish().await
 }
 
 // ---------------------------------------------------------------- cleanup
@@ -617,10 +672,7 @@ pub async fn upload(
             Ok(Some(f)) => f,
             Ok(None) => break,
             Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                return Err(ApiError::TooLarge(format!(
-                    "an artifact is at most {} bytes",
-                    cfg.max_bytes
-                )))
+                return Err(too_large(cfg.max_bytes))
             }
             Err(e) => return Err(ApiError::BadRequest(format!("multipart: {e}"))),
         };
@@ -637,12 +689,7 @@ pub async fn upload(
                     .text()
                     .await
                     .map_err(|e| ApiError::BadRequest(format!("multipart: {e}")))?;
-                let k: ArtifactKind = serde_json::from_value(v.trim().into())
-                    .map_err(|_| ApiError::BadRequest("kind: unknown".into()))?;
-                if k == ArtifactKind::Unknown {
-                    return Err(ApiError::BadRequest(format!("kind: unknown {v:?}")));
-                }
-                kind = Some(k);
+                kind = Some(parse_kind(&v)?);
             }
             // Unknown fields are ignored (SPEC §6).
             _ => {}
@@ -653,10 +700,32 @@ pub async fn upload(
             "the multipart field `file` is required".into(),
         ));
     };
+    let (row, created) = save(&app, user.id, stored, name, mime, kind).await?;
+    Ok((created_status(created), Json(row.to_api())))
+}
+
+fn created_status(created: bool) -> StatusCode {
+    if created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    }
+}
+
+/// Stores the record of an upload of `owner` (the same content and name: the existing one,
+/// `false`) and moves the content into place. `kind` absent: by type and extension (§12).
+async fn save(
+    app: &AppState,
+    owner: Uuid,
+    stored: Stored,
+    name: String,
+    mime: String,
+    kind: Option<ArtifactKind>,
+) -> ApiResult<(ArtifactRow, bool)> {
     let kind = kind.unwrap_or_else(|| kind_of(&mime, &name));
     let row = ArtifactRow {
         id: db::new_id(),
-        owner_id: user.id,
+        owner_id: owner,
         session_id: None,
         kind: serde_json::to_value(kind)
             .ok()
@@ -670,13 +739,18 @@ pub async fn upload(
         created_at: Utc::now(),
     };
     let (row, created) = insert_artifact(&app.db, &row).await?;
-    place(cfg, stored).await?;
-    let status = if created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    Ok((status, Json(row.to_api())))
+    place(&app.config.artifacts, stored).await?;
+    Ok((row, created))
+}
+
+/// `kind` as the client or the worker named it; `unknown` is refused.
+fn parse_kind(v: &str) -> ApiResult<ArtifactKind> {
+    let k: ArtifactKind = serde_json::from_value(v.trim().into())
+        .map_err(|_| ApiError::BadRequest("kind: unknown".into()))?;
+    if k == ArtifactKind::Unknown {
+        return Err(ApiError::BadRequest(format!("kind: unknown {v:?}")));
+    }
+    Ok(k)
 }
 
 /// The user's artifact; another user's looks like a missing one.
@@ -781,6 +855,27 @@ fn plain(status: StatusCode, msg: &'static str) -> Response {
     r
 }
 
+/// The worker of the bearer token; failures count against the address like a WebSocket
+/// login's.
+async fn worker_of(app: &AppState, ip: &str, headers: &HeaderMap) -> ApiResult<db::WorkerRow> {
+    let max_failures = app.config.limits.ws_auth_failures_per_min;
+    if app.limiter.exhausted(AUTH_FAILURES, ip, max_failures) {
+        return Err(ApiError::TooManyRequests);
+    }
+    let refuse = || {
+        app.limiter.allow(AUTH_FAILURES, ip, max_failures);
+        ApiError::Unauthorized("unknown worker token".into())
+    };
+    let token = bearer(headers)
+        .filter(|t| is_worker_token(t))
+        .ok_or_else(refuse)?;
+    let w = {
+        let _permit = app.ws_auth.try_acquire().map_err(|_| ApiError::Busy)?;
+        db::worker_by_token_hash(&app.db, &hash_secret(token)).await?
+    };
+    w.ok_or_else(refuse)
+}
+
 /// `GET /worker/artifacts/{id}` with the worker token (SPEC §5.3), no TTL. Only artifacts
 /// given to a session of this worker; anything else is `404`.
 pub async fn for_worker(
@@ -789,27 +884,86 @@ pub async fn for_worker(
     UrlPath(id): UrlPath<Uuid>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let max_failures = app.config.limits.ws_auth_failures_per_min;
-    if app.limiter.exhausted(AUTH_FAILURES, &ip, max_failures) {
-        return Err(ApiError::TooManyRequests);
-    }
-    let refuse = || {
-        app.limiter.allow(AUTH_FAILURES, &ip, max_failures);
-        ApiError::Unauthorized("unknown worker token".into())
-    };
-    let token = bearer(&headers)
-        .filter(|t| is_worker_token(t))
-        .ok_or_else(refuse)?;
-    let w = {
-        let _permit = app.ws_auth.try_acquire().map_err(|_| ApiError::Busy)?;
-        db::worker_by_token_hash(&app.db, &hash_secret(token)).await?
-    };
-    let w = w.ok_or_else(refuse)?;
+    let w = worker_of(&app, &ip, &headers).await?;
     if !worker_may_read(&app.db, w.id, id).await? {
         return Err(ApiError::NotFound);
     }
     let a = artifact(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     content(&app.config.artifacts, &a, Served::Worker, true).await
+}
+
+/// `PUT /worker/artifacts` with the worker token (SPEC §5.4, §12): the body is the file of
+/// an agent's `hqc_attach`, streamed. `x-hqc-session-id` names the session it is for, which
+/// must be one this worker runs (else `404`); `x-hqc-artifact-name` (percent-encoded),
+/// `x-hqc-artifact-kind?` and `Content-Type` work as in the client's upload. The owner is the
+/// session's owner; dedup and `kind` as for `POST /api/artifacts`. The artifact is linked to
+/// the session as an input's artifacts are, which is what `hqc_attach` checks.
+pub async fn from_worker(
+    State(app): State<AppState>,
+    ClientIp(ip): ClientIp,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult<(StatusCode, Json<Artifact>)> {
+    let w = worker_of(&app, &ip, &headers).await?;
+    let text = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
+    let session_id: Uuid = text("x-hqc-session-id")
+        .and_then(|v| v.trim().parse().ok())
+        .ok_or_else(|| ApiError::BadRequest("x-hqc-session-id: a session id is required".into()))?;
+    let s = db::session(&app.db, session_id)
+        .await?
+        .filter(|s| s.worker_id == Some(w.id) && !s.system)
+        .ok_or(ApiError::NotFound)?;
+    let cfg = &app.config.artifacts;
+    let announced = text(header::CONTENT_LENGTH.as_str()).and_then(|v| v.parse::<u64>().ok());
+    if announced.is_some_and(|n| n > cfg.max_bytes) {
+        return Err(too_large(cfg.max_bytes));
+    }
+    let name = clean_name(&pct_decode(text("x-hqc-artifact-name").unwrap_or("")));
+    let mime = mime_of(text(header::CONTENT_TYPE.as_str()), &name);
+    let kind = text("x-hqc-artifact-kind").map(parse_kind).transpose()?;
+    let stored = store_body(cfg, body).await?;
+    let (row, created) = save(&app, s.owner_id, stored, name, mime, kind).await?;
+    sqlx::query(
+        "INSERT INTO artifact_sessions (artifact_id, session_id) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(row.id)
+    .bind(s.id)
+    .execute(&app.db)
+    .await?;
+    tracing::info!(worker_id = %w.id, session_id = %s.id, artifact_id = %row.id, size = row.size, created, "artifact uploaded by the worker");
+    Ok((created_status(created), Json(row.to_api())))
+}
+
+/// The artifact was uploaded for `session_id` or given to it in an input.
+pub async fn of_session(db: &PgPool, session_id: Uuid, artifact_id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM artifact_sessions WHERE artifact_id = $1 AND session_id = $2)",
+    )
+    .bind(artifact_id)
+    .bind(session_id)
+    .fetch_one(db)
+    .await
+}
+
+/// Inverse of [`pct`]; an invalid sequence stays as it is.
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h << 4 | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Size of the request body `POST /api/artifacts` may have: the artifact plus the multipart

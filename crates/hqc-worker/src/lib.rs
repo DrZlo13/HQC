@@ -138,13 +138,23 @@ impl Worker {
             });
         }
         let (link, direct) = HubLink::new(outbox);
+        let artifacts = inbox::ArtifactClient::new(&self.config.hub_url, self.token.clone())
+            .with_inboxes(inboxes);
         // Bound before anything can start an agent whose MCP server would connect to it.
         let mcp_stop = CancellationToken::new();
         let mcp_task = match &self.mcp_socket {
             Some(path) => {
                 let socket = mcp::daemon::McpSocket::bind(path)?;
                 tracing::info!(path = %socket.path().display(), "mcp socket ready");
-                Some(tokio::spawn(socket.run(link.clone(), mcp_stop.clone())))
+                let attacher = mcp::attach::Attacher {
+                    allowed_roots: self.config.allowed_roots.clone(),
+                    client: artifacts.clone(),
+                };
+                Some(tokio::spawn(socket.run(
+                    link.clone(),
+                    attacher,
+                    mcp_stop.clone(),
+                )))
             }
             None => None,
         };
@@ -168,8 +178,6 @@ impl Worker {
         let conn_stop = CancellationToken::new();
         let conn_task = tokio::spawn(conn.run(conn_stop.clone()));
 
-        let artifacts = inbox::ArtifactClient::new(&self.config.hub_url, self.token.clone())
-            .with_inboxes(inboxes);
         let mut sup = Supervisor::new(
             Arc::new(self.config),
             self.adapters,

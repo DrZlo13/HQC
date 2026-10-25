@@ -8,6 +8,9 @@
 //! - Every [`ToDaemon::Call`] is checked again (the agent may have been replaced since) and
 //!   goes to the hub as `mcp.call` ([`HubLink::mcp_call`]); its `mcp.result` comes back as
 //!   [`FromDaemon::Result`].
+//! - `hqc_attach` first reads and uploads the file ([`Attacher::prepare`]); only then does
+//!   the `mcp.call` go, with the artifact id instead of the path. A cancel or EOF during the
+//!   upload stops it, and no `mcp.call` is sent.
 //! - [`ToDaemon::Cancel`] and EOF with calls open send `mcp.cancel` for each of them.
 //! - The token is never logged.
 
@@ -24,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::attach::Attacher;
 use super::{FromDaemon, ToDaemon, MAX_LINE};
 use crate::link::HubLink;
 
@@ -69,7 +73,7 @@ impl McpSocket {
     }
 
     /// Serves connections until `stop`.
-    pub async fn run(self, link: HubLink, stop: CancellationToken) {
+    pub async fn run(self, link: HubLink, attacher: Attacher, stop: CancellationToken) {
         let uid = unsafe { libc::geteuid() };
         loop {
             let stream = tokio::select! {
@@ -97,7 +101,7 @@ impl McpSocket {
                     continue;
                 }
             }
-            tokio::spawn(serve(stream, link.clone(), stop.clone()));
+            tokio::spawn(serve(stream, link.clone(), attacher.clone(), stop.clone()));
         }
     }
 }
@@ -115,7 +119,7 @@ fn refused(code: &str, message: impl Into<String>) -> FromDaemon {
 }
 
 /// One MCP process.
-async fn serve(stream: UnixStream, link: HubLink, stop: CancellationToken) {
+async fn serve(stream: UnixStream, link: HubLink, attacher: Attacher, stop: CancellationToken) {
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FromDaemon>();
@@ -171,6 +175,8 @@ async fn serve(stream: UnixStream, link: HubLink, stop: CancellationToken) {
 
     // The connection's call ids -> `request_id`s of open calls.
     let open: Arc<std::sync::Mutex<HashMap<u64, Uuid>>> = Arc::default();
+    // Calls still being prepared on the worker (an upload): no `mcp.call` yet.
+    let preparing: Arc<std::sync::Mutex<HashMap<u64, tokio::task::AbortHandle>>> = Arc::default();
     loop {
         let msg = tokio::select! {
             _ = stop.cancelled() => break,
@@ -187,6 +193,13 @@ async fn serve(stream: UnixStream, link: HubLink, stop: CancellationToken) {
                 break;
             }
             Some(Ok(ToDaemon::Cancel { id })) => {
+                if let Some(h) = preparing.lock().unwrap().remove(&id) {
+                    tracing::info!(
+                        call = id,
+                        "mcp call cancelled by the runtime before it was sent"
+                    );
+                    h.abort();
+                }
                 let rid = open.lock().unwrap().remove(&id);
                 if let Some(rid) = rid {
                     tracing::info!(request_id = %rid, "mcp call cancelled by the runtime");
@@ -216,41 +229,45 @@ async fn serve(stream: UnixStream, link: HubLink, stop: CancellationToken) {
                     );
                     continue;
                 }
-                let (rid, rx) = match link.mcp_call(sid, &tool, args) {
-                    Ok(Some(c)) => c,
-                    Ok(None) => {
+                if tool == hqc_proto::mcp::ATTACH {
+                    let Some(folders) = link.mcp().folders(sid) else {
                         fail(
                             error_code::UNAVAILABLE,
                             "the session's agent no longer runs".into(),
                         );
                         continue;
-                    }
-                    Err(e) => {
-                        tracing::error!(session_id = %sid, "mcp call not queued: {e:#}");
-                        fail(
-                            error_code::INTERNAL,
-                            "the worker could not queue the call".into(),
-                        );
-                        continue;
-                    }
-                };
-                tracing::info!(session_id = %sid, request_id = %rid, %tool, "mcp call");
-                open.lock().unwrap().insert(id, rid);
-                let (out, open) = (out_tx.clone(), open.clone());
-                tokio::spawn(async move {
-                    // A cancelled call's sender is dropped: no answer goes back (MCP).
-                    let Ok(outcome) = rx.await else { return };
-                    if open.lock().unwrap().remove(&id).is_none() {
-                        return;
-                    }
-                    let (result, error) = match outcome {
-                        Ok(r) => (Some(r), None),
-                        Err(e) => (None, Some(e)),
                     };
-                    let _ = out.send(FromDaemon::Result { id, result, error });
-                });
+                    let (link, attacher, out) = (link.clone(), attacher.clone(), out_tx.clone());
+                    let (open, prep) = (open.clone(), preparing.clone());
+                    // Held until the task is registered, so that it cannot finish first.
+                    let mut g = preparing.lock().unwrap();
+                    let task = tokio::spawn(async move {
+                        let args = attacher.prepare(sid, &folders, args).await;
+                        // Held until the call is in `open`: an EOF meanwhile then sees it.
+                        let mut p = prep.lock().unwrap();
+                        if p.remove(&id).is_none() {
+                            return;
+                        }
+                        match args {
+                            Ok(args) => send_call(&link, &out, &open, sid, id, &tool, args),
+                            Err(e) => {
+                                let _ = out.send(FromDaemon::Result {
+                                    id,
+                                    result: None,
+                                    error: Some(e),
+                                });
+                            }
+                        }
+                    });
+                    g.insert(id, task.abort_handle());
+                    continue;
+                }
+                send_call(&link, &out_tx, &open, sid, id, &tool, args);
             }
         }
+    }
+    for (_, h) in preparing.lock().unwrap().drain() {
+        h.abort();
     }
     // EOF (the MCP process exited) or stop: the calls still open die with it.
     let left: Vec<Uuid> = open.lock().unwrap().drain().map(|(_, r)| r).collect();
@@ -260,6 +277,53 @@ async fn serve(stream: UnixStream, link: HubLink, stop: CancellationToken) {
     }
     drop(out_tx);
     let _ = writer.await;
+}
+
+/// Sends `mcp.call` for the connection's call `id` and hands its `mcp.result` back.
+fn send_call(
+    link: &HubLink,
+    out_tx: &mpsc::UnboundedSender<FromDaemon>,
+    open: &Arc<std::sync::Mutex<HashMap<u64, Uuid>>>,
+    sid: Uuid,
+    id: u64,
+    tool: &str,
+    args: serde_json::Value,
+) {
+    let fail = |code: &str, message: &str| {
+        let _ = out_tx.send(FromDaemon::Result {
+            id,
+            result: None,
+            error: Some(McpError::new(code, message)),
+        });
+    };
+    let (rid, rx) = match link.mcp_call(sid, tool, args) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return fail(
+                error_code::UNAVAILABLE,
+                "the session's agent no longer runs",
+            )
+        }
+        Err(e) => {
+            tracing::error!(session_id = %sid, "mcp call not queued: {e:#}");
+            return fail(error_code::INTERNAL, "the worker could not queue the call");
+        }
+    };
+    tracing::info!(session_id = %sid, request_id = %rid, %tool, "mcp call");
+    open.lock().unwrap().insert(id, rid);
+    let (out, open) = (out_tx.clone(), open.clone());
+    tokio::spawn(async move {
+        // A cancelled call's sender is dropped: no answer goes back (MCP).
+        let Ok(outcome) = rx.await else { return };
+        if open.lock().unwrap().remove(&id).is_none() {
+            return;
+        }
+        let (result, error) = match outcome {
+            Ok(r) => (Some(r), None),
+            Err(e) => (None, Some(e)),
+        };
+        let _ = out.send(FromDaemon::Result { id, result, error });
+    });
 }
 
 /// The next message; `None` at EOF, `Err` for a line too long or not a message.

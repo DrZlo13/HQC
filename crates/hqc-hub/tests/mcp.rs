@@ -234,3 +234,193 @@ async fn list_sessions_of_the_owner() {
         assert_eq!(code(&r), "not_found", "{p}");
     }
 }
+
+/// `PUT /worker/artifacts` as the worker's daemon sends it (SPEC §5.4, §12).
+async fn put_artifact(
+    hub: &TestHub,
+    token: &str,
+    session: Option<&str>,
+    name: &str,
+    kind: Option<&str>,
+    body: &[u8],
+) -> (u16, Value) {
+    let mut r = hub
+        .http
+        .put(format!("{}/worker/artifacts", hub.base))
+        .bearer_auth(token)
+        .header("x-hqc-artifact-name", hqc_hub::artifacts::pct(name))
+        .body(body.to_vec());
+    if let Some(s) = session {
+        r = r.header("x-hqc-session-id", s);
+    }
+    if let Some(k) = kind {
+        r = r.header("x-hqc-artifact-kind", k);
+    }
+    let r = r.send().await.unwrap();
+    let s = r.status().as_u16();
+    (s, r.json().await.unwrap_or(Value::Null))
+}
+
+/// `mcp.call` with a given `request_id`: a repeat sends the same one.
+async fn call_as(w: &mut FakeWorker, token: &str, rid: &str, args: Value) -> Value {
+    w.send(
+        "mcp.call",
+        json!({"request_id": rid, "session_token": token, "tool": "hqc_attach", "args": args}),
+    )
+    .await;
+    let r = w.expect("mcp.result").await;
+    assert_eq!(r["payload"]["request_id"], rid);
+    r["payload"].clone()
+}
+
+fn new_rid() -> String {
+    Uuid::now_v7().to_string()
+}
+
+#[tokio::test]
+async fn the_worker_uploads_for_its_own_sessions() {
+    let hub = TestHub::start_artifacts(|c| c.max_bytes = 1000).await;
+    let (_, t1) = hub.enroll("one").await;
+    let (_, t2) = hub.enroll("two").await;
+    let (mut w1, _) = FakeWorker::online(&hub, &t1, WS_PATH).await;
+    let (_w2, _) = FakeWorker::online(&hub, &t2, "/Users/home-mac/work/other").await;
+    let (sid, _) = started(&hub, &mut w1, "Files").await;
+
+    let png = b"\x89PNG fake";
+    let (s, a) = put_artifact(&hub, &t1, Some(&sid), "shot.png", None, png).await;
+    assert_eq!(s, 201, "{a}");
+    assert_eq!(
+        (a["kind"].as_str(), a["name"].as_str(), a["size"].as_u64()),
+        (Some("image"), Some("shot.png"), Some(png.len() as u64))
+    );
+    // The same file under the same name is the same record; the owner is the session's.
+    let (s, again) = put_artifact(&hub, &t1, Some(&sid), "shot.png", None, png).await;
+    assert_eq!((s, &again["id"]), (200, &a["id"]));
+    let aid = a["id"].as_str().unwrap();
+    let (s, v) = hub.get(&format!("/api/artifacts/{aid}")).await;
+    assert_eq!(s, 200, "{v}");
+    // `kind` and a name with a path and non-ASCII letters, as in the client's upload.
+    let (s, d) = put_artifact(
+        &hub,
+        &t1,
+        Some(&sid),
+        "../правка.txt",
+        Some("diff"),
+        b"-a\n+b\n",
+    )
+    .await;
+    assert_eq!(s, 201, "{d}");
+    assert_eq!(
+        (d["kind"].as_str(), d["name"].as_str()),
+        (Some("diff"), Some("правка.txt"))
+    );
+    let (s, _) = put_artifact(&hub, &t1, Some(&sid), "x", Some("audio"), b"x").await;
+    assert_eq!(s, 400);
+
+    // Another worker's session, no session, an unknown one, a bad token.
+    let (s, _) = put_artifact(&hub, &t2, Some(&sid), "a.txt", None, b"a").await;
+    assert_eq!(s, 404);
+    let (s, _) = put_artifact(&hub, &t1, None, "a.txt", None, b"a").await;
+    assert_eq!(s, 400);
+    let unknown = new_rid();
+    let (s, _) = put_artifact(&hub, &t1, Some(&unknown), "a.txt", None, b"a").await;
+    assert_eq!(s, 404);
+    let bad = format!("hqcw_{}", "A".repeat(43));
+    let (s, _) = put_artifact(&hub, &bad, Some(&sid), "a.txt", None, b"a").await;
+    assert_eq!(s, 401);
+
+    // Over the cap: refused, nothing left behind.
+    let (s, v) = put_artifact(&hub, &t1, Some(&sid), "big.bin", None, &[1; 1001]).await;
+    assert_eq!((s, v["error"].as_str()), (413, Some("too_large")), "{v}");
+    let (s, _) = put_artifact(&hub, &t1, Some(&sid), "ok.bin", None, &[1; 1000]).await;
+    assert_eq!(s, 201);
+    let tmp = hub.app.config.artifacts.dir.join("tmp");
+    assert_eq!(std::fs::read_dir(tmp).unwrap().count(), 0);
+
+    // The session's worker may download it back.
+    let r = hub
+        .http
+        .get(format!("{}/worker/artifacts/{aid}", hub.base))
+        .bearer_auth(&t1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.bytes().await.unwrap().as_ref(), png);
+    hub.finish().await;
+}
+
+#[tokio::test]
+async fn attach_writes_one_event_per_request() {
+    let hub = TestHub::start().await;
+    let (_, t1) = hub.enroll("one").await;
+    let (mut w1, _) = FakeWorker::online(&hub, &t1, WS_PATH).await;
+    let (sid, token) = started(&hub, &mut w1, "Attach").await;
+    let (other, other_token) = started(&hub, &mut w1, "Other").await;
+    let (_, a) = put_artifact(&hub, &t1, Some(&sid), "shot.png", None, b"png").await;
+    let aid = a["id"].as_str().unwrap();
+    let attachments = |evs: Vec<Value>| -> Vec<Value> {
+        evs.into_iter()
+            .filter(|e| e["type"] == "attachment")
+            .collect()
+    };
+
+    let rid = new_rid();
+    let args = json!({"artifact_id": aid, "caption": "The new layout"});
+    let r = call_as(&mut w1, &token, &rid, args.clone()).await;
+    let res = &r["result"];
+    assert_eq!(
+        (
+            res["artifact_id"].as_str(),
+            res["name"].as_str(),
+            res["kind"].as_str()
+        ),
+        (Some(aid), Some("shot.png"), Some("image")),
+        "{r}"
+    );
+    let evs = attachments(hub.events(&sid).await);
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0]["event_id"], res["event_id"]);
+    assert_eq!(evs[0]["author"], json!({"kind": "agent", "id": sid}));
+    assert_eq!(
+        evs[0]["payload"],
+        json!({"artifact_id": aid, "kind": "image", "name": "shot.png", "caption": "The new layout"})
+    );
+
+    // The answer was lost and the worker sends the call again: the same result, no second
+    // event (SPEC §5.2).
+    let again = call_as(&mut w1, &token, &rid, args.clone()).await;
+    assert_eq!(again, r);
+    assert_eq!(attachments(hub.events(&sid).await).len(), 1);
+    // A new call attaches again.
+    let r2 = call_as(&mut w1, &token, &new_rid(), json!({"artifact_id": aid})).await;
+    assert_ne!(r2["result"]["event_id"], r["result"]["event_id"]);
+    let evs = attachments(hub.events(&sid).await);
+    assert_eq!(evs.len(), 2);
+    assert!(evs[1]["payload"].get("caption").is_none());
+
+    // One the user uploaded, an unknown one, one uploaded for another session (the same
+    // `request_id` there is another call).
+    let (_, user_up) = hub
+        .upload("notes.txt", "text/plain", b"n".to_vec(), None)
+        .await;
+    for id in [user_up["id"].as_str().unwrap().to_string(), new_rid()] {
+        let r = call_as(&mut w1, &token, &new_rid(), json!({"artifact_id": id})).await;
+        assert_eq!(code(&r), "not_found", "{r}");
+    }
+    for rid in [new_rid(), rid] {
+        let r = call_as(&mut w1, &other_token, &rid, json!({"artifact_id": aid})).await;
+        assert_eq!(code(&r), "not_found", "{r}");
+    }
+    assert!(attachments(hub.events(&other).await).is_empty());
+    // A path is the worker's business; the hub takes only the uploaded artifact.
+    for bad in [
+        json!({"path": "a.png"}),
+        json!({}),
+        json!({"artifact_id": aid, "kind": "image"}),
+    ] {
+        let r = call_as(&mut w1, &token, &new_rid(), bad).await;
+        assert_eq!(code(&r), "invalid_args", "{r}");
+    }
+    hub.finish().await;
+}

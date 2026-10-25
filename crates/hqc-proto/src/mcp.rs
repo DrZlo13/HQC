@@ -2,7 +2,9 @@
 //! implements behind `mcp.call` (SPEC §5.2). A tool appears here only once its task lands
 //! (docs/ITERATION-3.md): no stubs.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 /// One tool as `tools/list` shows it.
 #[derive(Debug, Clone, Copy)]
@@ -25,25 +27,72 @@ impl Tool {
 }
 
 pub const LIST_SESSIONS: &str = "hqc_list_sessions";
+pub const ATTACH: &str = "hqc_attach";
 
-pub const TOOLS: &[Tool] = &[Tool {
-    name: LIST_SESSIONS,
-    description: "List the hqc sessions of your owner: each with its address \
+pub const TOOLS: &[Tool] = &[
+    Tool {
+        name: LIST_SESSIONS,
+        description: "List the hqc sessions of your owner: each with its address \
         (<project-slug>/<session-slug>), title and status; `current: true` marks this \
         session. Give `project` (a project slug or id) to list one project only.",
-    input_schema: || {
-        json!({
-            "type": "object",
-            "properties": {
-                "project": {
-                    "type": "string",
-                    "description": "A project slug or id; all projects when absent."
-                }
-            },
-            "additionalProperties": false
-        })
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "A project slug or id; all projects when absent."
+                    }
+                },
+                "additionalProperties": false
+            })
+        },
     },
-}];
+    Tool {
+        name: ATTACH,
+        description: "Show a file from your workspace to the user in the hqc chat: an image \
+            inline, a diff as a diff, anything else as a file to open or download. At most \
+            100 MB. `path` is absolute or relative to your working directory and must lie \
+            inside the session's workspace.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file, absolute or relative to the working directory."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "The name shown in the chat; the file's name when absent."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["file", "image", "diff", "html", "text"],
+                        "description": "How the chat shows it; guessed from the name when absent."
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "A line shown with the file."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            })
+        },
+    },
+];
+
+/// `args` of the `mcp.call` for [`ATTACH`]: the worker reads and uploads `path` itself
+/// (`PUT /worker/artifacts`, SPEC §12) and sends the artifact instead of the path; `name`
+/// and `kind` went with the upload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachCall {
+    pub artifact_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+}
 
 pub fn tool(name: &str) -> Option<&'static Tool> {
     TOOLS.iter().find(|t| t.name == name)
@@ -93,6 +142,7 @@ mod tests {
             assert!(!t.description.is_empty());
         }
         assert!(tool(LIST_SESSIONS).is_some());
+        assert!(tool(ATTACH).is_some());
         assert!(tool("hqc_send").is_none(), "no stubs (docs/ITERATION-3.md)");
     }
 }

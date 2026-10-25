@@ -1,6 +1,7 @@
 //! T30 (SPEC §5.2, §7.2): the hqc MCP server `hqc-worker mcp` driven over stdio by a scripted
 //! runtime, the daemon's socket and its token check, `mcp.call` / `mcp.result` / `mcp.cancel`
-//! with a fake hub. The worker runs in process with the fake adapter; the MCP server is the
+//! with a fake hub. T31 (SPEC §7, §12): `hqc_attach` reads and uploads the file on the worker
+//! before its `mcp.call`. The worker runs in process with the fake adapter; the MCP server is the
 //! real binary.
 
 mod common;
@@ -84,8 +85,12 @@ impl Runtime {
     }
 
     async fn call(&mut self, id: u64, args: Value) {
+        self.call_tool(id, "hqc_list_sessions", args).await;
+    }
+
+    async fn call_tool(&mut self, id: u64, tool: &str, args: Value) {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
-                         "params": {"name": "hqc_list_sessions", "arguments": args}}))
+                         "params": {"name": tool, "arguments": args}}))
             .await;
     }
 }
@@ -160,7 +165,11 @@ async fn a_call_goes_to_the_hub_and_back() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["hqc_list_sessions"], "only tools that landed");
+    assert_eq!(
+        names,
+        ["hqc_list_sessions", "hqc_attach"],
+        "only tools that landed"
+    );
     assert_eq!(
         r["result"]["tools"][0]["inputSchema"]["type"], "object",
         "{r}"
@@ -391,5 +400,143 @@ async fn a_call_of_a_previous_run_is_not_sent() {
         .await
         .is_none());
     assert!(Outbox::open(&env.outbox()).unwrap().is_empty().unwrap());
+    w.stop().await;
+}
+
+#[tokio::test]
+async fn attach_uploads_the_file_before_the_call() {
+    let (env, hub, w, mut c, sid) = setup().await;
+    let ws = env.workspace();
+    std::fs::write(ws.join("sub/shot.png"), b"\x89PNG small").unwrap();
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+
+    // Relative to the working directory (here the workspace itself).
+    rt.call_tool(
+        2,
+        "hqc_attach",
+        json!({"path": "sub/shot.png", "caption": "The layout", "kind": "image"}),
+    )
+    .await;
+    let f = c.expect("mcp.call").await;
+    let ups = hub.artifacts.uploads();
+    assert_eq!(ups.len(), 1, "uploaded before the call");
+    let up = &ups[0];
+    assert_eq!(up.body, b"\x89PNG small");
+    assert_eq!(up.headers["authorization"], format!("Bearer {TOKEN}"));
+    assert_eq!(up.headers["x-hqc-session-id"], sid.to_string());
+    assert_eq!(up.headers["x-hqc-artifact-name"], "shot.png");
+    assert_eq!(up.headers["x-hqc-artifact-kind"], "image");
+    assert!(!up.headers.values().any(|v| v.contains(TOKEN_A)));
+    let p = &f["payload"];
+    assert_eq!(p["tool"], "hqc_attach");
+    assert_eq!(
+        p["args"],
+        json!({"artifact_id": up.id, "caption": "The layout"}),
+        "the hub gets the artifact, not the path"
+    );
+    let result = json!({"event_id": Uuid::now_v7(), "artifact_id": up.id, "name": "shot.png", "kind": "image"});
+    c.send(json!({"id": f["id"], "type": "mcp.result",
+                  "payload": {"request_id": p["request_id"], "result": result}}))
+        .await;
+    let r = rt.recv().await;
+    let (is_err, text) = result_text(&r);
+    assert!(!is_err, "{r}");
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), result);
+
+    // An absolute path and another name.
+    let abs = ws.join("sub/shot.png").display().to_string();
+    rt.call_tool(3, "hqc_attach", json!({"path": abs, "name": "layout.png"}))
+        .await;
+    let f = c.expect("mcp.call").await;
+    let ups = hub.artifacts.uploads();
+    assert_eq!(ups[1].headers["x-hqc-artifact-name"], "layout.png");
+    assert!(!ups[1].headers.contains_key("x-hqc-artifact-kind"));
+    assert_eq!(f["payload"]["args"], json!({"artifact_id": ups[1].id}));
+
+    // Refused on the worker: nothing is uploaded and no call goes to the hub.
+    let outside = env.dir.path().join("secret.txt");
+    std::fs::write(&outside, b"secret").unwrap();
+    std::os::unix::fs::symlink(&outside, ws.join("link.txt")).unwrap();
+    std::fs::write(env.root().join("beside.txt"), b"x").unwrap();
+    let cases = [
+        (
+            json!({"path": outside.display().to_string()}),
+            "invalid_args: ",
+        ),
+        (json!({"path": "link.txt"}), "invalid_args: "),
+        (json!({"path": "../beside.txt"}), "invalid_args: "),
+        (json!({"path": "sub"}), "invalid_args: "),
+        (json!({"path": "missing.txt"}), "not_found: "),
+        (
+            json!({"content": "hello", "name": "a.txt"}),
+            "invalid_args: ",
+        ),
+        (
+            json!({"path": "sub/shot.png", "kind": "audio"}),
+            "invalid_args: ",
+        ),
+    ];
+    for (n, (args, want)) in cases.into_iter().enumerate() {
+        rt.call_tool(10 + n as u64, "hqc_attach", args.clone())
+            .await;
+        let r = rt.recv().await;
+        let (is_err, text) = result_text(&r);
+        assert!(is_err && text.starts_with(want), "{args}: {text}");
+        assert!(!text.contains("secret\n"), "{text}");
+    }
+    assert_eq!(hub.artifacts.uploads().len(), 2);
+    assert!(c
+        .maybe("mcp.call", Duration::from_millis(300))
+        .await
+        .is_none());
+    drop(rt);
+    w.stop().await;
+}
+
+#[tokio::test]
+async fn a_call_cancelled_during_its_upload_is_not_sent() {
+    let (env, hub, w, mut c, _sid) = setup().await;
+    std::fs::write(env.workspace().join("a.txt"), b"a").unwrap();
+    hub.artifacts
+        .stall_uploads
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+    let uploaded = async |n: usize| {
+        let deadline = std::time::Instant::now() + WAIT;
+        while hub.artifacts.uploads().len() < n {
+            assert!(std::time::Instant::now() < deadline, "no upload");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+
+    // The runtime cancels while the file is on its way: no `mcp.call`, no answer (MCP).
+    rt.call_tool(2, "hqc_attach", json!({"path": "a.txt"}))
+        .await;
+    uploaded(1).await;
+    rt.send(
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                   "params": {"requestId": 2, "reason": "timeout"}}),
+    )
+    .await;
+    let r = rt.request(3, "ping", json!({})).await;
+    assert_eq!(r["result"], json!({}));
+
+    // The MCP process exits during an upload: the same.
+    rt.call_tool(4, "hqc_attach", json!({"path": "a.txt"}))
+        .await;
+    uploaded(2).await;
+    drop(rt.stdin.take());
+    tokio::time::timeout(WAIT, rt.child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    for ty in ["mcp.call", "mcp.cancel"] {
+        assert!(
+            c.maybe(ty, Duration::from_millis(800)).await.is_none(),
+            "{ty}"
+        );
+    }
     w.stop().await;
 }

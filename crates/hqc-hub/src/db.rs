@@ -1700,6 +1700,15 @@ pub async fn insert_event(db: &PgPool, e: &NewEvent) -> sqlx::Result<Inserted> {
     }
 }
 
+pub async fn event(db: &PgPool, event_id: Uuid) -> sqlx::Result<Option<EventRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {EVENT_COLS} FROM events WHERE event_id = $1"
+    ))
+    .bind(event_id)
+    .fetch_optional(db)
+    .await
+}
+
 async fn existing_seq(db: &PgPool, event_id: Uuid) -> sqlx::Result<Option<i64>> {
     sqlx::query_scalar("SELECT seq FROM events WHERE event_id = $1")
         .bind(event_id)

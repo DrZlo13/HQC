@@ -19,6 +19,7 @@
 //! (the "process token", what it authenticates with on the socket), while `mcp.call`
 //! carries the session's latest one (the "hub token").
 
+pub mod attach;
 pub mod daemon;
 pub mod server;
 
@@ -101,6 +102,8 @@ struct Inner {
 struct Tokens {
     process: Secret,
     hub: Secret,
+    /// Where the session's agent works, for `hqc_attach`.
+    folders: attach::Folders,
 }
 
 struct Open {
@@ -113,16 +116,25 @@ impl McpCalls {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The session's agent process starts with `token`: its MCP server authenticates with
-    /// it, and calls carry it until the next `session.start`.
-    pub fn bind(&self, session_id: Uuid, token: &Secret) {
+    /// The session's agent process starts with `token` in `folders`: its MCP server
+    /// authenticates with the token, and calls carry it until the next `session.start`.
+    pub fn bind(&self, session_id: Uuid, token: &Secret, folders: attach::Folders) {
         self.lock().sessions.insert(
             session_id,
             Tokens {
                 process: token.clone(),
                 hub: token.clone(),
+                folders,
             },
         );
+    }
+
+    /// The folders of the session whose agent runs.
+    pub fn folders(&self, session_id: Uuid) -> Option<attach::Folders> {
+        self.lock()
+            .sessions
+            .get(&session_id)
+            .map(|t| t.folders.clone())
     }
 
     /// `session.start` for an agent that keeps running: the hub knows only `token` now.
@@ -220,7 +232,12 @@ mod tests {
         let sid = Uuid::now_v7();
         let first = Secret::new("hqcs_first");
         assert!(m.open(sid).is_none(), "no agent, no call");
-        m.bind(sid, &first);
+        let folders = attach::Folders {
+            workspace: "/w".into(),
+            workdir: "/w/sub".into(),
+        };
+        m.bind(sid, &first, folders.clone());
+        assert_eq!(m.folders(sid), Some(folders));
         assert_eq!(m.session_for("hqcs_first"), Some(sid));
         assert_eq!(m.session_for("hqcs_firsT"), None);
         assert_eq!(m.session_for(""), None);

@@ -103,6 +103,11 @@ pub fn router(app: AppState) -> Router {
         .route("/api/artifacts/{id}", get(artifacts::meta))
         .route("/api/artifacts/{id}/url", get(artifacts::url))
         .route("/artifacts/{id}", get(artifacts::signed))
+        .route(
+            "/worker/artifacts",
+            axum::routing::put(artifacts::from_worker)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route("/worker/artifacts/{id}", get(artifacts::for_worker))
         .route("/api/ws", get(client_ws::handler))
         .route("/worker/enroll", post(api::worker_enroll))

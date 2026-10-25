@@ -48,11 +48,23 @@ pub struct FakeArtifact {
 /// Path and `Authorization` of an artifact request.
 pub type ArtifactRequest = (String, Option<String>);
 
+/// A `PUT /worker/artifacts` the fake hub took (SPEC §5.4): the headers, lowercased, and
+/// the body; it answered with `id`.
+#[derive(Clone, Debug)]
+pub struct Upload {
+    pub id: Uuid,
+    pub headers: std::collections::HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
 #[derive(Clone, Default)]
 pub struct Artifacts {
     pub files: Arc<std::sync::Mutex<std::collections::HashMap<Uuid, FakeArtifact>>>,
     /// Path and `Authorization` of every artifact request.
     pub requests: Arc<std::sync::Mutex<Vec<ArtifactRequest>>>,
+    pub uploads: Arc<std::sync::Mutex<Vec<Upload>>>,
+    /// Answer uploads only after a while.
+    pub stall_uploads: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Artifacts {
@@ -60,11 +72,19 @@ impl Artifacts {
         self.files.lock().unwrap().insert(id, a);
     }
 
-    /// Answers one plain HTTP request on `stream` if it is `GET /worker/artifacts/...`;
-    /// gives the stream back otherwise (a WebSocket upgrade).
+    pub fn uploads(&self) -> Vec<Upload> {
+        self.uploads.lock().unwrap().clone()
+    }
+
+    /// Answers one plain HTTP request on `stream` if it is `GET /worker/artifacts/...` or
+    /// `PUT /worker/artifacts`; gives the stream back otherwise (a WebSocket upgrade).
     async fn serve(&self, mut stream: TcpStream) -> Option<TcpStream> {
         let mut peek = [0u8; 64];
         let n = stream.peek(&mut peek).await.ok()?;
+        if peek[..n].starts_with(b"PUT /worker/artifacts ") {
+            self.take_upload(stream).await;
+            return None;
+        }
         if !peek[..n].starts_with(b"GET /worker/artifacts/") {
             return Some(stream);
         }
@@ -108,6 +128,59 @@ impl Artifacts {
         let _ = stream.write_all(&out).await;
         let _ = stream.shutdown().await;
         None
+    }
+}
+
+impl Artifacts {
+    async fn take_upload(&self, mut stream: TcpStream) -> Option<()> {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 65536];
+        let end = loop {
+            if let Some(i) = find(&buf, b"\r\n\r\n") {
+                break i + 4;
+            }
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..end]).to_string();
+        let headers: std::collections::HashMap<String, String> = head
+            .lines()
+            .skip(1)
+            .filter_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                Some((k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            })
+            .collect();
+        let len: usize = headers.get("content-length")?.parse().ok()?;
+        let mut body = buf[end..].to_vec();
+        while body.len() < len {
+            let n = stream.read(&mut tmp).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+        let id = Uuid::now_v7();
+        self.uploads
+            .lock()
+            .unwrap()
+            .push(Upload { id, headers, body });
+        if self.stall_uploads.load(std::sync::atomic::Ordering::SeqCst) {
+            // Answered late: a worker that did not give up would send its call then.
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let json = format!("{{\"id\":\"{id}\"}}");
+        let out = format!(
+            "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{json}",
+            json.len()
+        );
+        let _ = stream.write_all(out.as_bytes()).await;
+        let _ = stream.shutdown().await;
+        Some(())
     }
 }
 

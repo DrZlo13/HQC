@@ -371,6 +371,53 @@ describe('rendering attachments', () => {
     expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
   });
 
+  it("the agent's hqc_attach (T31): the files render as a user's do, after the tool call", async () => {
+    const src = fakeSource([meta('img', 'image', 'shot.png'), meta('dif', 'diff', 'fix.patch')]);
+    const fetchImpl = vi.fn(async () => new Response(DIFF));
+    const store = new ArtifactStore(src as never, fetchImpl as never);
+    const call = (seq: number, id: string) =>
+      ev('event.tool.call', (e) => {
+        e.seq = seq;
+        e.payload = { call_id: id, tool: 'mcp__hqc__hqc_attach', args_preview: '{"path":"shot.png"}' };
+      });
+    const result = (seq: number, id: string) =>
+      ev('event.tool.result', (e) => {
+        e.seq = seq;
+        e.payload = { call_id: id, result_preview: '{"event_id": "x"}', error: false };
+      });
+    // The hub writes the attachment while the call is open: between the call and its result.
+    const { el } = chatWith(
+      [
+        call(1, 't1'),
+        ev('event.attachment', (e) => {
+          e.seq = 2;
+          e.payload = { artifact_id: 'img', kind: 'image', name: 'shot.png', caption: 'The layout' };
+        }),
+        result(3, 't1'),
+        call(4, 't2'),
+        ev('event.attachment', (e) => {
+          e.seq = 5;
+          e.payload = { artifact_id: 'dif', kind: 'diff', name: 'fix.patch' };
+        }),
+        result(6, 't2'),
+      ],
+      store,
+    );
+    await flush();
+    await flush();
+    expect(el.querySelectorAll('.tool-group').length).toBe(2);
+    expect(el.querySelectorAll('.tool-group.tool-running').length).toBe(0);
+    const img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    expect(img.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
+    expect(el.querySelector('.attachment-caption')!.textContent).toBe('The layout');
+    expect(el.querySelector('.md-code-diff .diff-add')!.textContent).toBe('+new\n');
+    // The order of the feed: the call, the image, the call, the diff.
+    const order = [...el.querySelectorAll('.tool-group, .attachment')].map((n) =>
+      n.classList.contains('tool-group') ? 'call' : n.className.replace('attachment attachment-kind-', ''),
+    );
+    expect(order).toEqual(['call', 'image', 'call', 'diff']);
+  });
+
   it('without a store an attachment is a card from the event alone', () => {
     const { el } = chatWith([ev('event.attachment')]);
     expect(el.querySelector('.card-attachment .card-title')!.textContent).toContain('screen.png');

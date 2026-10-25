@@ -55,6 +55,17 @@ pub struct Session {
     /// until a process of the session has reported a list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<String>>,
+    /// The session whose agent started this one with `hqc_spawn` (SPEC §7), while it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<SpawnedBy>,
+}
+
+/// `spawned_by` of a session: the spawning session and its address
+/// (`<project-slug>/<session-slug>`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpawnedBy {
+    pub session_id: Uuid,
+    pub address: String,
 }
 
 impl Session {
@@ -551,6 +562,11 @@ mod tests {
         assert_eq!(held.summary().held_by, held.held_by);
         assert_eq!(held.held_by.unwrap().entrypoint, "claude-vscode");
         assert!(s.held_by.is_none());
+        assert_eq!(s.spawned_by.as_ref().unwrap().address, "hqc/planner");
+        assert!(
+            held.spawned_by.is_none(),
+            "absent unless hqc_spawn started it"
+        );
         assert_eq!(s.commands.as_deref().map(<[_]>::len), Some(4));
         assert_eq!(
             held.commands, None,

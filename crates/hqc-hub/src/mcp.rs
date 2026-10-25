@@ -84,6 +84,10 @@ pub const REGISTRY: &[HubTool] = &[
         name: hqc_proto::mcp::SEARCH_HISTORY,
         run: |app, caller, c| Box::pin(now(search_history(app, caller, c.args.clone()))),
     },
+    HubTool {
+        name: hqc_proto::mcp::SPAWN,
+        run: |app, caller, c| Box::pin(crate::spawn::spawn(app, caller, c)),
+    },
 ];
 
 /// The shape `new_secret("hqcs_")` gives session tokens; anything else never reaches the
@@ -164,7 +168,7 @@ pub(crate) fn args<T: DeserializeOwned>(v: Value) -> Result<T, McpError> {
 }
 
 /// The owner's project by slug or id (SPEC §7); another owner's is `not_found`.
-async fn owner_project(app: &AppState, owner: Uuid, p: &str) -> Result<Uuid, McpError> {
+pub(crate) async fn owner_project(app: &AppState, owner: Uuid, p: &str) -> Result<Uuid, McpError> {
     let projects = db::projects_of(&app.db, owner).await.map_err(internal)?;
     let id = p.parse::<Uuid>().ok();
     projects

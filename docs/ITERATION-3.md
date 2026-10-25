@@ -91,7 +91,7 @@ Sections: §15, §6.
 Acceptance: the common checks; hub tests: exact and fuzzy hits, Russian and English, another
 owner's sessions never returned; client test: search and jump.
 
-## T34. `hqc_spawn` (after T32)
+## T34. `hqc_spawn` (done, SPEC 0.37)
 
 Sections: §7 (`hqc_spawn`), §3 Session, §13.4, §7.1 (chains).
 - Hub: `hqc_spawn(project, workspace?, runtime?, model?, prompt)` creates a session of the

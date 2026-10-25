@@ -787,6 +787,14 @@ export interface SessionInfo {
   /** The runtime's slash commands without `/`, for completing `/` in the composer (T27);
    *  absent until a process of the session reported them. */
   commands?: string[];
+  /** The session whose agent started this one with `hqc_spawn` (SPEC §7), while it exists. */
+  spawned_by?: SpawnedBy;
+}
+
+/** `spawned_by` of a session: the spawning session and its address. */
+export interface SpawnedBy {
+  session_id: Uuid;
+  address: string;
 }
 
 export function parseMe(v: unknown): Me {
@@ -819,7 +827,14 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     system: optBool(o, 'system') ?? false,
     held_by: optHeldBy(o),
     commands: optStrArr(o, 'commands'),
+    spawned_by: optSpawnedBy(o),
   };
+}
+
+function optSpawnedBy(o: Obj): SpawnedBy | undefined {
+  if (!present(o, 'spawned_by')) return undefined;
+  const p = obj(o.spawned_by, 'spawned_by');
+  return { session_id: str(p, 'session_id'), address: str(p, 'address') };
 }
 
 /** `{sessions: [...]}` of `GET /api/projects/{id}/sessions`. */

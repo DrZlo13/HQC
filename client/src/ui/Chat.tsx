@@ -206,6 +206,14 @@ export function Chat({
           <div class="chat-meta">
             {pill}
             {system && <span class="chat-system-note">the worker's service session</span>}
+            {info?.spawned_by && (
+              <span class="chat-spawned">
+                started by{' '}
+                <a class="mono" href={`#/s/${info.spawned_by.session_id}`}>
+                  {info.spawned_by.address}
+                </a>
+              </span>
+            )}
             {phone ? (
               <span class="chat-where mono">{[worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
             ) : (

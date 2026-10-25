@@ -115,6 +115,9 @@ describe('examples/wire', () => {
     // T27: the runtime's slash commands; absent until a process reported them.
     expect(s.commands).toEqual(['compact', 'context', 'review', 'code-review']);
     expect(sys.commands).toBeUndefined();
+    // T34: the session that started it with hqc_spawn.
+    expect(s.spawned_by).toEqual({ session_id: '0199f3a2-7c10-7000-8000-000000000002', address: 'hqc/planner' });
+    expect(sys.spawned_by).toBeUndefined();
     expect(() => parseSessionInfo({ ...(load('api.session.json') as object), commands: [1] })).toThrow();
     const usage = parseEvent(load('event.usage.json'));
     expect(usage.type === 'usage' && [usage.payload.cost_usd, usage.payload.session_cost_usd]).toEqual([0.0123, 0.4567]);

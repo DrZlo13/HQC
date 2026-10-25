@@ -2,7 +2,7 @@
 //! on every read from the session row, its events, open requests and worker presence.
 
 use hqc_proto::{
-    api::{Agent, Session},
+    api::{Agent, Session, SpawnedBy},
     event::SessionState,
     frame::{LockedBy, ProcessState, Runtime, TitleSource},
 };
@@ -63,6 +63,8 @@ struct Aggregates {
     has_open_request: bool,
     last_read_seq: i64,
     unread: i64,
+    /// The address of `spawned_by` (SPEC §7).
+    spawned_by_address: Option<String>,
 }
 
 /// A stored enum name (`runtime`, `process_state`, `locked_by`) as its proto type.
@@ -79,7 +81,9 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
                     AND p.kind IN ('approval', 'clarify', 'worker_approval')) AS has_open_request,
             COALESCE(r.last_read_seq, 0) AS last_read_seq,
             (SELECT count(*) FROM events e WHERE e.session_id = s.id
-                AND e.seq > COALESCE(r.last_read_seq, 0) AND {UNREAD_FILTER}) AS unread
+                AND e.seq > COALESCE(r.last_read_seq, 0) AND {UNREAD_FILTER}) AS unread,
+            (SELECT p.slug || '/' || sp.slug FROM sessions sp JOIN projects p ON p.id = sp.project_id
+                WHERE sp.id = s.spawned_by) AS spawned_by_address
          FROM sessions s
          LEFT JOIN read_cursors r ON r.session_id = s.id AND r.user_id = $1
          WHERE s.id = ANY($2)"
@@ -151,6 +155,12 @@ pub async fn views(
                 held_by: s.held_by.and_then(|v| serde_json::from_value(v).ok()),
                 commands: s.commands.and_then(|v| serde_json::from_value(v).ok()),
                 system: s.system,
+                spawned_by: s.spawned_by.zip(a.spawned_by_address.clone()).map(
+                    |(session_id, address)| SpawnedBy {
+                        session_id,
+                        address,
+                    },
+                ),
             })
         })
         .collect())

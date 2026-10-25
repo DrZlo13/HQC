@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Api } from '../src/api';
 import { AppState } from '../src/app';
-import { parseEvent, type HeldBy, type HqcEvent, type SessionInfo, type SessionState } from '../src/proto';
+import { parseEvent, type HeldBy, type HqcEvent, type SessionInfo, type SessionState, type SpawnedBy } from '../src/proto';
 import type { HubSocket } from '../src/ws';
 import { Chat } from '../src/ui/Chat';
 
@@ -45,7 +45,7 @@ const HISTORY = [
 
 function setup(
   state: SessionState,
-  opts: { held_by?: HeldBy; history?: HqcEvent[]; commands?: string[]; fetched?: string[] } = {},
+  opts: { held_by?: HeldBy; history?: HqcEvent[]; commands?: string[]; fetched?: string[]; spawned_by?: SpawnedBy } = {},
 ) {
   const history = opts.history ?? HISTORY;
   const api = {
@@ -94,6 +94,7 @@ function setup(
     system: false,
     held_by: opts.held_by,
     commands: opts.commands,
+    spawned_by: opts.spawned_by,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -131,6 +132,17 @@ describe('header', () => {
     expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
     expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Archive']);
+  });
+
+  it('links to the session that started it with hqc_spawn (T34)', async () => {
+    let { app } = setup('idle');
+    await mount(app);
+    expect($('.chat-spawned')).toBeNull();
+    render(null, root);
+    ({ app } = setup('idle', { spawned_by: { session_id: 's0', address: 'hqc/planner' } }));
+    await mount(app);
+    expect($('.chat-spawned')!.textContent).toBe('started by hqc/planner');
+    expect($('.chat-spawned a')!.getAttribute('href')).toBe('#/s/s0');
   });
 
   it('pulses while a turn is on, no "Stop" when idle', async () => {

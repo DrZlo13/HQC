@@ -30,6 +30,7 @@ pub mod push;
 pub mod requests;
 pub mod search;
 pub mod security;
+pub mod spawn;
 pub mod state;
 pub mod titles;
 pub mod watchdog;

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.36, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.37, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -164,7 +164,10 @@ a takeover without registry data, §9.3; not part of the API session object), `h
 open, according to the live sessions registry on the worker, §9.3; in the API session object and
 in `session.summary` it is the field `held_by?`), `vscode_held_at` (nullable; since when the
 transcript has been held; not part of the API session object), `system` (bool: the worker's
-service session, §10.2; the API session object carries only `system: true`). `state` and
+service session, §10.2; the API session object carries only `system: true`), `spawned_by`
+(nullable; since 0.37, T34: the session whose agent created this one with `hqc_spawn`, §7;
+cleared when that session is deleted) and `spawn_chain_id` (nullable: the chain of that call,
+§7.1, kept for the spawn limits of §20; not part of the API session object). `state` and
 `queue_len` (§17.1) are **not stored**; the hub computes them when serving. In the first version
 a session has exactly one agent; people's access to a session is determined by Grant only.
 
@@ -279,7 +282,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s) | the hub on `hqc_send`/`hqc_ask`; `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result`; for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?` | worker or hub |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
@@ -530,7 +533,10 @@ MCP calls (worker → hub → worker):
   `attachment` event so, `hqc_send`/`hqc_ask` their `peer.message` (with `peer.message` as
   the tool); a repeated `hqc_send` answers the same `{to, delivery}` from that event, a
   repeated `hqc_ask` finds its `PendingRequest`: still open — `ack {}` again, closed — its
-  stored `mcp.result` under the repeat's frame `id`. The same `request_id` from another
+  stored `mcp.result` under the repeat's frame `id`. `hqc_spawn` (since 0.37) keys the new
+  session's id (`hqc_spawn` as the tool) and its first `peer.message` (as `hqc_send`): a
+  repeat finds the session, stores the message if the first call did not get that far, and
+  answers the same `{address}`. The same `request_id` from another
   session is another call.
 - A deferred answer (since 0.35): the hub keeps the `mcp.result` frame in
   `PendingRequest.result` and sends it to the asking session's worker, now if it is
@@ -832,7 +838,10 @@ Session object (`GET /api/sessions/{id}`, list, create, `PATCH`, `archive`):
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
-updated_at, commands?}`. `held_by` (`{entrypoint, status}`): the session is currently held open
+updated_at, commands?, spawned_by?}`. `spawned_by` (since 0.37, T34) — `{session_id, address}`
+of the session whose agent started this one with `hqc_spawn` (§7), absent otherwise or once
+that session is deleted; the client shows "started by <address>" in the chat header as a
+link to it. `held_by` (`{entrypoint, status}`): the session is currently held open
 by Claude Code outside hqc (§9.3): `state: locked_vscode`, takeover gives `409 vscode_open`
 until it is closed there.
 `system: true`: the worker's service session (§10.2): input, `stop`, `retry`, `takeover`,
@@ -967,6 +976,23 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `ask_timeout_s` (a larger value is cut to it), by default `ask_timeout_s`.
 - `hqc_spawn(project, workspace, runtime?, model?, prompt)` — create a session and an agent,
   return the address. `workspace` is required if the project has no `default_workspace_id`.
+  Since 0.37 (T34): `hqc_spawn(project, workspace?, runtime?, model?, prompt)`; the session is
+  created by the same path as `POST /api/projects/{id}/sessions` (§6), owned by the calling
+  session's owner, in the workspace's folder (`cwd` `.`) on the workspace's worker, titled
+  "Session N" until a title comes (§3), without `auto_approve`. `project` — a slug or an id
+  of the owner's project; `workspace` — an id, a label or a path of a workspace of that
+  project (else `not_found`), absent — the project's `default_workspace_id` (none:
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 4 (else
+  `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
+  start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
+  becomes a `peer.message` with `mode: send` from the calling session in the new session's
+  input queue (`delivery: pending`, like a send to a session with `wake_on_send`), so it
+  starts the first turn with the header `[hqc peer from <spawner> | mode=send]` and the new
+  agent knows whom to answer with `hqc_send`; its chain is the caller's moved on (§7.1). The
+  result is `{address}` at once; the call does not wait for the turn. The new session
+  records the spawner (`spawned_by`, §3); spawns are limited per chain and per owner and
+  hour (§20, `limit_exceeded`). A worker that is offline gets the session when it connects,
+  as for the API.
 - `hqc_list_sessions(project?)` — addresses, titles, statuses. Since 0.33 (T30): `project` is
   a slug or an id of the owner's project (another owner's or an unknown one: `not_found`); the
   result is `{sessions: [{address, title, status, current?}], truncated}`: the owner's
@@ -987,7 +1013,7 @@ and does not change on rename.
 
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
 since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
-`hqc_search_history` since 0.36, T33); the list is shared by the worker's MCP server and the hub
+`hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34); the list is shared by the worker's MCP server and the hub
 (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
 (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
@@ -1024,7 +1050,8 @@ Delivery:
 
 Queues (two different ones):
 - The session's **input queue** (§17.2): `user.message` and `peer.message` with `mode=ask`.
-  Each item starts its own turn, strictly in `seq` order.
+  Each item starts its own turn, strictly in `seq` order. The prompt of `hqc_spawn` (§7) is a
+  `peer.message` with `mode=send` that goes to this queue too.
 - The **send buffer**: a `peer.message` with `mode=send` under `wake_on_send: false` does not
   start a turn; the hub accumulates such messages and passes them in the `peer_prefix` of the
   next `session.input`; the worker prepends them to the input text as a "Messages from other
@@ -1073,7 +1100,11 @@ Chains:
   call is that of the calling session's last `delivered` input (inputs reach the agent one
   turn at a time, in `seq` order, so that input started the current turn). A `user.message`
   has no chain: a new one starts with `depth` = 1 for an ask, 0 for a send, and `hops` = 1;
-  otherwise the chain goes on with `hops` + 1 and, for an ask, `depth` + 1. Buffered sends
+  otherwise the chain goes on with `hops` + 1 and, for an ask, `depth` + 1. Since 0.37 (T34)
+  the `chain_id` started by a human's turn is derived from that turn's input (uuid v5), so
+  all calls of one turn share one chain, as the first sentence says (before, each call of a
+  human's turn started a chain of its own). `hqc_spawn` moves the chain like a send (`hops`
+  + 1) and counts the sessions it creates per chain (§20). Buffered sends
   carried in `peer_prefix` do not start a turn and lend it no chain.
 - When a limit is exceeded, the tool returns an error (`limit_exceeded`, since 0.35); only a human's turn can continue the
   chain. A deadlock (A waits for B, B waits for A) is resolved by the timeout.
@@ -2033,7 +2064,7 @@ KiCad, where a session corresponds to a part or a board.
 When a session is created from the UI, the workspace is chosen explicitly (the form preselects
 the project's `default_workspace_id`, `cwd` is an optional subfolder); `hqc_spawn` and cron require
 `workspace` or use the project's `default_workspace_id`; with neither, it is
-an error (`409 no_workspace` in REST, §6).
+an error (`409 no_workspace` in REST, §6; `invalid_args` from `hqc_spawn`, since 0.37).
 
 ## 14. Local config and worker environments
 
@@ -2383,6 +2414,8 @@ with `write` share the same queue.
   | `hqc_ask.timeout_s` (§7) | 1 … `ask_timeout_s` (600 s), larger cut to it | `0`: `error invalid_args` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
   | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
+  | `hqc_spawn` (§7, since 0.37): sessions spawned in one chain (§7.1; a human's turn is one chain) | 5 | `mcp.result` `error limit_exceeded`, nothing is created |
+  | … sessions spawned per owner | 20 in the last hour (sliding, by `created_at`; deleted sessions no longer count) | same |
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
   | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
   | the worker's MCP socket (§7.2) | a line up to 64 KB + 4 KB; peers of the same OS user only | the connection is closed |
@@ -2446,6 +2479,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.36 → 0.37 (T34, `hqc_spawn`)
+§3 Session: `spawned_by` and `spawn_chain_id` (migration `0017`). §5.2: a repeated
+`hqc_spawn` finds its session and message by `once_id`. §6: the session object gets
+`spawned_by? {session_id, address}`; the client's "started by" link. §7: `hqc_spawn(project,
+workspace?, runtime?, model?, prompt)` defined and listed: the API's session creation, the
+workspace by id, label or path, `claude_code` only, the caller's model by default, the prompt
+as a `peer.message` (`mode: send`) that starts the first turn, `{address}` at once. §7.1: the
+prompt joins the input queue; a human's turn is one chain (its id derived from the input),
+spawns move it like a send. §4: `peer.message` from `hqc_spawn`. §13.4: `invalid_args` from `hqc_spawn`. §20: spawn limits, 5 per
+chain and 20 per owner per hour. Notes: `docs/notes/t34-questions.md`.
 
 ### 0.35 → 0.36 (T33, search)
 §15: what is indexed (the text of `user.message`, `agent.message`, `peer.message`, `system`

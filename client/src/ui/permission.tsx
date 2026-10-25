@@ -264,7 +264,7 @@ function PermissionCard({
               onClick={() => answer(once)}
             >
               {optionLabel(once)}
-              {!sheet && <kbd class="kbd">⏎</kbd>}
+              {!sheet && hotkeys && <kbd class="kbd">⏎</kbd>}
             </button>
           )}
           <div class="perm-more">
@@ -293,7 +293,7 @@ function PermissionCard({
                 onClick={() => answer(deny)}
               >
                 {optionLabel(deny)}
-                {!sheet && <kbd class="kbd">Esc</kbd>}
+                {!sheet && hotkeys && <kbd class="kbd">Esc</kbd>}
               </button>
             )}
           </div>

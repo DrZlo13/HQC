@@ -125,6 +125,8 @@ describe('the request of a waited-on session in the asking session', () => {
     // B's own card, inside the frame; the worker's request nobody waits on is not here.
     expect(card.querySelector('.perm .perm-what')!.textContent).toBe('$ cargo build --release');
     expect($$('.foreign-request')).toHaveLength(1);
+    // The keys never answer another session's request, so the card shows no key hints.
+    expect(card.querySelector('.kbd')).toBeNull();
     expect(card.getAttribute('aria-label')).toBe('Request of Check the build on llm-server');
   });
 

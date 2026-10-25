@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.31, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.32, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2085,10 +2085,12 @@ with `write` share the same queue.
    by the registry of live sessions and forks — 0.22, T20). Criterion: take over from a phone
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
-3. hqc MCP: attach, send, ask, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Personal session.
+3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 6).
+   Tasks: `docs/ITERATION-3.md`.
 4. Generic ACP adapter (the first agent is Hermes, including steer); bare model
-   and local models through a proxy.
+   and local models through a proxy; the personal assistant session (moved from 3: its default
+   runtime is the bare model, §8.3), until then `hqc_send` needs `session`.
 5. Workspaces: clone, worktree, ephemeral, session template. Environments, bindings
    and `acp_agents` on the worker.
 6. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. Hub cron.
@@ -2204,6 +2206,10 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.31 → 0.32 (iteration 3 planned)
+§19: iteration 3 also gets `hqc_spawn`; the personal assistant session moves to iteration 4
+with the bare model; tools act on the owner's own sessions until grants (iteration 6).
 
 ### 0.30 → 0.31 (iteration 2 closed)
 §19: iteration 2 is closed; its criterion was checked by hand through the UI on a phone.

@@ -132,3 +132,26 @@ Acceptance: the common checks; a test per cap; the review's findings fixed or re
 reason.
 Done: every item with its status and test is in `docs/notes/t36-questions.md`. The
 process-ancestry check of the MCP socket is **[verify]** in SPEC §7.2 (no live run was made).
+
+## T37. Requests where the user is looking (after T36)
+
+Sections: §6, §7.1, §10.1, §10.2, §16. A request of a session that another session waits on
+(an open `hqc_ask`, also along a chain) is shown and answered only in its own feed: the user
+looks at the asking session and sees nothing but "Waiting for a reply".
+- Hub: one query for the owner's open requests (`approval`, `clarify`, `worker_approval`) with
+  the session's address, title and worker; `GET /api/requests`; live changes to the client
+  (with the summary subscription, no polling). For a session, the open requests of the
+  sessions it waits on through open asks, transitively.
+- Client: in the asking session, under its "Waiting for a reply from …" line, the waited-on
+  session's request as a card that answers it in place; the card names the session and the
+  worker at the top and does not look like the session's own requests. A "Requests" list of
+  all open requests (left column with a count on the desktop, a screen on the phone); each item
+  answers in place or opens its session.
+- Push: a request of a waited-on session opens the session where the user waits (the top of
+  the chain); one notification per request.
+- Answers go to the request's own session as now: the event, the audit and the permission
+  policy (the worker's) stay where they are; nothing is approved automatically.
+Acceptance: the common checks; hub tests: the owner's list, another owner's requests never
+listed, the transitive waits, live changes; client tests: the card in the asking session, the
+list, answering from both.
+

@@ -997,6 +997,9 @@ pub struct SessionRow {
     pub commands: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The session whose `hqc_spawn` started this one (SPEC §3 Session); null when that
+    /// session was deleted.
+    pub spawned_by: Option<Uuid>,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1004,7 +1007,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
-    s.updated_at";
+    s.updated_at, s.spawned_by";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1028,9 +1031,28 @@ pub struct NewSession<'a> {
     pub auto_approve: bool,
 }
 
+/// What `hqc_spawn` records on the session it creates.
+#[derive(Debug, Clone, Copy)]
+pub struct Spawn {
+    /// Derived from the call (`mcp::once_id`): a repeated call finds the session.
+    pub id: Uuid,
+    pub by: Uuid,
+    pub chain_id: Uuid,
+}
+
 /// Creates the session with a slug unique in the project (SPEC §3 Session) and a
 /// hub-assigned `runtime_session_id` for Claude Code (SPEC §8.1).
 pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid> {
+    create_spawned_session(db, n, None).await
+}
+
+/// [`create_session`], recording `hqc_spawn`'s [`Spawn`] when given. A session with the
+/// spawn's id already there is a unique violation.
+pub async fn create_spawned_session(
+    db: &PgPool,
+    n: NewSession<'_>,
+    spawn: Option<Spawn>,
+) -> sqlx::Result<Uuid> {
     let (title, source, base) = match n.title {
         Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
         None => {
@@ -1053,11 +1075,12 @@ pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid
         } else {
             format!("{base}-{i}")
         };
-        let id = new_id();
+        let id = spawn.map_or_else(new_id, |s| s.id);
         let r = sqlx::query(
             "INSERT INTO sessions (id, project_id, owner_id, workspace_id, worker_id, cwd, title, slug,
-                model, auto_approve, runtime, runtime_session_id, title_source)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11, $12)
+                model, auto_approve, runtime, runtime_session_id, title_source, spawned_by,
+                spawn_chain_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11, $12, $13, $14)
              ON CONFLICT (project_id, slug) DO NOTHING",
         )
         .bind(id)
@@ -1072,6 +1095,8 @@ pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid
         .bind(n.auto_approve)
         .bind(Uuid::new_v4().to_string())
         .bind(source.as_str())
+        .bind(spawn.map(|s| s.by))
+        .bind(spawn.map(|s| s.chain_id))
         .execute(db)
         .await?;
         if r.rows_affected() == 1 {

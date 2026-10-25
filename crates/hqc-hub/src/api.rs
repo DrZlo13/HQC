@@ -644,6 +644,20 @@ pub async fn create_session(
     Json(b): Json<CreateSessionRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let project = project_for(&app, &user, project_id).await?;
+    let s = new_session(&app, user.id, &project, &b, None).await?;
+    let v = state::view(&app, user.id, s).await?;
+    Ok((StatusCode::CREATED, Json(json!(v))))
+}
+
+/// Creates a session of `owner` in their `project` and starts its agent (SPEC §6, §13.4):
+/// `POST /api/projects/{id}/sessions` and `hqc_spawn` (SPEC §7, with `spawn`).
+pub async fn new_session(
+    app: &AppState,
+    owner: Uuid,
+    project: &db::ProjectRow,
+    b: &CreateSessionRequest,
+    spawn: Option<db::Spawn>,
+) -> ApiResult<SessionRow> {
     if let Some(m) = &b.model {
         if !valid_model(m) {
             return Err(ApiError::BadRequest(
@@ -651,8 +665,11 @@ pub async fn create_session(
             ));
         }
     }
-    let ws = session_workspace(&app, &project, &b).await?;
-    let worker = own_worker(&app, &user, ws.worker_id).await?;
+    let ws = session_workspace(app, project, b).await?;
+    let worker = match db::worker(&app.db, ws.worker_id).await? {
+        Some(w) if w.owner_id == owner && w.revoked_at.is_none() => w,
+        _ => return Err(ApiError::BadRequest("unknown worker".into())),
+    };
     let cwd = b
         .cwd
         .as_deref()
@@ -670,27 +687,26 @@ pub async fn create_session(
         check_title(t)?;
     }
     let title = title.map(hqc_proto::replace_nul);
-    let id = db::create_session(
+    let id = db::create_spawned_session(
         &app.db,
         db::NewSession {
-            project_id,
-            owner_id: user.id,
+            project_id: project.id,
+            owner_id: owner,
             workspace_id: Some(ws.id),
             worker_id: Some(worker.id),
             cwd,
             title: title.as_deref(),
             model: b.model.as_deref(),
             // Only the worker owner may enable it (SPEC §10.1); here that is the creator.
-            auto_approve: b.auto_approve && worker.owner_id == user.id,
+            auto_approve: b.auto_approve && worker.owner_id == owner,
         },
+        spawn,
     )
     .await?;
     let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
-    events::system(&app, &s, "session_created", "Session created").await?;
-    delivery::kick(&app, id, true).await;
-    let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
-    let v = state::view(&app, user.id, s).await?;
-    Ok((StatusCode::CREATED, Json(json!(v))))
+    events::system(app, &s, "session_created", "Session created").await?;
+    delivery::kick(app, id, true).await;
+    db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
 }
 
 pub async fn get_session(

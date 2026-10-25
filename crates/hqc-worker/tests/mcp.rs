@@ -167,7 +167,13 @@ async fn a_call_goes_to_the_hub_and_back() {
         .collect();
     assert_eq!(
         names,
-        ["hqc_list_sessions", "hqc_attach", "hqc_send", "hqc_ask"],
+        [
+            "hqc_list_sessions",
+            "hqc_attach",
+            "hqc_send",
+            "hqc_ask",
+            "hqc_spawn"
+        ],
         "only tools that landed"
     );
     assert_eq!(
@@ -234,10 +240,10 @@ async fn a_call_goes_to_the_hub_and_back() {
     let r = rt.request(5, "resources/list", json!({})).await;
     assert_eq!(r["error"]["code"], -32601);
     rt.send(json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-                   "params": {"name": "hqc_spawn", "arguments": {}}}))
+                   "params": {"name": "hqc_unknown", "arguments": {}}}))
         .await;
     let r = rt.recv().await;
-    assert_eq!(r["error"]["code"], -32602, "no stubs: {r}");
+    assert_eq!(r["error"]["code"], -32602, "an unlisted tool: {r}");
     let r = rt.request(7, "ping", json!({})).await;
     assert_eq!(r["result"], json!({}));
     drop(rt);

@@ -30,6 +30,7 @@ pub const LIST_SESSIONS: &str = "hqc_list_sessions";
 pub const ATTACH: &str = "hqc_attach";
 pub const SEND: &str = "hqc_send";
 pub const ASK: &str = "hqc_ask";
+pub const SPAWN: &str = "hqc_spawn";
 
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -131,6 +132,36 @@ pub const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: SPAWN,
+        description: "Start a new hqc session of your owner and give it its first task: \
+            `prompt` reaches the new agent as a message from this session and starts its first \
+            turn; it can answer you with hqc_send. Returns the new session's address at once \
+            and does not wait for its work. The session runs in a workspace of `project` (the \
+            project's default workspace when `workspace` is absent) on that workspace's \
+            machine, with your model unless `model` is given.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "A project slug or id."},
+                    "workspace": {
+                        "type": "string",
+                        "description": "A workspace of the project: its id, label or path."
+                    },
+                    "runtime": {
+                        "type": "string",
+                        "enum": ["claude_code"],
+                        "description": "The agent's runtime; claude_code is the only one so far."
+                    },
+                    "model": {"type": "string", "description": "The new agent's model."},
+                    "prompt": {"type": "string", "description": "The new agent's first task."}
+                },
+                "required": ["project", "prompt"],
+                "additionalProperties": false
+            })
+        },
+    },
 ];
 
 /// `args` of the `mcp.call` for [`ATTACH`]: the worker reads and uploads `path` itself
@@ -200,8 +231,9 @@ mod tests {
         assert!(tool(LIST_SESSIONS).is_some());
         assert!(tool(ATTACH).is_some());
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
+        assert!(tool(SPAWN).is_some());
         assert!(
-            tool("hqc_spawn").is_none(),
+            tool("hqc_schedule").is_none(),
             "no stubs (docs/ITERATION-3.md)"
         );
     }

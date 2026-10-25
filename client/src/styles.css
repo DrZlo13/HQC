@@ -1153,6 +1153,15 @@ select.input {
   color: var(--muted-2);
 }
 
+.chat-spawned {
+  color: var(--muted-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.chat-spawned a {
+  color: var(--text-3);
+}
+
 .conn-lost {
   color: var(--deny);
 }

@@ -146,16 +146,26 @@ async fn checked_target(
 }
 
 /// The chain of the input that started the session's current turn (SPEC §7.1): the last
-/// input delivered to it. `None`: a human's turn (or none yet).
-async fn turn_chain(app: &AppState, session_id: Uuid) -> anyhow::Result<Option<Chain>> {
-    let chain: Option<Option<Value>> = sqlx::query_scalar(
-        "SELECT chain FROM events WHERE session_id = $1 AND delivery = 'delivered'
+/// input delivered to it. A human's turn is a chain of its own with nothing in it yet
+/// (`depth` and `hops` 0), its id derived from the input, so every call of that turn shares
+/// it. `None`: no turn yet.
+pub(crate) async fn turn_chain(app: &AppState, session_id: Uuid) -> anyhow::Result<Option<Chain>> {
+    let row: Option<(Uuid, Option<Value>)> = sqlx::query_as(
+        "SELECT event_id, chain FROM events WHERE session_id = $1 AND delivery = 'delivered'
          ORDER BY seq DESC LIMIT 1",
     )
     .bind(session_id)
     .fetch_optional(&app.db)
     .await?;
-    Ok(chain.flatten().and_then(|c| serde_json::from_value(c).ok()))
+    Ok(row.map(|(input, chain)| {
+        chain
+            .and_then(|c| serde_json::from_value(c).ok())
+            .unwrap_or(Chain {
+                chain_id: crate::mcp::once_id("chain", session_id, &input.to_string()),
+                depth: 0,
+                hops: 0,
+            })
+    }))
 }
 
 /// The chain of a new message from a turn with chain `turn`: a human's turn starts one,

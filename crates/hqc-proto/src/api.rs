@@ -66,6 +66,12 @@ pub struct Session {
     /// (`session.state.permission_mode`); what the client shows. Absent until reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_permission_mode: Option<PermissionMode>,
+    /// While the current turn runs under a peer message's cap (T39, SPEC §10.1): the
+    /// address of the session up the chain whose `ask` lowered this `auto` session to `ask`
+    /// for the turn, as the worker reported it (`session.state.capped_input`). Absent
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_capped_by: Option<String>,
 }
 
 /// `spawned_by` of a session: the spawning session and its address
@@ -91,6 +97,7 @@ impl Session {
             held_by: self.held_by.clone(),
             permission_mode: self.permission_mode,
             effective_permission_mode: self.effective_permission_mode,
+            permission_capped_by: self.permission_capped_by.clone(),
         }
     }
 }

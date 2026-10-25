@@ -19,7 +19,8 @@
 //! - `system` `permission_denied` (the CLI refused a call by its rules, no request) →
 //!   `system policy_denied`;
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
-//!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38);
+//!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
+//!   on every success of our `set_permission_mode` (T39);
 //! - other `control_response` lines are the CLI's echo of ours and are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
@@ -370,11 +371,11 @@ impl Core {
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
                     self.model = v["model"].as_str().map(str::to_owned);
-                    let mut out = self.on_mode(&v["permissionMode"]);
+                    let mut out = self.on_mode(&v["permissionMode"], false);
                     out.extend(self.on_init(&v));
                     out
                 }
-                Some("status") => self.on_mode(&v["permissionMode"]),
+                Some("status") => self.on_mode(&v["permissionMode"], false),
                 Some("permission_denied") => {
                     let mut out: Vec<Action> = self.flush(false).into_iter().collect();
                     out.extend(self.on_permission_denied(&v));
@@ -388,8 +389,10 @@ impl Core {
 
     /// The CLI's permission mode: `auto` is `auto`, any other (`default`, which `manual`
     /// shows as, or `acceptEdits`/`plan` the CLI may enter by itself) asks. Reported when it
-    /// changes.
-    fn on_mode(&mut self, v: &Value) -> Vec<Action> {
+    /// changes, and on every confirmation of a switch of ours (`confirm`): the supervisor
+    /// waits for that before it hands over a turn capped to `ask` (T39), also when the
+    /// process already ran in `ask` because a switch back to `auto` was refused.
+    fn on_mode(&mut self, v: &Value, confirm: bool) -> Vec<Action> {
         let Some(m) = v.as_str() else {
             return vec![];
         };
@@ -398,7 +401,7 @@ impl Core {
         } else {
             PermissionMode::Ask
         };
-        if self.permission_mode == Some(mode) {
+        if self.permission_mode == Some(mode) && !confirm {
             return vec![];
         }
         tracing::info!(session_id = %self.session_id, mode = m, "permission mode");
@@ -417,7 +420,7 @@ impl Core {
             return vec![];
         }
         if r["subtype"] == "success" {
-            return self.on_mode(&r["response"]["mode"]);
+            return self.on_mode(&r["response"]["mode"], true);
         }
         tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the permission mode switch");
         vec![]

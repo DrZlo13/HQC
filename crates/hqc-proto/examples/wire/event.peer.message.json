@@ -6,6 +6,6 @@
   "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000002" },
   "type": "peer.message",
   "payload": { "from_session_id": "0199f3a2-7c10-7000-8000-000000000002", "from": "hqc/build-bot", "text": "Is the build green?", "mode": "ask", "request_id": "0199f3a2-7c10-7000-8000-0000000000d3" },
-  "chain": { "chain_id": "0199f3a2-7c10-7000-8000-0000000000c1", "depth": 1, "hops": 1 },
+  "chain": { "chain_id": "0199f3a2-7c10-7000-8000-0000000000c1", "depth": 1, "hops": 1, "permission_cap": "ask", "capped_by": "hqc/build-bot" },
   "delivery": "pending"
 }

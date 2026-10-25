@@ -111,6 +111,7 @@ mod tests {
             artifact_ids: vec![],
             peer_prefix: vec![],
             peer: None,
+            permission_cap: None,
         }
     }
 

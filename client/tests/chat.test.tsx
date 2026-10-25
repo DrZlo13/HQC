@@ -62,6 +62,7 @@ function setup(
     spawned_by?: SpawnedBy;
     permission_mode?: PermissionMode;
     effective_permission_mode?: PermissionMode;
+    permission_capped_by?: string;
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -120,6 +121,7 @@ function setup(
     spawned_by: opts.spawned_by,
     permission_mode: opts.permission_mode,
     effective_permission_mode: opts.effective_permission_mode,
+    permission_capped_by: opts.permission_capped_by,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -208,6 +210,38 @@ describe('permission mode', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  // T39: a turn capped by a message from a session in Ask.
+  it('shows a capped turn as Ask, who asked, and the own mode after it', async () => {
+    const { app } = setup('running', {
+      permission_mode: 'auto',
+      effective_permission_mode: 'ask',
+      permission_capped_by: 'personal/a',
+    });
+    await mount(app);
+    expect(mark()).toEqual({ auto: undefined, ask: 'Ask (asked by personal/a) · Auto after this turn' });
+    expect($('.perm-capped')!.getAttribute('title')).toContain('cannot raise permissions');
+
+    // The turn ends: the summary drops the cap and the worker runs Auto again.
+    const s = app.sessions.get('s1')!;
+    await act(async () =>
+      app.mergeSummary([
+        {
+          session_id: 's1',
+          project_id: 'p1',
+          title: s.title,
+          state: 'idle',
+          queue_len: 0,
+          unread: 0,
+          last_seq: 7,
+          last_read_seq: 7,
+          permission_mode: 'auto',
+          effective_permission_mode: 'auto',
+        },
+      ]),
+    );
+    expect(mark()).toEqual({ auto: 'Auto', ask: undefined });
   });
 
   it('follows the mode a summary brings', async () => {

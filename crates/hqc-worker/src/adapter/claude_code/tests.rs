@@ -197,6 +197,7 @@ impl Harness {
                 artifact_ids: vec![],
                 peer_prefix: vec![],
                 peer: None,
+                permission_cap: None,
             })
             .await
             .unwrap();
@@ -900,6 +901,19 @@ fn permission_mode_switch_in_the_stream() {
             PermissionMode::Auto
         ))]
     );
+    // Every confirmation of ours is reported, also of the mode it already had: a capped
+    // input waits for it (T39).
+    assert_eq!(
+        core.on_line(ok),
+        [Action::Emit(AdapterEvent::PermissionMode(
+            PermissionMode::Auto
+        ))]
+    );
+    let status = r#"{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}"#;
+    assert!(
+        core.on_line(status).is_empty(),
+        "the CLI's own report: on change only"
+    );
     let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"hqc-mode-2","error":"Cannot set permission mode"}}"#;
     assert!(core.on_line(refused).is_empty());
     // Our echo of an approval answer is not a mode.
@@ -1036,6 +1050,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             artifact_ids: vec![],
             peer_prefix: vec![],
             peer: None,
+            permission_cap: None,
         })
         .await
         .unwrap();
@@ -1069,6 +1084,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             artifact_ids: vec![],
             peer_prefix: vec![],
             peer: None,
+            permission_cap: None,
         })
         .await
         .is_err());
@@ -1451,6 +1467,7 @@ async fn image_attachments_are_image_blocks() {
         artifact_ids: vec![Uuid::nil()],
         peer_prefix: vec![],
         peer: None,
+        permission_cap: None,
     };
     let a = core.input_with_images(&input, images);
     assert!(matches!(&a[..], [Action::Write(v)] if *v == want), "{a:?}");
@@ -1474,6 +1491,7 @@ fn held_text_is_not_final_before_a_tool_call() {
         artifact_ids: vec![],
         peer_prefix: vec![],
         peer: None,
+        permission_cap: None,
     });
     let u1 = Uuid::new_v4();
     let u2 = Uuid::new_v4();
@@ -1521,6 +1539,7 @@ fn nul_never_reaches_an_event() {
         artifact_ids: vec![],
         peer_prefix: vec![],
         peer: None,
+        permission_cap: None,
     });
     let lines = [
         json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta",
@@ -1619,6 +1638,7 @@ async fn takeover_records_are_registered_as_own() {
         artifact_ids: vec![],
         peer_prefix: vec![],
         peer: None,
+        permission_cap: None,
     })
     .await
     .unwrap();

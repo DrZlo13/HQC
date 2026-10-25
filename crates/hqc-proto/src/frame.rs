@@ -118,6 +118,11 @@ pub enum WorkerFrame {
         /// Absent — not known yet.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_mode: Option<PermissionMode>,
+        /// The input whose `permission_cap` the agent runs its current turn under (since
+        /// SPEC 0.43, T39): the session's own mode is `auto`, the runtime confirmed `ask` for
+        /// this turn. Absent — no cap applies now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capped_input: Option<Uuid>,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -724,6 +729,10 @@ pub struct SessionInput {
     /// `text` (SPEC §7.1, since 0.34); absent for a `user.message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<PeerHeader>,
+    /// `permission_cap` of the input's chain (since SPEC 0.43, T39): with `ask`, a session
+    /// running in `auto` runs this turn in `ask`. The worker only ever lowers the mode for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_cap: Option<PermissionMode>,
 }
 
 /// `session.input.peer` (SPEC §5.3, §7.1).
@@ -902,6 +911,10 @@ mod tests {
         (
             "session.state",
             include_str!("../examples/wire/worker.session.state.released.json"),
+        ),
+        (
+            "session.state",
+            include_str!("../examples/wire/worker.session.state.capped.json"),
         ),
         (
             "result",

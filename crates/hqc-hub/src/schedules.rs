@@ -332,12 +332,7 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     // The chain moves on as for a send; one at its limit schedules nothing (SPEC §7.1).
     let chain = match &existing {
         Some(_) => None,
-        None => {
-            let turn = crate::peers::call_chain(app, caller, c)
-                .await
-                .map_err(internal)?;
-            Some(crate::peers::next_chain(turn, false)?)
-        }
+        None => Some(crate::peers::outgoing_chain(app, caller, c, false).await?),
     };
     let (session_id, to) = match &existing {
         Some(r) => {

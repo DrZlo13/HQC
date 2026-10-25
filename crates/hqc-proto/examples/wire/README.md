@@ -52,3 +52,8 @@ fingerprint `machine_id`; in `api.enroll.info.replace.json` a worker of the same
 T24: `hub.title.request.json` — the hub asks the session's worker for a title by the first prompt
 and the first final answer (each cut to 2000 characters); `worker.result.title.json` is the
 answer, one line of at most 60 characters. A failure is a plain `error` with the same `id`.
+
+T39: the chain of `event.peer.message.json` carries a cap (`permission_cap: ask`, `capped_by`),
+which `hub.session.input.peer.json` hands to the worker; `worker.session.state.capped.json` —
+the worker runs that input's turn in `ask` under the cap; `api.session.json` and
+`client.session.summary.json` show the session meanwhile (`permission_capped_by`).

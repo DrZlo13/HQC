@@ -61,8 +61,7 @@ pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<A
     if a.prompt.trim().is_empty() {
         return Err(err(error_code::INVALID_ARGS, "prompt is empty"));
     }
-    let turn = peers::call_chain(app, caller, c).await.map_err(internal)?;
-    let chain = peers::next_chain(turn, false)?;
+    let chain = peers::outgoing_chain(app, caller, c, false).await?;
     let id = once_id(hqc_proto::mcp::SPAWN, caller.id, &c.request_id);
     let s = match db::session(&app.db, id).await.map_err(internal)? {
         // A repeat (SPEC §5.2): the session is there, and the message below is found if the

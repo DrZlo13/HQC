@@ -1185,6 +1185,17 @@ select.input {
   white-space: nowrap;
 }
 
+/* T39: a turn capped to Ask by a message; the session's own Auto, dimmer, after it. */
+.perm-capped {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.perm-next {
+  opacity: 0.7;
+}
+
 .pill {
   display: inline-flex;
   align-items: center;

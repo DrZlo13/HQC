@@ -37,6 +37,16 @@ pub struct Chain {
     pub chain_id: Uuid,
     pub depth: u8,
     pub hops: u8,
+    /// The highest permission mode a turn this message starts may run in (since SPEC 0.43,
+    /// T39): the lower of the sender's mode and the cap of the input that started the
+    /// sender's turn; `auto` only if every session up the chain ran in `auto`. Absent on
+    /// chains made before 0.43: no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_cap: Option<crate::frame::PermissionMode>,
+    /// With a cap of `ask`: the address (`<project-slug>/<session-slug>`) of the session up
+    /// the chain whose `ask` set it, for the header of the capped turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capped_by: Option<String>,
 }
 
 /// Delivery of `user.message` / `peer.message` to the runtime (SPEC §3 Event, §5.2).

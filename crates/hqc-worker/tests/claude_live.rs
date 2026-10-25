@@ -135,6 +135,7 @@ async fn live_repo_settings_ignored() {
             artifact_ids: vec![],
             peer_prefix: vec![],
             peer: None,
+            permission_cap: None,
         })
         .await
         .unwrap();
@@ -254,6 +255,7 @@ async fn live_permission_mode_switch() {
                 artifact_ids: vec![],
                 peer_prefix: vec![],
                 peer: None,
+                permission_cap: None,
             })
             .await
             .unwrap();
@@ -393,6 +395,7 @@ async fn live_bash_turn_with_approval() {
             artifact_ids: vec![],
             peer_prefix: vec![],
             peer: None,
+            permission_cap: None,
         })
         .await
         .unwrap();
@@ -626,6 +629,7 @@ async fn live_permission_policy() {
             artifact_ids: vec![],
             peer_prefix: vec![],
             peer: None,
+            permission_cap: None,
         })
         .await
         .unwrap();
@@ -750,6 +754,7 @@ async fn live_ai_title() {
             artifact_ids: vec![],
             peer_prefix: vec![],
             peer: None,
+            permission_cap: None,
         })
         .await
         .unwrap();

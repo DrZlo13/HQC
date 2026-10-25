@@ -160,6 +160,7 @@ pub async fn views(
                     .effective_permission_mode
                     .as_deref()
                     .and_then(PermissionMode::parse),
+                permission_capped_by: s.permission_capped_by,
                 spawned_by: s.spawned_by.zip(a.spawned_by_address.clone()).map(
                     |(session_id, address)| SpawnedBy {
                         session_id,

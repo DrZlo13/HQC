@@ -11,6 +11,7 @@
       "from": "hqc/build-bot",
       "mode": "ask",
       "request_id": "0199f3a2-7c10-7000-8000-0000000000d3"
-    }
+    },
+    "permission_cap": "ask"
   }
 }

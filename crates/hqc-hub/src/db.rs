@@ -355,7 +355,7 @@ pub async fn ensure_system_session(db: &PgPool, worker_id: Uuid) -> sqlx::Result
 /// The worker restarted: none of its agents runs any more (SPEC §17.3).
 pub async fn worker_restarted(db: &PgPool, worker_id: Uuid) -> sqlx::Result<()> {
     sqlx::query(
-        "UPDATE sessions SET process_state = 'stopped',
+        "UPDATE sessions SET process_state = 'stopped', permission_capped_by = NULL,
             locked_by = CASE WHEN locked_by = 'hqc' THEN 'none' ELSE locked_by END
          WHERE worker_id = $1",
     )
@@ -1004,6 +1004,8 @@ pub struct SessionRow {
     pub permission_mode: Option<String>,
     /// The mode the worker last reported (`session.state.permission_mode`).
     pub effective_permission_mode: Option<String>,
+    /// The address whose `ask` caps the current turn (T39, `session.state.capped_input`).
+    pub permission_capped_by: Option<String>,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1011,7 +1013,8 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
-    s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode";
+    s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode, \
+    s.permission_capped_by";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1171,6 +1174,27 @@ pub async fn set_effective_permission_mode(
     )
     .bind(id)
     .bind(mode.as_str())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Who caps the session's current turn (T39): `capped_by` of the chain of the session's
+/// input `capped_input`, as the worker reports it; `None` clears it.
+pub async fn set_permission_capped_by(
+    db: &PgPool,
+    id: Uuid,
+    capped_input: Option<Uuid>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions s SET permission_capped_by = c.by
+         FROM (SELECT CASE WHEN $2::uuid IS NULL THEN NULL ELSE
+                 COALESCE((SELECT e.chain ->> 'capped_by' FROM events e
+                           WHERE e.event_id = $2 AND e.session_id = $1), '?') END AS by) c
+         WHERE s.id = $1 AND s.permission_capped_by IS DISTINCT FROM c.by",
+    )
+    .bind(id)
+    .bind(capped_input)
     .execute(db)
     .await?;
     Ok(())
@@ -1852,12 +1876,13 @@ pub struct InputRow {
     pub event_id: Uuid,
     pub seq: i64,
     pub payload: Value,
+    pub chain: Option<Value>,
 }
 
 /// `pending` input of a session in `seq` order (SPEC §5.2).
 pub async fn pending_inputs(db: &PgPool, session_id: Uuid) -> sqlx::Result<Vec<InputRow>> {
     sqlx::query_as(
-        "SELECT event_id, seq, payload FROM events
+        "SELECT event_id, seq, payload, chain FROM events
          WHERE session_id = $1 AND delivery = 'pending' ORDER BY seq",
     )
     .bind(session_id)

@@ -125,6 +125,7 @@ export class AppState {
         held_by: s.held_by,
         permission_mode: s.permission_mode,
         effective_permission_mode: s.effective_permission_mode,
+        permission_capped_by: s.permission_capped_by,
       });
     }
     // A session created elsewhere: fetch the list again for its title.

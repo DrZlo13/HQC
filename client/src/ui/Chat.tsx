@@ -399,10 +399,23 @@ function StatePill({ state, timeline }: { state: SessionState; timeline: Timelin
 }
 
 /** The session's permission mode (T38): what the worker reports the agent runs in, else
- *  what hqc asked for. "Auto" stands out: nothing but the worker's deny list stops a call. */
+ *  what hqc asked for. "Auto" stands out: nothing but the worker's deny list stops a call.
+ *  A turn capped by a message from a session in Ask (T39) shows both: Ask for this turn,
+ *  named by that session, and the session's own Auto after it. */
 export function PermissionMark({ info }: { info: SessionInfo }) {
   const runs = info.effective_permission_mode;
   const asked = info.permission_mode;
+  const by = info.permission_capped_by;
+  if (by) {
+    return (
+      <span
+        class="perm-ask perm-capped"
+        title={`This turn runs in Ask: it was started by a message along a chain with ${by}, which runs in Ask, and a message cannot raise permissions. The session's own mode, Auto, comes back when the turn ends.`}
+      >
+        Ask (asked by {by})<span class="perm-next"> · Auto after this turn</span>
+      </span>
+    );
+  }
   if (runs === 'auto' || (!runs && asked === 'auto')) {
     return (
       <span class="perm-auto" title="Claude Code decides tool calls itself; only the worker's deny list stops one">

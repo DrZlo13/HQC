@@ -72,6 +72,10 @@ export interface Chain {
   chain_id: Uuid;
   depth: number;
   hops: number;
+  /** The highest mode a turn this message starts may run in (T39); absent: no cap. */
+  permission_cap?: PermissionMode;
+  /** With an `ask` cap: the address of the session up the chain whose Ask set it. */
+  capped_by?: string;
 }
 
 export interface EventBase {
@@ -430,7 +434,13 @@ function parseAuthor(v: unknown): Author {
 
 function parseChain(v: unknown): Chain {
   const c = obj(v, 'chain');
-  return { chain_id: str(c, 'chain_id'), depth: num(c, 'depth'), hops: num(c, 'hops') };
+  return {
+    chain_id: str(c, 'chain_id'),
+    depth: num(c, 'depth'),
+    hops: num(c, 'hops'),
+    permission_cap: optPermissionMode(c, 'permission_cap'),
+    capped_by: optStr(c, 'capped_by'),
+  };
 }
 
 /** Parses a stored or streamed event (SPEC §3 Event). Throws `ProtoError` on a bad envelope
@@ -589,6 +599,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       tolerantEnum(x, 'mode', PEER_MODES);
       optStr(x, 'request_id');
     }
+    optPermissionMode(p, 'permission_cap');
   },
   'session.stop': (p) => void str(p, 'session_id'),
   'session.kill': (p) => void str(p, 'session_id'),
@@ -629,6 +640,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'title');
     optStrArr(p, 'commands');
     optPermissionMode(p, 'permission_mode');
+    optStr(p, 'capped_input');
   },
 };
 
@@ -682,6 +694,7 @@ export interface SessionSummary {
   held_by?: HeldBy;
   permission_mode?: PermissionMode;
   effective_permission_mode?: PermissionMode;
+  permission_capped_by?: string;
 }
 
 /** A session waiting on another through an open `hqc_ask`, directly or along a chain. */
@@ -774,6 +787,7 @@ export function parseSummary(v: unknown): SessionSummary {
     held_by: optHeldBy(s),
     permission_mode: optPermissionMode(s, 'permission_mode'),
     effective_permission_mode: optPermissionMode(s, 'effective_permission_mode'),
+    permission_capped_by: optStr(s, 'permission_capped_by'),
   };
 }
 
@@ -877,6 +891,9 @@ export interface SessionInfo {
   permission_mode?: PermissionMode;
   /** The mode the agent runs in, as the worker last reported it; absent until reported. */
   effective_permission_mode?: PermissionMode;
+  /** While the current turn runs in Ask under a peer message's cap (T39): the address of
+   *  the session up the chain whose Ask set it. */
+  permission_capped_by?: string;
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -954,6 +971,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     spawned_by: optSpawnedBy(o),
     permission_mode: optPermissionMode(o, 'permission_mode'),
     effective_permission_mode: optPermissionMode(o, 'effective_permission_mode'),
+    permission_capped_by: optStr(o, 'permission_capped_by'),
   };
 }
 

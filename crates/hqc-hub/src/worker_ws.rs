@@ -439,6 +439,7 @@ async fn handle_text(
             held_by,
             commands,
             permission_mode,
+            capped_input,
         } => {
             let st = StateFrame {
                 session_id,
@@ -449,6 +450,7 @@ async fn handle_text(
                 held_by,
                 commands,
                 permission_mode,
+                capped_input,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -634,6 +636,7 @@ struct StateFrame {
     held_by: Option<Option<hqc_proto::frame::HeldBy>>,
     commands: Option<Vec<String>>,
     permission_mode: Option<hqc_proto::frame::PermissionMode>,
+    capped_input: Option<Uuid>,
 }
 
 async fn on_session_state(
@@ -651,6 +654,7 @@ async fn on_session_state(
         held_by,
         commands,
         permission_mode,
+        capped_input,
     } = st;
     if session_id.is_nil() {
         // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
@@ -699,6 +703,8 @@ async fn on_session_state(
     if let Some(m) = permission_mode {
         db::set_effective_permission_mode(&app.db, session_id, m).await?;
     }
+    // A turn under a peer message's cap, or none (T39): every report says which.
+    db::set_permission_capped_by(&app.db, session_id, capped_input).await?;
     conn.reply(id, HubFrame::Ack(Ack::default()));
 
     if process_state == ProcessState::Stopped {

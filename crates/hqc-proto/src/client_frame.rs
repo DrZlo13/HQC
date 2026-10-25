@@ -100,6 +100,9 @@ pub struct SessionSummary {
     pub permission_mode: Option<crate::frame::PermissionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_permission_mode: Option<crate::frame::PermissionMode>,
+    /// As in the session object (T39).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_capped_by: Option<String>,
 }
 
 #[cfg(test)]

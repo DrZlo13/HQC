@@ -25,7 +25,7 @@
 use chrono::{DateTime, Utc};
 use hqc_proto::{
     event::Chain,
-    frame::{McpCall, McpCancel, McpError, McpResult, PeerPrefix},
+    frame::{McpCall, McpCancel, McpError, McpResult, PeerPrefix, PermissionMode},
     mcp::{cancel_reason, error_code},
 };
 use serde::Deserialize;
@@ -169,6 +169,8 @@ fn input_chain(session_id: Uuid, input: Uuid, chain: Option<Value>) -> Chain {
             chain_id: crate::mcp::once_id("chain", session_id, &input.to_string()),
             depth: 0,
             hops: 0,
+            permission_cap: None,
+            capped_by: None,
         })
 }
 
@@ -239,20 +241,72 @@ pub(crate) async fn admit(
     Ok(())
 }
 
-/// The chain of a new message from a turn with chain `turn`: a human's turn starts one,
-/// `hops` grows on every message and `depth` on every ask; over a limit is an error, which
-/// only a human's turn gets past (SPEC §7.1).
-pub fn next_chain(turn: Option<Chain>, ask: bool) -> Result<Chain, McpError> {
+/// The chain of a new message, spawn or schedule of session `caller` (SPEC §7.1): its
+/// call's chain moved on ([`next_chain`]) with the caller's mode for the cap (T39).
+pub(crate) async fn outgoing_chain(
+    app: &AppState,
+    caller: &SessionRow,
+    c: &McpCall,
+    ask: bool,
+) -> Result<Chain, McpError> {
+    let turn = call_chain(app, caller, c).await.map_err(internal)?;
+    let from = address(app, caller).await.map_err(internal)?;
+    next_chain(turn, ask, sender_mode(caller), &from)
+}
+
+/// The mode session `s` runs in as its worker last reported it (T38); `ask` before any
+/// report: what the hub does not know cannot lift a cap (T39).
+pub fn sender_mode(s: &SessionRow) -> PermissionMode {
+    s.effective_permission_mode
+        .as_deref()
+        .and_then(PermissionMode::parse)
+        .unwrap_or(PermissionMode::Ask)
+}
+
+/// The cap of a message sent in `mode` by `from` from a turn with chain `turn` (T39, SPEC
+/// §7.1): `auto` only if the sender and every session up the chain ran in `auto`, i.e. the
+/// lower of `mode` and the cap of the sender's turn; a human's turn has no cap. With `ask`,
+/// the session that set it: the first one up the chain in `ask`.
+pub fn chain_cap(
+    turn: Option<&Chain>,
+    mode: PermissionMode,
+    from: &str,
+) -> (PermissionMode, Option<String>) {
+    match turn.and_then(|t| Some((t.permission_cap?, t.capped_by.clone()))) {
+        Some((PermissionMode::Ask, by)) => (
+            PermissionMode::Ask,
+            Some(by.unwrap_or_else(|| from.to_string())),
+        ),
+        _ if mode == PermissionMode::Ask => (PermissionMode::Ask, Some(from.to_string())),
+        _ => (PermissionMode::Auto, None),
+    }
+}
+
+/// The chain of a new message from a turn with chain `turn`, sent by `from` running in
+/// `mode`: a human's turn starts one, `hops` grows on every message and `depth` on every
+/// ask; over a limit is an error, which only a human's turn gets past (SPEC §7.1). The cap
+/// is [`chain_cap`].
+pub fn next_chain(
+    turn: Option<Chain>,
+    ask: bool,
+    mode: PermissionMode,
+    from: &str,
+) -> Result<Chain, McpError> {
+    let (permission_cap, capped_by) = chain_cap(turn.as_ref(), mode, from);
     let c = match turn {
         None => Chain {
             chain_id: Uuid::now_v7(),
             depth: u8::from(ask),
             hops: 1,
+            permission_cap: Some(permission_cap),
+            capped_by,
         },
         Some(c) => Chain {
             chain_id: c.chain_id,
             depth: c.depth.saturating_add(u8::from(ask)),
             hops: c.hops.saturating_add(1),
+            permission_cap: Some(permission_cap),
+            capped_by,
         },
     };
     if c.depth > MAX_DEPTH {
@@ -320,8 +374,7 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         return Ok(Answer::Now(send_result(&to, row.delivery.is_some())));
     }
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
-    let turn = call_chain(app, caller, c).await.map_err(internal)?;
-    let chain = next_chain(turn, false)?;
+    let chain = outgoing_chain(app, caller, c, false).await?;
     admit(app, caller, &chain).await?;
     let wake = t.wake_on_send;
     let row = store_message(app, caller, &t, &c.request_id, &a.text, false, &chain).await?;
@@ -373,8 +426,7 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         None => max,
     };
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
-    let turn = call_chain(app, caller, c).await.map_err(internal)?;
-    let chain = next_chain(turn, true)?;
+    let chain = outgoing_chain(app, caller, c, true).await?;
     let open: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pending_requests
          WHERE kind = 'ask' AND session_id = $1 AND closed_at IS NULL",
@@ -732,11 +784,12 @@ mod tests {
 
     #[test]
     fn chains() {
-        let first = next_chain(None, false).unwrap();
+        let next = |turn, ask| next_chain(turn, ask, PermissionMode::Auto, "p/a");
+        let first = next(None, false).unwrap();
         assert_eq!((first.depth, first.hops), (0, 1));
-        let ask = next_chain(None, true).unwrap();
+        let ask = next(None, true).unwrap();
         assert_eq!((ask.depth, ask.hops), (1, 1));
-        let on = next_chain(Some(ask.clone()), true).unwrap();
+        let on = next(Some(ask.clone()), true).unwrap();
         assert_eq!(
             (on.chain_id, on.depth, on.hops),
             (ask.chain_id, 2, 2),
@@ -747,11 +800,11 @@ mod tests {
             ..on.clone()
         };
         assert!(
-            next_chain(Some(deep.clone()), false).is_ok(),
+            next(Some(deep.clone()), false).is_ok(),
             "a send adds no depth"
         );
         assert_eq!(
-            next_chain(Some(deep), true).unwrap_err().code,
+            next(Some(deep), true).unwrap_err().code,
             error_code::LIMIT_EXCEEDED
         );
         let long = Chain {
@@ -759,8 +812,42 @@ mod tests {
             ..on
         };
         assert_eq!(
-            next_chain(Some(long), false).unwrap_err().code,
+            next(Some(long), false).unwrap_err().code,
             error_code::LIMIT_EXCEEDED
+        );
+    }
+
+    // T39: `auto` only if the sender and every session up the chain run in `auto`.
+    #[test]
+    fn the_cap_is_the_lowest_mode_up_the_chain() {
+        use PermissionMode::{Ask, Auto};
+        let cap = |c: &Chain| (c.permission_cap, c.capped_by.clone());
+        // A human's turn has no cap: the sender's mode decides.
+        let human = input_chain(Uuid::now_v7(), Uuid::now_v7(), None);
+        assert_eq!(human.permission_cap, None);
+        let a = next_chain(Some(human.clone()), true, Auto, "p/a").unwrap();
+        assert_eq!(cap(&a), (Some(Auto), None));
+        let a = next_chain(Some(human), true, Ask, "p/a").unwrap();
+        assert_eq!(cap(&a), (Some(Ask), Some("p/a".into())));
+        // Along the chain: Auto -> Ask -> Auto stays Ask, named by the first one in Ask.
+        let ab = next_chain(None, true, Auto, "p/a").unwrap();
+        let bc = next_chain(Some(ab), true, Ask, "p/b").unwrap();
+        assert_eq!(cap(&bc), (Some(Ask), Some("p/b".into())));
+        let cd = next_chain(Some(bc), true, Auto, "p/c").unwrap();
+        assert_eq!(cap(&cd), (Some(Ask), Some("p/b".into())));
+        let de = next_chain(Some(cd), false, Ask, "p/d").unwrap();
+        assert_eq!(
+            cap(&de),
+            (Some(Ask), Some("p/b".into())),
+            "the first Ask names it"
+        );
+        // A chain from before 0.43 carries no cap: the sender's mode decides.
+        let old: Chain =
+            serde_json::from_value(json!({"chain_id": Uuid::now_v7(), "depth": 1, "hops": 1}))
+                .unwrap();
+        assert_eq!(
+            cap(&next_chain(Some(old), false, Auto, "p/a").unwrap()),
+            (Some(Auto), None)
         );
     }
 

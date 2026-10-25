@@ -119,6 +119,13 @@ describe('examples/wire', () => {
     expect(s.spawned_by).toEqual({ session_id: '0199f3a2-7c10-7000-8000-000000000002', address: 'hqc/planner' });
     expect(sys.spawned_by).toBeUndefined();
     expect(() => parseSessionInfo({ ...(load('api.session.json') as object), commands: [1] })).toThrow();
+    // T39: a turn capped by a message, in the session and its summary; the cap in a chain.
+    expect(s.permission_capped_by).toBe('hqc/build-bot');
+    expect(sys.permission_capped_by).toBeUndefined();
+    const one = parseServerFrame(load('client.session.summary.json'));
+    expect(one.type === 'session.summary' && one.session.permission_capped_by).toBe('hqc/build-bot');
+    const peer = parseEvent(load('event.peer.message.json'));
+    expect(peer.chain).toMatchObject({ permission_cap: 'ask', capped_by: 'hqc/build-bot' });
     const usage = parseEvent(load('event.usage.json'));
     expect(usage.type === 'usage' && [usage.payload.cost_usd, usage.payload.session_cost_usd]).toEqual([0.0123, 0.4567]);
     const sum =(load('client.session.summary.json') as { session: Record<string, unknown> }).session;

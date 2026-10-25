@@ -48,6 +48,8 @@ struct State {
     pid: Option<Option<u32>>,
     /// The permission mode of every `start`/`resume`, in order (T38).
     start_modes: Vec<(Uuid, PermissionMode)>,
+    /// `set_permission_mode` fails, as for a runtime that cannot switch (T39).
+    refuse_modes: bool,
 }
 
 #[derive(Clone, Default)]
@@ -64,6 +66,11 @@ impl FakeAdapters {
     /// default the test process, from which the MCP servers a test starts descend.
     pub fn set_pid(&self, pid: Option<u32>) {
         self.lock().pid = Some(pid);
+    }
+
+    /// Make every following `set_permission_mode` fail (T39).
+    pub fn set_refuse_modes(&self, refuse: bool) {
+        self.lock().refuse_modes = refuse;
     }
 
     /// Make every following `start`/`resume` fail.
@@ -202,6 +209,9 @@ impl Adapter for FakeAdapter {
 
     async fn set_permission_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {
         self.record(FakeCall::PermissionMode(self.session_id, mode));
+        if self.shared.lock().refuse_modes {
+            anyhow::bail!("fake: this runtime cannot switch its permission mode");
+        }
         Ok(())
     }
 

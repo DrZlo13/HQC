@@ -1086,6 +1086,314 @@ async fn allow_auto_false_runs_ask() {
     w.stop().await;
 }
 
+/// An input with `permission_cap` (T39).
+fn capped_input(sid: Uuid, eid: Uuid, cap: &str) -> Value {
+    let mut v = input(sid, eid, "from another session");
+    v["permission_cap"] = json!(cap);
+    v
+}
+
+/// The next `session.state` of `sid` that `pred` accepts.
+async fn state_where(c: &mut HubConn, sid: Uuid, pred: impl Fn(&Value) -> bool) -> Value {
+    let hit = |st: &Value| {
+        st["type"] == "session.state" && st["payload"]["session_id"] == json!(sid) && pred(st)
+    };
+    if let Some(i) = c.skipped.iter().position(hit) {
+        return c.skipped.remove(i);
+    }
+    loop {
+        let st = c.expect("session.state").await;
+        if hit(&st) {
+            return st;
+        }
+    }
+}
+
+/// A started session in `mode`, its first `session.state` read.
+async fn started_in(c: &mut HubConn, env: &Env, sid: Uuid, mode: &str) {
+    let mut start = env.start_payload(sid);
+    start["permission_mode"] = json!(mode);
+    c.frame("session.start", start).await;
+    c.expect("ack").await;
+    state_with_mode(c, sid, mode).await;
+}
+
+fn index(calls: &[FakeCall], call: &FakeCall) -> usize {
+    calls
+        .iter()
+        .position(|c| c == call)
+        .unwrap_or_else(|| panic!("no {call:?} in {calls:?}"))
+}
+
+fn switches(calls: &[FakeCall]) -> Vec<PermissionMode> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            FakeCall::PermissionMode(_, m) => Some(*m),
+            _ => None,
+        })
+        .collect()
+}
+
+use hqc_proto::frame::PermissionMode;
+
+// T39: a capped input in an auto session waits for the runtime's `ask`, runs in it, and the
+// session's own mode comes back before the user's input queued after it.
+#[tokio::test]
+async fn a_capped_turn_runs_in_ask_and_the_mode_comes_back() {
+    use PermissionMode::{Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+
+    let (e1, e2) = (Uuid::now_v7(), Uuid::now_v7());
+    c.frame("session.input", capped_input(sid, e1, "ask")).await;
+    adapters
+        .wait_for("switch down", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, Ask))
+        })
+        .await;
+    // The user's input queues meanwhile; nothing reaches the runtime before it confirms.
+    c.frame("session.input", input(sid, e2, "mine")).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !adapters
+            .calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::Input { .. })),
+        "{:?}",
+        adapters.calls()
+    );
+    adapters.emit(sid, AdapterEvent::PermissionMode(Ask)).await;
+    let first = FakeCall::Input {
+        session_id: sid,
+        event_id: e1,
+    };
+    adapters
+        .wait_for("capped input", |c| c.contains(&first))
+        .await;
+    let st = state_where(&mut c, sid, |st| st["payload"]["capped_input"] == json!(e1)).await;
+    assert_eq!(st["payload"]["permission_mode"], "ask");
+    adapters.accept_input(sid, e1).await;
+    adapters.end_turn(sid).await;
+
+    // Back to auto first, then the user's input.
+    let second = FakeCall::Input {
+        session_id: sid,
+        event_id: e2,
+    };
+    let calls = adapters
+        .wait_for("the user's input", |c| c.contains(&second))
+        .await;
+    assert_eq!(switches(&calls), [Ask, Auto]);
+    assert!(index(&calls, &FakeCall::PermissionMode(sid, Auto)) < index(&calls, &second));
+    adapters.emit(sid, AdapterEvent::PermissionMode(Auto)).await;
+    let st = state_with_mode(&mut c, sid, "auto").await;
+    assert!(st["payload"].get("capped_input").is_none(), "{st}");
+    w.stop().await;
+}
+
+// T39: a switch the user asks for during a capped turn waits for its end; meanwhile the
+// session reports the cap that holds it down.
+#[tokio::test]
+async fn a_switch_during_a_capped_turn_waits_for_its_end() {
+    use PermissionMode::Auto;
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "ask").await;
+
+    // In ask already: the capped input goes at once, no switch.
+    let e1 = Uuid::now_v7();
+    c.frame("session.input", capped_input(sid, e1, "ask")).await;
+    adapters
+        .wait_for("capped input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: e1,
+            })
+        })
+        .await;
+    adapters.accept_input(sid, e1).await;
+    let id = c
+        .frame(
+            "session.permission_mode",
+            json!({"session_id": sid, "permission_mode": "auto"}),
+        )
+        .await;
+    loop {
+        let ack = c.expect("ack").await;
+        if ack["id"] == id.as_str() {
+            break;
+        }
+    }
+    let st = state_where(&mut c, sid, |st| st["payload"]["capped_input"] == json!(e1)).await;
+    assert_eq!(st["payload"]["permission_mode"], "ask");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(switches(&adapters.calls()), [], "not raised mid-turn");
+
+    adapters.end_turn(sid).await;
+    let calls = adapters
+        .wait_for("the user's mode", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, Auto))
+        })
+        .await;
+    assert_eq!(switches(&calls), [Auto]);
+    w.stop().await;
+}
+
+// T39: the cap only lowers: `auto` on an input changes nothing, in an ask session or an auto
+// one, and the worker's `allow_auto` is not touched by it.
+#[tokio::test]
+async fn the_cap_never_raises() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    for mode in ["ask", "auto"] {
+        let sid = Uuid::now_v7();
+        started_in(&mut c, &env, sid, mode).await;
+        let e = Uuid::now_v7();
+        c.frame("session.input", capped_input(sid, e, "auto")).await;
+        adapters
+            .wait_for("input", |c| {
+                c.contains(&FakeCall::Input {
+                    session_id: sid,
+                    event_id: e,
+                })
+            })
+            .await;
+        adapters.accept_input(sid, e).await;
+        adapters.end_turn(sid).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(switches(&adapters.calls()), []);
+    w.stop().await;
+}
+
+// T39: a runtime that cannot switch is restarted in ask for the capped input; a process
+// started again later starts in the session's own mode.
+#[tokio::test]
+async fn a_runtime_that_cannot_switch_is_restarted_in_ask() {
+    use PermissionMode::{Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    adapters.set_refuse_modes(true);
+
+    let e1 = Uuid::now_v7();
+    c.frame("session.input", capped_input(sid, e1, "ask")).await;
+    let first = FakeCall::Input {
+        session_id: sid,
+        event_id: e1,
+    };
+    let calls = adapters
+        .wait_for("capped input", |c| c.contains(&first))
+        .await;
+    assert!(index(&calls, &FakeCall::Kill(sid)) < index(&calls, &FakeCall::Resume(sid)));
+    assert_eq!(adapters.start_modes(), [(sid, Auto), (sid, Ask)]);
+    adapters.accept_input(sid, e1).await;
+    adapters.end_turn(sid).await;
+
+    // The process lost later starts in the session's mode for an input without a cap.
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    adapters
+        .wait_for("kill", |c| {
+            c.iter().filter(|x| **x == FakeCall::Kill(sid)).count() == 2
+        })
+        .await;
+    let e2 = Uuid::now_v7();
+    c.frame("session.input", input(sid, e2, "mine")).await;
+    adapters
+        .wait_for("input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: e2,
+            })
+        })
+        .await;
+    assert_eq!(
+        adapters.start_modes(),
+        [(sid, Auto), (sid, Ask), (sid, Auto)]
+    );
+    w.stop().await;
+}
+
+// T39: a stopped agent starts in ask for a capped input (no switch needed); a turn lost with
+// its process leaves nothing behind: the next input starts the process in the session's mode.
+#[tokio::test]
+async fn a_stopped_agent_starts_in_ask_for_a_capped_input() {
+    use PermissionMode::{Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    adapters
+        .wait_for("kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+
+    let e1 = Uuid::now_v7();
+    c.frame("session.input", capped_input(sid, e1, "ask")).await;
+    adapters
+        .wait_for("capped input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: e1,
+            })
+        })
+        .await;
+    assert_eq!(adapters.start_modes(), [(sid, Auto), (sid, Ask)]);
+    assert_eq!(switches(&adapters.calls()), []);
+    state_where(&mut c, sid, |st| st["payload"]["capped_input"] == json!(e1)).await;
+    adapters.accept_input(sid, e1).await;
+
+    // The process dies mid-turn.
+    adapters
+        .emit(sid, AdapterEvent::Exited { error: None })
+        .await;
+    let st = state_where(&mut c, sid, |st| {
+        st["payload"]["process_state"] == "stopped"
+    })
+    .await;
+    assert!(st["payload"].get("capped_input").is_none(), "{st}");
+    let e2 = Uuid::now_v7();
+    c.frame("session.input", input(sid, e2, "mine")).await;
+    adapters
+        .wait_for("input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: e2,
+            })
+        })
+        .await;
+    assert_eq!(
+        adapters.start_modes(),
+        [(sid, Auto), (sid, Ask), (sid, Auto)]
+    );
+    w.stop().await;
+}
+
 // T14: the hub asks the worker about folders (SPEC §5.3): `fs.stat` before a workspace is
 // added, `fs.list_dirs` for the folder picker; answers stay inside allowed_roots.
 #[tokio::test]

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use hqc_proto::{
     client_frame::ServerFrame,
-    event::PeerMode,
+    event::{Chain, PeerMode},
     frame::{
         error_code, HubFrame, PeerHeader, PermissionMode, Runtime, SessionInput, SessionStart,
         StartMode, WireError,
@@ -68,7 +68,7 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
                 if sc.inflight.contains(&p.event_id) {
                     continue;
                 }
-                let mut frame = input_frame(session_id, p.event_id, &p.payload);
+                let mut frame = input_frame(session_id, p.event_id, &p.payload, p.chain.as_ref());
                 frame.peer_prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
                 sc.inflight.insert(p.event_id);
                 let id = conn.send(HubFrame::SessionInput(frame));
@@ -85,8 +85,14 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
     Ok(())
 }
 
-/// The input without `peer_prefix`; `peer` for a `peer.message` (SPEC §7.1).
-fn input_frame(session_id: Uuid, event_id: Uuid, payload: &Value) -> SessionInput {
+/// The input without `peer_prefix`; `peer` for a `peer.message` (SPEC §7.1); the cap of
+/// its chain, if it has one (T39).
+fn input_frame(
+    session_id: Uuid,
+    event_id: Uuid,
+    payload: &Value,
+    chain: Option<&Value>,
+) -> SessionInput {
     let peer = match (
         payload.get("from").and_then(Value::as_str),
         payload.get("mode"),
@@ -115,6 +121,9 @@ fn input_frame(session_id: Uuid, event_id: Uuid, payload: &Value) -> SessionInpu
             .unwrap_or_default(),
         peer_prefix: Vec::new(),
         peer,
+        permission_cap: chain
+            .and_then(|c| serde_json::from_value::<Chain>(c.clone()).ok())
+            .and_then(|c| c.permission_cap),
     }
 }
 

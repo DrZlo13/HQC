@@ -25,25 +25,77 @@ impl Tool {
 }
 
 pub const LIST_SESSIONS: &str = "hqc_list_sessions";
+pub const SEND: &str = "hqc_send";
+pub const ASK: &str = "hqc_ask";
 
-pub const TOOLS: &[Tool] = &[Tool {
-    name: LIST_SESSIONS,
-    description: "List the hqc sessions of your owner: each with its address \
+pub const TOOLS: &[Tool] = &[
+    Tool {
+        name: LIST_SESSIONS,
+        description: "List the hqc sessions of your owner: each with its address \
         (<project-slug>/<session-slug>), title and status; `current: true` marks this \
         session. Give `project` (a project slug or id) to list one project only.",
-    input_schema: || {
-        json!({
-            "type": "object",
-            "properties": {
-                "project": {
-                    "type": "string",
-                    "description": "A project slug or id; all projects when absent."
-                }
-            },
-            "additionalProperties": false
-        })
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "A project slug or id; all projects when absent."
+                    }
+                },
+                "additionalProperties": false
+            })
+        },
     },
-}];
+    Tool {
+        name: SEND,
+        description: "Send a message to another hqc session of your owner without waiting for a \
+            reply. The other agent reads it before its next input (or at once if that session \
+            wakes on messages); it may answer you later with hqc_send. `session` is an address \
+            from hqc_list_sessions (<project-slug>/<session-slug>) or a session id.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The message."},
+                    "session": {
+                        "type": "string",
+                        "description": "The target session: <project-slug>/<session-slug> or its id."
+                    }
+                },
+                "required": ["text", "session"],
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
+        name: ASK,
+        description: "Ask another hqc session of your owner and wait for its answer: the \
+            message starts a turn there, and that turn's final message comes back as this \
+            tool's result (`reply`). Waits up to `timeout_s` (at most and by default 600 s). \
+            Not to your own session. `session` is an address from hqc_list_sessions \
+            (<project-slug>/<session-slug>) or a session id.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The question or task."},
+                    "session": {
+                        "type": "string",
+                        "description": "The target session: <project-slug>/<session-slug> or its id."
+                    },
+                    "timeout_s": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "How long to wait for the reply, in seconds."
+                    }
+                },
+                "required": ["text", "session"],
+                "additionalProperties": false
+            })
+        },
+    },
+];
 
 pub fn tool(name: &str) -> Option<&'static Tool> {
     TOOLS.iter().find(|t| t.name == name)
@@ -65,6 +117,12 @@ pub mod error_code {
     pub const NOT_FOUND: &str = "not_found";
     /// The worker lost the call: the session's agent stopped, or the hub refused the frame.
     pub const UNAVAILABLE: &str = "unavailable";
+    /// `hqc_ask` got no reply within its timeout (SPEC §7.1).
+    pub const TIMEOUT: &str = "timeout";
+    /// A chain limit of SPEC §7.1 (`depth`, `hops`): only a human's turn goes on.
+    pub const LIMIT_EXCEEDED: &str = "limit_exceeded";
+    /// The worker restarted while `hqc_ask` waited: the blocking call died with it.
+    pub const WORKER_RESTART: &str = "worker_restart";
     pub const INTERNAL: &str = "internal";
 }
 
@@ -93,6 +151,10 @@ mod tests {
             assert!(!t.description.is_empty());
         }
         assert!(tool(LIST_SESSIONS).is_some());
-        assert!(tool("hqc_send").is_none(), "no stubs (docs/ITERATION-3.md)");
+        assert!(tool(SEND).is_some() && tool(ASK).is_some());
+        assert!(
+            tool("hqc_spawn").is_none(),
+            "no stubs (docs/ITERATION-3.md)"
+        );
     }
 }

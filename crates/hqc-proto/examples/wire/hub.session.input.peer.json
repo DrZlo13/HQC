@@ -1,0 +1,16 @@
+{
+  "id": "f-4",
+  "type": "session.input",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "event_id": "0199f3a2-7c10-7000-8000-00000000010e",
+    "text": "Is the build green?",
+    "artifact_ids": [],
+    "peer_prefix": [],
+    "peer": {
+      "from": "hqc/build-bot",
+      "mode": "ask",
+      "request_id": "0199f3a2-7c10-7000-8000-0000000000d3"
+    }
+  }
+}

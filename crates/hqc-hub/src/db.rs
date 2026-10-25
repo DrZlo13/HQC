@@ -1328,12 +1328,14 @@ pub async fn clear_turn_error(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
 
 /// Sessions whose computed state is `running` apart from worker presence (SPEC §17.1): a
 /// turn is open and nothing ranks above it. The caller checks that the worker is online.
+/// A session waiting for the answer to its `hqc_ask` is not silent but waiting, and is left
+/// out too (SPEC §7.1, §17.3).
 pub async fn running_turns(db: &PgPool) -> sqlx::Result<Vec<(Uuid, Option<Uuid>)>> {
     sqlx::query_as(
         "SELECT s.id, s.worker_id FROM sessions s
          WHERE s.turn_open AND NOT s.archived AND NOT s.last_turn_error AND s.locked_by <> 'vscode'
            AND NOT EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
-                           AND p.closed_at IS NULL AND p.kind IN ('approval', 'clarify'))
+                           AND p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'ask'))
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed')",
     )
     .fetch_all(db)
@@ -1717,6 +1719,15 @@ pub async fn event_by_client_op(
     ))
     .bind(session_id)
     .bind(client_op_id)
+    .fetch_optional(db)
+    .await
+}
+
+pub async fn event_by_id(db: &PgPool, event_id: Uuid) -> sqlx::Result<Option<EventRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {EVENT_COLS} FROM events WHERE event_id = $1"
+    ))
+    .bind(event_id)
     .fetch_optional(db)
     .await
 }

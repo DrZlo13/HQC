@@ -158,6 +158,14 @@ export function callLine(tool: string, argsPreview: string): { shell: boolean; t
   return { shell: false, text: key ? oneLine(String(args[key]), 400) : '' };
 }
 
+/** For a call of the hqc tool `hqc_ask` (`mcp__hqc__hqc_ask` in Claude Code, SPEC §7.1):
+ *  the session it asked, '' if the arguments do not say; undefined for any other tool. */
+export function askTarget(tool: string, argsPreview: string): string | undefined {
+  if (tool !== 'hqc_ask' && !tool.endsWith('__hqc_ask')) return undefined;
+  const s = callArgs(argsPreview).session;
+  return typeof s === 'string' ? oneLine(s, 200) : '';
+}
+
 /** Paths a call touches: the path arguments and, for Bash, absolute or `~` words of the
  *  command. */
 export function callPaths(tool: string, args: Record<string, unknown>): string[] {

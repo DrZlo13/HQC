@@ -192,6 +192,78 @@ async fn the_token_goes_only_to_the_daemon_and_a_lost_daemon_is_reconnected() {
     }
 }
 
+#[tokio::test]
+async fn a_waiting_call_reports_progress_until_it_is_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("d.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    let (mut to_server, server_in) = tokio::io::duplex(1 << 20);
+    let (server_out, from_server) = tokio::io::duplex(1 << 20);
+    tokio::spawn(
+        McpServer::new(Some("hqcs_t".into()), sock)
+            .with_progress_every(Duration::from_millis(30))
+            .serve(server_in, server_out),
+    );
+    let mut from_server = BufReader::new(from_server).lines();
+    let call = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {"name": "hqc_ask", "arguments": {"text": "hi", "session": "p/s"},
+                   "_meta": {"progressToken": "tok-7"}}});
+    to_server
+        .write_all(format!("{call}\n").as_bytes())
+        .await
+        .unwrap();
+    let (s, _) = tokio::time::timeout(WAIT, listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let (rd, mut wr) = s.into_split();
+    let mut rd = BufReader::new(rd).lines();
+    assert!(matches!(
+        read_msg(&mut rd).await,
+        Some(ToDaemon::Hello { .. })
+    ));
+    wr.write_all(b"{\"type\":\"ready\"}\n").await.unwrap();
+    let Some(ToDaemon::Call { id, tool, .. }) = read_msg(&mut rd).await else {
+        panic!("a call");
+    };
+    assert_eq!(tool, "hqc_ask");
+
+    for n in 1..=3 {
+        let p = next(&mut from_server).await;
+        assert_eq!(p["method"], "notifications/progress", "{p}");
+        assert_eq!(p["params"]["progressToken"], "tok-7");
+        assert_eq!(p["params"]["progress"], n, "progress only grows");
+    }
+    let answer = FromDaemon::Result {
+        id,
+        result: Some(json!({"from": "p/s", "reply": "hello"})),
+        error: None,
+    };
+    wr.write_all(format!("{}\n", serde_json::to_string(&answer).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let r = loop {
+        let m = next(&mut from_server).await;
+        if m.get("method").is_none() {
+            break m;
+        }
+    };
+    assert_eq!(r["id"], 7);
+    assert_eq!(r["result"]["isError"], false);
+    // Nothing after the answer.
+    let quiet = tokio::time::timeout(Duration::from_millis(150), from_server.next_line()).await;
+    assert!(quiet.is_err(), "{quiet:?}");
+}
+
+async fn next(r: &mut Lines<BufReader<DuplexStream>>) -> Value {
+    let l = tokio::time::timeout(WAIT, r.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(&l).unwrap()
+}
+
 #[test]
 fn tool_results() {
     let ok = tool_result(Ok(json!({"a": 1})));

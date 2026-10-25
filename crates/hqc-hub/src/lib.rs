@@ -25,6 +25,7 @@ pub mod error;
 pub mod events;
 pub mod mcp;
 pub mod mirror;
+pub mod peers;
 pub mod push;
 pub mod requests;
 pub mod security;

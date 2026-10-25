@@ -57,7 +57,7 @@ Acceptance: the common checks; worker tests: a path outside the roots, through a
 directory, over the cap; hub tests: upload, dedup, the event; client test: rendering; live run
 optional.
 
-## T32. `hqc_send` and `hqc_ask` (after T30)
+## T32. `hqc_send` and `hqc_ask` (done, SPEC 0.34)
 
 Sections: §7.1 in full, §3 PendingRequest, §4 `peer.message`, `ask_cancelled`, §5.2, §17.2.
 - Hub: `session` is required for both tools (no personal session until iteration 4); the

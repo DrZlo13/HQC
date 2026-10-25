@@ -663,9 +663,24 @@ pub struct SessionInput {
     pub text: String,
     #[serde(default)]
     pub artifact_ids: Vec<Uuid>,
-    /// Buffered `send` messages (SPEC §7.1); always empty in iteration 1.
+    /// Buffered `send` messages (SPEC §7.1).
     #[serde(default)]
     pub peer_prefix: Vec<PeerPrefix>,
+    /// For a `peer.message`: who sent it and how, for the header the worker puts before
+    /// `text` (SPEC §7.1, since 0.34); absent for a `user.message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerHeader>,
+}
+
+/// `session.input.peer` (SPEC §5.3, §7.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerHeader {
+    /// `<project-slug>/<session-slug>` of the sender.
+    pub from: String,
+    pub mode: crate::event::PeerMode,
+    /// Only for `mode: ask`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// One buffered `send` message in `session.input.peer_prefix` (SPEC §5.3, §7.1).
@@ -729,6 +744,10 @@ mod tests {
         (
             "session.input",
             include_str!("../examples/wire/hub.session.input.json"),
+        ),
+        (
+            "session.input",
+            include_str!("../examples/wire/hub.session.input.peer.json"),
         ),
         (
             "session.stop",

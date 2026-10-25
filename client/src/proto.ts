@@ -161,6 +161,8 @@ export interface Attachment {
 }
 export interface PeerMessage {
   from_session_id: Uuid;
+  /** The sender's address `<project-slug>/<session-slug>` (since SPEC 0.34). */
+  from?: string;
   text: string;
   mode: PeerMode;
   request_id?: string;
@@ -378,6 +380,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
   }),
   'peer.message': (p) => ({
     from_session_id: str(p, 'from_session_id'),
+    from: optStr(p, 'from'),
     text: str(p, 'text'),
     mode: tolerantEnum(p, 'mode', PEER_MODES),
     request_id: optStr(p, 'request_id'),
@@ -572,6 +575,12 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       str(x, 'text');
       str(x, 'ts');
     });
+    if (present(p, 'peer')) {
+      const x = obj(p.peer, 'peer');
+      str(x, 'from');
+      tolerantEnum(x, 'mode', PEER_MODES);
+      optStr(x, 'request_id');
+    }
   },
   'session.stop': (p) => void str(p, 'session_id'),
   'session.kill': (p) => void str(p, 'session_id'),

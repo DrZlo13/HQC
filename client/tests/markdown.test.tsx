@@ -247,6 +247,21 @@ describe('messages', () => {
     expect(root.querySelector('.line-system code')!.textContent).toBe('home-mac');
   });
 
+  it("a peer message shows the sender's address (T32), else the end of its id", () => {
+    const root = chat([
+      ev('event.peer.message', (e) => (e.payload.text = 'a question')),
+      ev('event.peer.message', (e) => {
+        e.seq = 43;
+        e.event_id = '0199f3a2-7c10-7000-8000-00000000010f';
+        delete e.payload.from;
+        e.payload.mode = 'send';
+        e.payload.text = 'a note';
+      }),
+    ]);
+    const titles = [...root.querySelectorAll('.card-peer .card-title')].map((t) => t.textContent);
+    expect(titles).toEqual(['Question from hqc/build-bot', 'Message from session 00000002']);
+  });
+
   it('every message has a copy button that copies the source text', async () => {
     const writeText = vi.fn(async (_: string) => {});
     vi.stubGlobal('isSecureContext', true);

@@ -167,13 +167,7 @@ impl Core {
     /// block followed by `images` (image blocks of the Messages API, SPEC §8.1). The
     /// artifacts' paths are already in `input.text` (`.hqc/inbox`, SPEC §12).
     pub fn input_with_images(&mut self, input: &SessionInput, images: Vec<Value>) -> Vec<Action> {
-        if !input.peer_prefix.is_empty() {
-            tracing::warn!(
-                session_id = %self.session_id,
-                event_id = %input.event_id,
-                "peer_prefix is not supported yet (iteration 3); sending the text only"
-            );
-        }
+        // `peer_prefix` and `peer` are in `text` already (crate::peer, SPEC §7.1).
         self.last_input = Some(input.event_id);
         self.awaiting_echo.push_back(input.event_id);
         self.in_turn = true;

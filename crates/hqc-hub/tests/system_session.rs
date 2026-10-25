@@ -362,6 +362,25 @@ async fn answer_while_offline_is_sent_after_hello() {
         json!({"request_id": "wa-5", "option_id": "deny"})
     );
     w.reply(&f["id"], "ack", json!({})).await;
+    // Close only once the hub has taken the ack: a close it sees first leaves the answer
+    // undelivered, and it is sent again, as it should be (it raced under load).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let done: bool = sqlx::query_scalar(
+            "SELECT result_delivered_at IS NOT NULL FROM pending_requests WHERE request_id = 'wa-5'",
+        )
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+        if done {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the ack was never taken"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     w.close().await;
     // Acked: not sent again.
     let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;

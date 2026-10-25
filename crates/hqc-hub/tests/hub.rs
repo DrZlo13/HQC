@@ -1149,7 +1149,16 @@ async fn turn_watchdog_closes_a_silent_turn() {
         .wait_session(&sid, "error", |v| v["state"] == "error")
         .await;
     assert_eq!(v["queue_len"], 0);
-    let l = lost(&hub, &sid).await;
+    // The hub marks the turn failed, then writes its `system turn_lost`: a read between the
+    // two finds no event yet (it raced on CI), so wait for it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let l = loop {
+        let l = lost(&hub, &sid).await;
+        if !l.is_empty() || tokio::time::Instant::now() > deadline {
+            break l;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(l.len(), 1, "{l:?}");
     assert!(
         l[0]["payload"]["text"]

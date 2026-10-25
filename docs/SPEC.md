@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.41, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.42, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -73,7 +73,11 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   `hqc_attach`: the worker resolves and reads the path itself, §7), pick an environment or a
   Hermes profile for a path the worker owner has not bound locally, or enable
   the machine's MCP servers. These are set only by the worker's local config (§14); the worker
-  ignores diverging values from `session.start` and answers with an error.
+  ignores diverging values from `session.start` and answers with an error. Nor can it run a
+  session in the `auto` permission mode on a worker with `[permissions] allow_auto = false`
+  (since 0.42, T38): the worker runs `ask` and reports it. Where `auto` is allowed, a hub that
+  switches a session to it gains nothing it did not have (it can answer `once` itself); the
+  worker's `deny` stays in force in both modes.
 - The promise about local MCP servers holds for Claude Code (`--strict-mcp-config`)
   and Hermes (`HERMES_ACP_SKIP_CONFIGURED_MCP=1`, the worker always sets it). For other
   ACP agents there is no general way: in the local config each `acp_agent` declares
@@ -191,7 +195,13 @@ transcript has been held; not part of the API session object), `system` (bool: t
 service session, §10.2; the API session object carries only `system: true`), `spawned_by`
 (nullable; since 0.37, T34: the session whose agent created this one with `hqc_spawn`, §7;
 cleared when that session is deleted) and `spawn_chain_id` (nullable: the chain of that call,
-§7.1, kept for the spawn limits of §20; not part of the API session object). `state` and
+§7.1, kept for the spawn limits of §20; not part of the API session object),
+`permission_mode` (nullable `ask` | `auto`; since 0.42, T38: the mode hqc asks the worker to
+run the agent in, chosen on creation and switched with `PATCH`; null — the worker's
+`[permissions] mode`, §14) and `effective_permission_mode` (nullable: the mode the worker last
+reported the agent runs in, `session.state.permission_mode`, §5.4; what the client shows). In
+`ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
+classifier decides and never asks (§8.1); the worker's `deny` stops a call in both. `state` and
 `queue_len` (§17.1) are **not stored**; the hub computes them when serving. In the first version
 a session has exactly one agent; people's access to a session is determined by Grant only.
 
@@ -603,8 +613,11 @@ MCP calls (worker → hub → worker):
 ### 5.3 Hub → worker frames
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
   cwd, environment, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
-  auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?}
-  — `mode`: `new` | `resume` (§5.2); `requested_by_owner` (sent only as `true`) — the worker
+  auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?,
+  permission_mode?}
+  — `mode`: `new` | `resume` (§5.2); `permission_mode` (since 0.42, T38) — `ask` | `auto`, the
+  session's `permission_mode` (§3); absent — the worker's `[permissions] mode`; the worker runs
+  `auto` only with `allow_auto` (§14) and reports the mode it runs in `session.state`; `requested_by_owner` (sent only as `true`) — the worker
   owner added the session's workspace: no confirmation of a new folder is needed (§10.2); the worker calls the adapter's `start` or `resume` (§8);
   on `new` the Claude Code adapter still checks for a jsonl with this uuid and, if there is one,
   continues it with `--resume` (§8.1); `owner_is_worker_owner` is needed by the worker for `allow_foreign_sessions`, the choice
@@ -625,6 +638,13 @@ MCP calls (worker → hub → worker):
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
 - `session.kill` {session_id} — terminate the agent process.
+- `session.permission_mode` {session_id, permission_mode} → `ack` (since 0.42, T38) — the user
+  switched the session's mode (§6). The worker decides as for `session.start` (`auto` only with
+  `allow_auto`); a running agent switches at once, also mid-turn (Claude Code: §8.1), a stopped
+  one starts in the mode; a session the worker has not started is only acked (the next
+  `session.start` carries the mode). The hub sends it when the worker is connected and
+  otherwise relies on `session.start`; a `session.start` for a running agent whose mode differs
+  switches it too.
 - `session.cleanup` {session_id, workspace_path | null, cwd, event_ids[]} → `ack` (since 0.23) —
   after `session.kill` when a session or its project is archived or deleted: remove the inbox
   folders of the inputs `event_ids` (for a session without a workspace — its scratch folder);
@@ -697,7 +717,8 @@ MCP calls (worker → hub → worker):
   field `capabilities.workspace_path`): workspaces are created in the hub (§3, §6) and checked by
   the worker against `allowed_roots`.
 - `event` {event} → `ack` (`session_id` is inside the event)
-- `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?, held_by?, commands?}
+- `session.state` {session_id, process_state, runtime_session_id?, locked_by, title?, held_by?, commands?,
+  permission_mode?}
   — `title`: the title the runtime gave the session (§8.1); the worker repeats the last one in
   every following `session.state`, the hub applies it by the `title_source` rule (§3 Session),
   folding it to one line of up to 200 characters. `held_by` — the transcript's holder (§9.3): no
@@ -714,6 +735,11 @@ MCP calls (worker → hub → worker):
   (only when it changed) and shows it in the session object (§6): names are trimmed, a
   leading `/` dropped, names with whitespace or control characters or longer than 100
   characters dropped, duplicates removed, at most 500 kept.
+  `permission_mode` (since 0.42, T38) — `ask` | `auto`, the mode the agent runs in: the one the
+  worker started or switched it with, then what the runtime reports (Claude Code:
+  `permissionMode` of `system/init` and `system/status`, §8.1); absent — not known yet;
+  repeated in every following `session.state` like `title`. The hub stores it as the session's
+  `effective_permission_mode` (§3).
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — events
   from the mirror (§9.1, §9.2), through the outbox; the answer is `ack {event_id, seq}` as for
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
@@ -800,8 +826,15 @@ the rest is marked "later"):
   the worker (§5.3); without `path`: `allowed_roots`; outside them: `400 invalid_path`;
   offline: `409 worker_offline`
 - `GET/POST /api/projects/{id}/sessions` (list: `{sessions: [<session>]}`; create:
-  {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?} → `201` and the session
-  object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4)
+  {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?} → `201` and
+  the session object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4).
+  `permission_mode` (since 0.42, T38): `ask` | `auto` (anything else: `422`, the body cannot be read); absent — the
+  worker's default. `PATCH /api/sessions/{id}` {title?, auto_approve?, permission_mode?}:
+  `permission_mode` switches the session's mode and sends the worker `session.permission_mode`
+  (§5.3); `auto` only by the worker owner (`403`, as for `auto_approve`), `ask` by whoever may
+  manage the session; the service session: `409 system_session`. The reply carries the stored
+  `permission_mode` and the `effective_permission_mode` the worker reported so far; its
+  confirmation comes as `session.summary`.
 - `GET /api/sessions/{id}/events?after_seq=&limit=` — pagination by `seq`, response
   `{events[], last_seq}`
 - `POST /api/sessions/{id}/input` {text, artifact_ids[], client_op_id} → `201 {event}`:
@@ -900,7 +933,15 @@ Session object (`GET /api/sessions/{id}`, list, create, `PATCH`, `archive`):
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
-updated_at, commands?, spawned_by?}`. `spawned_by` (since 0.37, T34) — `{session_id, address}`
+updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?}`.
+`permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
+null. The client shows the mode in the chat header: `effective_permission_mode`, else
+`permission_mode`; "Auto" as a marked badge, "Ask" as plain text, "Ask (Auto asked)" while
+the session asked for `auto` but its worker runs `ask` (not restarted yet, or `allow_auto =
+false`), nothing while both are absent. The session's "More" menu has "Switch to Auto" /
+"Switch to Ask"; the new-session form has "Permissions": the worker's default, Ask or Auto.
+Going to Ask asks nothing; going to Auto asks one line: "Switch to Auto? Claude Code then runs
+tool calls without asking; the worker's deny list is the only limit." `spawned_by` (since 0.37, T34) — `{session_id, address}`
 of the session whose agent started this one with `hqc_spawn` (§7), absent otherwise or once
 that session is deleted; the client shows "started by <address>" in the chat header as a
 link to it. `held_by` (`{entrypoint, status}`): the session is currently held open
@@ -939,8 +980,9 @@ newer copy).
   client updates `delivery`/`delivered_at` of its event with this `seq`;
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
-  project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?}` (the same as
-  in the session object); `{type: requests, requests[]}` (since 0.41, T37,
+  project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
+  permission_mode?, effective_permission_mode?}` (the same as in the session object; the modes
+  since 0.42, so the header follows a switch the worker confirms); `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -1051,7 +1093,11 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   Since 0.37 (T34): `hqc_spawn(project, workspace?, runtime?, model?, prompt)`; the session is
   created by the same path as `POST /api/projects/{id}/sessions` (§6), owned by the calling
   session's owner, in the workspace's folder (`cwd` `.`) on the workspace's worker, titled
-  "Session N" until a title comes (§3), without `auto_approve`. `project` — a slug or an id
+  "Session N" until a title comes (§3), without `auto_approve` and (since 0.42, T38) with
+  `permission_mode: ask`, whatever mode the caller runs in or the worker's default is: an
+  agent never starts a session in `auto`, and there is no argument for it (an unknown
+  argument is `invalid_args`); the owner may switch it later. A peer message (§7.1) never
+  changes the mode of the session it wakes. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
   `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 4 (else
@@ -1311,7 +1357,7 @@ without asking. The adapter passes `--setting-sources user,local` (the project f
 `settings.local.json` is read: `always` writes there) and an explicit `--permission-mode` with
 the "ask" mode: in the help of CLI 2.1.308 this is `manual` (`default` is not among the options),
 before that `default`; on start the worker reads `claude --help` and picks the one present
-(`[permissions] mode = "auto"` replaces it with `auto`, §14). Checked on 2.1.308 (T12,
+(a session in `auto`, §3, §14, gets `auto` instead). Checked on 2.1.308 (T12,
 fixture `always-git-push`): with `--setting-sources user,local --permission-mode manual`,
 `always` is still offered and writes the rule to `settings.local.json`; `manual` shows in
 `system/init` as `"permissionMode": "default"`.
@@ -1444,6 +1490,21 @@ The `auto` mode (`--permission-mode auto`, checked on 2.1.308): the CLI decides 
 and `sudo` when the user had asked for it; the decision is visible only in
 `tool_result_meta[].permission_decision.reason_type` (`classifier`, `mode`). The only
 boundary in this mode is `deny`.
+
+Switching a running process (since 0.42, T38): the adapter writes `{"type": "control_request",
+"request_id": "hqc-mode-<uuid>", "request": {"subtype": "set_permission_mode", "mode": "auto" |
+"default"}}` to stdin (`default` for `ask`: the CLI takes it and reports `manual` as `default`
+anyway). Verified on Claude Code **2.1.308** (fixture `permission-mode-switch`, live test
+`live_permission_mode_switch`): the CLI answers `control_response {subtype: success, response:
+{mode}}`, sends `{"type": "system", "subtype": "status", "permissionMode": "<mode>"}`, and the
+next `system/init` carries the new `permissionMode`; a `touch` in the working folder then ran
+without `can_use_tool` in `auto` and was asked about again after the switch back. The CLI applies
+the mode to its next permission check, so the worker does not wait for the end of a turn (a
+request already open stays open); the `--settings` deny list stays in force (it was given at
+start). The adapter reports `permissionMode` of `system/init`, of `system/status` and of the
+answer to its request as the session's mode (`auto` is `auto`, any other name `ask`) when it
+changes; a refusal (`subtype: error`) is logged and changes nothing, and the next start uses the
+new flag. No restart is needed on 2.1.308.
 
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
 "interrupt"}` to stdin; the CLI ends the turn with a `result` record with `subtype:
@@ -1945,6 +2006,13 @@ instruction from a tool result and did not follow it. This is input into the cur
 a new `user.message`: it has no queue and no `delivery`. For ACP agents (§8.2), later; worker
 requests (§10.2) and `clarify` have no such field (`400`).
 
+A session in the `auto` permission mode (since 0.42, T38; §3, §8.1) produces no
+`approval.request` for tool calls: Claude Code's classifier decides them on the worker, and only
+the worker's `deny` stops one; `AskUserQuestion` still reaches the user as `clarify.request`.
+Only the worker owner switches a session to `auto` (§6); spawned sessions start in `ask` (§7).
+This is the worker's mode, unlike `auto_approve`, which the hub applies to requests that do
+reach it.
+
 With `auto_approve` the hub answers with the first option with `canonical: once`, `by: auto`
 (calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14);
 only the worker owner can turn the mode on, and it is highlighted in the UI; on a shared
@@ -2231,14 +2299,21 @@ sessions; environments of iteration 5 will be able to extend it via `settings`):
 
 ```toml
 [permissions]
-mode = "ask"     # "ask" | "auto"
+mode = "ask"     # "ask" | "auto": sessions that do not ask for a mode
+allow_auto = true  # false: a session that asks for "auto" runs in "ask"
 allow = ["Bash(cargo test:*)", "Read"]   # run without asking
 deny = ["Bash(sudo:*)", "Bash(git push:*)"]  # never run and never ask
 ```
 
 - `mode = "ask"` (default): calls outside both lists are asked about (`approval.request`);
   `mode = "auto"`: `--permission-mode auto`, the CLI decides by itself and never asks (§8.1),
-  the only boundary is `deny`; the worker writes a warning to the log at start;
+  the only boundary is `deny`; the worker writes a warning to the log at start. Since 0.42
+  (T38) `mode` is the default of a session that does not ask for a mode: hqc may ask for
+  `ask` or `auto` per session (`session.start.permission_mode`, `session.permission_mode`,
+  §5.3);
+- `allow_auto` (default `true`; since 0.42, T38): `false` — the worker runs every session in
+  `ask` whatever hqc asks for, and reports `ask` (§5.4); `mode = "auto"` with `allow_auto =
+  false` is a config error;
 - `allow` is empty by default;
 - `deny`, if the field (or the block) is absent: `Bash(sudo:*)`, `Bash(ssh:*)`, `Bash(scp:*)`,
   `Bash(rm -rf /*)`, `Bash(curl * | sh)`, `Bash(curl * | bash)`, `Bash(dd:*)`, `Bash(mkfs*)`,
@@ -2675,6 +2750,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.41 → 0.42 (T38, a permission mode per session)
+§3 Session: `permission_mode` (what hqc asks for, null — the worker's default) and
+`effective_permission_mode` (what the worker reports). §5.3: `session.start.permission_mode?`
+and the frame `session.permission_mode`. §5.4: `session.state.permission_mode?`. §6: the mode
+on creation, `PATCH permission_mode` (`auto` by the worker owner only), both fields in the
+session object and `session.summary`, the header mark, the menu switch and the form field
+with a one-line confirmation for Auto. §7: `hqc_spawn` starts sessions in `ask` and has no
+argument for the mode; a peer message does not change it. §8.1: switching a running Claude
+Code process with `control_request set_permission_mode`, verified on 2.1.308 (no restart).
+§10.1: what Auto means for requests next to `auto_approve`. §14: `[permissions] allow_auto`;
+`mode` is the default of sessions that do not ask. §2.1: the hub cannot run Auto where
+`allow_auto = false`. Migration `0021`. Notes: `docs/notes/t38-questions.md`.
 
 ### 0.40 → 0.41 (T37, requests where the user is looking)
 §6: `GET /api/requests` (every open request of the user with its session, worker, event and the

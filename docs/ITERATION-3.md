@@ -155,7 +155,7 @@ Acceptance: the common checks; hub tests: the owner's list, another owner's requ
 listed, the transitive waits, live changes; client tests: the card in the asking session, the
 list, answering from both.
 
-## T38. A permission mode per session (after T37)
+## T38. A permission mode per session (done, SPEC 0.42)
 
 Sections: §2.1, §3 Session, §6, §8.1, §10.1, §14. Agents that write Python, grep, route boards
 and convert files ask all the time, and "Always allow" saves the exact command, which rarely
@@ -172,4 +172,6 @@ Acceptance: the common checks; worker tests: the flag in the CLI arguments or th
 switch, `allow_auto = false`, the reported mode; hub tests: create with a mode, switch, spawn
 without inheritance, another owner; client tests: the switch and the mark; a live run that
 switches a running session and sees `permissionMode` change.
+Done: the runtime switch is Claude Code's `set_permission_mode` control request (verified on
+2.1.308, no restart); decisions and open questions in `docs/notes/t38-questions.md`.
 

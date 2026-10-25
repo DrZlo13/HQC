@@ -336,6 +336,43 @@ Not verified: what the CLI considers an invalid rule and what happens then. The 
 too, one bad rule would silently drop the whole deny list, which is why the worker validates
 the rules when it reads `worker.toml` (SPEC §14).
 
+## Switching the permission mode of a running process, 2.1.308 (T38)
+
+Verified 2026-10-25 on Claude Code **2.1.308** (home-mac), `claude-haiku-5-5`, `--max-turns 2`.
+Before running, the CLI's code was read: the stream-json input loop handles `control_request`
+`subtype: "set_permission_mode"` (`{mode, ultraplan?, from_settings?}`), refuses an unknown mode
+with `Cannot set permission mode: must be one of …` (`invalid_mode`), checks the availability of
+`auto` before switching to it, and answers `{mode}`.
+
+Run 1, `tools/spike/driver.py --mode-then` (new in T38) in `tmp/spike-t38-switch`, one process,
+flags as the worker's (`--permission-prompt-tool stdio --setting-sources user,local
+--strict-mcp-config --permission-mode manual`), deny to every request; fixture
+`permission-mode-switch-2.1.308`:
+
+| step | stdout |
+|---|---|
+| start, `Reply with exactly: ONE` | `system/init` `"permissionMode": "default"`, reply ONE |
+| `{"type":"control_request","request_id":"mode-1","request":{"subtype":"set_permission_mode","mode":"auto"}}` | `{"type":"control_response","response":{"subtype":"success","request_id":"mode-1","response":{"mode":"auto"}}}`, then `{"type":"system","subtype":"status","status":null,"permissionMode":"auto"}` |
+| `Run the shell command: touch t38-b …` | `system/init` `"permissionMode": "auto"`; no `can_use_tool`; `tool_result_meta` `{"decision":"accept","source":"config","reason_type":"mode"}`; the file exists |
+| `set_permission_mode` `"default"` | `control_response` `{"mode":"default"}`, `system/status` `"permissionMode":"default"` |
+| `Run the shell command: touch t38-c …` | `system/init` `"default"`; `can_use_tool` for Bash, denied |
+
+Run 2, the live test `live_permission_mode_switch` (`crates/hqc-worker/tests/claude_live.rs`)
+through the adapter, ask → auto → ask between turns of one process, the ask mode `manual` as
+`claude --help` gives it: the adapter reported `permission_mode:ask` (init), `auto` and `ask`
+(the answers and `system/status`), the `touch` ran without a request in auto and got an
+`approval.request` after the switch back. 8 s.
+
+Conclusions:
+- The switch works in `-p` stream-json and needs no restart; the CLI confirms it three ways
+  (the response, `system/status`, the next `system/init`).
+- `default` is accepted for the ask mode even when the process was started with `manual`
+  (shown as `default` anyway).
+- A switch in the middle of a turn was not run: the CLI reads control requests while a turn
+  runs (`interrupt` works that way), and the mode is read at each permission check, so the
+  worker sends it at once; a `can_use_tool` already open stays open.
+- The `--settings` deny list is not touched by a switch (it is a settings source, not the mode).
+
 ## Session title with a one-shot `claude -p`, 2.1.308 (T24)
 
 This is how the worker runs `title.request` (SPEC §3 Session, §8.1; code: `hqc_worker::title`).

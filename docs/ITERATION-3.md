@@ -155,3 +155,21 @@ Acceptance: the common checks; hub tests: the owner's list, another owner's requ
 listed, the transitive waits, live changes; client tests: the card in the asking session, the
 list, answering from both.
 
+## T38. A permission mode per session (after T37)
+
+Sections: §2.1, §3 Session, §6, §8.1, §10.1, §14. Agents that write Python, grep, route boards
+and convert files ask all the time, and "Always allow" saves the exact command, which rarely
+matches again.
+- A session's mode is "Ask" or "Auto" (Claude Code's classifier, `--permission-mode auto`),
+  chosen when the session is created and switchable from its menu at any time; the worker's
+  `deny` stays stronger in both. The default comes from `[permissions] mode` of the worker.
+- Worker: `[permissions] allow_auto` (default `true`) — with `false` the worker refuses "Auto"
+  from hqc and runs the session in "Ask"; the worker reports the mode it actually runs.
+- Sessions started with `hqc_spawn` and sessions a peer message wakes do not inherit "Auto";
+  `hqc_spawn` cannot ask for it.
+- The client shows the mode in the session header; "Auto" is visibly marked.
+Acceptance: the common checks; worker tests: the flag in the CLI arguments or the runtime
+switch, `allow_auto = false`, the reported mode; hub tests: create with a mode, switch, spawn
+without inheritance, another owner; client tests: the switch and the mark; a live run that
+switches a running session and sees `permissionMode` change.
+

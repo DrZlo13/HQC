@@ -51,9 +51,8 @@ A version that silently ignored the request would look the same.
 - **`hqc_spawn`** stores `permission_mode: ask` explicitly (not null), so a worker with
   `mode = "auto"` does not run spawned sessions in auto either. Its arguments are
   `deny_unknown_fields`, so `permission_mode` in a call is `invalid_args`.
-- **Peer messages** never touch the mode. A session in auto that receives an `hqc_send`/
-  `hqc_ask` from another agent runs that turn in auto: the mode belongs to the session, not to
-  the input (as the task says). See question 1.
+- **Peer messages** never touch the mode. Since T39 the turn they start is capped instead:
+  it runs in auto only if every session up the chain does (`docs/notes/t39-questions.md`).
 - **`auto_approve`** is left as it is: in auto no approval reaches the hub, so the two do not
   conflict; `AskUserQuestion` still reaches the user in auto.
 - **The summary** (`session.summary`) carries both fields, so the header follows the worker's
@@ -78,15 +77,12 @@ A version that silently ignored the request would look the same.
 
 ## 4. Not verified / open questions
 
-1. **Auto and agent-to-agent input.** A session in auto runs whatever another of the owner's
-   agents sends it without asking (within `deny`). The task keeps the mode on the session; an
-   option would be to run turns started by a `peer.message` in ask. Question for the owner.
-2. **A switch in the middle of a turn** was not run live (both runs switched between turns).
+1. **A switch in the middle of a turn** was not run live (both runs switched between turns).
    The CLI's input loop handles control requests during a turn (`interrupt` relies on it), so
    it is expected to work.
-3. **`--restricted` with `--permission-mode auto`** (T12's open point) is still not run; a
+2. **`--restricted` with `--permission-mode auto`** (T12's open point) is still not run; a
    session without a workspace cannot be created through the API yet.
-4. **Showing the worker's default before the first start** would need `[permissions]` in
+3. **Showing the worker's default before the first start** would need `[permissions]` in
    `hello` (T12 left it out). Not added: no screen needs it yet beyond this header.
-5. **An audit line** in the feed ("switched to Auto by …") was not added; the header shows the
+4. **An audit line** in the feed ("switched to Auto by …") was not added; the header shows the
    current mode. With shared projects (§11) a collaborator may want to see who switched it.

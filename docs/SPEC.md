@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.42, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.43, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -100,7 +100,12 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   open asks, peer messages per session and minute and per chain, spawned sessions, schedules
   and their runs, searches, the bytes a worker uploads. Chains (§7.1) bound loops between
   agents; a schedule an agent creates continues its chain, so an agent cannot keep itself
-  running by scheduling its own next turn.
+  running by scheduling its own next turn. A message cannot raise permissions (since 0.43,
+  T39; §7.1): a turn an agent starts in another session (a peer message, the prompt of
+  `hqc_spawn`, a run of its schedule) runs in `auto` only if that session and every session
+  up the chain run in `auto`, so a session in `ask` gets no work done without asking through
+  one in `auto`. The hub computes the cap and the worker applies it; a compromised hub could
+  lift it, as it can answer requests itself (above).
 - A worker is trusted for its own sessions only (§5.2, §20): it writes their agent events and
   mirrored records, but no event that only the hub writes, nothing in another worker's
   sessions, and no `chain` or `delivery` (since 0.39: the hub drops them from a worker's
@@ -199,7 +204,10 @@ cleared when that session is deleted) and `spawn_chain_id` (nullable: the chain 
 `permission_mode` (nullable `ask` | `auto`; since 0.42, T38: the mode hqc asks the worker to
 run the agent in, chosen on creation and switched with `PATCH`; null — the worker's
 `[permissions] mode`, §14) and `effective_permission_mode` (nullable: the mode the worker last
-reported the agent runs in, `session.state.permission_mode`, §5.4; what the client shows). In
+reported the agent runs in, `session.state.permission_mode`, §5.4; what the client shows),
+`permission_capped_by` (nullable; since 0.43, T39: while the worker runs the current turn in
+`ask` under its input's cap, §7.1, the address of the session up the chain whose `ask` set it,
+from `session.state.capped_input`, §5.4). In
 `ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
 classifier decides and never asks (§8.1); the worker's `deny` stops a call in both. `state` and
 `queue_len` (§17.1) are **not stored**; the hub computes them when serving. In the first version
@@ -252,8 +260,8 @@ blocks, block 0 gets v5 of `uuid` and block `i > 0` gets v5 of the string `"<uui
 in the same namespace; the rule is mandatory for all three sources (§9.2);
 for everything else — v7 from the sender), `seq` (assigned by the hub, monotonic within the
 session), `ts`, `author` (`{kind: user|agent, id}` or `{kind: system}` without `id`; for an
-agent `id` = its `session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops}` for
-agent→agent chains, otherwise null), `client_op_id` (echoed back to the client), `delivery` and
+agent `id` = its `session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops,
+permission_cap?, capped_by?}` for agent→agent chains, otherwise null; the cap since 0.43, §7.1), `client_op_id` (echoed back to the client), `delivery` and
 `delivered_at` — two flat event fields, only on `user.message` and `peer.message`:
 `delivery` ∈ `pending | delivered | failed`, `delivered_at` — the delivery time.
 
@@ -634,6 +642,20 @@ MCP calls (worker → hub → worker):
   `send` messages (§7.1). `peer?` {from, mode, request_id?} (since 0.35) — only for a
   `peer.message`: the sender's address, `send`/`ask` and the ask's `request_id`, from which
   the worker writes the header (§7.1); `text` is the message's text without it.
+  `permission_cap?` (since 0.43, T39) — `ask` | `auto`, the cap of the input's chain (§7.1): with
+  `ask`, the worker runs this input's turn in `ask` whatever the session's mode. It only ever
+  lowers: a session in `ask` stays in `ask` under an `auto` cap, and the worker's own rules
+  (`allow_auto`, `deny`) are untouched. Before the runtime gets the input, a running process
+  in `auto` is switched to `ask` and the input waits for the runtime's confirmation (Claude
+  Code: the answer to `set_permission_mode`, §8.1); with no confirmation in 10 s, or a runtime
+  that cannot switch, the process is restarted in `ask` (resuming its transcript). A process
+  started for a capped input starts in `ask`. When the turn ends (a final answer, `stop`), the
+  session's own mode is asked for again unless the next queued input is capped too; a turn
+  lost with its process leaves nothing to undo, and the next process starts in the mode of the
+  input it runs. A switch of the session's mode (`session.permission_mode`, or a
+  `session.start` for a running agent) during a capped turn changes the session's mode at once
+  but reaches the runtime when the capped turn ends. Absent: no cap (a person's input, a run of
+  a person's schedule, a message from before 0.43).
 - `session.stop` {session_id} — interrupt the current turn.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
@@ -740,6 +762,12 @@ MCP calls (worker → hub → worker):
   `permissionMode` of `system/init` and `system/status`, §8.1); absent — not known yet;
   repeated in every following `session.state` like `title`. The hub stores it as the session's
   `effective_permission_mode` (§3).
+  `capped_input` (since 0.43, T39) — the `event_id` of the input whose `ask` cap the current turn
+  runs under while the session's own mode is `auto` (`permission_mode` is `ask` meanwhile);
+  absent — no cap holds the session down now. Unlike `title`, absence means none: every report
+  says it. The hub stores the `capped_by` of that input's chain as the session's
+  `permission_capped_by` (§3) and clears it on a report without the field and on a worker
+  restart.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — events
   from the mirror (§9.1, §9.2), through the outbox; the answer is `ack {event_id, seq}` as for
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
@@ -933,12 +961,15 @@ Session object (`GET /api/sessions/{id}`, list, create, `PATCH`, `archive`):
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
-updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?}`.
+updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?,
+permission_capped_by?}`.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header: `effective_permission_mode`, else
 `permission_mode`; "Auto" as a marked badge, "Ask" as plain text, "Ask (Auto asked)" while
 the session asked for `auto` but its worker runs `ask` (not restarted yet, or `allow_auto =
-false`), nothing while both are absent. The session's "More" menu has "Switch to Auto" /
+false`), nothing while both are absent; since 0.43 (T39), while `permission_capped_by` is set,
+"Ask (asked by <address>) · Auto after this turn": the turn runs in Ask under the cap, the
+session's own Auto comes back when it ends. The session's "More" menu has "Switch to Auto" /
 "Switch to Ask"; the new-session form has "Permissions": the worker's default, Ask or Auto.
 Going to Ask asks nothing; going to Auto asks one line: "Switch to Auto? Claude Code then runs
 tool calls without asking; the worker's deny list is the only limit." `spawned_by` (since 0.37, T34) — `{session_id, address}`
@@ -981,8 +1012,9 @@ newer copy).
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
-  permission_mode?, effective_permission_mode?}` (the same as in the session object; the modes
-  since 0.42, so the header follows a switch the worker confirms); `{type: requests, requests[]}` (since 0.41, T37,
+  permission_mode?, effective_permission_mode?, permission_capped_by?}` (the same as in the
+  session object; the modes since 0.42, so the header follows a switch the worker confirms, the
+  cap since 0.43); `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -1097,7 +1129,8 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `permission_mode: ask`, whatever mode the caller runs in or the worker's default is: an
   agent never starts a session in `auto`, and there is no argument for it (an unknown
   argument is `invalid_args`); the owner may switch it later. A peer message (§7.1) never
-  changes the mode of the session it wakes. `project` — a slug or an id
+  changes the mode of the session it wakes; since 0.43 (T39) the turn it starts runs under the
+  cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
   `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 4 (else
@@ -1255,6 +1288,20 @@ Chains:
   human's. A schedule made by a person (the API) carries none. A chain carries at most 50 peer
   messages in all (§20): `hops` grows only along a path, and one turn could otherwise fan out
   without end.
+- Since 0.43 (T39), a message cannot raise permissions (user decision, 2026-10-25): a turn woken
+  by a peer message (`hqc_ask`, `hqc_send` with `wake_on_send`, the prompt of `hqc_spawn`) or by
+  a run of an agent's schedule runs in `auto` only if the target and every session up the chain
+  run in `auto`; otherwise in `ask`. A turn started by a person's own message runs in the
+  session's mode. The hub keeps this as the chain's `permission_cap` (`ask` | `auto`), set
+  where it sets the chain: the cap of an outgoing message, spawn or schedule is the lower of
+  the calling session's `effective_permission_mode` (what its worker reported, §3; `ask` before
+  any report) and the cap of the input that started the calling turn (a person's input has
+  none). With `ask` the chain also carries `capped_by`, the address of the session that set it:
+  the earliest session of the chain found in `ask` (kept down the chain), for the header. An
+  agent's schedule stores the cap with its chain when it is made, and its runs carry it.
+  `session.input.permission_cap` takes it to the worker, which applies it to that turn only
+  (§5.3); the target's own mode does not enter the cap, since a target in `ask` runs in `ask`
+  anyway. A chain from before 0.43 has no cap.
 - When a limit is exceeded, the tool returns an error (`limit_exceeded`, since 0.35); only a human's turn can continue the
   chain. A deadlock (A waits for B, B waits for A) is resolved by the timeout.
 
@@ -1504,7 +1551,11 @@ request already open stays open); the `--settings` deny list stays in force (it 
 start). The adapter reports `permissionMode` of `system/init`, of `system/status` and of the
 answer to its request as the session's mode (`auto` is `auto`, any other name `ask`) when it
 changes; a refusal (`subtype: error`) is logged and changes nothing, and the next start uses the
-new flag. No restart is needed on 2.1.308.
+new flag. No restart is needed on 2.1.308. Since 0.43 (T39) every success answer to the
+adapter's own request is reported, also of the mode the session already had: a capped input
+(§5.3) waits for that confirmation before it is written to stdin. Verified live on 2.1.308
+(`live_cap`): a process started in `auto` confirmed `default` within milliseconds of the
+request, and the next turn's `touch` was asked about.
 
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
 "interrupt"}` to stdin; the CLI ends the turn with a `result` record with `subtype:
@@ -2011,7 +2062,11 @@ A session in the `auto` permission mode (since 0.42, T38; §3, §8.1) produces n
 the worker's `deny` stops one; `AskUserQuestion` still reaches the user as `clarify.request`.
 Only the worker owner switches a session to `auto` (§6); spawned sessions start in `ask` (§7).
 This is the worker's mode, unlike `auto_approve`, which the hub applies to requests that do
-reach it.
+reach it. A message cannot raise it (since 0.43, T39; §7.1): a turn woken by another agent runs
+in `ask` unless every session up the chain runs in `auto`, so a session in `auto` asks about the
+tool calls of a turn that a session in `ask` started, directly or along a chain; the header
+says so ("Ask (asked by <address>)", §6). Requests of such a turn go to the worker owner as
+always and are answered in the target's feed or from the sessions waiting on it.
 
 With `auto_approve` the hub answers with the first option with `canonical: once`, `by: auto`
 (calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14);
@@ -2460,7 +2515,8 @@ Since 0.38 (T35, `crates/hqc-hub/src/schedules.rs`):
   driven from VS Code takes no input (§6, §9.3): its runs are skipped (`next_run` moves on, a
   warn in the hub's log), not queued.
 - Since 0.39 (T36): a schedule made by an agent (`hqc_schedule`) keeps the chain of its call,
-  and its runs carry it (§7.1). The hub sends at most 60 runs per owner and hour; a run over
+  and its runs carry it (§7.1); since 0.43 (T39) with the chain's permission cap, fixed when
+  the schedule is made: a run of a schedule made by a session in `ask` runs in `ask` (§5.3). The hub sends at most 60 runs per owner and hour; a run over
   that is skipped like a run of a target that takes no input (a warn, `next_run` moves on). The
   count of schedules that may still run and the insert are made under a per-owner lock.
 - The hub's clock is injectable for tests (`AppState::clock`).
@@ -2506,7 +2562,8 @@ Input from the input queue (§7.1) that arrives during a turn waits for the fina
 and starts the next turn; one turn per item, in `seq` order. The
 "interrupt and send" button does `session.stop` and then the input. For runtimes with `steer`
 (Hermes) a "steer" button is available: `session.steer` without interrupting. Two users
-with `write` share the same queue.
+with `write` share the same queue. Each turn runs in its own input's mode (since 0.43, T39):
+a person's input queued behind a turn capped to `ask` runs in the session's mode (§5.3).
 
 ### 17.3 Processes
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
@@ -2750,6 +2807,20 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.42 → 0.43 (T39, a message cannot raise permissions)
+§7.1: the chain carries a permission cap (`permission_cap`, `capped_by`): a turn woken by a
+peer message, the prompt of `hqc_spawn` or a run of an agent's schedule runs in `auto` only if
+the target and every session up the chain run in `auto`; the cap is the lower of the sender's
+reported mode and the cap of the sender's turn. §3: the cap in `Event.chain`, the session's
+`permission_capped_by`. §5.3: `session.input.permission_cap?` and how the worker applies it
+(down only, before the runtime gets the input, waiting for the runtime's confirmation or
+restarting in `ask`; the session's own mode after the turn). §5.4:
+`session.state.capped_input?`. §6: `permission_capped_by?` in the session object and the
+summary, "Ask (asked by …)" in the header. §7: a spawned session's first turn is capped too.
+§8.1: every confirmation of the adapter's switch is reported. §10.1, §16, §17.2, §2.1: the
+rule where requests, schedules and the input queue meet it. Migration `0022`. Notes:
+`docs/notes/t39-questions.md`; T38's open question 1 is answered by it.
 
 ### 0.41 → 0.42 (T38, a permission mode per session)
 §3 Session: `permission_mode` (what hqc asks for, null — the worker's default) and

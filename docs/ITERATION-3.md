@@ -175,7 +175,7 @@ switches a running session and sees `permissionMode` change.
 Done: the runtime switch is Claude Code's `set_permission_mode` control request (verified on
 2.1.308, no restart); decisions and open questions in `docs/notes/t38-questions.md`.
 
-## T39. A message cannot raise permissions (after T38)
+## T39. A message cannot raise permissions (done, SPEC 0.43)
 
 Sections: §7.1, §10.1, §16, §17.2. After T38 a turn woken by another session's message ran in
 the target's mode, so a session in "Ask" could have work done without asking through a session
@@ -195,4 +195,8 @@ Acceptance: the common checks; hub tests for the four combinations (Auto/Ask sen
 a three-session chain with "Ask" in the middle, an agent's schedule; worker tests: the switch
 down and back, a user input queued after it, the cap never raising; a live run where A in "Ask"
 asks B in "Auto" and B's command is asked about.
+Done: the cap is a field of the chain (`permission_cap`, `capped_by`); the worker waits for the
+runtime's confirmation of Ask before it hands over a capped input, or restarts the process in
+Ask; the live run (`live_cap`, 2.1.308) saw B's `touch` asked about. Decisions and open
+questions in `docs/notes/t39-questions.md`.
 

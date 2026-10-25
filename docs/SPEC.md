@@ -1213,9 +1213,8 @@ Chains:
   (`Adapter::pid`; a hello waits up to 10 s for it while the agent starts; an adapter that
   reports no process gets no MCP server). The token is on the agent's command line, which every
   process of the OS user can read; another session's agent that uses it is refused (T30
-  question 2). **[verify]** that Claude Code starts its stdio MCP servers inside its own
-  process tree (the MCP SDK's stdio transport spawns them as children; no live run was made in
-  T36). It checks the token again on every call (the agent may have stopped since), and sends
+  question 2). Claude Code starts its stdio MCP servers inside its own process tree
+  (checked on 2.1.308 on 2026-10-25: `live_mcp` and `live_peers` pass with the check on). It checks the token again on every call (the agent may have stopped since), and sends
   `mcp.call` with the session's latest token from the hub (§5.2): an agent that keeps running
   across a reconnect's `session.start` keeps its MCP process and its token. When the agent
   stops, its open calls fail with `unavailable`.
@@ -2629,7 +2628,7 @@ agent's process tree, a worker trusted for its own sessions only (no `chain`/`de
 fields reduced to one line without `[`, `]`, `|`; a resent input keeps the `peer_prefix` of its
 first send (migration `0019`, `input_prefix`); an ask fails at once when its target's turn is
 lost; the chain of a call from `turn_input`; an agent's schedule continues its chain; 50 peer
-messages per chain. §7.2: the process-ancestry check **[verify]**. §15, §16: search and
+messages per chain. §7.2: the process-ancestry check (verified live on 2.1.308 after the merge). §15, §16: search and
 scheduled-run caps, per-owner locks on the counted creations. §20: the new rows. Notes:
 `docs/notes/t36-questions.md`.
 

@@ -1,8 +1,10 @@
 //! T30 (SPEC §5.2, §7.2): the hqc MCP server `hqc-worker mcp` driven over stdio by a scripted
 //! runtime, the daemon's socket and its token check, `mcp.call` / `mcp.result` / `mcp.cancel`
 //! with a fake hub. T31 (SPEC §7, §12): `hqc_attach` reads and uploads the file on the worker
-//! before its `mcp.call`. The worker runs in process with the fake adapter; the MCP server is the
-//! real binary.
+//! before its `mcp.call`. T36 (SPEC §2.1, §7.1, §7.2): a token used from outside the agent's
+//! process tree is refused; calls carry the input of their turn. The worker runs in process with
+//! the fake adapter; the MCP server is the real binary (a child of the test process, which the
+//! fake adapter reports as the agent).
 
 mod common;
 
@@ -10,7 +12,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use common::*;
-use hqc_worker::adapter::fake::FakeAdapters;
+use hqc_worker::adapter::fake::{FakeAdapters, FakeCall};
 use hqc_worker::outbox::{Outbox, FRAME_MCP_CALL};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -601,5 +603,95 @@ async fn a_call_cancelled_during_its_upload_is_not_sent() {
             "{ty}"
         );
     }
+    w.stop().await;
+}
+
+/// T30 question 2 (SPEC §2.1, §7.2): another session's agent on the same worker can read a
+/// session's token from its command line, but its MCP server does not descend from that
+/// session's agent process, so the daemon refuses it before any call.
+#[tokio::test]
+async fn a_token_used_outside_the_agents_process_tree_is_refused() {
+    let env = Env::new();
+    let mut hub = FakeHub::start().await;
+    let adapters = FakeAdapters::new();
+    // The session's "agent" is a process the MCP server below is not a child of.
+    let mut other = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    adapters.set_pid(Some(other.id()));
+    let mut w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    w.wait_status(|s| matches!(s, hqc_worker::connection::Status::Connected { .. }))
+        .await;
+    start_session(&mut c, &env, Uuid::now_v7(), TOKEN_A).await;
+
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+    rt.call(2, json!({})).await;
+    let r = rt.recv().await;
+    assert_eq!(
+        result_text(&r),
+        (
+            true,
+            "unauthorized: this process is not part of the session's agent".into()
+        )
+    );
+    assert!(c
+        .maybe("mcp.call", Duration::from_millis(300))
+        .await
+        .is_none());
+
+    // An agent with no known process gets no MCP server either.
+    adapters.set_pid(None);
+    start_session(&mut c, &env, Uuid::now_v7(), TOKEN_B).await;
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_B));
+    rt.initialize().await;
+    rt.call(2, json!({})).await;
+    let (is_err, text) = result_text(&rt.recv().await);
+    assert!(is_err && text.starts_with("unauthorized"), "{text}");
+    other.kill().unwrap();
+    other.wait().unwrap();
+    w.stop().await;
+}
+
+/// T32's chain race (SPEC §7.1): a call names the input of the turn it belongs to, so the hub
+/// need not guess the turn from the last input it saw acknowledged.
+#[tokio::test]
+async fn calls_carry_the_input_of_their_turn() {
+    let env = Env::new();
+    let mut hub = FakeHub::start().await;
+    let adapters = FakeAdapters::new();
+    let mut w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    w.wait_status(|s| matches!(s, hqc_worker::connection::Status::Connected { .. }))
+        .await;
+    let sid = Uuid::now_v7();
+    start_session(&mut c, &env, sid, TOKEN_A).await;
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+
+    // Before any input: no turn to name.
+    rt.call(2, json!({})).await;
+    let f = c.expect("mcp.call").await;
+    assert!(f["payload"].get("turn_input").is_none(), "{f}");
+
+    let eid = Uuid::now_v7();
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": eid, "text": "go", "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    adapters
+        .wait_for("input", |c| {
+            c.iter()
+                .any(|x| matches!(x, FakeCall::Input { event_id, .. } if *event_id == eid))
+        })
+        .await;
+    rt.call(3, json!({})).await;
+    let f = c.expect("mcp.call").await;
+    assert_eq!(f["payload"]["turn_input"], eid.to_string(), "{f}");
     w.stop().await;
 }

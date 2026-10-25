@@ -151,6 +151,12 @@ pub struct McpCall {
     pub tool: String,
     /// The tool's arguments as the agent gave them, at most [`crate::mcp::MAX_ARGS`] bytes.
     pub args: serde_json::Value,
+    /// The `event_id` of the input whose turn made the call, as the worker handed it to the
+    /// runtime (since SPEC 0.39). The hub takes the call's chain from it when it is the
+    /// session's input not older than its last delivered one (an `ack` lost in a reconnect
+    /// leaves the hub a turn behind, SPEC §7.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_input: Option<Uuid>,
 }
 
 /// `mcp.cancel {request_id, reason}` (SPEC §5.2, §7.2): one of [`crate::mcp::cancel_reason`].

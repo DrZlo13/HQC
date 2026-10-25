@@ -10,13 +10,17 @@
 //!   queue of the new one, so it starts its first turn and the new agent knows whom to
 //!   answer with `hqc_send`. The chain of the caller's turn goes on (`hops` + 1).
 //! - The result is `{address}` at once; the turn runs on its own.
-//! - Limits (SPEC §20): [`MAX_PER_CHAIN`] sessions spawned in one chain, [`MAX_PER_HOUR`]
-//!   per owner in the last hour; over them `limit_exceeded`.
+//! - Limits (SPEC §20, `Limits::spawns_per_chain`, `Limits::spawns_per_hour`): sessions
+//!   spawned in one chain and per owner in the last hour; over them `limit_exceeded`. The
+//!   prompt counts as a peer message ([`peers::admit`]). The count and the creation hold the
+//!   owner's lock ([`AppState::owner_lock`]), so parallel calls cannot pass the check
+//!   together.
 //! - Once per `request_id` (SPEC §5.2): the session's id and the message's `event_id` are
 //!   derived from the call, so a repeat finds both and answers the same address.
 
 use hqc_proto::{
     api::CreateSessionRequest,
+    event::Chain,
     frame::{McpCall, McpError},
     mcp::error_code,
 };
@@ -34,11 +38,6 @@ use crate::{
     mcp::{args, internal, once_id, owner_project, Answer},
     peers,
 };
-
-/// Sessions spawned in one chain (SPEC §7.1, §20) ...
-pub const MAX_PER_CHAIN: i64 = 5;
-/// ... and per owner in the last hour.
-pub const MAX_PER_HOUR: i64 = 20;
 
 fn err(code: &str, message: impl Into<String>) -> McpError {
     McpError::new(code, message)
@@ -60,7 +59,7 @@ pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<A
     if a.prompt.trim().is_empty() {
         return Err(err(error_code::INVALID_ARGS, "prompt is empty"));
     }
-    let turn = peers::turn_chain(app, caller.id).await.map_err(internal)?;
+    let turn = peers::call_chain(app, caller, c).await.map_err(internal)?;
     let chain = peers::next_chain(turn, false)?;
     let id = once_id(hqc_proto::mcp::SPAWN, caller.id, &c.request_id);
     let s = match db::session(&app.db, id).await.map_err(internal)? {
@@ -68,7 +67,7 @@ pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<A
         // first call got that far.
         Some(s) if s.owner_id == caller.owner_id => s,
         Some(_) => return Err(internal(format!("session {id} is not the caller's"))),
-        None => create(app, caller, id, chain.chain_id, &a).await?,
+        None => create(app, caller, id, &chain, &a).await?,
     };
     let from = peers::address(app, caller).await.map_err(internal)?;
     events::store_peer_message(
@@ -88,14 +87,15 @@ pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<A
     Ok(Answer::Now(json!({ "address": address })))
 }
 
-/// Checks the arguments and the limits, then creates the session `id` in chain `chain_id`.
+/// Checks the arguments and the limits, then creates the session `id` in `chain`.
 async fn create(
     app: &AppState,
     caller: &SessionRow,
     id: Uuid,
-    chain_id: Uuid,
+    chain: &Chain,
     a: &SpawnArgs,
 ) -> Result<SessionRow, McpError> {
+    let chain_id = chain.chain_id;
     if let Some(r) = a.runtime.as_deref().filter(|r| *r != "claude_code") {
         return Err(err(
             error_code::INVALID_ARGS,
@@ -111,7 +111,14 @@ async fn create(
         Some(w) => Some(workspace(app, &project, w).await?),
         None => None,
     };
+    // Held until the session is created: the next spawn of the owner counts it.
+    let _lock = app.owner_lock("spawn", caller.owner_id).await;
+    if let Some(s) = db::session(&app.db, id).await.map_err(internal)? {
+        // The same call ran meanwhile (a repeat that came in parallel).
+        return Ok(s);
+    }
     limits(app, caller.owner_id, chain_id).await?;
+    peers::admit(app, caller, chain).await?;
     let req = CreateSessionRequest {
         workspace_id,
         model: a.model.clone().or_else(|| caller.model.clone()),
@@ -124,13 +131,7 @@ async fn create(
     };
     match api::new_session(app, caller.owner_id, &project, &req, Some(spawn)).await {
         Ok(s) => Ok(s),
-        Err(e) => {
-            // The same call running twice at once: the other one created it.
-            if let Some(s) = db::session(&app.db, id).await.map_err(internal)? {
-                return Ok(s);
-            }
-            Err(api_error(e))
-        }
+        Err(e) => Err(api_error(e)),
     }
 }
 
@@ -153,6 +154,10 @@ async fn workspace(app: &AppState, project: &db::ProjectRow, w: &str) -> Result<
 
 /// The spawn limits of SPEC §20.
 async fn limits(app: &AppState, owner: Uuid, chain_id: Uuid) -> Result<(), McpError> {
+    let (per_chain, per_hour) = (
+        app.config.limits.spawns_per_chain,
+        app.config.limits.spawns_per_hour,
+    );
     let (in_chain, last_hour): (i64, i64) = sqlx::query_as(
         "SELECT count(*) FILTER (WHERE spawn_chain_id = $2),
                 count(*) FILTER (WHERE created_at > now() - interval '1 hour')
@@ -163,18 +168,16 @@ async fn limits(app: &AppState, owner: Uuid, chain_id: Uuid) -> Result<(), McpEr
     .fetch_one(&app.db)
     .await
     .map_err(internal)?;
-    if in_chain >= MAX_PER_CHAIN {
+    if in_chain >= per_chain {
         return Err(err(
             error_code::LIMIT_EXCEEDED,
-            format!(
-                "one chain spawns at most {MAX_PER_CHAIN} sessions; a person has to continue it"
-            ),
+            format!("one chain spawns at most {per_chain} sessions; a person has to continue it"),
         ));
     }
-    if last_hour >= MAX_PER_HOUR {
+    if last_hour >= per_hour {
         return Err(err(
             error_code::LIMIT_EXCEEDED,
-            format!("at most {MAX_PER_HOUR} sessions are spawned per hour; try again later"),
+            format!("at most {per_hour} sessions are spawned per hour; try again later"),
         ));
     }
     Ok(())

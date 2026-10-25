@@ -15,11 +15,17 @@ use tokio::sync::{broadcast, Semaphore};
 use uuid::Uuid;
 
 use crate::{
-    auth::Auth, config::Config, push::PushSender, security::RateLimiter, worker_ws::WorkerConn,
+    auth::Auth,
+    config::Config,
+    push::PushSender,
+    security::{Budget, RateLimiter},
+    worker_ws::WorkerConn,
 };
 
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
+
+type OwnerLock = Arc<tokio::sync::Mutex<()>>;
 
 pub struct Inner {
     pub db: PgPool,
@@ -44,6 +50,13 @@ pub struct Inner {
     pub titling: Mutex<std::collections::HashSet<Uuid>>,
     /// The clock of the hub cron ([`crate::schedules`]); tests set it.
     pub clock: crate::schedules::Clock,
+    /// The caps of the MCP surface and of worker uploads (SPEC §20).
+    pub budget: Budget,
+    /// Searches running at once (SPEC §15, §20).
+    pub searches: Arc<Semaphore>,
+    /// `(what, owner)` -> a lock held while a cap is counted and the row it counts is
+    /// written ([`AppState::owner_lock`]).
+    owner_locks: Mutex<HashMap<(&'static str, Uuid), OwnerLock>>,
 }
 
 impl Deref for AppState {
@@ -91,8 +104,29 @@ impl AppState {
             worker_pushes: Mutex::new(HashMap::new()),
             titling: Mutex::new(Default::default()),
             clock: Default::default(),
+            budget: Budget::default(),
+            searches: Arc::new(Semaphore::new(config.limits.search_concurrency)),
+            owner_locks: Mutex::new(HashMap::new()),
             config,
         }))
+    }
+
+    /// Serializes the creations of `what` (spawned sessions, schedules) of one owner, so that
+    /// a cap counted before an insert holds for parallel calls (SPEC §20). The hub is one
+    /// process (SPEC §2), so a lock in memory is enough.
+    pub async fn owner_lock(
+        &self,
+        what: &'static str,
+        owner: Uuid,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let m = self
+            .owner_locks
+            .lock()
+            .unwrap()
+            .entry((what, owner))
+            .or_default()
+            .clone();
+        m.lock_owned().await
     }
 
     pub fn notify(&self, n: Notice) {

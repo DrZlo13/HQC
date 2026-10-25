@@ -178,6 +178,32 @@ async fn worker_cannot_write_hub_events() {
     hub.finish().await;
 }
 
+/// `chain` and `delivery` belong to inputs, which only the hub writes (T36): a worker's
+/// event keeps neither, so it can reset no chain limit and queue no input.
+#[tokio::test]
+async fn worker_events_carry_no_chain_or_delivery() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("forged").await;
+    ack_start(&mut w, &sid).await;
+    let mut ev = agent_event(&sid, "agent.message", json!({"text": "hi", "final": false}));
+    ev["chain"] = json!({"chain_id": uuid::Uuid::now_v7(), "depth": 0, "hops": 0});
+    ev["delivery"] = json!("delivered");
+    ev["delivered_at"] = json!("2026-10-22T10:00:05Z");
+    let event_id: uuid::Uuid = ev["event_id"].as_str().unwrap().parse().unwrap();
+    let reply = reply_to(&mut w, ev).await;
+    assert_eq!(reply["type"], "ack", "{reply}");
+    let (chain, delivery): (Option<Value>, Option<String>) =
+        sqlx::query_as("SELECT chain, delivery FROM events WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_one(&hub.app.db)
+            .await
+            .unwrap();
+    assert_eq!((chain, delivery), (None, None));
+    hub.finish().await;
+}
+
 /// The service session takes only `system worker_log` from its worker (SPEC §10.2).
 #[tokio::test]
 async fn service_session_takes_only_worker_log() {
@@ -353,6 +379,51 @@ async fn mirror_checks_transcript_id_and_cwd() {
     let ack = mirror(&mut w, &ok, MIRROR_WS).await;
     assert!(ack["seq"].as_u64().is_some(), "{ack}");
     assert_eq!(project_sessions(&hub, &pid).await, 1);
+    hub.finish().await;
+}
+
+/// A mirrored record is history (T36): a typed prompt is `delivered`, nothing is `pending`
+/// input for the hub to send to an agent, whatever the worker says.
+#[tokio::test]
+async fn mirrored_events_are_never_pending_input() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, MIRROR_ROOT, hub.boot_id).await;
+    mirrored_project(&hub, &mut w).await;
+    let runtime = uuid::Uuid::new_v4().to_string();
+    let mut stored = Vec::new();
+    for (ty, payload) in [
+        (
+            "user.message",
+            json!({"text": "typed in VS Code", "artifact_ids": []}),
+        ),
+        ("agent.message", json!({"text": "hi", "final": false})),
+    ] {
+        let event_id = uuid::Uuid::new_v4();
+        let event = json!({
+            "session_id": uuid::Uuid::nil(), "event_id": event_id,
+            "ts": "2026-10-23T00:10:15.931Z",
+            "author": {"kind": "agent", "id": uuid::Uuid::nil()},
+            "type": ty, "payload": payload, "delivery": "pending",
+        });
+        let p = json!({"workspace_path": MIRROR_WS, "runtime_session_id": runtime,
+                       "cwd": MIRROR_WS, "event": event, "recent": false});
+        let id = w.send("mirror.event", p).await;
+        let reply = w.recv().await;
+        assert_eq!(
+            (reply["id"].as_str(), reply["type"].as_str()),
+            (Some(id.as_str()), Some("ack")),
+            "{reply}"
+        );
+        stored.push(event_id);
+    }
+    let d: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT delivery FROM events WHERE event_id = ANY($1) ORDER BY seq")
+            .bind(&stored)
+            .fetch_all(&hub.app.db)
+            .await
+            .unwrap();
+    assert_eq!(d, [Some("delivered".to_string()), None]);
     hub.finish().await;
 }
 

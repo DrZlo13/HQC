@@ -897,7 +897,10 @@ pub async fn for_worker(
 /// must be one this worker runs (else `404`); `x-hqc-artifact-name` (percent-encoded),
 /// `x-hqc-artifact-kind?` and `Content-Type` work as in the client's upload. The owner is the
 /// session's owner; dedup and `kind` as for `POST /api/artifacts`. The artifact is linked to
-/// the session as an input's artifacts are, which is what `hqc_attach` checks.
+/// the session as an input's artifacts are, which is what `hqc_attach` checks. A worker
+/// uploads at most `Limits::worker_upload_bytes_per_hour` (SPEC §20): an agent attaching in
+/// a loop must not fill the hub's disk; over it `429 upload_limit`, before the body is read
+/// when `Content-Length` says so.
 pub async fn from_worker(
     State(app): State<AppState>,
     ClientIp(ip): ClientIp,
@@ -911,17 +914,42 @@ pub async fn from_worker(
         .ok_or_else(|| ApiError::BadRequest("x-hqc-session-id: a session id is required".into()))?;
     let s = db::session(&app.db, session_id)
         .await?
-        .filter(|s| s.worker_id == Some(w.id) && !s.system)
+        .filter(|s| s.worker_id == Some(w.id) && !s.system && !s.archived)
         .ok_or(ApiError::NotFound)?;
     let cfg = &app.config.artifacts;
     let announced = text(header::CONTENT_LENGTH.as_str()).and_then(|v| v.parse::<u64>().ok());
     if announced.is_some_and(|n| n > cfg.max_bytes) {
         return Err(too_large(cfg.max_bytes));
     }
+    let (budget, hour, key) = (
+        app.config.limits.worker_upload_bytes_per_hour,
+        chrono::TimeDelta::hours(1),
+        w.id.to_string(),
+    );
+    let left = app
+        .budget
+        .left(UPLOAD_BYTES, &key, budget, hour, chrono::Utc::now());
+    if left == 0 || announced.is_some_and(|n| n > left) {
+        tracing::warn!(worker_id = %w.id, left, ?announced, "worker upload over the hourly budget refused");
+        return Err(ApiError::Limited(
+            "upload_limit",
+            format!("this worker uploaded its {budget} bytes of the last hour; try later"),
+        ));
+    }
     let name = clean_name(&pct_decode(text("x-hqc-artifact-name").unwrap_or("")));
     let mime = mime_of(text(header::CONTENT_TYPE.as_str()), &name);
     let kind = text("x-hqc-artifact-kind").map(parse_kind).transpose()?;
     let stored = store_body(cfg, body).await?;
+    // Counted once read: a body without `Content-Length` is known only now. The next upload
+    // finds the budget used up.
+    app.budget.spend(
+        UPLOAD_BYTES,
+        &key,
+        stored.size,
+        u64::MAX,
+        hour,
+        chrono::Utc::now(),
+    );
     let (row, created) = save(&app, s.owner_id, stored, name, mime, kind).await?;
     sqlx::query(
         "INSERT INTO artifact_sessions (artifact_id, session_id) VALUES ($1, $2)
@@ -934,6 +962,9 @@ pub async fn from_worker(
     tracing::info!(worker_id = %w.id, session_id = %s.id, artifact_id = %row.id, size = row.size, created, "artifact uploaded by the worker");
     Ok((created_status(created), Json(row.to_api())))
 }
+
+/// [`crate::security::Budget`] bucket of the bytes a worker uploads.
+const UPLOAD_BYTES: &str = "worker_upload_bytes";
 
 /// The artifact was uploaded for `session_id` or given to it in an input.
 pub async fn of_session(db: &PgPool, session_id: Uuid, artifact_id: Uuid) -> sqlx::Result<bool> {

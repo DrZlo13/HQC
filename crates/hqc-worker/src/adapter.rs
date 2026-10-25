@@ -93,6 +93,11 @@ pub trait Adapter: Send {
     async fn stop(&mut self) -> anyhow::Result<()>;
     /// Terminate the process. Returns when it is gone.
     async fn kill(&mut self) -> anyhow::Result<()>;
+    /// The runtime's process while it runs: its MCP server must descend from it (SPEC §7.2).
+    /// `None`: no process is known, and the session's MCP server is refused.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
     /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
     async fn answer_approval(
         &mut self,

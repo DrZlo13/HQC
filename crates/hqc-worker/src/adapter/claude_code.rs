@@ -279,6 +279,8 @@ struct Proc {
     /// Set once `start` has decided; until then the monitor does not report an exit.
     started: watch::Sender<bool>,
     monitor: JoinHandle<()>,
+    /// The CLI's process (SPEC §7.2: the hqc MCP server must descend from it).
+    pid: Option<u32>,
 }
 
 struct Io {
@@ -513,7 +515,8 @@ impl ClaudeCodeAdapter {
             runtime: uuid,
             own: self.opts.own_records.clone(),
         });
-        let live = Live::new(self.opts.own_records.clone(), uuid, spawned.pid);
+        let pid = spawned.pid;
+        let live = Live::new(self.opts.own_records.clone(), uuid, pid);
         let killing = Arc::new(AtomicBool::new(false));
         let (exit_tx, exited) = watch::channel(None);
         let stderr_tail = Arc::new(Mutex::new(String::new()));
@@ -552,6 +555,7 @@ impl ClaudeCodeAdapter {
             exited,
             started,
             monitor,
+            pid,
         };
 
         // Bad flags, an unknown `--resume` id or a logged-out CLI end the process at once.
@@ -677,6 +681,10 @@ impl Adapter for ClaudeCodeAdapter {
             }
         });
         Ok(())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.proc.as_ref().and_then(|p| p.pid)
     }
 
     async fn kill(&mut self) -> anyhow::Result<()> {

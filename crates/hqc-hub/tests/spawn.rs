@@ -312,8 +312,8 @@ async fn spawns_are_limited_per_chain_and_per_hour() {
     let (_, t) = hub.enroll("one").await;
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
     let (a, ta) = started(&hub, &mut w, "Spawner").await;
-    let per_chain = hqc_hub::spawn::MAX_PER_CHAIN;
-    let per_hour = hqc_hub::spawn::MAX_PER_HOUR;
+    let per_chain = hqc_hub::config::Limits::default().spawns_per_chain;
+    let per_hour = hqc_hub::config::Limits::default().spawns_per_hour;
 
     // One human turn is one chain: its spawns count together.
     human_turn(&hub, &mut w, &a).await;

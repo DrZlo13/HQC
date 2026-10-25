@@ -16,7 +16,12 @@
 //!   deleted session takes its schedules with it (`ON DELETE CASCADE`).
 //! - A target that is archived, or driven from VS Code, takes no input (SPEC §6, §9.3): the
 //!   run is skipped.
-//! - Limits (SPEC §20): [`MAX_ACTIVE_PER_OWNER`], [`MIN_INTERVAL`], [`MAX_MESSAGE`].
+//! - Limits (SPEC §20): [`MAX_ACTIVE_PER_OWNER`] (counted and inserted under the owner's
+//!   lock), [`MIN_INTERVAL`], [`MAX_MESSAGE`]; runs sent per owner and hour
+//!   (`Limits::schedule_runs_per_owner_hour`, more are skipped).
+//! - A schedule an agent creates keeps the chain of its call, moved on like a send (SPEC
+//!   §7.1); its runs carry it, so a turn they start continues that chain: an agent cannot
+//!   keep itself running for ever by scheduling its next turn.
 
 use std::{str::FromStr, sync::Mutex, time::Duration};
 
@@ -33,6 +38,7 @@ use croner::{
 };
 use hqc_proto::{
     api::{CreateSchedule, PatchSchedule, Schedule, ScheduleList},
+    event::Chain,
     frame::{McpCall, McpError},
     mcp::error_code,
 };
@@ -130,6 +136,8 @@ fn check_cron(cron: &Cron, tz: Tz, now: DateTime<Utc>) -> Result<DateTime<Utc>, 
 /// What a new schedule asks for, before the checks.
 struct NewSchedule {
     session_id: Uuid,
+    /// The chain of the `hqc_schedule` call; `None` for a person's schedule.
+    chain: Option<Chain>,
     cron: Option<String>,
     at: Option<DateTime<Utc>>,
     timezone: String,
@@ -202,6 +210,10 @@ async fn create(
         }
         _ => return Err(Refused::Invalid("give exactly one of at and cron".into())),
     };
+    let _lock = app.owner_lock("schedule", owner).await;
+    if let Some(row) = row(app, id).await? {
+        return Ok(row);
+    }
     let active: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM scheduled_messages WHERE owner_id = $1 AND next_run IS NOT NULL",
     )
@@ -215,8 +227,8 @@ async fn create(
     }
     sqlx::query(
         "INSERT INTO scheduled_messages
-           (id, owner_id, session_id, cron, at, timezone, message, catch_up, next_run)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING",
+           (id, owner_id, session_id, cron, at, timezone, message, catch_up, next_run, chain)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING",
     )
     .bind(id)
     .bind(owner)
@@ -227,6 +239,7 @@ async fn create(
     .bind(&n.message)
     .bind(n.catch_up)
     .bind(next_run)
+    .bind(n.chain.as_ref().map(serde_json::to_value).transpose()?)
     .execute(&app.db)
     .await?;
     tracing::info!(%id, session_id = %n.session_id, %next_run, "schedule created");
@@ -252,6 +265,8 @@ pub struct ScheduleRow {
     pub last_run: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The chain an agent's schedule carries (SPEC §7.1); `None` for a person's.
+    pub chain: Option<Value>,
 }
 
 impl ScheduleRow {
@@ -314,6 +329,16 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     let a: ScheduleArgs = args(c.args.clone())?;
     let id = crate::mcp::once_id(hqc_proto::mcp::SCHEDULE, caller.id, &c.request_id);
     let existing = row(app, id).await.map_err(internal)?;
+    // The chain moves on as for a send; one at its limit schedules nothing (SPEC §7.1).
+    let chain = match &existing {
+        Some(_) => None,
+        None => {
+            let turn = crate::peers::call_chain(app, caller, c)
+                .await
+                .map_err(internal)?;
+            Some(crate::peers::next_chain(turn, false)?)
+        }
+    };
     let (session_id, to) = match &existing {
         Some(r) => {
             let t = db::session(&app.db, r.session_id)
@@ -355,6 +380,7 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         id,
         NewSchedule {
             session_id,
+            chain,
             cron: a.cron,
             at,
             timezone,
@@ -433,6 +459,7 @@ pub async fn create_api(
         db::new_id(),
         NewSchedule {
             session_id: s.id,
+            chain: None,
             cron: b.cron,
             at: b.at,
             timezone: b.timezone.unwrap_or(user.timezone),
@@ -570,6 +597,15 @@ async fn fire(
     let mut sent = None;
     if missed && !r.catch_up {
         tracing::warn!(%id, %due, "scheduled run missed, skipped");
+    } else if !app.budget.spend(
+        "schedule_runs",
+        &r.owner_id.to_string(),
+        1,
+        app.config.limits.schedule_runs_per_owner_hour as u64,
+        TimeDelta::hours(1),
+        now,
+    ) {
+        tracing::warn!(%id, owner_id = %r.owner_id, %due, "scheduled run skipped: the owner's runs per hour are used up");
     } else {
         sent = send(app, &r, due).await?;
     }
@@ -606,6 +642,7 @@ async fn send(app: &AppState, r: &ScheduleRow, due: DateTime<Utc>) -> anyhow::Re
         "user.message",
         payload,
         Some("pending"),
+        r.chain.clone(),
     )
     .await?;
     if stored.is_some() {
@@ -688,6 +725,29 @@ mod tests {
         assert!(check("0,1 9 * * *").is_err());
         assert!(check("0 0 30 2 *").is_err(), "never runs");
         assert_eq!(check("0 13 * * *").unwrap(), utc("2026-10-25T13:00:00Z"));
+    }
+
+    /// Cron input from an agent (T36): sparse and long patterns are checked in bounded time.
+    #[test]
+    fn hostile_patterns_are_cheap() {
+        let tz = parse_tz("Pacific/Chatham").unwrap();
+        let now = utc("2026-10-25T12:00:00Z");
+        let long = (0..60).map(|m| m.to_string()).collect::<Vec<_>>().join(",");
+        for p in [
+            "0 0 29 2 1".to_string(),
+            "0 0 31 4 *".to_string(),
+            format!("{long} 0 1 1 *"),
+            "59 23 31 12 0".to_string(),
+        ] {
+            let t = std::time::Instant::now();
+            let _ = parse_cron(&p).map(|c| check_cron(&c, tz, now));
+            assert!(
+                t.elapsed() < Duration::from_secs(1),
+                "{p}: {:?}",
+                t.elapsed()
+            );
+        }
+        assert!(parse_cron(&"1,".repeat(30_000)).is_err());
     }
 
     #[test]

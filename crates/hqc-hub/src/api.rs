@@ -898,9 +898,11 @@ pub async fn search(
         cursor: q.cursor.filter(|c| !c.is_empty()),
         limit: q.limit.unwrap_or(crate::search::PAGE),
     };
-    match crate::search::search(&app.db, user.id, &query).await {
+    match crate::search::capped(&app, user.id, &query).await {
         Ok(page) => Ok(Json(page)),
         Err(crate::search::SearchError::Invalid(m)) => Err(ApiError::BadRequest(m)),
+        Err(crate::search::SearchError::Limited(m)) => Err(ApiError::Limited("search_limit", m)),
+        Err(crate::search::SearchError::Busy) => Err(ApiError::Busy),
         Err(crate::search::SearchError::Db(e)) => Err(e.into()),
     }
 }

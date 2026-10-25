@@ -160,6 +160,8 @@ impl ArtifactClient {
             let code = match status.as_u16() {
                 413 | 400 => error_code::INVALID_ARGS,
                 401 | 404 => error_code::UNAUTHORIZED,
+                // The worker's uploads per hour (SPEC §20).
+                429 => error_code::LIMIT_EXCEEDED,
                 _ => error_code::UNAVAILABLE,
             };
             return Err(McpError::new(

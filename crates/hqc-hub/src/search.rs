@@ -10,6 +10,10 @@
 //!   the `simple` configuration does not.
 //! - Order: newest first by `(ts, id)`, paged by a cursor on that pair; a title hit stands at
 //!   the session's creation time.
+//! - Cost (SPEC §20): a 5 s `statement_timeout`; per owner `Limits::searches_per_owner_min`
+//!   searches a minute, `Limits::fuzzy_searches_per_owner_min` of them fuzzy (a fuzzy query on
+//!   common trigrams costs about a second, T33); `Limits::search_concurrency` at once on the
+//!   hub ([`capped`]).
 
 use chrono::{DateTime, Utc};
 use hqc_proto::api::{SearchHit, SearchPage};
@@ -47,8 +51,50 @@ pub struct Query {
 pub enum SearchError {
     #[error("{0}")]
     Invalid(String),
+    /// Over the owner's searches per minute (SPEC §20).
+    #[error("{0}")]
+    Limited(String),
+    /// The hub runs as many searches as it takes at once.
+    #[error("the hub is busy with other searches; try again in a moment")]
+    Busy,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+/// [`search`] within the caps of SPEC §20: the owner's searches per minute (fuzzy ones
+/// counted on their own as well) and the searches running at once on the hub.
+pub async fn capped(
+    app: &crate::app::AppState,
+    owner: Uuid,
+    q: &Query,
+) -> Result<SearchPage, SearchError> {
+    let limits = &app.config.limits;
+    let _permit = app
+        .searches
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| SearchError::Busy)?;
+    let minute = chrono::TimeDelta::minutes(1);
+    let now = Utc::now();
+    let key = owner.to_string();
+    if q.fuzzy {
+        let max = limits.fuzzy_searches_per_owner_min as u64;
+        if !app
+            .budget
+            .spend("fuzzy_searches", &key, 1, max, minute, now)
+        {
+            return Err(SearchError::Limited(format!(
+                "at most {max} fuzzy searches a minute; search exact words or wait"
+            )));
+        }
+    }
+    let max = limits.searches_per_owner_min as u64;
+    if !app.budget.spend("searches", &key, 1, max, minute, now) {
+        return Err(SearchError::Limited(format!(
+            "at most {max} searches a minute; wait a little"
+        )));
+    }
+    search(&app.db, owner, q).await
 }
 
 #[derive(sqlx::FromRow)]

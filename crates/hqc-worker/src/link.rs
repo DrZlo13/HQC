@@ -63,7 +63,11 @@ impl HubLink {
         let Some((request_id, rx)) = self.mcp.open(session_id) else {
             return Ok(None);
         };
-        let payload = serde_json::json!({"request_id": request_id, "tool": tool, "args": args});
+        let mut payload = serde_json::json!({"request_id": request_id, "tool": tool, "args": args});
+        // The hub takes the call's chain from the turn's input (SPEC §7.1).
+        if let Some(input) = self.mcp.turn(session_id) {
+            payload["turn_input"] = serde_json::json!(input);
+        }
         if let Err(e) = self
             .outbox
             .push_frame(request_id, crate::outbox::FRAME_MCP_CALL, &payload)

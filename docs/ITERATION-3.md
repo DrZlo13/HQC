@@ -117,7 +117,7 @@ Sections: §16 (hub cron), §3 ScheduledMessage, §7.
 Acceptance: the common checks; hub tests with a fake clock: `at`, `cron` across a DST change,
 catch-up and skip, a deleted target session.
 
-## T36. Hardening of the MCP surface and the review backlog (closes the iteration)
+## T36. Hardening of the MCP surface and the review backlog (done, SPEC 0.39; closes the iteration)
 
 Sections: §2.1, §20, the 2026-10-23 security review (open items are in the project notes).
 - The new paths: caps and rate limits on `mcp.call` per session and worker, open asks per
@@ -130,3 +130,5 @@ Sections: §2.1, §20, the 2026-10-23 security review (open items are in the pro
 - An adversarial review of everything iteration 3 added, as before the first deploy.
 Acceptance: the common checks; a test per cap; the review's findings fixed or recorded with a
 reason.
+Done: every item with its status and test is in `docs/notes/t36-questions.md`. The
+process-ancestry check of the MCP socket is **[verify]** in SPEC §7.2 (no live run was made).

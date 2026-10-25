@@ -135,7 +135,62 @@ pub async fn call(app: &AppState, worker_id: Uuid, c: &McpCall) -> Option<McpRes
     }
 }
 
+/// Longest `request_id` of an `mcp.call` (the worker sends a uuid).
+pub const MAX_REQUEST_ID: usize = 128;
+
+/// A `request_id` as it may reach another agent's input (the header of an ask, SPEC §7.1):
+/// 1–[`MAX_REQUEST_ID`] characters of `A-Z a-z 0-9 . _ : -`.
+pub fn is_request_id(r: &str) -> bool {
+    (1..=MAX_REQUEST_ID).contains(&r.len())
+        && r.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-'))
+}
+
+const CALLS_PER_WORKER: &str = "mcp_calls_worker";
+const CALLS_PER_SESSION: &str = "mcp_calls_session";
+
+/// `limit_exceeded` for a rate cap of SPEC §20.
+pub(crate) fn too_often(what: &str) -> McpError {
+    err(
+        error_code::LIMIT_EXCEEDED,
+        format!("too many {what}; wait a minute"),
+    )
+}
+
+/// Spends one of `per_minute` in `bucket` for `key`.
+pub(crate) fn per_minute(
+    app: &AppState,
+    bucket: &'static str,
+    key: Uuid,
+    per_minute: usize,
+) -> bool {
+    app.budget.spend(
+        bucket,
+        &key.to_string(),
+        1,
+        per_minute as u64,
+        chrono::TimeDelta::minutes(1),
+        chrono::Utc::now(),
+    )
+}
+
 async fn run(app: &AppState, worker_id: Uuid, c: &McpCall) -> Result<Answer, McpError> {
+    let limits = &app.config.limits;
+    // Before the database: a worker flooding calls costs no lookups (SPEC §20).
+    if !per_minute(
+        app,
+        CALLS_PER_WORKER,
+        worker_id,
+        limits.mcp_calls_per_worker_min,
+    ) {
+        return Err(too_often("calls from this worker"));
+    }
+    if !is_request_id(&c.request_id) {
+        return Err(err(
+            error_code::INVALID_ARGS,
+            format!("request_id is not 1-{MAX_REQUEST_ID} characters of A-Z a-z 0-9 . _ : -"),
+        ));
+    }
     let size = serde_json::to_vec(&c.args).map_err(internal)?.len();
     if size > MAX_ARGS {
         return Err(err(
@@ -156,6 +211,20 @@ async fn run(app: &AppState, worker_id: Uuid, c: &McpCall) -> Result<Answer, Mcp
         .await
         .map_err(internal)?
         .ok_or_else(unauthorized)?;
+    if caller.archived {
+        return Err(err(
+            error_code::UNAVAILABLE,
+            "this session is archived; its agent acts no more",
+        ));
+    }
+    if !per_minute(
+        app,
+        CALLS_PER_SESSION,
+        caller.id,
+        limits.mcp_calls_per_session_min,
+    ) {
+        return Err(too_often("hqc tool calls from this session"));
+    }
     let tool = REGISTRY.iter().find(|t| t.name == c.tool).ok_or_else(|| {
         err(
             error_code::UNKNOWN_TOOL,
@@ -259,10 +328,12 @@ async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolRe
         cursor: a.cursor,
         limit: crate::search::PAGE,
     };
-    let page = crate::search::search(&app.db, caller.owner_id, &q)
+    let page = crate::search::capped(app, caller.owner_id, &q)
         .await
         .map_err(|e| match e {
             crate::search::SearchError::Invalid(m) => err(error_code::INVALID_ARGS, m),
+            crate::search::SearchError::Limited(m) => err(error_code::LIMIT_EXCEEDED, m),
+            e @ crate::search::SearchError::Busy => err(error_code::UNAVAILABLE, e.to_string()),
             crate::search::SearchError::Db(e) => internal(e),
         })?;
     let results: Vec<Value> = page

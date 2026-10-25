@@ -3,7 +3,9 @@
 //! artifact id.
 //!
 //! The hub is not trusted with the file system (SPEC §2.1), and neither is the agent's path:
-//! - `path` is absolute or relative to the session's working directory;
+//! - `path` is absolute or relative to the session's working directory; one that lies
+//!   outside the workspace as written is refused before the file system is asked, and no
+//!   refusal names a resolved path, so the tool tells nothing about files outside;
 //! - its canonical form (symlinks resolved) must lie inside the session's workspace and inside
 //!   `allowed_roots`;
 //! - only a regular file, at most [`crate::inbox::MAX_ARTIFACT_BYTES`]; the file is opened
@@ -103,6 +105,15 @@ pub fn resolve(roots: &[PathBuf], f: &Folders, path: &str) -> Result<PathBuf, Mc
     } else {
         f.workdir.join(p)
     };
+    let outside = || {
+        invalid(format!(
+            "{path} is outside the session's workspace {}",
+            f.workspace.display()
+        ))
+    };
+    if !lexical(&joined).starts_with(&f.workspace) {
+        return Err(outside());
+    }
     let real = joined.canonicalize().map_err(|e| {
         let code = if e.kind() == std::io::ErrorKind::NotFound {
             error_code::NOT_FOUND
@@ -112,19 +123,30 @@ pub fn resolve(roots: &[PathBuf], f: &Folders, path: &str) -> Result<PathBuf, Mc
         McpError::new(code, format!("{path}: {e}"))
     })?;
     if !real.starts_with(&f.workspace) {
-        return Err(invalid(format!(
-            "{path} resolves to {}, outside the session's workspace {}",
-            real.display(),
-            f.workspace.display()
-        )));
+        return Err(outside());
     }
     if !roots.iter().any(|r| real.starts_with(r)) {
         return Err(invalid(format!(
-            "{path} resolves to {}, outside the worker's allowed_roots",
-            real.display()
+            "{path} is outside the worker's allowed_roots"
         )));
     }
     Ok(real)
+}
+
+/// `p` with `.` and `..` resolved as written, without asking the file system.
+fn lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The file opened for reading, with its size: a regular file of at most `max` bytes.
@@ -197,6 +219,16 @@ mod tests {
         assert_eq!(code(resolve(&roots, &f, "/etc/hosts")), "invalid_args");
         assert_eq!(code(resolve(&roots, &f, "nope.txt")), "not_found");
         assert_eq!(code(resolve(&roots, &f, "")), "invalid_args");
+        // Outside as written: the same refusal whether the file exists or not (T36).
+        for p in ["/etc/hosts", "/etc/no-such-file", "../../../../nope"] {
+            let e = resolve(&roots, &f, p).unwrap_err();
+            assert_eq!(e.code, "invalid_args", "{p}");
+            assert!(
+                e.message.contains("outside the session's workspace"),
+                "{p}: {}",
+                e.message
+            );
+        }
 
         // A workspace outside allowed_roots (the hub said so; the worker does not trust it).
         let other = Folders {
@@ -215,6 +247,9 @@ mod tests {
         std::os::unix::fs::symlink(ws.join("a.png"), ws.join("in.png")).unwrap();
         assert_eq!(code(resolve(&roots, &f, "../out.txt")), "invalid_args");
         assert_eq!(code(resolve(&roots, &f, "../etc/hosts")), "invalid_args");
+        // The target outside is not named.
+        let e = resolve(&roots, &f, "../out.txt").unwrap_err();
+        assert!(!e.message.contains("beyond"), "{}", e.message);
         // A link that stays inside is the file it points to.
         assert_eq!(resolve(&roots, &f, "../in.png").unwrap(), ws.join("a.png"));
         // A link put in place after the check is not followed.

@@ -5,6 +5,11 @@
 //!   them out; this also covers the moment between `bind` and `chmod`).
 //! - The first line is [`ToDaemon::Hello`]: a token that is not the process token of a
 //!   session whose agent runs here gets [`FromDaemon::Refused`] and the connection closes.
+//! - So does a peer that does not descend from that session's agent process
+//!   ([`super::procs::descends_from`]): the token is on the agent's command line, which every
+//!   process of the OS user can read, the agents of the worker's other sessions included
+//!   (SPEC §2.1). The peer's pid is the kernel's (`LOCAL_PEEREPID` / `SO_PEERCRED`), taken
+//!   when the connection is accepted.
 //! - Every [`ToDaemon::Call`] is checked again (the agent may have been replaced since) and
 //!   goes to the hub as `mcp.call` ([`HubLink::mcp_call`]); its `mcp.result` comes back as
 //!   [`FromDaemon::Result`].
@@ -33,6 +38,9 @@ use crate::link::HubLink;
 
 /// A connection that sends no hello within this is closed.
 const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a hello waits for the agent's pid: the CLI may start its MCP servers before the
+/// worker has finished starting it.
+const PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The bound socket; the file is removed when this is dropped.
 pub struct McpSocket {
@@ -87,8 +95,8 @@ impl McpSocket {
                     }
                 },
             };
-            match stream.peer_cred() {
-                Ok(c) if c.uid() == uid => {}
+            let peer_pid = match stream.peer_cred() {
+                Ok(c) if c.uid() == uid => c.pid().and_then(|p| u32::try_from(p).ok()),
                 Ok(c) => {
                     tracing::warn!(
                         peer_uid = c.uid(),
@@ -100,8 +108,14 @@ impl McpSocket {
                     tracing::warn!("mcp socket: peer credentials: {e}");
                     continue;
                 }
-            }
-            tokio::spawn(serve(stream, link.clone(), attacher.clone(), stop.clone()));
+            };
+            tokio::spawn(serve(
+                stream,
+                peer_pid,
+                link.clone(),
+                attacher.clone(),
+                stop.clone(),
+            ));
         }
     }
 }
@@ -118,8 +132,46 @@ fn refused(code: &str, message: impl Into<String>) -> FromDaemon {
     }
 }
 
+/// The session's agent process, once the worker knows it; `None` if the agent stopped or
+/// the pid did not come in time.
+async fn agent_pid(link: &HubLink, sid: Uuid) -> Option<u32> {
+    let deadline = tokio::time::Instant::now() + PID_TIMEOUT;
+    loop {
+        match link.mcp().pid(sid) {
+            Some(super::AgentPid::Known(pid)) => return Some(pid),
+            Some(super::AgentPid::Starting) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether `peer` (the connecting process) runs inside the agent of session `sid`.
+async fn from_the_agent(link: &HubLink, sid: Uuid, peer: Option<u32>) -> bool {
+    let Some(peer) = peer else {
+        tracing::warn!(session_id = %sid, "mcp socket: the peer's pid is unknown");
+        return false;
+    };
+    let Some(agent) = agent_pid(link, sid).await else {
+        tracing::warn!(session_id = %sid, "mcp socket: the agent's process is not known");
+        return false;
+    };
+    let ok = super::procs::descends_from(peer, agent);
+    if !ok {
+        tracing::warn!(session_id = %sid, peer, agent, "mcp socket: a peer outside the session's agent refused");
+    }
+    ok
+}
+
 /// One MCP process.
-async fn serve(stream: UnixStream, link: HubLink, attacher: Attacher, stop: CancellationToken) {
+async fn serve(
+    stream: UnixStream,
+    peer_pid: Option<u32>,
+    link: HubLink,
+    attacher: Attacher,
+    stop: CancellationToken,
+) {
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd);
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<FromDaemon>();
@@ -143,6 +195,13 @@ async fn serve(stream: UnixStream, link: HubLink, attacher: Attacher, stop: Canc
             protocol_version,
             client,
         })) => match link.mcp().session_for(&token) {
+            Some(sid) if !from_the_agent(&link, sid, peer_pid).await => {
+                let _ = out_tx.send(refused(
+                    error_code::UNAUTHORIZED,
+                    "this process is not part of the session's agent",
+                ));
+                None
+            }
             Some(sid) => {
                 tracing::info!(session_id = %sid, ?protocol_version, client = %client.unwrap_or_default(), "mcp server connected");
                 let _ = out_tx.send(FromDaemon::Ready);

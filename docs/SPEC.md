@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.38, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.39, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -82,7 +82,27 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
 - A worker is remote code execution on the owner's machine. Anyone who can write
   to a session on this worker runs code as the owner within the owner's policy.
 - Between sessions of one worker the boundary is soft (§14): the processes run as the same
-  OS user and can read each other's environment and files.
+  OS user and can read each other's environment and files. Since 0.39 (T36) the hqc tools are
+  not part of that softness: the session token is on the agent's command line, readable by the
+  other sessions' agents, but the worker's MCP socket accepts a session's token only from a
+  process that descends from the agent process the worker started for that session (§7.2).
+  What stays soft: files, the environment, and anything an agent can do through another
+  session's own processes (ptrace where the OS allows it to the same user; macOS restricts it,
+  Linux with `ptrace_scope` 1 limits it to descendants).
+- An agent acts with its owner's rights (§7), so a prompt-injected or compromised agent can do
+  whatever the owner's hqc tools allow on the owner's sessions, and no more: every tool
+  resolves its targets among the owner's projects and sessions only (`not_found` otherwise).
+  What it can spend is capped (since 0.39, T36; §20): `mcp.call` per session and per worker,
+  open asks, peer messages per session and minute and per chain, spawned sessions, schedules
+  and their runs, searches, the bytes a worker uploads. Chains (§7.1) bound loops between
+  agents; a schedule an agent creates continues its chain, so an agent cannot keep itself
+  running by scheduling its own next turn.
+- A worker is trusted for its own sessions only (§5.2, §20): it writes their agent events and
+  mirrored records, but no event that only the hub writes, nothing in another worker's
+  sessions, and no `chain` or `delivery` (since 0.39: the hub drops them from a worker's
+  events and keeps a mirrored record's `delivery` only as `delivered` on a typed prompt), so
+  it can neither reset the chain limits of its sessions' turns nor queue input. A worker of the
+  same owner can still use the owner's hqc tools through its sessions' tokens, within the caps.
 - A colleague with access to a shared project is limited by grants (§11) and by the worker
   owner's confirmations (§10).
 
@@ -279,7 +299,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text`, `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled") | client; hub cron (§16, authored by the owner); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text`, `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -521,8 +541,12 @@ Hub → worker:
 - The worker keeps the mirror offsets for each jsonl file and the "file → cwd" cache on disk.
 
 MCP calls (worker → hub → worker):
-- `mcp.call {request_id, session_token, tool, args}` → `mcp.result {request_id,
-  result | error}`. `request_id` is a uuid the worker makes up per call. Fast tools (`attach`,
+- `mcp.call {request_id, session_token, tool, args, turn_input?}` → `mcp.result {request_id,
+  result | error}`. `request_id` is a uuid the worker makes up per call (since 0.39 the hub
+  refuses one that is not 1–128 characters of `A-Z a-z 0-9 . _ : -` with `invalid_args`: it
+  reaches another agent's input in the header of an ask, §7.1). `turn_input` (since 0.39) is
+  the `event_id` of the input whose turn made the call, as the worker handed it to the runtime;
+  the hub takes the call's chain from it (§7.1). Fast tools (`attach`,
   `list`, `search`, `schedule`, `send`, `spawn`) are answered at once: `mcp.result` comes as
   the reply to the call frame, under its `id`. `ask` is deferred: the hub answers the call
   frame with `ack {}`, creates a `PendingRequest`
@@ -566,7 +590,9 @@ MCP calls (worker → hub → worker):
 - Errors of a tool have one shape, `error {code, message}`; `code` ∈ `unauthorized`,
   `unknown_tool`, `invalid_args`, `not_found`, `unavailable` (the worker lost the call: the
   agent stopped, the hub refused the frame), `internal`; the list is open. `args` is at most
-  64 KB serialized (§20), else `invalid_args`.
+  64 KB serialized (§20), else `invalid_args`. Since 0.39 (T36): calls over the caps of §20
+  get `limit_exceeded` (the worker's calls per minute are counted before the token is looked
+  up), and a call of an archived session `unavailable`.
 - `mcp.cancel {request_id, reason}` → `ack {}` — the worker reports that a call died on its
   side (§7.2), `reason` ∈ `cancelled` (`notifications/cancelled`), `eof` (the MCP process
   exited with the call open). It is sent directly, not through the outbox; a call the hub has
@@ -963,7 +989,8 @@ session (§5.2). Rejected: `${VAR}` expansion in the MCP config and plain inheri
 variable would have to be in the CLI's environment, which Bash inherits), a config file (a
 file holding the token). Limitation: another process of the same OS user (the agents of other
 sessions on the worker included) can read the CLI's command line and the MCP process's
-environment; this is the same soft boundary as in §14. The bare model on the hub gets the same
+environment; this is the same soft boundary as in §14. Since 0.39 (T36) such a process cannot
+use the token: the daemon accepts it only from a process inside the session's agent (§7.2). The bare model on the hub gets the same
 tools directly. hqc tools are called without confirmation: Claude Code is started with
 `--allowedTools mcp__hqc` (§8.1).
 
@@ -1071,7 +1098,10 @@ Delivery:
   `Messages from other sessions (they await no reply):`, an empty line, then per message
   `[hqc peer from <address> | mode=send | sent=<ts, UTC, seconds>]`, its escaped text and an
   empty line, closed by `---` and an empty line. The sender's address and `request_id` are
-  escaped as well.
+  escaped as well. Since 0.39 (T36) the fields inside a header (the
+  sender's address, `request_id`) are reduced to one line of at most 200 characters with `[`,
+  `]`, `|` and control characters replaced by `_`, so a field can neither end the header nor
+  add one; the hub also refuses a `request_id` outside `A-Z a-z 0-9 . _ : -` (§5.2).
 - Rights: `hqc_send`/`hqc_ask` to someone else's session require the owner of the sending
   session to have a `write` grant on the target.
 - The target (since 0.35): an address or an id of a session of the caller's owner, not
@@ -1097,7 +1127,11 @@ Queues (two different ones):
   in its `peer_prefix`, oldest first; the input's `ack` removes them from the buffer (their
   events keep no `delivery`), a send that arrives meanwhile waits for the next input. The
   input queue takes `wake_on_send` as it is when the message is sent; there is no API to set
-  it yet.
+  it yet. Since 0.39 (T36): an input sent again (after a reconnect) carries exactly the
+  buffered messages it carried when it was first sent and that are still buffered, never
+  newer ones (table `input_prefix`, migration `0019`): the worker answers a resent input it
+  already gave to the agent with an `ack`, and that `ack` must not clear a message the agent
+  never got.
 
 The reply to an ask:
 - The reply is the `agent.message` with `final: true` and `in_reply_to` equal to the
@@ -1118,8 +1152,11 @@ The reply to an ask:
 - Since 0.35 (T32): the reply counts from any final `agent.message` the worker or its
   mirror stores in the target; it closes the ask with `{from, reply}` (§7). The timeout gives
   `error {code: timeout}`; a reply after it, or after `mcp.cancel`, goes nowhere. A target
-  whose turn on the question is lost or stopped without a final message gives no reply: the
-  ask waits for its timeout. The asking session's turn stays `running` while it waits; the
+  whose turn on the question is lost (`system turn_lost`: its process stopped, its worker
+  restarted, the watchdog) gives no reply; since 0.39 (T36) the ask then fails at once with
+  `unavailable` instead of waiting for its timeout (the question is not delivered again). A
+  turn that ends without a final message for another reason (stopped by the user) still
+  waits for the timeout. The asking session's turn stays `running` while it waits; the
   turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
   waiting call as "Waiting for a reply from <session>" with its timer (the runtime's
   `tool.call` of `hqc_ask`, no event of its own).
@@ -1138,6 +1175,18 @@ Chains:
   human's turn started a chain of its own). `hqc_spawn` moves the chain like a send (`hops`
   + 1) and counts the sessions it creates per chain (§20). Buffered sends
   carried in `peer_prefix` do not start a turn and lend it no chain.
+- Since 0.39 (T36): the hub takes the call's chain from the input the worker names in
+  `mcp.call.turn_input` (§5.2), if it is an input of the calling session (a `user.message` or a
+  `peer.message`, `pending` or `delivered`) not older than its last delivered one; otherwise from
+  the last delivered input as before. An input's `ack` bypasses the worker's outbox and is lost
+  with a dropped connection, so the hub could be a turn behind and give a call the previous
+  turn's chain; the worker cannot name an older turn to get a fresh chain.
+- Since 0.39 (T36): `hqc_schedule` moves the chain like a send (`hops` + 1, refused at the
+  limit) and stores it with the schedule; its runs carry it (a `user.message` with a `chain`), so
+  a turn started by an agent's schedule continues the agent's chain instead of starting a
+  human's. A schedule made by a person (the API) carries none. A chain carries at most 50 peer
+  messages in all (§20): `hops` grows only along a path, and one turn could otherwise fan out
+  without end.
 - When a limit is exceeded, the tool returns an error (`limit_exceeded`, since 0.35); only a human's turn can continue the
   chain. A deadlock (A waits for B, B waits for A) is resolved by the timeout.
 
@@ -1157,7 +1206,16 @@ Chains:
   `mcp.call` frame (§5.2). Keeps no state of its own except its open calls (since 0.35 not
   the `chain` either: the hub sets it, §7.1).
 - The daemon accepts on the socket only the token a running agent of one of its sessions was
-  started with, checks it again on every call (the agent may have stopped since), and sends
+  started with, and since 0.39 (T36) only from a process that descends from that session's
+  agent process: the peer's pid comes from the kernel (`LOCAL_PEEREPID` on macOS,
+  `SO_PEERCRED` on Linux) when the connection is accepted, and its parents are walked
+  (`proc_pidinfo` / `/proc/<pid>/stat`, at most 32 levels) up to the pid the adapter started
+  (`Adapter::pid`; a hello waits up to 10 s for it while the agent starts; an adapter that
+  reports no process gets no MCP server). The token is on the agent's command line, which every
+  process of the OS user can read; another session's agent that uses it is refused (T30
+  question 2). **[verify]** that Claude Code starts its stdio MCP servers inside its own
+  process tree (the MCP SDK's stdio transport spawns them as children; no live run was made in
+  T36). It checks the token again on every call (the agent may have stopped since), and sends
   `mcp.call` with the session's latest token from the hub (§5.2): an agent that keeps running
   across a reconnect's `session.start` keeps its MCP process and its token. When the agent
   stops, its open calls fail with `unavailable`.
@@ -2210,7 +2268,11 @@ Since 0.36 (T33; `crates/hqc-hub/src/search.rs`, migration `0016`, measurements 
   (ignoring case), else its beginning; `…` marks a cut.
 - **Cost.** A query runs with `statement_timeout` 5 s; over it the query is refused. Over 100k
   events a rare or common exact word takes 1–20 ms, a phrase 10–20 ms, fuzzy with a rare word
-  4–90 ms, fuzzy with a word in most events about 1 s (measured on home-mac).
+  4–90 ms, fuzzy with a word in most events about 1 s (measured on home-mac). Since 0.39 (T36,
+  §20): per owner 30 searches a minute, 10 of them fuzzy (`GET /api/search` and
+  `hqc_search_history` together; `429 search_limit` / `limit_exceeded`), and at most 4 searches
+  run at once on the hub (`503 busy` / `unavailable`), so one owner's agent cannot keep the
+  database busy with fuzzy queries.
 - **Client.** Desktop: the left column's search field filters the project's sessions by title
   and path at once (as before) and, from 2 characters and 300 ms after typing, shows the hub's
   hits below them ("In messages", "Similar words" for fuzzy, "More" for the next page). Phone:
@@ -2267,6 +2329,10 @@ Since 0.38 (T35, `crates/hqc-hub/src/schedules.rs`):
   missed while paused. Deleting the session deletes its schedules. A session that is archived or
   driven from VS Code takes no input (§6, §9.3): its runs are skipped (`next_run` moves on, a
   warn in the hub's log), not queued.
+- Since 0.39 (T36): a schedule made by an agent (`hqc_schedule`) keeps the chain of its call,
+  and its runs carry it (§7.1). The hub sends at most 60 runs per owner and hour; a run over
+  that is skipped like a run of a target that takes no input (a warn, `next_run` moves on). The
+  count of schedules that may still run and the insert are made under a per-owner lock.
 - The hub's clock is injectable for tests (`AppState::clock`).
 
 ## 17. States and lifecycle
@@ -2471,14 +2537,29 @@ with `write` share the same queue.
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
   | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
   | `hqc_spawn` (§7, since 0.37): sessions spawned in one chain (§7.1; a human's turn is one chain) | 5 | `mcp.result` `error limit_exceeded`, nothing is created |
-  | … sessions spawned per owner | 20 in the last hour (sliding, by `created_at`; deleted sessions no longer count) | same |
+  | … sessions spawned per owner | 20 in the last hour (sliding, by `created_at`; deleted sessions no longer count); since 0.39 counted and created under a per-owner lock, so parallel calls cannot overshoot | same |
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
   | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
   | the worker's MCP socket (§7.2) | a line up to 64 KB + 4 KB; peers of the same OS user only | the connection is closed |
-  | schedules per owner (§16, since 0.38) | 100 that may still run (`next_run` set, paused ones included) | `hqc_schedule`: `error limit_exceeded`; `POST /api/schedules`: `409 schedule_limit` |
+  | schedules per owner (§16, since 0.38) | 100 that may still run (`next_run` set, paused ones included); since 0.39 counted and inserted under a per-owner lock | `hqc_schedule`: `error limit_exceeded`; `POST /api/schedules`: `409 schedule_limit` |
   | `cron` of a schedule (§16) | runs at least 5 minutes apart, checked over its next 100 runs; a pattern that never runs is refused | `error invalid_args` / `400` |
   | `at` of a schedule | in the future | `error invalid_args` / `400` |
   | `message` of a schedule | non-blank, up to 16 KiB | `error invalid_args` / `400` |
+  | `mcp.call` per worker (§5.2, since 0.39) | 300 a minute, counted before the token is looked up | `mcp.result` `error limit_exceeded` |
+  | `mcp.call` per calling session | 60 a minute | same |
+  | `mcp.call.request_id` | 1–128 characters of `A-Z a-z 0-9 . _ : -` | `error invalid_args` |
+  | `mcp.call` of an archived session | refused | `error unavailable` |
+  | open `hqc_ask`s per session (§7.1) | 5 | `error limit_exceeded`, nothing is stored |
+  | peer messages a session sends (`hqc_send`, `hqc_ask`, the prompt of `hqc_spawn`) | 20 a minute | same |
+  | peer messages in one chain (§7.1) | 50 in all | same |
+  | `hqc_schedule` from an agent (§7.1, §16) | moves the chain on like a send; refused at the chain's limits | `error limit_exceeded` |
+  | runs of scheduled messages (§16) | 60 per owner and hour | the run is skipped, warn in the hub's log |
+  | searches (§15) | 30 per owner and minute, 10 of them fuzzy; 4 at once on the hub | `429 search_limit` / `503 busy`; `error limit_exceeded` / `unavailable` |
+  | `PUT /worker/artifacts` per worker | 2 GB per hour (sliding; `Content-Length` checked against what is left, the body counted once read); an archived session takes none | `429 upload_limit` (the worker's tool: `limit_exceeded`) / `404` |
+  | `chain`, `delivery`, `delivered_at` of a worker's `event` (§5.2) | dropped: only the hub writes inputs | stored without them |
+  | `delivery` of a `mirror.event` (§9.2) | `delivered` on a `user.message`, none otherwise, whatever the worker sent | — |
+  | the worker's MCP socket (§7.2, since 0.39) | a session's token only from a process inside that session's agent | the connection is refused (`unauthorized`) |
+  | `hqc_attach` paths (§7) | a `path` outside the workspace as written is refused before the file system is asked; no refusal names a resolved path | `error invalid_args` |
 - Push: the hub POSTs to the subscription's `endpoint`, so only `https://` without
   userinfo and without a non-standard port on push service hosts is accepted: `fcm.googleapis.com`,
   `updates.push.services.mozilla.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
@@ -2539,6 +2620,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.38 → 0.39 (T36, hardening of the MCP surface; iteration 3 closed)
+§2.1: what a prompt-injected or compromised agent can spend, the MCP socket bound to the
+agent's process tree, a worker trusted for its own sessions only (no `chain`/`delivery`).
+§5.2: `mcp.call.turn_input?`, the shape of `request_id`, `limit_exceeded` and archived callers.
+§7: the token on the command line no longer usable by other sessions' agents. §7.1: header
+fields reduced to one line without `[`, `]`, `|`; a resent input keeps the `peer_prefix` of its
+first send (migration `0019`, `input_prefix`); an ask fails at once when its target's turn is
+lost; the chain of a call from `turn_input`; an agent's schedule continues its chain; 50 peer
+messages per chain. §7.2: the process-ancestry check **[verify]**. §15, §16: search and
+scheduled-run caps, per-owner locks on the counted creations. §20: the new rows. Notes:
+`docs/notes/t36-questions.md`.
 
 ### 0.37 → 0.38 (T35, `hqc_schedule` and the hub cron)
 §3 ScheduledMessage: the table `scheduled_messages` (migration `0018`) with `next_run`, session

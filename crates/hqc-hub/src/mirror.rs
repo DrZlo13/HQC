@@ -222,10 +222,10 @@ pub async fn ingest(
         payload: raw.get("payload").cloned().unwrap_or(Value::Null),
         chain: None,
         client_op_id: None,
-        delivery: raw
-            .get("delivery")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        // A typed prompt is input that reached its agent (SPEC §9.2); nothing mirrored is
+        // pending input for the hub to deliver (SPEC §20).
+        delivery: matches!(m.event.kind, EventKind::UserMessage { .. })
+            .then(|| "delivered".to_string()),
         delivered_at: m.event.delivered_at,
     };
     let ack = match db::insert_event(&app.db, &new).await? {

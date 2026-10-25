@@ -157,15 +157,86 @@ pub(crate) async fn turn_chain(app: &AppState, session_id: Uuid) -> anyhow::Resu
     .bind(session_id)
     .fetch_optional(&app.db)
     .await?;
-    Ok(row.map(|(input, chain)| {
-        chain
-            .and_then(|c| serde_json::from_value(c).ok())
-            .unwrap_or(Chain {
-                chain_id: crate::mcp::once_id("chain", session_id, &input.to_string()),
-                depth: 0,
-                hops: 0,
-            })
-    }))
+    Ok(row.map(|(input, chain)| input_chain(session_id, input, chain)))
+}
+
+/// The chain of input `input` of a session: its own, or for a human's input one derived
+/// from it.
+fn input_chain(session_id: Uuid, input: Uuid, chain: Option<Value>) -> Chain {
+    chain
+        .and_then(|c| serde_json::from_value(c).ok())
+        .unwrap_or(Chain {
+            chain_id: crate::mcp::once_id("chain", session_id, &input.to_string()),
+            depth: 0,
+            hops: 0,
+        })
+}
+
+/// The chain of call `c` of session `caller`: that of the input the worker says the turn
+/// runs on (`turn_input`), if it is an input of the session given to the agent or on its
+/// way, not older than the last delivered one; otherwise [`turn_chain`]. The worker knows
+/// the turn before the hub does: the input's `ack` bypasses its outbox and is lost with a
+/// dropped connection, and until the resent input is acked again the hub's last delivered
+/// input is the previous turn's (SPEC §7.1). It cannot pick an older turn's chain.
+pub(crate) async fn call_chain(
+    app: &AppState,
+    caller: &SessionRow,
+    c: &McpCall,
+) -> anyhow::Result<Option<Chain>> {
+    if let Some(input) = c.turn_input {
+        let row: Option<(Option<Value>,)> = sqlx::query_as(
+            "SELECT e.chain FROM events e
+             WHERE e.event_id = $1 AND e.session_id = $2
+               AND e.type IN ('user.message', 'peer.message')
+               AND e.delivery IN ('pending', 'delivered')
+               AND e.seq >= COALESCE((SELECT max(d.seq) FROM events d
+                                      WHERE d.session_id = $2 AND d.delivery = 'delivered'), 0)",
+        )
+        .bind(input)
+        .bind(caller.id)
+        .fetch_optional(&app.db)
+        .await?;
+        if let Some((chain,)) = row {
+            return Ok(Some(input_chain(caller.id, input, chain)));
+        }
+        tracing::debug!(session_id = %caller.id, %input, "turn_input is not the session's current input; the hub's last delivered one counts");
+    }
+    turn_chain(app, caller.id).await
+}
+
+/// The caps a new peer message of `caller` in `chain` must fit (SPEC §20): messages per
+/// session and minute, messages per chain.
+pub(crate) async fn admit(
+    app: &AppState,
+    caller: &SessionRow,
+    chain: &Chain,
+) -> Result<(), McpError> {
+    let limits = &app.config.limits;
+    let in_chain: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE type = 'peer.message' AND chain ->> 'chain_id' = $1",
+    )
+    .bind(chain.chain_id.to_string())
+    .fetch_one(&app.db)
+    .await
+    .map_err(internal)?;
+    if in_chain >= limits.peer_messages_per_chain {
+        return Err(err(
+            error_code::LIMIT_EXCEEDED,
+            format!(
+                "one chain carries at most {} messages between sessions; a person has to continue it",
+                limits.peer_messages_per_chain
+            ),
+        ));
+    }
+    if !crate::mcp::per_minute(
+        app,
+        "peer_messages",
+        caller.id,
+        limits.peer_messages_per_session_min,
+    ) {
+        return Err(crate::mcp::too_often("messages to other sessions"));
+    }
+    Ok(())
 }
 
 /// The chain of a new message from a turn with chain `turn`: a human's turn starts one,
@@ -249,8 +320,9 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         return Ok(Answer::Now(send_result(&to, row.delivery.is_some())));
     }
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
-    let turn = turn_chain(app, caller.id).await.map_err(internal)?;
+    let turn = call_chain(app, caller, c).await.map_err(internal)?;
     let chain = next_chain(turn, false)?;
+    admit(app, caller, &chain).await?;
     let wake = t.wake_on_send;
     let row = store_message(app, caller, &t, &c.request_id, &a.text, false, &chain).await?;
     if wake {
@@ -301,8 +373,24 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         None => max,
     };
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
-    let turn = turn_chain(app, caller.id).await.map_err(internal)?;
+    let turn = call_chain(app, caller, c).await.map_err(internal)?;
     let chain = next_chain(turn, true)?;
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pending_requests
+         WHERE kind = 'ask' AND session_id = $1 AND closed_at IS NULL",
+    )
+    .bind(caller.id)
+    .fetch_one(&app.db)
+    .await
+    .map_err(internal)?;
+    let max_open = app.config.limits.open_asks_per_session;
+    if open >= max_open {
+        return Err(err(
+            error_code::LIMIT_EXCEEDED,
+            format!("this session already waits for {open} replies; at most {max_open} at once"),
+        ));
+    }
+    admit(app, caller, &chain).await?;
     let row = store_message(app, caller, &t, &c.request_id, &a.text, true, &chain).await?;
     let expires_at = Utc::now() + chrono::TimeDelta::seconds(timeout as i64);
     db::open_request(
@@ -372,26 +460,47 @@ async fn buffer(
     Ok(())
 }
 
-/// The buffered messages input `input` carries in `peer_prefix`: those not carried by
-/// another input still pending, in `seq` order. They stay in the buffer until its `ack`.
+/// The buffered messages input `input` carries in `peer_prefix`: when it is sent for the
+/// first time, those not carried by another input still pending, in `seq` order; when it is
+/// sent again (a reconnect), exactly those it carried then and that are still buffered. They
+/// stay in the buffer until its `ack`. Taking newer ones into a resent input would let its
+/// `ack` clear them although the agent may have got the first frame, without them (T32).
 pub async fn take_prefix(
     app: &AppState,
     session_id: Uuid,
     input: Uuid,
 ) -> anyhow::Result<Vec<PeerPrefix>> {
-    let rows: Vec<(Value, DateTime<Utc>)> = sqlx::query_as(
-        "WITH c AS (
-             UPDATE peer_buffer b SET carried_by = $2
-             WHERE b.session_id = $1
-               AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id = b.carried_by
-                                 AND e.event_id <> $2 AND e.delivery = 'pending')
-             RETURNING b.event_id, b.seq)
-         SELECT e.payload, e.ts FROM c JOIN events e ON e.event_id = c.event_id ORDER BY c.seq",
-    )
-    .bind(session_id)
-    .bind(input)
-    .fetch_all(&app.db)
-    .await?;
+    let first =
+        sqlx::query("INSERT INTO input_prefix (event_id) VALUES ($1) ON CONFLICT DO NOTHING")
+            .bind(input)
+            .execute(&app.db)
+            .await?
+            .rows_affected()
+            == 1;
+    let rows: Vec<(Value, DateTime<Utc>)> = if first {
+        sqlx::query_as(
+            "WITH c AS (
+                 UPDATE peer_buffer b SET carried_by = $2
+                 WHERE b.session_id = $1
+                   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id = b.carried_by
+                                     AND e.event_id <> $2 AND e.delivery = 'pending')
+                 RETURNING b.event_id, b.seq)
+             SELECT e.payload, e.ts FROM c JOIN events e ON e.event_id = c.event_id ORDER BY c.seq",
+        )
+        .bind(session_id)
+        .bind(input)
+        .fetch_all(&app.db)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT e.payload, e.ts FROM peer_buffer b JOIN events e ON e.event_id = b.event_id
+             WHERE b.session_id = $1 AND b.carried_by = $2 ORDER BY b.seq",
+        )
+        .bind(session_id)
+        .bind(input)
+        .fetch_all(&app.db)
+        .await?
+    };
     Ok(rows
         .into_iter()
         .map(|(p, ts)| PeerPrefix {
@@ -405,6 +514,10 @@ pub async fn take_prefix(
 /// Input `input` reached the agent: the messages it carried leave the buffer.
 pub async fn delivered(app: &AppState, input: Uuid) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM peer_buffer WHERE carried_by = $1")
+        .bind(input)
+        .execute(&app.db)
+        .await?;
+    sqlx::query("DELETE FROM input_prefix WHERE event_id = $1")
         .bind(input)
         .execute(&app.db)
         .await?;
@@ -466,6 +579,41 @@ pub async fn on_final(
         let to = p.payload["to"].as_str().unwrap_or_default().to_string();
         tracing::info!(session_id = %p.session_id, request_id = %p.request_id, "peer ask answered");
         answer(app, p, Ok(json!({"from": to, "reply": text}))).await?;
+    }
+    Ok(())
+}
+
+/// The turn of session `s` on its last delivered input was lost (its process stopped, SPEC
+/// §17.3): an ask that input carried gets no reply any more, so it fails now instead of at
+/// its timeout. The input is not delivered again.
+pub async fn turn_lost(app: &AppState, s: &SessionRow) -> anyhow::Result<()> {
+    let open: Vec<PendingRow> = sqlx::query_as(&format!(
+        "SELECT {ASK_COLS} FROM pending_requests
+         WHERE kind = 'ask' AND closed_at IS NULL
+           AND payload ->> 'target_session_id' = $1
+           AND payload ->> 'event_id' = (SELECT event_id::text FROM events
+                                         WHERE session_id = $2 AND delivery = 'delivered'
+                                         ORDER BY seq DESC LIMIT 1)"
+    ))
+    .bind(s.id.to_string())
+    .bind(s.id)
+    .fetch_all(&app.db)
+    .await?;
+    for p in open {
+        let to = p.payload["to"]
+            .as_str()
+            .unwrap_or("the session")
+            .to_string();
+        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, target = %s.id, "peer ask failed: the target's turn was lost");
+        answer(
+            app,
+            p,
+            Err(err(
+                error_code::UNAVAILABLE,
+                format!("{to} lost its turn on the question (its agent stopped); ask again"),
+            )),
+        )
+        .await?;
     }
     Ok(())
 }

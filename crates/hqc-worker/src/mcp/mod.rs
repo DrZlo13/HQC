@@ -21,6 +21,7 @@
 
 pub mod attach;
 pub mod daemon;
+pub mod procs;
 pub mod server;
 
 use std::collections::HashMap;
@@ -104,6 +105,20 @@ struct Tokens {
     hub: Secret,
     /// Where the session's agent works, for `hqc_attach`.
     folders: attach::Folders,
+    /// The agent's process: the MCP server must descend from it.
+    pid: AgentPid,
+    /// The input of the turn the agent runs (or ran last), sent with its calls.
+    turn: Option<Uuid>,
+}
+
+/// What the daemon knows of a session's agent process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPid {
+    /// The agent is being started; its MCP server may connect before the start returns.
+    Starting,
+    /// Started, but its runtime reports no process: its MCP server is refused.
+    Unknown,
+    Known(u32),
 }
 
 struct Open {
@@ -125,6 +140,8 @@ impl McpCalls {
                 process: token.clone(),
                 hub: token.clone(),
                 folders,
+                pid: AgentPid::Starting,
+                turn: None,
             },
         );
     }
@@ -135,6 +152,30 @@ impl McpCalls {
             .sessions
             .get(&session_id)
             .map(|t| t.folders.clone())
+    }
+
+    /// The session's agent started as `pid` (`None`: its runtime knows no process).
+    pub fn set_pid(&self, session_id: Uuid, pid: Option<u32>) {
+        if let Some(t) = self.lock().sessions.get_mut(&session_id) {
+            t.pid = pid.map_or(AgentPid::Unknown, AgentPid::Known);
+        }
+    }
+
+    /// The agent's process; `None` if the agent does not run.
+    pub fn pid(&self, session_id: Uuid) -> Option<AgentPid> {
+        self.lock().sessions.get(&session_id).map(|t| t.pid)
+    }
+
+    /// The agent was given input `event_id`: the turn its calls belong to (SPEC §7.1).
+    pub fn set_turn(&self, session_id: Uuid, event_id: Uuid) {
+        if let Some(t) = self.lock().sessions.get_mut(&session_id) {
+            t.turn = Some(event_id);
+        }
+    }
+
+    /// The input of the session's current turn.
+    pub fn turn(&self, session_id: Uuid) -> Option<Uuid> {
+        self.lock().sessions.get(&session_id).and_then(|t| t.turn)
     }
 
     /// `session.start` for an agent that keeps running: the hub knows only `token` now.
@@ -238,6 +279,15 @@ mod tests {
         };
         m.bind(sid, &first, folders.clone());
         assert_eq!(m.folders(sid), Some(folders));
+        assert_eq!(m.pid(sid), Some(AgentPid::Starting));
+        m.set_pid(sid, Some(42));
+        assert_eq!(m.pid(sid), Some(AgentPid::Known(42)));
+        m.set_pid(sid, None);
+        assert_eq!(m.pid(sid), Some(AgentPid::Unknown));
+        assert_eq!(m.turn(sid), None);
+        let input = Uuid::now_v7();
+        m.set_turn(sid, input);
+        assert_eq!(m.turn(sid), Some(input));
         assert_eq!(m.session_for("hqcs_first"), Some(sid));
         assert_eq!(m.session_for("hqcs_firsT"), None);
         assert_eq!(m.session_for(""), None);
@@ -260,5 +310,7 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap().unwrap_err().code, "unavailable");
         assert!(!m.is_open(rid));
         assert_eq!(m.session_for("hqcs_first"), None);
+        assert_eq!(m.pid(sid), None);
+        assert_eq!(m.turn(sid), None);
     }
 }

@@ -125,6 +125,31 @@ pub struct Limits {
     pub mirror_sessions_per_workspace: i64,
     /// `fs.*` requests in flight per worker; more get `429 worker_busy` (SPEC §20).
     pub worker_fs_concurrency: usize,
+    /// `mcp.call` per calling session and minute; more get `limit_exceeded` (SPEC §20).
+    pub mcp_calls_per_session_min: usize,
+    /// `mcp.call` per worker and minute, counted before the token is looked up.
+    pub mcp_calls_per_worker_min: usize,
+    /// Open `hqc_ask`s of one session.
+    pub open_asks_per_session: i64,
+    /// Peer messages (`hqc_send`, `hqc_ask`, the prompt of `hqc_spawn`) a session sends per
+    /// minute.
+    pub peer_messages_per_session_min: usize,
+    /// Peer messages in one chain, in total (SPEC §7.1).
+    pub peer_messages_per_chain: i64,
+    /// Sessions spawned in one chain (SPEC §7.1) ...
+    pub spawns_per_chain: i64,
+    /// ... and per owner in the last hour.
+    pub spawns_per_hour: i64,
+    /// Searches (`GET /api/search`, `hqc_search_history`) per owner and minute ...
+    pub searches_per_owner_min: usize,
+    /// ... of which fuzzy ones.
+    pub fuzzy_searches_per_owner_min: usize,
+    /// Searches running at once on the hub; more are refused.
+    pub search_concurrency: usize,
+    /// Runs of scheduled messages sent per owner and hour (SPEC §16); more are skipped.
+    pub schedule_runs_per_owner_hour: usize,
+    /// Bytes a worker uploads with `PUT /worker/artifacts` per hour.
+    pub worker_upload_bytes_per_hour: u64,
 }
 
 impl Default for Limits {
@@ -141,6 +166,18 @@ impl Default for Limits {
             mirror_sessions_per_day: 200,
             mirror_sessions_per_workspace: 2000,
             worker_fs_concurrency: 4,
+            mcp_calls_per_session_min: 60,
+            mcp_calls_per_worker_min: 300,
+            open_asks_per_session: 5,
+            peer_messages_per_session_min: 20,
+            peer_messages_per_chain: 50,
+            spawns_per_chain: 5,
+            spawns_per_hour: 20,
+            searches_per_owner_min: 30,
+            fuzzy_searches_per_owner_min: 10,
+            search_concurrency: 4,
+            schedule_runs_per_owner_hour: 60,
+            worker_upload_bytes_per_hour: 2_000_000_000,
         }
     }
 }

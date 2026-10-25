@@ -10,6 +10,7 @@
 //!   the artifact domain serves nothing else.
 //! - [`RateLimiter`]: sliding one-minute windows per key, for `/worker/*` by client address
 //!   ([`ClientIp`]).
+//! - [`Budget`]: weighted sliding windows of any length, for the caps of the MCP surface.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -24,6 +25,8 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+
+use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::{app::AppState, error::ApiError};
 
@@ -282,9 +285,84 @@ impl RateLimiter {
     }
 }
 
+/// Amounts spent and when, oldest first.
+type Spent = VecDeque<(DateTime<Utc>, u64)>;
+
+/// Amounts spent in a sliding window of any length, per `(bucket, key)`, at times the caller
+/// gives (the hub cron's clock is one a test sets). The caps of the MCP surface (SPEC §20):
+/// calls, messages, searches, upload bytes, scheduled runs.
+#[derive(Default)]
+pub struct Budget {
+    spent: Mutex<HashMap<(&'static str, String), Spent>>,
+}
+
+impl Budget {
+    /// Spends `amount` if the window ending at `now` still has room for it under `max`;
+    /// whether it did.
+    pub fn spend(
+        &self,
+        bucket: &'static str,
+        key: &str,
+        amount: u64,
+        max: u64,
+        window: TimeDelta,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let mut m = self.spent.lock().unwrap();
+        if m.len() > MAX_KEYS {
+            m.retain(|_, q| q.back().is_some_and(|(t, _)| now - *t < window));
+        }
+        let q = m.entry((bucket, key.to_string())).or_default();
+        while q.front().is_some_and(|(t, _)| now - *t >= window) {
+            q.pop_front();
+        }
+        let used: u64 = q.iter().map(|(_, a)| a).sum();
+        if used.saturating_add(amount) > max {
+            return false;
+        }
+        q.push_back((now, amount));
+        true
+    }
+
+    /// What is left of `max` in the window ending at `now`, without spending.
+    pub fn left(
+        &self,
+        bucket: &'static str,
+        key: &str,
+        max: u64,
+        window: TimeDelta,
+        now: DateTime<Utc>,
+    ) -> u64 {
+        let m = self.spent.lock().unwrap();
+        let used: u64 = m.get(&(bucket, key.to_string())).map_or(0, |q| {
+            q.iter()
+                .filter(|(t, _)| now - *t < window)
+                .map(|(_, a)| a)
+                .sum()
+        });
+        max.saturating_sub(used)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budgets_slide() {
+        let b = Budget::default();
+        let t0 = Utc::now();
+        let min = TimeDelta::minutes(1);
+        assert!(b.spend("x", "k", 60, 100, min, t0));
+        assert!(!b.spend("x", "k", 41, 100, min, t0), "over the cap");
+        assert!(b.spend("x", "other", 100, 100, min, t0), "keys are apart");
+        assert_eq!(b.left("x", "k", 100, min, t0), 40);
+        assert!(b.spend("x", "k", 40, 100, min, t0 + TimeDelta::seconds(30)));
+        // The first spend leaves the window.
+        let later = t0 + TimeDelta::seconds(61);
+        assert_eq!(b.left("x", "k", 100, min, later), 60);
+        assert!(b.spend("x", "k", 60, 100, min, later));
+    }
 
     fn ws_request(headers: &[(&str, &str)]) -> Request {
         let mut b = Request::builder()

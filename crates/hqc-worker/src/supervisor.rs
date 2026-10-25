@@ -969,6 +969,8 @@ impl Session {
             };
             // Messages from other sessions: headers and escaping (SPEC §7.1).
             let input = crate::peer::runtime_input(&input);
+            // Before the runtime has it: its first tool call may come at once.
+            self.link.mcp().set_turn(self.id, q.input.event_id);
             match self.adapter.input_with(&input, &files).await {
                 Ok(()) => {
                     self.turn = Some(Turn {
@@ -1119,6 +1121,8 @@ impl Session {
         match r {
             Ok(()) => {
                 self.started_once = true;
+                // Its MCP server is accepted only from inside this process (SPEC §7.2).
+                self.link.mcp().set_pid(self.id, self.adapter.pid());
                 self.set_state(ProcessState::Running);
                 Ok(())
             }

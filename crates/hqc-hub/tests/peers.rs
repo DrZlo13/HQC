@@ -411,7 +411,12 @@ async fn sends_wait_in_the_buffer_for_the_next_input() {
 
 #[tokio::test]
 async fn a_full_buffer_drops_the_oldest() {
-    let hub = TestHub::start().await;
+    // More messages in a row than a session may send per minute (T36): the buffer is tested.
+    let hub = TestHub::start_limited(hqc_hub::config::Limits {
+        peer_messages_per_session_min: 1000,
+        ..Default::default()
+    })
+    .await;
     let (_, t) = hub.enroll("one").await;
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
     let (_, ta) = started(&hub, &mut w, "Asker", None).await;

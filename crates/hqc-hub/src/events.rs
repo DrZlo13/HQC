@@ -83,7 +83,9 @@ fn ends_turn(kind: &EventKind) -> bool {
 /// `seq`; an event for a session the hub does not know (or that is not this worker's)
 /// gets `ack` without `seq` and is dropped (SPEC §5.2). So is an event for an archived
 /// session, unless it closes the turn. Events only the hub writes, and in the worker's
-/// service session anything but `system worker_log`, are refused (SPEC §10.2, §20).
+/// service session anything but `system worker_log`, are refused (SPEC §10.2, §20). `chain`
+/// and `delivery` belong to inputs, which only the hub writes: a worker's are dropped, so
+/// that it can neither reset the chain of its session's turn nor queue input (SPEC §7.1).
 pub async fn ingest_worker_event(
     app: &AppState,
     conn: &WorkerConn,
@@ -138,10 +140,10 @@ pub async fn ingest_worker_event(
         author: raw.get("author").cloned().unwrap_or(Value::Null),
         kind: str_field("type").unwrap_or_default(),
         payload: raw.get("payload").cloned().unwrap_or(Value::Null),
-        chain: raw.get("chain").filter(|c| !c.is_null()).cloned(),
+        chain: None,
         client_op_id: str_field("client_op_id"),
-        delivery: str_field("delivery"),
-        delivered_at: ev.delivered_at,
+        delivery: None,
+        delivered_at: None,
     };
     match db::insert_event(&app.db, &new).await? {
         Inserted::New(row) => {
@@ -177,7 +179,19 @@ pub async fn store_hub_event(
     delivery: Option<&str>,
 ) -> anyhow::Result<EventRow> {
     let id = db::new_id();
-    match store_hub_event_as(app, s, id, author, kind, payload, client_op_id, delivery).await? {
+    match store_hub_event_as(
+        app,
+        s,
+        id,
+        author,
+        kind,
+        payload,
+        client_op_id,
+        delivery,
+        None,
+    )
+    .await?
+    {
         Some(row) => Ok(row),
         None => anyhow::bail!("hub event {id} not stored: a duplicate"),
     }
@@ -193,10 +207,12 @@ pub async fn store_hub_event_once(
     kind: &str,
     payload: Value,
 ) -> anyhow::Result<Option<EventRow>> {
-    store_hub_event_as(app, s, event_id, author, kind, payload, None, None).await
+    store_hub_event_as(app, s, event_id, author, kind, payload, None, None, None).await
 }
 
-/// [`store_hub_event_once`] with a `delivery` (an input of the hub cron, SPEC §16).
+/// [`store_hub_event_once`] with a `delivery` and a `chain` (an input of the hub cron, SPEC
+/// §16: a schedule an agent created carries its chain, §7.1).
+#[allow(clippy::too_many_arguments)]
 pub async fn store_hub_event_with_id(
     app: &AppState,
     s: &SessionRow,
@@ -205,8 +221,12 @@ pub async fn store_hub_event_with_id(
     kind: &str,
     payload: Value,
     delivery: Option<&str>,
+    chain: Option<Value>,
 ) -> anyhow::Result<Option<EventRow>> {
-    store_hub_event_as(app, s, event_id, author, kind, payload, None, delivery).await
+    store_hub_event_as(
+        app, s, event_id, author, kind, payload, None, delivery, chain,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -219,6 +239,7 @@ async fn store_hub_event_as(
     mut payload: Value,
     client_op_id: Option<String>,
     delivery: Option<&str>,
+    chain: Option<Value>,
 ) -> anyhow::Result<Option<EventRow>> {
     hqc_proto::replace_nul_json(&mut author);
     hqc_proto::replace_nul_json(&mut payload);
@@ -231,7 +252,7 @@ async fn store_hub_event_as(
         author,
         kind: kind.to_string(),
         payload,
-        chain: None,
+        chain,
         client_op_id,
         delivery: delivery.map(str::to_string),
         delivered_at: None,
@@ -461,5 +482,7 @@ pub async fn turn_lost(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
         "The agent process stopped during a turn; the turn was lost",
     )
     .await?;
+    // An ask waiting for this turn's reply fails now (SPEC §7.1).
+    crate::peers::turn_lost(app, &s).await?;
     Ok(())
 }

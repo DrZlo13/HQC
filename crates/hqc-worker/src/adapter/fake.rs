@@ -42,6 +42,8 @@ struct State {
     fail_start: bool,
     sinks: HashMap<Uuid, EventSink>,
     inputs: Vec<(SessionInput, Vec<InboxFile>)>,
+    /// What [`Adapter::pid`] reports; the test process itself unless a test set another.
+    pid: Option<Option<u32>>,
 }
 
 #[derive(Clone, Default)]
@@ -52,6 +54,12 @@ pub struct FakeAdapters {
 impl FakeAdapters {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The process the agents of this factory report as theirs ([`Adapter::pid`]); by
+    /// default the test process, from which the MCP servers a test starts descend.
+    pub fn set_pid(&self, pid: Option<u32>) {
+        self.lock().pid = Some(pid);
     }
 
     /// Make every following `start`/`resume` fail.
@@ -203,6 +211,10 @@ impl Adapter for FakeAdapter {
     async fn kill(&mut self) -> anyhow::Result<()> {
         self.record(FakeCall::Kill(self.session_id));
         Ok(())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.shared.lock().pid.unwrap_or(Some(std::process::id()))
     }
 
     async fn answer_approval(

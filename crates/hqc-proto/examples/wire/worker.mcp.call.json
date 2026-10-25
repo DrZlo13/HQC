@@ -5,6 +5,7 @@
     "request_id": "0199f3a2-7c10-7000-8000-0000000000c1",
     "session_token": "hqcs_Z3VhcmQtdGhpcy1pcy1hbi1leGFtcGxlLXRva2VuLTAx",
     "tool": "hqc_list_sessions",
-    "args": { "project": "hqc" }
+    "args": { "project": "hqc" },
+    "turn_input": "0199f3a2-7c10-7000-8000-0000000000b7"
   }
 }

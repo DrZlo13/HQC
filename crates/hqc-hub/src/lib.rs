@@ -83,6 +83,7 @@ pub fn router(app: AppState) -> Router {
             "/api/sessions/{id}/requests/{request_id}",
             post(api::answer_request),
         )
+        .route("/api/requests", get(api::open_requests))
         .route("/api/sessions/{id}/read_cursor", put(api::read_cursor))
         .route("/api/workers", get(api::workers))
         .route("/api/workers/enroll/confirm", post(api::enroll_confirm))

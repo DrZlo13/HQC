@@ -85,6 +85,9 @@ pub enum Notice {
     },
     /// Something that feeds `state`, `queue_len` or unread changed (SPEC §6 `subscribe_summary`).
     SessionChanged { session_id: Uuid },
+    /// An open request of the user's sessions, or an `hqc_ask` between them, opened or
+    /// closed (SPEC §6 `requests`).
+    RequestsChanged { owner_id: Uuid },
 }
 
 impl AppState {
@@ -144,6 +147,10 @@ impl AppState {
 
     pub fn session_changed(&self, session_id: Uuid) {
         self.notify(Notice::SessionChanged { session_id });
+    }
+
+    pub fn requests_changed(&self, owner_id: Uuid) {
+        self.notify(Notice::RequestsChanged { owner_id });
     }
 
     pub fn is_watching(&self, user: Uuid, session: Uuid) -> bool {

@@ -60,6 +60,12 @@ pub enum ServerFrame {
     /// One session changed.
     #[serde(rename = "session.summary")]
     SessionSummary { session: SessionSummary },
+    /// Every open request of the user (SPEC §6, §10.1): after `summary`, and again, whole,
+    /// whenever a request opens or closes or an `hqc_ask` that waits on one does.
+    #[serde(rename = "requests")]
+    Requests {
+        requests: Vec<crate::api::OpenRequest>,
+    },
     #[serde(rename = "pong")]
     Pong {},
     #[serde(rename = "error")]
@@ -134,6 +140,10 @@ mod tests {
             "session.summary",
             include_str!("../examples/wire/client.session.summary.json"),
         ),
+        (
+            "requests",
+            include_str!("../examples/wire/client.requests.json"),
+        ),
         ("pong", include_str!("../examples/wire/client.pong.json")),
         ("error", include_str!("../examples/wire/client.error.json")),
     ];
@@ -154,6 +164,7 @@ mod tests {
             ServerFrame::Delivery { .. } => "delivery",
             ServerFrame::Summary { .. } => "summary",
             ServerFrame::SessionSummary { .. } => "session.summary",
+            ServerFrame::Requests { .. } => "requests",
             ServerFrame::Pong {} => "pong",
             ServerFrame::Error { .. } => "error",
         }

@@ -797,6 +797,8 @@ pub async fn delete_session(
         .execute(&app.db)
         .await?;
     app.session_changed(id);
+    // Its requests and asks went with it.
+    app.requests_changed(s.owner_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1066,6 +1068,16 @@ pub async fn answer_request(
     let s = session_for(&app, &user, id, Action::Write).await?;
     let r = requests::answer(&app, &user, &s, &request_id, b).await?;
     Ok(Json(json!(r)))
+}
+
+/// `GET /api/requests`: the user's open requests (SPEC §6, §10.1).
+pub async fn open_requests(
+    State(app): State<AppState>,
+    user: CurrentUser,
+) -> ApiResult<Json<api::RequestList>> {
+    Ok(Json(api::RequestList {
+        requests: requests::open_of(&app, user.id).await?,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

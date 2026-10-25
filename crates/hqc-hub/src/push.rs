@@ -163,12 +163,27 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
         tracing::debug!(session_id = %s.id, "worker request: push skipped, one was sent less than 10 s ago");
         return;
     }
-    let payload = message(s, row, request_id.map(String::as_str), body);
+    let request_id = request_id.cloned();
     let app = app.clone();
+    let s = s.clone();
+    let row = row.clone();
     let session_owner = s.owner_id;
     let session_id = s.id;
     let worker_id = s.worker_id;
     tokio::spawn(async move {
+        // A request of a session other sessions wait on (`hqc_ask`, SPEC §7.1) is answered
+        // where the user waits: the click opens the top of the chain (SPEC §16).
+        let waiting = if approval_like {
+            crate::requests::waiting_on(&app, session_owner, session_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!(%session_id, error = %e, "push: who waits on the request");
+                    Vec::new()
+                })
+        } else {
+            Vec::new()
+        };
+        let payload = message(&s, &row, request_id.as_deref(), body);
         let mut users = vec![session_owner];
         // Approvals go to the worker owner (SPEC §10.1, §16).
         if approval_like {
@@ -182,6 +197,17 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
         }
         for u in users {
             if app.is_watching(u, session_id) {
+                continue;
+            }
+            if u == session_owner && !waiting.is_empty() {
+                // Watching a waiting session shows the request there (SPEC §10.1).
+                if waiting.iter().any(|w| app.is_watching(u, w.session_id)) {
+                    continue;
+                }
+                let top = waiting.last().map(|w| w.session_id);
+                let mut p = payload.clone();
+                p["open_session_id"] = serde_json::json!(top);
+                send_to_user(&app, u, &p).await;
                 continue;
             }
             send_to_user(&app, u, &payload).await;
@@ -206,8 +232,9 @@ fn worker_push_due(app: &AppState, worker_id: Uuid) -> bool {
     }
 }
 
-/// Web Push carries at most 4096 bytes after encryption; keep the plaintext under this.
-const MAX_PUSH_BYTES: usize = 3800;
+/// Web Push carries at most 4096 bytes after encryption; keep the plaintext under this (and
+/// room for `open_session_id`, added per user).
+const MAX_PUSH_BYTES: usize = 3700;
 
 /// The push body (SPEC §16): `{session_id, type, title, body, tag, payload}` with the
 /// stored event as `payload`, left out if the message would not fit a push.
@@ -223,6 +250,7 @@ pub fn message(s: &SessionRow, row: &EventRow, request_id: Option<&str>, body: S
             None => format!("{}:{}", s.id, row.kind),
         }),
         payload: Some(row.to_json()),
+        open_session_id: None,
     };
     let size = |m: &PushMessage| serde_json::to_vec(m).map(|v| v.len()).unwrap_or(usize::MAX);
     if size(&m) > MAX_PUSH_BYTES {

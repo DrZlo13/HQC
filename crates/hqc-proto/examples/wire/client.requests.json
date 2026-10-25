@@ -1,0 +1,39 @@
+{
+  "type": "requests",
+  "requests": [
+    {
+      "session_id": "0199f3a2-7c10-7000-8000-000000000003",
+      "request_id": "req-7",
+      "kind": "approval",
+      "address": "hqc/helper",
+      "title": "Check the build on llm-server",
+      "worker_id": "0199f3a2-7c10-7000-8000-0000000000a2",
+      "worker_name": "llm-server",
+      "event": {
+        "session_id": "0199f3a2-7c10-7000-8000-000000000003",
+        "event_id": "0199f3a2-7c10-7000-8000-000000000207",
+        "seq": 12,
+        "ts": "2026-10-25T10:00:00Z",
+        "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000003" },
+        "type": "approval.request",
+        "payload": {
+          "request_id": "req-7",
+          "tool": "Bash",
+          "description": "cargo build --release",
+          "options": [
+            { "id": "allow", "label": "Allow once", "canonical": "once" },
+            { "id": "deny", "label": "Deny", "canonical": "deny" }
+          ],
+          "expires_at": "2026-10-25T11:00:00Z"
+        }
+      },
+      "waiting": [
+        {
+          "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+          "address": "hqc/run-the-tests",
+          "title": "hqc: run the tests"
+        }
+      ]
+    }
+  ]
+}

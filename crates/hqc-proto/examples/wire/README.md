@@ -12,8 +12,8 @@ Rust tests require that each file deserializes and serializes back to exactly th
 - `client.<type>[.<case>].json` — a frame on `/api/ws` (SPEC §6, `hqc_proto::client_frame`):
   flat `{type, ...}`, no `id`, no `payload`. Client -> hub: `subscribe`, `unsubscribe`,
   `subscribe_summary`, `ping`; hub -> client: `event` (`client.event.delta.json` — an
-  `agent.delta` without `seq`), `subscribed`, `delivery`, `summary`, `session.summary`, `pong`,
-  `error`.
+  `agent.delta` without `seq`), `subscribed`, `delivery`, `summary`, `session.summary`,
+  `requests` (the user's open requests, T37), `pong`, `error`.
 - `api.<name>[.request].json` — REST bodies (SPEC §5.1, §6, `hqc_proto::api`): `api.session.json`
   (the session object; its summary is `client.session.summary.json`; `api.session.vscode.json` —
   one held open in VS Code, `held_by`, T20), `api.events.json`,
@@ -23,7 +23,8 @@ Rust tests require that each file deserializes and serializes back to exactly th
   `api.session.request.json` (creating a session in a workspace), `api.project*.json` and
   `api.projects.json` (projects), `api.workspace*.json` and `api.workspaces.json`
   (workspaces; `api.workspace.conflict.json` — the `409 workspace_conflict` body),
-  `api.dirs.json` (`GET /api/workers/{id}/dirs`), `api.artifact.json` (`POST /api/artifacts`,
+  `api.dirs.json` (`GET /api/workers/{id}/dirs`), `api.requests.json` (`GET /api/requests`,
+  T37: a request two sessions wait on and a worker's own request), `api.artifact.json` (`POST /api/artifacts`,
   `GET /api/artifacts/{id}`) and `api.artifact.url.json` (`GET /api/artifacts/{id}/url`).
 
 Optional fields are omitted when absent; readers must accept `null` for them as well.

@@ -434,6 +434,19 @@ async fn after_store(
         push::on_event(app, s, row, kind);
     }
     app.session_changed(s.id);
+    if matches!(
+        kind,
+        EventKind::ApprovalRequest { .. }
+            | EventKind::ApprovalResponse { .. }
+            | EventKind::ApprovalCancel { .. }
+            | EventKind::ClarifyRequest { .. }
+            | EventKind::ClarifyResponse { .. }
+            | EventKind::ClarifyCancel { .. }
+    ) {
+        // The request row is opened or closed by now (above, or by the caller before it
+        // stored the event).
+        app.requests_changed(s.owner_id);
+    }
     Ok(())
 }
 

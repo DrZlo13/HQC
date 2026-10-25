@@ -6,7 +6,9 @@
 //!   `agent.delta` (no `seq`), `delivery` changes of inputs;
 //! - `unsubscribe {session_id}`;
 //! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
-//!   `session.summary {session}` whenever one of them changes;
+//!   `session.summary {session}` whenever one of them changes; with it `requests {requests}`,
+//!   the user's open requests, sent whole again whenever one opens or closes or an ask
+//!   waiting on one does (T37);
 //! - `ping` -> `pong`.
 //!
 //! An `event` frame carries the event exactly as stored (SPEC §3 Event); `client_op_id`
@@ -28,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     app::{AppState, Notice},
     auth::CurrentUser,
-    db, delivery,
+    db, delivery, requests,
     security::MAX_WS_MESSAGE,
     state,
 };
@@ -230,6 +232,12 @@ impl Client {
                     None => true,
                 }
             }
+            Notice::RequestsChanged { owner_id } => {
+                if !self.summary || *owner_id != self.user.id {
+                    return true;
+                }
+                self.send_requests().await
+            }
             Notice::SessionChanged { session_id } => {
                 if !self.summary {
                     return true;
@@ -259,10 +267,21 @@ impl Client {
         match views {
             Ok(v) => {
                 let sessions = v.iter().map(|v| v.summary()).collect();
-                self.send(ServerFrame::Summary { sessions }).await
+                self.send(ServerFrame::Summary { sessions }).await && self.send_requests().await
             }
             Err(e) => {
                 tracing::error!(error = %e, "summary");
+                self.error("internal", "internal error", None).await
+            }
+        }
+    }
+
+    /// Every open request of the user (SPEC §6 `requests`).
+    async fn send_requests(&mut self) -> bool {
+        match requests::open_of(&self.app, self.user.id).await {
+            Ok(requests) => self.send(ServerFrame::Requests { requests }).await,
+            Err(e) => {
+                tracing::error!(error = %e, "requests");
                 self.error("internal", "internal error", None).await
             }
         }

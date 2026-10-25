@@ -13,10 +13,11 @@
 //! lives in its service session: `approval.request` with the options `once` / `deny`, the
 //! answer or the hub's cancellation goes back as `worker.approval.response`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::Utc;
 use hqc_proto::{
+    api::{OpenRequest, WaitingSession},
     event::{ApprovalOption, CancelReason, ClarifyAnswer},
     frame::{worker_approval, WorkerApprovalRequest},
 };
@@ -542,5 +543,144 @@ pub async fn expiry_loop(app: AppState) {
         if let Err(e) = crate::peers::expire(&app).await {
             tracing::error!(error = %e, "expired asks");
         }
+    }
+}
+
+// ---------------------------------------------------------------- the user's open requests
+
+/// How far along a chain of asks the waiting sessions are looked for. A chain nests at most
+/// [`crate::peers::MAX_DEPTH`] asks; asks of separate chains can join into a longer line or
+/// a cycle, which this bounds.
+const MAX_WAIT_DEPTH: i32 = 8;
+
+#[derive(Debug, sqlx::FromRow)]
+struct WaitRow {
+    session_id: Uuid,
+    waiter: Uuid,
+    address: String,
+    title: String,
+}
+
+/// Session -> the sessions of `owner` that wait on it through open `hqc_ask`s, directly or
+/// along a chain, the nearest first (SPEC §7.1, §10.1).
+async fn waits(app: &AppState, owner: Uuid) -> anyhow::Result<HashMap<Uuid, Vec<WaitingSession>>> {
+    let rows: Vec<WaitRow> = sqlx::query_as(
+        "WITH RECURSIVE asks AS (
+             SELECT p.session_id AS asker, (p.payload ->> 'target_session_id')::uuid AS target
+             FROM pending_requests p JOIN sessions s ON s.id = p.session_id
+             WHERE p.kind = 'ask' AND p.closed_at IS NULL AND s.owner_id = $1),
+         waits (session_id, waiter, depth) AS (
+             SELECT target, asker, 1 FROM asks
+             UNION
+             SELECT w.session_id, a.asker, w.depth + 1
+             FROM waits w JOIN asks a ON a.target = w.waiter
+             WHERE w.depth < $2)
+         SELECT w.session_id, w.waiter, pr.slug || '/' || s.slug AS address, s.title
+         FROM waits w JOIN sessions s ON s.id = w.waiter JOIN projects pr ON pr.id = s.project_id
+         WHERE w.waiter <> w.session_id AND s.owner_id = $1
+         GROUP BY w.session_id, w.waiter, pr.slug, s.slug, s.title
+         ORDER BY w.session_id, min(w.depth), w.waiter",
+    )
+    .bind(owner)
+    .bind(MAX_WAIT_DEPTH)
+    .fetch_all(&app.db)
+    .await?;
+    let mut m: HashMap<Uuid, Vec<WaitingSession>> = HashMap::new();
+    for r in rows {
+        m.entry(r.session_id).or_default().push(WaitingSession {
+            session_id: r.waiter,
+            address: r.address,
+            title: r.title,
+        });
+    }
+    Ok(m)
+}
+
+/// The sessions of `owner` waiting on `session_id`, the nearest first; the last is the top
+/// of the chain.
+pub async fn waiting_on(
+    app: &AppState,
+    owner: Uuid,
+    session_id: Uuid,
+) -> anyhow::Result<Vec<WaitingSession>> {
+    Ok(waits(app, owner)
+        .await?
+        .remove(&session_id)
+        .unwrap_or_default())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct OpenRow {
+    session_id: Uuid,
+    request_id: String,
+    kind: String,
+    address: String,
+    title: String,
+    worker_id: Option<Uuid>,
+    worker_name: Option<String>,
+    system: bool,
+    event_id: Option<Uuid>,
+}
+
+/// Every open `approval`, `clarify` and `worker_approval` in the sessions of `owner`, oldest
+/// first, each with its event and the sessions waiting on it (SPEC §6 `GET /api/requests`).
+/// Only the owner's sessions: another user's requests are never listed.
+pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequest>> {
+    let rows: Vec<OpenRow> = sqlx::query_as(
+        "SELECT p.session_id, p.request_id, p.kind, pr.slug || '/' || s.slug AS address,
+                s.title, s.worker_id, w.name AS worker_name, s.system,
+                (SELECT e.event_id FROM events e
+                 WHERE e.session_id = p.session_id
+                   AND e.type IN ('approval.request', 'clarify.request')
+                   AND e.payload ->> 'request_id' = p.request_id
+                 ORDER BY e.seq DESC LIMIT 1) AS event_id
+         FROM pending_requests p
+         JOIN sessions s ON s.id = p.session_id
+         JOIN projects pr ON pr.id = s.project_id
+         LEFT JOIN workers w ON w.id = s.worker_id
+         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval')
+           AND s.owner_id = $1 AND NOT s.archived
+         ORDER BY p.created_at, p.id",
+    )
+    .bind(owner)
+    .fetch_all(&app.db)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<Uuid> = rows.iter().filter_map(|r| r.event_id).collect();
+    let events: HashMap<Uuid, Value> = db::events_by_ids(&app.db, &ids)
+        .await?
+        .into_iter()
+        .map(|e| (e.event_id, e.to_json()))
+        .collect();
+    let waits = waits(app, owner).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let event = events.get(&r.event_id?)?.clone();
+            Some(OpenRequest {
+                waiting: waits.get(&r.session_id).cloned().unwrap_or_default(),
+                session_id: r.session_id,
+                request_id: r.request_id,
+                kind: r.kind,
+                address: r.address,
+                title: r.title,
+                worker_id: r.worker_id,
+                worker_name: r.worker_name,
+                system: r.system,
+                event,
+            })
+        })
+        .collect())
+}
+
+/// The open requests of the owner of `session_id`, or who waits on them, may have changed:
+/// clients of that owner get the list again (SPEC §6 `requests`).
+pub async fn changed_in(app: &AppState, session_id: Uuid) {
+    match db::session(&app.db, session_id).await {
+        Ok(Some(s)) => app.requests_changed(s.owner_id),
+        Ok(None) => {}
+        Err(e) => tracing::error!(%session_id, error = %e, "requests changed: session lookup"),
     }
 }

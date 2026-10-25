@@ -1766,6 +1766,16 @@ pub async fn event_by_id(db: &PgPool, event_id: Uuid) -> sqlx::Result<Option<Eve
     .await
 }
 
+/// The events with these ids, in no particular order.
+pub async fn events_by_ids(db: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<EventRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {EVENT_COLS} FROM events WHERE event_id = ANY($1)"
+    ))
+    .bind(ids)
+    .fetch_all(db)
+    .await
+}
+
 /// Events with `seq > after_seq`, oldest first.
 pub async fn events_after(
     db: &PgPool,

@@ -363,6 +363,48 @@ pub struct PushKeys {
     pub auth: String,
 }
 
+/// An open request of the user (SPEC §6 `GET /api/requests`, §10.1, §10.2): an `approval`
+/// or `clarify` of a session, or a worker's own request (`worker_approval`, in its service
+/// session), with where it is and who waits on it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenRequest {
+    pub session_id: Uuid,
+    pub request_id: String,
+    /// `approval` | `clarify` | `worker_approval`.
+    pub kind: String,
+    /// `<project-slug>/<session-slug>` of the request's session.
+    pub address: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<Uuid>,
+    /// The worker's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_name: Option<String>,
+    /// The request is in a worker's service session (SPEC §10.2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub system: bool,
+    /// The `approval.request` / `clarify.request` event as stored (SPEC §4).
+    pub event: serde_json::Value,
+    /// The sessions that wait on this one through open `hqc_ask`s (SPEC §7.1), the nearest
+    /// first: the last is the top of the chain. Empty when nobody waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting: Vec<WaitingSession>,
+}
+
+/// A session waiting on another through an open `hqc_ask`, directly or along a chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitingSession {
+    pub session_id: Uuid,
+    pub address: String,
+    pub title: String,
+}
+
+/// `GET /api/requests`: every open request of the user, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestList {
+    pub requests: Vec<OpenRequest>,
+}
+
 /// The Web Push message body (SPEC §16). `payload` is the event of SPEC §4 as stored; the
 /// hub leaves it out when the message would not fit a push (about 4 KB). The service worker
 /// derives `title` / `body` from `type` and `payload` when they are absent and shows
@@ -382,6 +424,10 @@ pub struct PushMessage {
     pub tag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<serde_json::Value>,
+    /// The session a click opens when it is not `session_id`: for a request of a session
+    /// that other sessions wait on, the top of the chain (SPEC §16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_session_id: Option<Uuid>,
 }
 
 /// A scheduled message (SPEC §3 ScheduledMessage, §16) as `/api/schedules` returns it.
@@ -645,6 +691,12 @@ mod tests {
         roundtrip::<ApiError>(include_str!("../examples/wire/api.error.json"));
         roundtrip::<VapidKey>(include_str!("../examples/wire/api.vapid.json"));
         roundtrip::<PushSubscription>(include_str!("../examples/wire/api.push.subscribe.json"));
+        let rl: RequestList = roundtrip(include_str!("../examples/wire/api.requests.json"));
+        assert_eq!(rl.requests.len(), 2);
+        let ev: crate::event::Event = serde_json::from_value(rl.requests[0].event.clone()).unwrap();
+        assert_eq!(ev.session_id, rl.requests[0].session_id);
+        assert_eq!(rl.requests[0].waiting.len(), 2);
+        assert!(rl.requests[1].system && rl.requests[1].waiting.is_empty());
         let p: PushMessage = roundtrip(include_str!("../examples/wire/api.push.json"));
         let ev: crate::event::Event = serde_json::from_value(p.payload.unwrap()).unwrap();
         assert_eq!(ev.session_id, p.session_id);

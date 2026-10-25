@@ -405,6 +405,8 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
     .await
     .map_err(internal)?;
     tracing::info!(from = %caller.id, to = %t.id, request_id = %c.request_id, timeout, "peer ask");
+    // A request the target has open now shows in the caller too (SPEC §10.1).
+    app.requests_changed(caller.owner_id);
     delivery::kick(app, t.id, false).await;
     Ok(Answer::Later)
 }
@@ -542,6 +544,7 @@ async fn answer(
     };
     let frame = result_frame(r);
     if db::close_request(&app.db, p.id, Some(&frame)).await? {
+        requests::changed_in(app, p.session_id).await;
         requests::deliver_result(
             app,
             &PendingRow {
@@ -664,6 +667,7 @@ pub async fn cancelled(app: &AppState, worker_id: Uuid, c: &McpCancel) -> anyhow
     let Some(s) = db::session(&app.db, p.session_id).await? else {
         return Ok(());
     };
+    app.requests_changed(s.owner_id);
     let to = p.payload["to"].as_str().unwrap_or("another session");
     let why = if c.reason == cancel_reason::EOF {
         "the agent's hqc tools stopped"
@@ -698,6 +702,7 @@ pub async fn worker_restarted(app: &AppState, worker_id: Uuid) -> anyhow::Result
         ));
         if db::close_request(&app.db, p.id, Some(&frame)).await? {
             db::result_delivered(&app.db, p.id).await?;
+            requests::changed_in(app, p.session_id).await;
         }
     }
     Ok(())

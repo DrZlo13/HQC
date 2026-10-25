@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.30, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.31, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2083,7 +2083,8 @@ with `write` share the same queue.
    session~~ (0.17, T17), ~~artifacts, `.hqc/inbox`~~ (0.18, T16, without `hqc_attach`),
    ~~VS Code import and mirror, takeover both ways~~ (0.19, T15; consolidation — T18; takeover
    by the registry of live sessions and forks — 0.22, T20). Criterion: take over from a phone
-   a session started in VS Code (live test `live_takeover`; not checked through the UI on a phone).
+   a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
+   Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, list, search, schedule; `mcp.call` frames;
    MCP server per §7.2. Personal session.
 4. Generic ACP adapter (the first agent is Hermes, including steer); bare model
@@ -2203,6 +2204,9 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.30 → 0.31 (iteration 2 closed)
+§19: iteration 2 is closed; its criterion was checked by hand through the UI on a phone.
 
 ### 0.29 → 0.30 (a session taken over in VS Code mid-turn)
 §4 `session_released`, §9.3: when a holder appears or a foreign writer is found while hqc's

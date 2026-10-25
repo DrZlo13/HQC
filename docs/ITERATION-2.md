@@ -9,6 +9,15 @@ Each task is self-contained: it can be handed to a separate agent together with 
 and the listed sections of `docs/SPEC.md`. Dependencies are stated. The iteration's other tasks
 are added here as they are set.
 
+Closed on 2026-10-25. The criterion was checked by hand through the UI on a phone: a session
+started in VS Code shows up in hqc with its history, is taken over from the phone, answers
+permission requests and sees attachments from the phone, and goes back to VS Code with the whole
+conversation. Also checked by hand: adding workspaces, refusing folders outside `allowed_roots`,
+local slash commands, a dropped connection, a takeover in VS Code mid-turn (T29). Deferred:
+tombstones of deleted sessions for the mirror (`docs/notes/t24-questions.md`), "deny always" for
+a new folder (iteration 6); the second worker (home-mac) has no display, so VS Code there was
+not checked.
+
 ## T14. Projects and several workspaces (done, SPEC 0.16)
 
 Sections: §3 (Project, Workspace, Session, Worker), §5.3, §5.4, §6, §13, §14, §19.2.

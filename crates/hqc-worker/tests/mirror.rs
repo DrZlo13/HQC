@@ -59,9 +59,10 @@ async fn mirror_set(c: &mut HubConn, path: &str, enabled: bool) -> Value {
     }
 }
 
-/// While the worker's agent runs the session, the outside turn is held; the agent is
-/// stopped after its turn, `session.state` says `locked_by: vscode`, the held records go
-/// out as `mirror.event`, and further input is refused.
+/// While the worker's agent runs the session, the outside turn is held for the grace
+/// period; then the agent is stopped at once, mid-turn (SPEC §9.3, 0.30), `session.state`
+/// says `locked_by: vscode`, the held records go out as `mirror.event`, and further input
+/// is refused.
 #[tokio::test]
 async fn foreign_writer_releases_the_session() {
     let env = Env::with_mirror();
@@ -105,15 +106,9 @@ async fn foreign_writer_releases_the_session() {
     let r = mirror_set(&mut c, &ws, true).await;
     assert_eq!(r["type"], "ack", "{r}");
 
-    // Held during the turn: no mirror.event, no kill, even after the grace period.
-    assert!(c
-        .maybe("mirror.event", Duration::from_millis(800))
-        .await
-        .is_none());
-    assert!(!adapters.calls().contains(&FakeCall::Kill(sid)));
-    adapters.end_turn(sid).await;
+    // The turn never ends: after the grace period the agent is killed in the middle of it.
     adapters
-        .wait_for("kill after the turn", |c| c.contains(&FakeCall::Kill(sid)))
+        .wait_for("kill during the turn", |c| c.contains(&FakeCall::Kill(sid)))
         .await;
     loop {
         let st = c.expect("session.state").await;
@@ -304,7 +299,7 @@ async fn holder_report(c: &mut HubConn) -> Value {
 }
 
 /// T20 (SPEC §9.3): VS Code opens the transcript the worker's agent runs. The worker reports
-/// the holder, stops the agent after its turn and says `locked_by: vscode`; the holder is
+/// the holder, stops the agent at once, mid-turn, and says `locked_by: vscode`; the holder is
 /// reported again after a reconnect and as `null` once the process has gone. Mirroring is
 /// not needed for any of it.
 #[tokio::test]
@@ -339,11 +334,10 @@ async fn holder_releases_the_session() {
         holder_report(&mut c).await,
         json!({"entrypoint": "claude-vscode", "status": "idle"})
     );
-    // The turn runs on; then the agent stops and the session is VS Code's.
-    assert!(!adapters.calls().contains(&FakeCall::Kill(sid)));
-    adapters.end_turn(sid).await;
+    // The turn does not end: VS Code continues from what it read, so the agent stops now
+    // and the session is VS Code's.
     adapters
-        .wait_for("kill after the turn", |c| c.contains(&FakeCall::Kill(sid)))
+        .wait_for("kill during the turn", |c| c.contains(&FakeCall::Kill(sid)))
         .await;
     loop {
         let st = c.expect("session.state").await;

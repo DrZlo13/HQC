@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.29, 2026-10-24. Status: the architecture agreed after six reviews and a survey of
+Version 0.30, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -287,7 +287,7 @@ the client renders only them. The "source" column is the component that produces
 | `input_rejected` | hub | the worker rejected an input other than as a failed start; the input became `failed` (§5.2) |
 | `ask_cancelled` | hub | a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), iteration 3 |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
-| `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent after the turn, `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
+| `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
@@ -1457,10 +1457,16 @@ fields and broken files. The remaining records are holders; of several for one t
   exited.
 - A holder appeared while hqc is driving the session: the hub sets `locked_by: vscode` at once
   and writes `system session_released` with `reason: vscode_open` ("The session was opened in
-  VS Code: hqc stopped the agent after the turn. To drive it from here, close it in VS Code and
-  take it over again."), `pending` inputs become `failed`; the worker stops the agent after the
-  current turn (at once if there is no turn) and clears its input queue, as on a foreign write
-  below.
+  VS Code: hqc stopped the agent, interrupting a turn in progress. To drive it from here, close
+  it in VS Code and take it over again."), `pending` inputs become `failed`; the worker stops
+  the agent at once, a turn in progress included, and clears its input queue, as on a foreign
+  write below. The other process continues the transcript from what it read when it opened
+  it: whatever hqc's agent did after that would land on a branch nobody continues, and its
+  tools would change files behind the other agent's back. VS Code 2.1.310 does not start its
+  process for a session another process holds busy: it waits and offers "take over"
+  (`open_held_session` in its log), so a holder appearing mid-turn is a deliberate takeover;
+  older versions start it on opening. The hub cancels the open requests of the stopped
+  process and closes the turn with `turn_lost` (§17.3).
 - The "take over" button (`POST /api/sessions/{id}/takeover`). A live holder: `409 vscode_open`
   with `message` "the session is open in VS Code: close it there and take it over again" and a
   `held_by` field. No holder: on a worker with the registry the takeover goes through at once;
@@ -1497,11 +1503,11 @@ fields and broken files. The remaining records are holders; of several for one t
   (`isSidechain: false`, not `isMeta`) that yield at least one event (empty `thinking` does
   not count, §9). A record with a `uuid` the adapter has not seen in stream-json (and that the
   adapter did not recognise by the text of its input, §9.2), while an hqc process is working,
-  means that the session was continued in VS Code: the worker stops its agent after the
-  current turn (at once if there is no turn), the worker's input queue is cleared,
+  means that the session was continued in VS Code: the worker stops its agent at once, a turn
+  in progress included (since 0.30, for the reason above), the worker's input queue is cleared,
   `session.state` carries `locked_by: vscode`; the hub writes `system` with code
   `session_released` and `reason: foreign_write` ("The session was continued in VS Code: hqc
-  stopped the agent after the turn…"), and `pending` inputs become `failed`. Then the mirror
+  stopped the agent, interrupting a turn in progress…"), and `pending` inputs become `failed`. Then the mirror
   sends the held-back records. While no hqc process is running, any such record with `recent`
   and without registry data moves the session to `locked_by: vscode` (from `hqc`, also with
   `session_released`). The hub applies `locked_by` from `session.state` as follows: the
@@ -2197,6 +2203,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.29 → 0.30 (a session taken over in VS Code mid-turn)
+§4 `session_released`, §9.3: when a holder appears or a foreign writer is found while hqc's
+agent is in a turn, the worker stops the agent at once instead of after the turn. The 2026-10-25
+case: VS Code 2.1.310 took over the session during a 30 s `Bash` call, closed the call with its
+own "Tool call interrupted" result and continued from there, while hqc's agent finished the call
+and answered on a branch VS Code never saw. The `session_released` texts say the turn was
+interrupted; the hub's `turn_lost` and the cancelling of open requests on `stopped` apply as
+before.
 
 ### 0.28 → 0.29 (T28, translated to English)
 Translated to English, with no change in meaning; English is now the language of the whole

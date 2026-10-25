@@ -230,7 +230,7 @@ async fn takeover_and_release() {
     // The worker queues it (SPEC §17.2) and never acks: it stops before the next turn.
     w.expect("session.input").await;
 
-    // VS Code writes again: the worker stops its agent after the turn and reports it.
+    // VS Code writes again: the worker stops its agent at once and reports it.
     w.event(agent_event(
         &sid,
         "agent.message",

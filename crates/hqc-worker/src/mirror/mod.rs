@@ -21,7 +21,8 @@
 //!   emit it and does not move past it for [`GRACE`] (stream-json may lag behind the file).
 //!   Then, with Claude Code's registry of live sessions (below), it goes out like any other
 //!   record: only a holder releases a session hqc runs (T25). Without the registry the
-//!   supervisor is told ([`Output::ForeignWriter`]), stops the agent after its turn and
+//!   supervisor is told ([`Output::ForeignWriter`]), stops the agent at once (a turn in
+//!   progress included) and
 //!   reports `locked_by: vscode`; then the process is gone and the held records go out;
 //! - otherwise it is emitted at once with `recent` set when the file was written within the
 //!   last 30 s; the hub turns such a session into `locked_by: vscode`.

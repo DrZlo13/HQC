@@ -46,10 +46,11 @@ pub const RELEASED: &str = "session_released";
 
 const TAKEN_OVER_TEXT: &str = "hqc took over the session. If it is open in VS Code, its context \
     there is stale: reopen the session in VS Code after you switch back.";
-const RELEASED_TEXT: &str = "The session was continued in VS Code: hqc stopped the agent after \
-    the turn. To drive it from here, take it over again.";
-const RELEASED_OPEN_TEXT: &str = "The session was opened in VS Code: hqc stopped the agent after \
-    the turn. To drive it from here, close it in VS Code and take it over again.";
+const RELEASED_TEXT: &str = "The session was continued in VS Code: hqc stopped the agent, \
+    interrupting a turn in progress. To drive it from here, take it over again.";
+const RELEASED_OPEN_TEXT: &str = "The session was opened in VS Code: hqc stopped the agent, \
+    interrupting a turn in progress. To drive it from here, close it in VS Code and take it \
+    over again.";
 
 /// `reason` of `session_released` and `error` of the takeover refusal: a live process
 /// outside hqc holds the transcript (SPEC §4, §9.3).

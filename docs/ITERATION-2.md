@@ -410,3 +410,17 @@ Acceptance: no Cyrillic outside fixtures, the design mockups and test data; `car
 `cd client && npm run typecheck && npm test && npm run build`, `E2E_CLAUDE_BIN=/usr/bin/false
 tools/e2e-local.sh` → `PASS (rehearsal)`; SPEC version +1 (0.29) with a §23 entry. Notes:
 `docs/notes/t28-questions.md`.
+
+## T29. A takeover in VS Code stops the turn at once (done, SPEC 0.30)
+
+Sections: §4, §9.3, §23. Taking a session over in VS Code while hqc's agent is in a turn split
+the transcript: VS Code closed the running tool call as interrupted and continued from there,
+hqc's agent finished the turn on a branch nobody continues.
+- Worker: a holder or a foreign writer of a session the worker runs stops the agent at once, a
+  turn in progress included; the "stop after the turn" state is gone.
+- Hub: the `session_released` texts say the turn was interrupted.
+Acceptance: worker tests `holder_releases_the_session` and `foreign_writer_releases_the_session`
+kill the agent with the turn still open; `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace`; SPEC 0.30 with a §23 entry. By hand:
+a long `Bash` call from hqc, "take over" in VS Code during it — hqc shows the release at once,
+VS Code continues without a split.

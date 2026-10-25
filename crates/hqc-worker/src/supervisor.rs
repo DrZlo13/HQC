@@ -313,7 +313,7 @@ impl Supervisor {
                     .find(|(_, h)| h.runtime_session_id.as_deref() == Some(rid.as_str()))
                 {
                     Some((sid, h)) => {
-                        tracing::info!(session_id = %sid, runtime_session_id = %rid, "session continued elsewhere; releasing it after the turn");
+                        tracing::info!(session_id = %sid, runtime_session_id = %rid, "session continued elsewhere; releasing it now");
                         let _ = h.tx.send(Cmd::Release);
                     }
                     None => {
@@ -678,7 +678,6 @@ impl Supervisor {
             runtime_session_id: None,
             title: None,
             commands: None,
-            release_pending: false,
             released: false,
             started_once: false,
             resume_requested: false,
@@ -744,8 +743,6 @@ struct Session {
     title: Option<String>,
     /// The runtime's slash commands, repeated in every `session.state` like `title`.
     commands: Option<Vec<String>>,
-    /// Another writer continues the transcript: stop when the turn ends (SPEC §9.3).
-    release_pending: bool,
     /// Stopped for that writer: `locked_by: vscode` until the next `session.start`.
     released: bool,
     started_once: bool,
@@ -811,7 +808,6 @@ impl Session {
                 self.resume_requested = mode == StartMode::Resume;
                 // A takeover (SPEC §9.3): the hub decided this worker runs the session again.
                 self.released = false;
-                self.release_pending = false;
                 match self.ensure_running().await {
                     Ok(()) => {
                         self.link.reply(&id, ack(None));
@@ -864,7 +860,7 @@ impl Session {
                 self.reply_result(&id, r);
             }
             Cmd::Resync => self.send_state(),
-            Cmd::Release => self.release_after_turn().await,
+            Cmd::Release => self.release().await,
             Cmd::Held { runtime_session_id } => {
                 let rid = runtime_session_id.to_string();
                 let mine = self
@@ -873,22 +869,11 @@ impl Session {
                     .or(self.spec.runtime_session_id.as_deref())
                     == Some(rid.as_str());
                 if mine && self.state != ProcessState::Stopped {
-                    tracing::info!(session_id = %self.id, runtime_session_id = %rid, "the session was opened outside hqc; releasing it after the turn");
-                    self.release_after_turn().await;
+                    tracing::info!(session_id = %self.id, runtime_session_id = %rid, "the session was opened outside hqc; releasing it now");
+                    self.release().await;
                 }
             }
             Cmd::Shutdown => unreachable!("handled in run"),
-        }
-    }
-
-    /// Stop for another writer or holder after the current turn, at once without one.
-    async fn release_after_turn(&mut self) {
-        if self.state == ProcessState::Stopped {
-            return;
-        }
-        self.release_pending = true;
-        if self.turn.is_none() {
-            self.release().await;
         }
     }
 
@@ -1022,11 +1007,7 @@ impl Session {
             },
             AdapterEvent::TurnEnded => {
                 self.end_turn();
-                if self.release_pending {
-                    self.release().await;
-                } else {
-                    self.pump().await;
-                }
+                self.pump().await;
             }
             AdapterEvent::RuntimeSessionId(r) => {
                 self.runtime_session_id = Some(r);
@@ -1132,18 +1113,19 @@ impl Session {
         }
     }
 
-    /// Hands the session to the other writer (SPEC §9.3): the process stops, queued input
-    /// stays `pending` in the hub, `session.state` says `locked_by: vscode`.
+    /// Hands the session to the other writer or holder (SPEC §9.3): the process stops at
+    /// once, a turn in progress included. The other process continues the transcript from
+    /// what it read when it opened it, so whatever this agent did afterwards would land on a
+    /// branch nobody continues. Queued input stays `pending` in the hub, `session.state`
+    /// says `locked_by: vscode`.
     async fn release(&mut self) {
-        self.release_pending = false;
+        if self.state == ProcessState::Stopped {
+            return;
+        }
         self.released = true;
         self.queue.clear();
-        tracing::info!(session_id = %self.id, "the session continues elsewhere (VS Code); stopping the agent");
-        if self.state == ProcessState::Stopped {
-            self.send_state();
-        } else {
-            self.kill_process("continued in VS Code").await;
-        }
+        tracing::info!(session_id = %self.id, in_turn = self.turn.is_some(), "the session continues elsewhere (VS Code); stopping the agent");
+        self.kill_process("continued in VS Code").await;
     }
 
     async fn kill_process(&mut self, why: &str) {

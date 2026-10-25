@@ -53,7 +53,7 @@ export class ChatSession {
     if (this.closed) return;
     const t = this.timeline;
     this.unsubscribe = this.socket.subscribe(this.id, {
-      afterSeq: () => t.lastSeq,
+      afterSeq: () => t.resumeSeq(),
       onEvent: (ev) => t.apply(ev),
       onDelivery: (d) => t.applyDelivery(d),
       onInvalid: (raw, err) => t.addInvalid(raw, err),

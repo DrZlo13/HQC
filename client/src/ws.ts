@@ -14,7 +14,7 @@ import {
 export type ConnState = 'connecting' | 'open' | 'closed';
 
 export interface SessionSubscriber {
-  /** Last `seq` applied; read at each (re)subscribe. */
+  /** The `seq` to resume after; read at each (re)subscribe. */
   afterSeq(): number;
   onEvent(ev: HqcEvent): void;
   /** `delivery` of a stored input changed (the event itself is not sent again). */

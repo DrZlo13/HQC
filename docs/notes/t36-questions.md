@@ -155,3 +155,9 @@ first live run after this merge (any `live_*` test) settles it.
 2. A cap on open approval/clarify requests per normal session (1.4).
 3. Moving `mcp.call` handling off the worker connection's loop (1.4).
 4. Resending `session.cleanup` to a worker that was offline (1.3).
+
+## Confirmed (2026-10-25)
+
+The user confirmed the changes to §7.1 **[decision]** made in iteration 3: the hub sets the
+chain (T32), one chain per human turn (T34), an agent's schedule carries its chain and a chain
+carries at most 50 peer messages (T36).

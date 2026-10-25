@@ -225,9 +225,16 @@ describe("approval.request (T26 card)", () => {
         CANONICAL_LABELS[o.canonical as keyof typeof CANONICAL_LABELS],
       );
     }
-    // "Allow" first with ⏎, "Deny" with Esc.
+    // "Allow" first; the key hints only on the card the keys answer.
     expect(buttons[0].getAttribute("data-canonical")).toBe("once");
-    expect(buttons[0].querySelector(".kbd")!.textContent).toBe("⏎");
+    expect(root.querySelector(".kbd")).toBeNull();
+  });
+
+  it("shows ⏎ on Allow and Esc on Deny when the keys answer this card", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request"));
+    show(t, { hotkeyRequest: raw("event.approval.request").payload.request_id });
+    expect(optionButtons()[0].querySelector(".kbd")!.textContent).toBe("⏎");
     expect(root.querySelector('[data-option="deny"] .kbd')!.textContent).toBe(
       "Esc",
     );

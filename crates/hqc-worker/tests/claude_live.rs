@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hqc_proto::event::{Event, EventKind};
-use hqc_proto::frame::{Runtime, SessionInput};
+use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use hqc_worker::adapter::claude_code::process::{CommandSpec, OsSpawner, Spawned, Spawner};
 use hqc_worker::adapter::claude_code::{paths, ClaudeCodeAdapters, ClaudeOptions};
 use hqc_worker::adapter::{AdapterEvent, AdapterFactory};
@@ -46,6 +46,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::RuntimeSessionId(s) => format!("runtime_session_id:{s}"),
         AdapterEvent::Title(t) => format!("title:{t}"),
         AdapterEvent::Commands(c) => format!("commands:{}", c.len()),
+        AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
     }
 }
 
@@ -101,7 +102,7 @@ async fn live_repo_settings_ignored() {
 
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
-        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         ..ClaudeOptions::default()
     };
     let spawner = Arc::new(Recording::default());
@@ -121,6 +122,7 @@ async fn live_repo_settings_ignored() {
         auto_approve: false,
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -185,6 +187,162 @@ async fn live_repo_settings_ignored() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+/// T38 (SPEC §8.1): a running process switches its permission mode between turns with
+/// `set_permission_mode`, and the CLI reports it: ask → auto → ask in one process. In auto
+/// `touch` runs without a request; back in ask the next `touch` is asked about (denied here).
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_permission_mode_switch -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_permission_mode_switch() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    let work = root.join(format!("spike-t38-live-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&work).unwrap();
+    let work = work.canonicalize().unwrap();
+    // `always` must not write into the hqc checkout: a repository of its own.
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&work)
+        .status()
+        .unwrap()
+        .success());
+
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(Recording::default()));
+    let session_id = Uuid::now_v7();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: work.clone(),
+        workdir: work.clone(),
+        environment: "default".into(),
+        runtime_session_id: Some(Uuid::new_v4().to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: false,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+
+    // One turn: the modes the CLI reported and the tools it asked about (each denied).
+    async fn turn(
+        adapter: &mut Box<dyn hqc_worker::adapter::Adapter>,
+        rx: &mut mpsc::Receiver<AdapterEvent>,
+        session_id: Uuid,
+        text: &str,
+    ) -> (Vec<PermissionMode>, Vec<String>) {
+        adapter
+            .input(&SessionInput {
+                session_id,
+                event_id: Uuid::now_v7(),
+                text: text.into(),
+                artifact_ids: vec![],
+                peer_prefix: vec![],
+                peer: None,
+            })
+            .await
+            .unwrap();
+        let (mut modes, mut asked) = (vec![], vec![]);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+        loop {
+            let ev = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("turn did not end in 180 s")
+                .expect("channel closed");
+            println!("{}", label(&ev));
+            match &ev {
+                AdapterEvent::PermissionMode(m) => modes.push(*m),
+                AdapterEvent::Event(e) => {
+                    if let EventKind::ApprovalRequest {
+                        request_id, tool, ..
+                    } = &e.kind
+                    {
+                        asked.push(tool.clone());
+                        adapter
+                            .answer_approval(request_id, "deny", None)
+                            .await
+                            .unwrap();
+                    }
+                }
+                AdapterEvent::TurnEnded => return (modes, asked),
+                AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+                _ => {}
+            }
+        }
+    }
+    /// The switch is confirmed before the next turn.
+    async fn switched(rx: &mut mpsc::Receiver<AdapterEvent>, want: PermissionMode) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let ev = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("no confirmation of the switch in 20 s")
+                .expect("channel closed");
+            println!("{}", label(&ev));
+            if ev == AdapterEvent::PermissionMode(want) {
+                return;
+            }
+        }
+    }
+
+    let (modes, asked) = turn(&mut adapter, &mut rx, session_id, "Reply with exactly: ONE").await;
+    assert_eq!(
+        modes,
+        [PermissionMode::Ask],
+        "system/init of an ask process"
+    );
+    assert!(asked.is_empty(), "{asked:?}");
+
+    adapter
+        .set_permission_mode(PermissionMode::Auto)
+        .await
+        .unwrap();
+    switched(&mut rx, PermissionMode::Auto).await;
+    let (_, asked) = turn(
+        &mut adapter,
+        &mut rx,
+        session_id,
+        "Run the shell command: touch hqc-t38-auto. Then reply with exactly: TWO",
+    )
+    .await;
+    assert!(asked.is_empty(), "auto asked about {asked:?}");
+    assert!(
+        work.join("hqc-t38-auto").exists(),
+        "the command ran in auto"
+    );
+
+    adapter
+        .set_permission_mode(PermissionMode::Ask)
+        .await
+        .unwrap();
+    switched(&mut rx, PermissionMode::Ask).await;
+    let (_, asked) = turn(
+        &mut adapter,
+        &mut rx,
+        session_id,
+        "Run the shell command: touch hqc-t38-ask. Then reply with exactly: THREE",
+    )
+    .await;
+    assert_eq!(asked, ["Bash"], "ask asks again");
+    assert!(!work.join("hqc-t38-ask").exists(), "denied");
+    adapter.kill().await.unwrap();
+}
+
 #[tokio::test]
 async fn live_bash_turn_with_approval() {
     if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
@@ -198,7 +356,7 @@ async fn live_bash_turn_with_approval() {
 
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
-        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         ..ClaudeOptions::default()
     };
     let config_dir = opts.config_dir.clone().expect("claude config dir");
@@ -220,6 +378,7 @@ async fn live_bash_turn_with_approval() {
         auto_approve: false,
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -404,7 +563,7 @@ async fn live_bash_turn_with_approval() {
 /// ```
 #[tokio::test]
 async fn live_permission_policy() {
-    use hqc_worker::permissions::{PermissionMode, Permissions};
+    use hqc_worker::permissions::Permissions;
     if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
         eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
         return;
@@ -425,9 +584,10 @@ async fn live_permission_policy() {
     deny.push("Bash(touch hqc-denied:*)".into());
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
-        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         permissions: Permissions {
             mode: PermissionMode::Ask,
+            allow_auto: true,
             allow: vec!["Bash(touch hqc-allowed:*)".into()],
             deny,
         },
@@ -450,6 +610,7 @@ async fn live_permission_policy() {
         auto_approve: false,
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -553,7 +714,7 @@ async fn live_ai_title() {
     let work = work.canonicalize().unwrap();
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
-        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         ..ClaudeOptions::default()
     };
     let config_dir = opts.config_dir.clone().expect("claude config dir");
@@ -574,6 +735,7 @@ async fn live_ai_title() {
         auto_approve: false,
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);

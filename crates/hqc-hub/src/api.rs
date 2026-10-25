@@ -19,7 +19,9 @@ use hqc_proto::{
         ProjectList, PushSubscription, SessionList, VapidKey, WorkspaceList,
     },
     event::CancelReason,
-    frame::{FsListDirs, FsStat, HubFrame, ListCandidates, ResultBody, SessionCleanup},
+    frame::{
+        FsListDirs, FsStat, HubFrame, ListCandidates, PermissionMode, ResultBody, SessionCleanup,
+    },
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -717,6 +719,8 @@ pub async fn new_session(
             model: b.model.as_deref(),
             // Only the worker owner may enable it (SPEC §10.1); here that is the creator.
             auto_approve: b.auto_approve && worker.owner_id == owner,
+            // The creator owns the worker (above), so `auto` is theirs to choose (T38).
+            permission_mode: b.permission_mode,
         },
         spawn,
     )
@@ -740,6 +744,8 @@ pub async fn get_session(
 pub struct PatchSession {
     pub title: Option<String>,
     pub auto_approve: Option<bool>,
+    /// T38: `auto` only by the worker owner; a running agent switches at once.
+    pub permission_mode: Option<PermissionMode>,
 }
 
 pub async fn patch_session(
@@ -772,6 +778,34 @@ pub async fn patch_session(
             .bind(a)
             .execute(&app.db)
             .await?;
+    }
+    if let Some(m) = b.permission_mode {
+        if s.system {
+            return Err(ApiError::Conflict(
+                "system_session",
+                "the worker's service session has no agent".into(),
+            ));
+        }
+        let owner = match s.worker_id {
+            Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
+            None => None,
+        };
+        // Auto runs tool calls the worker owner would otherwise be asked about (SPEC §10.1).
+        if m == PermissionMode::Auto && owner != Some(user.id) {
+            return Err(ApiError::Forbidden(
+                "only the worker owner switches a session to auto".into(),
+            ));
+        }
+        db::set_permission_mode(&app.db, id, m).await?;
+        // A stopped agent starts in it; an offline worker gets it with `session.start`.
+        send_to_worker(
+            &app,
+            &s,
+            HubFrame::SessionPermissionMode {
+                session_id: id,
+                permission_mode: m,
+            },
+        );
     }
     app.session_changed(id);
     let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;

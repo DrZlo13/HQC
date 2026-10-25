@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Drive `claude -p` in stream-json mode, log every stdin/stdout frame, answer can_use_tool.
 
-usage: driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] [--then PROMPT ...] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+usage: driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] [--then PROMPT ...] [--mode-then MODE PROMPT ...] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 POLICY: once | deny | always | ask_answer | none
 --then PROMPT (repeatable): after each `result`, send the next prompt in the same process
 instead of closing stdin (several turns of one process).
+--mode-then MODE PROMPT (repeatable, in order with --then): the same, but first send a
+`set_permission_mode` control request with MODE and wait for its response.
 --deny-message-file FILE (or SPIKE_DENY_MESSAGE): the `message` of a deny answer.
 --resume UUID (or SPIKE_RESUME): continue that session with --resume instead of a new
 --session-id.
@@ -17,10 +19,14 @@ args = sys.argv[1:]
 # `--resume UUID` / `--arg-prompt` before the positional arguments: the same as the
 # variables, for shells where setting the environment is awkward.
 then = []
-while args and args[0] in ("--resume", "--arg-prompt", "--deny-message-file", "--then"):
+while args and args[0] in ("--resume", "--arg-prompt", "--deny-message-file", "--then",
+                           "--mode-then"):
     if args[0] == "--then":
-        then.append(args[1])
+        then.append((None, args[1]))
         args = args[2:]
+    elif args[0] == "--mode-then":
+        then.append((args[1], args[2]))
+        args = args[3:]
     elif args[0] == "--resume":
         os.environ["SPIKE_RESUME"] = args[1]
         args = args[2:]
@@ -52,7 +58,7 @@ cmd = ["claude", "-p", "--output-format", "stream-json", "--input-format", "stre
        "--replay-user-messages", "--verbose", "--model", "claude-haiku-5-5",
        "--max-turns", "2"] + session + extra
 json.dump({"cmd": cmd, "cwd": os.path.abspath(cwd), "session_id": sid, "policy": policy,
-           "prompts": [prompt] + then,
+           "prompts": [prompt] + [t for _, t in then], "modes": [m for m, _ in then],
            "env": {k: v for k, v in os.environ.items() if k.startswith("MCP_")}},
           open(f"{out}/run.json", "w"), indent=1)
 
@@ -92,6 +98,7 @@ if os.environ.get("SPIKE_INIT"):
           "request": {"subtype": "initialize"}})
 send({"type": "user", "message": {"role": "user", "content": prompt}})
 
+pending_prompt = None
 deadline = time.time() + float(os.environ.get("SPIKE_TIMEOUT", "180"))
 timer = threading.Timer(deadline - time.time(), p.kill); timer.start()
 for line in p.stdout:
@@ -105,9 +112,18 @@ for line in p.stdout:
         req = msg.get("request", {})
         if req.get("subtype") == "can_use_tool" and policy != "none":
             answer(msg.get("request_id"), req)
+    if msg.get("type") == "control_response" and pending_prompt is not None:
+        send({"type": "user", "message": {"role": "user", "content": pending_prompt}})
+        pending_prompt = None
     if msg.get("type") == "result":
         if then:
-            send({"type": "user", "message": {"role": "user", "content": then.pop(0)}})
+            mode, text = then.pop(0)
+            if mode is None:
+                send({"type": "user", "message": {"role": "user", "content": text}})
+            else:
+                pending_prompt = text
+                send({"type": "control_request", "request_id": f"mode-{len(then)}",
+                      "request": {"subtype": "set_permission_mode", "mode": mode}})
         else:
             p.stdin.close()
 timer.cancel()

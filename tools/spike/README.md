@@ -13,7 +13,7 @@ Starts `claude -p` in stream-json mode with `--permission-prompts host
 policy and closes stdin after `result`.
 
 ```
-tools/spike/driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] [--then PROMPT ...] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
+tools/spike/driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] [--then PROMPT ...] [--mode-then MODE PROMPT ...] OUT_DIR CWD POLICY PROMPT [-- extra claude args]
 ```
 
 - `--resume UUID` (or `SPIKE_RESUME`): continue that session with `--resume` instead of a new
@@ -24,6 +24,9 @@ tools/spike/driver.py [--resume UUID] [--arg-prompt] [--deny-message-file FILE] 
 
 - `--then PROMPT` (repeatable): after each `result` send the next prompt in the same process
   instead of closing stdin (T27: several turns of one process).
+- `--mode-then MODE PROMPT` (repeatable, in order with `--then`): the same, but first send
+  `control_request {subtype: set_permission_mode, mode: MODE}` and wait for its
+  `control_response` (T38: switching the permission mode of a running process).
 
 - `POLICY`: `once` (allow), `deny`, `always` (allow + every `permission_suggestions` entry
   as `updatedPermissions`), `ask_answer` (answer `AskUserQuestion` with the first option of

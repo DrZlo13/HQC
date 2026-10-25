@@ -8,6 +8,8 @@
     "queue_len": 0,
     "unread": 1,
     "last_seq": 43,
-    "last_read_seq": 42
+    "last_read_seq": 42,
+    "permission_mode": "auto",
+    "effective_permission_mode": "auto"
   }
 }

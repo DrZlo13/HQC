@@ -17,7 +17,7 @@ use uuid::Uuid;
 use super::engine::{Action, Core};
 use super::process::Sig;
 use super::scripted::ScriptedClaude;
-use super::{ClaudeCodeAdapters, ClaudeOptions};
+use super::{ClaudeCodeAdapter, ClaudeCodeAdapters, ClaudeOptions};
 use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
 use crate::config::StartSpec;
 
@@ -149,6 +149,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         auto_approve: false,
         session_token: crate::token::Secret::new("st"),
         ask_timeout_s: 600,
+        permission_mode: crate::permissions::PermissionMode::Ask,
     }
 }
 
@@ -235,6 +236,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
             AdapterEvent::Title(_) => "title".into(),
             AdapterEvent::Commands(_) => "commands".into(),
+            // Every `system/init` carries it; the T38 tests look at it on their own.
+            AdapterEvent::PermissionMode(_) => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -738,7 +741,8 @@ async fn command_line_carries_session_restrictions() {
 }
 
 /// T12 (SPEC §8.1, §14): `[permissions]` reach the CLI as `--settings` on every start,
-/// restricted included; `mode = "auto"` becomes `--permission-mode auto`.
+/// restricted included; a session in auto gets `--permission-mode auto` (T38), the others the
+/// CLI's ask mode.
 #[tokio::test]
 async fn command_line_carries_permissions() {
     use crate::permissions::{PermissionMode, Permissions};
@@ -748,6 +752,7 @@ async fn command_line_carries_permissions() {
     let mut opts = options(config.path());
     opts.permissions = Permissions {
         mode: PermissionMode::Ask,
+        allow_auto: true,
         allow: vec!["Bash(cargo test:*)".into(), "Read".into()],
         deny: vec!["Bash(git push:*)".into()],
     };
@@ -785,19 +790,154 @@ async fn command_line_carries_permissions() {
     assert_eq!(settings(2), json!({"voiceEnabled": false}));
     a.kill().await.unwrap();
 
-    // The worker config: the CLI's ask mode unless `mode = "auto"`.
+    // The worker config gives the CLI's ask mode; the session's mode picks the flag (T38).
     let base = format!(
         "hub_url = \"https://h\"\nallowed_roots = [{0:?}]\n",
         work.path().display().to_string()
     );
     let cfg = crate::config::Config::parse(&base).unwrap();
     let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
-    assert_eq!(f.opts.permission_mode, "manual");
+    assert_eq!(f.opts.ask_mode, "manual");
     assert_eq!(f.opts.permissions, Permissions::default());
     let cfg =
         crate::config::Config::parse(&format!("{base}[permissions]\nmode = \"auto\"\n")).unwrap();
     let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
-    assert_eq!(f.opts.permission_mode, "auto");
+    assert_eq!(f.opts.ask_mode, "manual");
+    let mode = |a: &ClaudeCodeAdapter, s: &StartSpec| -> String {
+        let args = a.command(s, &Uuid::nil(), false).args;
+        let i = args.iter().position(|a| a == "--permission-mode").unwrap();
+        args[i + 1].clone()
+    };
+    let a = ClaudeCodeAdapter {
+        session_id: s.session_id,
+        opts: f.opts.clone(),
+        policy: f.policy.clone(),
+        spawner: f.spawner.clone(),
+        events: mpsc::channel(1).0,
+        proc: None,
+    };
+    s.permission_mode = PermissionMode::Ask;
+    assert_eq!(mode(&a, &s), "manual");
+    s.permission_mode = PermissionMode::Auto;
+    assert_eq!(mode(&a, &s), "auto", "restricted too");
+    s.restricted = false;
+    assert_eq!(mode(&a, &s), "auto");
+    // The deny list goes with auto as with ask.
+    assert!(a
+        .command(&s, &Uuid::nil(), false)
+        .args
+        .contains(&"--settings".to_string()));
+}
+
+/// T38: a running process switches with `set_permission_mode` (`default` for ask, the
+/// name 2.1.308 takes), and what the CLI then reports in `system/status` and
+/// `system/init` becomes [`AdapterEvent::PermissionMode`] when it changes. Fixture
+/// `permission-mode-switch`: ask → auto → ask in one process.
+#[test]
+fn permission_mode_switch_in_the_stream() {
+    use crate::permissions::PermissionMode;
+    let fx = fixture!("permission-mode-switch", "2.1.308");
+    let stdin: Vec<Value> = fx
+        .stdin
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let sent: Vec<&str> = stdin
+        .iter()
+        .filter(|v| v["request"]["subtype"] == "set_permission_mode")
+        .map(|v| v["request"]["mode"].as_str().unwrap())
+        .collect();
+    assert_eq!(sent, ["auto", "default"]);
+
+    let mut core = Core::new(Uuid::now_v7(), false);
+    for (mode, want) in [
+        (PermissionMode::Auto, "auto"),
+        (PermissionMode::Ask, "default"),
+    ] {
+        let Action::Write(v) = core.set_permission_mode(mode) else {
+            panic!("not a write");
+        };
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(
+            v["request"],
+            json!({"subtype": "set_permission_mode", "mode": want})
+        );
+        assert!(v["request_id"].as_str().unwrap().starts_with("hqc-mode-"));
+    }
+    let mut modes = Vec::new();
+    let mut requests = 0;
+    for line in fx.stream.lines() {
+        for a in core.on_line(line) {
+            match a {
+                Action::Emit(AdapterEvent::PermissionMode(m)) => modes.push(m),
+                Action::Emit(AdapterEvent::Event(e))
+                    if matches!(e.kind, EventKind::ApprovalRequest { .. }) =>
+                {
+                    requests += 1
+                }
+                _ => {}
+            }
+        }
+    }
+    // Reported once per change: init (default), the switch to auto, the switch back.
+    assert_eq!(
+        modes,
+        [
+            PermissionMode::Ask,
+            PermissionMode::Auto,
+            PermissionMode::Ask
+        ]
+    );
+    // Only the turn in ask asked.
+    assert_eq!(requests, 1);
+
+    // The CLI's answer to our request reports the mode too; a refusal changes nothing.
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let ok = r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-mode-1","response":{"mode":"auto"}}}"#;
+    assert_eq!(
+        core.on_line(ok),
+        [Action::Emit(AdapterEvent::PermissionMode(
+            PermissionMode::Auto
+        ))]
+    );
+    let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"hqc-mode-2","error":"Cannot set permission mode"}}"#;
+    assert!(core.on_line(refused).is_empty());
+    // Our echo of an approval answer is not a mode.
+    let echo = r#"{"type":"control_response","response":{"subtype":"success","request_id":"277e","response":{"behavior":"allow","mode":"auto"}}}"#;
+    assert!(core.on_line(echo).is_empty());
+}
+
+/// T38: `set_permission_mode` on the adapter writes the control request to a running
+/// process and does nothing without one.
+#[tokio::test]
+async fn adapter_switches_a_running_process() {
+    use crate::permissions::PermissionMode;
+    let mut h = Harness::start("", Uuid::new_v4()).await;
+    h.adapter
+        .set_permission_mode(PermissionMode::Auto)
+        .await
+        .unwrap();
+    let req = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(v) = h
+                .claude
+                .stdin()
+                .into_iter()
+                .find(|v| v["request"]["subtype"] == "set_permission_mode")
+            {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no set_permission_mode on stdin");
+    assert_eq!(req["request"]["mode"], "auto");
+    h.adapter.kill().await.unwrap();
+    h.adapter
+        .set_permission_mode(PermissionMode::Ask)
+        .await
+        .unwrap();
 }
 
 /// The agent gets a cleared environment with only the allowed variables (SPEC §14).
@@ -1086,6 +1226,7 @@ fn policy(allow: &[&str], deny: &[&str]) -> Arc<crate::permissions::Policy> {
     Arc::new(crate::permissions::Policy::new(
         &crate::permissions::Permissions {
             mode: crate::permissions::PermissionMode::Ask,
+            allow_auto: true,
             allow: allow.iter().map(|r| r.to_string()).collect(),
             deny: deny.iter().map(|r| r.to_string()).collect(),
         },

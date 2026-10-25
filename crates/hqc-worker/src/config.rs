@@ -18,7 +18,8 @@
 //! # show_in_vscode = true          # sessions run by hqc appear in VS Code's history
 //!
 //! [permissions]                  # optional, see crate::permissions
-//! mode = "ask"                   # "ask" | "auto"
+//! mode = "ask"                   # "ask" | "auto": sessions that do not ask for a mode
+//! allow_auto = true              # false: a session that asks for "auto" runs in "ask" (T38)
 //! allow = ["Bash(cargo test:*)"]
 //! # deny: default crate::permissions::DEFAULT_DENY (sudo, ssh, scp, rm -rf /*, ...)
 //! ```
@@ -31,7 +32,7 @@ use hqc_proto::frame::{Runtime, SessionStart};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::permissions::{Permissions, RawPermissions};
+use crate::permissions::{PermissionMode, Permissions, RawPermissions};
 use crate::token::Secret;
 
 /// The only environment in iteration 1 (SPEC §14: no `environments{}` / `env_bindings[]` yet).
@@ -170,6 +171,10 @@ pub struct StartSpec {
     pub auto_approve: bool,
     pub session_token: Secret,
     pub ask_timeout_s: u32,
+    /// The mode the agent runs in: `session.start.permission_mode` as `[permissions]`
+    /// allows it (T38, [`crate::permissions::Permissions::mode_for`]); a later
+    /// `session.permission_mode` changes it.
+    pub permission_mode: PermissionMode,
 }
 
 impl StartSpec {
@@ -281,7 +286,22 @@ impl Config {
             auto_approve: s.auto_approve,
             session_token: Secret::new(s.session_token.clone()),
             ask_timeout_s: s.ask_timeout_s,
+            permission_mode: self.permission_mode(s.session_id, s.permission_mode),
         })
+    }
+
+    /// The mode a session runs in when hqc asks for `asked` (T38): `auto` only with
+    /// `[permissions] allow_auto`; a refusal is logged, the session runs in `ask`.
+    pub fn permission_mode(
+        &self,
+        session_id: Uuid,
+        asked: Option<PermissionMode>,
+    ) -> PermissionMode {
+        let mode = self.permissions.mode_for(asked);
+        if asked == Some(PermissionMode::Auto) && mode != PermissionMode::Auto {
+            tracing::warn!(%session_id, "the hub asked for permission mode auto; [permissions] allow_auto = false, running ask");
+        }
+        mode
     }
 
     /// The canonical workspace, which must lie inside `allowed_roots` (symlinks resolved),
@@ -642,6 +662,34 @@ mod tests {
         }
         let e = Config::parse(&format!("{base}[permissions]\ndeny = [\"Bash()\"]\n")).unwrap_err();
         assert!(format!("{e:#}").contains("permissions.deny"), "{e:#}");
+    }
+
+    /// T38: the mode a session runs in is hqc's choice, else `mode`; `auto` only with
+    /// `allow_auto`.
+    #[test]
+    fn session_permission_mode() {
+        use crate::permissions::PermissionMode::{Ask, Auto};
+        let base = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n";
+        let id = Uuid::nil();
+        let c = Config::parse(base).unwrap();
+        assert!(c.permissions.allow_auto, "allowed by default");
+        assert_eq!(c.permission_mode(id, None), Ask);
+        assert_eq!(c.permission_mode(id, Some(Auto)), Auto);
+        assert_eq!(c.permission_mode(id, Some(Ask)), Ask);
+
+        let c = Config::parse(&format!("{base}[permissions]\nmode = \"auto\"\n")).unwrap();
+        assert_eq!(c.permission_mode(id, None), Auto);
+        assert_eq!(c.permission_mode(id, Some(Ask)), Ask);
+
+        let c = Config::parse(&format!("{base}[permissions]\nallow_auto = false\n")).unwrap();
+        assert_eq!(c.permission_mode(id, Some(Auto)), Ask);
+        assert_eq!(c.permission_mode(id, None), Ask);
+
+        let e = Config::parse(&format!(
+            "{base}[permissions]\nmode = \"auto\"\nallow_auto = false\n"
+        ))
+        .unwrap_err();
+        assert!(format!("{e:#}").contains("allow_auto"), "{e:#}");
     }
 
     #[test]

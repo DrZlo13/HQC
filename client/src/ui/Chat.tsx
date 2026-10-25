@@ -2,14 +2,14 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { ApiError } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize } from '../artifacts';
-import type { SessionInfo, SessionState } from '../proto';
+import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
 import type { Timeline } from '../timeline';
 import { ActivityLine, ChatItems, StreamingMessage, onlyRequests, type ChatActions } from './cards';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { IconAttach, IconBack, IconCode, IconMore, IconSend, IconStop } from './icons';
-import { STATE_LABELS, formatCost, homePath, modelName } from './labels';
+import { AUTO_CONFIRM, STATE_LABELS, formatCost, homePath, modelName } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
 import { WaitedRequests } from './requests';
@@ -174,6 +174,11 @@ export function Chat({
     );
   };
   const stop = () => act(() => chat.stop(), 'Not stopped');
+  // T38: Ask at once, Auto after a one-line confirmation.
+  const setMode = (mode: PermissionMode) => {
+    if (mode === 'auto' && !confirm(AUTO_CONFIRM)) return;
+    void act(() => app.setPermissionMode(sessionId, mode), 'Not switched');
+  };
   const { model, cost } = t.usageTotals();
   const pill = <StatePill state={state} timeline={t} />;
   const conn = app.conn !== 'open' && <span class="conn-lost">offline</span>;
@@ -208,6 +213,7 @@ export function Chat({
           <h1 class="chat-title">{info?.title || 'Session'}</h1>
           <div class="chat-meta">
             {pill}
+            {!system && info && <PermissionMark info={info} />}
             {system && <span class="chat-system-note">the worker's service session</span>}
             {info?.spawned_by && (
               <span class="chat-spawned">
@@ -294,6 +300,7 @@ export function Chat({
             onUnarchive={unarchive}
             onDelete={remove}
             onSchedules={() => setSchedules(true)}
+            onPermissionMode={setMode}
           />
         )}
       </header>
@@ -391,6 +398,38 @@ function StatePill({ state, timeline }: { state: SessionState; timeline: Timelin
   );
 }
 
+/** The session's permission mode (T38): what the worker reports the agent runs in, else
+ *  what hqc asked for. "Auto" stands out: nothing but the worker's deny list stops a call. */
+export function PermissionMark({ info }: { info: SessionInfo }) {
+  const runs = info.effective_permission_mode;
+  const asked = info.permission_mode;
+  if (runs === 'auto' || (!runs && asked === 'auto')) {
+    return (
+      <span class="perm-auto" title="Claude Code decides tool calls itself; only the worker's deny list stops one">
+        Auto
+      </span>
+    );
+  }
+  if (asked === 'auto') {
+    return (
+      <span class="perm-ask" title="The worker runs this session in Ask: until the agent next runs, or for good if the worker does not allow Auto">
+        Ask (Auto asked)
+      </span>
+    );
+  }
+  if (!runs && !asked) return null;
+  return (
+    <span class="perm-ask" title="Tool calls outside the worker's rules are asked about">
+      Ask
+    </span>
+  );
+}
+
+/** The mode the menu switches from: hqc's choice, else what the agent runs in. */
+export function currentMode(info: SessionInfo): PermissionMode {
+  return info.permission_mode ?? info.effective_permission_mode ?? 'ask';
+}
+
 /** "More": archive, restore and delete; on a phone also the path, model and cost. */
 function MoreMenu({
   info,
@@ -403,6 +442,7 @@ function MoreMenu({
   onUnarchive,
   onDelete,
   onSchedules,
+  onPermissionMode,
 }: {
   info: SessionInfo;
   phone: boolean;
@@ -415,6 +455,7 @@ function MoreMenu({
   onUnarchive: () => void;
   onDelete: () => void;
   onSchedules: () => void;
+  onPermissionMode: (mode: PermissionMode) => void;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -476,6 +517,15 @@ function MoreMenu({
           )}
           {onRetry && item('btn-retry', 'Retry', onRetry)}
           {item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
+          {!archived &&
+            (currentMode(info) === 'auto'
+              ? item('btn-mode-ask', 'Switch to Ask', () => onPermissionMode('ask'), 'Ask before tool calls outside the worker\'s rules')
+              : item(
+                  'btn-mode-auto',
+                  'Switch to Auto',
+                  () => onPermissionMode('auto'),
+                  "Claude Code decides tool calls itself; the worker's deny list is the only limit",
+                ))}
           {!archived && item('btn-archive', 'Archive', onArchive, 'Move the session to the archive; the agent stops')}
           {archived && item('btn-unarchive', 'Restore', onUnarchive)}
           {archived && item('btn-delete menu-danger', 'Delete', onDelete)}

@@ -171,6 +171,7 @@ pub async fn ingest(
                     title: None,
                     model: None,
                     auto_approve: false,
+                    permission_mode: None,
                 },
             )
             .await?;

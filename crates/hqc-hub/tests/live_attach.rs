@@ -80,7 +80,7 @@ async fn live_attach_writes_the_event() {
     .unwrap();
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
-        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         ..ClaudeOptions::default()
     };
     let adapters = ClaudeCodeAdapters::new(opts, Arc::new(OsSpawner)).with_mcp(McpLaunch {

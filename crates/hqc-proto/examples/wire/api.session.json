@@ -28,5 +28,7 @@
   "created_at": "2026-10-22T09:00:00Z",
   "updated_at": "2026-10-22T10:00:02Z",
   "commands": ["compact", "context", "review", "code-review"],
-  "spawned_by": {"session_id": "0199f3a2-7c10-7000-8000-000000000002", "address": "hqc/planner"}
+  "spawned_by": {"session_id": "0199f3a2-7c10-7000-8000-000000000002", "address": "hqc/planner"},
+  "permission_mode": "auto",
+  "effective_permission_mode": "auto"
 }

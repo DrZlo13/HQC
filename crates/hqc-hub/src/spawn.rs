@@ -15,13 +15,15 @@
 //!   prompt counts as a peer message ([`peers::admit`]). The count and the creation hold the
 //!   owner's lock ([`AppState::owner_lock`]), so parallel calls cannot pass the check
 //!   together.
+//! - The new session runs in `ask` (T38): an agent never starts a session in `auto`, and
+//!   `hqc_spawn` has no argument for the mode.
 //! - Once per `request_id` (SPEC §5.2): the session's id and the message's `event_id` are
 //!   derived from the call, so a repeat finds both and answers the same address.
 
 use hqc_proto::{
     api::CreateSessionRequest,
     event::Chain,
-    frame::{McpCall, McpError},
+    frame::{McpCall, McpError, PermissionMode},
     mcp::error_code,
 };
 use serde::Deserialize;
@@ -122,6 +124,9 @@ async fn create(
     let req = CreateSessionRequest {
         workspace_id,
         model: a.model.clone().or_else(|| caller.model.clone()),
+        // Never `auto`, whatever the caller runs in or the worker's default (T38): the owner
+        // switches a spawned session to auto by hand.
+        permission_mode: Some(PermissionMode::Ask),
         ..CreateSessionRequest::default()
     };
     let spawn = db::Spawn {

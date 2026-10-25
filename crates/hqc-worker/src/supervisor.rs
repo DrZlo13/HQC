@@ -20,6 +20,10 @@
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
+//! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
+//!   go through [`Config::permission_mode`] (`auto` only with `allow_auto`); a running agent
+//!   switches at once, a stopped one starts in the mode. The mode the runtime confirms is
+//!   sent in `session.state.permission_mode`, repeated like `title`.
 //! - `idle_timeout` (SPEC §17.3): an idle process is killed, the next input resumes it.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
@@ -171,6 +175,11 @@ enum Cmd {
     },
     Kill {
         id: String,
+    },
+    /// The mode the session runs in from now on, already decided by the config (T38).
+    PermissionMode {
+        id: String,
+        mode: hqc_proto::frame::PermissionMode,
     },
     Approval {
         id: String,
@@ -379,6 +388,18 @@ impl Supervisor {
                     return;
                 }
                 (session_id, Cmd::Kill { id })
+            }
+            HubFrame::SessionPermissionMode {
+                session_id,
+                permission_mode,
+            } => {
+                if !self.sessions.contains_key(&session_id) {
+                    // Nothing runs: the next `session.start` carries the mode.
+                    self.link.reply(&id, ack(None));
+                    return;
+                }
+                let mode = self.cfg.permission_mode(session_id, Some(permission_mode));
+                (session_id, Cmd::PermissionMode { id, mode })
             }
             HubFrame::ApprovalResponse {
                 session_id,
@@ -678,6 +699,7 @@ impl Supervisor {
             runtime_session_id: None,
             title: None,
             commands: None,
+            permission_mode: None,
             released: false,
             started_once: false,
             resume_requested: false,
@@ -700,6 +722,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Input { id, .. }
         | Cmd::Stop { id }
         | Cmd::Kill { id }
+        | Cmd::PermissionMode { id, .. }
         | Cmd::Approval { id, .. }
         | Cmd::Clarify { id, .. } => id.clone(),
         Cmd::Resync | Cmd::Release | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
@@ -743,6 +766,9 @@ struct Session {
     title: Option<String>,
     /// The runtime's slash commands, repeated in every `session.state` like `title`.
     commands: Option<Vec<String>>,
+    /// The permission mode the agent runs in (T38): the one it was started or switched
+    /// with, then what the runtime reports; repeated in every `session.state`.
+    permission_mode: Option<hqc_proto::frame::PermissionMode>,
     /// Stopped for that writer: `locked_by: vscode` until the next `session.start`.
     released: bool,
     started_once: bool,
@@ -802,6 +828,8 @@ impl Session {
                     // agent's MCP calls carry it from now on, and so does its next process.
                     self.link.mcp().set_hub_token(self.id, &spec.session_token);
                     self.spec.session_token = spec.session_token.clone();
+                    // A switch the worker missed while it was offline (T38).
+                    self.switch_mode(spec.permission_mode).await;
                     if *spec != self.spec {
                         tracing::warn!(session_id = %self.id, "session.start for a running agent; keeping the running one");
                     }
@@ -843,6 +871,10 @@ impl Session {
                 self.kill_process("session.kill").await;
                 self.link.reply(&id, ack(None));
             }
+            Cmd::PermissionMode { id, mode } => {
+                self.switch_mode(mode).await;
+                self.link.reply(&id, ack(None));
+            }
             Cmd::Approval {
                 id,
                 request_id,
@@ -878,6 +910,24 @@ impl Session {
                 }
             }
             Cmd::Shutdown => unreachable!("handled in run"),
+        }
+    }
+
+    /// Run in `mode` from now on (T38): the next start takes it from the spec, a running
+    /// agent switches at once, mid-turn too (the runtime applies it to its next permission
+    /// check). A runtime that refuses keeps its mode until its next start; `session.state`
+    /// says which mode it runs.
+    async fn switch_mode(&mut self, mode: hqc_proto::frame::PermissionMode) {
+        if self.spec.permission_mode == mode {
+            return;
+        }
+        tracing::info!(session_id = %self.id, mode = mode.as_str(), "permission mode switched");
+        self.spec.permission_mode = mode;
+        if self.state == ProcessState::Stopped {
+            return;
+        }
+        if let Err(e) = self.adapter.set_permission_mode(mode).await {
+            tracing::warn!(session_id = %self.id, "permission mode not switched until the next start: {e:#}");
         }
     }
 
@@ -1035,6 +1085,12 @@ impl Session {
                     self.send_state();
                 }
             }
+            AdapterEvent::PermissionMode(m) => {
+                if self.permission_mode != Some(m) {
+                    self.permission_mode = Some(m);
+                    self.send_state();
+                }
+            }
             AdapterEvent::Exited { error } => {
                 if self.state == ProcessState::Stopped {
                     return;
@@ -1121,6 +1177,8 @@ impl Session {
         match r {
             Ok(()) => {
                 self.started_once = true;
+                // What the process was started with, until it reports otherwise.
+                self.permission_mode = Some(self.spec.permission_mode);
                 // Its MCP server is accepted only from inside this process (SPEC §7.2).
                 self.link.mcp().set_pid(self.id, self.adapter.pid());
                 self.set_state(ProcessState::Running);
@@ -1200,6 +1258,7 @@ impl Session {
             title: self.title.clone(),
             held_by: None,
             commands: self.commands.clone(),
+            permission_mode: self.permission_mode,
         });
     }
 

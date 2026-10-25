@@ -230,6 +230,7 @@ async fn another_owners_requests_are_never_listed() {
             title: Some("Secret"),
             model: None,
             auto_approve: false,
+            permission_mode: None,
         },
     )
     .await

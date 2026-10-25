@@ -1,7 +1,7 @@
 //! Postgres access (sqlx, runtime queries). Migrations: `crates/hqc-hub/migrations`.
 
 use chrono::{DateTime, Utc};
-use hqc_proto::frame::TitleSource;
+use hqc_proto::frame::{PermissionMode, TitleSource};
 use serde_json::{Map, Value};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use uuid::Uuid;
@@ -1000,6 +1000,10 @@ pub struct SessionRow {
     /// The session whose `hqc_spawn` started this one (SPEC §3 Session); null when that
     /// session was deleted.
     pub spawned_by: Option<Uuid>,
+    /// `ask` | `auto`: the mode hqc asks the worker for (T38); null — the worker's default.
+    pub permission_mode: Option<String>,
+    /// The mode the worker last reported (`session.state.permission_mode`).
+    pub effective_permission_mode: Option<String>,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1007,7 +1011,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
-    s.updated_at, s.spawned_by";
+    s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1029,6 +1033,8 @@ pub struct NewSession<'a> {
     pub title: Option<&'a str>,
     pub model: Option<&'a str>,
     pub auto_approve: bool,
+    /// `None`: the worker's `[permissions] mode` (T38).
+    pub permission_mode: Option<PermissionMode>,
 }
 
 /// What `hqc_spawn` records on the session it creates.
@@ -1079,8 +1085,9 @@ pub async fn create_spawned_session(
         let r = sqlx::query(
             "INSERT INTO sessions (id, project_id, owner_id, workspace_id, worker_id, cwd, title, slug,
                 model, auto_approve, runtime, runtime_session_id, title_source, spawned_by,
-                spawn_chain_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11, $12, $13, $14)
+                spawn_chain_id, permission_mode)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11, $12, $13, $14,
+                $15)
              ON CONFLICT (project_id, slug) DO NOTHING",
         )
         .bind(id)
@@ -1097,6 +1104,7 @@ pub async fn create_spawned_session(
         .bind(source.as_str())
         .bind(spawn.map(|s| s.by))
         .bind(spawn.map(|s| s.chain_id))
+        .bind(n.permission_mode.map(PermissionMode::as_str))
         .execute(db)
         .await?;
         if r.rows_affected() == 1 {
@@ -1148,6 +1156,33 @@ pub async fn set_commands(db: &PgPool, id: Uuid, commands: &[String]) -> sqlx::R
     .bind(v)
     .execute(db)
     .await?;
+    Ok(())
+}
+
+/// The mode the worker reports the session's agent runs in (T38).
+pub async fn set_effective_permission_mode(
+    db: &PgPool,
+    id: Uuid,
+    mode: PermissionMode,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET effective_permission_mode = $2
+         WHERE id = $1 AND effective_permission_mode IS DISTINCT FROM $2",
+    )
+    .bind(id)
+    .bind(mode.as_str())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// The mode hqc asks the worker for (T38, `PATCH /api/sessions/{id}`).
+pub async fn set_permission_mode(db: &PgPool, id: Uuid, mode: PermissionMode) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET permission_mode = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(mode.as_str())
+        .execute(db)
+        .await?;
     Ok(())
 }
 

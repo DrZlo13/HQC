@@ -10,7 +10,16 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Api } from '../src/api';
 import { AppState } from '../src/app';
-import { parseEvent, type HeldBy, type HqcEvent, type SessionInfo, type SessionState, type SpawnedBy } from '../src/proto';
+import {
+  parseEvent,
+  type HeldBy,
+  type HqcEvent,
+  type PermissionMode,
+  type SessionInfo,
+  type SessionState,
+  type SpawnedBy,
+} from '../src/proto';
+import { AUTO_CONFIRM } from '../src/ui/labels';
 import type { HubSocket } from '../src/ws';
 import { Chat } from '../src/ui/Chat';
 
@@ -45,7 +54,15 @@ const HISTORY = [
 
 function setup(
   state: SessionState,
-  opts: { held_by?: HeldBy; history?: HqcEvent[]; commands?: string[]; fetched?: string[]; spawned_by?: SpawnedBy } = {},
+  opts: {
+    held_by?: HeldBy;
+    history?: HqcEvent[];
+    commands?: string[];
+    fetched?: string[];
+    spawned_by?: SpawnedBy;
+    permission_mode?: PermissionMode;
+    effective_permission_mode?: PermissionMode;
+  } = {},
 ) {
   const history = opts.history ?? HISTORY;
   const api = {
@@ -58,6 +75,12 @@ function setup(
     readCursor: vi.fn(async () => {}),
     approve: vi.fn(async () => {}),
     takeover: vi.fn(async () => ({})),
+    // PATCH /api/sessions/{id}: the hub stores the mode, the worker confirms it at once.
+    patchSession: vi.fn(async (_id: string, patch: { permission_mode?: PermissionMode }) => ({
+      ...info,
+      permission_mode: patch.permission_mode,
+      effective_permission_mode: patch.permission_mode,
+    })),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -95,6 +118,8 @@ function setup(
     held_by: opts.held_by,
     commands: opts.commands,
     spawned_by: opts.spawned_by,
+    permission_mode: opts.permission_mode,
+    effective_permission_mode: opts.effective_permission_mode,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -115,6 +140,100 @@ async function mount(app: AppState, phone = false) {
 const $ = (sel: string) => root.querySelector<HTMLElement>(sel);
 const button = (text: string) => [...root.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === text);
 
+// T38: the session's permission mode in the header, and the switch in "More".
+describe('permission mode', () => {
+  const mark = () => ({ auto: $('.perm-auto')?.textContent, ask: $('.perm-ask')?.textContent });
+  const menu = async () => {
+    await act(async () => $('.btn-more')!.click());
+    return [...root.querySelectorAll<HTMLButtonElement>('.menu-item')];
+  };
+
+  it('marks Auto, shows Ask, and what the worker runs over what was asked', async () => {
+    let { app } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'auto' });
+    await mount(app);
+    expect(mark()).toEqual({ auto: 'Auto', ask: undefined });
+    expect($('.perm-auto')!.getAttribute('title')).toContain('deny list');
+    render(null, root);
+
+    // Asked for auto, the worker runs ask (allow_auto = false, or not started again yet).
+    ({ app } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'ask' }));
+    await mount(app);
+    expect(mark()).toEqual({ auto: undefined, ask: 'Ask (Auto asked)' });
+    render(null, root);
+
+    ({ app } = setup('idle', { effective_permission_mode: 'ask' }));
+    await mount(app);
+    expect(mark()).toEqual({ auto: undefined, ask: 'Ask' });
+    render(null, root);
+
+    // Nothing known yet: no mark.
+    ({ app } = setup('idle'));
+    await mount(app);
+    expect(mark()).toEqual({ auto: undefined, ask: undefined });
+  });
+
+  it('switches to Auto after a one-line confirmation and back to Ask without one', async () => {
+    const { app, api } = setup('idle', { effective_permission_mode: 'ask' });
+    await mount(app);
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    try {
+      let items = await menu();
+      expect(items.map((b) => b.textContent)).toContain('Switch to Auto');
+      await act(async () => items.find((b) => b.textContent === 'Switch to Auto')!.click());
+      expect(confirm).toHaveBeenCalledWith(AUTO_CONFIRM);
+      expect(AUTO_CONFIRM).toContain("deny list is the only limit");
+      expect(AUTO_CONFIRM.includes('\n')).toBe(false);
+      expect(api.patchSession).not.toHaveBeenCalled();
+
+      confirm.mockReturnValue(true);
+      items = await menu();
+      await act(async () => {
+        items.find((b) => b.textContent === 'Switch to Auto')!.click();
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      expect(api.patchSession).toHaveBeenCalledWith('s1', { permission_mode: 'auto' });
+      expect(mark().auto).toBe('Auto');
+
+      confirm.mockClear();
+      items = await menu();
+      expect(items.map((b) => b.textContent)).toContain('Switch to Ask');
+      await act(async () => {
+        items.find((b) => b.textContent === 'Switch to Ask')!.click();
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(api.patchSession).toHaveBeenLastCalledWith('s1', { permission_mode: 'ask' });
+      expect(mark()).toEqual({ auto: undefined, ask: 'Ask' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('follows the mode a summary brings', async () => {
+    const { app } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'ask' });
+    await mount(app);
+    const s = app.sessions.get('s1')!;
+    await act(async () =>
+      app.mergeSummary([
+        {
+          session_id: 's1',
+          project_id: 'p1',
+          title: s.title,
+          state: 'idle',
+          queue_len: 0,
+          unread: 0,
+          last_seq: 7,
+          last_read_seq: 7,
+          permission_mode: 'auto',
+          effective_permission_mode: 'auto',
+        },
+      ]),
+    );
+    expect(mark().auto).toBe('Auto');
+  });
+});
+
 describe('header', () => {
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
     const { app } = setup('waiting');
@@ -131,7 +250,7 @@ describe('header', () => {
     expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
     expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Archive']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Switch to Auto', 'Archive']);
   });
 
   it('links to the session that started it with hqc_spawn (T34)', async () => {

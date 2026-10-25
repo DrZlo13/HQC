@@ -3,7 +3,16 @@
 // of the projects that have been looked at.
 
 import { Api, ApiError, type NewSessionOptions } from './api';
-import type { ClarifyAnswer, Me, OpenRequest, Project, SessionInfo, SessionSummary, Workspace } from './proto';
+import type {
+  ClarifyAnswer,
+  Me,
+  OpenRequest,
+  PermissionMode,
+  Project,
+  SessionInfo,
+  SessionSummary,
+  Workspace,
+} from './proto';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
 export class AppState {
@@ -114,6 +123,8 @@ export class AppState {
         // `archived` is the top state of SPEC §17.1, so the summary carries it.
         archived: s.state === 'archived',
         held_by: s.held_by,
+        permission_mode: s.permission_mode,
+        effective_permission_mode: s.effective_permission_mode,
       });
     }
     // A session created elsewhere: fetch the list again for its title.
@@ -244,6 +255,13 @@ export class AppState {
     this.sessions.set(s.id, s);
     this.changed();
     return s;
+  }
+
+  /** Switches the session's permission mode (T38); the hub tells a running agent at once. */
+  async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
+    const s = await this.api.patchSession(sessionId, { permission_mode: mode });
+    this.sessions.set(s.id, s);
+    this.changed();
   }
 
   async createProject(name: string): Promise<Project> {

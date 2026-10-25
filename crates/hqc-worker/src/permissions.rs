@@ -37,16 +37,14 @@ pub const DEFAULT_DENY: &[&str] = &[
     "Bash(git push -f:*)",
 ];
 
-/// What the CLI does with a call no rule matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PermissionMode {
-    /// Ask the owner (`can_use_tool` → `approval.request`).
-    #[default]
-    Ask,
-    /// `--permission-mode auto`: the CLI's classifier decides and never asks; only `deny`
-    /// stops a call (checked on 2.1.308).
-    Auto,
+/// What the CLI does with a call no rule matches: ask the owner (`can_use_tool` →
+/// `approval.request`), or `--permission-mode auto`, where the CLI's classifier decides and
+/// never asks and only `deny` stops a call (checked on 2.1.308). A session may ask for
+/// either (T38); `mode` is the default.
+pub use hqc_proto::frame::PermissionMode;
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +52,9 @@ pub enum PermissionMode {
 pub struct RawPermissions {
     #[serde(default)]
     mode: PermissionMode,
+    /// `false`: a session that asks for `auto` runs in `ask` (T38).
+    #[serde(default = "yes")]
+    allow_auto: bool,
     #[serde(default)]
     allow: Vec<String>,
     /// Absent: [`DEFAULT_DENY`]; `deny = []` turns it off.
@@ -63,7 +64,10 @@ pub struct RawPermissions {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Permissions {
+    /// The mode of a session that does not ask for one.
     pub mode: PermissionMode,
+    /// Whether hqc may run a session in `auto` (T38).
+    pub allow_auto: bool,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
 }
@@ -72,6 +76,7 @@ impl Default for Permissions {
     fn default() -> Self {
         Self {
             mode: PermissionMode::Ask,
+            allow_auto: true,
             allow: vec![],
             deny: DEFAULT_DENY.iter().map(|r| r.to_string()).collect(),
         }
@@ -83,8 +88,12 @@ impl Permissions {
         let Some(raw) = raw else {
             return Ok(Self::default());
         };
+        if raw.mode == PermissionMode::Auto && !raw.allow_auto {
+            bail!("permissions: mode = \"auto\" with allow_auto = false");
+        }
         let p = Self {
             mode: raw.mode,
+            allow_auto: raw.allow_auto,
             allow: raw.allow,
             deny: raw.deny.unwrap_or_else(|| Self::default().deny),
         };
@@ -94,6 +103,15 @@ impl Permissions {
             }
         }
         Ok(p)
+    }
+
+    /// The mode a session runs in: the one hqc asks for, else `mode`; `auto` only with
+    /// `allow_auto` (T38). The worker decides, not the hub (SPEC §2.1).
+    pub fn mode_for(&self, asked: Option<PermissionMode>) -> PermissionMode {
+        match asked.unwrap_or(self.mode) {
+            PermissionMode::Auto if self.allow_auto => PermissionMode::Auto,
+            _ => PermissionMode::Ask,
+        }
     }
 
     /// The `--settings` JSON. Voice input is always off: a headless agent has no use for the
@@ -358,6 +376,7 @@ mod tests {
     fn allow_and_hint() {
         let p = Policy::new(&Permissions {
             mode: PermissionMode::Ask,
+            allow_auto: true,
             allow: vec![
                 "Bash(cargo test:*)".into(),
                 "Bash(git status)".into(),
@@ -425,6 +444,7 @@ mod tests {
         );
         let none = Permissions {
             mode: PermissionMode::Ask,
+            allow_auto: true,
             allow: vec![],
             deny: vec![],
         };

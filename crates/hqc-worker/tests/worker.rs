@@ -953,6 +953,139 @@ async fn idle_agent_is_stopped_and_resumed_by_input() {
     w.stop().await;
 }
 
+/// A `session.state` of `sid` whose `permission_mode` is `mode`, skipped or next.
+async fn state_with_mode(c: &mut HubConn, sid: Uuid, mode: &str) -> Value {
+    let hit = |st: &Value| {
+        st["type"] == "session.state"
+            && st["payload"]["session_id"] == json!(sid)
+            && st["payload"]["permission_mode"] == mode
+    };
+    if let Some(i) = c.skipped.iter().position(hit) {
+        return c.skipped.remove(i);
+    }
+    loop {
+        let st = c.expect("session.state").await;
+        if hit(&st) {
+            return st;
+        }
+    }
+}
+
+// T38: the mode of `session.start` reaches the adapter's start; `session.permission_mode`
+// switches the running agent and the next start; the mode the runtime confirms goes in every
+// `session.state`.
+#[tokio::test]
+async fn permission_mode_is_started_switched_and_reported() {
+    use hqc_proto::frame::PermissionMode::{Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let mut start = env.start_payload(sid);
+    start["permission_mode"] = json!("auto");
+    c.frame("session.start", start).await;
+    c.expect("ack").await;
+    state_with_mode(&mut c, sid, "auto").await;
+    assert_eq!(adapters.start_modes(), [(sid, Auto)]);
+
+    // A running agent switches at once; the runtime's confirmation is what is reported.
+    let id = c
+        .frame(
+            "session.permission_mode",
+            json!({"session_id": sid, "permission_mode": "ask"}),
+        )
+        .await;
+    let ack = c.expect("ack").await;
+    assert_eq!(ack["id"], id.as_str());
+    adapters
+        .wait_for("switch", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, Ask))
+        })
+        .await;
+    adapters.emit(sid, AdapterEvent::PermissionMode(Ask)).await;
+    state_with_mode(&mut c, sid, "ask").await;
+
+    // The next process starts in the switched mode, and the mode stays in `session.state`.
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["process_state"] == "stopped" {
+            assert_eq!(st["payload"]["permission_mode"], "ask");
+            break;
+        }
+    }
+    let e = Uuid::now_v7();
+    c.frame("session.input", input(sid, e, "go")).await;
+    adapters
+        .wait_for("input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: e,
+            })
+        })
+        .await;
+    assert_eq!(adapters.start_modes(), [(sid, Auto), (sid, Ask)]);
+
+    // An unknown session: nothing to switch, the next `session.start` carries the mode.
+    let other = Uuid::now_v7();
+    let id = c
+        .frame(
+            "session.permission_mode",
+            json!({"session_id": other, "permission_mode": "auto"}),
+        )
+        .await;
+    loop {
+        let ack = c.expect("ack").await;
+        if ack["id"] == id.as_str() {
+            assert_eq!(ack["payload"], json!({}));
+            break;
+        }
+    }
+    w.stop().await;
+}
+
+// T38: with `[permissions] allow_auto = false` the worker runs `ask` whatever the hub asks
+// for, at the start and on a switch, and reports `ask`.
+#[tokio::test]
+async fn allow_auto_false_runs_ask() {
+    use hqc_proto::frame::PermissionMode::Ask;
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let cfg = hqc_worker::config::Config::parse(&format!(
+        "{}[permissions]\nallow_auto = false\n",
+        env.config_toml(&hub.url())
+    ))
+    .unwrap();
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let mut start = env.start_payload(sid);
+    start["permission_mode"] = json!("auto");
+    c.frame("session.start", start).await;
+    c.expect("ack").await;
+    state_with_mode(&mut c, sid, "ask").await;
+    assert_eq!(adapters.start_modes(), [(sid, Ask)]);
+    c.frame(
+        "session.permission_mode",
+        json!({"session_id": sid, "permission_mode": "auto"}),
+    )
+    .await;
+    c.expect("ack").await;
+    assert!(
+        !adapters
+            .calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::PermissionMode(..))),
+        "no switch to auto"
+    );
+    w.stop().await;
+}
+
 // T14: the hub asks the worker about folders (SPEC §5.3): `fs.stat` before a workspace is
 // added, `fs.list_dirs` for the folder picker; answers stay inside allowed_roots.
 #[tokio::test]

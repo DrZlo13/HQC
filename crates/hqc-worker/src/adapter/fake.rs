@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hqc_proto::event::{Author, ClarifyAnswer, Event, EventKind};
-use hqc_proto::frame::{Runtime, SessionInput};
+use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use uuid::Uuid;
 
 use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
@@ -33,6 +33,8 @@ pub enum FakeCall {
         request_id: String,
         answers: usize,
     },
+    /// A switch of the running process (T38).
+    PermissionMode(Uuid, PermissionMode),
 }
 
 #[derive(Default)]
@@ -44,6 +46,8 @@ struct State {
     inputs: Vec<(SessionInput, Vec<InboxFile>)>,
     /// What [`Adapter::pid`] reports; the test process itself unless a test set another.
     pid: Option<Option<u32>>,
+    /// The permission mode of every `start`/`resume`, in order (T38).
+    start_modes: Vec<(Uuid, PermissionMode)>,
 }
 
 #[derive(Clone, Default)]
@@ -74,6 +78,11 @@ impl FakeAdapters {
     /// Every input as the adapter got it (text with the attachment block) and its files.
     pub fn inputs(&self) -> Vec<(SessionInput, Vec<InboxFile>)> {
         self.lock().inputs.clone()
+    }
+
+    /// The permission mode each `start`/`resume` got from its spec, in order (T38).
+    pub fn start_modes(&self) -> Vec<(Uuid, PermissionMode)> {
+        self.lock().start_modes.clone()
     }
 
     /// Number of adapters created, i.e. sessions the supervisor tried to run.
@@ -175,12 +184,25 @@ impl FakeAdapter {
 
 #[async_trait]
 impl Adapter for FakeAdapter {
-    async fn start(&mut self, _: &StartSpec) -> anyhow::Result<()> {
+    async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
+        self.shared
+            .lock()
+            .start_modes
+            .push((self.session_id, spec.permission_mode));
         self.spawn(FakeCall::Start(self.session_id))
     }
 
-    async fn resume(&mut self, _: &StartSpec) -> anyhow::Result<()> {
+    async fn resume(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
+        self.shared
+            .lock()
+            .start_modes
+            .push((self.session_id, spec.permission_mode));
         self.spawn(FakeCall::Resume(self.session_id))
+    }
+
+    async fn set_permission_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {
+        self.record(FakeCall::PermissionMode(self.session_id, mode));
+        Ok(())
     }
 
     async fn input(&mut self, input: &SessionInput) -> anyhow::Result<()> {

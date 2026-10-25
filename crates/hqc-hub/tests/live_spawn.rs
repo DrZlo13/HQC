@@ -90,7 +90,7 @@ async fn live_a_spawns_b_and_bs_first_turn_runs() {
     .unwrap();
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
-        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         ..ClaudeOptions::default()
     };
     let claude_dir = opts.config_dir.clone().expect("claude config dir");

@@ -55,6 +55,10 @@ export const LOCKED_BY = ['none', 'hqc', 'vscode'] as const;
 export type LockedBy = (typeof LOCKED_BY)[number];
 
 export const START_MODES = ['new', 'resume'] as const;
+
+/** A session's permission mode (T38): ask the worker owner, or Claude Code decides. */
+export const PERMISSION_MODES = ['ask', 'auto'] as const;
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
 export type StartMode = (typeof START_MODES)[number];
 
 // ---- event envelope -------------------------------------------------------------------
@@ -566,6 +570,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     bool(p, 'owner_is_worker_owner');
     num(p, 'ask_timeout_s');
     optBool(p, 'requested_by_owner');
+    optPermissionMode(p, 'permission_mode');
   },
   'session.input': (p) => {
     str(p, 'session_id');
@@ -587,6 +592,10 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   },
   'session.stop': (p) => void str(p, 'session_id'),
   'session.kill': (p) => void str(p, 'session_id'),
+  'session.permission_mode': (p) => {
+    str(p, 'session_id');
+    strictEnum(p, 'permission_mode', PERMISSION_MODES);
+  },
   'session.steer': (p) => {
     str(p, 'session_id');
     str(p, 'text');
@@ -619,8 +628,16 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     strictEnum(p, 'locked_by', LOCKED_BY);
     optStr(p, 'title');
     optStrArr(p, 'commands');
+    optPermissionMode(p, 'permission_mode');
   },
 };
+
+/** An optional permission mode; an unknown one reads as absent. */
+function optPermissionMode(o: Obj, k: string): PermissionMode | undefined {
+  if (!present(o, k)) return undefined;
+  const v = tolerantEnum(o, k, PERMISSION_MODES);
+  return v === 'unknown' ? undefined : v;
+}
 
 /** Parses a worker <-> hub frame strictly (SPEC §5.2). */
 export function parseFrame(json: unknown): Frame {
@@ -663,6 +680,8 @@ export interface SessionSummary {
   last_seq: number;
   last_read_seq: number;
   held_by?: HeldBy;
+  permission_mode?: PermissionMode;
+  effective_permission_mode?: PermissionMode;
 }
 
 /** A session waiting on another through an open `hqc_ask`, directly or along a chain. */
@@ -753,6 +772,8 @@ export function parseSummary(v: unknown): SessionSummary {
     last_seq: num(s, 'last_seq'),
     last_read_seq: num(s, 'last_read_seq'),
     held_by: optHeldBy(s),
+    permission_mode: optPermissionMode(s, 'permission_mode'),
+    effective_permission_mode: optPermissionMode(s, 'effective_permission_mode'),
   };
 }
 
@@ -852,6 +873,10 @@ export interface SessionInfo {
   commands?: string[];
   /** The session whose agent started this one with `hqc_spawn` (SPEC §7), while it exists. */
   spawned_by?: SpawnedBy;
+  /** The mode hqc asks the worker for (T38); absent: the worker's own default. */
+  permission_mode?: PermissionMode;
+  /** The mode the agent runs in, as the worker last reported it; absent until reported. */
+  effective_permission_mode?: PermissionMode;
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -927,6 +952,8 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     held_by: optHeldBy(o),
     commands: optStrArr(o, 'commands'),
     spawned_by: optSpawnedBy(o),
+    permission_mode: optPermissionMode(o, 'permission_mode'),
+    effective_permission_mode: optPermissionMode(o, 'effective_permission_mode'),
   };
 }
 

@@ -4,7 +4,7 @@
 use hqc_proto::{
     api::{Agent, Session, SpawnedBy},
     event::SessionState,
-    frame::{LockedBy, ProcessState, Runtime, TitleSource},
+    frame::{LockedBy, PermissionMode, ProcessState, Runtime, TitleSource},
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -155,6 +155,11 @@ pub async fn views(
                 held_by: s.held_by.and_then(|v| serde_json::from_value(v).ok()),
                 commands: s.commands.and_then(|v| serde_json::from_value(v).ok()),
                 system: s.system,
+                permission_mode: s.permission_mode.as_deref().and_then(PermissionMode::parse),
+                effective_permission_mode: s
+                    .effective_permission_mode
+                    .as_deref()
+                    .and_then(PermissionMode::parse),
                 spawned_by: s.spawned_by.zip(a.spawned_by_address.clone()).map(
                     |(session_id, address)| SpawnedBy {
                         session_id,

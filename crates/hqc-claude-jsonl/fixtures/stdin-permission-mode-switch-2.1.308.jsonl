@@ -1,0 +1,6 @@
+{"type": "user", "message": {"role": "user", "content": "Reply with exactly: ONE"}}
+{"type": "control_request", "request_id": "mode-1", "request": {"subtype": "set_permission_mode", "mode": "auto"}}
+{"type": "user", "message": {"role": "user", "content": "Run the shell command: touch t38-b. Then reply with exactly: TWO"}}
+{"type": "control_request", "request_id": "mode-0", "request": {"subtype": "set_permission_mode", "mode": "default"}}
+{"type": "user", "message": {"role": "user", "content": "Run the shell command: touch t38-c. Then reply with exactly: THREE"}}
+{"type": "control_response", "response": {"subtype": "success", "request_id": "cabfdf7a-c869-41fc-a312-9ac2907a000d", "response": {"behavior": "deny", "message": "denied by hqc spike"}}}

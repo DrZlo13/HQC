@@ -113,11 +113,11 @@ pub struct ClaudeOptions {
     pub entrypoint: Option<String>,
     /// Appended to the command line (tests: `--max-turns`).
     pub extra_args: Vec<String>,
-    /// `--permission-mode`, always passed so that a `defaultMode` from settings
-    /// (`bypassPermissions`, `acceptEdits`) does not apply: the CLI's "ask" mode, `default`
-    /// or `manual` by version ([`crate::capabilities::claude_permission_mode`]), or `auto`
-    /// with `[permissions] mode = "auto"`.
-    pub permission_mode: String,
+    /// The CLI's "ask" mode, `default` or `manual` by version
+    /// ([`crate::capabilities::claude_permission_mode`]). `--permission-mode` is always
+    /// passed, so that a `defaultMode` from settings (`bypassPermissions`, `acceptEdits`)
+    /// does not apply: this, or `auto` for a session in auto (T38).
+    pub ask_mode: String,
     /// Tools disallowed in every session on top of `session.start.disallowed_tools`. By
     /// default Claude Code's own cross-session messaging, which bypasses the hub
     /// (`allow_native_messaging` in the worker config keeps it).
@@ -143,7 +143,7 @@ impl Default for ClaudeOptions {
             config_dir: paths::default_config_dir(),
             mcp: None,
             extra_args: vec![],
-            permission_mode: "default".into(),
+            ask_mode: "default".into(),
             always_disallowed: NATIVE_MESSAGING_TOOLS
                 .iter()
                 .map(|t| t.to_string())
@@ -218,16 +218,13 @@ impl ClaudeCodeAdapters {
         self.opts.own_records.clone()
     }
 
-    /// `permission_mode`: the CLI's "ask" mode, used unless `[permissions] mode = "auto"`.
-    pub fn from_config(cfg: &Config, permission_mode: String) -> Self {
+    /// `ask_mode`: the CLI's "ask" mode ([`ClaudeOptions::ask_mode`]).
+    pub fn from_config(cfg: &Config, ask_mode: String) -> Self {
         Self::new(
             ClaudeOptions {
                 claude_bin: cfg.claude_bin.clone(),
                 entrypoint: cfg.show_in_vscode.then(|| "claude-vscode".to_string()),
-                permission_mode: match cfg.permissions.mode {
-                    PermissionMode::Ask => permission_mode,
-                    PermissionMode::Auto => "auto".into(),
-                },
+                ask_mode,
                 permissions: cfg.permissions.clone(),
                 always_disallowed: if cfg.allow_native_messaging {
                     vec![]
@@ -376,7 +373,8 @@ impl ClaudeCodeAdapter {
     }
 
     /// The CLI command line (SPEC §8.1). Besides the protocol flags:
-    /// - `--setting-sources user,local` and `--permission-mode default`: a repository's own
+    /// - `--setting-sources user,local` and `--permission-mode` (the ask mode or `auto`,
+    ///   T38): a repository's own
     ///   `.claude/settings.json` (hooks, `defaultMode`) is not applied; `local` stays for the
     ///   rules `always` writes;
     /// - `restricted` → `--restricted` (no command-running tools, file tools confined to the
@@ -427,7 +425,10 @@ impl ClaudeCodeAdapter {
         }
         args.extend([
             "--permission-mode".into(),
-            self.opts.permission_mode.clone(),
+            match spec.permission_mode {
+                PermissionMode::Ask => self.opts.ask_mode.clone(),
+                PermissionMode::Auto => "auto".into(),
+            },
         ]);
         if let Some(p) = spec.system_prompt.as_deref().filter(|p| !p.is_empty()) {
             args.extend(["--append-system-prompt".into(), p.to_string()]);
@@ -709,6 +710,15 @@ impl Adapter for ClaudeCodeAdapter {
         }
         tracing::info!(session_id = %self.session_id, "claude killed");
         Ok(())
+    }
+
+    async fn set_permission_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {
+        let Ok(p) = self.running() else {
+            return Ok(());
+        };
+        tracing::info!(session_id = %self.session_id, mode = mode.as_str(), "switching the permission mode");
+        let action = lock(&p.core).set_permission_mode(mode);
+        p.io.run(vec![action]).await
     }
 
     async fn answer_approval(

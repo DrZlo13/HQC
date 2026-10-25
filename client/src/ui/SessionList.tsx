@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { WorkerInfo } from '../api';
 import type { AppState } from '../app';
-import type { SessionInfo, Workspace } from '../proto';
+import type { PermissionMode, SessionInfo, Workspace } from '../proto';
 import { useSubscription } from './hooks';
 import { IconPlus, IconSearch } from './icons';
-import { formatWhen, homePath } from './labels';
+import { AUTO_CONFIRM, formatWhen, homePath } from './labels';
 import { RequestsLink } from './requests';
 import { SearchHits } from './Search';
 import {
@@ -328,6 +328,8 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
   const [title, setTitle] = useState('');
   const [workspace, setWorkspace] = useState('');
   const [cwd, setCwd] = useState('');
+  // T38: '' is the worker's own default.
+  const [mode, setMode] = useState<PermissionMode | ''>('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = app.projects.get(projectId);
@@ -343,7 +345,11 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
     setBusy(true);
     setError(null);
     try {
-      const s = await app.createSession(title.trim() || undefined, { workspace_id: chosen, cwd: cwd.trim() }, projectId);
+      const s = await app.createSession(
+        title.trim() || undefined,
+        { workspace_id: chosen, cwd: cwd.trim(), permission_mode: mode || undefined },
+        projectId,
+      );
       onDone();
       location.hash = `#/s/${s.id}`;
     } catch (err) {
@@ -398,6 +404,28 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
           value={cwd}
           onInput={(e) => setCwd((e.target as HTMLInputElement).value)}
         />
+      </label>
+      <label class="field">
+        <span class="field-label">Permissions</span>
+        <select
+          class="input"
+          name="permission_mode"
+          value={mode}
+          onChange={(e) => {
+            const el = e.target as HTMLSelectElement;
+            const next = el.value as PermissionMode | '';
+            // Auto after a one-line confirmation; Ask and the default at once.
+            if (next === 'auto' && !confirm(AUTO_CONFIRM)) {
+              el.value = mode;
+              return;
+            }
+            setMode(next);
+          }}
+        >
+          <option value="">The worker's default</option>
+          <option value="ask">Ask</option>
+          <option value="auto">Auto</option>
+        </select>
       </label>
       {error && <div class="error-text">{error}</div>}
       <div class="row">

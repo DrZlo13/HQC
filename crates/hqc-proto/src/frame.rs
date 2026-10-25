@@ -113,6 +113,11 @@ pub enum WorkerFrame {
         /// list in every following `session.state`, like `title`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commands: Option<Vec<String>>,
+        /// The permission mode the session's agent runs in (T38), as the worker decided it
+        /// and the runtime confirmed it; repeated in every following `session.state`.
+        /// Absent — not known yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<PermissionMode>,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -403,6 +408,14 @@ pub enum HubFrame {
     /// Terminate the agent process.
     #[serde(rename = "session.kill")]
     SessionKill { session_id: Uuid },
+    /// The user switched the session's permission mode (T38): a running agent switches
+    /// at once, a stopped one starts in it next time. Answered with `ack`; the mode the
+    /// agent runs comes back in `session.state`.
+    #[serde(rename = "session.permission_mode")]
+    SessionPermissionMode {
+        session_id: Uuid,
+        permission_mode: PermissionMode,
+    },
     #[serde(rename = "approval.response")]
     ApprovalResponse {
         session_id: Uuid,
@@ -581,6 +594,36 @@ pub enum Runtime {
     None,
 }
 
+/// A session's permission mode (SPEC §3 Session, §8.1, T38): what the runtime does with a
+/// tool call no rule of the worker's `[permissions]` decides. The worker's `deny` stops a
+/// call in both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Ask the worker owner (`approval.request`).
+    #[default]
+    Ask,
+    /// Claude Code's classifier decides and never asks (`--permission-mode auto`).
+    Auto,
+}
+
+impl PermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ask" => Some(Self::Ask),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessState {
@@ -659,6 +702,11 @@ pub struct SessionStart {
     /// confirmation of a new folder (SPEC §10.2). Sent only when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub requested_by_owner: bool,
+    /// The mode hqc asks for (T38); absent: the worker's `[permissions] mode`. The worker
+    /// may run `ask` instead (`allow_auto = false`) and reports what it runs in
+    /// `session.state.permission_mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -711,6 +759,7 @@ mod tests {
         "session.input",
         "session.stop",
         "session.kill",
+        "session.permission_mode",
         "approval.response",
         "clarify.response",
         "fs.stat",
@@ -762,6 +811,10 @@ mod tests {
         (
             "session.kill",
             include_str!("../examples/wire/hub.session.kill.json"),
+        ),
+        (
+            "session.permission_mode",
+            include_str!("../examples/wire/hub.session.permission_mode.json"),
         ),
         (
             "approval.response",
@@ -898,6 +951,7 @@ mod tests {
             HubFrame::SessionInput(_) => "session.input",
             HubFrame::SessionStop { .. } => "session.stop",
             HubFrame::SessionKill { .. } => "session.kill",
+            HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::ApprovalResponse { .. } => "approval.response",
             HubFrame::ClarifyResponse { .. } => "clarify.response",
             HubFrame::FsStat(_) => "fs.stat",

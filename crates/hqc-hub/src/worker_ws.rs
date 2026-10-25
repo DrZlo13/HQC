@@ -438,6 +438,7 @@ async fn handle_text(
             title,
             held_by,
             commands,
+            permission_mode,
         } => {
             let st = StateFrame {
                 session_id,
@@ -447,6 +448,7 @@ async fn handle_text(
                 title,
                 held_by,
                 commands,
+                permission_mode,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -631,6 +633,7 @@ struct StateFrame {
     title: Option<String>,
     held_by: Option<Option<hqc_proto::frame::HeldBy>>,
     commands: Option<Vec<String>>,
+    permission_mode: Option<hqc_proto::frame::PermissionMode>,
 }
 
 async fn on_session_state(
@@ -647,6 +650,7 @@ async fn on_session_state(
         title,
         held_by,
         commands,
+        permission_mode,
     } = st;
     if session_id.is_nil() {
         // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
@@ -690,6 +694,10 @@ async fn on_session_state(
     }
     if let Some(c) = commands {
         db::set_commands(&app.db, session_id, &runtime_commands(c)).await?;
+    }
+    // What the agent runs in, which the client shows (T38).
+    if let Some(m) = permission_mode {
+        db::set_effective_permission_mode(&app.db, session_id, m).await?;
     }
     conn.reply(id, HubFrame::Ack(Ack::default()));
 

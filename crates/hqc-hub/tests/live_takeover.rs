@@ -112,7 +112,7 @@ async fn live_vscode_import_takeover_release() {
     .unwrap();
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
-        permission_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
         ..ClaudeOptions::default()
     };
     let claude_dir = opts.config_dir.clone().expect("claude config dir");

@@ -94,6 +94,12 @@ pub struct SessionSummary {
     /// As in the session object: who outside hqc holds the transcript open (SPEC §9.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_by: Option<crate::frame::HeldBy>,
+    /// As in the session object (T38): the mode hqc asks for and the mode the agent runs
+    /// in, so the chat header follows a switch the worker confirms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<crate::frame::PermissionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_permission_mode: Option<crate::frame::PermissionMode>,
 }
 
 #[cfg(test)]

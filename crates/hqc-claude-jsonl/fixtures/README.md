@@ -61,6 +61,17 @@ Claude Code 2.1.308, cost and slash commands (T27, SPEC §4, §8.1; `driver.py -
 Their `system/init` keeps `slash_commands` and `terminal_slash_commands` (sanitize.py keeps
 them since T27); `system/init` comes again before every turn of a process.
 
+Claude Code 2.1.308, switching the permission mode of a running process (T38, SPEC §8.1;
+`driver.py --mode-then` in `tmp/spike-t38-switch`, `--permission-prompt-tool stdio
+--setting-sources user,local --strict-mcp-config --permission-mode manual`, deny to every
+request):
+
+- `permission-mode-switch` — three turns of one process: `Reply with exactly: ONE`; then
+  `control_request {subtype: set_permission_mode, mode: auto}` and `touch t38-b` (ran without
+  `can_use_tool`, `reason_type: mode`); then `mode: default` and `touch t38-c` (asked, denied).
+  Each switch is answered with `control_response {mode}` and `system/status
+  {permissionMode}`, and the next `system/init` carries the new mode.
+
 In the stream files of the T12 sets the `input_json_delta` fragments of a tool input whose
 path had to be rewritten are joined into the first fragment (sanitizing split paths).
 

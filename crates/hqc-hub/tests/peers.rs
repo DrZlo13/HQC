@@ -302,6 +302,7 @@ async fn refusals_come_at_once() {
             title: Some("Secret"),
             model: None,
             auto_approve: false,
+            permission_mode: None,
         },
     )
     .await

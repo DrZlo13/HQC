@@ -168,16 +168,21 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   await until('project route', () => !$('.workspaces'));
   button('New')!.click();
   await until('new session form', () => $('.new-session select[name=workspace]'));
-  await until('workspaces loaded', () => $$('.new-session option').length === 1);
-  expect($('.new-session option')!.textContent).toContain('(default)');
+  await until('workspaces loaded', () => $$('.new-session select[name=workspace] option').length === 1);
+  expect($('.new-session select[name=workspace] option')!.textContent).toContain('(default)');
   choose('.new-session select[name=workspace]', app.workspaces.get(pid)![0].id);
   type('.new-session input[name=cwd]', 'pcb');
+  // T38: Auto in the form, confirmed (the globals answer every confirm with yes).
+  expect($('.new-session select[name=permission_mode]')!.textContent).toBe("The worker's defaultAskAuto");
+  choose('.new-session select[name=permission_mode]', 'auto');
   await settle();
   submit('.new-session');
   await until('chat', () => $('.chat textarea'));
   const sid = location.hash.split('/')[2];
   const s = await app.api.session(sid);
   expect(s).toMatchObject({ project_id: pid, workspace_id: app.workspaces.get(pid)![0].id, cwd: 'pcb' });
+  expect(s).toMatchObject({ permission_mode: 'auto', effective_permission_mode: 'auto' });
+  expect($('.chat .perm-auto')!.textContent).toBe('Auto');
   await until('listed in the project', () => $$('.session-row').find((r) => r.getAttribute('href') === `#/s/${sid}`));
   // The personal project's sessions are not shown here.
   expect($$('.session-row').some((r) => r.textContent?.includes('Empty session'))).toBe(false);

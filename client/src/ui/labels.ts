@@ -26,6 +26,10 @@ export function isDeny(o: ApprovalOption): boolean {
   return o.canonical === 'deny' || o.canonical === 'deny_always';
 }
 
+/** The one line asked before a session goes to Auto (T38); Ask needs no confirmation. */
+export const AUTO_CONFIRM =
+  "Switch to Auto? Claude Code then runs tool calls without asking; the worker's deny list is the only limit.";
+
 /** The state of a session in its header pill and in the session list. */
 export const STATE_LABELS: Record<SessionState, string> = {
   archived: 'Archived',

@@ -143,6 +143,7 @@ impl HubLink {
             title: None,
             held_by: Some(held_by),
             commands: None,
+            permission_mode: None,
         };
         let payload = serde_json::to_value(&frame)?["payload"].take();
         self.outbox

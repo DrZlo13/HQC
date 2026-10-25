@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::client_frame::SessionSummary;
 use crate::event::SessionState;
-use crate::frame::{HeldBy, LockedBy, ProcessState, Runtime, TitleSource};
+use crate::frame::{HeldBy, LockedBy, PermissionMode, ProcessState, Runtime, TitleSource};
 
 /// A session as `GET /api/sessions/{id}`, the session list and `POST .../sessions` return
 /// it (SPEC §3 Session, §6). `state`, `queue_len`, `last_read_seq` and `unread` are computed
@@ -58,6 +58,14 @@ pub struct Session {
     /// The session whose agent started this one with `hqc_spawn` (SPEC §7), while it exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<SpawnedBy>,
+    /// The permission mode hqc asks the worker for (T38, SPEC §3 Session): set on creation
+    /// or by `PATCH`; absent — the worker's `[permissions] mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
+    /// The mode the session's agent runs in, as its worker last reported it
+    /// (`session.state.permission_mode`); what the client shows. Absent until reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_permission_mode: Option<PermissionMode>,
 }
 
 /// `spawned_by` of a session: the spawning session and its address
@@ -81,6 +89,8 @@ impl Session {
             last_seq: self.last_seq,
             last_read_seq: self.last_read_seq,
             held_by: self.held_by.clone(),
+            permission_mode: self.permission_mode,
+            effective_permission_mode: self.effective_permission_mode,
         }
     }
 }
@@ -127,6 +137,9 @@ pub struct CreateSessionRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub auto_approve: bool,
+    /// Absent: the worker's `[permissions] mode` (T38). `auto` only from the worker owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 /// A project (SPEC §3 Project, §6): `GET /api/projects/{id}`, an element of the list, the

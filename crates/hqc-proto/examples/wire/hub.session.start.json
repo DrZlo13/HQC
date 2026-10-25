@@ -15,6 +15,7 @@
     "auto_approve": false,
     "session_token": "st_example",
     "owner_is_worker_owner": true,
-    "ask_timeout_s": 600
+    "ask_timeout_s": 600,
+    "permission_mode": "ask"
   }
 }

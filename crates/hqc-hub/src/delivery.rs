@@ -15,7 +15,8 @@ use hqc_proto::{
     client_frame::ServerFrame,
     event::PeerMode,
     frame::{
-        error_code, HubFrame, PeerHeader, Runtime, SessionInput, SessionStart, StartMode, WireError,
+        error_code, HubFrame, PeerHeader, PermissionMode, Runtime, SessionInput, SessionStart,
+        StartMode, WireError,
     },
 };
 use serde_json::Value;
@@ -159,6 +160,7 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         ask_timeout_s: app.config.timing.ask_timeout_s,
         // The worker owner added the folder, so they agreed to sessions in it (SPEC §10.2).
         requested_by_owner,
+        permission_mode: s.permission_mode.as_deref().and_then(PermissionMode::parse),
     })
 }
 

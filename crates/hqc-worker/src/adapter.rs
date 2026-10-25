@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use hqc_proto::event::{Author, ClarifyAnswer, Event, EventKind};
-use hqc_proto::frame::{Runtime, SessionInput};
+use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -44,6 +44,10 @@ pub enum AdapterEvent {
     /// The runtime's slash commands, without `/` (Claude Code: `system/init`, SPEC §8.1);
     /// sent as `session.state.commands`. Reported when the list changes.
     Commands(Vec<String>),
+    /// The permission mode the runtime runs in (T38, Claude Code: `permissionMode` of
+    /// `system/init` and `system/status`); sent as `session.state.permission_mode`.
+    /// Reported when it changes.
+    PermissionMode(PermissionMode),
     /// The process ended by itself. Not required after `kill`.
     Exited { error: Option<String> },
 }
@@ -98,6 +102,13 @@ pub trait Adapter: Send {
     fn pid(&self) -> Option<u32> {
         None
     }
+    /// Switch the running process to `mode` (T38); with no process, nothing to do: the next
+    /// start takes the mode from its [`StartSpec`]. The runtime confirms with
+    /// [`AdapterEvent::PermissionMode`].
+    async fn set_permission_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {
+        let _ = mode;
+        anyhow::bail!("this runtime cannot switch its permission mode while it runs")
+    }
     /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
     async fn answer_approval(
         &mut self,
@@ -125,10 +136,10 @@ pub struct BuiltinAdapters {
 }
 
 impl BuiltinAdapters {
-    /// `permission_mode`: see [`crate::capabilities::claude_permission_mode`].
-    pub fn from_config(cfg: &Config, permission_mode: String) -> Self {
+    /// `ask_mode`: see [`crate::capabilities::claude_permission_mode`].
+    pub fn from_config(cfg: &Config, ask_mode: String) -> Self {
         Self {
-            claude: ClaudeCodeAdapters::from_config(cfg, permission_mode),
+            claude: ClaudeCodeAdapters::from_config(cfg, ask_mode),
         }
     }
 

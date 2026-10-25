@@ -32,6 +32,7 @@ import {
   type EnrollInfo,
   type HqcEvent,
   type Me,
+  type PermissionMode,
   type Project,
   type SearchPage,
   type Schedule,
@@ -58,6 +59,8 @@ export type Fetch = typeof fetch;
 export interface NewSessionOptions {
   workspace_id?: string;
   cwd?: string;
+  /** Absent: the worker's `[permissions] mode` (T38). */
+  permission_mode?: PermissionMode;
 }
 
 /** A page of events; `invalid` are raw events that failed validation (shown, not dropped). */
@@ -149,8 +152,13 @@ export class Api {
     if (title) body.title = title;
     if (opts.workspace_id) body.workspace_id = opts.workspace_id;
     if (opts.cwd && opts.cwd !== '.') body.cwd = opts.cwd;
+    if (opts.permission_mode) body.permission_mode = opts.permission_mode;
     const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, body);
     return parseSessionInfo(data);
+  }
+
+  async patchSession(id: string, patch: { permission_mode?: PermissionMode }): Promise<SessionInfo> {
+    return parseSessionInfo(await this.req('PATCH', `/api/sessions/${enc(id)}`, patch));
   }
 
   async projects(): Promise<Project[]> {

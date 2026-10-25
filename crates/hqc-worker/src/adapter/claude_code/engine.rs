@@ -18,7 +18,9 @@
 //!   `system policy_denied` when a deny rule of `[permissions]` matches;
 //! - `system` `permission_denied` (the CLI refused a call by its rules, no request) →
 //!   `system policy_denied`;
-//! - `control_response` lines are the CLI's echo of ours and are skipped.
+//! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
+//!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38);
+//! - other `control_response` lines are the CLI's echo of ours and are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
 //! [`preview`]): the hub's Postgres refuses it (SPEC §5.2).
@@ -34,7 +36,7 @@ use hqc_proto::event::{
     ApprovalCanonical, ApprovalOption, Author, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
     SessionState,
 };
-use hqc_proto::frame::SessionInput;
+use hqc_proto::frame::{PermissionMode, SessionInput};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -56,6 +58,8 @@ pub const CLARIFY_CANCEL_MESSAGE: &str = "The user did not answer the questions.
 pub const POLICY_DENY_MESSAGE: &str = "Denied by the worker's permission policy";
 /// `system.code` of a tool call refused by a deny rule of `[permissions]` (SPEC §4).
 pub const POLICY_DENIED: &str = "policy_denied";
+/// `request_id` prefix of our `set_permission_mode` control requests.
+const MODE_REQUEST: &str = "hqc-mode-";
 
 // Mostly `Emit`, like `AdapterEvent` itself; boxing would only add an allocation.
 #[allow(clippy::large_enum_variant)]
@@ -105,6 +109,8 @@ pub struct Core {
     cost_total: Option<f64>,
     /// The slash commands last reported by this process.
     commands: Option<Vec<String>>,
+    /// The permission mode last reported by this process.
+    permission_mode: Option<PermissionMode>,
     /// Message uuids read since the last [`Core::take_seen`].
     seen: Vec<Uuid>,
 }
@@ -131,6 +137,7 @@ impl Core {
             model: None,
             cost_total: None,
             commands: None,
+            permission_mode: None,
             seen: Vec::new(),
         }
     }
@@ -197,6 +204,21 @@ impl Core {
             "request": {"subtype": "interrupt"},
         });
         Some((Action::Write(req), self.turn))
+    }
+
+    /// Switch the running process to `mode` (T38): `control_request {subtype:
+    /// set_permission_mode}`, which the CLI applies to the next permission check and
+    /// confirms with `system/status {permissionMode}` (checked on 2.1.308). `ask` is the
+    /// CLI's `default`, the name it reports for `manual` too.
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) -> Action {
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("{MODE_REQUEST}{}", Uuid::now_v7()),
+            "request": {"subtype": "set_permission_mode", "mode": match mode {
+                PermissionMode::Ask => "default",
+                PermissionMode::Auto => "auto",
+            }},
+        }))
     }
 
     /// `message`: the user's text with `deny` (T26); it goes to Claude Code as the reason of
@@ -344,12 +366,15 @@ impl Core {
             "user" if !sub => self.on_user(&v),
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
-            "control_response" => vec![],
+            "control_response" => self.on_control_response(&v),
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
                     self.model = v["model"].as_str().map(str::to_owned);
-                    self.on_init(&v)
+                    let mut out = self.on_mode(&v["permissionMode"]);
+                    out.extend(self.on_init(&v));
+                    out
                 }
+                Some("status") => self.on_mode(&v["permissionMode"]),
                 Some("permission_denied") => {
                     let mut out: Vec<Action> = self.flush(false).into_iter().collect();
                     out.extend(self.on_permission_denied(&v));
@@ -359,6 +384,43 @@ impl Core {
             },
             _ => vec![],
         }
+    }
+
+    /// The CLI's permission mode: `auto` is `auto`, any other (`default`, which `manual`
+    /// shows as, or `acceptEdits`/`plan` the CLI may enter by itself) asks. Reported when it
+    /// changes.
+    fn on_mode(&mut self, v: &Value) -> Vec<Action> {
+        let Some(m) = v.as_str() else {
+            return vec![];
+        };
+        let mode = if m == "auto" {
+            PermissionMode::Auto
+        } else {
+            PermissionMode::Ask
+        };
+        if self.permission_mode == Some(mode) {
+            return vec![];
+        }
+        tracing::info!(session_id = %self.session_id, mode = m, "permission mode");
+        self.permission_mode = Some(mode);
+        vec![Action::Emit(AdapterEvent::PermissionMode(mode))]
+    }
+
+    /// The CLI's answer to our `set_permission_mode`; every other `control_response` is
+    /// the echo of one of ours.
+    fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
+        let r = &v["response"];
+        if !r["request_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with(MODE_REQUEST))
+        {
+            return vec![];
+        }
+        if r["subtype"] == "success" {
+            return self.on_mode(&r["response"]["mode"]);
+        }
+        tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the permission mode switch");
+        vec![]
     }
 
     /// `slash_commands` of `system/init` without those that only work in the terminal UI

@@ -203,6 +203,15 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       last_seq: s.last_seq,
       last_read_seq: s.read_seq,
       ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
+      ...modes(s),
+    };
+  }
+
+  // T38: the mode hqc asks for and the one the mock worker runs (it allows auto).
+  function modes(s) {
+    return {
+      ...(s.permission_mode ? { permission_mode: s.permission_mode } : {}),
+      effective_permission_mode: s.permission_mode ?? 'ask',
     };
   }
 
@@ -259,6 +268,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       ...(s.held_by && !s.holder_hidden ? { held_by: s.held_by } : {}),
       // As if a process of the session had reported them (T27): `/` completes them.
       commands: MOCK_COMMANDS,
+      ...modes(s),
     };
   }
 
@@ -553,9 +563,12 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (!wsId) throw fail(409, 'no_workspace', 'the project has no workspace; add one first');
     if (!ws || ws.project_id !== pr.id) throw fail(400, 'bad_request', 'workspace_id is not a workspace of this project');
     const n = [...sessions.values()].filter((s) => s.project_id === pr.id).length + 1;
+    const mode = body?.permission_mode;
+    if (mode !== undefined && mode !== 'ask' && mode !== 'auto') throw fail(400, 'bad_request', 'permission_mode is ask or auto');
     const s = newSession(String(body?.title || `Session ${n}`), randomUUID(), {
       project_id: pr.id, workspace_id: ws.id, cwd: String(body?.cwd || '.'),
     });
+    if (mode) s.permission_mode = mode;
     return withStatus(201, info(s));
   });
   route('GET', '/api/workspaces', (_, __, q) => ({
@@ -699,6 +712,16 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return { entries: (TREE[path] ?? []).map((name) => ({ name, path: `${path}/${name}` })) };
   });
   route('GET', '/api/sessions/:id', (p) => info(sessionOr404(p.id)));
+  route('PATCH', '/api/sessions/:id', (p, body) => {
+    const s = sessionOr404(p.id);
+    const mode = body?.permission_mode;
+    if (mode !== undefined) {
+      if (mode !== 'ask' && mode !== 'auto') throw fail(400, 'bad_request', 'permission_mode is ask or auto');
+      s.permission_mode = mode;
+      pushSummary(s);
+    }
+    return info(s);
+  });
   route('GET', '/api/sessions/:id/events', (p, _, q) => {
     const s = sessionOr404(p.id);
     const after = Number(q.get('after_seq') ?? 0);

@@ -1166,6 +1166,25 @@ select.input {
   color: var(--deny);
 }
 
+/* T38: the permission mode next to the state pill; Auto stands out. */
+.perm-auto {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  border: 1px solid var(--warn-line);
+  background: var(--warn-tile);
+  color: var(--warn);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.perm-ask {
+  color: var(--muted-2);
+  white-space: nowrap;
+}
+
 .pill {
   display: inline-flex;
   align-items: center;

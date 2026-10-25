@@ -135,12 +135,14 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     }
     let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
     let p = &config.permissions;
-    tracing::info!(hub = %config.hub_url, allowed_roots = ?config.allowed_roots, %capabilities, %permission_mode, permissions = ?p.mode, allow = p.allow.len(), deny = p.deny.len(), "starting worker");
+    tracing::info!(hub = %config.hub_url, allowed_roots = ?config.allowed_roots, %capabilities, %permission_mode, permissions = ?p.mode, allow_auto = p.allow_auto, allow = p.allow.len(), deny = p.deny.len(), "starting worker");
     if config.legacy_workspace {
         tracing::warn!("worker.toml has an iteration 1 [workspace] block, which is ignored: add workspaces in the web client and remove the block");
     }
     if p.mode == hqc_worker::permissions::PermissionMode::Auto {
         tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call");
+    } else if p.allow_auto {
+        tracing::info!("[permissions] allow_auto: a session switched to auto in hqc runs without asking; only the deny list stops a call");
     }
     // The agents' hqc MCP server is this binary (SPEC §7.2).
     let mcp_socket = hqc_worker::mcp::socket_path(&config::hqc_home()?);

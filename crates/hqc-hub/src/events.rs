@@ -196,6 +196,19 @@ pub async fn store_hub_event_once(
     store_hub_event_as(app, s, event_id, author, kind, payload, None, None).await
 }
 
+/// [`store_hub_event_once`] with a `delivery` (an input of the hub cron, SPEC §16).
+pub async fn store_hub_event_with_id(
+    app: &AppState,
+    s: &SessionRow,
+    event_id: Uuid,
+    author: Value,
+    kind: &str,
+    payload: Value,
+    delivery: Option<&str>,
+) -> anyhow::Result<Option<EventRow>> {
+    store_hub_event_as(app, s, event_id, author, kind, payload, None, delivery).await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn store_hub_event_as(
     app: &AppState,

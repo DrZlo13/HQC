@@ -88,6 +88,8 @@ export interface EventBase {
 export interface UserMessage {
   text: string;
   artifact_ids: Uuid[];
+  /** The hub cron sent it for this schedule, on the owner's behalf (SPEC §16). */
+  schedule_id?: Uuid;
 }
 export interface AgentDelta {
   text: string;
@@ -312,6 +314,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
   'user.message': (p) => ({
     text: str(p, 'text'),
     artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
+    schedule_id: optStr(p, 'schedule_id'),
   }),
   'agent.delta': (p) => ({ text: str(p, 'text') }),
   'agent.message': (p) => ({
@@ -760,6 +763,8 @@ export interface Me {
   email: string;
   display_name?: string;
   personal_project_id: Uuid;
+  /** IANA name; the default zone of the user's schedules (SPEC §16). */
+  timezone?: string;
 }
 
 /** The fields of the hub's session object (SPEC §6) the client uses. */
@@ -796,7 +801,43 @@ export function parseMe(v: unknown): Me {
     email: str(o, 'email'),
     display_name: optStr(o, 'display_name'),
     personal_project_id: str(o, 'personal_project_id'),
+    timezone: optStr(o, 'timezone'),
   };
+}
+
+/** A scheduled message (SPEC §3 ScheduledMessage, §16): exactly one of `cron` and `at`. */
+export interface Schedule {
+  id: Uuid;
+  session_id: Uuid;
+  cron?: string;
+  at?: string;
+  timezone: string;
+  message: string;
+  enabled: boolean;
+  catch_up: boolean;
+  /** Absent when it will not run again (an `at` that ran). */
+  next_run?: string;
+  last_run?: string;
+}
+
+export function parseSchedule(v: unknown): Schedule {
+  const o = obj(v, 'schedule');
+  return {
+    id: str(o, 'id'),
+    session_id: str(o, 'session_id'),
+    cron: optStr(o, 'cron'),
+    at: optStr(o, 'at'),
+    timezone: str(o, 'timezone'),
+    message: str(o, 'message'),
+    enabled: bool(o, 'enabled'),
+    catch_up: bool(o, 'catch_up'),
+    next_run: optStr(o, 'next_run'),
+    last_run: optStr(o, 'last_run'),
+  };
+}
+
+export function parseScheduleList(v: unknown): Schedule[] {
+  return arr(obj(v, 'schedule list'), 'schedules').map(parseSchedule);
 }
 
 export function parseSessionInfo(v: unknown): SessionInfo {

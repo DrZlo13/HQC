@@ -88,7 +88,7 @@ pub async fn address(app: &AppState, s: &SessionRow) -> anyhow::Result<String> {
 }
 
 /// The owner's session `addr` points at (an address or an id), with its address.
-async fn target(
+pub(crate) async fn target(
     app: &AppState,
     caller: &SessionRow,
     addr: &str,

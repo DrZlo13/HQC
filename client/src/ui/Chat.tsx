@@ -12,6 +12,7 @@ import { IconAttach, IconBack, IconCode, IconMore, IconSend, IconStop } from './
 import { STATE_LABELS, formatCost, homePath, modelName } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
+import { SchedulesPanel } from './Schedules';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 
@@ -19,6 +20,7 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
   const chat = useMemo(() => new ChatSession(app.api, app.socket, sessionId), [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
   const [requestsOnly, setRequestsOnly] = useState(false);
+  const [schedules, setSchedules] = useState(false);
   const artifacts = useMemo(() => new ArtifactStore(app.api), [app]);
   const [files, setFiles] = useState<OutgoingFile[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -253,9 +255,11 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
             onArchive={archive}
             onUnarchive={unarchive}
             onDelete={remove}
+            onSchedules={() => setSchedules(true)}
           />
         )}
       </header>
+      {schedules && <SchedulesPanel api={app.api} sessionId={sessionId} onClose={() => setSchedules(false)} />}
       <div
         class="timeline"
         ref={scroller}
@@ -359,6 +363,7 @@ function MoreMenu({
   onArchive,
   onUnarchive,
   onDelete,
+  onSchedules,
 }: {
   info: SessionInfo;
   phone: boolean;
@@ -370,6 +375,7 @@ function MoreMenu({
   onArchive: () => void;
   onUnarchive: () => void;
   onDelete: () => void;
+  onSchedules: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -430,6 +436,7 @@ function MoreMenu({
             </div>
           )}
           {onRetry && item('btn-retry', 'Retry', onRetry)}
+          {item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
           {!archived && item('btn-archive', 'Archive', onArchive, 'Move the session to the archive; the agent stops')}
           {archived && item('btn-unarchive', 'Restore', onUnarchive)}
           {archived && item('btn-delete menu-danger', 'Delete', onDelete)}

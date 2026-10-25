@@ -130,7 +130,7 @@ describe('header', () => {
     expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
     expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Archive']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Archive']);
   });
 
   it('pulses while a turn is on, no "Stop" when idle', async () => {

@@ -344,6 +344,68 @@ pub struct PushMessage {
     pub payload: Option<serde_json::Value>,
 }
 
+/// A scheduled message (SPEC §3 ScheduledMessage, §16) as `/api/schedules` returns it.
+/// Exactly one of `cron` and `at` is set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub session_id: Uuid,
+    /// 5 fields, in `timezone`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+    /// IANA name, e.g. `Europe/Berlin`.
+    pub timezone: String,
+    pub message: String,
+    pub enabled: bool,
+    pub catch_up: bool,
+    /// When it is due next; absent when it will not run again (an `at` that ran).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `GET /api/schedules?session_id=`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleList {
+    pub schedules: Vec<Schedule>,
+}
+
+/// `POST /api/schedules`: `cron` or `at`; `timezone` defaults to the user's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateSchedule {
+    pub session_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    pub message: String,
+    #[serde(default)]
+    pub catch_up: bool,
+}
+
+/// `PATCH /api/schedules/{id}`: pause (`enabled: false`) or resume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchSchedule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+/// `PATCH /api/me`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchMe {
+    /// IANA name; the default zone of the user's schedules (SPEC §16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
 /// `POST /api/workers/enroll/confirm`; case and the dash of `code` do not matter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnrollConfirmRequest {
@@ -622,6 +684,19 @@ mod tests {
             serde_json::to_string(&VapidKey { public_key: None }).unwrap(),
             r#"{"public_key":null}"#
         );
+    }
+
+    #[test]
+    fn schedule_examples_roundtrip() {
+        let s: Schedule = roundtrip(include_str!("../examples/wire/api.schedule.json"));
+        assert!(s.cron.is_some() && s.at.is_none());
+        let l: ScheduleList = roundtrip(include_str!("../examples/wire/api.schedules.json"));
+        assert!(l.schedules[0].at.is_some() && l.schedules[0].last_run.is_none());
+        roundtrip::<CreateSchedule>(include_str!("../examples/wire/api.schedule.request.json"));
+        roundtrip::<PatchSchedule>(include_str!(
+            "../examples/wire/api.schedule.patch.request.json"
+        ));
+        roundtrip::<PatchMe>(include_str!("../examples/wire/api.me.patch.request.json"));
     }
 
     #[test]

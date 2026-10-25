@@ -7,7 +7,8 @@ Hub / worker / client system for driving LLM agents on many machines from one ch
   change the spec in the same PR, bump its version line and add an entry to §23. Never let
   behaviour drift from the spec silently.
 - `docs/ITERATION-3.md` is the current task list (`docs/ITERATION-1.md` and
-  `docs/ITERATION-2.md` are the closed ones). Each task names the spec sections it implements and its acceptance criteria.
+  `docs/ITERATION-2.md` are the closed ones).
+- `docs/BACKLOG.md` holds requests not planned into an iteration yet. Each task names the spec sections it implements and its acceptance criteria.
 - Marks in the spec: **[decision]** = decided, ask before changing; **[verify]** = verify
   on a real build first, then replace the mark with what you found (version, fixture).
 

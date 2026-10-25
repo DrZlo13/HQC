@@ -17,6 +17,7 @@ import {
   parseProject,
   parseProjectList,
   parsePushMessage,
+  parseSearchPage,
   parseServerFrame,
   parseSessionInfo,
   parseVapidKey,
@@ -125,6 +126,12 @@ describe('examples/wire', () => {
 
   it('reads the other REST bodies', () => {
     expect(parseEventPage(load('api.events.json')).last_seq).toBe(43);
+    const sp = parseSearchPage(load('api.search.json'));
+    expect(sp.results.map((h) => [h.address, h.seq, h.archived])).toEqual([
+      ['hqc/hqc-run-the-tests', 42, false],
+      ['personal/migration-plan', undefined, true],
+    ]);
+    expect(sp.next_cursor).toBeTruthy();
     const input = parseInputResponse(load('api.input.json'));
     expect(input.client_op_id).toBe((load('api.input.request.json') as { client_op_id: string }).client_op_id);
     expect(parseApiError(load('api.error.json')).error).toBe('request_closed');

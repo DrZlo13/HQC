@@ -80,7 +80,7 @@ Acceptance: the common checks; hub tests for every rule above (queue, buffer and
 reply matching, timeout, offline resend, cancel, chain limits, self-ask); worker tests for the
 header and escaping; live `HQC_LIVE_CLAUDE=1`: session A asks session B, gets B's reply.
 
-## T33. Search: the index, `hqc_search_history` and the search bar (after T30)
+## T33. Search: the index, `hqc_search_history` and the search bar (done, SPEC 0.36)
 
 Sections: §15, §6.
 - Hub: migration with `pg_trgm`, a `tsvector` (`simple`) over the event text and session

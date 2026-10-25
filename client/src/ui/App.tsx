@@ -4,6 +4,7 @@ import { Chat } from './Chat';
 import { Enroll } from './Enroll';
 import { useIsPhone, useSubscription } from './hooks';
 import { ProjectRail } from './ProjectRail';
+import { SearchScreen } from './Search';
 import { SessionList } from './SessionList';
 import { Settings } from './Settings';
 import { Workspaces } from './Workspaces';
@@ -12,16 +13,24 @@ export type Route =
   | { name: 'list' }
   | { name: 'project'; id: string }
   | { name: 'workspaces'; projectId: string }
-  | { name: 'session'; id: string }
+  | { name: 'session'; id: string; seq?: number }
+  | { name: 'search' }
   | { name: 'settings' }
   | { name: 'enroll'; code: string };
 
 /** Hash routes, so the hub can serve the client as static files: `#/p/<project>`,
- *  `#/p/<project>/workspaces`, `#/s/<session>`, `#/settings`, `#/enroll?code=ABCD-1234`. */
+ *  `#/p/<project>/workspaces`, `#/s/<session>` (`?seq=<seq>`: scrolled to that event, a
+ *  search hit), `#/search` (the phone's search screen), `#/settings`,
+ *  `#/enroll?code=ABCD-1234`. */
 export function parseRoute(hash: string): Route {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
   const parts = path.split('/').filter(Boolean);
-  if (parts[0] === 's' && parts[1]) return { name: 'session', id: decodeURIComponent(parts[1]) };
+  if (parts[0] === 's' && parts[1]) {
+    const seq = Number(new URLSearchParams(query).get('seq') ?? NaN);
+    const id = decodeURIComponent(parts[1]);
+    return Number.isInteger(seq) && seq > 0 ? { name: 'session', id, seq } : { name: 'session', id };
+  }
+  if (parts[0] === 'search') return { name: 'search' };
   if (parts[0] === 'p' && parts[1]) {
     const id = decodeURIComponent(parts[1]);
     return parts[2] === 'workspaces' ? { name: 'workspaces', projectId: id } : { name: 'project', id };
@@ -65,7 +74,11 @@ export function App({ app }: { app: AppState }) {
   let main;
   switch (route.name) {
     case 'session':
-      main = <Chat key={route.id} app={app} sessionId={route.id} phone={phone} />;
+      main = <Chat key={route.id} app={app} sessionId={route.id} phone={phone} focusSeq={route.seq} />;
+      break;
+    case 'search':
+      // A phone screen; a desktop has the search in the left column.
+      main = phone ? <SearchScreen app={app} /> : <div class="placeholder">Search from the field on the left</div>;
       break;
     case 'workspaces':
       main = <Workspaces key={route.projectId} app={app} projectId={route.projectId} />;

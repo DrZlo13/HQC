@@ -54,7 +54,31 @@ export interface ChatActions {
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
   const blocks = buildFeed(items, actions.timeline);
-  return <>{blocks.map((b) => <BlockView key={b.key} block={b} actions={actions} />)}</>;
+  // `data-seq`: the first event of the block, for the jump to a search hit (Chat).
+  return (
+    <>
+      {blocks.map((b) => (
+        <div key={b.key} class="feed-block" data-seq={blockSeq(b)}>
+          <BlockView block={b} actions={actions} />
+        </div>
+      ))}
+    </>
+  );
+}
+
+function blockSeq(b: Block): number | undefined {
+  switch (b.kind) {
+    case 'agent':
+    case 'approval':
+      return b.event.seq;
+    case 'tools': {
+      const first = b.rows[0];
+      const row = first?.kind === 'call' ? (first.call ?? first.result) : first?.event;
+      return b.caption?.seq ?? row?.seq;
+    }
+    case 'item':
+      return b.item.kind === 'event' ? b.item.event.seq : undefined;
+  }
 }
 
 function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.35, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.36, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -808,7 +808,15 @@ the rest is marked "later"):
   (`api.candidates.json`): a `workspace.list_candidates` frame to the worker (§5.3, §9.1); offline:
   `409 worker_offline`; no reply within 10 s: `504 worker_timeout`; a worker without a mirror
   refused: `400 invalid_path`
-- `GET /api/search?q=&project=&fuzzy=`
+- `GET /api/search?q=&project=&fuzzy=&cursor=&limit=` → `{results[{session_id, address,
+  title, archived, seq?, type?, ts, snippet}], next_cursor?}` (`api.search.json`, since 0.36,
+  T33; §15): `q` 1–200 characters after trimming; `project` an id or slug of the user's
+  project (another user's or an unknown one: `404`); `fuzzy=1` (or `true`) needs at least 3
+  characters; `limit` 1–50, 20 by default; `next_cursor` is opaque, passed back as `cursor`
+  for the next page, absent on the last one. A hit without `seq` is a title hit. Refused
+  queries (empty, too long, too short for fuzzy, a foreign cursor, over the time limit): `400
+  bad_request` with the reason in `message`. The client opens a hit at
+  `#/s/<session>?seq=<seq>` (a title hit at `#/s/<session>`)
 - `GET/POST/DELETE /api/grants`
 - `POST /api/push/subscribe` (body is `PushSubscription.toJSON()`: `{endpoint,
   expirationTime?, keys: {p256dh, auth}}`), `DELETE /api/push/subscribe {endpoint}`,
@@ -965,14 +973,21 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   sessions, the most recently active first, at most 200 (`truncated: true` beyond), archived
   sessions and the workers' service sessions left out; `status` is the session's `state`
   (§17.1); `current: true` marks the calling session.
-- `hqc_search_history(query, project?, fuzzy?)` — history search, respecting grants.
+- `hqc_search_history(query, project?, fuzzy?)` — history search, respecting grants. Since
+  0.36 (T33): `hqc_search_history(query, project?, fuzzy?, cursor?)` runs the query of `GET
+  /api/search` (§6, §15) for the calling session's owner, 20 hits per call; the result is
+  `{results: [{address, title, archived, seq?, type?, ts, snippet}], next_cursor?}` (no
+  `session_id`: the address is what the other tools take). `project` is a slug or an id of
+  the owner's project (else `not_found`); a refused query is `invalid_args`. No side effects,
+  so a repeated call simply runs again.
 - `hqc_schedule(session, at|cron, message)` — the hub's cron (§16).
 
 Session address: `<project-slug>/<session-slug>` or the id. A slug is unique within the project
 and does not change on rename.
 
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
-since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32); the list is shared by the worker's MCP server and the hub
+since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
+`hqc_search_history` since 0.36, T33); the list is shared by the worker's MCP server and the hub
 (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
 (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
@@ -2109,6 +2124,39 @@ are filtered by grants. Limitation: `simple` has no stemming, word forms are fou
 only by the trigram search. One index, two consumers: the search bar in the client
 and `hqc_search_history`.
 
+Since 0.36 (T33; `crates/hqc-hub/src/search.rs`, migration `0016`, measurements in
+`docs/notes/t33-questions.md`):
+- **What is indexed.** The text a human reads: `payload.text` of `user.message`,
+  `agent.message` (final or not), `peer.message` and `system`; not tool calls, tool results,
+  thinking, requests or attachments. Two stored generated columns of `events`, `search_text`
+  (that text or null) and `search_words` (its `simple` tsvector), so Postgres keeps them on
+  every insert and the migration's table rewrite backfills old rows; GIN indexes on
+  `search_words` and on `search_text` with `gin_trgm_ops`, and on session titles (expression
+  indexes, as titles change). `pg_trgm` is a trusted extension, created by the migration.
+- **Whose.** Until grants (iteration 6): the user's (the calling session's owner's) sessions,
+  archived ones included and marked `archived: true`, the workers' service sessions left out.
+- **Matching.** Exact: `search_words @@ websearch_to_tsquery('simple', q)` (words in any
+  case; `"a phrase"`, `or`, `-word`). Fuzzy adds `q <% text` (trigram word similarity) with
+  `pg_trgm.word_similarity_threshold` 0.5 for the query (the default 0.6 misses one typo in
+  a short word); it finds other word forms and typos, at least 3 characters. Titles are
+  matched the same way; a title hit has no `seq` and stands at the session's creation time.
+- **Order and pages.** Newest first by `(ts, id)` (the event's time and id, for a title the
+  session's creation and id); the cursor is that pair of the page's last hit, so pages do not
+  repeat or skip hits when new events arrive. No ranking by relevance.
+- **Snippet.** About 160 characters on one line around the first query word found in the text
+  (ignoring case), else its beginning; `…` marks a cut.
+- **Cost.** A query runs with `statement_timeout` 5 s; over it the query is refused. Over 100k
+  events a rare or common exact word takes 1–20 ms, a phrase 10–20 ms, fuzzy with a rare word
+  4–90 ms, fuzzy with a word in most events about 1 s (measured on home-mac).
+- **Client.** Desktop: the left column's search field filters the project's sessions by title
+  and path at once (as before) and, from 2 characters and 300 ms after typing, shows the hub's
+  hits below them ("In messages", "Similar words" for fuzzy, "More" for the next page). Phone:
+  the list's search button opens `#/search`, a screen with the field, the sessions of all
+  projects matching by title or path, and the hub's hits. A hit opens `#/s/<session>?seq=<seq>`:
+  the chat loads its history as always (in full, page by page) and, once the event is there,
+  scrolls the block that holds it (the last block starting at or before `seq`) to the middle
+  and marks it.
+
 ## 16. Notifications and hub cron
 
 Web Push on events: `approval.request`, `clarify.request`, `worker.approval.request`
@@ -2334,6 +2382,7 @@ with `write` share the same queue.
   | chain of peer messages (§7.1) | `depth` ≤ 3 nested asks, `hops` ≤ 20 messages | `mcp.result` `error limit_exceeded` |
   | `hqc_ask.timeout_s` (§7) | 1 … `ask_timeout_s` (600 s), larger cut to it | `0`: `error invalid_args` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
+  | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
   | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
   | the worker's MCP socket (§7.2) | a line up to 64 KB + 4 KB; peers of the same OS user only | the connection is closed |
@@ -2397,6 +2446,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.35 → 0.36 (T33, search)
+§15: what is indexed (the text of `user.message`, `agent.message`, `peer.message`, `system`
+and session titles; no tool output), whose (the owner's sessions, archived ones marked,
+service sessions left out), exact and fuzzy matching (word similarity threshold 0.5), newest
+first with a cursor, the snippet, the 5 s limit and the measured cost over 100k events, the
+client (the left column's field, the phone's `#/search` screen, `#/s/<id>?seq=` opens a hit).
+Migration `0016`: `pg_trgm`, stored generated columns `events.search_text` and
+`search_words` (backfilled by the table rewrite), GIN indexes. §6: `GET /api/search` defined
+(`api.search.json`). §7: `hqc_search_history(query, project?, fuzzy?, cursor?)` defined and
+listed. §20: limits of a search query. Notes: `docs/notes/t33-questions.md`.
 
 ### 0.34 → 0.35 (T32, `hqc_send` and `hqc_ask`)
 §3 PendingRequest: an `ask` is a row of the asking session with the target and the

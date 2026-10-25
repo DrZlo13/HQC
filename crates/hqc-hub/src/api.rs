@@ -831,6 +831,46 @@ pub async fn session_events(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    /// A project id or slug of the user's.
+    pub project: Option<String>,
+    /// `1` or `true`.
+    pub fuzzy: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// `GET /api/search?q=&project=&fuzzy=&cursor=&limit=` (SPEC §15): the user's sessions
+/// only; another user's project is `404`, as a missing one.
+pub async fn search(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Query(q): Query<SearchQuery>,
+) -> ApiResult<Json<api::SearchPage>> {
+    let project_id = match q.project.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => Some(
+            crate::search::project_of(&app.db, user.id, p)
+                .await?
+                .ok_or(ApiError::NotFound)?,
+        ),
+        None => None,
+    };
+    let query = crate::search::Query {
+        text: q.q,
+        project_id,
+        fuzzy: matches!(q.fuzzy.as_deref(), Some("1" | "true")),
+        cursor: q.cursor.filter(|c| !c.is_empty()),
+        limit: q.limit.unwrap_or(crate::search::PAGE),
+    };
+    match crate::search::search(&app.db, user.id, &query).await {
+        Ok(page) => Ok(Json(page)),
+        Err(crate::search::SearchError::Invalid(m)) => Err(ApiError::BadRequest(m)),
+        Err(crate::search::SearchError::Db(e)) => Err(e.into()),
+    }
+}
+
 /// `POST /api/sessions/{id}/input`: stored as `user.message` with `delivery: pending`
 /// and delivered when the worker is there (SPEC §5.2). A repeated `client_op_id` returns
 /// the event stored the first time, with 200 instead of 201.

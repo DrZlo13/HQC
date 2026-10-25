@@ -252,6 +252,35 @@ pub struct EventPage {
     pub last_seq: u64,
 }
 
+/// `GET /api/search` (SPEC §15): hits newest first; `next_cursor` fetches the next page
+/// (`&cursor=`), absent on the last one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchPage {
+    pub results: Vec<SearchHit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// One search hit: an event's text, or the session's title (no `seq`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub session_id: Uuid,
+    /// `<project-slug>/<session-slug>` (SPEC §7).
+    pub address: String,
+    pub title: String,
+    pub archived: bool,
+    /// The event to open the session at; absent for a title hit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// The event's type; absent for a title hit.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The event's time, or the session's creation for a title hit.
+    pub ts: DateTime<Utc>,
+    /// A short piece of the text around the first match.
+    pub snippet: String,
+}
+
 /// `POST /api/sessions/{id}/input`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputRequest {
@@ -528,6 +557,9 @@ mod tests {
             "absent until a process reported a list"
         );
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));
+        let sp: SearchPage = roundtrip(include_str!("../examples/wire/api.search.json"));
+        assert!(sp.results[0].seq.is_some() && sp.results[1].seq.is_none());
+        assert!(sp.results[1].archived && sp.next_cursor.is_some());
         roundtrip::<InputRequest>(include_str!("../examples/wire/api.input.request.json"));
         let r: InputResponse = roundtrip(include_str!("../examples/wire/api.input.json"));
         let ev: crate::event::Event = serde_json::from_value(r.event).unwrap();

@@ -80,6 +80,10 @@ pub const REGISTRY: &[HubTool] = &[
         name: hqc_proto::mcp::ASK,
         run: |app, caller, c| Box::pin(crate::peers::ask(app, caller, c)),
     },
+    HubTool {
+        name: hqc_proto::mcp::SEARCH_HISTORY,
+        run: |app, caller, c| Box::pin(now(search_history(app, caller, c.args.clone()))),
+    },
 ];
 
 /// The shape `new_secret("hqcs_")` gives session tokens; anything else never reaches the
@@ -219,6 +223,63 @@ async fn list_sessions(app: &AppState, caller: &SessionRow, v: Value) -> ToolRes
         })
         .collect();
     Ok(json!({ "sessions": sessions, "truncated": truncated }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchArgs {
+    query: String,
+    project: Option<String>,
+    #[serde(default)]
+    fuzzy: bool,
+    cursor: Option<String>,
+}
+
+/// `hqc_search_history(query, project?, fuzzy?, cursor?)` (SPEC §7, §15): the query of
+/// `GET /api/search` for the calling session's owner, as `{results: [{address, title,
+/// archived, seq?, type?, ts, snippet}], next_cursor?}`. No side effects.
+async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
+    let a: SearchArgs = args(v)?;
+    let project_id = match a.project {
+        Some(p) => Some(owner_project(app, caller.owner_id, &p).await?),
+        None => None,
+    };
+    let q = crate::search::Query {
+        text: a.query,
+        project_id,
+        fuzzy: a.fuzzy,
+        cursor: a.cursor,
+        limit: crate::search::PAGE,
+    };
+    let page = crate::search::search(&app.db, caller.owner_id, &q)
+        .await
+        .map_err(|e| match e {
+            crate::search::SearchError::Invalid(m) => err(error_code::INVALID_ARGS, m),
+            crate::search::SearchError::Db(e) => internal(e),
+        })?;
+    let results: Vec<Value> = page
+        .results
+        .into_iter()
+        .map(|h| {
+            let mut v = json!({
+                "address": h.address,
+                "title": h.title,
+                "archived": h.archived,
+                "ts": h.ts,
+                "snippet": h.snippet,
+            });
+            if let (Some(seq), Some(kind)) = (h.seq, h.kind) {
+                v["seq"] = json!(seq);
+                v["type"] = json!(kind);
+            }
+            v
+        })
+        .collect();
+    let mut out = json!({ "results": results });
+    if let Some(c) = page.next_cursor {
+        out["next_cursor"] = json!(c);
+    }
+    Ok(out)
 }
 
 /// The id of what call `request_id` of `tool` from session `caller` writes: the same for a

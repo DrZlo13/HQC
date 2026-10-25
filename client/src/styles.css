@@ -2891,3 +2891,66 @@ select.input {
   height: 1px;
   opacity: 0;
 }
+
+/* History search (SPEC §15): the hub's hits under the list, the phone's search screen, and
+   the event a hit opened. */
+.search-hits {
+  margin-bottom: 14px;
+}
+.search-fuzzy {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted-2);
+  cursor: pointer;
+}
+.search-snippet {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-3);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.search-snippet mark {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-radius: 3px;
+}
+.search-archived {
+  flex: none;
+  font-size: 11px;
+  color: var(--faint);
+}
+.search-more {
+  margin: 4px 8px;
+}
+.search-screen .m-head-row .search {
+  flex: 1;
+}
+.feed-block.is-found {
+  border-radius: 10px;
+  animation: found 2.4s ease-out;
+}
+@keyframes found {
+  from {
+    box-shadow: 0 0 0 2px var(--accent);
+    background: var(--accent-soft);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent;
+    background: transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .feed-block.is-found {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+}

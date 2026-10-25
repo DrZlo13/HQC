@@ -15,7 +15,18 @@ import { PermissionBlock } from './permission';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 
-export function Chat({ app, sessionId, phone = false }: { app: AppState; sessionId: string; phone?: boolean }) {
+/** `focusSeq`: scroll to that event once it is loaded and mark it (a search hit, SPEC §15). */
+export function Chat({
+  app,
+  sessionId,
+  phone = false,
+  focusSeq,
+}: {
+  app: AppState;
+  sessionId: string;
+  phone?: boolean;
+  focusSeq?: number;
+}) {
   const chat = useMemo(() => new ChatSession(app.api, app.socket, sessionId), [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
   const [requestsOnly, setRequestsOnly] = useState(false);
@@ -125,6 +136,24 @@ export function Chat({ app, sessionId, phone = false }: { app: AppState; session
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
+  });
+  // The jump to a search hit: the history loads in full on open (ChatSession.open), so the
+  // event is there once `lastSeq` reaches it; the block that holds it is the last one that
+  // starts at or before it (a hidden event's neighbour).
+  const focused = useRef<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el || focusSeq === undefined || focused.current === focusSeq || t.lastSeq < focusSeq) return;
+    let target: HTMLElement | undefined;
+    for (const b of el.querySelectorAll<HTMLElement>('.feed-block[data-seq]')) {
+      if (Number(b.dataset.seq) <= focusSeq) target = b;
+    }
+    if (!target) return;
+    focused.current = focusSeq;
+    stick.current = false;
+    el.querySelector('.feed-block.is-found')?.classList.remove('is-found');
+    target.classList.add('is-found');
+    target.scrollIntoView?.({ block: 'center' });
   });
 
   const archive = () => act(() => app.api.archive(sessionId).then(() => app.refreshSessions()), 'Not archived');

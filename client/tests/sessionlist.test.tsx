@@ -137,7 +137,7 @@ describe('list logic', () => {
 
 function makeApp(list = LIST) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
-  const app = new AppState({ workspaces: async () => [] } as unknown as Api, socket);
+  const app = new AppState({ workspaces: async () => [], search: async () => ({ results: [] }) } as unknown as Api, socket);
   app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0' };
   app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, created_at: at(90) });
@@ -226,7 +226,7 @@ describe('SessionList (desktop column)', () => {
     expect(groups()).toEqual([['Running', '1', ['Step determinism']]]);
     await type('no such thing');
     expect(groups()).toEqual([]);
-    expect(root.querySelector('.empty')!.textContent).toBe('Nothing found');
+    expect(root.querySelector('.empty')!.textContent).toBe('No sessions match');
   });
 
   it('lists the workers with their active sessions, offline ones grey', async () => {
@@ -266,10 +266,8 @@ describe('SessionList (phone)', () => {
     expect(root.querySelector('.chip.is-current .chip-badge')!.textContent).toBe('1');
     expect(groups().map((g) => g[0])).toEqual(['Needs you', 'Running', 'Idle']);
     expect(root.querySelector('.fab')!.textContent).toBe('New');
-    // The search opens from its button.
+    // The search is a screen of its own (T33, tests/search.test.tsx).
     expect(root.querySelector('input[aria-label="Search sessions"]')).toBeNull();
-    await act(async () => root.querySelector<HTMLButtonElement>('button[aria-label="Search by title and path"]')!.click());
-    await type('network');
-    expect(groups()).toEqual([['Needs you', '1', ['Network sync']]]);
+    expect(root.querySelector('a[aria-label="Search sessions and messages"]')!.getAttribute('href')).toBe('#/search');
   });
 });

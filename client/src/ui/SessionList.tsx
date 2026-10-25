@@ -5,6 +5,7 @@ import type { SessionInfo, Workspace } from '../proto';
 import { useSubscription } from './hooks';
 import { IconPlus, IconSearch } from './icons';
 import { formatWhen, homePath } from './labels';
+import { SearchHits } from './Search';
 import {
   LIST_MODES,
   activeLabel,
@@ -43,8 +44,8 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<ListMode>(loadMode);
+  // The phone searches on its own screen (`#/search`).
   const [query, setQuery] = useState('');
-  const [searching, setSearching] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const project = app.currentProject();
   const archived = app.archivedSessions();
@@ -75,7 +76,7 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
       <input
         type="search"
         aria-label="Search sessions"
-        placeholder="Search by title and path"
+        placeholder="Search sessions and messages"
         value={query}
         onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
       />
@@ -106,22 +107,15 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
         <header class="m-head">
           <div class="m-head-row">
             <h1>Sessions</h1>
-            <button
-              type="button"
-              class="icon-btn icon-btn-round"
-              aria-label="Search by title and path"
-              aria-pressed={searching}
-              onClick={() => setSearching(!searching)}
-            >
+            <a class="icon-btn icon-btn-round" href="#/search" aria-label="Search sessions and messages">
               <IconSearch size={20} />
-            </button>
+            </a>
             <a class="icon-btn icon-btn-round" href="#/settings" aria-label="Account and settings">
               <span class="avatar">{(app.me?.email ?? '?').slice(0, 1).toUpperCase()}</span>
             </a>
           </div>
           {(app.error || conn) && <div class="m-head-state">{app.error ? 'Hub unavailable' : 'offline'}</div>}
           <ProjectChips app={app} onError={setError} />
-          {searching && search}
           {modes}
         </header>
       ) : (
@@ -175,8 +169,9 @@ export function SessionList({ app, current, phone }: { app: AppState; current?: 
           </div>
         ))}
         {app.me && groups.length === 0 && (
-          <div class="empty">{query ? 'Nothing found' : showArchived ? 'The archive is empty' : 'No sessions yet'}</div>
+          <div class="empty">{query ? 'No sessions match' : showArchived ? 'The archive is empty' : 'No sessions yet'}</div>
         )}
+        {!phone && <SearchHits app={app} query={query} />}
         {project && (
           <div class="list-foot">
             <a href={`#/p/${project.id}/workspaces`}>Project workspaces</a>

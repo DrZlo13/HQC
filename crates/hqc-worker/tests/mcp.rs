@@ -167,7 +167,13 @@ async fn a_call_goes_to_the_hub_and_back() {
         .collect();
     assert_eq!(
         names,
-        ["hqc_list_sessions", "hqc_attach", "hqc_send", "hqc_ask"],
+        [
+            "hqc_list_sessions",
+            "hqc_attach",
+            "hqc_send",
+            "hqc_ask",
+            "hqc_search_history"
+        ],
         "only tools that landed"
     );
     assert_eq!(

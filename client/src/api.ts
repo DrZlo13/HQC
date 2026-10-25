@@ -14,6 +14,7 @@ import {
   parseMe,
   parseProject,
   parseProjectList,
+  parseSearchPage,
   parseSessionInfo,
   parseSessionList,
   parseVapidKey,
@@ -30,6 +31,7 @@ import {
   type HqcEvent,
   type Me,
   type Project,
+  type SearchPage,
   type SessionInfo,
   type Workspace,
 } from './proto';
@@ -199,6 +201,15 @@ export class Api {
 
   async session(id: string): Promise<SessionInfo> {
     return parseSessionInfo(await this.req('GET', `/api/sessions/${enc(id)}`));
+  }
+
+  /** `GET /api/search` (SPEC §15): the user's sessions, newest hits first. */
+  async search(q: string, opts: { fuzzy?: boolean; project?: string; cursor?: string } = {}): Promise<SearchPage> {
+    const p = new URLSearchParams({ q });
+    if (opts.fuzzy) p.set('fuzzy', '1');
+    if (opts.project) p.set('project', opts.project);
+    if (opts.cursor) p.set('cursor', opts.cursor);
+    return parseSearchPage(await this.req('GET', `/api/search?${p}`));
   }
 
   async events(id: string, afterSeq: number, limit = 200): Promise<EventPage> {

@@ -1,0 +1,23 @@
+{
+  "results": [
+    {
+      "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+      "address": "hqc/hqc-run-the-tests",
+      "title": "hqc: run the tests",
+      "archived": false,
+      "seq": 42,
+      "type": "agent.message",
+      "ts": "2026-10-22T09:14:03Z",
+      "snippet": "…all 212 tests pass; the migration backfills the search index in about a second…"
+    },
+    {
+      "session_id": "0199f3a2-7c10-7000-8000-000000000002",
+      "address": "personal/migration-plan",
+      "title": "Migration plan",
+      "archived": true,
+      "ts": "2026-10-20T17:02:11Z",
+      "snippet": "Migration plan"
+    }
+  ],
+  "next_cursor": "1729443731000000.0199f3a2-7c10-7000-8000-000000000002"
+}

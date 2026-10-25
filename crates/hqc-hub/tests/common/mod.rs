@@ -198,14 +198,27 @@ impl TestHub {
             .connect(&url)
             .await
             .unwrap_or_else(|e| panic!("connect to {url} (HQC_TEST_DATABASE_URL): {e}"));
+        // pg_trgm (migration 0016) is one per database: it lives in `public`, outside the
+        // schemas the tests drop, and every test's search path reaches it there. Concurrent
+        // creates may race; the loser finds it on the next try.
+        for _ in 0..3 {
+            if sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
+                .execute(&admin)
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
         let schema = format!("t_{}", Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(&admin)
             .await
             .unwrap();
+        let search_path = format!("{schema},public");
         let opts = PgConnectOptions::from_str(&url)
             .unwrap()
-            .options([("search_path", schema.as_str())]);
+            .options([("search_path", search_path.as_str())]);
         let pool = PgPoolOptions::new()
             .max_connections(8)
             .connect_with(opts)

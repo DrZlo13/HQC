@@ -942,6 +942,42 @@ export function parseEventPage(v: unknown): { events: unknown[]; last_seq: numbe
   return { events: arr(o, 'events'), last_seq: num(o, 'last_seq') };
 }
 
+/** One hit of `GET /api/search` (SPEC §15): an event's text, or the session's title (no
+ *  `seq`). */
+export interface SearchHit {
+  session_id: Uuid;
+  address: string;
+  title: string;
+  archived: boolean;
+  seq?: number;
+  type?: string;
+  ts: string;
+  snippet: string;
+}
+
+export interface SearchPage {
+  results: SearchHit[];
+  next_cursor?: string;
+}
+
+export function parseSearchPage(v: unknown): SearchPage {
+  const o = obj(v, 'search page');
+  const results = arr(o, 'results').map((r) => {
+    const h = obj(r, 'search hit');
+    return {
+      session_id: str(h, 'session_id'),
+      address: str(h, 'address'),
+      title: str(h, 'title'),
+      archived: bool(h, 'archived'),
+      seq: optNum(h, 'seq'),
+      type: optStr(h, 'type'),
+      ts: str(h, 'ts'),
+      snippet: str(h, 'snippet'),
+    };
+  });
+  return { results, next_cursor: optStr(o, 'next_cursor') };
+}
+
 /** `{event}` of `POST /api/sessions/{id}/input`: the stored `user.message`. */
 export function parseInputResponse(v: unknown): HqcEvent {
   return parseEvent(obj(v, 'input response').event);

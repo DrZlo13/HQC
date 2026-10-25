@@ -30,6 +30,7 @@ pub const LIST_SESSIONS: &str = "hqc_list_sessions";
 pub const ATTACH: &str = "hqc_attach";
 pub const SEND: &str = "hqc_send";
 pub const ASK: &str = "hqc_ask";
+pub const SEARCH_HISTORY: &str = "hqc_search_history";
 
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -131,6 +132,37 @@ pub const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: SEARCH_HISTORY,
+        description: "Search the history of your owner's hqc sessions (archived ones too): \
+            the messages of users and agents, messages between sessions, hqc's notices and \
+            session titles; not tool output. Exact words by default (\"quoted phrase\", \
+            `or`, `-word`); `fuzzy: true` also finds other word forms and typos. Newest first, \
+            20 per call; pass `next_cursor` as `cursor` for more. Each hit has the session's \
+            address, the event's `seq` and a snippet.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to look for."},
+                    "project": {
+                        "type": "string",
+                        "description": "A project slug or id; all projects when absent."
+                    },
+                    "fuzzy": {
+                        "type": "boolean",
+                        "description": "Similar words too (at least 3 characters)."
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "`next_cursor` of the previous call."
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            })
+        },
+    },
 ];
 
 /// `args` of the `mcp.call` for [`ATTACH`]: the worker reads and uploads `path` itself
@@ -200,6 +232,7 @@ mod tests {
         assert!(tool(LIST_SESSIONS).is_some());
         assert!(tool(ATTACH).is_some());
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
+        assert!(tool(SEARCH_HISTORY).is_some());
         assert!(
             tool("hqc_spawn").is_none(),
             "no stubs (docs/ITERATION-3.md)"

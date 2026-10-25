@@ -50,7 +50,10 @@ The hub listens on loopback only, and in dev mode this is mandatory (§6). The w
 
 ### 1.1 Postgres
 
-The hub works with Postgres 17 (verified; iteration 1 needs no extensions). The connection
+The hub works with Postgres 17 (verified). Since migration `0016` (T33, search) it needs the
+`pg_trgm` extension: it ships with Postgres (contrib, in the Debian/Ubuntu `postgresql`
+package, Homebrew and the `postgres` image) and is trusted, so the migration creates it as the
+database owner (`hqc` below); no superuser step. The connection
 has no TLS (sqlx is built without TLS), so the database must be on the same host as the hub
 (or in a trusted network, without `sslmode=require` in the connection string).
 

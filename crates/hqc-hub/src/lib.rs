@@ -28,6 +28,7 @@ pub mod mirror;
 pub mod peers;
 pub mod push;
 pub mod requests;
+pub mod search;
 pub mod security;
 pub mod state;
 pub mod titles;
@@ -70,6 +71,7 @@ pub fn router(app: AppState) -> Router {
                 .delete(api::delete_session),
         )
         .route("/api/sessions/{id}/events", get(api::session_events))
+        .route("/api/search", get(api::search))
         .route("/api/sessions/{id}/input", post(api::input))
         .route("/api/sessions/{id}/stop", post(api::stop))
         .route("/api/sessions/{id}/retry", post(api::retry))

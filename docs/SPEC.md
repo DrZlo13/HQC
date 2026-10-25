@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.40, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.41, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -816,7 +816,9 @@ the rest is marked "later"):
   less than 30 s ago: `409 vscode_active`; worker offline: `409 worker_offline`; archived:
   `409 archived`; service session: `409 system_session`
 - `POST /api/sessions/{id}/requests/{request_id}` {option_id, message? | answers} → `{event_id, seq}`
-  of the stored answer; closed request: `409 request_closed` (§10.1). `message` is a text reply
+  of the stored answer; closed request: `409 request_closed` (§10.1). The same call answers a
+  request wherever the client shows it (its own feed, the feed of a session waiting on it, the
+  "Requests" list, §10.1): `{id}` is always the request's own session. `message` is a text reply
   instead of the call (§10.1): only for an `approval` in a session and only with an option of
   `canonical: deny`/`deny_always`, non-empty, up to 16 KiB, otherwise `400`
 - `POST /api/artifacts` (multipart: field `file`, optional `kind`) → `201` and the artifact
@@ -829,6 +831,17 @@ the rest is marked "later"):
   .../input`) with `artifact_ids` of someone else's or nonexistent artifacts: `400
   unknown_artifact`; more than 32: `400`. Download by link: `GET /artifacts/{id}?exp=&sig=`
   (outside `/api`, §12); for the worker: `GET /worker/artifacts/{id}` (§5.3)
+- `GET /api/requests` → `{requests[]}` (`api.requests.json`, since 0.41, T37): every open
+  request (`approval`, `clarify`, `worker_approval`) in the user's sessions that are not
+  archived, oldest first, the workers' service sessions included. An item is `{session_id,
+  request_id, kind, address, title, worker_id?, worker_name?, system?, event, waiting[]}`:
+  `address` (`<project-slug>/<session-slug>`), `title` and the worker of the request's session,
+  `system: true` for a worker's own request (§10.2), `event` — the `approval.request` /
+  `clarify.request` as stored (§4), `waiting` — `{session_id, address, title}` of the user's
+  sessions that wait on this one through open `hqc_ask`s (§7.1), directly or along a chain,
+  the nearest first, so the last is the top of the chain (absent when nobody waits). Only the
+  user's own sessions and asks count: another user's request, or another user's ask aimed at
+  the user's session, is never listed. The same list comes over `/api/ws` as `requests` (below)
 - `PUT /api/sessions/{id}/read_cursor` {last_read_seq}
 - `GET /api/workers` → `{workers[]}`: workers that are not revoked; `?include_revoked=1` adds
   the revoked ones (the "Settings" screen). The worker object is `{id, name, os, status: online
@@ -908,7 +921,8 @@ WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. An event
 stored from a client input carries its `client_op_id`, so the client shows the message at
 once and matches it with the echo (a technique from Agent Host Protocol, §22). A separate
-subscription, `subscribe_summary`, gives `state`, `queue_len` and unread counts per session.
+subscription, `subscribe_summary`, gives `state`, `queue_len` and unread counts per session,
+and the user's open requests (`requests`, since 0.41).
 After a reconnect the client repeats `subscribe` with the last `seq` it has seen, or from
 before its first input still `pending` if that is earlier (since 0.40): a `delivery` frame sent
 while the socket was down is lost, and an event sent again carries its current `delivery`,
@@ -926,7 +940,11 @@ newer copy).
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?}` (the same as
-  in the session object); `{type: pong}`; `{type: error, code, message, session_id?}`.
+  in the session object); `{type: requests, requests[]}` (since 0.41, T37,
+  `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
+  again, whole, whenever one of the user's requests opens or closes (an event of §4
+  `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
+  or closes; no polling. `{type: pong}`; `{type: error, code, message, session_id?}`.
   The client ignores an unknown `type`.
 - `unread` is the number of events with `seq > last_read_seq` among: `agent.message` with
   `final: true`, `approval.request`, `clarify.request`, `peer.message`, `system`, except
@@ -1889,6 +1907,30 @@ cancel on `session.stop` (the Claude Code adapter silently forgets requests stil
 end of an interrupted turn). The hub cancels an open `clarify` the same way: a
 `clarify.cancel` event and a `clarify.response` frame with `answers: {}`; the adapter answers
 the runtime `deny`, and the turn continues without answers.
+**Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
+own feed:
+- In every session that waits on its session through an open `hqc_ask` (§7.1), directly or
+  along a chain (A asks B, B asks C: C's request shows in B and in A), under that session's
+  "Waiting for a reply from …" line. The card is the same component as in the request's own
+  feed (permission card, text reply, clarify form), framed and headed by the session it
+  belongs to (title, address, link) and its worker, so it cannot be taken for a request of
+  the session the user is looking at; Enter and Esc do not answer it. Other sessions waiting
+  on it are named under the header.
+- In the "Requests" list: every open request of the user (`GET /api/requests`, the `requests`
+  frame, §6), the workers' own requests (§10.2) included; on a desktop an entry with the count
+  in the left column (shown while something is open), on a phone a "Requests" button with the
+  count in the session list's header; both open `#/requests`. Each item is the same card with
+  the same header and the sessions waiting on it, answers in place and links to its session.
+
+An answer from any of these places is the ordinary answer of the request's own session (`POST
+/api/sessions/{session}/requests/{request_id}`, §6): the `approval.response` /
+`clarify.response` event, its audit (`by`) and the frame to the worker are those of that
+session, the worker's permission policy (§14) is untouched, and nothing is answered on the
+user's behalf. Once a request is answered or cancelled anywhere (its feed, another session's
+feed, the list, another device, expiry, stop, archive), the hub sends the new list and every
+place drops the card at once; an answer that loses the race gets `409 request_closed`, and the
+client drops the card too.
+
 **Reply with text** (T26). Instead of a button the user can write what to do instead of the
 call: the client answers with the `canonical: deny` option (if there is none, `deny_always`)
 and a `message` field; the hub puts `message` into the `approval.response` event and into the
@@ -1955,7 +1997,8 @@ worker (§6) deletes it (§17.4).
   with `description` over 4096 bytes, a `request_id` or `kind` of the wrong length, or over 20
   open requests per worker gets `error invalid_frame`, and nothing is written (table §20).
   Push for such requests: at most once per 10 s per worker (the request is written, the
-  notification is skipped).
+  notification is skipped). Open worker requests are also in the user's "Requests" list
+  (§10.1, since 0.41) and answered there in place.
 - hub → worker `worker.approval.response {request_id, option_id}`: the owner's answer, or
   `deny` when the hub cancels; the worker replies `ack` even when it no longer has the
   request. The answer is kept in `PendingRequest.result` until the `ack`; an answer the worker
@@ -2303,7 +2346,16 @@ Push body (JSON, `hqc_proto::api::PushMessage`, example `examples/wire/api.push.
 `<session_id>:<type>`: a notification with the same tag replaces the previous one) and omits
 `payload` if the message does not fit into a push (about 4 KB). The client's service worker,
 without `title`/`body`, builds them from `type` and `payload`, shows `approval.request` and
-`clarify.request` with `requireInteraction`, and on click opens `#/s/<session_id>`.
+`clarify.request` with `requireInteraction`, and on click opens `#/s/<session_id>`, or
+`#/s/<open_session_id>` when that is set.
+
+A request of a session that other sessions of its owner wait on through open `hqc_ask`s
+(since 0.41, T37; §7.1, §10.1): still one notification per request, with the request's own
+`session_id` and `tag` (so a later notification of the same request replaces it), plus
+`open_session_id` — the top of the chain (the session the user started the work in, where the
+card is shown too). No push while the user watches the request's session or any session
+waiting on it. Only the session owner gets `open_session_id`; a worker owner who is not the
+session owner gets the push as before.
 
 Hub cron: `ScheduledMessage` — at `at` or by `cron` in the user's `timezone`,
 send `message` to `session_id`, or create a session from the project template
@@ -2623,6 +2675,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.40 → 0.41 (T37, requests where the user is looking)
+§6: `GET /api/requests` (every open request of the user with its session, worker, event and the
+sessions waiting on it through `hqc_ask`s, transitively), the `requests` frame of the summary
+subscription, `open_session_id?` in the push body, the answer endpoint used from any view.
+§10.1: a request is also shown, as the same card under a header naming its session and
+worker, in every session waiting on it and in the "Requests" list; answers stay the request
+session's own. §10.2: workers' requests are in that list. §16: the push of a waited-on request
+opens the top of the chain, one notification per request, none while the user watches the
+chain. Migration `0020` (an index to find a request's event). Notes:
+`docs/notes/t37-questions.md`.
 
 ### 0.39 → 0.40 (a delivery lost while the socket was down)
 §6: a resubscription starts before the first input still `pending`, and an event sent again

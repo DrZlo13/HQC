@@ -133,7 +133,7 @@ reason.
 Done: every item with its status and test is in `docs/notes/t36-questions.md`. The
 process-ancestry check of the MCP socket is **[verify]** in SPEC §7.2 (no live run was made).
 
-## T37. Requests where the user is looking (after T36)
+## T37. Requests where the user is looking (done, SPEC 0.41)
 
 Sections: §6, §7.1, §10.1, §10.2, §16. A request of a session that another session waits on
 (an open `hqc_ask`, also along a chain) is shown and answered only in its own feed: the user

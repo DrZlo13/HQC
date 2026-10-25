@@ -106,7 +106,7 @@ Acceptance: the common checks; hub tests: a project and workspace of the owner o
 workspace, the first turn starts, chain and spawn limits; live `HQC_LIVE_CLAUDE=1`: A spawns
 B, B's first turn runs.
 
-## T35. `hqc_schedule` and the hub cron (after T30)
+## T35. `hqc_schedule` and the hub cron (done, SPEC 0.38)
 
 Sections: §16 (hub cron), §3 ScheduledMessage, §7.
 - Hub: a `scheduled_messages` table; `hqc_schedule(session, at|cron, message)` and

@@ -32,6 +32,7 @@ pub const SEND: &str = "hqc_send";
 pub const ASK: &str = "hqc_ask";
 pub const SEARCH_HISTORY: &str = "hqc_search_history";
 pub const SPAWN: &str = "hqc_spawn";
+pub const SCHEDULE: &str = "hqc_schedule";
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: LIST_SESSIONS,
@@ -193,6 +194,47 @@ pub const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: SCHEDULE,
+        description: "Schedule a message into an hqc session of your owner (this one too): the \
+            hub sends `message` there as your owner's input, once at `at` or repeatedly by \
+            `cron`, and the session's agent gets it as a new turn. Give exactly one of `at` (an \
+            RFC 3339 time with an offset, e.g. 2026-10-26T09:00:00+01:00) and `cron` (5 fields: \
+            minute hour day-of-month month day-of-week, at most every 5 minutes) in `timezone` \
+            (IANA, e.g. Europe/Berlin; your owner's zone when absent). A run missed while the \
+            hub was down is skipped unless `catch_up` is true. The owner sees, pauses and \
+            deletes schedules in the hqc client.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "session": {
+                        "type": "string",
+                        "description": "The target session: <project-slug>/<session-slug> or its id."
+                    },
+                    "message": {"type": "string", "description": "The text to send."},
+                    "at": {
+                        "type": "string",
+                        "description": "When to send it once: an RFC 3339 time with an offset."
+                    },
+                    "cron": {
+                        "type": "string",
+                        "description": "When to send it repeatedly: a 5-field cron pattern."
+                    },
+                    "timezone": {
+                        "type": "string",
+                        "description": "The IANA time zone of `cron`; your owner's when absent."
+                    },
+                    "catch_up": {
+                        "type": "boolean",
+                        "description": "Send a run missed while the hub was down once, late."
+                    }
+                },
+                "required": ["session", "message"],
+                "additionalProperties": false
+            })
+        },
+    },
 ];
 
 /// `args` of the `mcp.call` for [`ATTACH`]: the worker reads and uploads `path` itself
@@ -260,13 +302,10 @@ mod tests {
             assert!(!t.description.is_empty());
         }
         assert!(tool(LIST_SESSIONS).is_some());
+        assert!(tool(SCHEDULE).is_some());
         assert!(tool(SPAWN).is_some());
         assert!(tool(ATTACH).is_some());
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
         assert!(tool(SEARCH_HISTORY).is_some());
-        assert!(
-            tool("hqc_schedule").is_none(),
-            "no stubs (docs/ITERATION-3.md)"
-        );
     }
 }

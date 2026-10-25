@@ -1,0 +1,11 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000102",
+  "seq": 43,
+  "ts": "2026-10-26T08:00:01Z",
+  "author": { "kind": "user", "id": "0199f3a2-7c10-7000-8000-0000000000aa" },
+  "type": "user.message",
+  "payload": { "text": "Check the nightly build", "artifact_ids": [], "schedule_id": "019a1c2e-5b00-7000-8000-00000000c001" },
+  "delivery": "delivered",
+  "delivered_at": "2026-10-26T08:00:02Z"
+}

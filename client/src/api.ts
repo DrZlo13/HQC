@@ -15,6 +15,8 @@ import {
   parseProject,
   parseProjectList,
   parseSearchPage,
+  parseScheduleList,
+  parseSchedule,
   parseSessionInfo,
   parseSessionList,
   parseVapidKey,
@@ -32,6 +34,7 @@ import {
   type Me,
   type Project,
   type SearchPage,
+  type Schedule,
   type SessionInfo,
   type Workspace,
 } from './proto';
@@ -116,6 +119,23 @@ export class Api {
 
   async me(): Promise<Me> {
     return parseMe(await this.req('GET', '/api/me'));
+  }
+
+  /** The default zone of new schedules (SPEC §16). */
+  async setTimezone(timezone: string): Promise<Me> {
+    return parseMe(await this.req('PATCH', '/api/me', { timezone }));
+  }
+
+  async schedules(sessionId: string): Promise<Schedule[]> {
+    return parseScheduleList(await this.req('GET', `/api/schedules?session_id=${enc(sessionId)}`));
+  }
+
+  async patchSchedule(id: string, patch: { enabled: boolean }): Promise<Schedule> {
+    return parseSchedule(await this.req('PATCH', `/api/schedules/${enc(id)}`, patch));
+  }
+
+  async deleteSchedule(id: string): Promise<void> {
+    await this.req('DELETE', `/api/schedules/${enc(id)}`);
   }
 
   async sessions(projectId: string): Promise<SessionInfo[]> {

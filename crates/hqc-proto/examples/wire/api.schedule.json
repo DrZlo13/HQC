@@ -1,0 +1,14 @@
+{
+  "id": "019a1c2e-5b00-7000-8000-00000000c001",
+  "owner_id": "019a1c2e-5b00-7000-8000-000000000001",
+  "session_id": "019a1c2e-5b00-7000-8000-0000000000a1",
+  "cron": "0 9 * * 1-5",
+  "timezone": "Europe/Berlin",
+  "message": "Check the nightly build and report failures.",
+  "enabled": true,
+  "catch_up": false,
+  "next_run": "2026-10-26T08:00:00Z",
+  "last_run": "2026-10-23T07:00:00Z",
+  "created_at": "2026-10-20T12:00:00Z",
+  "updated_at": "2026-10-23T07:00:00Z"
+}

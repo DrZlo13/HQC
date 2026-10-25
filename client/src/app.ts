@@ -42,6 +42,7 @@ export class AppState {
     try {
       this.me = await this.api.me();
       this.currentProjectId ??= this.me.personal_project_id;
+      this.syncTimezone();
       await this.refreshSessions();
       this.error = null;
     } catch (e) {
@@ -50,6 +51,16 @@ export class AppState {
     this.socket.onSummary((list) => this.mergeSummary(list));
     this.socket.start();
     this.changed();
+  }
+
+  /** The hub's zone of the user follows the browser's: schedules default to it (SPEC §16). */
+  private syncTimezone(): void {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!tz || !this.me || this.me.timezone === undefined || this.me.timezone === tz) return;
+    this.api.setTimezone(tz).then(
+      (me) => (this.me = me),
+      () => {},
+    );
   }
 
   /** Projects and the sessions of every project. */

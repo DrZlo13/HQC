@@ -42,6 +42,8 @@ pub struct Inner {
     pub worker_pushes: Mutex<HashMap<Uuid, Instant>>,
     /// Sessions whose title the hub has started to derive in this process ([`crate::titles`]).
     pub titling: Mutex<std::collections::HashSet<Uuid>>,
+    /// The clock of the hub cron ([`crate::schedules`]); tests set it.
+    pub clock: crate::schedules::Clock,
 }
 
 impl Deref for AppState {
@@ -88,6 +90,7 @@ impl AppState {
             turn_activity: Mutex::new(HashMap::new()),
             worker_pushes: Mutex::new(HashMap::new()),
             titling: Mutex::new(Default::default()),
+            clock: Default::default(),
             config,
         }))
     }

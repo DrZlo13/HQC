@@ -173,7 +173,8 @@ async fn a_call_goes_to_the_hub_and_back() {
             "hqc_send",
             "hqc_ask",
             "hqc_search_history",
-            "hqc_spawn"
+            "hqc_spawn",
+            "hqc_schedule"
         ],
         "only tools that landed"
     );

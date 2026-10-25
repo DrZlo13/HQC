@@ -1,0 +1,7 @@
+{
+  "session_id": "019a1c2e-5b00-7000-8000-0000000000a1",
+  "cron": "0 9 * * 1-5",
+  "timezone": "Europe/Berlin",
+  "message": "Check the nightly build and report failures.",
+  "catch_up": false
+}

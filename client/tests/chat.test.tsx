@@ -131,7 +131,7 @@ describe('header', () => {
     expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
     expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Archive']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Archive']);
   });
 
   it('links to the session that started it with hqc_spawn (T34)', async () => {

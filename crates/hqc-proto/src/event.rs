@@ -158,6 +158,10 @@ pub enum EventKind {
         text: String,
         #[serde(default)]
         artifact_ids: Vec<Uuid>,
+        /// The hub cron sent it for this `ScheduledMessage` (SPEC §16), on behalf of the
+        /// owner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schedule_id: Option<Uuid>,
     },
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
@@ -551,6 +555,21 @@ mod tests {
             assert_eq!(back["type"], *name);
             assert_eq!(serde_json::from_value::<Event>(back).unwrap(), e);
         }
+    }
+
+    #[test]
+    fn a_scheduled_user_message_roundtrips() {
+        let src = include_str!("../examples/wire/event.user.message.scheduled.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(
+            e.kind,
+            EventKind::UserMessage {
+                schedule_id: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }
 
     #[test]

@@ -87,6 +87,24 @@ pub async fn me(user: CurrentUser) -> Json<Value> {
     }))
 }
 
+/// `PATCH /api/me` {timezone?}: an IANA name, the default zone of new schedules (SPEC §16).
+pub async fn patch_me(
+    State(app): State<AppState>,
+    mut user: CurrentUser,
+    Json(b): Json<api::PatchMe>,
+) -> ApiResult<Json<Value>> {
+    if let Some(tz) = b.timezone {
+        let tz = crate::schedules::parse_tz(&tz).map_err(ApiError::BadRequest)?;
+        sqlx::query("UPDATE users SET timezone = $2, updated_at = now() WHERE id = $1")
+            .bind(user.id)
+            .bind(tz.name())
+            .execute(&app.db)
+            .await?;
+        user.timezone = tz.name().to_string();
+    }
+    Ok(me(user).await)
+}
+
 /// The user's project; another user's looks like a missing one.
 async fn project_for(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<db::ProjectRow> {
     match db::project(&app.db, id).await? {

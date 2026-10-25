@@ -318,6 +318,7 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
       <div class="meta">
         {event.payload.text && <CopyButton text={event.payload.text} />}
         {formatTime(event.ts)}
+        {event.payload.schedule_id && <span class="scheduled"> · scheduled</span>}
         {d === 'pending' && <span class="delivery"> · awaiting delivery</span>}
         {d === 'failed' && <span class="delivery delivery-failed"> · not delivered</span>}
       </div>

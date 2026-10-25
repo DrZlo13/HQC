@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.37, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.38, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -97,6 +97,10 @@ it has `author`.
 (OpenRouter, Anthropic API; encrypted with the hub's master key, which lives in the hub's
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
 project, created on first sign-in; the personal assistant session lives in it).
+
+`timezone` (since 0.38, T35) — an IANA name, `UTC` until set; the default zone of new
+schedules (§16). The client sets it to the browser's zone (`PATCH /api/me`, §6) when it starts
+and the two differ.
 
 ### Worker
 `owner_id`, `name`, `os`, `token_hash`, `status` (online/offline), `last_seen`,
@@ -260,6 +264,12 @@ row of its own (§5.2).
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
 `timezone`, `message`, `enabled`, `last_run`, `catch_up`.
 
+Since 0.38 (T35; table `scheduled_messages`, migration `0018`): `session_id` only — the
+project-template variant waits for session templates (iteration 5); exactly one of `cron` (5
+fields) and `at` (a time); `timezone` — an IANA name, the owner's `timezone` when not given;
+`next_run` — when it is due next (UTC), null once it will not run again (an `at` that ran or
+was skipped); `catch_up` false by default. Deleting the session deletes its schedules.
+
 ## 4. Event schema
 
 One schema for all runtimes. The adapter translates the runtime's stream into these events;
@@ -269,7 +279,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text`, `artifact_ids[]` | client; mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text`, `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled") | client; hub cron (§16, authored by the owner); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -531,7 +541,7 @@ MCP calls (worker → hub → worker):
   (`once_id` in `crates/hqc-hub/src/mcp.rs`), and a call that finds it already written
   answers from it — the same result, nothing written twice. `hqc_attach` keys its
   `attachment` event so, `hqc_send`/`hqc_ask` their `peer.message` (with `peer.message` as
-  the tool); a repeated `hqc_send` answers the same `{to, delivery}` from that event, a
+  the tool), `hqc_schedule` its schedule (since 0.38); a repeated `hqc_send` answers the same `{to, delivery}` from that event, a
   repeated `hqc_ask` finds its `PendingRequest`: still open — `ack {}` again, closed — its
   stored `mcp.result` under the repeat's frame `id`. `hqc_spawn` (since 0.37) keys the new
   session's id (`hqc_spawn` as the tool) and its first `peer.message` (as `hqc_send`): a
@@ -729,7 +739,9 @@ read them. Unknown fields are ignored in both directions.
 HTTP API (iteration 1 and projects with workspaces from iteration 2; the list is not complete,
 the rest is marked "later"):
 
-- `GET /api/me`; later `PATCH /api/me` (keys, time zone)
+- `GET /api/me` → `{id, email, display_name, timezone, personal_project_id}`; `PATCH
+  /api/me` {timezone?} (since 0.38, `api.me.patch.request.json`; an unknown zone: `400`) → the
+  same object; later keys
 - `GET /api/projects` → `{projects[]}`, `POST /api/projects` {name, description?} → `201`
   and the project, `GET/PATCH/DELETE /api/projects/{id}` (`PATCH` {name?, description?,
   default_workspace_id?} — a workspace of this project, otherwise `400`; the personal project:
@@ -831,7 +843,18 @@ the rest is marked "later"):
   body itself: §16. `endpoint`: only `https://` on push service hosts (§20), otherwise `400`;
   at most 10 subscriptions per user (`409 push_limit`); someone else's `endpoint`: `409
   conflict`, not a takeover; a repeated request for one's own subscription updates it.
-- later: `/api/schedules` (ScheduledMessage), `/api/projects/{id}/template`
+- `/api/schedules` (since 0.38, T35; §3 ScheduledMessage, §16): `GET
+  /api/schedules?session_id=` → `{schedules[]}` (`api.schedules.json`; without `session_id`:
+  all of the user's), the next due first, finished ones last; `POST /api/schedules`
+  {session_id, cron? | at?, timezone?, message, catch_up?} → `201` and the schedule
+  (`api.schedule.request.json`, `api.schedule.json`; the checks of §16 and §20 give `400`, an
+  archived session `409 archived`, over the limit `409 schedule_limit`); `PATCH
+  /api/schedules/{id}` {enabled?} → the schedule (pause and resume; a `cron` resumed runs next
+  after now); `DELETE /api/schedules/{id}` → `204`. Another user's schedule or session: `404`.
+  The schedule object is `{id, owner_id, session_id, cron?, at?, timezone, message, enabled,
+  catch_up, next_run?, last_run?, created_at, updated_at}`. The client lists, pauses, resumes
+  and deletes a session's schedules from the session's "More" menu ("Schedules")
+- later: `/api/projects/{id}/template`
 
 Session object (`GET /api/sessions/{id}`, list, create, `PATCH`, `archive`):
 `{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, title_source, slug, agent: {runtime,
@@ -902,7 +925,7 @@ the client offers "Take over" or, with `held_by`, closing the session in VS Code
 is open in VS Code: close it there and take it over again", §9.3), `vscode_active` (takeover
 before 30 s of silence without registry data, §9.3), `system_session` (the worker's service
 session, §10.2), `request_closed`, `no_workspace`, `worker_offline`, `workspace_conflict`,
-`workspace_in_use`, `personal_project`, `push_limit`, `conflict`, `worker_online` (replacing a
+`workspace_in_use`, `personal_project`, `push_limit`, `schedule_limit` (§20), `conflict`, `worker_online` (replacing a
 connected worker, §5.1), `worker_not_revoked` and `worker_has_sessions` (deleting a worker; the
 latter with `sessions_count`); `400`: `bad_request`,
 `unknown_artifact` (§12) and the path check codes (`outside_allowed_roots`, `path_not_found`,
@@ -1006,14 +1029,23 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `session_id`: the address is what the other tools take). `project` is a slug or an id of
   the owner's project (else `not_found`); a refused query is `invalid_args`. No side effects,
   so a repeated call simply runs again.
-- `hqc_schedule(session, at|cron, message)` — the hub's cron (§16).
+- `hqc_schedule(session, at|cron, message)` — the hub's cron (§16). Since 0.38 (T35):
+  `hqc_schedule(session, message, at?, cron?, timezone?, catch_up?)`; `session` — an address or
+  an id of the owner's session (the calling one too), by the target rules of §7.1 except that a
+  session driven from VS Code is accepted (its runs are skipped while it is, §16); `at` — RFC
+  3339 with an offset, in the future; `cron` — 5 fields in `timezone` (the owner's by default);
+  exactly one of the two, else `invalid_args`, as are a bad pattern, zone or time and the limits
+  of §20 except the count (`limit_exceeded`). The result is `{schedule_id, session, next_run,
+  timezone}` (`session` — the target's address). Once per `request_id` (§5.2): the schedule's id
+  is `once_id("hqc_schedule", …)`, and a repeat answers from that row. The agent can neither
+  list nor delete schedules; the owner does that in the client (§6).
 
 Session address: `<project-slug>/<session-slug>` or the id. A slug is unique within the project
 and does not change on rename.
 
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
 since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
-`hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34); the list is shared by the worker's MCP server and the hub
+`hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34; `hqc_schedule` since 0.38, T35); the list is shared by the worker's MCP server and the hub
 (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
 (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
@@ -2214,6 +2246,29 @@ in `workspace_id` and send it there. Missed runs (the hub was down): with `catch
 it runs once, otherwise they are skipped. No task scheduler for agents;
 anything more complex is Hermes cron.
 
+Since 0.38 (T35, `crates/hqc-hub/src/schedules.rs`):
+- A run is a `user.message` of the owner (`author: {kind: user, id: <owner>}`) with
+  `schedule_id` in the payload, stored `pending` and delivered like the user's own input (§5.2):
+  it queues behind a running turn and waits for an offline worker. Its `event_id` is derived
+  from the schedule and the run's time, so a run is stored at most once.
+- `cron` is 5 fields (minute, hour, day of month, month, day of week; `L`, `W`, `#` and the
+  `@daily`-style names are accepted, seconds and years are not), evaluated in `timezone` with
+  the crate `croner` and the IANA database of `chrono-tz`. DST as in Vixie cron: a fixed time
+  in the skipped hour runs right after the gap (02:30 on a spring-forward night runs at 03:00), a
+  fixed time in the repeated hour runs once, the first time; a daily 09:00 stays 09:00 local
+  time across the change.
+- `next_run` is kept in the table, so the loop survives a restart. Every 10 s the hub sends what
+  is due. A run found more than 2 minutes late was missed (the hub was down): with `catch_up`
+  it is sent once, late, otherwise skipped; either way the next run is the first one after now
+  (several missed runs of a `cron` give one message at most). An `at` runs or is skipped once
+  and is then finished (`next_run` null), kept for the list until deleted.
+- A paused (`enabled: false`) or deleted schedule never fires; the hub locks the row while it
+  sends, so a pause or a delete during a run waits for it. Resuming a `cron` skips the runs
+  missed while paused. Deleting the session deletes its schedules. A session that is archived or
+  driven from VS Code takes no input (§6, §9.3): its runs are skipped (`next_run` moves on, a
+  warn in the hub's log), not queued.
+- The hub's clock is injectable for tests (`AppState::clock`).
+
 ## 17. States and lifecycle
 
 ### 17.1 Session state
@@ -2354,7 +2409,8 @@ with `write` share the same queue.
    runtime is the bare model, §8.3), until then `hqc_send` needs `session`.
 5. Workspaces: clone, worktree, ephemeral, session template. Environments, bindings
    and `acp_agents` on the worker.
-6. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. Hub cron.
+6. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+   (0.38, T35, with `hqc_schedule`).
 7. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
@@ -2419,6 +2475,10 @@ with `write` share the same queue.
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
   | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
   | the worker's MCP socket (§7.2) | a line up to 64 KB + 4 KB; peers of the same OS user only | the connection is closed |
+  | schedules per owner (§16, since 0.38) | 100 that may still run (`next_run` set, paused ones included) | `hqc_schedule`: `error limit_exceeded`; `POST /api/schedules`: `409 schedule_limit` |
+  | `cron` of a schedule (§16) | runs at least 5 minutes apart, checked over its next 100 runs; a pattern that never runs is refused | `error invalid_args` / `400` |
+  | `at` of a schedule | in the future | `error invalid_args` / `400` |
+  | `message` of a schedule | non-blank, up to 16 KiB | `error invalid_args` / `400` |
 - Push: the hub POSTs to the subscription's `endpoint`, so only `https://` without
   userinfo and without a non-standard port on push service hosts is accepted: `fcm.googleapis.com`,
   `updates.push.services.mozilla.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
@@ -2479,6 +2539,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.37 → 0.38 (T35, `hqc_schedule` and the hub cron)
+§3 ScheduledMessage: the table `scheduled_messages` (migration `0018`) with `next_run`, session
+targets only; User `timezone` set by the client. §4: `user.message.schedule_id?`, the hub cron
+as a source. §6: `PATCH /api/me {timezone}`, `/api/schedules` (list, create, pause/resume,
+delete), `409 schedule_limit`, the client's "Schedules" panel. §7: `hqc_schedule(session,
+message, at?, cron?, timezone?, catch_up?)` defined and listed, once per `request_id`, no
+listing or deleting by the agent. §16: how runs are sent, the 5-field cron with `croner` and
+`chrono-tz`, DST, the 2-minute "missed" rule and `catch_up`, pause, delete and targets that take
+no input. §19: the hub cron moved from iteration 6 to 3. §20: limits of schedules. Notes:
+`docs/notes/t35-questions.md`.
 
 ### 0.36 → 0.37 (T34, `hqc_spawn`)
 §3 Session: `spawned_by` and `spawn_chain_id` (migration `0017`). §5.2: a repeated

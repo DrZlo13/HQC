@@ -28,6 +28,7 @@ pub mod mirror;
 pub mod peers;
 pub mod push;
 pub mod requests;
+pub mod schedules;
 pub mod search;
 pub mod security;
 pub mod spawn;
@@ -42,7 +43,7 @@ pub use config::Config;
 pub fn router(app: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/api/me", get(api::me))
+        .route("/api/me", get(api::me).patch(api::patch_me))
         .route(
             "/api/projects",
             get(api::projects).post(api::create_project),
@@ -113,6 +114,14 @@ pub fn router(app: AppState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/worker/artifacts/{id}", get(artifacts::for_worker))
+        .route(
+            "/api/schedules",
+            get(schedules::list).post(schedules::create_api),
+        )
+        .route(
+            "/api/schedules/{id}",
+            axum::routing::patch(schedules::patch).delete(schedules::delete),
+        )
         .route("/api/ws", get(client_ws::handler))
         .route("/worker/enroll", post(api::worker_enroll))
         .route("/worker/enroll/poll", post(api::worker_enroll_poll))
@@ -139,6 +148,7 @@ pub fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> App
     if let Some(limit) = app.config.timing.turn_watchdog {
         tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));
     }
+    tokio::spawn(schedules::cron_loop(app.clone()));
     if let Some(keep) = app.config.artifacts.retention {
         tokio::spawn(artifacts::cleanup_loop(app.clone(), keep));
     }

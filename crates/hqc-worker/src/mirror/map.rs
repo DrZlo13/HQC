@@ -86,6 +86,7 @@ fn user(m: &Message) -> Vec<Event> {
                     EventKind::UserMessage {
                         text: text(t),
                         artifact_ids: vec![],
+                        schedule_id: None,
                     },
                 ));
             }

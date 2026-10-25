@@ -175,3 +175,24 @@ switches a running session and sees `permissionMode` change.
 Done: the runtime switch is Claude Code's `set_permission_mode` control request (verified on
 2.1.308, no restart); decisions and open questions in `docs/notes/t38-questions.md`.
 
+## T39. A message cannot raise permissions (after T38)
+
+Sections: §7.1, §10.1, §16, §17.2. After T38 a turn woken by another session's message ran in
+the target's mode, so a session in "Ask" could have work done without asking through a session
+in "Auto". The rule (user decision, 2026-10-25): a turn woken by a peer message (`hqc_ask`,
+`hqc_send` with `wake_on_send`, the prompt of `hqc_spawn`) or by an agent's schedule runs in
+"Auto" only if the target and every session up the chain run in "Auto"; otherwise in "Ask".
+A turn started by the user's own message runs in the session's mode, as now.
+- Hub: a mode cap travels with the chain — the cap of a peer message is the lower of the sender
+  session's effective mode and the cap of the input that started the sender's turn; an agent's
+  schedule stores the cap with its chain. `session.input` carries the cap (additive).
+- Worker: for an input with an "Ask" cap in a session running "Auto", switch to "Ask" before
+  handing the input to the runtime and back after the turn ends (the T38 runtime switch); a
+  queued user input after it runs in the session's own mode. The cap only lowers: the worker
+  never raises a mode because of it.
+- Client: a turn running under the cap shows "Ask (asked by <address>)" in the header.
+Acceptance: the common checks; hub tests for the four combinations (Auto/Ask sender × target),
+a three-session chain with "Ask" in the middle, an agent's schedule; worker tests: the switch
+down and back, a user input queued after it, the cap never raising; a live run where A in "Ask"
+asks B in "Auto" and B's command is asked about.
+

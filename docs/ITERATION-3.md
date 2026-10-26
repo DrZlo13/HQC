@@ -200,3 +200,16 @@ runtime's confirmation of Ask before it hands over a capped input, or restarts t
 Ask; the live run (`live_cap`, 2.1.308) saw B's `touch` asked about. Decisions and open
 questions in `docs/notes/t39-questions.md`.
 
+## T40. The cap for buffered sends and old schedules (after T39)
+
+Sections: §7.1, §10.1, §16. Two gaps T39 left (`docs/notes/t39-questions.md`, user decision
+2026-10-26):
+- A buffered `hqc_send` (no wake) puts its text in front of the target's next input. That input's
+  turn now takes the lowest cap of the buffered messages it carries, together with its own (a
+  user's input has none of its own): text from a session in "Ask" never runs in "Auto".
+- An agent's schedule caps each run with the lower of the cap stored when it was made and its
+  creator's effective mode at run time (a deleted creator counts as "Ask").
+Acceptance: the common checks; hub tests: a user's input carrying a buffered send from "Ask"
+runs capped, one from "Auto" does not; a schedule whose creator moved from "Auto" to "Ask", and
+one whose creator was deleted; the client's header names the session that capped the turn.
+

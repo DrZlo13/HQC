@@ -286,3 +286,35 @@ async fn a_schedule_run_is_capped_by_its_creators_mode_now() {
     );
     hub.finish().await;
 }
+
+/// SPEC 0.45: a creator the user switched to Ask caps its schedule's runs at once, before
+/// its worker confirms the switch.
+#[tokio::test]
+async fn a_switch_to_ask_caps_before_the_worker_confirms_it() {
+    let hub = TestHub::start().await;
+    hub.app.clock.set(utc("2026-10-26T10:00:00Z"));
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = session(&hub, &mut w, "A", "auto").await;
+    let (b, _) = session(&hub, &mut w, "B", "auto").await;
+    human_input(&hub, &mut w, &a).await;
+    schedule(&mut w, &ta, "2026-10-26T10:05:00Z", "after the switch").await;
+
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{a}"),
+            json!({"permission_mode": "ask"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    // The worker has not confirmed: A still runs in auto as far as it reported.
+    assert_eq!(v["effective_permission_mode"], "auto", "{v}");
+    w.expect("session.permission_mode").await;
+
+    hub.app.clock.set(utc("2026-10-26T10:05:01Z"));
+    assert_eq!(hqc_hub::schedules::run_due(&hub.app).await.unwrap(), 1);
+    let input = input_of(&mut w, vec![], &b).await;
+    assert_eq!(input["payload"]["text"], "after the switch");
+    assert_eq!(input["payload"]["permission_cap"], "ask", "{input}");
+    hub.finish().await;
+}

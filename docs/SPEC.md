@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.44, 2026-10-26. Status: the architecture agreed after six reviews and a survey of
+Version 0.45, 2026-10-26. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1301,9 +1301,11 @@ Chains:
   run in `auto`; otherwise in `ask`. A turn started by a person's own message runs in the
   session's mode. The hub keeps this as the chain's `permission_cap` (`ask` | `auto`), set
   where it sets the chain: the cap of an outgoing message, spawn or schedule is the lower of
-  the calling session's `effective_permission_mode` (what its worker reported, §3; `ask` before
-  any report) and the cap of the input that started the calling turn (a person's input has
-  none). With `ask` the chain also carries `capped_by`, the address of the session that set it:
+  the calling session's mode and the cap of the input that started the calling turn (a
+  person's input has none). The session's mode here is `ask` if the user asked for `ask`
+  (`permission_mode`, §3; since 0.45, so a switch to `ask` counts at once, before the worker
+  confirms it), otherwise its `effective_permission_mode` (what its worker reported; `ask`
+  before any report). With `ask` the chain also carries `capped_by`, the address of the session that set it:
   the earliest session of the chain found in `ask` (kept down the chain), for the header. An
   agent's schedule stores the cap with its chain when it is made, and its runs carry it.
   `session.input.permission_cap` takes it to the worker, which applies it to that turn only
@@ -2544,7 +2546,7 @@ Since 0.38 (T35, `crates/hqc-hub/src/schedules.rs`):
   and its runs carry it (§7.1); since 0.43 (T39) with the chain's permission cap, fixed when
   the schedule is made: a run of a schedule made by a session in `ask` runs in `ask` (§5.3).
   Since 0.44 (T40) the cap of each run is the lower of that cap and the creator's
-  (`created_by`, §3) effective mode at run time: a run of a schedule whose creator has moved
+  (`created_by`, §3) mode at run time, taken as in §7.1: a run of a schedule whose creator has moved
   from `auto` to `ask` since runs in `ask`, and so does one whose creator was deleted, or was
   not stored (a schedule from before 0.44). The hub sends at most 60 runs per owner and hour; a run over
   that is skipped like a run of a target that takes no input (a warn, `next_run` moves on). The
@@ -2838,6 +2840,10 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.44 → 0.45 (a switch to `ask` caps at once)
+§7.1, §16: the mode of a sender or a schedule's creator for the cap is `ask` as soon as the user
+asks for `ask`, not only once its worker reports it; otherwise the reported mode, as before.
 
 ### 0.43 → 0.44 (T40, the cap for buffered sends and old schedules)
 §7.1: an input's turn takes the lowest cap of the buffered sends it carries in `peer_prefix`

@@ -269,9 +269,13 @@ pub(crate) async fn outgoing_chain(
     next_chain(turn, ask, sender_mode(caller), &from)
 }
 
-/// The mode session `s` runs in as its worker last reported it (T38); `ask` before any
-/// report: what the hub does not know cannot lift a cap (T39).
+/// The mode of session `s` for a cap: the lower of what the user asked for (T38) and what its
+/// worker last reported, so a switch to `ask` counts at once, before the worker confirms it;
+/// `ask` before any report: what the hub does not know cannot lift a cap (T39).
 pub fn sender_mode(s: &SessionRow) -> PermissionMode {
+    if s.permission_mode.as_deref().and_then(PermissionMode::parse) == Some(PermissionMode::Ask) {
+        return PermissionMode::Ask;
+    }
     s.effective_permission_mode
         .as_deref()
         .and_then(PermissionMode::parse)

@@ -1180,7 +1180,8 @@ pub async fn set_effective_permission_mode(
 }
 
 /// Who caps the session's current turn (T39): `capped_by` of the chain of the session's
-/// input `capped_input`, as the worker reports it; `None` clears it.
+/// input `capped_input`, as the worker reports it, or of the send buffer it carried when its
+/// own chain has no `ask` cap (T40, `input_caps`); `None` clears it.
 pub async fn set_permission_capped_by(
     db: &PgPool,
     id: Uuid,
@@ -1189,7 +1190,9 @@ pub async fn set_permission_capped_by(
     sqlx::query(
         "UPDATE sessions s SET permission_capped_by = c.by
          FROM (SELECT CASE WHEN $2::uuid IS NULL THEN NULL ELSE
-                 COALESCE((SELECT e.chain ->> 'capped_by' FROM events e
+                 COALESCE((SELECT CASE WHEN e.chain ->> 'permission_cap' = 'ask'
+                                       THEN e.chain ->> 'capped_by' ELSE i.capped_by END
+                           FROM events e LEFT JOIN input_caps i ON i.event_id = e.event_id
                            WHERE e.event_id = $2 AND e.session_id = $1), '?') END AS by) c
          WHERE s.id = $1 AND s.permission_capped_by IS DISTINCT FROM c.by",
     )

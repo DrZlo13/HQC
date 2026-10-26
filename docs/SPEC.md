@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.43, 2026-10-25. Status: the architecture agreed after six reviews and a survey of
+Version 0.44, 2026-10-26. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -104,7 +104,8 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   T39; §7.1): a turn an agent starts in another session (a peer message, the prompt of
   `hqc_spawn`, a run of its schedule) runs in `auto` only if that session and every session
   up the chain run in `auto`, so a session in `ask` gets no work done without asking through
-  one in `auto`. The hub computes the cap and the worker applies it; a compromised hub could
+  one in `auto`; since 0.44 (T40) neither through a buffered send nor through a schedule
+  made while it ran in `auto`. The hub computes the cap and the worker applies it; a compromised hub could
   lift it, as it can answer requests itself (above).
 - A worker is trusted for its own sessions only (§5.2, §20): it writes their agent events and
   mirrored records, but no event that only the hub writes, nothing in another worker's
@@ -307,6 +308,9 @@ project-template variant waits for session templates (iteration 5); exactly one 
 fields) and `at` (a time); `timezone` — an IANA name, the owner's `timezone` when not given;
 `next_run` — when it is due next (UTC), null once it will not run again (an `at` that ran or
 was skipped); `catch_up` false by default. Deleting the session deletes its schedules.
+Since 0.44 (T40, migration `0023`): `created_by` — the session whose agent made the schedule
+(`hqc_schedule`), not part of the API object; null for a person's schedule, and once that
+session is deleted (the schedule stays). Its runs are capped by that session's mode (§16).
 
 ## 4. Event schema
 
@@ -654,8 +658,10 @@ MCP calls (worker → hub → worker):
   lost with its process leaves nothing to undo, and the next process starts in the mode of the
   input it runs. A switch of the session's mode (`session.permission_mode`, or a
   `session.start` for a running agent) during a capped turn changes the session's mode at once
-  but reaches the runtime when the capped turn ends. Absent: no cap (a person's input, a run of
-  a person's schedule, a message from before 0.43).
+  but reaches the runtime when the capped turn ends. Since 0.44 (T40) it is `ask` also when
+  one of the buffered messages in `peer_prefix` has an `ask` cap, whatever the input (§7.1).
+  Absent: no cap (a person's input that carries no such message, a run of a person's
+  schedule, a message from before 0.43).
 - `session.stop` {session_id} — interrupt the current turn.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
@@ -1275,7 +1281,8 @@ Chains:
   all calls of one turn share one chain, as the first sentence says (before, each call of a
   human's turn started a chain of its own). `hqc_spawn` moves the chain like a send (`hops`
   + 1) and counts the sessions it creates per chain (§20). Buffered sends
-  carried in `peer_prefix` do not start a turn and lend it no chain.
+  carried in `peer_prefix` do not start a turn and lend it no chain (since 0.44, T40, only
+  their permission cap, below).
 - Since 0.39 (T36): the hub takes the call's chain from the input the worker names in
   `mcp.call.turn_input` (§5.2), if it is an input of the calling session (a `user.message` or a
   `peer.message`, `pending` or `delivered`) not older than its last delivered one; otherwise from
@@ -1302,6 +1309,22 @@ Chains:
   `session.input.permission_cap` takes it to the worker, which applies it to that turn only
   (§5.3); the target's own mode does not enter the cap, since a target in `ask` runs in `ask`
   anyway. A chain from before 0.43 has no cap.
+- Since 0.44 (T40; user decision, 2026-10-26), two gaps of that rule are closed:
+  - A buffered `send` (no wake) puts its text in front of the target's next input
+    (`peer_prefix`), so that input's turn takes the lowest cap of the buffered messages it
+    carries together with its own (a person's input has none of its own): text from a session
+    in `ask` never runs in `auto`. With `ask`, `capped_by` is that of the input's own chain
+    if it has an `ask` cap, else that of the first such buffered message. The hub decides it
+    when it first hands the buffer to the input (the same messages go with a resent input) and
+    keeps it with the input (`input_caps`, migration `0023`; the input's stored `chain` is not
+    changed): it is the cap of the turn, so the header shows it and what the turn sends,
+    spawns or schedules carries it on. A buffered message from before 0.43 has no cap.
+  - An agent's schedule caps each run with the lower of the cap stored when it was made and
+    its creator's `effective_permission_mode` at run time (`ask` before any report, as above),
+    `capped_by` the creator's address when it is the creator that lowers it. A deleted
+    creator counts as `ask` (`capped_by`: "a deleted session"), and so does the unknown
+    creator of a schedule made before 0.44. The run's `user.message` stores the chain with
+    that cap.
 - When a limit is exceeded, the tool returns an error (`limit_exceeded`, since 0.35); only a human's turn can continue the
   chain. A deadlock (A waits for B, B waits for A) is resolved by the timeout.
 
@@ -2066,7 +2089,10 @@ reach it. A message cannot raise it (since 0.43, T39; §7.1): a turn woken by an
 in `ask` unless every session up the chain runs in `auto`, so a session in `auto` asks about the
 tool calls of a turn that a session in `ask` started, directly or along a chain; the header
 says so ("Ask (asked by <address>)", §6). Requests of such a turn go to the worker owner as
-always and are answered in the target's feed or from the sessions waiting on it.
+always and are answered in the target's feed or from the sessions waiting on it. Since 0.44
+(T40) the same holds for a turn whose input carries a buffered send from a session in `ask`,
+a person's own message included, and for a run of an agent's schedule whose creator runs in
+`ask` now or was deleted.
 
 With `auto_approve` the hub answers with the first option with `canonical: once`, `by: auto`
 (calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14);
@@ -2516,7 +2542,11 @@ Since 0.38 (T35, `crates/hqc-hub/src/schedules.rs`):
   warn in the hub's log), not queued.
 - Since 0.39 (T36): a schedule made by an agent (`hqc_schedule`) keeps the chain of its call,
   and its runs carry it (§7.1); since 0.43 (T39) with the chain's permission cap, fixed when
-  the schedule is made: a run of a schedule made by a session in `ask` runs in `ask` (§5.3). The hub sends at most 60 runs per owner and hour; a run over
+  the schedule is made: a run of a schedule made by a session in `ask` runs in `ask` (§5.3).
+  Since 0.44 (T40) the cap of each run is the lower of that cap and the creator's
+  (`created_by`, §3) effective mode at run time: a run of a schedule whose creator has moved
+  from `auto` to `ask` since runs in `ask`, and so does one whose creator was deleted, or was
+  not stored (a schedule from before 0.44). The hub sends at most 60 runs per owner and hour; a run over
   that is skipped like a run of a target that takes no input (a warn, `next_run` moves on). The
   count of schedules that may still run and the insert are made under a per-owner lock.
 - The hub's clock is injectable for tests (`AppState::clock`).
@@ -2563,7 +2593,8 @@ and starts the next turn; one turn per item, in `seq` order. The
 "interrupt and send" button does `session.stop` and then the input. For runtimes with `steer`
 (Hermes) a "steer" button is available: `session.steer` without interrupting. Two users
 with `write` share the same queue. Each turn runs in its own input's mode (since 0.43, T39):
-a person's input queued behind a turn capped to `ask` runs in the session's mode (§5.3).
+a person's input queued behind a turn capped to `ask` runs in the session's mode (§5.3),
+unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7.1).
 
 ### 17.3 Processes
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
@@ -2807,6 +2838,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.43 → 0.44 (T40, the cap for buffered sends and old schedules)
+§7.1: an input's turn takes the lowest cap of the buffered sends it carries in `peer_prefix`
+together with its own, so text from a session in `ask` never runs in `auto`, a person's own
+input included; the cap is kept with the input (`input_caps`), named in the header and carried
+on by what the turn sends. §16: each run of an agent's schedule is capped by the lower of the
+stored cap and its creator's effective mode at run time; a deleted creator (or the unknown one
+of a schedule from before 0.44) counts as `ask`. §3 ScheduledMessage: `created_by`. §5.3, §10.1,
+§17.2, §2.1: the rule where `session.input`, requests and the input queue meet it. Migration
+`0023`. The worker is unchanged. Answers T39's open questions 1 and 2
+(`docs/notes/t39-questions.md`).
 
 ### 0.42 → 0.43 (T39, a message cannot raise permissions)
 §7.1: the chain carries a permission cap (`permission_cap`, `capped_by`): a turn woken by a

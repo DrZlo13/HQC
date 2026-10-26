@@ -14,7 +14,8 @@
 //!   0015) without `delivery`, and go to the agent in `peer_prefix` of the session's next
 //!   input ([`take_prefix`]); that input's `ack` clears them ([`delivered`]). The buffer
 //!   keeps the newest [`MAX_BUFFER_MESSAGES`] / [`MAX_BUFFER_BYTES`]; the older ones are
-//!   dropped with a `system peer_evicted` in the target.
+//!   dropped with a `system peer_evicted` in the target. A buffered message with an `ask`
+//!   cap caps the turn of the input that carries it (T40).
 //! - An ask is a `PendingRequest` of the asking session (`kind: ask`, `worker_id` of its
 //!   worker, `payload {target_session_id, event_id, to}`), answered later: the target's
 //!   final `agent.message` with `in_reply_to` = the message ([`on_final`]), the timeout
@@ -150,20 +151,28 @@ async fn checked_target(
 /// (`depth` and `hops` 0), its id derived from the input, so every call of that turn shares
 /// it. `None`: no turn yet.
 pub(crate) async fn turn_chain(app: &AppState, session_id: Uuid) -> anyhow::Result<Option<Chain>> {
-    let row: Option<(Uuid, Option<Value>)> = sqlx::query_as(
-        "SELECT event_id, chain FROM events WHERE session_id = $1 AND delivery = 'delivered'
-         ORDER BY seq DESC LIMIT 1",
+    let row: Option<(Uuid, Option<Value>, Option<String>)> = sqlx::query_as(
+        "SELECT e.event_id, e.chain, c.capped_by
+         FROM events e LEFT JOIN input_caps c ON c.event_id = e.event_id
+         WHERE e.session_id = $1 AND e.delivery = 'delivered'
+         ORDER BY e.seq DESC LIMIT 1",
     )
     .bind(session_id)
     .fetch_optional(&app.db)
     .await?;
-    Ok(row.map(|(input, chain)| input_chain(session_id, input, chain)))
+    Ok(row.map(|(input, chain, buffered)| input_chain(session_id, input, chain, buffered)))
 }
 
 /// The chain of input `input` of a session: its own, or for a human's input one derived
-/// from it.
-fn input_chain(session_id: Uuid, input: Uuid, chain: Option<Value>) -> Chain {
-    chain
+/// from it; capped to `ask` by `buffered` when the send buffer the input carried had an
+/// `ask` cap and its own chain has none (T40, [`take_prefix`]).
+fn input_chain(
+    session_id: Uuid,
+    input: Uuid,
+    chain: Option<Value>,
+    buffered: Option<String>,
+) -> Chain {
+    let mut c = chain
         .and_then(|c| serde_json::from_value(c).ok())
         .unwrap_or(Chain {
             chain_id: crate::mcp::once_id("chain", session_id, &input.to_string()),
@@ -171,7 +180,12 @@ fn input_chain(session_id: Uuid, input: Uuid, chain: Option<Value>) -> Chain {
             hops: 0,
             permission_cap: None,
             capped_by: None,
-        })
+        });
+    if let Some(by) = buffered.filter(|_| c.permission_cap != Some(PermissionMode::Ask)) {
+        c.permission_cap = Some(PermissionMode::Ask);
+        c.capped_by = Some(by);
+    }
+    c
 }
 
 /// The chain of call `c` of session `caller`: that of the input the worker says the turn
@@ -186,8 +200,9 @@ pub(crate) async fn call_chain(
     c: &McpCall,
 ) -> anyhow::Result<Option<Chain>> {
     if let Some(input) = c.turn_input {
-        let row: Option<(Option<Value>,)> = sqlx::query_as(
-            "SELECT e.chain FROM events e
+        let row: Option<(Option<Value>, Option<String>)> = sqlx::query_as(
+            "SELECT e.chain, c.capped_by
+             FROM events e LEFT JOIN input_caps c ON c.event_id = e.event_id
              WHERE e.event_id = $1 AND e.session_id = $2
                AND e.type IN ('user.message', 'peer.message')
                AND e.delivery IN ('pending', 'delivered')
@@ -198,8 +213,8 @@ pub(crate) async fn call_chain(
         .bind(caller.id)
         .fetch_optional(&app.db)
         .await?;
-        if let Some((chain,)) = row {
-            return Ok(Some(input_chain(caller.id, input, chain)));
+        if let Some((chain, buffered)) = row {
+            return Ok(Some(input_chain(caller.id, input, chain, buffered)));
         }
         tracing::debug!(session_id = %caller.id, %input, "turn_input is not the session's current input; the hub's last delivered one counts");
     }
@@ -519,11 +534,11 @@ async fn buffer(
 /// sent again (a reconnect), exactly those it carried then and that are still buffered. They
 /// stay in the buffer until its `ack`. Taking newer ones into a resent input would let its
 /// `ack` clear them although the agent may have got the first frame, without them (T32).
-pub async fn take_prefix(
-    app: &AppState,
-    session_id: Uuid,
-    input: Uuid,
-) -> anyhow::Result<Vec<PeerPrefix>> {
+///
+/// With them the input's turn takes the lowest cap (T40, SPEC §7.1): when one of them has
+/// an `ask` cap, so does the input, named by the first such message's `capped_by`; it is
+/// kept in `input_caps` for the header and for what the turn sends ([`input_chain`]).
+pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyhow::Result<Prefix> {
     let first =
         sqlx::query("INSERT INTO input_prefix (event_id) VALUES ($1) ON CONFLICT DO NOTHING")
             .bind(input)
@@ -531,7 +546,7 @@ pub async fn take_prefix(
             .await?
             .rows_affected()
             == 1;
-    let rows: Vec<(Value, DateTime<Utc>)> = if first {
+    let rows: Vec<(Value, DateTime<Utc>, Option<Value>)> = if first {
         sqlx::query_as(
             "WITH c AS (
                  UPDATE peer_buffer b SET carried_by = $2
@@ -539,7 +554,8 @@ pub async fn take_prefix(
                    AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id = b.carried_by
                                      AND e.event_id <> $2 AND e.delivery = 'pending')
                  RETURNING b.event_id, b.seq)
-             SELECT e.payload, e.ts FROM c JOIN events e ON e.event_id = c.event_id ORDER BY c.seq",
+             SELECT e.payload, e.ts, e.chain FROM c JOIN events e ON e.event_id = c.event_id
+             ORDER BY c.seq",
         )
         .bind(session_id)
         .bind(input)
@@ -547,7 +563,7 @@ pub async fn take_prefix(
         .await?
     } else {
         sqlx::query_as(
-            "SELECT e.payload, e.ts FROM peer_buffer b JOIN events e ON e.event_id = b.event_id
+            "SELECT e.payload, e.ts, e.chain FROM peer_buffer b JOIN events e ON e.event_id = b.event_id
              WHERE b.session_id = $1 AND b.carried_by = $2 ORDER BY b.seq",
         )
         .bind(session_id)
@@ -555,14 +571,39 @@ pub async fn take_prefix(
         .fetch_all(&app.db)
         .await?
     };
-    Ok(rows
-        .into_iter()
-        .map(|(p, ts)| PeerPrefix {
-            from: p["from"].as_str().unwrap_or("?").to_string(),
-            text: p["text"].as_str().unwrap_or_default().to_string(),
-            ts,
-        })
-        .collect())
+    let from = |p: &Value| p["from"].as_str().unwrap_or("?").to_string();
+    let capped_by = rows.iter().find_map(|(p, _, chain)| {
+        let c: Chain = serde_json::from_value(chain.clone()?).ok()?;
+        (c.permission_cap? == PermissionMode::Ask).then(|| c.capped_by.unwrap_or_else(|| from(p)))
+    });
+    if let Some(by) = &capped_by {
+        sqlx::query(
+            "INSERT INTO input_caps (event_id, capped_by) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(input)
+        .bind(by)
+        .execute(&app.db)
+        .await?;
+    }
+    Ok(Prefix {
+        messages: rows
+            .iter()
+            .map(|(p, ts, _)| PeerPrefix {
+                from: from(p),
+                text: p["text"].as_str().unwrap_or_default().to_string(),
+                ts: *ts,
+            })
+            .collect(),
+        capped_by,
+    })
+}
+
+/// What [`take_prefix`] gives an input.
+pub struct Prefix {
+    /// Its `peer_prefix`.
+    pub messages: Vec<PeerPrefix>,
+    /// With an `ask` cap among them: the session that set the first one.
+    pub capped_by: Option<String>,
 }
 
 /// Input `input` reached the agent: the messages it carried leave the buffer.
@@ -823,7 +864,7 @@ mod tests {
         use PermissionMode::{Ask, Auto};
         let cap = |c: &Chain| (c.permission_cap, c.capped_by.clone());
         // A human's turn has no cap: the sender's mode decides.
-        let human = input_chain(Uuid::now_v7(), Uuid::now_v7(), None);
+        let human = input_chain(Uuid::now_v7(), Uuid::now_v7(), None, None);
         assert_eq!(human.permission_cap, None);
         let a = next_chain(Some(human.clone()), true, Auto, "p/a").unwrap();
         assert_eq!(cap(&a), (Some(Auto), None));

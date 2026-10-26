@@ -21,7 +21,8 @@
 //!   (`Limits::schedule_runs_per_owner_hour`, more are skipped).
 //! - A schedule an agent creates keeps the chain of its call, moved on like a send (SPEC
 //!   §7.1); its runs carry it, so a turn they start continues that chain: an agent cannot
-//!   keep itself running for ever by scheduling its next turn.
+//!   keep itself running for ever by scheduling its next turn. Each run is capped by the
+//!   lower of the chain's cap and its creator's mode at run time (T40, [`run_chain`]).
 
 use std::{str::FromStr, sync::Mutex, time::Duration};
 
@@ -39,7 +40,7 @@ use croner::{
 use hqc_proto::{
     api::{CreateSchedule, PatchSchedule, Schedule, ScheduleList},
     event::Chain,
-    frame::{McpCall, McpError},
+    frame::{McpCall, McpError, PermissionMode},
     mcp::error_code,
 };
 use serde::Deserialize;
@@ -138,6 +139,8 @@ struct NewSchedule {
     session_id: Uuid,
     /// The chain of the `hqc_schedule` call; `None` for a person's schedule.
     chain: Option<Chain>,
+    /// The session whose agent made it; `None` for a person's schedule.
+    created_by: Option<Uuid>,
     cron: Option<String>,
     at: Option<DateTime<Utc>>,
     timezone: String,
@@ -227,8 +230,9 @@ async fn create(
     }
     sqlx::query(
         "INSERT INTO scheduled_messages
-           (id, owner_id, session_id, cron, at, timezone, message, catch_up, next_run, chain)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING",
+           (id, owner_id, session_id, cron, at, timezone, message, catch_up, next_run, chain,
+            created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING",
     )
     .bind(id)
     .bind(owner)
@@ -240,6 +244,7 @@ async fn create(
     .bind(n.catch_up)
     .bind(next_run)
     .bind(n.chain.as_ref().map(serde_json::to_value).transpose()?)
+    .bind(n.created_by)
     .execute(&app.db)
     .await?;
     tracing::info!(%id, session_id = %n.session_id, %next_run, "schedule created");
@@ -267,6 +272,9 @@ pub struct ScheduleRow {
     pub updated_at: DateTime<Utc>,
     /// The chain an agent's schedule carries (SPEC §7.1); `None` for a person's.
     pub chain: Option<Value>,
+    /// The session whose agent made it (T40); `None` for a person's, and for an agent's
+    /// whose creator was deleted or that predates 0.44.
+    pub created_by: Option<Uuid>,
 }
 
 impl ScheduleRow {
@@ -376,6 +384,7 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         NewSchedule {
             session_id,
             chain,
+            created_by: Some(caller.id),
             cron: a.cron,
             at,
             timezone,
@@ -455,6 +464,7 @@ pub async fn create_api(
         NewSchedule {
             session_id: s.id,
             chain: None,
+            created_by: None,
             cron: b.cron,
             at: b.at,
             timezone: b.timezone.unwrap_or(user.timezone),
@@ -628,6 +638,7 @@ async fn send(app: &AppState, r: &ScheduleRow, due: DateTime<Utc>) -> anyhow::Re
         return Ok(None);
     }
     db::clear_turn_error(&app.db, s.id).await?;
+    let chain = run_chain(app, r).await?;
     let payload: Value = json!({"text": r.message, "artifact_ids": [], "schedule_id": r.id});
     let stored = events::store_hub_event_with_id(
         app,
@@ -637,13 +648,45 @@ async fn send(app: &AppState, r: &ScheduleRow, due: DateTime<Utc>) -> anyhow::Re
         "user.message",
         payload,
         Some("pending"),
-        r.chain.clone(),
+        chain,
     )
     .await?;
     if stored.is_some() {
         tracing::info!(id = %r.id, session_id = %s.id, %due, "scheduled message sent");
     }
     Ok(Some(s.id))
+}
+
+/// `capped_by` of a run whose schedule's creator is gone (deleted, or not stored before 0.44).
+pub const GONE_CREATOR: &str = "a deleted session";
+
+/// The chain a run of `r` carries: none for a person's schedule; for an agent's, the stored
+/// one capped with the lower of its stored cap and the creator's effective mode now (T40,
+/// SPEC §16), a creator that is gone counting as `ask`.
+async fn run_chain(app: &AppState, r: &ScheduleRow) -> anyhow::Result<Option<Value>> {
+    let Some(stored) = &r.chain else {
+        return Ok(None);
+    };
+    let mut c: Chain = serde_json::from_value(stored.clone())?;
+    if c.permission_cap == Some(PermissionMode::Ask) {
+        return Ok(Some(stored.clone()));
+    }
+    let creator = match r.created_by {
+        Some(id) => db::session(&app.db, id).await?,
+        None => None,
+    };
+    let by = match &creator {
+        None => Some(GONE_CREATOR.to_string()),
+        Some(s) if crate::peers::sender_mode(s) == PermissionMode::Ask => {
+            Some(crate::peers::address(app, s).await?)
+        }
+        Some(_) => None,
+    };
+    if let Some(by) = by {
+        c.permission_cap = Some(PermissionMode::Ask);
+        c.capped_by = Some(by);
+    }
+    Ok(Some(serde_json::to_value(c)?))
 }
 
 #[cfg(test)]

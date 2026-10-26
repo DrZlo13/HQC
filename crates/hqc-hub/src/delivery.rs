@@ -69,7 +69,12 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
                     continue;
                 }
                 let mut frame = input_frame(session_id, p.event_id, &p.payload, p.chain.as_ref());
-                frame.peer_prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
+                let prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
+                frame.peer_prefix = prefix.messages;
+                // Buffered text from a session in Ask never runs in Auto (T40).
+                if prefix.capped_by.is_some() {
+                    frame.permission_cap = Some(PermissionMode::Ask);
+                }
                 sc.inflight.insert(p.event_id);
                 let id = conn.send(HubFrame::SessionInput(frame));
                 replies.insert(

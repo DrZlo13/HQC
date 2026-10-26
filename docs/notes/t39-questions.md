@@ -52,7 +52,8 @@ open question 1. One live `claude` run of the two allowed (`live_cap`, `claude-h
   the turn's mode and the session's own. The worker reports it only when the session's own mode
   is Auto, so a session in Ask shows plain "Ask".
 - **An agent's schedule keeps the cap it was made with**, as it keeps its chain (T36). A
-  person's schedule has no chain and no cap.
+  person's schedule has no chain and no cap. (T40: each run also takes its creator's mode at
+  run time.)
 
 ## 2. Tests
 
@@ -83,23 +84,16 @@ file was not created.
 
 ## 3. Not verified / open questions
 
-1. **Buffered sends.** A `send` into the send buffer does not start a turn, so the rule does not
-   apply: its text reaches the agent in `peer_prefix` of the next input, and if that is the
-   person's own message the turn runs in the session's mode. A session in Ask can thus put text
-   in front of an Auto session's next human turn. Capping such a turn too would follow the
-   spirit of the rule but not its letter ("a turn started by the user's own message runs in the
-   session's mode"); left for the owner.
-2. **A schedule outliving its creator's mode.** The cap is fixed when an agent's schedule is
-   made; if that session later switches from Auto to Ask, the schedule's runs still run in Auto
-   (the other direction is harmless). Recomputing at each run would need the creating session,
-   which a schedule does not store.
-3. **The restart fallback** (no confirmation in 10 s, or a runtime that cannot switch) is tested
+Questions 1 (buffered sends) and 2 (a schedule outliving its creator's mode) were answered by
+the owner on 2026-10-26 and done in T40 (SPEC 0.44).
+
+1. **The restart fallback** (no confirmation in 10 s, or a runtime that cannot switch) is tested
    with the fake adapter only; Claude Code 2.1.308 always confirmed.
-4. **Messages from before 0.43** still pending when the hub is upgraded carry no cap and run in
+2. **Messages from before 0.43** still pending when the hub is upgraded carry no cap and run in
    the target's mode.
-5. **The confirmation is matched by order**, not by the request's id: the worker takes the next
+3. **The confirmation is matched by order**, not by the request's id: the worker takes the next
    reported Ask after asking for Ask. The CLI answers control requests in order and reports its
    own mode changes only after making them, so a stale Ask cannot come in between; matching ids
    would need a separate adapter event.
-6. **The hub is trusted with the cap**, like with the answers to requests (§2.1): a compromised
+4. **The hub is trusted with the cap**, like with the answers to requests (§2.1): a compromised
    hub can leave it out. The worker cannot check the chain.

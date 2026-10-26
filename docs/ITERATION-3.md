@@ -200,7 +200,7 @@ runtime's confirmation of Ask before it hands over a capped input, or restarts t
 Ask; the live run (`live_cap`, 2.1.308) saw B's `touch` asked about. Decisions and open
 questions in `docs/notes/t39-questions.md`.
 
-## T40. The cap for buffered sends and old schedules (after T39)
+## T40. The cap for buffered sends and old schedules (done, SPEC 0.44)
 
 Sections: §7.1, §10.1, §16. Two gaps T39 left (`docs/notes/t39-questions.md`, user decision
 2026-10-26):
@@ -212,4 +212,10 @@ Sections: §7.1, §10.1, §16. Two gaps T39 left (`docs/notes/t39-questions.md`,
 Acceptance: the common checks; hub tests: a user's input carrying a buffered send from "Ask"
 runs capped, one from "Auto" does not; a schedule whose creator moved from "Auto" to "Ask", and
 one whose creator was deleted; the client's header names the session that capped the turn.
+Done: the cap a buffered message lends an input is decided when the hub first hands it the
+buffer and kept in `input_caps` (migration `0023`), so the header names it and the turn's own
+messages carry it on; a schedule stores its creator (`created_by`) and a run computes its cap
+at run time, a creator that is gone (deleted, or a schedule from before 0.44) counting as
+"Ask". The worker and the client are unchanged: the header already names
+`permission_capped_by`, which now comes from either source. Tests: hub `tests/t40.rs`.
 

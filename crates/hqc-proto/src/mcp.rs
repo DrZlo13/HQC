@@ -57,7 +57,9 @@ pub const TOOLS: &[Tool] = &[
         description: "Show a file from your workspace to the user in the hqc chat: an image \
             inline, a diff as a diff, anything else as a file to open or download. At most \
             100 MB. `path` is absolute or relative to your working directory and must lie \
-            inside the session's workspace.",
+            inside the session's workspace. The result's `artifact_id` can go in `files` of \
+            hqc_send and hqc_ask; a file attached during a turn that answers an hqc_ask goes \
+            back to the asker with the reply.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -90,7 +92,10 @@ pub const TOOLS: &[Tool] = &[
         description: "Send a message to another hqc session of your owner without waiting for a \
             reply. The other agent reads it before its next input (or at once if that session \
             wakes on messages); it may answer you later with hqc_send. `session` is an address \
-            from hqc_list_sessions (<project-slug>/<session-slug>) or a session id.",
+            from hqc_list_sessions (<project-slug>/<session-slug>) or a session id. To hand \
+            over files, list them in `files` (paths in your workspace, at most 100 MB each, or \
+            artifact ids from hqc_attach); never paste a file's content into `text`. The other \
+            agent gets each file as a local path on its own machine.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -99,7 +104,8 @@ pub const TOOLS: &[Tool] = &[
                     "session": {
                         "type": "string",
                         "description": "The target session: <project-slug>/<session-slug> or its id."
-                    }
+                    },
+                    "files": files_schema()
                 },
                 "required": ["text", "session"],
                 "additionalProperties": false
@@ -112,7 +118,12 @@ pub const TOOLS: &[Tool] = &[
             message starts a turn there, and that turn's final message comes back as this \
             tool's result (`reply`). Waits up to `timeout_s` (at most and by default 600 s). \
             Not to your own session. `session` is an address from hqc_list_sessions \
-            (<project-slug>/<session-slug>) or a session id.",
+            (<project-slug>/<session-slug>) or a session id. To hand over files, list them in \
+            `files` (paths in your workspace, at most 100 MB each, or artifact ids from \
+            hqc_attach); never paste a file's content into `text`. The other agent gets each \
+            file as a local path; the files it attaches with hqc_attach while answering come \
+            back in the result's `files`, each with a local `path` on this machine (or an \
+            `error`).",
         input_schema: || {
             json!({
                 "type": "object",
@@ -126,7 +137,8 @@ pub const TOOLS: &[Tool] = &[
                         "type": "integer",
                         "minimum": 1,
                         "description": "How long to wait for the reply, in seconds."
-                    }
+                    },
+                    "files": files_schema()
                 },
                 "required": ["text", "session"],
                 "additionalProperties": false
@@ -236,6 +248,44 @@ pub const TOOLS: &[Tool] = &[
         },
     },
 ];
+
+/// The `files` argument of [`SEND`] and [`ASK`] (since 0.46, T41).
+fn files_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "string"},
+        "maxItems": MAX_FILES,
+        "description": "Files to hand over: paths (absolute or relative to your working \
+            directory, inside the session's workspace) or artifact ids from hqc_attach."
+    })
+}
+
+/// Most files one message carries (the hub's cap on an input's artifacts, SPEC §20).
+pub const MAX_FILES: usize = 32;
+
+/// One file of an [`ASK`] reply as the hub sends it in `result.files` (since 0.46, T41): an
+/// artifact the target attached during its answering turn. The asking worker downloads it
+/// into its own inbox and gives the agent a [`ReplyFile`] instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplyArtifact {
+    pub artifact_id: Uuid,
+    pub name: String,
+    pub kind: crate::event::ArtifactKind,
+}
+
+/// One file of an [`ASK`] reply as the agent gets it: the local `path` of the download, or
+/// the `error` that stopped it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReplyFile {
+    pub name: String,
+    pub kind: crate::event::ArtifactKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
 
 /// `args` of the `mcp.call` for [`ATTACH`]: the worker reads and uploads `path` itself
 /// (`PUT /worker/artifacts`, SPEC §12) and sends the artifact instead of the path; `name`

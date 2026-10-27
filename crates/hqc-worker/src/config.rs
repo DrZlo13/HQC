@@ -181,22 +181,25 @@ impl StartSpec {
     /// The working directory still exists and still resolves inside the workspace: a symlink
     /// may have been swapped since `session.start` (SPEC §2.1).
     pub fn recheck_workdir(&self) -> anyhow::Result<()> {
-        let ws = self
-            .workspace
-            .canonicalize()
-            .with_context(|| format!("workspace {}", self.workspace.display()))?;
-        let real = self
-            .workdir
-            .canonicalize()
-            .with_context(|| format!("working directory {}", self.workdir.display()))?;
-        if real != self.workdir || !real.starts_with(&ws) || !real.is_dir() {
-            bail!(
-                "working directory {} no longer resolves inside the workspace",
-                self.workdir.display()
-            );
-        }
-        Ok(())
+        recheck_workdir(&self.workspace, &self.workdir)
     }
+}
+
+/// [`StartSpec::recheck_workdir`] for the canonical `workspace` and `workdir` of a session.
+pub fn recheck_workdir(workspace: &Path, workdir: &Path) -> anyhow::Result<()> {
+    let ws = workspace
+        .canonicalize()
+        .with_context(|| format!("workspace {}", workspace.display()))?;
+    let real = workdir
+        .canonicalize()
+        .with_context(|| format!("working directory {}", workdir.display()))?;
+    if real != workdir || !real.starts_with(&ws) || !real.is_dir() {
+        bail!(
+            "working directory {} no longer resolves inside the workspace",
+            workdir.display()
+        );
+    }
+    Ok(())
 }
 
 impl Config {

@@ -753,6 +753,12 @@ pub struct PeerPrefix {
     pub from: String,
     pub text: String,
     pub ts: DateTime<Utc>,
+    /// The message's `event_id` (since 0.46, T41): its files go to `.hqc/inbox/<event_id>/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<Uuid>,
+    /// The message's files (since 0.46, T41), downloaded like the input's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_ids: Vec<Uuid>,
 }
 
 #[cfg(test)]

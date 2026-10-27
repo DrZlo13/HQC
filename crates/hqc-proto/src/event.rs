@@ -268,6 +268,10 @@ pub enum EventKind {
         /// Only for `mode: ask`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        /// Files the sender gave with `files` (since 0.46, T41): artifacts of the owner,
+        /// downloaded into the target's inbox like a user's attachments (SPEC §12).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        artifact_ids: Vec<Uuid>,
     },
     #[serde(rename = "usage")]
     Usage {

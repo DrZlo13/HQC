@@ -12,12 +12,16 @@
 //!   without following a symlink in its last component and checked again on the open handle,
 //!   so a file swapped after the check is refused, and exactly the size seen there is sent;
 //! - `content` (for the bare model, iteration 4) is not accepted.
+//!
+//! The same rules hold for the `files` of `hqc_send` and `hqc_ask` (T41,
+//! [`Attacher::prepare_files`]), and the files of a reply to `hqc_ask` are downloaded into the
+//! session's own inbox before the agent gets the result ([`Attacher::reply_files`]).
 
 use std::path::{Path, PathBuf};
 
 use hqc_proto::event::ArtifactKind;
 use hqc_proto::frame::McpError;
-use hqc_proto::mcp::{error_code, AttachCall};
+use hqc_proto::mcp::{error_code, AttachCall, ReplyArtifact, MAX_FILES};
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -70,9 +74,28 @@ impl Attacher {
         if a.kind == Some(ArtifactKind::Unknown) {
             return Err(invalid("kind: one of file, image, diff, html, text"));
         }
-        let real = resolve(&self.allowed_roots, folders, &a.path)?;
-        let name = a.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
-            Path::new(&a.path)
+        let artifact_id = self
+            .upload_path(session_id, folders, &a.path, a.name, a.kind)
+            .await?;
+        Ok(serde_json::to_value(AttachCall {
+            artifact_id,
+            caption: a.caption,
+        })
+        .expect("AttachCall serializes"))
+    }
+
+    /// Resolves, reads and uploads the file `path` names for `session_id`; its artifact id.
+    async fn upload_path(
+        &self,
+        session_id: Uuid,
+        folders: &Folders,
+        path: &str,
+        name: Option<String>,
+        kind: Option<ArtifactKind>,
+    ) -> Result<Uuid, McpError> {
+        let real = resolve(&self.allowed_roots, folders, path)?;
+        let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
+            Path::new(path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
@@ -80,17 +103,89 @@ impl Attacher {
         let (file, size) = open_regular(&real, self.client.max_artifact())?;
         let artifact_id = self
             .client
-            .upload(session_id, file, size, &name, a.kind)
+            .upload(session_id, file, size, &name, kind)
             .await
             .inspect_err(|e| {
-                tracing::warn!(%session_id, path = %real.display(), code = %e.code, "hqc_attach upload: {}", e.message);
+                tracing::warn!(%session_id, path = %real.display(), code = %e.code, "upload: {}", e.message);
             })?;
-        tracing::info!(%session_id, path = %real.display(), %artifact_id, "hqc_attach uploaded");
-        Ok(serde_json::to_value(AttachCall {
-            artifact_id,
-            caption: a.caption,
-        })
-        .expect("AttachCall serializes"))
+        tracing::info!(%session_id, path = %real.display(), %artifact_id, "file uploaded for an hqc tool");
+        Ok(artifact_id)
+    }
+
+    /// `files` of `hqc_send` / `hqc_ask` (T41): each entry an artifact id (a uuid, kept as it
+    /// is: the hub checks it is the owner's and this session's) or a path, read and uploaded
+    /// by the rules of `hqc_attach`; the arguments of the `mcp.call` carry `artifact_ids`
+    /// instead. The first refusal fails the call, and nothing is sent.
+    pub async fn prepare_files(
+        &self,
+        session_id: Uuid,
+        folders: &Folders,
+        args: Value,
+    ) -> Result<Value, McpError> {
+        let Value::Object(mut args) = args else {
+            return Err(invalid("arguments must be an object"));
+        };
+        let files = match args.remove("files") {
+            None | Some(Value::Null) => vec![],
+            Some(Value::Array(v)) => v,
+            Some(_) => return Err(invalid("files: a list of paths or artifact ids")),
+        };
+        if files.len() > MAX_FILES {
+            return Err(invalid(format!("files: at most {MAX_FILES}")));
+        }
+        let mut ids: Vec<Uuid> = Vec::new();
+        for f in files {
+            let Value::String(f) = f else {
+                return Err(invalid("files: a list of paths or artifact ids"));
+            };
+            let id = match f.trim().parse::<Uuid>() {
+                Ok(id) => id,
+                Err(_) => self
+                    .upload_path(session_id, folders, &f, None, None)
+                    .await
+                    .map_err(|e| McpError::new(&e.code, format!("files: {}", e.message)))?,
+            };
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        if !ids.is_empty() {
+            args.insert("artifact_ids".into(), serde_json::json!(ids));
+        }
+        Ok(Value::Object(args))
+    }
+
+    /// The result of `hqc_ask` with its `files` (artifacts of the reply, T41) downloaded into
+    /// the session's inbox (`.hqc/inbox/<request_id>/`) and given as local paths; a file that
+    /// could not be downloaded keeps its name with an `error`, the reply text comes back
+    /// anyway. A result without files is returned as it is.
+    pub async fn reply_files(
+        &self,
+        folders: &Folders,
+        request_id: Uuid,
+        mut result: Value,
+    ) -> Value {
+        let files: Vec<ReplyArtifact> = match result.get("files") {
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(%request_id, "the files of a reply are not readable: {e}");
+                    vec![]
+                }
+            },
+            None => return result,
+        };
+        let got = crate::inbox::fetch_reply(
+            &self.client,
+            &folders.workspace,
+            &folders.workdir,
+            &self.allowed_roots,
+            request_id,
+            &files,
+        )
+        .await;
+        result["files"] = serde_json::to_value(got).expect("ReplyFile serializes");
+        result
     }
 }
 

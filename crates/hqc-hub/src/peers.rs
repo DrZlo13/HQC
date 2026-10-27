@@ -22,12 +22,18 @@
 //!   ([`expire`]), `mcp.cancel` ([`cancelled`]) or a restart of the asking worker
 //!   ([`worker_restarted`]). The answer is an `mcp.result` frame kept in `result` until the
 //!   worker acks it, so an asking worker that was offline gets it after `hello`.
+//! - Files (T41): `artifact_ids` of a call are the owner's artifacts linked to the calling
+//!   session (uploaded by its worker from the agent's `files`, or given to it); the message
+//!   keeps them and links them to the target, whose worker downloads them into its inbox. A
+//!   reply carries the artifacts the target attached during its answering turn
+//!   ([`reply_files`]), linked to the asking session, whose worker downloads them before it
+//!   answers the agent.
 
 use chrono::{DateTime, Utc};
 use hqc_proto::{
-    event::Chain,
+    event::{ArtifactKind, Chain},
     frame::{McpCall, McpCancel, McpError, McpResult, PeerPrefix, PermissionMode},
-    mcp::{cancel_reason, error_code},
+    mcp::{cancel_reason, error_code, ReplyArtifact, MAX_FILES},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -68,6 +74,9 @@ fn err(code: &str, message: impl Into<String>) -> McpError {
 struct SendArgs {
     text: String,
     session: String,
+    /// The worker's upload of the agent's `files` (T41).
+    #[serde(default)]
+    artifact_ids: Vec<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +85,8 @@ struct AskArgs {
     text: String,
     session: String,
     timeout_s: Option<u64>,
+    #[serde(default)]
+    artifact_ids: Vec<Uuid>,
 }
 
 /// `<project-slug>/<session-slug>` of a session.
@@ -144,6 +155,70 @@ async fn checked_target(
         ));
     }
     Ok((t, to))
+}
+
+/// The files of a message (T41): at most [`MAX_FILES`], each an artifact of the caller's owner
+/// linked to the calling session (uploaded for it, or given to it in an input or a reply);
+/// anything else is `not_found`. A repeated id counts once.
+async fn checked_files(
+    app: &AppState,
+    caller: &SessionRow,
+    ids: &[Uuid],
+) -> Result<Vec<Uuid>, McpError> {
+    let mut out: Vec<Uuid> = Vec::new();
+    for id in ids {
+        if !out.contains(id) {
+            out.push(*id);
+        }
+    }
+    if out.len() > MAX_FILES {
+        return Err(err(
+            error_code::INVALID_ARGS,
+            format!("at most {MAX_FILES} files per message"),
+        ));
+    }
+    if out.is_empty() {
+        return Ok(out);
+    }
+    let found: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT a.id) FROM artifacts a
+         JOIN artifact_sessions s ON s.artifact_id = a.id
+         WHERE a.id = ANY($1) AND a.owner_id = $2 AND s.session_id = $3",
+    )
+    .bind(&out)
+    .bind(caller.owner_id)
+    .bind(caller.id)
+    .fetch_one(&app.db)
+    .await
+    .map_err(internal)?;
+    if found as usize != out.len() {
+        return Err(err(
+            error_code::NOT_FOUND,
+            "files: no such artifact of this session",
+        ));
+    }
+    Ok(out)
+}
+
+/// Links artifacts `ids` to session `session_id`, so that its worker may download them
+/// (SPEC §12).
+async fn link_files(app: &AppState, session_id: Uuid, ids: &[Uuid]) -> anyhow::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO artifact_sessions (artifact_id, session_id)
+         SELECT unnest($1::uuid[]), $2 ON CONFLICT DO NOTHING",
+    )
+    .bind(ids)
+    .bind(session_id)
+    .execute(&app.db)
+    .await?;
+    sqlx::query("UPDATE artifacts SET updated_at = now() WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(&app.db)
+        .await?;
+    Ok(())
 }
 
 /// The chain of the input that started the session's current turn (SPEC §7.1): the last
@@ -343,6 +418,14 @@ pub fn next_chain(
     Ok(c)
 }
 
+/// What a `peer.message` says.
+#[derive(Clone, Copy)]
+struct Message<'a> {
+    text: &'a str,
+    files: &'a [Uuid],
+    ask: bool,
+}
+
 /// Stores the `peer.message` of a call, or finds the one stored by an earlier copy of it.
 /// An ask, and a send to a session that wakes on them, go to the input queue (`pending`);
 /// other sends have no `delivery` (the send buffer).
@@ -351,10 +434,10 @@ async fn store_message(
     caller: &SessionRow,
     t: &SessionRow,
     request_id: &str,
-    text: &str,
-    ask: bool,
+    m: Message<'_>,
     chain: &Chain,
 ) -> Result<EventRow, McpError> {
+    let Message { text, files, ask } = m;
     let delivery = (ask || t.wake_on_send).then_some("pending");
     let from = address(app, caller).await.map_err(internal)?;
     let mut payload = json!({
@@ -366,6 +449,12 @@ async fn store_message(
     if ask {
         payload["request_id"] = json!(request_id);
     }
+    if !files.is_empty() {
+        payload["artifact_ids"] = json!(files);
+    }
+    // Before the message exists: once it does, its input may reach the target's worker,
+    // which downloads the files at once.
+    link_files(app, t.id, files).await.map_err(internal)?;
     events::store_peer_message(
         app,
         t,
@@ -379,7 +468,7 @@ async fn store_message(
     .map_err(internal)
 }
 
-/// `hqc_send(text, session)`: `{to, delivery: queued | buffered}`.
+/// `hqc_send(text, session, artifact_ids?)`: `{to, delivery: queued | buffered}`.
 pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
     let a: SendArgs = args(c.args.clone())?;
     let id = message_id(caller.id, &c.request_id);
@@ -393,10 +482,16 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         return Ok(Answer::Now(send_result(&to, row.delivery.is_some())));
     }
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
+    let files = checked_files(app, caller, &a.artifact_ids).await?;
     let chain = outgoing_chain(app, caller, c, false).await?;
     admit(app, caller, &chain).await?;
     let wake = t.wake_on_send;
-    let row = store_message(app, caller, &t, &c.request_id, &a.text, false, &chain).await?;
+    let m = Message {
+        text: &a.text,
+        files: &files,
+        ask: false,
+    };
+    let row = store_message(app, caller, &t, &c.request_id, m, &chain).await?;
     if wake {
         delivery::kick(app, t.id, false).await;
     } else {
@@ -412,7 +507,8 @@ fn send_result(to: &str, queued: bool) -> Value {
     json!({"to": to, "delivery": if queued { "queued" } else { "buffered" }})
 }
 
-/// `hqc_ask(text, session, timeout_s?)`: answered later with `{from, reply}`.
+/// `hqc_ask(text, session, timeout_s?, artifact_ids?)`: answered later with `{from, reply,
+/// files?}`.
 pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
     let a: AskArgs = args(c.args.clone())?;
     if let Some(p) = db::request_by_id(&app.db, caller.id, "ask", &c.request_id)
@@ -445,6 +541,7 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         None => max,
     };
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
+    let files = checked_files(app, caller, &a.artifact_ids).await?;
     let chain = outgoing_chain(app, caller, c, true).await?;
     let open: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pending_requests
@@ -462,7 +559,12 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         ));
     }
     admit(app, caller, &chain).await?;
-    let row = store_message(app, caller, &t, &c.request_id, &a.text, true, &chain).await?;
+    let m = Message {
+        text: &a.text,
+        files: &files,
+        ask: true,
+    };
+    let row = store_message(app, caller, &t, &c.request_id, m, &chain).await?;
     let expires_at = Utc::now() + chrono::TimeDelta::seconds(timeout as i64);
     db::open_request(
         &app.db,
@@ -550,7 +652,7 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
             .await?
             .rows_affected()
             == 1;
-    let rows: Vec<(Value, DateTime<Utc>, Option<Value>)> = if first {
+    let rows: Vec<(Uuid, Value, DateTime<Utc>, Option<Value>)> = if first {
         sqlx::query_as(
             "WITH c AS (
                  UPDATE peer_buffer b SET carried_by = $2
@@ -558,7 +660,7 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
                    AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id = b.carried_by
                                      AND e.event_id <> $2 AND e.delivery = 'pending')
                  RETURNING b.event_id, b.seq)
-             SELECT e.payload, e.ts, e.chain FROM c JOIN events e ON e.event_id = c.event_id
+             SELECT e.event_id, e.payload, e.ts, e.chain FROM c JOIN events e ON e.event_id = c.event_id
              ORDER BY c.seq",
         )
         .bind(session_id)
@@ -567,7 +669,7 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
         .await?
     } else {
         sqlx::query_as(
-            "SELECT e.payload, e.ts, e.chain FROM peer_buffer b JOIN events e ON e.event_id = b.event_id
+            "SELECT e.event_id, e.payload, e.ts, e.chain FROM peer_buffer b JOIN events e ON e.event_id = b.event_id
              WHERE b.session_id = $1 AND b.carried_by = $2 ORDER BY b.seq",
         )
         .bind(session_id)
@@ -576,7 +678,7 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
         .await?
     };
     let from = |p: &Value| p["from"].as_str().unwrap_or("?").to_string();
-    let capped_by = rows.iter().find_map(|(p, _, chain)| {
+    let capped_by = rows.iter().find_map(|(_, p, _, chain)| {
         let c: Chain = serde_json::from_value(chain.clone()?).ok()?;
         (c.permission_cap? == PermissionMode::Ask).then(|| c.capped_by.unwrap_or_else(|| from(p)))
     });
@@ -592,10 +694,15 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
     Ok(Prefix {
         messages: rows
             .iter()
-            .map(|(p, ts, _)| PeerPrefix {
+            .map(|(id, p, ts, _)| PeerPrefix {
                 from: from(p),
                 text: p["text"].as_str().unwrap_or_default().to_string(),
                 ts: *ts,
+                event_id: Some(*id),
+                artifact_ids: p
+                    .get("artifact_ids")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default(),
             })
             .collect(),
         capped_by,
@@ -657,13 +764,15 @@ async fn answer(
 const ASK_COLS: &str =
     "id, kind, session_id, request_id, payload, expires_at, worker_id, result, closed_at";
 
-/// A final `agent.message` of session `s` answering input `in_reply_to`: the reply to the
-/// ask that delivered it, if one waits (SPEC §7.1).
+/// A final `agent.message` of session `s` (at `seq`) answering input `in_reply_to`: the
+/// reply to the ask that delivered it, if one waits (SPEC §7.1), with the files of the
+/// answering turn ([`reply_files`]).
 pub async fn on_final(
     app: &AppState,
     s: &SessionRow,
     in_reply_to: Uuid,
     text: &str,
+    seq: i64,
 ) -> anyhow::Result<()> {
     let open: Vec<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
@@ -677,10 +786,62 @@ pub async fn on_final(
             continue;
         }
         let to = p.payload["to"].as_str().unwrap_or_default().to_string();
-        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, "peer ask answered");
-        answer(app, p, Ok(json!({"from": to, "reply": text}))).await?;
+        let files = reply_files(app, s, p.session_id, in_reply_to, seq).await?;
+        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, files = files.len(), "peer ask answered");
+        let mut result = json!({"from": to, "reply": text});
+        if !files.is_empty() {
+            result["files"] = serde_json::to_value(&files)?;
+        }
+        answer(app, p, Ok(result)).await?;
     }
     Ok(())
+}
+
+/// The files of a reply (T41, SPEC §7.1): the artifacts of the `attachment` events of
+/// session `s` between the question `question` and the final message at `seq`, oldest first,
+/// once each, at most [`MAX_FILES`]. Only artifacts of the session's owner count: a worker
+/// may write `attachment` events of its own, and the id of another owner's artifact in one
+/// must not reach the asking worker. They are linked to the asking session `asker`, so its
+/// worker may download them.
+pub async fn reply_files(
+    app: &AppState,
+    s: &SessionRow,
+    asker: Uuid,
+    question: Uuid,
+    seq: i64,
+) -> anyhow::Result<Vec<ReplyArtifact>> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT a.id, a.name, a.kind FROM events e
+         JOIN artifacts a ON a.id::text = e.payload ->> 'artifact_id'
+         WHERE e.session_id = $1 AND e.type = 'attachment' AND a.owner_id = $2
+           AND e.seq > (SELECT q.seq FROM events q WHERE q.event_id = $3 AND q.session_id = $1)
+           AND e.seq < $4
+         ORDER BY e.seq",
+    )
+    .bind(s.id)
+    .bind(s.owner_id)
+    .bind(question)
+    .bind(seq)
+    .fetch_all(&app.db)
+    .await?;
+    let mut files: Vec<ReplyArtifact> = Vec::new();
+    for (id, name, kind) in rows {
+        if files.iter().any(|f| f.artifact_id == id) {
+            continue;
+        }
+        if files.len() == MAX_FILES {
+            tracing::warn!(session_id = %s.id, %question, "the files of a reply beyond {MAX_FILES} are left out");
+            break;
+        }
+        files.push(ReplyArtifact {
+            artifact_id: id,
+            name,
+            kind: serde_json::from_value(Value::String(kind)).unwrap_or(ArtifactKind::File),
+        });
+    }
+    let ids: Vec<Uuid> = files.iter().map(|f| f.artifact_id).collect();
+    link_files(app, asker, &ids).await?;
+    Ok(files)
 }
 
 /// The turn of session `s` on its last delivered input was lost (its process stopped, SPEC

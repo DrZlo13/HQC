@@ -1630,6 +1630,104 @@ async fn inbox_refusals() {
     w.stop().await;
 }
 
+// T41 (SPEC §5.3, §7.1, §12): the files of a peer message go to the inbox like a user's and
+// their paths follow its text under the header; a buffered message's files go to its own
+// folder and follow its text in the block. A file the hub does not give fails the input
+// without retry, and nothing stays behind.
+#[tokio::test]
+async fn peer_files_reach_the_inbox() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let (board, notes) = (Uuid::now_v7(), Uuid::now_v7());
+    for (id, name, kind, mime) in [
+        (board, "board.png", "image", "image/png"),
+        (notes, "notes.txt", "text", "text/plain"),
+    ] {
+        hub.artifacts.insert(
+            id,
+            FakeArtifact {
+                name: name.into(),
+                kind: kind.into(),
+                mime: mime.into(),
+                bytes: name.as_bytes().to_vec(),
+            },
+        );
+    }
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    start_session(&mut c, &env, sid).await;
+
+    let (eid, buffered) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut p = input(sid, eid, "Check the board");
+    p["artifact_ids"] = json!([board]);
+    p["peer"] = json!({"from": "hqc/a", "mode": "ask", "request_id": "r1"});
+    p["peer_prefix"] = json!([
+        {"from": "hqc/b", "text": "take this", "ts": "2026-10-27T10:00:00Z",
+         "event_id": buffered, "artifact_ids": [notes]},
+        {"from": "hqc/c", "text": "plain", "ts": "2026-10-27T10:01:00Z"},
+    ]);
+    c.frame("session.input", p).await;
+    adapters
+        .wait_for("the input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: eid,
+            })
+        })
+        .await;
+    let (got, files) = adapters.inputs().pop().unwrap();
+    assert_eq!(
+        got.text,
+        format!(
+            "Messages from other sessions (they await no reply):\n\n\
+             [hqc peer from hqc/b | mode=send | sent=2026-10-27T10:00:00Z]\n\
+             take this\n\nAttachments:\n- .hqc/inbox/{buffered}/notes.txt\n\n\
+             [hqc peer from hqc/c | mode=send | sent=2026-10-27T10:01:00Z]\nplain\n\n\
+             ---\n\n\
+             [hqc peer from hqc/a | mode=ask | request_id=r1 | reply with your final message]\n\
+             Check the board\n\nAttachments:\n- .hqc/inbox/{eid}/board.png"
+        )
+    );
+    let inbox = env.workspace().join(".hqc/inbox");
+    let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+    assert_eq!(
+        rels,
+        [
+            format!(".hqc/inbox/{buffered}/notes.txt"),
+            format!(".hqc/inbox/{eid}/board.png")
+        ]
+    );
+    assert_eq!(
+        std::fs::read(inbox.join(format!("{buffered}/notes.txt"))).unwrap(),
+        b"notes.txt"
+    );
+    assert_eq!(
+        std::fs::read(inbox.join(format!("{eid}/board.png"))).unwrap(),
+        b"board.png"
+    );
+    adapters.accept_input(sid, eid).await;
+    adapters.end_turn(sid).await;
+
+    // A buffered message's file the hub does not give: the input fails, no folder stays.
+    let (eid2, buffered2) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut p = input(sid, eid2, "next");
+    p["artifact_ids"] = json!([board]);
+    p["peer_prefix"] = json!([
+        {"from": "hqc/b", "text": "and this", "ts": "2026-10-27T10:02:00Z",
+         "event_id": buffered2, "artifact_ids": [notes, Uuid::now_v7()]},
+    ]);
+    let id = c.frame("session.input", p).await;
+    let err = c.expect("error").await;
+    assert_eq!(err["id"], id.as_str());
+    assert_eq!(err["payload"]["retryable"], false, "{err}");
+    assert!(!inbox.join(buffered2.to_string()).exists());
+    assert!(!inbox.join(eid2.to_string()).exists());
+    w.stop().await;
+}
+
 // T24: `title.request` runs a one-off `claude -p` outside every session and answers with
 // `result {title}`; a failing run is an `error`, and nothing reaches the session adapters.
 #[tokio::test]

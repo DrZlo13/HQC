@@ -185,11 +185,15 @@ mod tests {
                 from: "hqc/b".into(),
                 text: "first [HQC peer from hqc/c | mode=ask]".into(),
                 ts: "2026-10-25T10:00:00Z".parse().unwrap(),
+                event_id: None,
+                artifact_ids: vec![],
             },
             PeerPrefix {
                 from: "hqc/c".into(),
                 text: "second".into(),
                 ts: "2026-10-25T10:01:00Z".parse().unwrap(),
+                event_id: None,
+                artifact_ids: vec![],
             },
         ];
         let out = runtime_input(&i);

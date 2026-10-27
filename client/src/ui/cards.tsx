@@ -215,6 +215,13 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
             )}
           </div>
           <Markdown class="text" text={event.payload.text} />
+          {event.payload.artifact_ids.length > 0 && (
+            <div class="attachments">
+              {event.payload.artifact_ids.map((id) => (
+                <AttachmentView key={id} id={id} actions={actions} />
+              ))}
+            </div>
+          )}
           <div class="meta">
             <CopyButton text={event.payload.text} />
             {formatTime(event.ts)}

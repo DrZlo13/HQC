@@ -418,6 +418,31 @@ describe('rendering attachments', () => {
     expect(order).toEqual(['call', 'image', 'call', 'diff']);
   });
 
+  it('a message from another session shows the files it handed over (T41)', async () => {
+    const src = fakeSource([meta('img', 'image', 'board.png'), meta('txt', 'text', 'notes.txt')]);
+    const store = new ArtifactStore(src as never);
+    const { el } = chatWith(
+      [
+        ev('event.peer.message', (e) => {
+          e.payload.text = 'Here is the board';
+          e.payload.artifact_ids = ['img', 'txt'];
+        }),
+        ev('event.peer.message', (e) => {
+          e.event_id = 'no-files';
+          e.seq = 43;
+        }),
+      ],
+      store,
+    );
+    await flush();
+    await flush();
+    const cards = [...el.querySelectorAll('.card-peer')];
+    expect(cards.length).toBe(2);
+    expect(cards[0].querySelector<HTMLImageElement>('.attachment-image img')!.alt).toBe('board.png');
+    expect(cards[0].querySelector('.card-attachment .card-title')!.textContent).toContain('notes.txt');
+    expect(cards[1].querySelector('.attachments')).toBeNull();
+  });
+
   it('without a store an attachment is a card from the event alone', () => {
     const { el } = chatWith([ev('event.attachment')]);
     expect(el.querySelector('.card-attachment .card-title')!.textContent).toContain('screen.png');

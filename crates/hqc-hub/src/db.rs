@@ -1255,19 +1255,33 @@ pub async fn first_text(db: &PgPool, id: Uuid, kind: &str) -> sqlx::Result<Optio
     .await
 }
 
-/// `user.message` events of the session that carried artifacts: their inbox folders on the
-/// worker (`session.cleanup`, T21).
+/// The session's inbox folders on the worker (`session.cleanup`, T21): those of its
+/// `user.message` and `peer.message` events that carried artifacts (T41: a buffered message's
+/// files have a folder of their own), and those of the replies with files to its asks, named
+/// by the ask's `request_id` (T41).
 pub async fn inbox_events(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<Uuid>> {
-    sqlx::query_scalar(
+    let mut ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT event_id FROM events
-         WHERE session_id = $1 AND type = 'user.message'
+         WHERE session_id = $1 AND type IN ('user.message', 'peer.message')
            AND jsonb_typeof(payload->'artifact_ids') = 'array'
            AND jsonb_array_length(payload->'artifact_ids') > 0
          ORDER BY seq",
     )
     .bind(id)
     .fetch_all(db)
-    .await
+    .await?;
+    let asks: Vec<String> = sqlx::query_scalar(
+        "SELECT request_id FROM pending_requests
+         WHERE session_id = $1 AND kind = 'ask'
+           AND jsonb_typeof(result->'payload'->'result'->'files') = 'array'
+         ORDER BY closed_at",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await?;
+    // The worker names the folder by its call's id, a uuid.
+    ids.extend(asks.iter().filter_map(|r| r.parse::<Uuid>().ok()));
+    Ok(ids)
 }
 
 pub fn slugify(title: &str) -> String {

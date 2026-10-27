@@ -4,6 +4,9 @@
 //! their paths are appended to the text as a block "Attachments:", and `.hqc/` is added to the
 //! workspace's `.git/info/exclude`.
 //!
+//! Since T41 also the files of buffered messages in `peer_prefix` (each in the folder of its
+//! message) and of a reply to `hqc_ask` (in the folder of the call, [`fetch_reply`]).
+//!
 //! The hub is not trusted with the file system (SPEC §2.1): names are sanitized here, the
 //! inbox folder must resolve inside the workspace (a symlinked `.hqc` is refused), and files
 //! are written to a fresh temporary file and renamed into place, so an existing symlink is
@@ -260,44 +263,131 @@ struct Downloaded {
     size: u64,
 }
 
+fn distinct(ids: &[Uuid]) -> Vec<Uuid> {
+    let mut out: Vec<Uuid> = Vec::new();
+    for id in ids {
+        if !out.contains(id) {
+            out.push(*id);
+        }
+    }
+    out
+}
+
+/// Before the first file goes into an inbox of `workdir`: the folder is remembered for the
+/// sweep at start, and `.hqc/` excluded from git.
+fn touch(client: &ArtifactClient, workspace: &Path, workdir: &Path, allowed_roots: &[PathBuf]) {
+    if let Some(k) = &client.inboxes {
+        if let Err(e) = k.insert(workdir) {
+            tracing::warn!(workdir = %workdir.display(), "inbox folder not remembered: {e:#}");
+        }
+    }
+    if let Err(e) = exclude_hqc(workspace, allowed_roots) {
+        tracing::warn!(workspace = %workspace.display(), "cannot add .hqc/ to .git/info/exclude: {e:#}");
+    }
+}
+
 /// The input as the runtime gets it: the text with the block of paths, and the files.
 /// Without artifacts the input is unchanged and nothing is touched on disk.
+///
+/// The files of a buffered message in `peer_prefix` (T41) go to the folder of that message
+/// (`.hqc/inbox/<its event_id>/`) and their block follows its text; the limit per input
+/// counts them together with the input's own.
 pub async fn prepare(
     client: &ArtifactClient,
     spec: &StartSpec,
     input: &SessionInput,
     allowed_roots: &[PathBuf],
 ) -> Result<(SessionInput, Vec<InboxFile>), InboxError> {
-    let mut ids: Vec<Uuid> = Vec::new();
-    for id in &input.artifact_ids {
-        if !ids.contains(id) {
-            ids.push(*id);
-        }
-    }
-    if ids.is_empty() {
+    let own = distinct(&input.artifact_ids);
+    if own.is_empty() && input.peer_prefix.iter().all(|p| p.artifact_ids.is_empty()) {
         return Ok((input.clone(), vec![]));
     }
-    let dir = inbox_dir(spec, input.event_id)?;
-    if let Some(k) = &client.inboxes {
-        if let Err(e) = k.insert(&spec.workdir) {
-            tracing::warn!(workdir = %spec.workdir.display(), "inbox folder not remembered: {e:#}");
+    touch(client, &spec.workspace, &spec.workdir, allowed_roots);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut total = 0u64;
+    let r: Result<(SessionInput, Vec<InboxFile>), InboxError> = async {
+        let mut out = input.clone();
+        let mut all = Vec::new();
+        for p in out.peer_prefix.iter_mut() {
+            let ids = distinct(&p.artifact_ids);
+            if ids.is_empty() {
+                continue;
+            }
+            let folder = p.event_id.unwrap_or_else(Uuid::now_v7);
+            let dir = inbox_dir(&spec.workspace, &spec.workdir, folder)?;
+            dirs.push(dir.clone());
+            let files = fetch_all(client, &dir, folder, ids, &mut total).await?;
+            p.text = with_block(&p.text, &files);
+            all.extend(files);
         }
-    }
-    if let Err(e) = exclude_hqc(&spec.workspace, allowed_roots) {
-        tracing::warn!(workspace = %spec.workspace.display(), "cannot add .hqc/ to .git/info/exclude: {e:#}");
-    }
-    match fetch_all(client, &dir, input.event_id, ids).await {
-        Ok(files) => {
-            let mut out = input.clone();
+        if !own.is_empty() {
+            let dir = inbox_dir(&spec.workspace, &spec.workdir, input.event_id)?;
+            dirs.push(dir.clone());
+            let files = fetch_all(client, &dir, input.event_id, own, &mut total).await?;
             out.text = with_block(&input.text, &files);
-            Ok((out, files))
+            all.extend(files);
         }
-        Err(e) => {
-            // The hub sends the input again (retryable) or it has failed: start clean.
-            let _ = std::fs::remove_dir_all(&dir);
-            Err(e)
+        Ok((out, all))
+    }
+    .await;
+    if r.is_err() {
+        // The hub sends the input again (retryable) or it has failed: start clean.
+        for d in dirs {
+            let _ = std::fs::remove_dir_all(&d);
         }
     }
+    r
+}
+
+/// The files of an `hqc_ask` reply (T41, SPEC §7.1) for the session working in `workdir`:
+/// downloaded into `.hqc/inbox/<folder>/` (`folder` is the call's id) with the limits of an
+/// input, each one given back with its absolute path, or with the error that stopped it.
+pub async fn fetch_reply(
+    client: &ArtifactClient,
+    workspace: &Path,
+    workdir: &Path,
+    allowed_roots: &[PathBuf],
+    folder: Uuid,
+    files: &[hqc_proto::mcp::ReplyArtifact],
+) -> Vec<hqc_proto::mcp::ReplyFile> {
+    use hqc_proto::mcp::ReplyFile;
+    let failed = |f: &hqc_proto::mcp::ReplyArtifact, e: String| ReplyFile {
+        name: f.name.clone(),
+        kind: f.kind,
+        path: None,
+        size: None,
+        error: Some(e),
+    };
+    if files.is_empty() {
+        return vec![];
+    }
+    touch(client, workspace, workdir, allowed_roots);
+    let dir = match inbox_dir(workspace, workdir, folder) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(workdir = %workdir.display(), "reply files: {e:#}");
+            return files.iter().map(|f| failed(f, format!("{e:#}"))).collect();
+        }
+    };
+    let mut out = Vec::new();
+    let mut taken: Vec<String> = Vec::new();
+    let mut total = 0u64;
+    for f in files {
+        match fetch_one(client, &dir, folder, f.artifact_id, &mut total, &mut taken).await {
+            Ok(got) => out.push(ReplyFile {
+                name: f.name.clone(),
+                kind: f.kind,
+                path: Some(got.path.display().to_string()),
+                size: Some(got.size),
+                error: None,
+            }),
+            Err(e) => {
+                tracing::warn!(artifact_id = %f.artifact_id, "reply file not downloaded: {e:#}");
+                out.push(failed(f, format!("not downloaded: {e}")));
+            }
+        }
+    }
+    out
 }
 
 async fn fetch_all(
@@ -305,44 +395,56 @@ async fn fetch_all(
     dir: &Path,
     event_id: Uuid,
     ids: Vec<Uuid>,
+    total: &mut u64,
 ) -> Result<Vec<InboxFile>, InboxError> {
     let mut files = Vec::new();
     let mut taken: Vec<String> = Vec::new();
-    let mut total = 0u64;
     for id in ids {
-        let budget = client.max_input.saturating_sub(total);
-        let d = client.download(id, dir, budget).await?;
-        total += d.size;
-        let name = unique(&sanitize_name(&d.name), &taken);
-        taken.push(name.clone());
-        let path = dir.join(&name);
-        // rename replaces whatever is at `path` (a symlink included) without following it.
-        std::fs::rename(&d.tmp, &path)
-            .with_context(|| format!("move into {}", path.display()))
-            .map_err(InboxError::Other)?;
-        let rel = format!("{HQC_DIR}/inbox/{event_id}/{name}");
-        files.push(InboxFile {
-            artifact_id: id,
-            path,
-            rel,
-            kind: d.kind,
-            mime: d.mime,
-            size: d.size,
-        });
+        files.push(fetch_one(client, dir, event_id, id, total, &mut taken).await?);
     }
     Ok(files)
 }
 
-/// `<workdir>/.hqc/inbox/<event_id>`, created one level at a time: the working directory
+/// Downloads artifact `id` into `dir` (`.hqc/inbox/<folder>`) under a name not in `taken`,
+/// within what is left of [`ArtifactClient::max_input`] after `total`.
+async fn fetch_one(
+    client: &ArtifactClient,
+    dir: &Path,
+    folder: Uuid,
+    id: Uuid,
+    total: &mut u64,
+    taken: &mut Vec<String>,
+) -> Result<InboxFile, InboxError> {
+    let budget = client.max_input.saturating_sub(*total);
+    let d = client.download(id, dir, budget).await?;
+    *total += d.size;
+    let name = unique(&sanitize_name(&d.name), taken);
+    taken.push(name.clone());
+    let path = dir.join(&name);
+    // rename replaces whatever is at `path` (a symlink included) without following it.
+    std::fs::rename(&d.tmp, &path)
+        .with_context(|| format!("move into {}", path.display()))
+        .map_err(InboxError::Other)?;
+    let rel = format!("{HQC_DIR}/inbox/{folder}/{name}");
+    Ok(InboxFile {
+        artifact_id: id,
+        path,
+        rel,
+        kind: d.kind,
+        mime: d.mime,
+        size: d.size,
+    })
+}
+
+/// `<workdir>/.hqc/inbox/<folder>`, created one level at a time: the working directory
 /// must still resolve inside the workspace, and none of the three levels may be a symlink,
 /// so nothing is created outside the workspace.
-fn inbox_dir(spec: &StartSpec, event_id: Uuid) -> Result<PathBuf, InboxError> {
-    spec.recheck_workdir()?;
-    let mut dir = spec
-        .workdir
+fn inbox_dir(workspace: &Path, workdir: &Path, folder: Uuid) -> Result<PathBuf, InboxError> {
+    crate::config::recheck_workdir(workspace, workdir)?;
+    let mut dir = workdir
         .canonicalize()
-        .with_context(|| format!("resolve {}", spec.workdir.display()))?;
-    for part in [HQC_DIR, "inbox", &event_id.to_string()] {
+        .with_context(|| format!("resolve {}", workdir.display()))?;
+    for part in [HQC_DIR, "inbox", &folder.to_string()] {
         dir.push(part);
         match std::fs::symlink_metadata(&dir) {
             Ok(m) if m.file_type().is_symlink() => {
@@ -642,14 +744,14 @@ mod tests {
         let client = ArtifactClient::new(&url, Secret::new("hqcw_test")).with_limits(2000, 2500);
         let d = tempfile::tempdir().unwrap();
 
-        let files = fetch_all(&client, d.path(), Uuid::nil(), vec![small])
+        let files = fetch_all(&client, d.path(), Uuid::nil(), vec![small], &mut 0)
             .await
             .unwrap();
         assert_eq!(files[0].size, 900);
         std::fs::remove_file(&files[0].path).unwrap();
 
         for id in [big, chunked] {
-            let e = fetch_all(&client, d.path(), Uuid::nil(), vec![id])
+            let e = fetch_all(&client, d.path(), Uuid::nil(), vec![id], &mut 0)
                 .await
                 .unwrap_err();
             assert!(matches!(e, InboxError::TooLarge(i, 2000) if i == id), "{e}");
@@ -658,7 +760,7 @@ mod tests {
         }
 
         // 1500 + 1500 is over the 2500 of one input: the second stops at the 1000 left.
-        let e = fetch_all(&client, d.path(), Uuid::nil(), vec![a, b])
+        let e = fetch_all(&client, d.path(), Uuid::nil(), vec![a, b], &mut 0)
             .await
             .unwrap_err();
         assert!(matches!(e, InboxError::TooLarge(i, 1000) if i == b), "{e}");

@@ -559,6 +559,168 @@ async fn attach_uploads_the_file_before_the_call() {
     w.stop().await;
 }
 
+/// T41 (SPEC §7, §14): `files` of `hqc_send` / `hqc_ask` are read and uploaded on the worker by
+/// the rules of `hqc_attach` before the call, which carries `artifact_ids` instead; an artifact
+/// id passes as it is; a refused file stops the call before anything goes to the hub.
+#[tokio::test]
+async fn message_files_are_uploaded_before_the_call() {
+    let (env, hub, w, mut c, sid) = setup().await;
+    let ws = env.workspace();
+    std::fs::write(ws.join("sub/plan.txt"), b"the plan").unwrap();
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+
+    let given = Uuid::now_v7();
+    rt.call_tool(
+        2,
+        "hqc_send",
+        json!({"text": "here", "session": "hqc/b",
+               "files": ["sub/plan.txt", given.to_string(), "sub/plan.txt"]}),
+    )
+    .await;
+    let f = c.expect("mcp.call").await;
+    let ups = hub.artifacts.uploads();
+    assert_eq!(ups.len(), 2, "each path read and uploaded");
+    assert_eq!(ups[0].body, b"the plan");
+    assert_eq!(ups[0].headers["x-hqc-session-id"], sid.to_string());
+    assert_eq!(ups[0].headers["x-hqc-artifact-name"], "plan.txt");
+    assert_eq!(f["payload"]["tool"], "hqc_send");
+    // The fake hub gives every upload a new id; the real one dedups the same file.
+    assert_eq!(
+        f["payload"]["args"],
+        json!({"text": "here", "session": "hqc/b",
+               "artifact_ids": [ups[0].id, given, ups[1].id]}),
+        "the hub gets artifacts, not paths"
+    );
+    c.send(json!({"id": f["id"], "type": "mcp.result",
+                  "payload": {"request_id": f["payload"]["request_id"],
+                              "result": {"to": "hqc/b", "delivery": "buffered"}}}))
+        .await;
+    let r = rt.recv().await;
+    assert!(!result_text(&r).0, "{r}");
+
+    // No `files`, or an empty list: the arguments go as they are.
+    rt.call_tool(
+        3,
+        "hqc_ask",
+        json!({"text": "q", "session": "hqc/b", "files": []}),
+    )
+    .await;
+    let f = c.expect("mcp.call").await;
+    assert_eq!(
+        f["payload"]["args"],
+        json!({"text": "q", "session": "hqc/b"})
+    );
+    c.send(json!({"id": f["id"], "type": "ack", "payload": {}}))
+        .await;
+
+    // Refused on the worker: nothing uploaded, no call.
+    let outside = env.dir.path().join("secret.txt");
+    std::fs::write(&outside, b"secret").unwrap();
+    std::os::unix::fs::symlink(&outside, ws.join("link.txt")).unwrap();
+    let many: Vec<String> = (0..33).map(|_| Uuid::now_v7().to_string()).collect();
+    let cases = [
+        (json!([outside.display().to_string()]), "invalid_args: "),
+        (json!(["link.txt"]), "invalid_args: "),
+        (json!(["sub"]), "invalid_args: "),
+        (json!(["sub/plan.txt", "missing.txt"]), "not_found: "),
+        (json!("sub/plan.txt"), "invalid_args: "),
+        (json!([1]), "invalid_args: "),
+        (json!(many), "invalid_args: "),
+    ];
+    let before = hub.artifacts.uploads().len();
+    for (n, (files, want)) in cases.into_iter().enumerate() {
+        rt.call_tool(
+            10 + n as u64,
+            "hqc_send",
+            json!({"text": "x", "session": "hqc/b", "files": files}),
+        )
+        .await;
+        let r = rt.recv().await;
+        let (is_err, text) = result_text(&r);
+        assert!(is_err && text.starts_with(want), "{files}: {text}");
+        assert!(!text.contains("secret\n"), "{text}");
+    }
+    // Only the file before the missing one went up; no call followed.
+    assert_eq!(hub.artifacts.uploads().len(), before + 1);
+    assert!(c
+        .maybe("mcp.call", Duration::from_millis(300))
+        .await
+        .is_none());
+    drop(rt);
+    w.stop().await;
+}
+
+/// T41 (SPEC §7.1, §12): the files of an `hqc_ask` reply are downloaded into the session's
+/// inbox (`.hqc/inbox/<request_id>/`) before the result reaches the runtime, which gets local
+/// paths; a file that could not be downloaded is reported with an error, the reply still comes.
+#[tokio::test]
+async fn the_files_of_a_reply_are_downloaded_before_the_result() {
+    let (env, hub, w, mut c, _sid) = setup().await;
+    let report = Uuid::now_v7();
+    hub.artifacts.insert(
+        report,
+        FakeArtifact {
+            name: "report.txt".into(),
+            kind: "text".into(),
+            mime: "text/plain".into(),
+            bytes: b"all green".to_vec(),
+        },
+    );
+    let gone = Uuid::now_v7();
+    let mut rt = Runtime::spawn(&env, Some(TOKEN_A));
+    rt.initialize().await;
+    rt.call_tool(2, "hqc_ask", json!({"text": "green?", "session": "hqc/ci"}))
+        .await;
+    let f = c.expect("mcp.call").await;
+    let rid = f["payload"]["request_id"].as_str().unwrap().to_string();
+    c.send(json!({"id": f["id"], "type": "ack", "payload": {}}))
+        .await;
+    let id = c
+        .frame(
+            "mcp.result",
+            json!({"request_id": rid, "result": {"from": "hqc/ci", "reply": "yes",
+                   "files": [{"artifact_id": report, "name": "report.txt", "kind": "text"},
+                             {"artifact_id": gone, "name": "gone.png", "kind": "image"}]}}),
+        )
+        .await;
+    let ack = c.expect("ack").await;
+    assert_eq!(ack["id"], id.as_str());
+    let r = rt.recv().await;
+    assert_eq!(r["id"], 2);
+    let (is_err, text) = result_text(&r);
+    assert!(!is_err, "{r}");
+    let got: Value = serde_json::from_str(&text).unwrap();
+    let path = env
+        .workspace()
+        .canonicalize()
+        .unwrap()
+        .join(format!(".hqc/inbox/{rid}/report.txt"));
+    assert_eq!(got["from"], "hqc/ci");
+    assert_eq!(got["reply"], "yes");
+    assert_eq!(
+        got["files"][0],
+        json!({"name": "report.txt", "kind": "text",
+               "path": path.display().to_string(), "size": 9})
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"all green");
+    assert_eq!(got["files"][1]["name"], "gone.png");
+    assert!(got["files"][1].get("path").is_none(), "{got}");
+    assert!(
+        got["files"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not downloaded"),
+        "{got}"
+    );
+    // Downloaded with the worker token.
+    let reqs = hub.artifacts.requests.lock().unwrap().clone();
+    let bearer = format!("Bearer {TOKEN}");
+    assert!(reqs.iter().all(|(_, a)| a.as_deref() == Some(&bearer[..])));
+    drop(rt);
+    w.stop().await;
+}
+
 #[tokio::test]
 async fn a_call_cancelled_during_its_upload_is_not_sent() {
     let (env, hub, w, mut c, _sid) = setup().await;

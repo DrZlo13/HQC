@@ -15,7 +15,10 @@
 //!   [`FromDaemon::Result`].
 //! - `hqc_attach` first reads and uploads the file ([`Attacher::prepare`]); only then does
 //!   the `mcp.call` go, with the artifact id instead of the path. A cancel or EOF during the
-//!   upload stops it, and no `mcp.call` is sent.
+//!   upload stops it, and no `mcp.call` is sent. The `files` of `hqc_send` and `hqc_ask` go
+//!   the same way ([`Attacher::prepare_files`], T41), and the files of an `hqc_ask` reply
+//!   are downloaded into the session's inbox before the result goes back
+//!   ([`Attacher::reply_files`]).
 //! - [`ToDaemon::Cancel`] and EOF with calls open send `mcp.cancel` for each of them.
 //! - The token is never logged.
 
@@ -288,7 +291,10 @@ async fn serve(
                     );
                     continue;
                 }
-                if tool == hqc_proto::mcp::ATTACH {
+                // Files to upload first: `hqc_attach`'s, and `files` of a message (T41).
+                let files = (tool == hqc_proto::mcp::SEND || tool == hqc_proto::mcp::ASK)
+                    && args.get("files").is_some();
+                if tool == hqc_proto::mcp::ATTACH || files {
                     let Some(folders) = link.mcp().folders(sid) else {
                         fail(
                             error_code::UNAVAILABLE,
@@ -301,14 +307,20 @@ async fn serve(
                     // Held until the task is registered, so that it cannot finish first.
                     let mut g = preparing.lock().unwrap();
                     let task = tokio::spawn(async move {
-                        let args = attacher.prepare(sid, &folders, args).await;
+                        let args = if files {
+                            attacher.prepare_files(sid, &folders, args).await
+                        } else {
+                            attacher.prepare(sid, &folders, args).await
+                        };
                         // Held until the call is in `open`: an EOF meanwhile then sees it.
                         let mut p = prep.lock().unwrap();
                         if p.remove(&id).is_none() {
                             return;
                         }
                         match args {
-                            Ok(args) => send_call(&link, &out, &open, sid, id, &tool, args),
+                            Ok(args) => {
+                                send_call(&link, &attacher, &out, &open, sid, id, &tool, args)
+                            }
                             Err(e) => {
                                 let _ = out.send(FromDaemon::Result {
                                     id,
@@ -321,7 +333,7 @@ async fn serve(
                     g.insert(id, task.abort_handle());
                     continue;
                 }
-                send_call(&link, &out_tx, &open, sid, id, &tool, args);
+                send_call(&link, &attacher, &out_tx, &open, sid, id, &tool, args);
             }
         }
     }
@@ -338,9 +350,12 @@ async fn serve(
     let _ = writer.await;
 }
 
-/// Sends `mcp.call` for the connection's call `id` and hands its `mcp.result` back.
+/// Sends `mcp.call` for the connection's call `id` and hands its `mcp.result` back; the files
+/// of an `hqc_ask` reply are downloaded first (T41).
+#[allow(clippy::too_many_arguments)]
 fn send_call(
     link: &HubLink,
+    attacher: &Attacher,
     out_tx: &mpsc::UnboundedSender<FromDaemon>,
     open: &Arc<std::sync::Mutex<HashMap<u64, Uuid>>>,
     sid: Uuid,
@@ -371,9 +386,19 @@ fn send_call(
     tracing::info!(session_id = %sid, request_id = %rid, %tool, "mcp call");
     open.lock().unwrap().insert(id, rid);
     let (out, open) = (out_tx.clone(), open.clone());
+    let (link, attacher, ask) = (link.clone(), attacher.clone(), tool == hqc_proto::mcp::ASK);
     tokio::spawn(async move {
         // A cancelled call's sender is dropped: no answer goes back (MCP).
-        let Ok(outcome) = rx.await else { return };
+        let Ok(mut outcome) = rx.await else { return };
+        if let (true, Ok(r)) = (ask, &mut outcome) {
+            if r.get("files").is_some() {
+                match link.mcp().folders(sid) {
+                    Some(f) => *r = attacher.reply_files(&f, rid, r.take()).await,
+                    // The agent is gone, and its call with it.
+                    None => return,
+                }
+            }
+        }
         if open.lock().unwrap().remove(&id).is_none() {
             return;
         }

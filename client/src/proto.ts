@@ -176,6 +176,8 @@ export interface PeerMessage {
   text: string;
   mode: PeerMode;
   request_id?: string;
+  /** The files the sender handed over (since SPEC 0.46, T41); empty when it had none. */
+  artifact_ids: Uuid[];
 }
 export interface Usage {
   input_tokens: number;
@@ -395,6 +397,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     text: str(p, 'text'),
     mode: tolerantEnum(p, 'mode', PEER_MODES),
     request_id: optStr(p, 'request_id'),
+    artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
   }),
   usage: (p) => ({
     input_tokens: num(p, 'input_tokens'),

@@ -219,3 +219,25 @@ at run time, a creator that is gone (deleted, or a schedule from before 0.44) co
 "Ask". The worker and the client are unchanged: the header already names
 `permission_capped_by`, which now comes from either source. Tests: hub `tests/t40.rs`.
 
+## T41. Files between sessions (after T40)
+
+Sections: §4 (peer.message), §5.3 (session.input), §7, §7.1, §12, §14, §20. `hqc_send` and
+`hqc_ask` carry text only, so an agent cannot hand another session a file; the iteration's
+criterion needs B's file to reach A (2026-10-27: an agent on home-mac fell back to pasting a
+file into the message text).
+- `hqc_send(text, session, files?)` and `hqc_ask(text, session, timeout_s?, files?)`: `files`
+  are paths (or artifact ids from `hqc_attach` results). The sender's worker resolves and
+  uploads paths with the `hqc_attach` rules (inside the workspace and `allowed_roots`, regular
+  files, 100 MB each), then the call carries artifact ids. The `peer.message` keeps
+  `artifact_ids`; the target's worker downloads them into its `.hqc/inbox` and lists the paths
+  under the peer header, as for a user's attachments (§12).
+- The reply to `hqc_ask` carries the files the target attached during the answering turn
+  (`hqc_attach` and files of its final message): the asker's worker downloads them into its own
+  `.hqc/inbox` before it returns the tool result, which lists the local paths.
+- Owner's own sessions only; an artifact of another owner is `not_found`; the inbox caps of T36
+  apply; a repeated call acts once (§5.2).
+Acceptance: the common checks; worker tests: upload rules on the sender side, download into
+the inbox on both sides, the result's paths; hub tests: artifacts on the message and on the
+reply, another owner's artifact, a repeat; a live run: A asks B on another session, B attaches a
+file, A's tool result has a local path to it with the same content.
+

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.45, 2026-10-26. Status: the architecture agreed after six reviews and a survey of
+Version 0.46, 2026-10-27. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -70,7 +70,9 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   no open ports (§20). Signing input and answers with device keys registered on the worker
   locally is iteration 3+.
 - The hub **cannot**: go outside the worker's `allowed_roots` (also not through an agent's
-  `hqc_attach`: the worker resolves and reads the path itself, §7), pick an environment or a
+  `hqc_attach` or the `files` of `hqc_send`/`hqc_ask`: the worker resolves and reads the path
+  itself, §7; files that reach a worker from the hub are written only into its own
+  `.hqc/inbox`, §5.3, §12), pick an environment or a
   Hermes profile for a path the worker owner has not bound locally, or enable
   the machine's MCP servers. These are set only by the worker's local config (§14); the worker
   ignores diverging values from `session.start` and answers with an error. Nor can it run a
@@ -334,7 +336,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result`; for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?` | worker or hub |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
@@ -370,7 +372,10 @@ Rules:
 - The user's files always go into `user.message.artifact_ids[]`, including without text
   (`text` empty): this is input, and the agent receives them (§8.1, §12) **[decision]** (T16). An
   `attachment` event is not delivered to the agent — it is a file shown in the feed (`hqc_attach`,
-  §7); the client does not write `attachment` events of its own.
+  §7); the client does not write `attachment` events of its own. Since 0.46 (T41) an agent's
+  files for another session go into `peer.message.artifact_ids[]` the same way, and the
+  `attachment` events of a turn that answers an `hqc_ask` go back to the asker with the
+  reply (§7.1).
 - `*_preview` fields are cut by the worker to 4 KB; the full tool result is not sent to the hub,
   except diffs and results saved as artifacts.
 - `agent.delta` goes to clients over WebSocket and is not saved; `agent.message` is saved.
@@ -589,7 +594,8 @@ MCP calls (worker → hub → worker):
   `attachment` event so, `hqc_send`/`hqc_ask` their `peer.message` (with `peer.message` as
   the tool), `hqc_schedule` its schedule (since 0.38); a repeated `hqc_send` answers the same `{to, delivery}` from that event, a
   repeated `hqc_ask` finds its `PendingRequest`: still open — `ack {}` again, closed — its
-  stored `mcp.result` under the repeat's frame `id`. `hqc_spawn` (since 0.37) keys the new
+  stored `mcp.result` under the repeat's frame `id` (since 0.46 with the reply's `files`, which
+  the worker downloads again into the same folder). `hqc_spawn` (since 0.37) keys the new
   session's id (`hqc_spawn` as the tool) and its first `peer.message` (as `hqc_send`): a
   repeat finds the session, stores the message if the first call did not get that far, and
   answers the same `{address}`. The same `request_id` from another
@@ -597,7 +603,10 @@ MCP calls (worker → hub → worker):
 - A deferred answer (since 0.35): the hub keeps the `mcp.result` frame in
   `PendingRequest.result` and sends it to the asking session's worker, now if it is
   connected, else after its next `hello` (no `session.start` is needed: the connection routes
-  `mcp.result` itself), until the worker acks it. A worker restart (a new `boot_id`) closes
+  `mcp.result` itself), until the worker acks it. Since 0.46 (T41) the result of `hqc_ask` may
+  carry `files: [{artifact_id, name, kind}]`; the worker acks the frame at once, downloads the
+  files into the asking session's inbox and only then answers the MCP call, with local paths
+  instead of the ids (§7). A worker restart (a new `boot_id`) closes
   the worker's open asks with `error {code: worker_restart}` and drops their unsent answers:
   the blocking calls died with the old process.
 - The token (since 0.33). The hub issues a new token with every `session.start`, also for an
@@ -639,11 +648,15 @@ MCP calls (worker → hub → worker):
   it only if the path, with symlinks resolved, is a directory inside `allowed_roots`, and
   checks `cwd` against it (§8.1), otherwise `error {invalid_frame}`.
 - `session.input` {session_id, event_id, text, artifact_ids[],
-  peer_prefix[{from: "<project-slug>/<session-slug>", text, ts}]} —
+  peer_prefix[{from: "<project-slug>/<session-slug>", text, ts, event_id?, artifact_ids[]?}]} —
   the worker downloads the artifacts via `GET /worker/artifacts/{id}` with its token
   (no TTL) into `<workspace>/<cwd>/.hqc/inbox/<event_id>/` and substitutes the paths; the
   `.hqc/` folder is added to the workspace's `.git/info/exclude`. `peer_prefix` — accumulated
-  `send` messages (§7.1). `peer?` {from, mode, request_id?} (since 0.35) — only for a
+  `send` messages (§7.1); since 0.46 (T41) each with its `event_id` and its files
+  (`artifact_ids`, absent when none), which the worker downloads into
+  `.hqc/inbox/<that event_id>/` and lists after that message's text in the block, the limit of
+  500 MB per input (§20) counting them together with the input's own; a file the hub does not
+  give fails the input as for its own files. `peer?` {from, mode, request_id?} (since 0.35) — only for a
   `peer.message`: the sender's address, `send`/`ask` and the ask's `request_id`, from which
   the worker writes the header (§7.1); `text` is the message's text without it.
   `permission_cap?` (since 0.43, T39) — `ask` | `auto`, the cap of the input's chain (§7.1): with
@@ -675,7 +688,9 @@ MCP calls (worker → hub → worker):
   switches it too.
 - `session.cleanup` {session_id, workspace_path | null, cwd, event_ids[]} → `ack` (since 0.23) —
   after `session.kill` when a session or its project is archived or deleted: remove the inbox
-  folders of the inputs `event_ids` (for a session without a workspace — its scratch folder);
+  folders of the inputs `event_ids` (for a session without a workspace — its scratch folder;
+  since 0.46 also the folders of `peer.message`s with files and of `hqc_ask` replies with files,
+  named by the ask's `request_id`);
   path checks and details are in §17.4.
 - `title.request` {request_id, session_id, user_text, agent_text} → `result {request_id, title}`
   or `error` (since 0.25, T24) — the session title (§3 Session): `user_text` — the first
@@ -1126,6 +1141,27 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   session: an immediate error. Since 0.35 (T32): the result is `{from, reply}` — the
   target's address and the text of its final answer; `timeout_s` is at least 1 and at most
   `ask_timeout_s` (a larger value is cut to it), by default `ask_timeout_s`.
+- Files between sessions (since 0.46, T41): `hqc_send(text, session, files?)` and
+  `hqc_ask(text, session, timeout_s?, files?)`. `files` is a list of at most 32 strings, each
+  a path or an artifact id (a uuid, e.g. from an `hqc_attach` result). The sender's worker
+  daemon resolves, reads and uploads every path by the rules of `hqc_attach` (inside the
+  session's workspace and `allowed_roots`, symlinks resolved, a regular file of at most 100
+  MB each, `PUT /worker/artifacts`); a uuid passes as it is. Then it sends the `mcp.call` with
+  `artifact_ids` instead of `files` (the hub never sees a path; a `files` that reaches the hub
+  is an unknown argument, `invalid_args`). The first refusal fails the call before anything
+  goes to the hub (a path uploaded before it stays an unreferenced artifact, removed by the
+  cleanup of §12). The hub accepts only artifacts of the owner linked to the calling session
+  in `artifact_sessions` (uploaded for it, or given to it in an input or a reply), at most 32,
+  each once; anything else is `not_found` and nothing is stored. The `peer.message` keeps them
+  in `artifact_ids` and they are linked to the target, whose worker downloads them into its
+  own `.hqc/inbox` and lists the paths after the message's text, under the peer header
+  (§5.3, §12). A repeated call acts once (§5.2). The reply to an `hqc_ask` carries the files
+  the target attached during its answering turn (§7.1): the result is `{from, reply,
+  files?}`, `files` absent when there are none; the asking worker gives the agent `files:
+  [{name, kind, path, size}]` with `path` absolute, in `<workdir>/.hqc/inbox/<request_id>/`,
+  or `{name, kind, error}` for a file it could not download (the reply text comes back
+  anyway). The tool descriptions tell the agent to hand files over with `files` and never
+  paste them into `text`, and that they arrive as local paths.
 - `hqc_spawn(project, workspace, runtime?, model?, prompt)` — create a session and an agent,
   return the address. `workspace` is required if the project has no `default_workspace_id`.
   Since 0.37 (T34): `hqc_spawn(project, workspace?, runtime?, model?, prompt)`; the session is
@@ -1203,7 +1239,8 @@ Delivery:
   "Messages from other sessions" block if `peer_prefix` is not empty, then the header line if
   `peer` is set, then the escaped `text` (with the inbox paths of §12). The block is
   `Messages from other sessions (they await no reply):`, an empty line, then per message
-  `[hqc peer from <address> | mode=send | sent=<ts, UTC, seconds>]`, its escaped text and an
+  `[hqc peer from <address> | mode=send | sent=<ts, UTC, seconds>]`, its escaped text (since
+  0.46 followed by the `Attachments:` block of its own files, `.hqc/inbox/<its event_id>/…`) and an
   empty line, closed by `---` and an empty line. The sender's address and `request_id` are
   escaped as well. Since 0.39 (T36) the fields inside a header (the
   sender's address, `request_id`) are reduced to one line of at most 200 characters with `[`,
@@ -1228,8 +1265,10 @@ Queues (two different ones):
   limit: 50 messages or 64 KB; the oldest are evicted with a `system` event. With
   `wake_on_send: true`, a send goes to the input queue like an ask that waits for no reply.
   Since 0.35 (T32): a buffered send is stored without `delivery` and kept in the table
-  `peer_buffer` (migration `0015`; 64 KB is the sum of the texts in bytes); the eviction event
-  is `system peer_evicted` in the target. When the hub sends an input it marks the buffered
+  `peer_buffer` (migration `0015`; 64 KB is the sum of the texts in bytes; files do not
+  count, they are not in the frame but downloaded by the worker); the eviction event
+  is `system peer_evicted` in the target. Since 0.46 (T41) a buffered message carries its files
+  with it: its entry in `peer_prefix` has its `event_id` and `artifact_ids` (§5.3). When the hub sends an input it marks the buffered
   messages not carried by another input still `pending` as carried by this one and puts them
   in its `peer_prefix`, oldest first; the input's `ack` removes them from the buffer (their
   events keep no `delivery`), a send that arrives meanwhile waits for the next input. The
@@ -1257,7 +1296,15 @@ The reply to an ask:
 - Open `ask`s are stored in `PendingRequest`; after the sending worker restarts, the
   blocking call is lost and the `ask` is closed with an error (§5.2).
 - Since 0.35 (T32): the reply counts from any final `agent.message` the worker or its
-  mirror stores in the target; it closes the ask with `{from, reply}` (§7). The timeout gives
+  mirror stores in the target; it closes the ask with `{from, reply}` (§7). Since 0.46 (T41)
+  the reply also carries the files of the answering turn: the artifacts of the target's
+  `attachment` events between the question (the `peer.message`) and that final message,
+  oldest first, each once, at most 32, only artifacts of the session's owner (a worker can
+  write an `attachment` event itself, and another owner's id in one is left out), as
+  `files: [{artifact_id, name, kind}]` in the stored `mcp.result`; the hub links them to the
+  asking session so that its worker may download them, and that worker answers the agent with
+  local paths (§7, §5.2). The final message has no files of its own: what the target wants to
+  hand back it attaches with `hqc_attach`. The timeout gives
   `error {code: timeout}`; a reply after it, or after `mcp.cancel`, goes nowhere. A target
   whose turn on the question is lost (`system turn_lost`: its process stopped, its worker
   restarted, the watchdog) gives no reply; since 0.39 (T36) the ask then fails at once with
@@ -2290,6 +2337,9 @@ else is `404`; the hub's own CSP (§20) adds this origin to `img-src`, `frame-sr
 The worker downloads artifacts via `GET /worker/artifacts/{id}` with its token (§5.3), no TTL:
 only artifacts that came in the input of a session of this worker (others get `404`); the name
 and `kind` are in the headers `x-hqc-artifact-name` (percent-encoded) and `x-hqc-artifact-kind`.
+The rule is the link in `artifact_sessions` to a session of this worker; since 0.46 (T41) a
+`peer.message` with files links them to its target, and a reply with files to the asking
+session (§7.1), so the target's and the asker's workers may download them.
 
 Client. User → agent: files are attached to a message (paperclip, drag and drop, paste;
 several; image previews as `data:` URLs); first each goes through `POST /api/artifacts`, then
@@ -2305,10 +2355,14 @@ for one of its sessions; the owner is the session's owner, dedup and `kind` as f
 upload; the artifact is linked to the session in `artifact_sessions`, which is what the tool
 checks (and the session's worker may download it back). The `attachment` event renders like a
 user's attachment, standing in the feed after the tool group of its call; diffs of ACP agents
-are saved as artifacts by the adapter itself (§8.2).
+are saved as artifacts by the adapter itself (§8.2). Agent → agent (since 0.46, T41): the
+`files` of `hqc_send`/`hqc_ask` go up by the same worker upload and down into the target's
+`.hqc/inbox` like a user's files; the files of a reply into the asker's (§7, §7.1). In the
+feed a `peer.message` shows its files under its text like a `user.message`.
 
 **Cleanup** (since 0.23, T21). Once a day (the first time right after start) the hub deletes
-artifact records that no event references (`user.message.artifact_ids`, `artifact_id` of
+artifact records that no event references (`artifact_ids` of `user.message` and, since 0.46,
+`peer.message`, `artifact_id` of
 `attachment` and `tool.result`) and that are older than `HQC_ARTIFACT_RETENTION_DAYS` (default
 30, `0` means never delete) by `updated_at`, the last upload of the same file or input with it.
 The file on disk is deleted only when no records are left for its sha256: first it is moved
@@ -2642,7 +2696,9 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   the hub sends the worker, after `session.kill`, the frame
   `session.cleanup {session_id, workspace_path | null, cwd, event_ids[]}`
   → `ack` (example `hub.session.cleanup*.json`; added purely additively, `session.kill` did not
-  change): `event_ids` are the session's inputs with attachments. The worker deletes
+  change): `event_ids` are the session's inputs with attachments (since 0.46 also its
+  `peer.message`s with files, buffered ones included, and the `request_id`s of its asks whose
+  reply had files, §7.1). The worker deletes
   `<workspace>/<cwd>/.hqc/inbox/<event_id>` of these inputs, and for a session without a workspace
   (`null`, §8.4), its folder `<scratch_root>/<session_id>`. The worker does not trust the hub's
   paths (§2.1): the workspace is inside `allowed_roots`, `cwd` is relative without `..` and is
@@ -2747,7 +2803,7 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   | `fs.stat`, `fs.list_dirs`, `workspace.list_candidates` from the API (§5.3, §6) | 4 at once per worker | `429 worker_busy`, no frame goes to the worker |
   | takeover without a registry (§9.3): `locked_by: vscode` without `vscode_active_at` | treated as "written just now" | `409 vscode_active`; the transition to `vscode` sets the time, migration `0012` fills it in for old rows |
   | turn watchdog (§17.3) | a pass every `limit / 10`, at least every 10 s, over the partial index `turn_open` | — |
-  | attachment download by the worker (§12, `.hqc/inbox`) | 100 MB per artifact, 500 MB per input; streamed to disk | the download is aborted, the partial file is deleted, `error` on `session.input` without retry |
+  | attachment download by the worker (§12, `.hqc/inbox`) | 100 MB per artifact, 500 MB per input (since 0.46 the files of its buffered messages included); streamed to disk | the download is aborted, the partial file is deleted, `error` on `session.input` without retry |
   | attachment display by the client (§12) | a diff body is fetched only once `size` is known; text and diffs over 2 MB get "Download" only; a body with `Content-Length` over the display limit is not read | — |
   | `mcp.call.args` (§5.2, since 0.33) | 64 KB serialized; the worker refuses a bigger call before sending it, the hub checks again | `mcp.result` `error invalid_args` |
   | `mcp.call.session_token` (§5.2) | `hqcs_` + 43 base64url characters, checked before the database | `mcp.result` `error unauthorized` |
@@ -2780,6 +2836,9 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   | `delivery` of a `mirror.event` (§9.2) | `delivered` on a `user.message`, none otherwise, whatever the worker sent | — |
   | the worker's MCP socket (§7.2, since 0.39) | a session's token only from a process inside that session's agent | the connection is refused (`unauthorized`) |
   | `hqc_attach` paths (§7) | a `path` outside the workspace as written is refused before the file system is asked; no refusal names a resolved path | `error invalid_args` |
+  | `files` of `hqc_send`/`hqc_ask` (§7, since 0.46) | at most 32; each path by the rules of `hqc_attach` (above), on the sender's worker | `error invalid_args` / `not_found` from the worker, no call is sent |
+  | `artifact_ids` of `hqc_send`/`hqc_ask` on the hub | at most 32, each an artifact of the owner linked to the calling session | `error invalid_args` / `not_found`, nothing is stored |
+  | files of an `hqc_ask` reply (§7.1) | at most 32, artifacts of the target's owner only; downloaded by the asking worker with the limits of an input (100 MB each, 500 MB per reply) | the rest left out (warn in the hub's log) / that file reported with an `error` |
 - Push: the hub POSTs to the subscription's `endpoint`, so only `https://` without
   userinfo and without a non-standard port on push service hosts is accepted: `fcm.googleapis.com`,
   `updates.push.services.mozilla.com`, `*.push.services.mozilla.com`, `*.push.apple.com`,
@@ -2840,6 +2899,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.45 → 0.46 (T41, files between sessions)
+§7: `hqc_send` and `hqc_ask` take `files` (paths or artifact ids); the sender's worker uploads
+paths by the rules of `hqc_attach` and the call carries `artifact_ids`; the result of `hqc_ask`
+has `files` with local paths. §7.1: a reply carries the files the target attached during its
+answering turn; buffered sends carry their files. §4: `peer.message.artifact_ids`. §5.2: the
+asking worker downloads a reply's files before it answers the call. §5.3: `peer_prefix` entries
+have `event_id` and `artifact_ids`; `session.cleanup` covers their folders and the replies'.
+§12: the link in `artifact_sessions` lets the target's and the asker's workers download; the
+feed shows a peer message's files. §17.4, §20, §2.1 accordingly. No migration. Notes in
+`docs/notes/t41-questions.md`.
 
 ### 0.44 → 0.45 (a switch to `ask` caps at once)
 §7.1, §16: the mode of a sender or a schedule's creator for the cap is `ask` as soon as the user

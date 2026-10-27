@@ -219,7 +219,7 @@ at run time, a creator that is gone (deleted, or a schedule from before 0.44) co
 "Ask". The worker and the client are unchanged: the header already names
 `permission_capped_by`, which now comes from either source. Tests: hub `tests/t40.rs`.
 
-## T41. Files between sessions (after T40)
+## T41. Files between sessions (done, SPEC 0.46)
 
 Sections: §4 (peer.message), §5.3 (session.input), §7, §7.1, §12, §14, §20. `hqc_send` and
 `hqc_ask` carry text only, so an agent cannot hand another session a file; the iteration's
@@ -240,4 +240,12 @@ Acceptance: the common checks; worker tests: upload rules on the sender side, do
 the inbox on both sides, the result's paths; hub tests: artifacts on the message and on the
 reply, another owner's artifact, a repeat; a live run: A asks B on another session, B attaches a
 file, A's tool result has a local path to it with the same content.
+Done: the sender's daemon uploads `files` with the `hqc_attach` rules and sends `artifact_ids`;
+the hub links them to the target and, for a reply, links the target's `attachment`s of the
+answering turn (owner's only) to the asker and puts them in the stored `mcp.result`; the asking
+daemon downloads them into `.hqc/inbox/<request_id>/` before it answers. No migration. Tests: hub
+`tests/t41.rs`; worker `tests/mcp.rs` (`message_files_are_uploaded_before_the_call`,
+`the_files_of_a_reply_are_downloaded_before_the_result`), `tests/worker.rs`
+(`peer_files_reach_the_inbox`); client `attachments.test.tsx`; live `live_files` (2.1.308, with
+`ENABLE_TOOL_SEARCH=false`). Decisions and open questions in `docs/notes/t41-questions.md`.
 

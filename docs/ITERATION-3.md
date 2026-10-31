@@ -15,6 +15,14 @@ Each task is self-contained: it can be handed to a separate agent together with 
 and the listed sections of `docs/SPEC.md`. Dependencies are stated; T31, T32, T33 and T35 can
 run in parallel after T30; T36 closes the iteration.
 
+Closed on 2026-10-31. The criterion was checked by hand on the production hub: session A on
+home-mac asked an existing session B on drzlo-mac with `hqc_ask` and a file; B changed the file
+and returned it with `hqc_attach`, and A reported it in its own feed with the same content
+(checksums compared). Also checked by hand: permission requests of a waited-on session in the
+asking session and in the global list (T37), Ask/Auto per session (T38), files with `hqc_send`
+in both directions (T41). Moved to `docs/BACKLOG.md`: a pattern instead of the exact command on
+the permission card, a rules screen, per-folder permission rules.
+
 ## T30. The MCP pipe and `hqc_list_sessions` (done, SPEC 0.33)
 
 Sections: §5.2 (MCP calls), §5.3, §5.4, §7, §7.2, §8.1, §2.1. The whole path of one tool call,

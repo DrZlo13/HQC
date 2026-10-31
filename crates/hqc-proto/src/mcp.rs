@@ -59,7 +59,8 @@ pub const TOOLS: &[Tool] = &[
             100 MB. `path` is absolute or relative to your working directory and must lie \
             inside the session's workspace. The result's `artifact_id` can go in `files` of \
             hqc_send and hqc_ask; a file attached during a turn that answers an hqc_ask goes \
-            back to the asker with the reply.",
+            back to the asker with the reply (so do the files of an hqc_send to the asker \
+            from that turn).",
         input_schema: || {
             json!({
                 "type": "object",
@@ -95,7 +96,9 @@ pub const TOOLS: &[Tool] = &[
             from hqc_list_sessions (<project-slug>/<session-slug>) or a session id. To hand \
             over files, list them in `files` (paths in your workspace, at most 100 MB each, or \
             artifact ids from hqc_attach); never paste a file's content into `text`. The other \
-            agent gets each file as a local path on its own machine.",
+            agent gets each file as a local path on its own machine. While you answer an \
+            hqc_ask, a send to the asker goes back with your reply (its text after your final \
+            message, its files with the reply's files; `delivery: with_reply`).",
         input_schema: || {
             json!({
                 "type": "object",
@@ -121,9 +124,10 @@ pub const TOOLS: &[Tool] = &[
             (<project-slug>/<session-slug>) or a session id. To hand over files, list them in \
             `files` (paths in your workspace, at most 100 MB each, or artifact ids from \
             hqc_attach); never paste a file's content into `text`. The other agent gets each \
-            file as a local path; the files it attaches with hqc_attach while answering come \
-            back in the result's `files`, each with a local `path` on this machine (or an \
-            `error`).",
+            file as a local path; the files it attaches with hqc_attach or sends to you with \
+            hqc_send while answering come back in the result's `files`, each with a local \
+            `path` on this machine (or an `error`), and the text of such a send follows its \
+            final message in `reply`.",
         input_schema: || {
             json!({
                 "type": "object",

@@ -28,6 +28,11 @@
 //!   reply carries the artifacts the target attached during its answering turn
 //!   ([`reply_files`]), linked to the asking session, whose worker downloads them before it
 //!   answers the agent.
+//! - A send that comes back as a reply (T42): a send of the target to the asker from the turn
+//!   on the question, while the ask is open, is kept on the ask ([`join_reply`]) instead of
+//!   the asker's send buffer; the reply carries its text after the final message and its
+//!   files after the turn's attachments ([`on_final`]). An ask that closes without a reply
+//!   puts such messages into the send buffer after all.
 
 use chrono::{DateTime, Utc};
 use hqc_proto::{
@@ -221,12 +226,13 @@ async fn link_files(app: &AppState, session_id: Uuid, ids: &[Uuid]) -> anyhow::R
     Ok(())
 }
 
-/// The chain of the input that started the session's current turn (SPEC §7.1): the last
-/// input delivered to it. A human's turn is a chain of its own with nothing in it yet
-/// (`depth` and `hops` 0), its id derived from the input, so every call of that turn shares
-/// it. `None`: no turn yet.
-pub(crate) async fn turn_chain(app: &AppState, session_id: Uuid) -> anyhow::Result<Option<Chain>> {
-    let row: Option<(Uuid, Option<Value>, Option<String>)> = sqlx::query_as(
+/// An input with its chain and its cap from the send buffer (`input_caps`).
+type TurnInput = (Uuid, Option<Value>, Option<String>);
+
+/// The input that started the session's current turn (SPEC §7.1): the last input delivered
+/// to it. `None`: no turn yet.
+async fn last_delivered(app: &AppState, session_id: Uuid) -> anyhow::Result<Option<TurnInput>> {
+    Ok(sqlx::query_as(
         "SELECT e.event_id, e.chain, c.capped_by
          FROM events e LEFT JOIN input_caps c ON c.event_id = e.event_id
          WHERE e.session_id = $1 AND e.delivery = 'delivered'
@@ -234,8 +240,7 @@ pub(crate) async fn turn_chain(app: &AppState, session_id: Uuid) -> anyhow::Resu
     )
     .bind(session_id)
     .fetch_optional(&app.db)
-    .await?;
-    Ok(row.map(|(input, chain, buffered)| input_chain(session_id, input, chain, buffered)))
+    .await?)
 }
 
 /// The chain of input `input` of a session: its own, or for a human's input one derived
@@ -265,7 +270,9 @@ fn input_chain(
 
 /// The chain of call `c` of session `caller`: that of the input the worker says the turn
 /// runs on (`turn_input`), if it is an input of the session given to the agent or on its
-/// way, not older than the last delivered one; otherwise [`turn_chain`]. The worker knows
+/// way, not older than the last delivered one; otherwise the last delivered input. A human's
+/// turn is a chain of its own with nothing in it yet (`depth` and `hops` 0), its id derived
+/// from the input, so every call of that turn shares it. The worker knows
 /// the turn before the hub does: the input's `ack` bypasses its outbox and is lost with a
 /// dropped connection, and until the resent input is acked again the hub's last delivered
 /// input is the previous turn's (SPEC §7.1). It cannot pick an older turn's chain.
@@ -274,6 +281,17 @@ pub(crate) async fn call_chain(
     caller: &SessionRow,
     c: &McpCall,
 ) -> anyhow::Result<Option<Chain>> {
+    Ok(call_input(app, caller, c)
+        .await?
+        .map(|(input, chain, buffered)| input_chain(caller.id, input, chain, buffered)))
+}
+
+/// The input the turn of call `c` runs on, by the rules of [`call_chain`].
+async fn call_input(
+    app: &AppState,
+    caller: &SessionRow,
+    c: &McpCall,
+) -> anyhow::Result<Option<TurnInput>> {
     if let Some(input) = c.turn_input {
         let row: Option<(Option<Value>, Option<String>)> = sqlx::query_as(
             "SELECT e.chain, c.capped_by
@@ -289,11 +307,11 @@ pub(crate) async fn call_chain(
         .fetch_optional(&app.db)
         .await?;
         if let Some((chain, buffered)) = row {
-            return Ok(Some(input_chain(caller.id, input, chain, buffered)));
+            return Ok(Some((input, chain, buffered)));
         }
         tracing::debug!(session_id = %caller.id, %input, "turn_input is not the session's current input; the hub's last delivered one counts");
     }
-    turn_chain(app, caller.id).await
+    last_delivered(app, caller.id).await
 }
 
 /// The caps a new peer message of `caller` in `chain` must fit (SPEC §20): messages per
@@ -424,11 +442,13 @@ struct Message<'a> {
     text: &'a str,
     files: &'a [Uuid],
     ask: bool,
+    /// A send that goes with the reply to an ask of the target (T42): never queued.
+    with_reply: bool,
 }
 
 /// Stores the `peer.message` of a call, or finds the one stored by an earlier copy of it.
 /// An ask, and a send to a session that wakes on them, go to the input queue (`pending`);
-/// other sends have no `delivery` (the send buffer).
+/// other sends have no `delivery` (the send buffer, or the reply they go with).
 async fn store_message(
     app: &AppState,
     caller: &SessionRow,
@@ -437,8 +457,13 @@ async fn store_message(
     m: Message<'_>,
     chain: &Chain,
 ) -> Result<EventRow, McpError> {
-    let Message { text, files, ask } = m;
-    let delivery = (ask || t.wake_on_send).then_some("pending");
+    let Message {
+        text,
+        files,
+        ask,
+        with_reply,
+    } = m;
+    let delivery = (ask || (t.wake_on_send && !with_reply)).then_some("pending");
     let from = address(app, caller).await.map_err(internal)?;
     let mut payload = json!({
         "from_session_id": caller.id,
@@ -468,7 +493,9 @@ async fn store_message(
     .map_err(internal)
 }
 
-/// `hqc_send(text, session, artifact_ids?)`: `{to, delivery: queued | buffered}`.
+/// `hqc_send(text, session, artifact_ids?)`: `{to, delivery: queued | buffered |
+/// with_reply}`. A send from the turn that answers an open ask of the target goes with the
+/// reply ([`join_reply`]).
 pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
     let a: SendArgs = args(c.args.clone())?;
     let id = message_id(caller.id, &c.request_id);
@@ -479,17 +506,35 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             .map_err(internal)?
             .ok_or_else(|| err(error_code::NOT_FOUND, "the target session is gone"))?;
         let to = address(app, &t).await.map_err(internal)?;
-        return Ok(Answer::Now(send_result(&to, row.delivery.is_some())));
+        let how = if row.delivery.is_some() {
+            QUEUED
+        } else if joined(app, t.id, id).await.map_err(internal)? {
+            WITH_REPLY
+        } else {
+            BUFFERED
+        };
+        return Ok(Answer::Now(send_result(&to, how)));
     }
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
     let files = checked_files(app, caller, &a.artifact_ids).await?;
     let chain = outgoing_chain(app, caller, c, false).await?;
     admit(app, caller, &chain).await?;
-    let wake = t.wake_on_send;
     let m = Message {
         text: &a.text,
         files: &files,
         ask: false,
+        with_reply: true,
+    };
+    if let Some((input, _, _)) = call_input(app, caller, c).await.map_err(internal)? {
+        if join_reply(app, caller, &t, input, &c.request_id, m, &chain).await? {
+            tracing::info!(from = %caller.id, to = %t.id, "peer message goes with the reply");
+            return Ok(Answer::Now(send_result(&to, WITH_REPLY)));
+        }
+    }
+    let wake = t.wake_on_send;
+    let m = Message {
+        with_reply: false,
+        ..m
     };
     let row = store_message(app, caller, &t, &c.request_id, m, &chain).await?;
     if wake {
@@ -500,11 +545,87 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             .map_err(internal)?;
     }
     tracing::info!(from = %caller.id, to = %t.id, wake, "peer message sent");
-    Ok(Answer::Now(send_result(&to, wake)))
+    Ok(Answer::Now(send_result(
+        &to,
+        if wake { QUEUED } else { BUFFERED },
+    )))
 }
 
-fn send_result(to: &str, queued: bool) -> Value {
-    json!({"to": to, "delivery": if queued { "queued" } else { "buffered" }})
+/// `delivery` of an `hqc_send` result (SPEC §7).
+const QUEUED: &str = "queued";
+const BUFFERED: &str = "buffered";
+const WITH_REPLY: &str = "with_reply";
+
+fn send_result(to: &str, delivery: &str) -> Value {
+    json!({"to": to, "delivery": delivery})
+}
+
+/// A send of `caller` to `t` from the turn on input `input` (T42, SPEC §7.1): if that input
+/// is the question of an ask of `t` still open, the message is stored in `t` without
+/// `delivery`, kept on the ask (`payload.joined`) instead of the send buffer, and goes with
+/// the reply ([`on_final`]). The ask's row stays locked from the check until the message is
+/// on it, so the reply cannot close the ask in between and leave the message behind. `false`:
+/// no such ask, nothing stored.
+async fn join_reply(
+    app: &AppState,
+    caller: &SessionRow,
+    t: &SessionRow,
+    input: Uuid,
+    request_id: &str,
+    m: Message<'_>,
+    chain: &Chain,
+) -> Result<bool, McpError> {
+    let mut tx = app.db.begin().await.map_err(internal)?;
+    let ask: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM pending_requests
+         WHERE kind = 'ask' AND closed_at IS NULL AND session_id = $1
+           AND payload ->> 'target_session_id' = $2 AND payload ->> 'event_id' = $3
+         FOR UPDATE",
+    )
+    .bind(t.id)
+    .bind(caller.id.to_string())
+    .bind(input.to_string())
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(internal)?;
+    let Some(ask) = ask else {
+        return Ok(false);
+    };
+    let row = store_message(app, caller, t, request_id, m, chain).await?;
+    sqlx::query(
+        "UPDATE pending_requests
+         SET payload = jsonb_set(payload, '{joined}',
+                                 COALESCE(payload -> 'joined', '[]'::jsonb) || to_jsonb($2::text)),
+             updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(ask)
+    .bind(row.event_id.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+    Ok(true)
+}
+
+/// Whether message `event_id` went with the reply to an ask of session `asker`.
+async fn joined(app: &AppState, asker: Uuid, event_id: Uuid) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pending_requests
+                        WHERE kind = 'ask' AND session_id = $1 AND payload -> 'joined' ? $2)",
+    )
+    .bind(asker)
+    .bind(event_id.to_string())
+    .fetch_one(&app.db)
+    .await?)
+}
+
+/// The messages joined to an ask (`payload.joined`).
+fn joined_of(payload: &Value) -> Vec<Uuid> {
+    payload
+        .get("joined")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
 }
 
 /// `hqc_ask(text, session, timeout_s?, artifact_ids?)`: answered later with `{from, reply,
@@ -563,6 +684,7 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         text: &a.text,
         files: &files,
         ask: true,
+        with_reply: false,
     };
     let row = store_message(app, caller, &t, &c.request_id, m, &chain).await?;
     let expires_at = Utc::now() + chrono::TimeDelta::seconds(timeout as i64);
@@ -736,37 +858,80 @@ fn result_frame(r: McpResult) -> Value {
     json!({"type": "mcp.result", "payload": r})
 }
 
-/// Closes an open ask with `outcome` and sends it to the asking worker.
-async fn answer(
-    app: &AppState,
-    p: PendingRow,
-    outcome: Result<Value, McpError>,
-) -> anyhow::Result<()> {
-    let r = match outcome {
-        Ok(v) => McpResult::ok(&p.request_id, v),
-        Err(e) => McpResult::err(&p.request_id, &e.code, e.message),
+/// Closes an open ask without a reply (`error`) and sends that to the asking worker; the
+/// messages joined to it go to the asker's send buffer after all ([`rebuffer`]).
+async fn fail(app: &AppState, p: PendingRow, error: McpError) -> anyhow::Result<()> {
+    let frame = result_frame(McpResult::err(&p.request_id, &error.code, error.message));
+    let Some(joined) = close_ask(app, p.id, Some(&frame)).await? else {
+        return Ok(());
     };
-    let frame = result_frame(r);
-    if db::close_request(&app.db, p.id, Some(&frame)).await? {
-        requests::changed_in(app, p.session_id).await;
-        requests::deliver_result(
-            app,
-            &PendingRow {
-                result: Some(frame),
-                ..p
-            },
-        )
-        .await;
+    rebuffer(app, p.session_id, &joined).await?;
+    sent(app, p, frame).await;
+    Ok(())
+}
+
+/// The asking worker gets the closed ask's answer `frame`.
+async fn sent(app: &AppState, p: PendingRow, frame: Value) {
+    requests::changed_in(app, p.session_id).await;
+    requests::deliver_result(
+        app,
+        &PendingRow {
+            result: Some(frame),
+            ..p
+        },
+    )
+    .await;
+}
+
+/// Closes ask `id` with `result` unless it is closed already (`None`); the messages joined
+/// to it. The update waits for a [`join_reply`] holding the row and then sees its message.
+async fn close_ask(
+    app: &AppState,
+    id: Uuid,
+    result: Option<&Value>,
+) -> anyhow::Result<Option<Vec<Uuid>>> {
+    let payload: Option<Value> = sqlx::query_scalar(
+        "UPDATE pending_requests SET closed_at = now(), result = $2, updated_at = now()
+         WHERE id = $1 AND closed_at IS NULL RETURNING payload",
+    )
+    .bind(id)
+    .bind(result)
+    .fetch_optional(&app.db)
+    .await?;
+    Ok(payload.as_ref().map(joined_of))
+}
+
+/// Messages joined to an ask that closed without a reply (T42): they wait in the asker's send
+/// buffer like any send, so nothing the target sent is lost.
+async fn rebuffer(app: &AppState, asker: Uuid, joined: &[Uuid]) -> anyhow::Result<()> {
+    if joined.is_empty() {
+        return Ok(());
     }
+    let Some(s) = db::session(&app.db, asker).await? else {
+        return Ok(());
+    };
+    for id in joined {
+        if let Some(row) = db::event_by_id(&app.db, *id).await? {
+            let bytes = row.payload["text"].as_str().map_or(0, str::len);
+            buffer(app, &s, &row, bytes).await?;
+        }
+    }
+    tracing::info!(session_id = %asker, messages = joined.len(), "an ask closed without a reply; its joined messages are buffered");
     Ok(())
 }
 
 const ASK_COLS: &str =
     "id, kind, session_id, request_id, payload, expires_at, worker_id, result, closed_at";
 
+/// Separates the final message of a reply from a message the target sent with `hqc_send`
+/// during the answering turn (T42), and two such messages.
+pub const JOINED_SEPARATOR: &str = "\n\n--- sent with hqc_send while answering ---\n";
+
 /// A final `agent.message` of session `s` (at `seq`) answering input `in_reply_to`: the
 /// reply to the ask that delivered it, if one waits (SPEC §7.1), with the files of the
-/// answering turn ([`reply_files`]).
+/// answering turn ([`reply_files`]) and the messages the turn sent to the asker (T42), their
+/// texts after `text`. The ask's row is locked from reading its joined messages until it is
+/// closed, so a [`join_reply`] either comes before and is in the reply, or finds it closed.
 pub async fn on_final(
     app: &AppState,
     s: &SessionRow,
@@ -785,14 +950,47 @@ pub async fn on_final(
         if p.payload["target_session_id"].as_str() != Some(&s.id.to_string()) {
             continue;
         }
+        let mut tx = app.db.begin().await?;
+        let payload: Option<Value> = sqlx::query_scalar(
+            "SELECT payload FROM pending_requests WHERE id = $1 AND closed_at IS NULL FOR UPDATE",
+        )
+        .bind(p.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(payload) = payload else { continue };
+        let joined: Vec<(Value,)> =
+            sqlx::query_as("SELECT payload FROM events WHERE event_id = ANY($1) ORDER BY seq")
+                .bind(joined_of(&payload))
+                .fetch_all(&app.db)
+                .await?;
+        let mut reply = text.to_string();
+        let mut sent_files: Vec<Uuid> = Vec::new();
+        for (m,) in &joined {
+            reply.push_str(JOINED_SEPARATOR);
+            reply.push_str(m["text"].as_str().unwrap_or_default());
+            if let Some(ids) = m.get("artifact_ids") {
+                sent_files
+                    .extend(serde_json::from_value::<Vec<Uuid>>(ids.clone()).unwrap_or_default());
+            }
+        }
         let to = p.payload["to"].as_str().unwrap_or_default().to_string();
-        let files = reply_files(app, s, p.session_id, in_reply_to, seq).await?;
-        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, files = files.len(), "peer ask answered");
-        let mut result = json!({"from": to, "reply": text});
+        let files = reply_files(app, s, p.session_id, in_reply_to, seq, &sent_files).await?;
+        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, files = files.len(), joined = joined.len(), "peer ask answered");
+        let mut result = json!({"from": to, "reply": reply});
         if !files.is_empty() {
             result["files"] = serde_json::to_value(&files)?;
         }
-        answer(app, p, Ok(result)).await?;
+        let frame = result_frame(McpResult::ok(&p.request_id, result));
+        sqlx::query(
+            "UPDATE pending_requests SET closed_at = now(), result = $2, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(p.id)
+        .bind(&frame)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        sent(app, p, frame).await;
     }
     Ok(())
 }
@@ -801,16 +999,18 @@ pub async fn on_final(
 /// session `s` between the question `question` and the final message at `seq`, oldest first,
 /// once each, at most [`MAX_FILES`]. Only artifacts of the session's owner count: a worker
 /// may write `attachment` events of its own, and the id of another owner's artifact in one
-/// must not reach the asking worker. They are linked to the asking session `asker`, so its
-/// worker may download them.
+/// must not reach the asking worker. Then `sent`, the files of the messages the turn sent to
+/// the asker (T42), in order. They are linked to the asking session `asker`, so its worker may
+/// download them.
 pub async fn reply_files(
     app: &AppState,
     s: &SessionRow,
     asker: Uuid,
     question: Uuid,
     seq: i64,
+    sent: &[Uuid],
 ) -> anyhow::Result<Vec<ReplyArtifact>> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+    let mut rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT a.id, a.name, a.kind FROM events e
          JOIN artifacts a ON a.id::text = e.payload ->> 'artifact_id'
          WHERE e.session_id = $1 AND e.type = 'attachment' AND a.owner_id = $2
@@ -824,6 +1024,21 @@ pub async fn reply_files(
     .bind(seq)
     .fetch_all(&app.db)
     .await?;
+    if !sent.is_empty() {
+        // Checked by `hqc_send` already (the owner's, linked to the target); the owner again
+        // for the same reason as above.
+        let found: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id, name, kind FROM artifacts WHERE id = ANY($1) AND owner_id = $2",
+        )
+        .bind(sent)
+        .bind(s.owner_id)
+        .fetch_all(&app.db)
+        .await?;
+        rows.extend(
+            sent.iter()
+                .filter_map(|id| found.iter().find(|f| f.0 == *id).cloned()),
+        );
+    }
     let mut files: Vec<ReplyArtifact> = Vec::new();
     for (id, name, kind) in rows {
         if files.iter().any(|f| f.artifact_id == id) {
@@ -866,13 +1081,13 @@ pub async fn turn_lost(app: &AppState, s: &SessionRow) -> anyhow::Result<()> {
             .unwrap_or("the session")
             .to_string();
         tracing::info!(session_id = %p.session_id, request_id = %p.request_id, target = %s.id, "peer ask failed: the target's turn was lost");
-        answer(
+        fail(
             app,
             p,
-            Err(err(
+            err(
                 error_code::UNAVAILABLE,
                 format!("{to} lost its turn on the question (its agent stopped); ask again"),
-            )),
+            ),
         )
         .await?;
     }
@@ -893,13 +1108,10 @@ pub async fn expire(app: &AppState) -> anyhow::Result<()> {
             .unwrap_or("the session")
             .to_string();
         tracing::info!(session_id = %p.session_id, request_id = %p.request_id, "peer ask timed out");
-        answer(
+        fail(
             app,
             p,
-            Err(err(
-                error_code::TIMEOUT,
-                format!("no reply from {to} in time"),
-            )),
+            err(error_code::TIMEOUT, format!("no reply from {to} in time")),
         )
         .await?;
     }
@@ -919,9 +1131,10 @@ pub async fn cancelled(app: &AppState, worker_id: Uuid, c: &McpCancel) -> anyhow
     .fetch_optional(&app.db)
     .await?;
     let Some(p) = open else { return Ok(()) };
-    if !db::close_request(&app.db, p.id, None).await? {
+    let Some(joined) = close_ask(app, p.id, None).await? else {
         return Ok(());
-    }
+    };
+    rebuffer(app, p.session_id, &joined).await?;
     let Some(s) = db::session(&app.db, p.session_id).await? else {
         return Ok(());
     };
@@ -958,7 +1171,8 @@ pub async fn worker_restarted(app: &AppState, worker_id: Uuid) -> anyhow::Result
             error_code::WORKER_RESTART,
             "the worker restarted while the call waited",
         ));
-        if db::close_request(&app.db, p.id, Some(&frame)).await? {
+        if let Some(joined) = close_ask(app, p.id, Some(&frame)).await? {
+            rebuffer(app, p.session_id, &joined).await?;
             db::result_delivered(&app.db, p.id).await?;
             requests::changed_in(app, p.session_id).await;
         }

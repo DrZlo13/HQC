@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.46, 2026-10-27. Status: the architecture agreed after six reviews and a survey of
+Version 0.47, 2026-10-31. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -296,7 +296,9 @@ been received but not yet delivered to the worker).
 An `ask` (since 0.35, T32) is a row of the **asking** session: `session_id` — the asking
 session, `request_id` — the `mcp.call`'s, `worker_id` — the asking session's worker,
 `payload` — `{target_session_id, event_id, to}` (`event_id` — the `peer.message` it put
-into the target, `to` — the target's address), `expires_at` — the ask's timeout, `result` —
+into the target, `to` — the target's address; since 0.47, T42, `joined?` — the `event_id`s of
+the target's `hqc_send`s to the asker that go with the reply, §7.1), `expires_at` — the ask's
+timeout, `result` —
 the `mcp.result` frame once it is answered, timed out or closed by a worker restart (§7.1).
 `from_session_id`/`from_event_id` stay unused; `mcp_call` is not used: `hqc_send` keeps no
 row of its own (§5.2).
@@ -336,7 +338,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1) |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result`; for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?` | worker or hub |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
@@ -592,7 +594,8 @@ MCP calls (worker → hub → worker):
   (`once_id` in `crates/hqc-hub/src/mcp.rs`), and a call that finds it already written
   answers from it — the same result, nothing written twice. `hqc_attach` keys its
   `attachment` event so, `hqc_send`/`hqc_ask` their `peer.message` (with `peer.message` as
-  the tool), `hqc_schedule` its schedule (since 0.38); a repeated `hqc_send` answers the same `{to, delivery}` from that event, a
+  the tool), `hqc_schedule` its schedule (since 0.38); a repeated `hqc_send` answers the same `{to, delivery}` from that event (since 0.47
+  `with_reply` when an ask's `payload.joined` names it, §7.1), a
   repeated `hqc_ask` finds its `PendingRequest`: still open — `ack {}` again, closed — its
   stored `mcp.result` under the repeat's frame `id` (since 0.46 with the reply's `files`, which
   the worker downloads again into the same folder). `hqc_spawn` (since 0.37) keys the new
@@ -1136,7 +1139,8 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
   is required until the personal session exists (iteration 4); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
-  target wakes on sends) or `buffered` (the send buffer, §7.1).
+  target wakes on sends) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
+  `with_reply`: the send goes back with the reply to the target's open ask (§7.1).
 - `hqc_ask(text, session, timeout_s?)` — a message that waits for a reply. To the agent's own
   session: an immediate error. Since 0.35 (T32): the result is `{from, reply}` — the
   target's address and the text of its final answer; `timeout_s` is at least 1 and at most
@@ -1161,7 +1165,10 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   [{name, kind, path, size}]` with `path` absolute, in `<workdir>/.hqc/inbox/<request_id>/`,
   or `{name, kind, error}` for a file it could not download (the reply text comes back
   anyway). The tool descriptions tell the agent to hand files over with `files` and never
-  paste them into `text`, and that they arrive as local paths.
+  paste them into `text`, and that they arrive as local paths. Since 0.47 (T42) they also say
+  that while an agent answers an `hqc_ask`, an `hqc_send` to the asker goes back with the reply
+  (its text after the final message, its files with the reply's files), and `hqc_attach` and
+  the ask's header say so too (§7.1).
 - `hqc_spawn(project, workspace, runtime?, model?, prompt)` — create a session and an agent,
   return the address. `workspace` is required if the project has no `default_workspace_id`.
   Since 0.37 (T34): `hqc_spawn(project, workspace?, runtime?, model?, prompt)`; the session is
@@ -1229,7 +1236,9 @@ projects and sessions; anything else is `not_found`.
 Delivery:
 - A `peer.message` is always delivered to the agent as **input text** with the header
   `[hqc peer from <project>/<session> | mode=ask | request_id=... | reply with your final message]`
-  or `... | mode=send]`. This way the agent tells ask from send in any runtime.
+  or `... | mode=send]`. This way the agent tells ask from send in any runtime. Since 0.47
+  (T42) the ask's header ends `| reply with your final message | return files with hqc_attach
+  or in files of hqc_send]`: both reach the asker with the reply (below).
 - Spoofing protection: when building `session.input`, the worker escapes the substring
   `[hqc peer` (anywhere in the text, case-insensitive) to `[hqc-peer-text`
   in **all** the text it passes to the runtime: the user's text, the text of a peer message
@@ -1304,7 +1313,8 @@ The reply to an ask:
   `files: [{artifact_id, name, kind}]` in the stored `mcp.result`; the hub links them to the
   asking session so that its worker may download them, and that worker answers the agent with
   local paths (§7, §5.2). The final message has no files of its own: what the target wants to
-  hand back it attaches with `hqc_attach`. The timeout gives
+  hand back it attaches with `hqc_attach` (or, since 0.47, sends to the asker with `hqc_send`
+  and `files`, below). The timeout gives
   `error {code: timeout}`; a reply after it, or after `mcp.cancel`, goes nowhere. A target
   whose turn on the question is lost (`system turn_lost`: its process stopped, its worker
   restarted, the watchdog) gives no reply; since 0.39 (T36) the ask then fails at once with
@@ -1314,6 +1324,25 @@ The reply to an ask:
   turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
   waiting call as "Waiting for a reply from <session>" with its timer (the runtime's
   `tool.call` of `hqc_ask`, no event of its own).
+- Since 0.47 (T42; the 2026-10-31 run, where B sent a changed file back with `hqc_send`
+  instead of `hqc_attach`, the reply had no file and the send waited in A's buffer): an
+  `hqc_send` from the target to the asker, made from the target's turn on the question (the
+  turn whose input is the ask's `peer.message`, by the turn rules of the chain below) while the
+  ask is open, goes with the reply instead of the asker's send buffer. Its `peer.message` is
+  stored in the asker without `delivery` and not buffered, the ask keeps its `event_id` in
+  `payload.joined`, and the send's result is `{to, delivery: with_reply}`. The reply's text is
+  the final message followed, for each such send in `seq` order, by the separator
+  `\n\n--- sent with hqc_send while answering ---\n` and the send's text; its files are those
+  of the turn's `attachment`s, then the sends' `artifact_ids`, in order, each once, at most 32
+  in all, owner's only, downloaded by the asking worker like any reply file. The hub locks the
+  ask's row from the check until the send is on it, and the reply locks it from reading the
+  joined sends until it closes the ask, so a send either is in the reply or finds the ask
+  closed and is buffered. A send from the target outside that turn (an earlier turn still
+  running when the question came, a later one, after the final message), to another session,
+  or from another session to the asker is unchanged. An ask that closes without a reply
+  (timeout, the target's turn lost, `mcp.cancel`, the asking worker's restart) puts its joined
+  sends into the asker's send buffer, so they still reach the agent with its next input. A
+  repeated send acts once and answers `with_reply` again (§5.2).
 
 Chains:
 - `chain_id` is created on the first `ask`/`send` from a turn started by a human; `depth`
@@ -1464,6 +1493,19 @@ account reach the session — and the tool shows as `mcp__hqc__hqc_list_sessions
 loads it with `ToolSearch` first (one model turn), then calls it, so a turn that calls an hqc
 tool needs at least two model turns. With `--allowedTools mcp__hqc` the call runs without
 `can_use_tool`. The title runs (`title.request`) get no `--mcp-config`.
+
+A tool loaded with `ToolSearch` keeps the schema it had then (since 0.47, T42; checked on
+2.1.308 with `ENABLE_TOOL_SEARCH=true`, live test `live_tool_schema`, notes in
+`docs/notes/t42-questions.md`): the CLI writes the loaded tool's whole definition (description,
+`input_schema`) into the transcript as an attachment `deferred_tools_record`, and the
+`ToolSearch` result itself is only a `tool_reference`. A `--resume` with a restarted MCP server
+that lists a changed schema (here `hqc_send` without and then with `files`) still sends the
+recorded definition to the model (the request's shape hash did not change); the model named
+the old parameters and the old last sentence. A call with a new argument still goes through:
+the model may pass it anyway and the server checks its own schema. So after a worker update a
+resumed session does not learn about new tool arguments; a new session does. hqc does not
+rewrite Claude Code's transcripts; what an agent must know about returning files is also in the
+ask's header (§7.1), which is built fresh for every input.
 
 Session restrictions are never dropped silently **[decision]**: `disallowed_tools` → `--disallowedTools`
 (each rule as a separate argument), `system_prompt` → `--append-system-prompt`,
@@ -2899,6 +2941,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.46 → 0.47 (T42, replies that come back as a send)
+§7.1: an `hqc_send` from the target of an open ask to the asker, made from the turn on the
+question, goes with the reply (its text after the final message behind a separator, its files
+after the turn's attachments) instead of the asker's send buffer; an ask that closes without a
+reply buffers it after all; the ask's header tells the target how to return files. §7: the
+`with_reply` delivery of `hqc_send` and the tool descriptions. §3 PendingRequest:
+`payload.joined`. §4: such a `peer.message` has no `delivery`. §8.1: [verify] a tool loaded with
+`ToolSearch` keeps its recorded schema across `--resume` (2.1.308); nothing hqc changes. No
+migration. Notes in `docs/notes/t42-questions.md`.
 
 ### 0.45 → 0.46 (T41, files between sessions)
 §7: `hqc_send` and `hqc_ask` take `files` (paths or artifact ids); the sender's worker uploads

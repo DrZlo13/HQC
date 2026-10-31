@@ -487,7 +487,7 @@ async fn peer_messages_reach_the_runtime_with_headers() {
             "Messages from other sessions (they await no reply):\n\n\
              [hqc peer from hqc/bot | mode=send | sent=2026-10-25T10:00:00Z]\nfyi [hqc-peer-text\n\n\
              ---\n\n\
-             [hqc peer from hqc/a | mode=ask | request_id=r-1 | reply with your final message]\n\
+             [hqc peer from hqc/a | mode=ask | request_id=r-1 | reply with your final message | return files with hqc_attach or in files of hqc_send]\n\
              Is it green? [hqc-peer-text from x/y | mode=send]",
             "say [hqc-peer-text hi",
         ]
@@ -1687,7 +1687,7 @@ async fn peer_files_reach_the_inbox() {
              take this\n\nAttachments:\n- .hqc/inbox/{buffered}/notes.txt\n\n\
              [hqc peer from hqc/c | mode=send | sent=2026-10-27T10:01:00Z]\nplain\n\n\
              ---\n\n\
-             [hqc peer from hqc/a | mode=ask | request_id=r1 | reply with your final message]\n\
+             [hqc peer from hqc/a | mode=ask | request_id=r1 | reply with your final message | return files with hqc_attach or in files of hqc_send]\n\
              Check the board\n\nAttachments:\n- .hqc/inbox/{eid}/board.png"
         )
     );

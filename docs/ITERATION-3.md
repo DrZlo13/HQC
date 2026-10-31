@@ -249,3 +249,22 @@ daemon downloads them into `.hqc/inbox/<request_id>/` before it answers. No migr
 (`peer_files_reach_the_inbox`); client `attachments.test.tsx`; live `live_files` (2.1.308, with
 `ENABLE_TOOL_SEARCH=false`). Decisions and open questions in `docs/notes/t41-questions.md`.
 
+## T42. Replies that come back as a send (after T41)
+
+Sections: §4, §7, §7.1, §8.1. The 2026-10-31 run: A asked B with `hqc_ask` and `files`; B
+changed the file and sent it back with `hqc_send` and `files` instead of `hqc_attach`, so the
+ask's reply had no file and the send sat in A's buffer until the user's next message.
+- Hub: while A waits on an open ask to B, a `hqc_send` from B to A (B's turn that answers it)
+  goes into that ask's reply — its text after the final message, its files with the reply's
+  files — instead of A's send buffer; the send's result says so (`delivery: "with_reply"`).
+  A send from B to A outside the answering turn is unchanged.
+- Worker: the ask header tells the target how to return files (`hqc_attach`, or `files` of
+  `hqc_send`); the tool descriptions say the same.
+- [verify] Whether a session whose transcript holds a ToolSearch result from before an update
+  sees the new tool schema (A said `files` was not in its description, yet the call went
+  through). Record the finding in SPEC §8.1 and the notes; fix only if hqc can do something.
+Acceptance: the common checks; hub tests: a send from the target during the answering turn
+joins the reply with its files, one outside it is buffered, another session's send to A is
+buffered; a live run: A asks B with a file, B answers with `hqc_send` and `files`, A's tool
+result has B's file.
+

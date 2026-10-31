@@ -249,7 +249,7 @@ daemon downloads them into `.hqc/inbox/<request_id>/` before it answers. No migr
 (`peer_files_reach_the_inbox`); client `attachments.test.tsx`; live `live_files` (2.1.308, with
 `ENABLE_TOOL_SEARCH=false`). Decisions and open questions in `docs/notes/t41-questions.md`.
 
-## T42. Replies that come back as a send (after T41)
+## T42. Replies that come back as a send (done, SPEC 0.47)
 
 Sections: §4, §7, §7.1, §8.1. The 2026-10-31 run: A asked B with `hqc_ask` and `files`; B
 changed the file and sent it back with `hqc_send` and `files` instead of `hqc_attach`, so the
@@ -267,4 +267,13 @@ Acceptance: the common checks; hub tests: a send from the target during the answ
 joins the reply with its files, one outside it is buffered, another session's send to A is
 buffered; a live run: A asks B with a file, B answers with `hqc_send` and `files`, A's tool
 result has B's file.
+Done: the send is a `peer.message` in A without `delivery`, kept on the ask (`payload.joined`)
+under a row lock shared with the reply, so it is either in the reply or finds the ask closed;
+the reply appends its text behind `--- sent with hqc_send while answering ---` and its files
+after the turn's attachments (the T41 download path); an ask that closes without a reply puts
+joined sends into A's buffer. The ask's header and the tool descriptions say how to return
+files. [verify]: on 2.1.308 a tool loaded with `ToolSearch` is recorded in the transcript
+(`deferred_tools_record`) and a resume sends that old schema; nothing changed in hqc (SPEC
+§8.1). No migration. Tests: hub `tests/t42.rs`; worker header tests; live `live_reply_send`
+and `live_tool_schema` (2.1.308). Notes in `docs/notes/t42-questions.md`.
 

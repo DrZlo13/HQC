@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.48, 2026-10-31. Status: the architecture agreed after six reviews and a survey of
+Version 0.49, 2026-10-31. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -308,7 +308,7 @@ row of its own (§5.2).
 `timezone`, `message`, `enabled`, `last_run`, `catch_up`.
 
 Since 0.38 (T35; table `scheduled_messages`, migration `0018`): `session_id` only — the
-project-template variant waits for session templates (iteration 5); exactly one of `cron` (5
+project-template variant waits for session templates (iteration 4); exactly one of `cron` (5
 fields) and `at` (a time); `timezone` — an IANA name, the owner's `timezone` when not given;
 `next_run` — when it is due next (UTC), null once it will not run again (an `at` that ran or
 was skipped); `catch_up` false by default. Deleting the session deletes its schedules.
@@ -1119,7 +1119,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 4) and is refused until then
+  `content` comes with the bare model (iteration 5) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -1137,7 +1137,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 4); the result is `{to,
+  is required until the personal session exists (iteration 5); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1).
@@ -1182,7 +1182,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 4 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 5 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -2224,7 +2224,7 @@ worker (§6) deletes it (§17.4).
 
 **Frames** (§5.3, §5.4; added in 0.17, same protocol version):
 - worker → hub `worker.approval.request {request_id, kind, description, expires_at}` → `ack
-  {}`. `kind`: `workspace.use` (below), `workspace.create`, `workspace.delete` (iteration 5,
+  {}`. `kind`: `workspace.use` (below), `workspace.create`, `workspace.delete` (iteration 4,
   §13); the list is open. The hub writes into the service session an event `approval.request
   {request_id, tool: <kind>, description, options: [{id: once, canonical: once}, {id: deny,
   canonical: deny}], expires_at}` with `author: {kind: system}` and opens a `PendingRequest`
@@ -2255,7 +2255,7 @@ owner can answer (`POST /api/sessions/{system_session_id}/requests/{request_id}`
 `approval.cancel {worker_restart}` without a frame, since the process that was waiting no
 longer exists. Push as for any `approval.request` (§16).
 
-**New folder** (`workspace.use`, since 0.17; the only use until iteration 5). The worker keeps
+**New folder** (`workspace.use`, since 0.17; the only use until iteration 4). The worker keeps
 a cache of folders in which it has agreed to run sessions: `$HQC_HOME/known_workspaces.json`
 (an array of canonical paths, mode 0600, written through a temporary file). A `session.start`
 with a `workspace_path` whose canonical path is not in the cache, for a session with
@@ -2425,7 +2425,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Only the worker's owner can add a workspace to a worker (until
 the sharing of iteration 6 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. `clone` and
-`worktree`: iteration 5.
+`worktree`: iteration 4.
 
 ### 13.2 Deletion
 `dir`: only the hub's record is deleted, the folder is left alone; while the workspace has
@@ -2474,7 +2474,7 @@ The hub gets a copy in `hello` and shows it; only the worker owner can change it
 machine (`hqc-worker env ...`).
 
 Permission policy `[permissions]` (in effect since 0.14 for all of the worker's Claude Code
-sessions; environments of iteration 5 will be able to extend it via `settings`):
+sessions; environments of iteration 4 will be able to extend it via `settings`):
 
 ```toml
 [permissions]
@@ -2789,11 +2789,12 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
    MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 6).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
-4. Generic ACP adapter (the first agent is Hermes, including steer); bare model
-   and local models through a proxy; the personal assistant session (moved from 3: its default
-   runtime is the bare model, §8.3), until then `hqc_send` needs `session`.
-5. Workspaces: clone, worktree, ephemeral, session template. Environments, bindings
-   and `acp_agents` on the worker.
+4. Workspaces: clone, worktree, ephemeral, session template. Environments and bindings on
+   the worker. Moved ahead of the agents on 2026-10-31.
+5. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+   worker; bare model and local models through a proxy; the personal assistant session
+   (moved from 3: its default runtime is the bare model, §8.3), until then `hqc_send` needs
+   `session`.
 6. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
 7. Tauri, native notifications, several agents in one session.
@@ -2942,6 +2943,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.48 → 0.49 (iterations 4 and 5 swapped)
+§19: workspaces, environments and bindings are now iteration 4, the ACP adapter, the bare and
+local models and the personal session iteration 5; `acp_agents` on the worker moves with the
+ACP adapter. References in the spec follow.
 
 ### 0.47 → 0.48 (iteration 3 closed)
 §19: iteration 3 is closed; its criterion was checked by hand on the production hub.

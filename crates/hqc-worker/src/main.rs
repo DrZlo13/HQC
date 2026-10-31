@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
                 .serve(tokio::io::stdin(), tokio::io::stdout())
                 .await
         }
-        Cmd::Env => anyhow::bail!("env: not implemented (iteration 5)"),
+        Cmd::Env => anyhow::bail!("env: not implemented (iteration 4)"),
     }
 }
 

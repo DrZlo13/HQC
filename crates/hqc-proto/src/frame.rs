@@ -251,7 +251,7 @@ pub mod worker_approval {
     /// `session.start` in a folder the worker has not run sessions in yet, for a session
     /// the worker owner did not start (SPEC §10.2).
     pub const WORKSPACE_USE: &str = "workspace.use";
-    /// Iteration 5 (SPEC §13.1, §13.2).
+    /// Iteration 4 (SPEC §13.1, §13.2).
     pub const WORKSPACE_CREATE: &str = "workspace.create";
     pub const WORKSPACE_DELETE: &str = "workspace.delete";
     /// Option ids of the `approval.request` the hub writes, and of the answer.

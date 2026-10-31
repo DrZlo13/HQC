@@ -839,7 +839,7 @@ Per §19.1 and the notes `docs/notes/t2..t6-questions.md`:
 - ~~One project, one workspace~~: lifted in T14: projects are created, renamed and
   deleted in the client (the personal one: description only), and a project has several
   workspaces on any workers. Workspaces are `dir` only (an existing folder); `clone`, `worktree`,
-  `ephemeral` and the session template are iteration 5. A session without a workspace (§8.4)
+  `ephemeral` and the session template are iteration 4. A session without a workspace (§8.4)
   cannot be created from the client. Deleting a workspace removes only the record; while it has
   non-archived sessions, the hub does not delete it.
 - **Upgrading from iteration 1** (hub migration `0005`): the workspace from the old `[workspace]

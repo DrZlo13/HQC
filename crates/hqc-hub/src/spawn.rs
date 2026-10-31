@@ -4,7 +4,7 @@
 //! - The session is created by the path of `POST /api/projects/{id}/sessions`
 //!   ([`api::new_session`]): a project of the caller's owner (slug or id), a workspace of
 //!   that project (id, label or path; the project's `default_workspace_id` when absent) on a
-//!   worker of the owner; runtime `claude_code` only until iteration 4; `model` absent is the
+//!   worker of the owner; runtime `claude_code` only until iteration 5; `model` absent is the
 //!   calling session's model.
 //! - `prompt` is a `peer.message` (`mode: send`) from the calling session into the input
 //!   queue of the new one, so it starts its first turn and the new agent knows whom to

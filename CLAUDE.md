@@ -41,4 +41,4 @@ Hub / worker / client system for driving LLM agents on many machines from one ch
 ## Machines
 - This repo is developed on `home-mac` (macOS arm64), which is also the first worker.
   Claude Code CLI is installed and logged in there; Postgres 17 runs via Homebrew.
-- `llm-server` runs Hermes (ACP agent for iteration 4) and a local model on :8082.
+- `llm-server` runs Hermes (ACP agent for iteration 5) and a local model on :8082.

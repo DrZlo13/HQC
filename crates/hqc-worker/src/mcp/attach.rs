@@ -11,7 +11,7 @@
 //! - only a regular file, at most [`crate::inbox::MAX_ARTIFACT_BYTES`]; the file is opened
 //!   without following a symlink in its last component and checked again on the open handle,
 //!   so a file swapped after the check is refused, and exactly the size seen there is sent;
-//! - `content` (for the bare model, iteration 4) is not accepted.
+//! - `content` (for the bare model, iteration 5) is not accepted.
 //!
 //! The same rules hold for the `files` of `hqc_send` and `hqc_ask` (T41,
 //! [`Attacher::prepare_files`]), and the files of a reply to `hqc_ask` are downloaded into the

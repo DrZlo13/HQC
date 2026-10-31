@@ -75,7 +75,7 @@ pub const SETTING_SOURCES: &str = "user,local";
 /// The agent's environment: only these variables of the worker's (SPEC §14), never `HQC_*`
 /// (the worker's token store, config) or other secrets the worker runs with. `SHELL` and
 /// `LOGNAME` are what the CLI's Bash tool and the Keychain lookup need besides the list of
-/// SPEC §14; variables of the workspace's environment come on top (iteration 5).
+/// SPEC §14; variables of the workspace's environment come on top (iteration 4).
 pub fn child_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     const NAMES: &[&str] = &[
         "PATH",

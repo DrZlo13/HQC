@@ -37,11 +37,11 @@ allow = ["Bash(ssh debian@192.168.1.20:*)", "Bash(curl http://192.168.1.1:*)"]
 Matched by the workspace path, the longest match wins (like `env_bindings`, SPEC §14). Only
 the worker's config sets it: the hub cannot grant a folder `ssh`, so the trust boundary of SPEC
 §2.1 holds. A session's mode still applies on top ("Ask" asks, "Auto" lets the classifier
-decide). It is a first piece of the environments of iteration 5 (`ssh` keys are credentials).
+decide). It is a first piece of the environments of iteration 4 (`ssh` keys are credentials).
 
 ## Earlier
 
 - Tombstones of deleted sessions, so the mirror does not bring them back:
   `docs/notes/t24-questions.md`.
 - "Deny always" for a new folder in the worker's service session: iteration 6.
-- The personal assistant session: iteration 4 (SPEC §19).
+- The personal assistant session: iteration 5 (SPEC §19).

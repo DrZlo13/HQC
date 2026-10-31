@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.49, 2026-10-31. Status: the architecture agreed after six reviews and a survey of
+Version 0.50, 2026-10-31. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -308,7 +308,7 @@ row of its own (§5.2).
 `timezone`, `message`, `enabled`, `last_run`, `catch_up`.
 
 Since 0.38 (T35; table `scheduled_messages`, migration `0018`): `session_id` only — the
-project-template variant waits for session templates (iteration 4); exactly one of `cron` (5
+project-template variant waits for session templates (backlog); exactly one of `cron` (5
 fields) and `at` (a time); `timezone` — an IANA name, the owner's `timezone` when not given;
 `next_run` — when it is due next (UTC), null once it will not run again (an `at` that ran or
 was skipped); `catch_up` false by default. Deleting the session deletes its schedules.
@@ -2437,7 +2437,7 @@ contains a warning. An `ephemeral` workspace is **not deleted automatically** wh
 session is archived; it is marked "for deletion" and shows a button;
 deletion is always confirmed.
 
-### 13.3 Project session template
+### 13.3 Project session template (backlog since 0.50)
 An optional project setting: `{workspace_id, cwd_pattern: "<slug>", prompt}`.
 A new session from the template creates the subfolder `<workspace>/<slug>` and starts with the
 starting prompt. The workspace in the template is required. Meant for projects like cad and
@@ -2474,7 +2474,7 @@ The hub gets a copy in `hello` and shows it; only the worker owner can change it
 machine (`hqc-worker env ...`).
 
 Permission policy `[permissions]` (in effect since 0.14 for all of the worker's Claude Code
-sessions; environments of iteration 4 will be able to extend it via `settings`):
+sessions; since iteration 4 an environment can extend it with its own `permissions`, below):
 
 ```toml
 [permissions]
@@ -2515,21 +2515,21 @@ both launched by the worker):
 - `ssh_keys`: keys handed out through a separate ssh-agent socket to this process only;
   by default there is no agent;
 - `env`: variables and tokens (GitHub etc.);
-- `settings`: additional Claude Code settings via `--settings` (for example,
-  `permissions.deny` for `Bash(ssh*)`, `Bash(scp*)`); **Claude Code only**,
-  ACP agents have no equivalent, so for them the `default` environment is weaker: the only
-  boundary is the absence of keys;
+- `permissions` (since 0.50, replaces the earlier free-form `settings`): `unblock` — rules of the
+  worker's `deny` lifted for this environment only (a rule not in that `deny` is a config error),
+  `allow` and `deny` — added to the worker's lists; the effective order stays the three levels
+  above. **Claude Code only**, ACP agents have no equivalent, so for them the `default`
+  environment is weaker: the only boundary is the absence of keys;
 - `allow_local_mcp`: allow MCP servers from the machine (Claude Code: without
   `--strict-mcp-config`; Hermes: without `HERMES_ACP_SKIP_CONFIGURED_MCP`); default
   false;
-- `network`: policy for Claude Code's bash sandbox mode, if enabled;
-- `roots`: additional allowed paths;
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
 
 The `default` environment: no keys, no tokens, `deny` from `[permissions]` (by default it
 includes ssh/scp too), local MCP off. Keys of one project (for example `infra`) are moved out of
-`~/.ssh` into the worker's store (Keychain on a Mac) and are available only to sessions on paths
+`~/.ssh` into the worker's store (files in `$HQC_HOME/keys/`, 0700 and 0600, decided on
+2026-10-31: Keychain is locked in ssh sessions on a Mac) and are available only to sessions on paths
 with that environment.
 
 Limitation: without a container or a separate OS user the agent sees the files
@@ -2763,8 +2763,8 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
 - Worker: Rust, one static binary on macOS/Linux/Windows, systemd/launchd/
   Windows service, optional tray icon. MCP server on `rmcp` (subcommand
   `hqc-worker mcp`). ACP client: the `agent-client-protocol` crate (the protocol's official
-  Rust SDK), **[verify]** that it is current. Secure store for tokens and keys: Keychain
-  on macOS; on Linux and Windows in the first version the worker token is a 0600 file (§5.1),
+  Rust SDK), **[verify]** that it is current. Secure store for the worker token: Keychain
+  on macOS (ssh keys of environments are 0600 files, §14); on Linux and Windows in the first version the worker token is a 0600 file (§5.1),
   libsecret and DPAPI later.
 - Client: TypeScript, responsive web, PWA; Tauri on the same code later.
 - Shared crates: `hqc-proto` (event and frame schema, versioned),
@@ -2789,8 +2789,9 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
    MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 6).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
-4. Workspaces: clone, worktree, ephemeral, session template. Environments and bindings on
-   the worker. Moved ahead of the agents on 2026-10-31.
+4. Workspaces: clone, worktree, ephemeral. Environments and bindings on the worker. Moved
+   ahead of the agents on 2026-10-31; the session template (§13.3) went to `docs/BACKLOG.md`.
+   Tasks: `docs/ITERATION-4.md`.
 5. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; bare model and local models through a proxy; the personal assistant session
    (moved from 3: its default runtime is the bare model, §8.3), until then `hqc_send` needs
@@ -2943,6 +2944,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.49 → 0.50 (iteration 4 planned)
+§14: an environment's free-form `settings` is replaced by `permissions {unblock, allow, deny}`
+(per-folder rules, from `docs/BACKLOG.md`); `network` and `roots` are dropped until needed
+(backlog); ssh keys of environments live in 0600 files under `$HQC_HOME/keys/`, not in
+Keychain (§18 follows). §19: the session template leaves iteration 4 for the backlog; tasks in
+`docs/ITERATION-4.md`.
 
 ### 0.48 → 0.49 (iterations 4 and 5 swapped)
 §19: workspaces, environments and bindings are now iteration 4, the ACP adapter, the bare and

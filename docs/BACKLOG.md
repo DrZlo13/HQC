@@ -3,22 +3,12 @@
 Ideas and requests not planned into an iteration yet. When one is taken, it becomes a task in
 the current `docs/ITERATION-*.md` and leaves this list.
 
-## Permissions managed from hqc (2026-10-25)
+## Permission rules left out of T48 (2026-10-31)
 
-The rules live in three places today (`[permissions]` of `~/.hqc/worker.toml`,
-`~/.claude/settings.json`, `.claude/settings.local.json` of a repository), none of them visible
-in hqc; "Always allow" saves the exact command with all its arguments, so it rarely matches
-again, and agents that write Python, grep, route boards and convert files ask all the time.
-A permission mode per session is T38 (`docs/ITERATION-3.md`).
-
-1. **A pattern instead of the exact command on the card.** Next to "Always allow", "Allow
-   `python3 *` in this folder" with a pattern hqc suggests from the command and the user can edit
-   before confirming. The hub keeps such rules per workspace and sends them with
-   `session.start`; the worker merges them into `--settings`, its `deny` wins.
-2. **A rules screen.** Per worker and folder, every rule in force with its source
-   (`worker.toml`, Claude Code's user settings, the folder's settings, hqc's rules), so a rule
-   that blocks something by accident is easy to find. hqc's rules are added and removed there;
-   Claude Code's own files are shown, not edited.
+- Removing "Always allow" rules from a folder's `.claude/settings.local.json` on the rules
+  screen (a Claude Code file that VS Code reads too; T48 shows them read-only).
+- hqc's own deny rules per folder ("never run `rm` here"); until then deny lives only in
+  `worker.toml`.
 
 ## Environment options left out of iteration 4 (2026-10-31)
 

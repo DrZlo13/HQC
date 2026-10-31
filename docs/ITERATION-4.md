@@ -14,11 +14,44 @@ needs them. ACP agents and `acp_agents` are iteration 5. The project session tem
 moves to `docs/BACKLOG.md` (2026-10-31: sessions in a shared folder create their subprojects
 themselves).
 
-The UX tasks the user lists before this iteration starts are added here and run first.
+The UX tasks (T48 on) run first; the user adds to them before the workspace tasks start.
 
 Each task is self-contained: it can be handed to a separate agent together with `CLAUDE.md`
 and the listed sections of `docs/SPEC.md`. Dependencies are stated; T44 and T45 can run in
 parallel after T43; T46 needs T45, T47 needs T46.
+
+## T48. Permission rules in hqc: a rules screen and patterns from the card
+
+Sections: §2.1, §3 Workspace, §5.3, §6, §8.1, §10.1, §14. Runs first. The rules live in
+`worker.toml`, `~/.claude/settings.json` and the folder's `.claude/settings.local.json`, none
+of them visible in hqc, and "Always allow" saves the exact command, so it rarely matches again
+(`docs/BACKLOG.md`, "Permissions managed from hqc", items 1 and 2, moved here).
+- hqc's own allow rules, per workspace (decided 2026-10-31: a folder, not a project or a
+  worker), stored on the hub (a migration), owner only. The worker gets them with
+  `session.start` and in a new frame when they change, and applies them itself in
+  `can_use_tool` (allow without asking) after its `deny`, so a new rule works in a running
+  session too; `deny` of the worker always wins. A compound Bash command (`&&`, `;`, `|`,
+  subshells) is allowed by an hqc rule only if every part is; anything the matcher does not
+  understand is asked. This keeps §2.1: the hub can answer permission requests already, a rule
+  is a standing answer within the owner's policy, and it cannot lift the worker's `deny`.
+- The card: next to "Always allow" (the exact command, as now) an "Allow in this folder" with
+  a pattern hqc suggests from the command (`Bash(python3 *)` for `python3 tools/conv.py x`,
+  the tool name alone for non-Bash tools), editable before confirming; the call is allowed and
+  the rule saved.
+- The rules screen, from the worker's settings (pick a folder) and from the session header
+  (that session's folder): the default mode and the session's mode; "Check a command" (the
+  rule that decides, or "asks"); then three groups in the order they act — denied (never runs,
+  never asks), allowed (no asking), the rest (Ask: a card, Auto: the classifier) — each rule
+  with its source (`worker.toml`, `~/.claude/settings.json`, `.claude/settings.local.json`,
+  hqc). hqc's rules are added and removed there; the others are read-only. The data comes from
+  the worker on request (`permissions.inspect {path}` → the rules of the three files for that
+  workspace, parsed, with sources; the check runs on the worker with its own matcher).
+Acceptance: the common checks; worker tests: hqc rules applied in `can_use_tool` and never
+over `deny`, compound commands, a rule update reaching a running session, `permissions.inspect`
+of the three sources; hub tests: rules CRUD (owner only, per workspace), sent with
+`session.start` and on change; client tests: the card's pattern, the screen's groups and the
+check; by hand: allow `python3 *` from a card on the phone, the next `python3` call in that
+folder runs without a card, a session in another folder still asks.
 
 ## T43. Environments and bindings on the worker
 

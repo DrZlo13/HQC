@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hqc mobile — project settings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1D1B18}
+.app{--bg:#1D1B18;--side:#1A2220;--side-plain:#191715;--rail:#12201D;--row-on:#23403B;--row-hover:#1E2D2A;--surface:#262320;--border:#38332D;--text:#F2EEE8;--text2:#D8D1C7;--muted:#ADA599;--code:#141210;--accent:#3FB8A8;--accent-soft:#1F3532;--accent-line:#2E6B63;--bubble:#2A3532;--mark-bg:#24423D;--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:var(--text)}
+.app a{color:var(--accent)}
+.app code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--text2)}
+.mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+.ib{width:36px;height:36px;flex:0 0 auto;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;padding:0}
+.ib:hover{background:var(--row-hover);color:var(--text)}
+.btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.app a.btn{color:var(--text)}
+.btn:hover{border-color:var(--accent-line)}
+.btn.pri,.app a.btn.pri{background:var(--accent);border-color:var(--accent);color:#15120F;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.quiet,.app a.btn.quiet{background:transparent;border-color:transparent;color:var(--text2)}
+.btn.quiet:hover{background:var(--row-hover)}
+.btn.danger{color:#F59486}
+.btn.dangerfill{background:#C8483A;border-color:#C8483A;color:#FFF5F2;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed;filter:none}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.22)}
+.row{position:relative;display:flex;gap:10px;padding:8px 8px 8px 10px;border-radius:8px;color:var(--text)}
+.row:hover,.row.hov{background:var(--row-hover)}
+.row.on{background:var(--row-on)}
+.row .acts{position:absolute;top:5px;right:5px;display:flex;gap:2px;opacity:0;background:inherit;border-radius:8px;padding-left:6px}
+.row:hover .acts,.row.hov .acts,.row:focus-within .acts{opacity:1}
+.row .ib{width:30px;height:30px;color:var(--text2)}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12.5px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.tile{width:44px;height:44px;border-radius:12px;border:0;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;padding:0;color:#F2EEE8;font-weight:700}
+.tile.other{opacity:var(--mark-other);filter:var(--mark-filter);transition:opacity .15s,filter .15s}
+.tile.other:hover{opacity:1;filter:none}
+.stripes{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 8px,transparent 8px 16px)}
+.field{height:38px;box-sizing:border-box;border-radius:8px;border:1px solid var(--border);background:var(--code);color:var(--text);padding:0 12px;font:13.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;outline:0;min-width:0}
+.field:focus{border-color:var(--accent)}
+.chipbtn{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--text2);font:12.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent-line);color:var(--text)}
+.row.reo{padding-left:2px}
+.row.reo .acts{display:none}
+.row.dragging,.mrow.dragging{background:var(--row-hover);box-shadow:0 0 0 1px var(--accent-line),0 10px 24px rgba(0,0,0,.45);position:relative;z-index:2}
+.grip{flex:0 0 28px;align-self:stretch;border:0;background:transparent;color:var(--muted);cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px;padding:0}
+.grip:hover,.grip:focus-visible{color:var(--text);background:var(--row-hover)}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.mrow{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;text-decoration:none;color:var(--text);user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.app a.mrow{color:var(--text)}
+.mrow:hover{background:var(--row-hover)}
+.mrow.on{background:var(--row-on)}
+.chip2{flex:0 0 auto;height:38px;padding:0 12px;border-radius:19px;border:1px solid var(--border);background:rgba(0,0,0,.18);color:var(--text2);font:500 14px Inter,system-ui,sans-serif;display:flex;align-items:center;gap:7px;cursor:pointer}
+.sheetbtn{display:flex;align-items:center;gap:14px;width:100%;height:52px;padding:0 16px;border:0;border-radius:12px;background:transparent;color:var(--text);font:500 16px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:none;text-align:left;box-sizing:border-box}
+.app a.sheetbtn{color:var(--text)}
+.sheetbtn:hover{background:var(--row-hover)}
+.app .ib.big{width:44px;height:44px;border-radius:22px;color:var(--text2)}
+.btn.lg{height:48px;border-radius:12px;font-size:15px;justify-content:center}
+</style>
+</helmet>
+
+<div class="app" style="{{themeVars}}">
+<div style="position: relative; width: 390px; height: 844px; overflow: hidden; display: flex; flex-direction: column; font-size: 15px; background: var(--bg)">
+  <header style="flex: 0 0 auto; padding: 6px 4px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 2px; background: var(--side)">
+    <a class="ib big" href="MList2.dc.html" aria-label="Back to sessions"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 4.5L7 10l5.5 5.5"></path></svg></a>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+      <div style="font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Project settings</div>
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); min-width: 0; white-space: nowrap; overflow: hidden"><span>ESP</span></div>
+    </div>
+  </header>
+
+  <div style="flex: 1; min-height: 0; overflow-y: auto; padding: 18px 16px 32px; display: flex; flex-direction: column; gap: 24px">
+    <section style="display: flex; flex-direction: column; gap: 10px">
+      <h2 style="margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted)">Appearance</h2>
+      <a class="sheetbtn" href="#" style="height: auto; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border)">
+        <span style="flex: 0 0 48px; height: 48px; border-radius: 13px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 24px">🔌</span>
+        <span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 700">ESP</span><span style="font-size: 13px; color: var(--text2); display: flex; align-items: center; gap: 6px"><span style="width: 10px; height: 10px; border-radius: 5px; background: var(--accent)"></span>Teal · Warm</span></span>
+        <span style="font-size: 14px; color: var(--accent)">Change</span>
+      </a>
+    </section>
+    <section style="display: flex; flex-direction: column; gap: 10px">
+      <h2 style="margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted)">Workspaces</h2>
+      <p style="margin: 0; font-size: 13.5px; color: var(--text2)">Folders on workers that this project’s sessions work in. Removing one keeps the folder on disk.</p>
+      <div style="border-radius: 12px; background: var(--surface); border: 1px solid var(--border); overflow: hidden">
+        <div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 2px">
+          <div style="display: flex; align-items: center; gap: 8px"><span style="font-weight: 700">jai</span><span style="height: 20px; padding: 0 7px; border-radius: 6px; background: rgba(92,201,138,.14); color: #6FD49A; font-size: 11.5px; font-weight: 600; display: inline-flex; align-items: center">default</span></div>
+          <span class="mono" style="font-size: 12.5px; color: var(--text2); overflow-wrap: anywhere">drzlo-mac:~/work/jai/jai</span>
+        </div>
+        <label style="display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 14px; border-top: 1px solid var(--border); font-size: 15px">VS Code sessions<input type="checkbox" checked style="width: 20px; height: 20px; accent-color: var(--accent)"></label>
+        <a class="sheetbtn" href="MRules2.dc.html" style="border-radius: 0; border-top: 1px solid var(--border); height: 48px; font-size: 15px"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.5v4.5c0 4-2.6 6.8-6 8-3.4-1.2-6-4-6-8V5z"></path></svg><span style="flex: 1">Rules</span><span style="color: var(--muted)">2 hqc</span><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l5 5-5 5"></path></svg></a>
+        <button class="sheetbtn" style="border-radius: 0; border-top: 1px solid var(--border); height: 48px; font-size: 15px; color: #F59486">Remove</button>
+      </div>
+      <div style="border-radius: 12px; background: var(--surface); border: 1px solid var(--border); overflow: hidden">
+        <div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 2px">
+          <div style="display: flex; align-items: center; gap: 8px"><span style="font-weight: 700">c6-displays</span></div>
+          <span class="mono" style="font-size: 12.5px; color: var(--text2); overflow-wrap: anywhere">home-mac:~/work/c6-displays</span>
+        </div>
+        <label style="display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 14px; border-top: 1px solid var(--border); font-size: 15px">VS Code sessions<input type="checkbox" style="width: 20px; height: 20px; accent-color: var(--accent)"></label>
+        <a class="sheetbtn" href="MRules2.dc.html" style="border-radius: 0; border-top: 1px solid var(--border); height: 48px; font-size: 15px"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.5v4.5c0 4-2.6 6.8-6 8-3.4-1.2-6-4-6-8V5z"></path></svg><span style="flex: 1">Rules</span><span style="color: var(--muted)">none</span><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l5 5-5 5"></path></svg></a>
+        <button class="sheetbtn" style="border-radius: 0; border-top: 1px solid var(--border); height: 48px; font-size: 15px; color: #F59486">Remove</button>
+      </div>
+      <button class="btn pri lg"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg>Add a workspace</button>
+      <button class="btn lg">Import from Claude Code</button>
+    </section>
+    <section style="display: flex; flex-direction: column; gap: 10px">
+      <h2 style="margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted)">Project</h2>
+      <button class="btn lg">Rename</button>
+      <button class="btn lg danger">Delete project</button>
+    </section>
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"color":{"editor":"color","default":"#3FB8A8","options":["#3FB8A8","#B57BD6","#6E9BFF","#E77A9A"]},"base":{"editor":"enum","default":"warm","options":["warm","graphite","contrast"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+
+  theme(color, base) {
+    const BASES = {
+      warm: { bg: '#1D1B18', side: '#191715', rail: '#100E0C', surface: '#282521', border: '#3A352F', text: '#F2EEE8', text2: '#D8D1C7', muted: '#ADA599', code: '#141210' },
+      graphite: { bg: '#1A1C1F', side: '#16181B', rail: '#0E0F11', surface: '#25282C', border: '#353A40', text: '#EDEFF2', text2: '#CDD2D8', muted: '#A3A9B1', code: '#121315' },
+      contrast: { bg: '#121110', side: '#0F0E0D', rail: '#070706', surface: '#211F1C', border: '#4A443C', text: '#FFFFFF', text2: '#E9E4DC', muted: '#C6BEB2', code: '#0A0908' }
+    };
+    const B = BASES[base] || BASES.warm;
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const mix = (a, b, t) => { const A = rgb(a); const C = rgb(b); return '#' + A.map((v, i) => Math.round(v * t + C[i] * (1 - t)).toString(16).padStart(2, '0')).join(''); };
+    const c = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#3FB8A8';
+    return '--bg:' + B.bg + ';--side:' + mix(c, B.side, 0.12) + ';--side-plain:' + B.side + ';--rail:' + mix(c, B.rail, 0.18) + ';--row-on:' + mix(c, B.side, 0.3) + ';--row-hover:' + mix(c, B.side, 0.18) +
+      ';--surface:' + B.surface + ';--border:' + B.border + ';--text:' + B.text + ';--text2:' + B.text2 + ';--muted:' + B.muted + ';--code:' + B.code +
+      ';--accent:' + c + ';--accent-soft:' + mix(c, B.bg, 0.2) + ';--accent-line:' + mix(c, B.bg, 0.5) + ';--bubble:' + mix(c, B.surface, 0.2) + ';background:' + B.bg + ';' + this.markVars(c, B, mix);
+  }
+  markVars(c, B, mix) {
+    // Current project in the rail: accent pill at the left edge + stronger tile.
+    return '--mark-bg:' + mix(c, B.rail, 0.42) + ';--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;';
+  }
+
+  renderVals() {
+    return { themeVars: this.theme(this.props.color ?? '#3FB8A8', this.props.base ?? 'warm') };
+  }
+}
+</script>
+</body>
+</html>

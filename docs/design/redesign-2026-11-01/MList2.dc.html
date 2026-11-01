@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hqc mobile — sessions</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1D1B18}
+.app{--bg:#1D1B18;--side:#1A2220;--side-plain:#191715;--rail:#12201D;--row-on:#23403B;--row-hover:#1E2D2A;--surface:#262320;--border:#38332D;--text:#F2EEE8;--text2:#D8D1C7;--muted:#ADA599;--code:#141210;--accent:#3FB8A8;--accent-soft:#1F3532;--accent-line:#2E6B63;--bubble:#2A3532;--mark-bg:#24423D;--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:var(--text)}
+.app a{color:var(--accent)}
+.app code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--text2)}
+.mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+.ib{width:36px;height:36px;flex:0 0 auto;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;padding:0}
+.ib:hover{background:var(--row-hover);color:var(--text)}
+.btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.app a.btn{color:var(--text)}
+.btn:hover{border-color:var(--accent-line)}
+.btn.pri,.app a.btn.pri{background:var(--accent);border-color:var(--accent);color:#15120F;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.quiet,.app a.btn.quiet{background:transparent;border-color:transparent;color:var(--text2)}
+.btn.quiet:hover{background:var(--row-hover)}
+.btn.danger{color:#F59486}
+.btn.dangerfill{background:#C8483A;border-color:#C8483A;color:#FFF5F2;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed;filter:none}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.22)}
+.row{position:relative;display:flex;gap:10px;padding:8px 8px 8px 10px;border-radius:8px;color:var(--text)}
+.row:hover,.row.hov{background:var(--row-hover)}
+.row.on{background:var(--row-on)}
+.row .acts{position:absolute;top:5px;right:5px;display:flex;gap:2px;opacity:0;background:inherit;border-radius:8px;padding-left:6px}
+.row:hover .acts,.row.hov .acts,.row:focus-within .acts{opacity:1}
+.row .ib{width:30px;height:30px;color:var(--text2)}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12.5px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.tile{width:44px;height:44px;border-radius:12px;border:0;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;padding:0;color:#F2EEE8;font-weight:700}
+.tile.other{opacity:var(--mark-other);filter:var(--mark-filter);transition:opacity .15s,filter .15s}
+.tile.other:hover{opacity:1;filter:none}
+.stripes{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 8px,transparent 8px 16px)}
+.field{height:38px;box-sizing:border-box;border-radius:8px;border:1px solid var(--border);background:var(--code);color:var(--text);padding:0 12px;font:13.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;outline:0;min-width:0}
+.field:focus{border-color:var(--accent)}
+.chipbtn{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--text2);font:12.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent-line);color:var(--text)}
+.row.reo{padding-left:2px}
+.row.reo .acts{display:none}
+.row.dragging,.mrow.dragging{background:var(--row-hover);box-shadow:0 0 0 1px var(--accent-line),0 10px 24px rgba(0,0,0,.45);position:relative;z-index:2}
+.grip{flex:0 0 28px;align-self:stretch;border:0;background:transparent;color:var(--muted);cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px;padding:0}
+.grip:hover,.grip:focus-visible{color:var(--text);background:var(--row-hover)}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.mrow{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;text-decoration:none;color:var(--text);user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.app a.mrow{color:var(--text)}
+.mrow:hover{background:var(--row-hover)}
+.mrow.on{background:var(--row-on)}
+.chip2{flex:0 0 auto;height:38px;padding:0 12px;border-radius:19px;border:1px solid var(--border);background:rgba(0,0,0,.18);color:var(--text2);font:500 14px Inter,system-ui,sans-serif;display:flex;align-items:center;gap:7px;cursor:pointer}
+.sheetbtn{display:flex;align-items:center;gap:14px;width:100%;height:52px;padding:0 16px;border:0;border-radius:12px;background:transparent;color:var(--text);font:500 16px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:none;text-align:left;box-sizing:border-box}
+.app a.sheetbtn{color:var(--text)}
+.sheetbtn:hover{background:var(--row-hover)}
+.app .ib.big{width:44px;height:44px;border-radius:22px;color:var(--text2)}
+.btn.lg{height:48px;border-radius:12px;font-size:15px;justify-content:center}
+</style>
+</helmet>
+
+<div class="app" style="{{themeVars}}">
+<div style="position: relative; width: 390px; height: 844px; overflow: hidden; display: flex; flex-direction: column; font-size: 15px; background: var(--bg)">
+  <header style="flex: 0 0 auto; padding: 14px 16px 10px; display: flex; flex-direction: column; gap: 12px; background: var(--side)">
+    <div style="display: flex; align-items: center; gap: 2px">
+      <h1 style="flex: 1; margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -.01em">Sessions</h1>
+      <button class="ib big" aria-label="Search sessions and messages"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="9" r="5"></circle><path d="M13 13l4 4"></path></svg></button>
+      <a class="ib big" href="MSettings2.dc.html" aria-label="Project settings"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.6"></circle><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"></path></svg></a>
+    </div>
+    <div role="group" aria-label="Projects" style="display: flex; gap: 8px; overflow-x: auto; margin: 0 -16px; padding: 0 16px 2px">
+      <button class="chip2" aria-pressed="true" style="background: var(--accent-soft); border-color: var(--accent); color: var(--text); font-weight: 600"><span style="font-size: 17px">🔌</span>ESP<span style="min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center">1</span></button>
+      <button class="chip2" aria-pressed="false"><span style="font-size: 17px">⚛️</span>physics-mp</button>
+      <button class="chip2" aria-pressed="false"><span style="font-size: 17px">🛰️</span>HQC</button>
+      <button class="chip2" aria-pressed="false"><span style="font-size: 17px">🏡</span>Personal</button>
+      <button class="chip2" aria-pressed="false"><span style="font-size: 17px">🧪</span>Tests</button>
+    </div>
+    <sc-if value="{{notReo}}" hint-placeholder-val="{{ true }}">
+      <div style="display: flex; gap: 8px">
+        <div role="group" aria-label="Order" style="flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 10px; background: rgba(0,0,0,.22); border: 1px solid var(--border)">
+          <sc-for list="{{sorts}}" as="m" hint-placeholder-count="3">
+            <button class="{{m.cls}}" aria-pressed="{{m.pressed}}" onClick="{{m.pick}}" style="height: 36px; font-size: 13.5px">{{m.label}}</button>
+          </sc-for>
+        </div>
+        <button class="ib big" onClick="{{startReo}}" aria-label="Reorder sessions" style="border-radius: 10px; border: 1px solid var(--border); background: rgba(0,0,0,.22)"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v14M3.5 6.5L7 3l3.5 3.5M13 17V3M9.5 13.5L13 17l3.5-3.5"></path></svg></button>
+      </div>
+    </sc-if>
+    <sc-if value="{{reo}}" hint-placeholder-val="{{ false }}">
+      <div style="display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 14px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent-line)">
+        <span style="display: flex; color: var(--accent)"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v14M3.5 6.5L7 3l3.5 3.5M13 17V3M9.5 13.5L13 17l3.5-3.5"></path></svg></span>
+        <span style="flex: 1; font-weight: 600">Reorder</span>
+        <button class="btn quiet" onClick="{{cancelReo}}" style="height: 40px">Cancel</button>
+        <button class="btn pri" onClick="{{doneReo}}" style="height: 40px">Done</button>
+      </div>
+    </sc-if>
+  </header>
+
+  <div onPointerMove="{{dragMove}}" onPointerUp="{{dragEnd}}" onPointerCancel="{{dragEnd}}" style="flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 96px">
+    <sc-for list="{{groups}}" as="g" hint-placeholder-count="2">
+      <div style="display: flex; gap: 6px; padding: 12px 16px 4px; font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: {{g.color}}"><span>{{g.label}}</span><span style="color: var(--muted)">{{g.count}}</span></div>
+      <sc-for list="{{g.items}}" as="item" hint-placeholder-count="3">
+        <div data-row="1" class="{{item.wrapCls}}" style="display: flex; align-items: stretch" onPointerDown="{{item.press}}" onPointerUp="{{release}}" onPointerLeave="{{release}}" onContextMenu="{{item.ctx}}">
+          <a class="{{item.cls}}" href="{{item.href}}" onClick="{{item.click}}" style="flex: 1; min-width: 0">
+            <span style="{{item.dotStyle}}"></span>
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+              <span style="display: flex; gap: 8px; align-items: baseline">
+                <span style="flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.title}}</span>
+                <span style="flex: 0 0 auto; font-size: 12.5px; color: var(--muted)">{{item.when}}</span>
+              </span>
+              <span style="font-size: 13.5px; color: {{item.subColor}}">{{item.sub}}</span>
+              <span class="mono" style="font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.where}}</span>
+            </span>
+          </a>
+          <sc-if value="{{item.reo}}" hint-placeholder-val="{{ false }}">
+            <button class="grip" aria-label="Drag to reorder, or use arrow keys" onPointerDown="{{item.onDown}}" onKeyDown="{{item.onKey}}" style="flex: 0 0 56px; border-radius: 0"><svg aria-hidden="true" width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="2.5" cy="3" r="1.4"></circle><circle cx="7.5" cy="3" r="1.4"></circle><circle cx="2.5" cy="8" r="1.4"></circle><circle cx="7.5" cy="8" r="1.4"></circle><circle cx="2.5" cy="13" r="1.4"></circle><circle cx="7.5" cy="13" r="1.4"></circle></svg></button>
+          </sc-if>
+        </div>
+      </sc-for>
+    </sc-for>
+    <p style="margin: 8px 16px 0; font-size: 12.5px; color: var(--muted)">{{hint}}</p>
+    <div style="margin: 14px 12px 0; display: flex; flex-direction: column; gap: 6px">
+      <a class="sheetbtn" href="MArchive2.dc.html" style="height: 48px; color: var(--text2)"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg><span style="flex: 1">Archive</span><span style="color: var(--muted)">{{archiveCount}}</span></a>
+      <a class="sheetbtn" href="#" style="height: 48px; background: var(--row-on); font-weight: 600"><span style="flex: 1">Requests</span><span style="min-width: 20px; height: 20px; border-radius: 10px; background: #F2B35B; color: #1A1206; font-size: 11.5px; font-weight: 700; display: flex; align-items: center; justify-content: center">1</span></a>
+    </div>
+    <div style="margin: 16px 16px 0; padding-top: 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px">
+      <div style="font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted)">Workers</div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 14px"><span style="width: 8px; height: 8px; border-radius: 4px; background: #5CC98A"></span><span style="flex: 1">drzlo-mac</span><span style="color: var(--muted); font-size: 13px">1 active</span></div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 14px"><span style="width: 8px; height: 8px; border-radius: 4px; background: #5CC98A"></span><span style="flex: 1">home-mac</span><span style="color: var(--muted); font-size: 13px">none active</span></div>
+    </div>
+  </div>
+
+  <sc-if value="{{toastOn}}" hint-placeholder-val="{{ false }}">
+    <div role="status" style="position: absolute; left: 12px; right: 12px; bottom: 92px; padding: 6px 6px 6px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); display: flex; align-items: center; gap: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45)">
+      <span style="flex: 1; min-width: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Archived «{{toastTitle}}»</span>
+      <button class="btn quiet" onClick="{{undo}}" style="height: 40px; color: var(--accent); font-weight: 600; font-size: 14px">Undo</button>
+    </div>
+  </sc-if>
+
+  <button class="btn pri" onClick="{{newSession}}" style="position: absolute; right: 16px; bottom: 24px; height: 56px; padding: 0 20px 0 16px; border-radius: 28px; font-size: 15px; box-shadow: 0 8px 24px rgba(0,0,0,.45)"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg>New</button>
+
+  <sc-if value="{{sheetOn}}" hint-placeholder-val="{{ true }}">
+    <div onClick="{{closeSheet}}" style="position: absolute; inset: 0; background: rgba(6,5,4,.6)"></div>
+    <section role="dialog" aria-label="Session actions" style="position: absolute; left: 0; right: 0; bottom: 0; border-radius: 20px 20px 0 0; background: var(--surface); border-top: 1px solid var(--border); padding: 8px 12px 24px; display: flex; flex-direction: column; gap: 2px; box-shadow: 0 -16px 40px rgba(0,0,0,.45)">
+      <span style="align-self: center; width: 40px; height: 5px; border-radius: 3px; background: var(--border); margin-bottom: 10px"></span>
+      <div style="padding: 0 16px 12px; display: flex; flex-direction: column">
+        <span style="font-weight: 700; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sheetTitle}}</span>
+        <span class="mono" style="font-size: 12.5px; color: var(--muted)">{{sheetWhere}}</span>
+      </div>
+      <sc-if value="{{sheetMenu}}" hint-placeholder-val="{{ true }}">
+        <button class="sheetbtn" onClick="{{archiveSheet}}"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg>Archive</button>
+        <button class="sheetbtn"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6 3h5l4 4v10H6z"></path><path d="M11 3v4h4"></path></svg>Rename</button>
+        <a class="sheetbtn" href="MRules2.dc.html"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.5v4.5c0 4-2.6 6.8-6 8-3.4-1.2-6-4-6-8V5z"></path></svg>Folder rules</a>
+        <button class="sheetbtn" onClick="{{askDelete}}" style="color: #F59486"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M8 6V4h4v2M5.5 6l.8 10a1 1 0 0 0 1 .9h5.4a1 1 0 0 0 1-.9l.8-10"></path></svg>Delete…</button>
+        <button class="btn lg" onClick="{{closeSheet}}" style="margin-top: 8px">Cancel</button>
+      </sc-if>
+      <sc-if value="{{sheetConfirm}}" hint-placeholder-val="{{ false }}">
+        <div style="padding: 0 16px 12px; font-size: 14px; color: var(--text2)">Delete this session forever? Messages and history go too. Files on disk stay.</div>
+        <button class="btn lg dangerfill" onClick="{{doDelete}}">Delete forever</button>
+        <button class="btn lg" onClick="{{closeSheet}}" style="margin-top: 8px">Cancel</button>
+      </sc-if>
+    </section>
+  </sc-if>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"color":{"editor":"color","default":"#3FB8A8","options":["#3FB8A8","#B57BD6","#6E9BFF","#E77A9A"]},"base":{"editor":"enum","default":"warm","options":["warm","graphite","contrast"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = Object.assign(this.initSide(), { deleted: [], sheet: 'files', confirm: false });
+    this.t = null;
+    this.longFired = false;
+  }
+
+  theme(color, base) {
+    const BASES = {
+      warm: { bg: '#1D1B18', side: '#191715', rail: '#100E0C', surface: '#282521', border: '#3A352F', text: '#F2EEE8', text2: '#D8D1C7', muted: '#ADA599', code: '#141210' },
+      graphite: { bg: '#1A1C1F', side: '#16181B', rail: '#0E0F11', surface: '#25282C', border: '#353A40', text: '#EDEFF2', text2: '#CDD2D8', muted: '#A3A9B1', code: '#121315' },
+      contrast: { bg: '#121110', side: '#0F0E0D', rail: '#070706', surface: '#211F1C', border: '#4A443C', text: '#FFFFFF', text2: '#E9E4DC', muted: '#C6BEB2', code: '#0A0908' }
+    };
+    const B = BASES[base] || BASES.warm;
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const mix = (a, b, t) => { const A = rgb(a); const C = rgb(b); return '#' + A.map((v, i) => Math.round(v * t + C[i] * (1 - t)).toString(16).padStart(2, '0')).join(''); };
+    const c = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#3FB8A8';
+    return '--bg:' + B.bg + ';--side:' + mix(c, B.side, 0.12) + ';--side-plain:' + B.side + ';--rail:' + mix(c, B.rail, 0.18) + ';--row-on:' + mix(c, B.side, 0.3) + ';--row-hover:' + mix(c, B.side, 0.18) +
+      ';--surface:' + B.surface + ';--border:' + B.border + ';--text:' + B.text + ';--text2:' + B.text2 + ';--muted:' + B.muted + ';--code:' + B.code +
+      ';--accent:' + c + ';--accent-soft:' + mix(c, B.bg, 0.2) + ';--accent-line:' + mix(c, B.bg, 0.5) + ';--bubble:' + mix(c, B.surface, 0.2) + ';background:' + B.bg + ';' + this.markVars(c, B, mix);
+  }
+  markVars(c, B, mix) {
+    // Current project in the rail: accent pill at the left edge + stronger tile.
+    return '--mark-bg:' + mix(c, B.rail, 0.42) + ';--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;';
+  }
+
+
+  dragVals() {
+    return {
+      dragMove: (e) => {
+        const d = this.drag;
+        if (!d) return;
+        e.preventDefault();
+        const from = d.base.indexOf(d.id);
+        const to = Math.max(0, Math.min(d.base.length - 1, from + Math.round((e.clientY - d.y) / d.h)));
+        const o = d.base.slice();
+        o.splice(from, 1);
+        o.splice(to, 0, d.id);
+        if (o.join('|') !== this.state.order.join('|')) this.setState({ order: o });
+      },
+      dragEnd: () => { if (this.drag) { this.drag = null; this.setState({ dragId: null }); } }
+    };
+  }
+  handleVals(id) {
+    return {
+      onDown: (e) => {
+        const row = e.currentTarget.closest('[data-row]');
+        this.drag = { id: id, y: e.clientY, h: row ? row.offsetHeight + 2 : 64, base: this.state.order.slice() };
+        e.preventDefault();
+        this.setState({ dragId: id });
+      },
+      onKey: (e) => {
+        const dir = e.key === 'ArrowUp' ? -1 : (e.key === 'ArrowDown' ? 1 : 0);
+        if (!dir) return;
+        e.preventDefault();
+        const o = this.state.order.slice();
+        const i = o.indexOf(id);
+        const j = i + dir;
+        if (j < 0 || j >= o.length) return;
+        o.splice(i, 1);
+        o.splice(j, 0, id);
+        this.setState({ order: o });
+      }
+    };
+  }
+  sortVals() {
+    const st = this.state;
+    return {
+      reo: !!st.reordering,
+      notReo: !st.reordering,
+      sorts: [['state', 'State'], ['recent', 'Recent'], ['custom', 'Custom']].map((m) => ({
+        label: m[1], cls: st.sort === m[0] ? 'seg on' : 'seg', pressed: st.sort === m[0] ? 'true' : 'false',
+        pick: () => this.setState({ sort: m[0] })
+      })),
+      startReo: () => this.setState({ reordering: true, savedOrder: this.state.order.slice() }),
+      cancelReo: () => this.setState({ reordering: false, order: this.state.savedOrder || this.state.order, dragId: null }),
+      doneReo: () => this.setState({ reordering: false, sort: 'custom', dragId: null })
+    };
+  }
+  groupsFor(live, byId, deco) {
+    const st = this.state;
+    const by = (f) => live.filter(f).sort((a, b) => a.rank - b.rank);
+    let g;
+    if (st.reordering || st.sort === 'custom') {
+      g = [{ label: st.reordering ? 'Drag to reorder' : 'Custom order', color: st.reordering ? 'var(--accent)' : 'var(--muted)', items: st.order.filter((id) => byId[id] && live.indexOf(byId[id]) >= 0).map((id) => byId[id]), plain: true }];
+    } else if (st.sort === 'state') {
+      g = [
+        { label: 'Needs you', color: '#F2B35B', items: by((s) => s.state === 'wait') },
+        { label: 'Running', color: 'var(--muted)', items: by((s) => s.state === 'run') },
+        { label: 'Idle', color: 'var(--muted)', items: by((s) => s.state === 'idle') }
+      ];
+    } else {
+      g = [
+        { label: 'Today', color: 'var(--muted)', items: by((s) => s.day === 'today') },
+        { label: 'Earlier', color: 'var(--muted)', items: by((s) => s.day !== 'today') }
+      ];
+    }
+    return g.filter((x) => x.items.length).map((x) => ({ label: x.label, color: x.color, count: x.plain ? '' : String(x.items.length), items: x.items.map(deco) }));
+  }
+
+  sessions() {
+    return [
+      { id: 'xfer', title: 'Обмен файлами hqc-xfer-test через hqc', state: 'wait', sub: 'Waiting for permission', where: 'drzlo-mac · jai/jai', when: 'now', day: 'today', rank: 0, href: 'Session.dc.html' },
+      { id: 'files', title: 'Файлы в текущей папке', state: 'idle', sub: 'Idle', where: 'home-mac · c6-displays', when: '31 min', day: 'today', rank: 1, href: 'AskingSession.dc.html' },
+      { id: 'led', title: 'Драйвер LED-матрицы', state: 'idle', sub: 'Idle', where: 'home-mac · c6-displays', when: '2 h', day: 'today', rank: 2, href: '#' },
+      { id: 'spi', title: 'SPI-шина: таймауты', state: 'idle', sub: 'Idle', where: 'drzlo-mac · jai/jai', when: 'Oct 29', day: 'earlier', rank: 3, href: '#' },
+      { id: 'ota', title: 'Прошивка по воздуху (OTA)', state: 'idle', sub: 'Idle', where: 'home-mac · c6-displays', when: 'Oct 27', day: 'earlier', rank: 4, href: '#' }
+    ].concat((this.state && this.state.extra) || []);
+  }
+  initSide() {
+    return { archived: [], toast: null, sort: 'recent', reordering: false, order: ['xfer', 'led', 'spi', 'files', 'ota'], savedOrder: null, dragId: null, extra: [], lastPos: 0 };
+  }
+  addSession() {
+    const n = (this.state.extra || []).length + 1;
+    const id = 'new' + n;
+    const s = { id: id, title: n === 1 ? 'New session' : 'New session ' + n, state: 'run', sub: 'Starting…', where: 'drzlo-mac · jai/jai', when: 'now', day: 'today', rank: -n, href: '#' };
+    this.setState({ extra: (this.state.extra || []).concat([s]), order: [id].concat(this.state.order) });
+  }
+  sideVals() {
+    const st = this.state;
+    const all = this.sessions();
+    const byId = {};
+    all.forEach((s) => { byId[s.id] = s; });
+    const live = all.filter((s) => st.archived.indexOf(s.id) < 0);
+    const activeId = this.activeId ? this.activeId() : 'xfer';
+    const reo = !!st.reordering;
+    const deco = (s) => Object.assign({
+      title: s.title, when: s.when, sub: s.sub, where: s.where, href: s.href, reo: reo,
+      cls: 'row' + (s.id === activeId ? ' on' : '') + (reo ? ' reo' : '') + (st.dragId === s.id ? ' dragging' : ''),
+      dotStyle: 'flex: 0 0 8px; height: 8px; margin-top: 8px; border-radius: 4px; ' + (s.state === 'wait' ? 'background: #F2B35B' : (s.state === 'run' ? 'background: var(--accent)' : 'box-shadow: inset 0 0 0 1.5px var(--muted)')),
+      dotClass: s.state === 'run' ? 'pulse' : '',
+      subColor: s.state === 'wait' ? '#F2B35B' : 'var(--muted)',
+      archive: () => this.setState({ archived: this.state.archived.concat([s.id]), order: this.state.order.filter((x) => x !== s.id), lastPos: Math.max(0, this.state.order.indexOf(s.id)), toast: s.title })
+    }, this.handleVals(s.id));
+    const wait = live.filter((s) => s.state === 'wait').length;
+    const idle = live.filter((s) => s.state === 'idle').length;
+    const parts = [];
+    if (wait) parts.push(wait + ' needs you');
+    if (idle) parts.push(idle + ' idle');
+    return Object.assign({
+      groups: this.groupsFor(live, byId, deco),
+      projSub: parts.join(' · ') || 'No sessions yet',
+      archiveCount: String(3 + st.archived.length),
+      toastOn: !!st.toast,
+      toastTitle: st.toast || '',
+      undo: () => { const id = this.state.archived[this.state.archived.length - 1]; const o = this.state.order.slice(); if (id) o.splice(Math.min(this.state.lastPos || 0, o.length), 0, id); this.setState({ archived: this.state.archived.slice(0, -1), order: o, toast: null }); },
+      newSession: () => this.addSession()
+    }, this.sortVals(), this.dragVals());
+  }
+
+  renderVals() {
+    const st = this.state;
+    const all = this.sessions();
+    const byId = {};
+    all.forEach((s) => { byId[s.id] = s; });
+    const live = all.filter((s) => st.archived.indexOf(s.id) < 0 && st.deleted.indexOf(s.id) < 0);
+    const cur = all.find((s) => s.id === st.sheet);
+    const reo = !!st.reordering;
+    const open = (id) => { this.longFired = true; this.setState({ sheet: id, confirm: false }); };
+    const deco = (s) => Object.assign({
+      title: s.title, when: s.when, sub: s.sub, where: s.where, href: reo ? '#' : (s.id === 'xfer' ? 'MSession2.dc.html' : '#'), reo: reo,
+      cls: 'mrow' + (!reo && st.sheet === s.id ? ' on' : ''),
+      wrapCls: st.dragId === s.id ? 'mrow dragging' : '',
+      dotStyle: 'flex: 0 0 10px; height: 10px; margin-top: 7px; border-radius: 5px; ' + (s.state === 'wait' ? 'background: #F2B35B' : (s.state === 'run' ? 'background: var(--accent)' : 'box-shadow: inset 0 0 0 1.5px var(--muted)')),
+      subColor: s.state === 'wait' ? '#F2B35B' : 'var(--muted)',
+      press: () => { if (this.state.reordering) return; clearTimeout(this.t); this.longFired = false; this.t = setTimeout(() => open(s.id), 450); },
+      ctx: (e) => { e.preventDefault(); if (this.state.reordering) return; clearTimeout(this.t); open(s.id); },
+      click: (e) => { if (this.longFired || this.state.reordering) { e.preventDefault(); this.longFired = false; } }
+    }, this.handleVals(s.id));
+    return Object.assign({
+      themeVars: this.theme(this.props.color ?? '#3FB8A8', this.props.base ?? 'warm'),
+      groups: this.groupsFor(live, byId, deco),
+      hint: reo ? 'Drag the handle on the right. Done saves the order and switches to Custom.' : 'Press and hold a session to archive, rename or delete it.',
+      release: () => clearTimeout(this.t),
+      archiveCount: String(3 + st.archived.length),
+      sheetOn: !!cur && !reo,
+      sheetMenu: !!cur && !st.confirm,
+      sheetConfirm: !!cur && st.confirm,
+      sheetTitle: cur ? cur.title : '',
+      sheetWhere: cur ? cur.where : '',
+      closeSheet: () => this.setState({ sheet: null, confirm: false }),
+      archiveSheet: () => this.setState({ archived: st.archived.concat([st.sheet]), order: st.order.filter((x) => x !== st.sheet), lastPos: Math.max(0, st.order.indexOf(st.sheet)), toast: cur ? cur.title : '', sheet: null }),
+      newSession: () => this.addSession(),
+      askDelete: () => this.setState({ confirm: true }),
+      doDelete: () => this.setState({ deleted: st.deleted.concat([st.sheet]), order: st.order.filter((x) => x !== st.sheet), sheet: null, confirm: false }),
+      toastOn: !!st.toast,
+      toastTitle: st.toast || '',
+      undo: () => { const id = st.archived[st.archived.length - 1]; const o = st.order.slice(); if (id) o.splice(Math.min(st.lastPos || 0, o.length), 0, id); this.setState({ archived: st.archived.slice(0, -1), order: o, toast: null }); }
+    }, this.sortVals(), this.dragVals());
+  }
+}
+</script>
+</body>
+</html>

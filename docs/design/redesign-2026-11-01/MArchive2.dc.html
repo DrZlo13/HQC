@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hqc mobile — archive</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1D1B18}
+.app{--bg:#1D1B18;--side:#1A2220;--side-plain:#191715;--rail:#12201D;--row-on:#23403B;--row-hover:#1E2D2A;--surface:#262320;--border:#38332D;--text:#F2EEE8;--text2:#D8D1C7;--muted:#ADA599;--code:#141210;--accent:#3FB8A8;--accent-soft:#1F3532;--accent-line:#2E6B63;--bubble:#2A3532;--mark-bg:#24423D;--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:var(--text)}
+.app a{color:var(--accent)}
+.app code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--text2)}
+.mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+.ib{width:36px;height:36px;flex:0 0 auto;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;padding:0}
+.ib:hover{background:var(--row-hover);color:var(--text)}
+.btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.app a.btn{color:var(--text)}
+.btn:hover{border-color:var(--accent-line)}
+.btn.pri,.app a.btn.pri{background:var(--accent);border-color:var(--accent);color:#15120F;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.quiet,.app a.btn.quiet{background:transparent;border-color:transparent;color:var(--text2)}
+.btn.quiet:hover{background:var(--row-hover)}
+.btn.danger{color:#F59486}
+.btn.dangerfill{background:#C8483A;border-color:#C8483A;color:#FFF5F2;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed;filter:none}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.22)}
+.row{position:relative;display:flex;gap:10px;padding:8px 8px 8px 10px;border-radius:8px;color:var(--text)}
+.row:hover,.row.hov{background:var(--row-hover)}
+.row.on{background:var(--row-on)}
+.row .acts{position:absolute;top:5px;right:5px;display:flex;gap:2px;opacity:0;background:inherit;border-radius:8px;padding-left:6px}
+.row:hover .acts,.row.hov .acts,.row:focus-within .acts{opacity:1}
+.row .ib{width:30px;height:30px;color:var(--text2)}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12.5px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.tile{width:44px;height:44px;border-radius:12px;border:0;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;padding:0;color:#F2EEE8;font-weight:700}
+.tile.other{opacity:var(--mark-other);filter:var(--mark-filter);transition:opacity .15s,filter .15s}
+.tile.other:hover{opacity:1;filter:none}
+.stripes{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 8px,transparent 8px 16px)}
+.field{height:38px;box-sizing:border-box;border-radius:8px;border:1px solid var(--border);background:var(--code);color:var(--text);padding:0 12px;font:13.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;outline:0;min-width:0}
+.field:focus{border-color:var(--accent)}
+.chipbtn{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--text2);font:12.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent-line);color:var(--text)}
+.row.reo{padding-left:2px}
+.row.reo .acts{display:none}
+.row.dragging,.mrow.dragging{background:var(--row-hover);box-shadow:0 0 0 1px var(--accent-line),0 10px 24px rgba(0,0,0,.45);position:relative;z-index:2}
+.grip{flex:0 0 28px;align-self:stretch;border:0;background:transparent;color:var(--muted);cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px;padding:0}
+.grip:hover,.grip:focus-visible{color:var(--text);background:var(--row-hover)}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.mrow{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;text-decoration:none;color:var(--text);user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.app a.mrow{color:var(--text)}
+.mrow:hover{background:var(--row-hover)}
+.mrow.on{background:var(--row-on)}
+.chip2{flex:0 0 auto;height:38px;padding:0 12px;border-radius:19px;border:1px solid var(--border);background:rgba(0,0,0,.18);color:var(--text2);font:500 14px Inter,system-ui,sans-serif;display:flex;align-items:center;gap:7px;cursor:pointer}
+.sheetbtn{display:flex;align-items:center;gap:14px;width:100%;height:52px;padding:0 16px;border:0;border-radius:12px;background:transparent;color:var(--text);font:500 16px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:none;text-align:left;box-sizing:border-box}
+.app a.sheetbtn{color:var(--text)}
+.sheetbtn:hover{background:var(--row-hover)}
+.app .ib.big{width:44px;height:44px;border-radius:22px;color:var(--text2)}
+.btn.lg{height:48px;border-radius:12px;font-size:15px;justify-content:center}
+</style>
+</helmet>
+
+<div class="app" style="{{themeVars}}">
+<div style="position: relative; width: 390px; height: 844px; overflow: hidden; display: flex; flex-direction: column; font-size: 15px; background: var(--bg)">
+  <header class="stripes" style="flex: 0 0 auto; padding: 6px 12px 14px 4px; border-bottom: 1px solid var(--border); background-color: var(--side-plain); display: flex; flex-direction: column; gap: 6px">
+    <div style="display: flex; align-items: center; gap: 6px">
+      <a class="ib big" href="MList2.dc.html" aria-label="Back to sessions"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 4.5L7 10l5.5 5.5"></path></svg></a>
+      <span style="flex: 0 0 32px; height: 32px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border); color: var(--text2); display: flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg></span>
+      <div style="flex: 1; min-width: 0"><div style="font-size: 18px; font-weight: 700">Archive</div><div style="font-size: 12.5px; color: var(--muted)">ESP · {{countLabel}}</div></div>
+    </div>
+    <p style="margin: 0 0 0 14px; font-size: 13px; color: var(--text2)">Read-only. Restore a session to keep working, or delete it for good.</p>
+  </header>
+  <div style="flex: 1; min-height: 0; overflow-y: auto; background: var(--side-plain); padding: 8px 0 24px">
+    <sc-for list="{{rows}}" as="r" hint-placeholder-count="3">
+      <div style="{{r.style}}">
+        <div style="display: flex; gap: 12px">
+          <span style="flex: 0 0 16px; margin-top: 3px; color: var(--muted); display: flex"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg></span>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+            <span style="font-weight: 600; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
+            <span style="font-size: 13px; color: var(--muted)">Archived {{r.when}}</span>
+            <span class="mono" style="font-size: 12px; color: var(--muted)">{{r.where}}</span>
+          </div>
+        </div>
+        <sc-if value="{{r.idle}}" hint-placeholder-val="{{ true }}">
+          <div style="margin-top: 10px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+            <button class="btn" onClick="{{r.restore}}" style="height: 44px; justify-content: center; color: var(--accent)"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5a6 6 0 1 1 1.8 4.3"></path><path d="M4 4.5V9.5h5"></path></svg>Restore</button>
+            <button class="btn danger" onClick="{{r.ask}}" style="height: 44px; justify-content: center"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M8 6V4h4v2M5.5 6l.8 10a1 1 0 0 0 1 .9h5.4a1 1 0 0 0 1-.9l.8-10"></path></svg>Delete</button>
+          </div>
+        </sc-if>
+        <sc-if value="{{r.confirming}}" hint-placeholder-val="{{ false }}">
+          <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px">
+            <span style="font-size: 13.5px; color: #F59486">Delete forever? This can’t be undone.</span>
+            <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+              <button class="btn dangerfill" onClick="{{r.del}}" style="height: 44px; justify-content: center">Delete</button>
+              <button class="btn" onClick="{{r.cancel}}" style="height: 44px; justify-content: center">Cancel</button>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </sc-for>
+    <sc-if value="{{empty}}" hint-placeholder-val="{{ false }}">
+      <div style="padding: 40px 16px; text-align: center; color: var(--muted)">Archive is empty</div>
+    </sc-if>
+  </div>
+  <sc-if value="{{toastOn}}" hint-placeholder-val="{{ false }}">
+    <div role="status" style="position: absolute; left: 12px; right: 12px; bottom: 24px; padding: 12px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.45)">{{toast}}</div>
+  </sc-if>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"color":{"editor":"color","default":"#3FB8A8","options":["#3FB8A8","#B57BD6","#6E9BFF","#E77A9A"]},"base":{"editor":"enum","default":"warm","options":["warm","graphite","contrast"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { list: ['files', 'test', 'spi'], confirm: 'spi', toast: '' };
+  }
+
+  theme(color, base) {
+    const BASES = {
+      warm: { bg: '#1D1B18', side: '#191715', rail: '#100E0C', surface: '#282521', border: '#3A352F', text: '#F2EEE8', text2: '#D8D1C7', muted: '#ADA599', code: '#141210' },
+      graphite: { bg: '#1A1C1F', side: '#16181B', rail: '#0E0F11', surface: '#25282C', border: '#353A40', text: '#EDEFF2', text2: '#CDD2D8', muted: '#A3A9B1', code: '#121315' },
+      contrast: { bg: '#121110', side: '#0F0E0D', rail: '#070706', surface: '#211F1C', border: '#4A443C', text: '#FFFFFF', text2: '#E9E4DC', muted: '#C6BEB2', code: '#0A0908' }
+    };
+    const B = BASES[base] || BASES.warm;
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const mix = (a, b, t) => { const A = rgb(a); const C = rgb(b); return '#' + A.map((v, i) => Math.round(v * t + C[i] * (1 - t)).toString(16).padStart(2, '0')).join(''); };
+    const c = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#3FB8A8';
+    return '--bg:' + B.bg + ';--side:' + mix(c, B.side, 0.12) + ';--side-plain:' + B.side + ';--rail:' + mix(c, B.rail, 0.18) + ';--row-on:' + mix(c, B.side, 0.3) + ';--row-hover:' + mix(c, B.side, 0.18) +
+      ';--surface:' + B.surface + ';--border:' + B.border + ';--text:' + B.text + ';--text2:' + B.text2 + ';--muted:' + B.muted + ';--code:' + B.code +
+      ';--accent:' + c + ';--accent-soft:' + mix(c, B.bg, 0.2) + ';--accent-line:' + mix(c, B.bg, 0.5) + ';--bubble:' + mix(c, B.surface, 0.2) + ';background:' + B.bg + ';' + this.markVars(c, B, mix);
+  }
+  markVars(c, B, mix) {
+    // Current project in the rail: accent pill at the left edge + stronger tile.
+    return '--mark-bg:' + mix(c, B.rail, 0.42) + ';--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;';
+  }
+
+  renderVals() {
+    const st = this.state;
+    const A = {
+      files: { title: 'Файлы в текущей папке', when: 'today 23:45', where: 'home-mac · c6-displays' },
+      test: { title: 'Тестовая сессия', when: 'Oct 25', where: 'home-mac · multi-debugger' },
+      spi: { title: 'Старый эксперимент с SPI', when: 'Oct 20', where: 'drzlo-mac · jai/jai' }
+    };
+    const n = st.list.length;
+    return {
+      themeVars: this.theme(this.props.color ?? '#3FB8A8', this.props.base ?? 'warm'),
+      countLabel: n === 1 ? '1 session' : n + ' sessions',
+      empty: n === 0,
+      toastOn: !!st.toast,
+      toast: st.toast,
+      rows: st.list.map((id) => {
+        const a = A[id];
+        const c = st.confirm === id;
+        return {
+          title: a.title, when: a.when, where: a.where, confirming: c, idle: !c,
+          style: 'padding: 14px 16px; border-bottom: 1px solid var(--border);' + (c ? ' background: rgba(200,72,58,.1);' : ''),
+          restore: () => this.setState({ list: this.state.list.filter((x) => x !== id), toast: 'Restored «' + a.title + '»' }),
+          ask: () => this.setState({ confirm: id }),
+          cancel: () => this.setState({ confirm: null }),
+          del: () => this.setState({ list: this.state.list.filter((x) => x !== id), confirm: null, toast: 'Deleted «' + a.title + '»' })
+        };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -14,15 +14,98 @@ needs them. ACP agents and `acp_agents` are iteration 5. The project session tem
 moves to `docs/BACKLOG.md` (2026-10-31: sessions in a shared folder create their subprojects
 themselves).
 
-The UX tasks (T48 on) run first; the user adds to them before the workspace tasks start.
+The UX tasks T48–T51 run first, by the round 2 redesign `docs/design/redesign-2026-11-01`
+(mockups for desktop and phone; its README is the behaviour spec and lists the decisions made
+with the user). T49 goes first, since the others build on its theme and layout; then T48, T50
+and T51 can run in parallel (they touch different parts of the client, the merge is in
+`styles.css`).
 
 Each task is self-contained: it can be handed to a separate agent together with `CLAUDE.md`
 and the listed sections of `docs/SPEC.md`. Dependencies are stated; T44 and T45 can run in
 parallel after T43; T46 needs T45, T47 needs T46.
 
+## T49. Theme, project appearance and the new layout
+
+Sections: §3 User, §3 Project, §6, §12. Mockups: all of `docs/design/redesign-2026-11-01`
+for the layout; `Appearance`, `ProjectSettings`, `MSettings2` for the screens. The 2026-10-24
+palette is cold and low in contrast; projects all look alike.
+- The app takes the tokens of `theme.js`: base theme (Warm default, Graphite, High contrast;
+  all dark) plus the project color, as CSS variables on the root, recomputed when the project
+  changes. Status colors stay fixed (amber waiting, green online, red danger, violet between
+  sessions). The new project bar, sidebar header, rows and widths of the README's "Theme and
+  color" and "Project bar"; "Project workspaces" leaves the sidebar for the project settings.
+- Hub: `users.theme` (`warm` | `graphite` | `contrast`, default `warm`) in `GET/PATCH
+  /api/me`; `projects.color` (one of the 8 names of `theme.js`, default by a hash of the id)
+  and `projects.icon` (`{kind: emoji, value}` | `{kind: letters, value}` (1–2 characters) |
+  `{kind: image, artifact_id}`) in the project object and `PATCH /api/projects/{id}`. An image
+  is uploaded like an attachment (§12), PNG, JPEG or WebP only by the content's magic bytes,
+  square, 128 px to 1024 px, at most 256 KB; SVG and anything else is `422`. A migration.
+- Project settings page (desktop and phone) with Appearance, Workspaces (moved here: the rows
+  with "VS Code sessions", "Rules · N hqc" once T48 is in, "Remove"; "Add a workspace",
+  "Import from Claude Code") and Project ("Rename", "Delete project"); the Appearance dialog
+  with a live preview, on the phone a full-screen sheet with the same sections.
+Acceptance: the common checks; hub tests: theme and project appearance round trips, image
+checks (an SVG, a PNG renamed to `.webp` that is fine, a too large one, a non-square one), the
+personal project gets appearance too; client tests: tokens per base and color, the dialog, the
+settings page; by hand on a phone and a desktop: switch a project's color and icon and the
+app theme, and see the same on the other device after a reload.
+
+## T50. Session list: archive at hand, archive mode, custom order
+
+Sections: §3 Session, §6, §17.4. Depends on T49. Mockups: `Session` (sidebar), `Archive`,
+`MList2`, `MArchive2`. Archiving takes two clicks far from the session, the archive looks like
+the ordinary list, and there is no order of one's own.
+- Row actions: on hover or focus the archive button and "⋯" (Rename, Folder rules, Delete with
+  confirmation in the row); on the phone a long press (or right click) opens the bottom sheet of
+  `MList2`. The archive button leaves the session header.
+- Archiving from a row shows "Archived «…» · Undo" and calls the hub only when the toast goes
+  away (5 s; decided 2026-11-01), so Undo stops nothing; leaving the page in that window
+  archives at once. The session returns to its place on Undo.
+- Archive mode as in `Archive` / `MArchive2`: plain sidebar, hatching, back arrow, "Restore" and
+  "Delete" always on the row, delete confirmed in the row; an open archived session has the
+  "Archived" chip, the band "Archived <when> · read-only…", the dimmed feed and no input. Hub:
+  `sessions.archived_at` (a migration; set on archive, cleared on unarchive; sessions archived
+  before it show no time) in the session object.
+- Order: State / Recent / Custom and Reorder (⇅) with the "Reorder · Cancel · Done" bar, a
+  handle, pointer-event drag (mouse and finger) and ↑/↓ on the handle. Hub: the order per user
+  and project (`PUT /api/projects/{id}/session_order {session_ids}`, ids of the project's
+  unarchived sessions; unknown ones are ignored, missing ones go first) and the chosen mode in
+  the same record; new sessions go on top in Custom. A migration.
+Acceptance: the common checks; hub tests: `archived_at`, the order round trip and its rules
+(another user's sessions, archived ones, a new session on top); client tests: the delayed archive
+and Undo, the archive mode screen, reorder by keyboard and the saved order; by hand on a phone:
+archive by a long press and undo, restore and delete from the archive, reorder with a finger.
+
+## T51. Messages between sessions in the feed
+
+Sections: §4 (`peer.message`, `agent.message.in_reply_to`), §6, §7, §7.1. Depends on T49.
+Mockups: `Session`, `AskingSession`, `MSession2`. Today a peer message is a card close to the
+others, and the asking side sees only a tool call.
+- Violet blocks with the direction arrow (↗ left this session, ↙ came into it) and the other
+  session's address as a link (`<project-slug>/<session-slug>`; an unknown or deleted one is
+  plain text):
+  - answering session: "↙ Question from X" (a `peer.message` with `mode: ask`; "↙ Message from
+    X" for a send) with text and attachments; "↗ Reply to X · delivered <time>" is the
+    `agent.message` with `final: true` whose `in_reply_to` is that question, with its files;
+  - asking session: "↗ Sent to X · delivered <time>" for the `hqc_send` / `hqc_ask` tool call
+    (text and `files` from its input), "↙ Reply from X" for the `hqc_ask` result (`reply` and
+    `files`, with Open / Download of the local copies); a send folded into a reply (T42) shows
+    after its separator in the same block.
+- Hub: the delivery time the blocks show. For a question or a send the `peer.message`'s
+  `delivered_at` (already in the event's delivery); for a reply the time the asking worker
+  acknowledged the result (`result_delivered_at`, §7.1), given to the client on the reply's
+  `agent.message` as `reply_delivered_at` in the session's events (no new event; the API
+  object gets the field when known).
+Acceptance: the common checks; hub test: `reply_delivered_at` on the reply after the ack;
+client tests: each of the four blocks from fixtures of a real exchange (T41/T42 runs), a send
+folded into a reply, a link to a deleted session; by hand: the iteration 3 exchange (A asks B
+with a file, B returns it) looks like the mockups on both sides, on a desktop and a phone.
+
 ## T48. Permission rules in hqc: a rules screen and patterns from the card
 
-Sections: §2.1, §3 Workspace, §5.3, §6, §8.1, §10.1, §14. Runs first. The rules live in
+Sections: §2.1, §3 Workspace, §5.3, §6, §8.1, §10.1, §14. Depends on T49. Mockups: `Session`
+(permission card v2), `Rules`, `ProjectSettings`, `MSession2`, `MRules2`, `MSettings2`. The rules
+live in
 `worker.toml`, `~/.claude/settings.json` and the folder's `.claude/settings.local.json`, none
 of them visible in hqc, and "Always allow" saves the exact command, so it rarely matches again
 (`docs/BACKLOG.md`, "Permissions managed from hqc", items 1 and 2, moved here).
@@ -36,10 +119,14 @@ of them visible in hqc, and "Always allow" saves the exact command, so it rarely
   is a standing answer within the owner's policy, and it cannot lift the worker's `deny`.
 - The card: next to "Always allow" (the exact command, as now) an "Allow in this folder" with
   a pattern hqc suggests from the command (`Bash(python3 *)` for `python3 tools/conv.py x`,
-  the tool name alone for non-Bash tools), editable before confirming; the call is allowed and
-  the rule saved.
-- The rules screen, from the worker's settings (pick a folder) and from the session header
-  (that session's folder): the default mode and the session's mode; "Check a command" (the
+  `Bash(git fetch:*)` for `git -C sub fetch` when `sub` is inside the folder and no pattern
+  otherwise, the tool name alone for non-Bash tools), one field per part of a compound command,
+  editable before confirming; "Save and allow" saves the rules and runs the call.
+- The rules screen of a workspace, opened from the workspace's row in the project settings,
+  where folders are added (decided 2026-10-31: the folder is the rules' source, so it is edited
+  there), and from the session header for that session's folder; no screen in the worker's
+  settings, the `worker.toml` rules show on every folder's screen with their source. It shows
+  the default mode and the session's mode; "Check a command" (the
   rule that decides, or "asks"); then three groups in the order they act — denied (never runs,
   never asks), allowed (no asking), the rest (Ask: a card, Auto: the classifier) — each rule
   with its source (`worker.toml`, `~/.claude/settings.json`, `.claude/settings.local.json`,

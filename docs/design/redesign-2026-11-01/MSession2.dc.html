@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hqc mobile — session</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1D1B18}
+.app{--bg:#1D1B18;--side:#1A2220;--side-plain:#191715;--rail:#12201D;--row-on:#23403B;--row-hover:#1E2D2A;--surface:#262320;--border:#38332D;--text:#F2EEE8;--text2:#D8D1C7;--muted:#ADA599;--code:#141210;--accent:#3FB8A8;--accent-soft:#1F3532;--accent-line:#2E6B63;--bubble:#2A3532;--mark-bg:#24423D;--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:var(--text)}
+.app a{color:var(--accent)}
+.app code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--text2)}
+.mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+.ib{width:36px;height:36px;flex:0 0 auto;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;padding:0}
+.ib:hover{background:var(--row-hover);color:var(--text)}
+.btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.app a.btn{color:var(--text)}
+.btn:hover{border-color:var(--accent-line)}
+.btn.pri,.app a.btn.pri{background:var(--accent);border-color:var(--accent);color:#15120F;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.quiet,.app a.btn.quiet{background:transparent;border-color:transparent;color:var(--text2)}
+.btn.quiet:hover{background:var(--row-hover)}
+.btn.danger{color:#F59486}
+.btn.dangerfill{background:#C8483A;border-color:#C8483A;color:#FFF5F2;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed;filter:none}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.22)}
+.row{position:relative;display:flex;gap:10px;padding:8px 8px 8px 10px;border-radius:8px;color:var(--text)}
+.row:hover,.row.hov{background:var(--row-hover)}
+.row.on{background:var(--row-on)}
+.row .acts{position:absolute;top:5px;right:5px;display:flex;gap:2px;opacity:0;background:inherit;border-radius:8px;padding-left:6px}
+.row:hover .acts,.row.hov .acts,.row:focus-within .acts{opacity:1}
+.row .ib{width:30px;height:30px;color:var(--text2)}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12.5px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.tile{width:44px;height:44px;border-radius:12px;border:0;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;padding:0;color:#F2EEE8;font-weight:700}
+.tile.other{opacity:var(--mark-other);filter:var(--mark-filter);transition:opacity .15s,filter .15s}
+.tile.other:hover{opacity:1;filter:none}
+.stripes{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 8px,transparent 8px 16px)}
+.field{height:38px;box-sizing:border-box;border-radius:8px;border:1px solid var(--border);background:var(--code);color:var(--text);padding:0 12px;font:13.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;outline:0;min-width:0}
+.field:focus{border-color:var(--accent)}
+.chipbtn{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--text2);font:12.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent-line);color:var(--text)}
+.row.reo{padding-left:2px}
+.row.reo .acts{display:none}
+.row.dragging,.mrow.dragging{background:var(--row-hover);box-shadow:0 0 0 1px var(--accent-line),0 10px 24px rgba(0,0,0,.45);position:relative;z-index:2}
+.grip{flex:0 0 28px;align-self:stretch;border:0;background:transparent;color:var(--muted);cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px;padding:0}
+.grip:hover,.grip:focus-visible{color:var(--text);background:var(--row-hover)}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.mrow{display:flex;gap:12px;align-items:flex-start;padding:12px 16px;text-decoration:none;color:var(--text);user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.app a.mrow{color:var(--text)}
+.mrow:hover{background:var(--row-hover)}
+.mrow.on{background:var(--row-on)}
+.chip2{flex:0 0 auto;height:38px;padding:0 12px;border-radius:19px;border:1px solid var(--border);background:rgba(0,0,0,.18);color:var(--text2);font:500 14px Inter,system-ui,sans-serif;display:flex;align-items:center;gap:7px;cursor:pointer}
+.sheetbtn{display:flex;align-items:center;gap:14px;width:100%;height:52px;padding:0 16px;border:0;border-radius:12px;background:transparent;color:var(--text);font:500 16px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:none;text-align:left;box-sizing:border-box}
+.app a.sheetbtn{color:var(--text)}
+.sheetbtn:hover{background:var(--row-hover)}
+.app .ib.big{width:44px;height:44px;border-radius:22px;color:var(--text2)}
+.btn.lg{height:48px;border-radius:12px;font-size:15px;justify-content:center}
+</style>
+</helmet>
+
+<div class="app" style="{{themeVars}}">
+<div style="position: relative; width: 390px; height: 844px; overflow: hidden; display: flex; flex-direction: column; font-size: 15px; background: var(--bg)">
+  <header style="flex: 0 0 auto; padding: 6px 4px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 2px; background: var(--side)">
+    <a class="ib big" href="MList2.dc.html" aria-label="Back to sessions"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 4.5L7 10l5.5 5.5"></path></svg></a>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+      <div style="font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Обмен файлами hqc-xfer-test через hqc</div>
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); min-width: 0; white-space: nowrap; overflow: hidden"><span style="{{chipDot}}"></span><span style="color: {{statusColor}}">{{statusLabel}}</span><span style="opacity: .5">·</span><span class="mono" style="overflow: hidden; text-overflow: ellipsis">drzlo-mac · jai/jai</span></div>
+    </div>
+    <button class="ib big" aria-label="Stop agent"><svg aria-hidden="true" width="11" height="11" viewBox="0 0 12 12" fill="currentColor"><rect x="1" y="1" width="10" height="10" rx="2"></rect></svg></button>
+    <button class="ib big" aria-label="More: path, model, cost, folder rules, archive"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><circle cx="4.5" cy="10" r="1.6"></circle><circle cx="10" cy="10" r="1.6"></circle><circle cx="15.5" cy="10" r="1.6"></circle></svg></button>
+  </header>
+
+  <div style="flex: 1; min-height: 0; overflow: hidden; padding: 0 14px 14px; display: flex; flex-direction: column; justify-content: flex-end; gap: 14px">
+    <section aria-label="Question from another session" style="border-radius: 12px; background: rgba(169,155,255,.08); border: 1px solid rgba(169,155,255,.32); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px">
+      <div style="display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: #C4BAFF">
+            <span style="width: 20px; height: 20px; border-radius: 6px; background: rgba(169,155,255,.2); display: inline-flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5L5 15M12 15H5V8"></path></svg></span>
+            <span style="font-weight: 600">Question from</span>
+            <a href="#" class="mono" style="color: #E3DDFF; text-decoration: none; border-bottom: 1px solid rgba(169,155,255,.5)">esp/session-4</a>
+            <span style="flex: 1"></span><span style="color: var(--muted)">23:11</span>
+          </div>
+      <p style="margin: 0; font-size: 14.5px">Привет! Это esp/session-4, проверяем обмен файлами через hqc. В своей копии замени «line: original» и допиши «checked: …», потом верни файл и напиши путь и sha1.</p>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; border-radius: 9px; background: rgba(0,0,0,.25)">
+            <span style="display: flex; color: var(--text2)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6 3h5l4 4v10H6z"></path><path d="M11 3v4h4"></path></svg></span>
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span class="mono" style="font-size: 12.5px">hqc-xfer-test.txt</span><span style="font-size: 11.5px; color: var(--muted)">text · 58 B</span></span>
+            <button class="btn quiet" style="height: 40px; padding: 0 10px">Open</button>
+          </div>
+    </section>
+    <button class="btn quiet" style="align-self: flex-start; height: 36px; padding: 0 8px; margin-left: -8px; color: var(--muted)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l5 5-5 5"></path></svg><span style="color: #F59486">✕</span>6 commands · 1 failed</button>
+    <section aria-label="Reply to another session" style="border-radius: 12px; background: rgba(169,155,255,.08); border: 1px solid rgba(169,155,255,.32); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px">
+      <div style="display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: #C4BAFF">
+            <span style="width: 20px; height: 20px; border-radius: 6px; background: rgba(169,155,255,.2); display: inline-flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15L15 5M8 5h7v7"></path></svg></span>
+            <span style="font-weight: 600">Reply to</span>
+            <a href="#" class="mono" style="color: #E3DDFF; text-decoration: none; border-bottom: 1px solid rgba(169,155,255,.5)">esp/session-4</a>
+            <span style="flex: 1"></span><span style="color: var(--muted)">delivered 23:11</span>
+          </div>
+      <p style="margin: 0; font-size: 14.5px">Готово, изменённый файл во вложении.</p>
+      <div style="display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 4px 10px; font-size: 12.5px">
+        <span style="color: var(--muted)">sha1 before</span><span class="mono" style="color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap">164101e63be96789e461337c5af0</span>
+        <span style="color: var(--muted)">sha1 after</span><span class="mono" style="color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap">8376c431fb7f454ec97c0522631c</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 10px; border-radius: 9px; background: rgba(0,0,0,.25)">
+            <span style="display: flex; color: var(--text2)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6 3h5l4 4v10H6z"></path><path d="M11 3v4h4"></path></svg></span>
+            <span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span class="mono" style="font-size: 12.5px">hqc-xfer-test.txt</span><span style="font-size: 11.5px; color: var(--muted)">text · 106 B</span></span>
+            <button class="btn quiet" style="height: 40px; padding: 0 10px">Open</button>
+          </div>
+    </section>
+    <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px">
+      <div style="max-width: 82%; padding: 9px 14px; border-radius: 16px 16px 4px 16px; background: var(--bubble)">Прогони конвертер на этом файле и подтяни подмодуль</div>
+      <div style="font-size: 12px; color: var(--muted)">23:33</div>
+    </div>
+    <sc-if value="{{resolved}}" hint-placeholder-val="{{ false }}">
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted)">
+        <span style="color: {{resColor}}">{{resIcon}}</span><span class="mono" style="color: var(--text2)">conv.py … &amp;&amp; git fetch</span><span>· {{resLabel}}</span>
+      </div>
+    </sc-if>
+  </div>
+
+  <sc-if value="{{sheetMain}}" hint-placeholder-val="{{ true }}">
+    <section aria-label="Permission request" style="flex: 0 0 auto; border-radius: 18px 18px 0 0; background: #1F1A12; border-top: 1px solid #5A4520; padding: 16px 16px 22px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 -12px 32px rgba(0,0,0,.4)">
+      <div style="display: flex; align-items: center; gap: 10px">
+        <span style="flex: 0 0 32px; height: 32px; border-radius: 9px; background: #33281A; color: #F2B35B; display: flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.5v4.5c0 4-2.6 6.8-6 8-3.4-1.2-6-4-6-8V5z"></path></svg></span>
+        <div style="flex: 1; min-width: 0"><div style="font-weight: 600">Run a command?</div><div style="font-size: 13px; color: #D9B97E">Bash · 2 parts</div></div>
+        <span style="font-size: 12.5px; color: var(--muted)">0:12</span>
+      </div>
+      <div style="border-radius: 10px; background: var(--code); border: 1px solid var(--border); overflow-x: auto"><pre style="margin: 0; padding: 10px 12px; font: 13px/1.55 'JetBrains Mono', ui-monospace, monospace; white-space: pre-wrap; word-break: break-all"><span style="color: var(--muted)">$ </span>python3 tools/conv.py hqc-xfer-test.txt &amp;&amp; git -C sub fetch</pre></div>
+      <button class="btn pri lg" onClick="{{allowOnce}}" style="height: 50px; font-size: 16px">Allow once</button>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+        <button class="btn lg" onClick="{{allowAlways}}">Always allow</button>
+        <button class="btn lg" onClick="{{openFolder}}">In this folder…</button>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+        <button class="btn quiet lg" onClick="{{deny}}">Deny</button>
+        <button class="btn quiet lg" onClick="{{deny}}" style="color: var(--accent)">Reply instead</button>
+      </div>
+    </section>
+  </sc-if>
+
+  <sc-if value="{{sheetFolder}}" hint-placeholder-val="{{ false }}">
+    <section aria-label="Allow in this folder" style="position: absolute; inset: 0; background: var(--bg); display: flex; flex-direction: column">
+      <header style="flex: 0 0 auto; padding: 6px 8px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 4px; background: var(--side)">
+        <button class="btn quiet" onClick="{{closeFolder}}" style="height: 44px">Back</button>
+        <div style="flex: 1; text-align: center; font-weight: 700">Allow in this folder</div>
+        <span style="width: 64px"></span>
+      </header>
+      <div style="flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 16px">
+        <div class="mono" style="font-size: 13px; color: var(--text2)">drzlo-mac:~/work/jai/jai</div>
+        <div style="display: flex; gap: 8px; font-size: 14px; color: var(--text2)"><svg aria-hidden="true" style="flex: 0 0 14px; margin-top: 3px" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="10" cy="10" r="7.5"></circle><path d="M10 9v5M10 6.2v.1"></path></svg><span>Two parts. The rule applies only when every part is allowed, in all sessions of this folder, right away.</span></div>
+        <label style="display: flex; flex-direction: column; gap: 6px"><span class="mono" style="font-size: 12.5px; color: var(--muted)">python3 tools/conv.py hqc-xfer-test.txt</span><input class="field" value="Bash(python3 *)" aria-label="Rule for part 1" style="height: 46px; font-size: 15px"></label>
+        <label style="display: flex; flex-direction: column; gap: 6px"><span class="mono" style="font-size: 12.5px; color: var(--muted)">git -C sub fetch</span><input class="field" value="Bash(git fetch:*)" aria-label="Rule for part 2" style="height: 46px; font-size: 15px"></label>
+        <a href="MRules2.dc.html" style="font-size: 14px; text-decoration: none">Open folder rules →</a>
+      </div>
+      <div style="padding: 12px 16px 24px; border-top: 1px solid var(--border)">
+        <button class="btn pri lg" onClick="{{saveFolder}}" style="width: 100%; height: 50px; font-size: 16px">Save and allow</button>
+      </div>
+    </section>
+  </sc-if>
+
+  <sc-if value="{{resolved}}" hint-placeholder-val="{{ false }}">
+    <div style="flex: 0 0 auto; border-top: 1px solid var(--border); padding: 10px 12px 22px; display: flex; align-items: flex-end; gap: 6px">
+      <button class="ib big" aria-label="Attach file"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 9.5l-5.8 5.8a3.5 3.5 0 0 1-5-5l6.4-6.4a2.3 2.3 0 0 1 3.3 3.3l-6.4 6.4a1.2 1.2 0 0 1-1.7-1.7l5.8-5.8"></path></svg></button>
+      <textarea aria-label="Message" rows="1" placeholder="Message" style="flex: 1; min-width: 0; min-height: 44px; box-sizing: border-box; resize: none; border-radius: 22px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: 15px/1.4 Inter, system-ui, sans-serif; padding: 11px 16px; outline: 0"></textarea>
+      <button class="btn pri" aria-label="Send" style="width: 44px; height: 44px; border-radius: 22px; padding: 0; justify-content: center"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 16V4M5 9l5-5 5 5"></path></svg></button>
+    </div>
+  </sc-if>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"color":{"editor":"color","default":"#3FB8A8","options":["#3FB8A8","#B57BD6","#6E9BFF","#E77A9A"]},"base":{"editor":"enum","default":"warm","options":["warm","graphite","contrast"]},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { perm: 'pending', folder: false };
+  }
+
+  theme(color, base) {
+    const BASES = {
+      warm: { bg: '#1D1B18', side: '#191715', rail: '#100E0C', surface: '#282521', border: '#3A352F', text: '#F2EEE8', text2: '#D8D1C7', muted: '#ADA599', code: '#141210' },
+      graphite: { bg: '#1A1C1F', side: '#16181B', rail: '#0E0F11', surface: '#25282C', border: '#353A40', text: '#EDEFF2', text2: '#CDD2D8', muted: '#A3A9B1', code: '#121315' },
+      contrast: { bg: '#121110', side: '#0F0E0D', rail: '#070706', surface: '#211F1C', border: '#4A443C', text: '#FFFFFF', text2: '#E9E4DC', muted: '#C6BEB2', code: '#0A0908' }
+    };
+    const B = BASES[base] || BASES.warm;
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const mix = (a, b, t) => { const A = rgb(a); const C = rgb(b); return '#' + A.map((v, i) => Math.round(v * t + C[i] * (1 - t)).toString(16).padStart(2, '0')).join(''); };
+    const c = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#3FB8A8';
+    return '--bg:' + B.bg + ';--side:' + mix(c, B.side, 0.12) + ';--side-plain:' + B.side + ';--rail:' + mix(c, B.rail, 0.18) + ';--row-on:' + mix(c, B.side, 0.3) + ';--row-hover:' + mix(c, B.side, 0.18) +
+      ';--surface:' + B.surface + ';--border:' + B.border + ';--text:' + B.text + ';--text2:' + B.text2 + ';--muted:' + B.muted + ';--code:' + B.code +
+      ';--accent:' + c + ';--accent-soft:' + mix(c, B.bg, 0.2) + ';--accent-line:' + mix(c, B.bg, 0.5) + ';--bubble:' + mix(c, B.surface, 0.2) + ';background:' + B.bg + ';' + this.markVars(c, B, mix);
+  }
+  markVars(c, B, mix) {
+    // Current project in the rail: accent pill at the left edge + stronger tile.
+    return '--mark-bg:' + mix(c, B.rail, 0.42) + ';--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;';
+  }
+
+  renderVals() {
+    const st = this.state;
+    const pending = st.perm === 'pending';
+    const denied = st.perm === 'denied';
+    const labels = { once: 'allowed once', always: 'always allowed', folder: '2 folder rules saved', denied: 'denied' };
+    return {
+      themeVars: this.theme(this.props.color ?? '#3FB8A8', this.props.base ?? 'warm'),
+      sheetMain: pending && !st.folder,
+      sheetFolder: pending && st.folder,
+      resolved: !pending,
+      resLabel: labels[st.perm] || '',
+      resIcon: denied ? '✕' : '✓',
+      resColor: denied ? 'var(--muted)' : '#5CC98A',
+      statusLabel: pending ? 'Waiting for permission' : (denied ? 'Waiting for reply' : 'Running'),
+      statusColor: pending ? '#F2B35B' : 'var(--muted)',
+      chipDot: 'flex: 0 0 7px; height: 7px; border-radius: 4px; background: ' + (pending ? '#F2B35B' : (denied ? 'var(--muted)' : 'var(--accent)')),
+      allowOnce: () => this.setState({ perm: 'once' }),
+      allowAlways: () => this.setState({ perm: 'always' }),
+      deny: () => this.setState({ perm: 'denied' }),
+      openFolder: () => this.setState({ folder: true }),
+      closeFolder: () => this.setState({ folder: false }),
+      saveFolder: () => this.setState({ perm: 'folder', folder: false })
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hqc — project appearance</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1D1B18}
+.app{--bg:#1D1B18;--side:#1A2220;--side-plain:#191715;--rail:#12201D;--row-on:#23403B;--row-hover:#1E2D2A;--surface:#262320;--border:#38332D;--text:#F2EEE8;--text2:#D8D1C7;--muted:#ADA599;--code:#141210;--accent:#3FB8A8;--accent-soft:#1F3532;--accent-line:#2E6B63;--bubble:#2A3532;--mark-bg:#24423D;--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:var(--text)}
+.app a{color:var(--accent)}
+.app code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--text2)}
+.mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+.ib{width:36px;height:36px;flex:0 0 auto;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;padding:0}
+.ib:hover{background:var(--row-hover);color:var(--text)}
+.btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.app a.btn{color:var(--text)}
+.btn:hover{border-color:var(--accent-line)}
+.btn.pri,.app a.btn.pri{background:var(--accent);border-color:var(--accent);color:#15120F;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.quiet,.app a.btn.quiet{background:transparent;border-color:transparent;color:var(--text2)}
+.btn.quiet:hover{background:var(--row-hover)}
+.btn.danger{color:#F59486}
+.btn.dangerfill{background:#C8483A;border-color:#C8483A;color:#FFF5F2;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed;filter:none}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.22)}
+.row{position:relative;display:flex;gap:10px;padding:8px 8px 8px 10px;border-radius:8px;color:var(--text)}
+.row:hover,.row.hov{background:var(--row-hover)}
+.row.on{background:var(--row-on)}
+.row .acts{position:absolute;top:5px;right:5px;display:flex;gap:2px;opacity:0;background:inherit;border-radius:8px;padding-left:6px}
+.row:hover .acts,.row.hov .acts,.row:focus-within .acts{opacity:1}
+.row .ib{width:30px;height:30px;color:var(--text2)}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12.5px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.tile{width:44px;height:44px;border-radius:12px;border:0;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;padding:0;color:#F2EEE8;font-weight:700}
+.tile.other{opacity:var(--mark-other);filter:var(--mark-filter);transition:opacity .15s,filter .15s}
+.tile.other:hover{opacity:1;filter:none}
+.stripes{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 8px,transparent 8px 16px)}
+.field{height:38px;box-sizing:border-box;border-radius:8px;border:1px solid var(--border);background:var(--code);color:var(--text);padding:0 12px;font:13.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;outline:0;min-width:0}
+.field:focus{border-color:var(--accent)}
+.chipbtn{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--text2);font:12.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent-line);color:var(--text)}
+.row.reo{padding-left:2px}
+.row.reo .acts{display:none}
+.row.dragging,.mrow.dragging{background:var(--row-hover);box-shadow:0 0 0 1px var(--accent-line),0 10px 24px rgba(0,0,0,.45);position:relative;z-index:2}
+.grip{flex:0 0 28px;align-self:stretch;border:0;background:transparent;color:var(--muted);cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px;padding:0}
+.grip:hover,.grip:focus-visible{color:var(--text);background:var(--row-hover)}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+
+<div class="app" style="{{themeVars}}">
+<div style="position: relative; min-height: 900px; display: flex; flex-wrap: wrap">
+  <nav aria-label="Projects" style="flex: 0 0 72px; background: var(--rail); display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 0; border-right: 1px solid rgba(0,0,0,.3)">
+    <div style="height: 28px; display: flex; align-items: center; font-weight: 700; font-size: 13px; color: var(--muted)">hqc</div>
+    <div style="width: 28px; height: 1px; background: var(--border); margin-bottom: 4px"></div>
+    <button class="tile other" aria-label="Personal" title="Personal" style="background: rgba(138,147,166,.24)">🏡</button>
+    <button class="tile other" aria-label="physics-mp" title="physics-mp" style="background: rgba(110,155,255,.24)">⚛️</button>
+    <button class="tile other" aria-label="HQC" title="HQC" style="background: rgba(181,123,214,.26)">🛰️</button>
+    <div style="position: relative">
+      <span aria-hidden="true" style="position: absolute; left: -14px; top: 8px; width: 4px; height: 28px; border-radius: 0 4px 4px 0; background: var(--accent); opacity: var(--mark-pill)"></span>
+      <button class="tile" aria-label="ESP" title="ESP" aria-current="page" style="background: var(--mark-bg); box-shadow: var(--mark-shadow)">{{tileIcon}}</button>
+      <span style="position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 2px solid var(--rail)">1</span>
+    </div>
+    <button class="tile other" aria-label="Tests" title="Tests" style="background: rgba(231,122,154,.24)">🧪</button>
+    <button class="tile" aria-label="New project" style="background: transparent; border: 1px dashed var(--border); color: var(--muted)"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg></button>
+    <div style="flex: 1"></div>
+    <button class="ib" aria-label="Settings" style="color: var(--muted)"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 6h14M3 14h14"></path><circle cx="7" cy="6" r="2" fill="currentColor"></circle><circle cx="13" cy="14" r="2" fill="currentColor"></circle></svg></button>
+    <div style="width: 34px; height: 34px; border-radius: 17px; background: #3A352F; color: #F2EEE8; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center">W</div>
+  </nav>
+  <div aria-hidden="true" style="flex: 1 1 280px; max-width: 310px; background: var(--side); border-right: 1px solid rgba(0,0,0,.3); padding: 16px; display: flex; flex-direction: column; gap: 10px">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <span style="flex: 0 0 32px; height: 32px; border-radius: 9px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 17px; font-weight: 700">{{tileIcon}}</span>
+      <div style="font-size: 16px; font-weight: 700">ESP</div>
+    </div>
+    <div style="height: 34px; border-radius: 8px; background: rgba(0,0,0,.22); border: 1px solid var(--border)"></div>
+    <div style="height: 58px; border-radius: 8px; background: var(--row-on)"></div>
+    <div style="height: 58px; border-radius: 8px; background: rgba(255,255,255,.02)"></div>
+  </div>
+  <div aria-hidden="true" style="flex: 999 1 560px; min-width: 0; background: var(--bg)"></div>
+  <div style="position: absolute; inset: 0; background: rgba(8,7,6,.62); display: flex; align-items: center; justify-content: center; padding: 24px">
+    <section role="dialog" aria-label="Project appearance" style="width: 100%; max-width: 760px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 24px 60px rgba(0,0,0,.55); overflow: hidden">
+      <div style="padding: 18px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px">
+        <div style="flex: 1">
+          <div style="font-size: 17px; font-weight: 700">Project appearance</div>
+          <div style="font-size: 13px; color: var(--muted)">ESP · icon and color show in the project bar, sidebar and buttons</div>
+        </div>
+        <a class="ib" href="ProjectSettings.dc.html" aria-label="Close"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 5l10 10M15 5L5 15"></path></svg></a>
+      </div>
+      <div style="display: flex; flex-wrap: wrap">
+        <div style="flex: 1 1 380px; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 22px">
+          <div style="display: flex; flex-direction: column; gap: 10px">
+            <div style="display: flex; align-items: center; gap: 12px">
+              <span style="font-weight: 600; flex: 1">Icon</span>
+              <div role="group" aria-label="Icon type" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 9px; background: rgba(0,0,0,.25); border: 1px solid var(--border); width: 240px">
+                <sc-for list="{{modes}}" as="m" hint-placeholder-count="3">
+                  <button class="{{m.cls}}" aria-pressed="{{m.pressed}}" onClick="{{m.pick}}">{{m.label}}</button>
+                </sc-for>
+              </div>
+            </div>
+            <sc-if value="{{isEmoji}}" hint-placeholder-val="{{ true }}">
+              <div style="display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px">
+                <sc-for list="{{emojis}}" as="e" hint-placeholder-count="16">
+                  <button aria-label="{{e.label}}" onClick="{{e.pick}}" style="{{e.style}}">{{e.ch}}</button>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{isLetters}}" hint-placeholder-val="{{ false }}">
+              <label style="display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text2)">Letters
+                <input class="field" maxlength="2" value="{{letters}}" onInput="{{onLetters}}" aria-label="Project letters" style="width: 80px; font-family: Inter, system-ui, sans-serif; font-weight: 700; text-transform: uppercase">
+                <span style="color: var(--muted)">1–2 characters</span>
+              </label>
+            </sc-if>
+            <sc-if value="{{isImage}}" hint-placeholder-val="{{ false }}">
+              <div style="height: 92px; border-radius: 10px; border: 1.5px dashed var(--border); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: var(--text2); font-size: 13px">
+                <span style="font-weight: 600">Drop an image or <a href="#">choose a file</a></span>
+                <span style="color: var(--muted); font-size: 12.5px">PNG, JPEG or WebP · square, at least 128 px</span>
+              </div>
+            </sc-if>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 10px">
+            <span style="font-weight: 600">Project color</span>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px">
+              <sc-for list="{{colors}}" as="c" hint-placeholder-count="8">
+                <button aria-label="{{c.label}}" aria-pressed="{{c.pressed}}" title="{{c.label}}" onClick="{{c.pick}}" style="{{c.style}}"></button>
+              </sc-for>
+            </div>
+            <span style="font-size: 12.5px; color: var(--muted)">Tints the project bar and sidebar, and colors buttons and the running indicator. Waiting stays amber in every project.</span>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 10px">
+            <div style="display: flex; align-items: baseline; gap: 8px"><span style="font-weight: 600">App theme</span><span style="font-size: 12.5px; color: var(--muted)">for all projects</span></div>
+            <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
+              <sc-for list="{{bases}}" as="b" hint-placeholder-count="3">
+                <button aria-pressed="{{b.pressed}}" onClick="{{b.pick}}" style="{{b.style}}">
+                  <span style="{{b.swatch}}"></span>
+                  <span style="font: 600 13px Inter, system-ui, sans-serif">{{b.label}}</span>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live preview -->
+        <div style="flex: 0 1 260px; min-width: 240px; padding: 20px; border-left: 1px solid var(--border); background: rgba(0,0,0,.15); display: flex; flex-direction: column; gap: 10px">
+          <span style="font-size: 12px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted)">Preview</span>
+          <div style="border-radius: 12px; overflow: hidden; border: 1px solid var(--border); display: flex; height: 300px">
+            <div style="flex: 0 0 52px; background: var(--rail); display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 0">
+              <span style="width: 32px; height: 32px; border-radius: 9px; background: rgba(110,155,255,.24); display: flex; align-items: center; justify-content: center; font-size: 15px">⚛️</span>
+              <span style="position: relative; width: 32px; height: 32px; border-radius: 9px; background: var(--mark-bg); box-shadow: var(--mark-shadow); display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700"><span aria-hidden="true" style="position: absolute; left: -10px; top: 6px; width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--accent); opacity: var(--mark-pill)"></span>{{tileIcon}}</span>
+              <span style="width: 32px; height: 32px; border-radius: 9px; background: rgba(231,122,154,.24); display: flex; align-items: center; justify-content: center; font-size: 15px">🧪</span>
+            </div>
+            <div style="flex: 1; min-width: 0; background: var(--side); padding: 12px 10px; display: flex; flex-direction: column; gap: 8px">
+              <div style="display: flex; align-items: center; gap: 6px">
+                <span style="flex: 1; font-weight: 700; font-size: 13px">ESP</span>
+                <span style="height: 24px; padding: 0 8px; border-radius: 6px; background: var(--accent); color: #15120F; font-size: 11.5px; font-weight: 700; display: flex; align-items: center">+ New</span>
+              </div>
+              <div style="padding: 7px 8px; border-radius: 7px; background: var(--row-on); display: flex; gap: 7px">
+                <span style="flex: 0 0 7px; height: 7px; margin-top: 5px; border-radius: 4px; background: var(--accent)"></span>
+                <span style="display: flex; flex-direction: column; min-width: 0"><span style="font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Драйвер LED-матрицы</span><span style="font-size: 11px; color: var(--muted)">Running</span></span>
+              </div>
+              <div style="padding: 7px 8px; border-radius: 7px; display: flex; gap: 7px">
+                <span style="flex: 0 0 7px; height: 7px; margin-top: 5px; border-radius: 4px; background: #F2B35B"></span>
+                <span style="display: flex; flex-direction: column; min-width: 0"><span style="font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Обмен файлами</span><span style="font-size: 11px; color: #F2B35B">Waiting for permission</span></span>
+              </div>
+              <div style="padding: 7px 8px; border-radius: 7px; display: flex; gap: 7px">
+                <span style="flex: 0 0 7px; height: 7px; margin-top: 5px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--muted)"></span>
+                <span style="display: flex; flex-direction: column; min-width: 0"><span style="font-size: 12px; font-weight: 600">Файлы в папке</span><span style="font-size: 11px; color: var(--muted)">Idle</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px">
+        <a class="btn quiet" href="ProjectSettings.dc.html">Cancel</a>
+        <a class="btn pri" href="ProjectSettings.dc.html">Save</a>
+      </div>
+    </section>
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { mode: 'emoji', emoji: '🔌', letters: 'ES', color: '#3FB8A8', base: 'warm' };
+  }
+
+  theme(color, base) {
+    const BASES = {
+      warm: { bg: '#1D1B18', side: '#191715', rail: '#100E0C', surface: '#282521', border: '#3A352F', text: '#F2EEE8', text2: '#D8D1C7', muted: '#ADA599', code: '#141210' },
+      graphite: { bg: '#1A1C1F', side: '#16181B', rail: '#0E0F11', surface: '#25282C', border: '#353A40', text: '#EDEFF2', text2: '#CDD2D8', muted: '#A3A9B1', code: '#121315' },
+      contrast: { bg: '#121110', side: '#0F0E0D', rail: '#070706', surface: '#211F1C', border: '#4A443C', text: '#FFFFFF', text2: '#E9E4DC', muted: '#C6BEB2', code: '#0A0908' }
+    };
+    const B = BASES[base] || BASES.warm;
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const mix = (a, b, t) => { const A = rgb(a); const C = rgb(b); return '#' + A.map((v, i) => Math.round(v * t + C[i] * (1 - t)).toString(16).padStart(2, '0')).join(''); };
+    const c = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#3FB8A8';
+    return '--bg:' + B.bg + ';--side:' + mix(c, B.side, 0.12) + ';--side-plain:' + B.side + ';--rail:' + mix(c, B.rail, 0.18) + ';--row-on:' + mix(c, B.side, 0.3) + ';--row-hover:' + mix(c, B.side, 0.18) +
+      ';--surface:' + B.surface + ';--border:' + B.border + ';--text:' + B.text + ';--text2:' + B.text2 + ';--muted:' + B.muted + ';--code:' + B.code +
+      ';--accent:' + c + ';--accent-soft:' + mix(c, B.bg, 0.2) + ';--accent-line:' + mix(c, B.bg, 0.5) + ';--bubble:' + mix(c, B.surface, 0.2) + ';background:' + B.bg + ';' + this.markVars(c, B, mix);
+  }
+  markVars(c, B, mix) {
+    // Current project in the rail: accent pill at the left edge + stronger tile.
+    return '--mark-bg:' + mix(c, B.rail, 0.42) + ';--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;';
+  }
+
+  renderVals() {
+    const st = this.state;
+    const EM = ['🔌', '⚡', '📡', '🛰️', '🤖', '🧪', '⚛️', '🎮', '🔧', '🧠', '🐙', '🌿', '🔥', '🧩', '🦊', '📟'];
+    const COL = [['Teal', '#3FB8A8'], ['Plum', '#B57BD6'], ['Blue', '#6E9BFF'], ['Rose', '#E77A9A'], ['Moss', '#8DBA5B'], ['Coral', '#F08A5D'], ['Cyan', '#4FC3E8'], ['Slate', '#8A93A6']];
+    const BS = [['warm', 'Warm', '#1D1B18', '#282521'], ['graphite', 'Graphite', '#1A1C1F', '#25282C'], ['contrast', 'High contrast', '#121110', '#4A443C']];
+    const tileIcon = st.mode === 'emoji' ? st.emoji : ((st.letters || 'ES').toUpperCase().slice(0, 2));
+    return {
+      themeVars: this.theme(st.color, st.base),
+      tileIcon: tileIcon,
+      isEmoji: st.mode === 'emoji',
+      isLetters: st.mode === 'letters',
+      isImage: st.mode === 'image',
+      letters: st.letters,
+      onLetters: (e) => this.setState({ letters: e.target.value }),
+      modes: [['emoji', 'Emoji'], ['letters', 'Letters'], ['image', 'Image']].map((m) => ({ label: m[1], cls: st.mode === m[0] ? 'seg on' : 'seg', pressed: st.mode === m[0] ? 'true' : 'false', pick: () => this.setState({ mode: m[0] }) })),
+      emojis: EM.map((ch) => ({ ch: ch, label: 'Use ' + ch, pick: () => this.setState({ emoji: ch }), style: 'height: 40px; border-radius: 9px; font-size: 19px; cursor: pointer; border: 0; padding: 0; ' + (st.emoji === ch ? 'background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent)' : 'background: rgba(0,0,0,.22)') })),
+      colors: COL.map((c) => ({ label: c[0], pressed: st.color === c[1] ? 'true' : 'false', pick: () => this.setState({ color: c[1] }), style: 'width: 36px; height: 36px; border-radius: 18px; border: 0; padding: 0; cursor: pointer; background: ' + c[1] + '; ' + (st.color === c[1] ? 'box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--text)' : '') })),
+      bases: BS.map((b) => ({ label: b[1], pressed: st.base === b[0] ? 'true' : 'false', pick: () => this.setState({ base: b[0] }),
+        style: 'display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px; border-radius: 10px; cursor: pointer; color: var(--text); background: rgba(0,0,0,.18); text-align: left; ' + (st.base === b[0] ? 'border: 2px solid var(--accent)' : 'border: 2px solid transparent'),
+        swatch: 'width: 100%; height: 30px; border-radius: 6px; background: linear-gradient(90deg, ' + b[2] + ' 0 60%, ' + b[3] + ' 60% 100%); box-shadow: inset 0 0 0 1px rgba(255,255,255,.08)' }))
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hqc — archive</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1D1B18}
+.app{--bg:#1D1B18;--side:#1A2220;--side-plain:#191715;--rail:#12201D;--row-on:#23403B;--row-hover:#1E2D2A;--surface:#262320;--border:#38332D;--text:#F2EEE8;--text2:#D8D1C7;--muted:#ADA599;--code:#141210;--accent:#3FB8A8;--accent-soft:#1F3532;--accent-line:#2E6B63;--bubble:#2A3532;--mark-bg:#24423D;--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:var(--text)}
+.app a{color:var(--accent)}
+.app code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--text2)}
+.mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+.ib{width:36px;height:36px;flex:0 0 auto;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;padding:0}
+.ib:hover{background:var(--row-hover);color:var(--text)}
+.btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.app a.btn{color:var(--text)}
+.btn:hover{border-color:var(--accent-line)}
+.btn.pri,.app a.btn.pri{background:var(--accent);border-color:var(--accent);color:#15120F;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.quiet,.app a.btn.quiet{background:transparent;border-color:transparent;color:var(--text2)}
+.btn.quiet:hover{background:var(--row-hover)}
+.btn.danger{color:#F59486}
+.btn.dangerfill{background:#C8483A;border-color:#C8483A;color:#FFF5F2;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed;filter:none}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.22)}
+.row{position:relative;display:flex;gap:10px;padding:8px 8px 8px 10px;border-radius:8px;color:var(--text)}
+.row:hover,.row.hov{background:var(--row-hover)}
+.row.on{background:var(--row-on)}
+.row .acts{position:absolute;top:5px;right:5px;display:flex;gap:2px;opacity:0;background:inherit;border-radius:8px;padding-left:6px}
+.row:hover .acts,.row.hov .acts,.row:focus-within .acts{opacity:1}
+.row .ib{width:30px;height:30px;color:var(--text2)}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12.5px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.tile{width:44px;height:44px;border-radius:12px;border:0;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;padding:0;color:#F2EEE8;font-weight:700}
+.tile.other{opacity:var(--mark-other);filter:var(--mark-filter);transition:opacity .15s,filter .15s}
+.tile.other:hover{opacity:1;filter:none}
+.stripes{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 8px,transparent 8px 16px)}
+.field{height:38px;box-sizing:border-box;border-radius:8px;border:1px solid var(--border);background:var(--code);color:var(--text);padding:0 12px;font:13.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;outline:0;min-width:0}
+.field:focus{border-color:var(--accent)}
+.chipbtn{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--text2);font:12.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent-line);color:var(--text)}
+.row.reo{padding-left:2px}
+.row.reo .acts{display:none}
+.row.dragging,.mrow.dragging{background:var(--row-hover);box-shadow:0 0 0 1px var(--accent-line),0 10px 24px rgba(0,0,0,.45);position:relative;z-index:2}
+.grip{flex:0 0 28px;align-self:stretch;border:0;background:transparent;color:var(--muted);cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px;padding:0}
+.grip:hover,.grip:focus-visible{color:var(--text);background:var(--row-hover)}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+
+<div class="app" style="{{themeVars}}">
+<div style="min-height: 900px; display: flex; flex-wrap: wrap">
+  <nav aria-label="Projects" style="flex: 0 0 72px; background: var(--rail); display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 0; border-right: 1px solid rgba(0,0,0,.3)">
+    <div style="height: 28px; display: flex; align-items: center; font-weight: 700; font-size: 13px; color: var(--muted)">hqc</div>
+    <div style="width: 28px; height: 1px; background: var(--border); margin-bottom: 4px"></div>
+    <button class="tile other" aria-label="Personal" title="Personal" style="background: rgba(138,147,166,.24)">🏡</button>
+    <button class="tile other" aria-label="physics-mp" title="physics-mp" style="background: rgba(110,155,255,.24)">⚛️</button>
+    <button class="tile other" aria-label="HQC" title="HQC" style="background: rgba(181,123,214,.26)">🛰️</button>
+    <div style="position: relative">
+      <span aria-hidden="true" style="position: absolute; left: -14px; top: 8px; width: 4px; height: 28px; border-radius: 0 4px 4px 0; background: var(--accent); opacity: var(--mark-pill)"></span>
+      <button class="tile" aria-label="ESP" title="ESP" aria-current="page" style="background: var(--mark-bg); box-shadow: var(--mark-shadow)">🔌</button>
+      <span style="position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 2px solid var(--rail)">1</span>
+    </div>
+    <button class="tile other" aria-label="Tests" title="Tests" style="background: rgba(231,122,154,.24)">🧪</button>
+    <button class="tile" aria-label="New project" style="background: transparent; border: 1px dashed var(--border); color: var(--muted)"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg></button>
+    <div style="flex: 1"></div>
+    <button class="ib" aria-label="Settings" style="color: var(--muted)"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 6h14M3 14h14"></path><circle cx="7" cy="6" r="2" fill="currentColor"></circle><circle cx="13" cy="14" r="2" fill="currentColor"></circle></svg></button>
+    <div style="width: 34px; height: 34px; border-radius: 17px; background: #3A352F; color: #F2EEE8; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center">W</div>
+  </nav>
+  <aside aria-label="ESP archive" style="flex: 1 1 280px; max-width: 310px; background: var(--side-plain); border-right: 1px solid rgba(0,0,0,.3); display: flex; flex-direction: column">
+    <div class="stripes" style="padding: 14px 14px 14px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; align-items: center; gap: 8px">
+        <a class="ib" href="Session.dc.html" aria-label="Back to sessions" title="Back to sessions"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 4.5L7 10l5.5 5.5"></path></svg></a>
+        <span style="flex: 0 0 32px; height: 32px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border); color: var(--text2); display: flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg></span>
+        <div style="flex: 1; min-width: 0">
+          <div style="font-size: 16px; font-weight: 700">Archive</div>
+          <div style="font-size: 12.5px; color: var(--muted)">ESP · {{countLabel}}</div>
+        </div>
+      </div>
+      <p style="margin: 0 0 0 6px; font-size: 12.5px; line-height: 1.5; color: var(--text2)">Read-only. Restore a session to keep working, or delete it for good.</p>
+    </div>
+    <div style="padding: 12px 12px 6px">
+      <label style="display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: 8px; background: rgba(0,0,0,.22); border: 1px solid var(--border); color: var(--muted)">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="9" r="5"></circle><path d="M13 13l4 4"></path></svg>
+        <input aria-label="Search archive" placeholder="Search archive" style="flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: 13px Inter, system-ui, sans-serif">
+      </label>
+    </div>
+    <div style="flex: 1; overflow-y: auto; padding: 4px 8px 12px; display: flex; flex-direction: column; gap: 4px">
+      <sc-for list="{{rows}}" as="r" hint-placeholder-count="3">
+        <div style="{{r.style}}">
+          <div style="display: flex; gap: 10px">
+            <span style="flex: 0 0 16px; margin-top: 2px; color: var(--muted); display: flex"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg></span>
+            <div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+              <a href="#" style="color: var(--text2); text-decoration: none; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</a>
+              <span style="font-size: 12.5px; color: var(--muted)">Archived {{r.when}}</span>
+              <span class="mono" style="font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.where}}</span>
+            </div>
+          </div>
+          <sc-if value="{{r.confirming}}" hint-placeholder-val="{{ false }}">
+            <div style="margin: 8px 0 0 26px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
+              <span style="font-size: 12.5px; color: #F59486; margin-right: 4px">Delete forever?</span>
+              <button class="btn dangerfill" onClick="{{r.del}}" style="height: 30px; padding: 0 10px">Delete</button>
+              <button class="btn quiet" onClick="{{r.cancel}}" style="height: 30px; padding: 0 10px">Cancel</button>
+            </div>
+          </sc-if>
+          <sc-if value="{{r.idle}}" hint-placeholder-val="{{ true }}">
+            <div style="margin: 8px 0 0 20px; display: flex; gap: 4px">
+              <button class="btn quiet" onClick="{{r.restore}}" style="height: 30px; padding: 0 10px; color: var(--accent)"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5a6 6 0 1 1 1.8 4.3"></path><path d="M4 4.5V9.5h5"></path></svg>Restore</button>
+              <button class="btn quiet danger" onClick="{{r.ask}}" style="height: 30px; padding: 0 10px"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h12M8 6V4h4v2M5.5 6l.8 10a1 1 0 0 0 1 .9h5.4a1 1 0 0 0 1-.9l.8-10"></path></svg>Delete</button>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+      <sc-if value="{{empty}}" hint-placeholder-val="{{ false }}">
+        <div style="padding: 24px 12px; text-align: center; font-size: 13px; color: var(--muted)">Archive is empty</div>
+      </sc-if>
+      <sc-if value="{{toastOn}}" hint-placeholder-val="{{ false }}">
+        <div role="status" style="margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); font-size: 13px; color: var(--text2)">{{toast}}</div>
+      </sc-if>
+    </div>
+  </aside>
+  <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; background: var(--bg)">
+    <header style="padding: 14px 24px 14px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+        <h1 style="margin: 0; font-size: 17px; font-weight: 700; line-height: 1.3">Файлы в текущей папке</h1>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted)">
+          <span style="{{chipStyle}}">{{chipLabel}}</span>
+          <span style="height: 22px; padding: 0 8px; border-radius: 11px; border: 1px solid var(--border); color: var(--text2); display: inline-flex; align-items: center; font-weight: 500">Auto</span>
+          <span>home-mac</span><span style="opacity: .5">/</span>
+          <span class="mono" style="color: var(--text2)">~/work/c6-displays</span>
+          <span style="opacity: .5">/</span><span>Opus 5.5</span><span style="opacity: .5">/</span><span>$0.28 this session</span>
+        </div>
+      </div>
+      <button class="ib" aria-label="More: schedules" title="More"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><circle cx="4.5" cy="10" r="1.6"></circle><circle cx="10" cy="10" r="1.6"></circle><circle cx="15.5" cy="10" r="1.6"></circle></svg></button>
+    </header>
+    <sc-if value="{{archived}}" hint-placeholder-val="{{ true }}">
+      <div class="stripes" style="padding: 7px 28px; border-bottom: 1px solid var(--border); font-size: 12.5px; color: var(--text2); display: flex; align-items: center; gap: 8px; background-color: var(--side-plain)">
+        <span style="display: flex; color: var(--muted)"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg></span>Archived today at 23:45 · read-only. Restore or delete it from the list on the left.
+      </div>
+    </sc-if>
+
+    <div style="flex: 1; overflow-y: auto; padding: 26px 28px 32px; display: flex; justify-content: center">
+      <div style="{{feedStyle}}">
+        <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px">
+          <div style="max-width: 82%; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--bubble); color: var(--text)">Что за файлы в текущей папке? Кратко.</div>
+          <div style="font-size: 12px; color: var(--muted)">23:08</div>
+        </div>
+        <article style="display: flex; flex-direction: column; gap: 10px; color: var(--text)">
+          <p style="margin: 0">Главное в корне:</p>
+          <ul style="margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px">
+            <li><code>main.c</code> — точка входа: инициализация дисплеев и цикл отрисовки;</li>
+            <li><code>font5x7.h</code> — растровый шрифт 5×7;</li>
+            <li><code>hal_ang.u8</code>, <code>hal_hl.u8</code>, <code>hal_shade.u8</code>, <code>hal_tex.u8</code>, <code>hal_pal.rgb</code> — бинарные данные для глаза HAL 9000 (углы, блики, затенение, текстура, палитра).</li>
+          </ul>
+          <p style="margin: 0">Судя по последним коммитам, проект про вывод на дисплеи и LED-матрицы. Если нужно, могу подробнее разобрать <code>main.c</code>.</p>
+          <div style="font-size: 12px; color: var(--muted)">23:09 · 4 → 651 tokens · cache 59k · $0.108</div>
+        </article>
+      </div>
+    </div>
+
+    <sc-if value="{{live}}" hint-placeholder-val="{{ false }}">
+      <div style="padding: 12px 28px 18px; border-top: 1px solid var(--border); display: flex; justify-content: center">
+        <div style="width: 100%; max-width: 780px; display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border)">
+          <input aria-label="Message" placeholder="Message" style="flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: 14px Inter, system-ui, sans-serif">
+          <button class="btn pri" aria-label="Send" style="width: 36px; padding: 0; justify-content: center"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 16V4M5 9l5-5 5 5"></path></svg></button>
+        </div>
+      </div>
+    </sc-if>
+    <sc-if value="{{gone}}" hint-placeholder-val="{{ false }}">
+      <div style="padding: 18px 28px; border-top: 1px solid var(--border); text-align: center; color: var(--muted); font-size: 13px">Session deleted</div>
+    </sc-if>
+  </main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"color":{"editor":"color","default":"#3FB8A8","options":["#3FB8A8","#B57BD6","#6E9BFF","#E77A9A"]},"base":{"editor":"enum","default":"warm","options":["warm","graphite","contrast"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { list: ['files', 'test', 'spi'], confirm: null, toast: '', main: 'archived' };
+  }
+
+  theme(color, base) {
+    const BASES = {
+      warm: { bg: '#1D1B18', side: '#191715', rail: '#100E0C', surface: '#282521', border: '#3A352F', text: '#F2EEE8', text2: '#D8D1C7', muted: '#ADA599', code: '#141210' },
+      graphite: { bg: '#1A1C1F', side: '#16181B', rail: '#0E0F11', surface: '#25282C', border: '#353A40', text: '#EDEFF2', text2: '#CDD2D8', muted: '#A3A9B1', code: '#121315' },
+      contrast: { bg: '#121110', side: '#0F0E0D', rail: '#070706', surface: '#211F1C', border: '#4A443C', text: '#FFFFFF', text2: '#E9E4DC', muted: '#C6BEB2', code: '#0A0908' }
+    };
+    const B = BASES[base] || BASES.warm;
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const mix = (a, b, t) => { const A = rgb(a); const C = rgb(b); return '#' + A.map((v, i) => Math.round(v * t + C[i] * (1 - t)).toString(16).padStart(2, '0')).join(''); };
+    const c = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#3FB8A8';
+    return '--bg:' + B.bg + ';--side:' + mix(c, B.side, 0.12) + ';--side-plain:' + B.side + ';--rail:' + mix(c, B.rail, 0.18) + ';--row-on:' + mix(c, B.side, 0.3) + ';--row-hover:' + mix(c, B.side, 0.18) +
+      ';--surface:' + B.surface + ';--border:' + B.border + ';--text:' + B.text + ';--text2:' + B.text2 + ';--muted:' + B.muted + ';--code:' + B.code +
+      ';--accent:' + c + ';--accent-soft:' + mix(c, B.bg, 0.2) + ';--accent-line:' + mix(c, B.bg, 0.5) + ';--bubble:' + mix(c, B.surface, 0.2) + ';background:' + B.bg + ';' + this.markVars(c, B, mix);
+  }
+  markVars(c, B, mix) {
+    // Current project in the rail: accent pill at the left edge + stronger tile.
+    return '--mark-bg:' + mix(c, B.rail, 0.42) + ';--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;';
+  }
+
+  archive() {
+    return {
+      files: { title: 'Файлы в текущей папке', when: 'today 23:45', where: 'home-mac · c6-displays', active: true },
+      test: { title: 'Тестовая сессия', when: 'Oct 25', where: 'home-mac · multi-debugger' },
+      spi: { title: 'Старый эксперимент с SPI', when: 'Oct 20', where: 'drzlo-mac · jai/jai' }
+    };
+  }
+  renderVals() {
+    const st = this.state;
+    const A = this.archive();
+    const rows = st.list.map((id) => {
+      const a = A[id];
+      const confirming = st.confirm === id;
+      return {
+        title: a.title, when: a.when, where: a.where,
+        confirming: confirming,
+        idle: !confirming,
+        style: 'padding: 10px 10px 10px 8px; border-radius: 8px;' + (a.active ? ' background: var(--surface); box-shadow: inset 0 0 0 1px var(--border);' : '') + (confirming ? ' background: rgba(200,72,58,.12); box-shadow: inset 0 0 0 1px rgba(245,148,134,.35);' : ''),
+        restore: () => this.setState({ list: this.state.list.filter((x) => x !== id), toast: 'Restored «' + a.title + '» to sessions', main: id === 'files' ? 'live' : this.state.main }),
+        ask: () => this.setState({ confirm: id }),
+        cancel: () => this.setState({ confirm: null }),
+        del: () => this.setState({ list: this.state.list.filter((x) => x !== id), confirm: null, toast: 'Deleted «' + a.title + '»', main: id === 'files' ? 'gone' : this.state.main })
+      };
+    });
+    const n = st.list.length;
+    const archived = st.main === 'archived';
+    const chip = 'display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; font-weight: 600; ';
+    return {
+      themeVars: this.theme(this.props.color ?? '#3FB8A8', this.props.base ?? 'warm'),
+      rows: rows,
+      empty: n === 0,
+      countLabel: n === 1 ? '1 session' : n + ' sessions',
+      toastOn: !!st.toast,
+      toast: st.toast,
+      archived: archived,
+      live: st.main === 'live',
+      gone: st.main === 'gone',
+      confirmMain: st.confirm === 'main',
+      notConfirm: st.confirm !== 'main',
+      feedStyle: 'width: 100%; max-width: 780px; display: flex; flex-direction: column; gap: 20px;' + (archived ? ' opacity: .82;' : '') + (st.main === 'gone' ? ' display: none;' : ''),
+      chipStyle: archived ? chip + 'background: var(--surface); color: var(--text2); box-shadow: inset 0 0 0 1px var(--border)' : chip + 'background: var(--surface); color: var(--text2)',
+      chipLabel: archived ? 'Archived' : (st.main === 'gone' ? 'Deleted' : 'Idle'),
+      restoreMain: () => this.setState({ main: 'live', list: this.state.list.filter((x) => x !== 'files'), confirm: null, toast: 'Restored «Файлы в текущей папке» to sessions' }),
+      askMain: () => this.setState({ confirm: 'main' }),
+      cancelMain: () => this.setState({ confirm: null }),
+      deleteMain: () => this.setState({ main: 'gone', list: this.state.list.filter((x) => x !== 'files'), confirm: null, toast: 'Deleted «Файлы в текущей папке»' }),
+      archiveMain: () => this.setState({ main: 'archived', list: ['files'].concat(this.state.list.filter((x) => x !== 'files')), toast: '' })
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hqc — asking session</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1D1B18}
+.app{--bg:#1D1B18;--side:#1A2220;--side-plain:#191715;--rail:#12201D;--row-on:#23403B;--row-hover:#1E2D2A;--surface:#262320;--border:#38332D;--text:#F2EEE8;--text2:#D8D1C7;--muted:#ADA599;--code:#141210;--accent:#3FB8A8;--accent-soft:#1F3532;--accent-line:#2E6B63;--bubble:#2A3532;--mark-bg:#24423D;--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;font-family:Inter,system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;line-height:1.55;color:var(--text)}
+.app a{color:var(--accent)}
+.app code{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--code);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--text2)}
+.mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+.ib{width:36px;height:36px;flex:0 0 auto;border-radius:8px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;text-decoration:none;padding:0}
+.ib:hover{background:var(--row-hover);color:var(--text)}
+.btn{height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:500 13px Inter,system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.app a.btn{color:var(--text)}
+.btn:hover{border-color:var(--accent-line)}
+.btn.pri,.app a.btn.pri{background:var(--accent);border-color:var(--accent);color:#15120F;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.quiet,.app a.btn.quiet{background:transparent;border-color:transparent;color:var(--text2)}
+.btn.quiet:hover{background:var(--row-hover)}
+.btn.danger{color:#F59486}
+.btn.dangerfill{background:#C8483A;border-color:#C8483A;color:#FFF5F2;font-weight:600}
+.btn[disabled]{opacity:.45;cursor:not-allowed;filter:none}
+.kbd{font:500 11px Inter,system-ui,sans-serif;padding:1px 6px;border-radius:4px;background:rgba(0,0,0,.22)}
+.row{position:relative;display:flex;gap:10px;padding:8px 8px 8px 10px;border-radius:8px;color:var(--text)}
+.row:hover,.row.hov{background:var(--row-hover)}
+.row.on{background:var(--row-on)}
+.row .acts{position:absolute;top:5px;right:5px;display:flex;gap:2px;opacity:0;background:inherit;border-radius:8px;padding-left:6px}
+.row:hover .acts,.row.hov .acts,.row:focus-within .acts{opacity:1}
+.row .ib{width:30px;height:30px;color:var(--text2)}
+.seg{height:30px;border:0;border-radius:6px;background:transparent;color:var(--muted);font:500 12.5px Inter,system-ui,sans-serif;cursor:pointer}
+.seg.on{background:var(--surface);color:var(--text);box-shadow:0 1px 0 rgba(0,0,0,.25)}
+.tile{width:44px;height:44px;border-radius:12px;border:0;display:flex;align-items:center;justify-content:center;font-size:21px;cursor:pointer;padding:0;color:#F2EEE8;font-weight:700}
+.tile.other{opacity:var(--mark-other);filter:var(--mark-filter);transition:opacity .15s,filter .15s}
+.tile.other:hover{opacity:1;filter:none}
+.stripes{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.04) 0 8px,transparent 8px 16px)}
+.field{height:38px;box-sizing:border-box;border-radius:8px;border:1px solid var(--border);background:var(--code);color:var(--text);padding:0 12px;font:13.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;outline:0;min-width:0}
+.field:focus{border-color:var(--accent)}
+.chipbtn{height:28px;padding:0 10px;border-radius:14px;border:1px solid var(--border);background:transparent;color:var(--text2);font:12.5px 'JetBrains Mono',ui-monospace,Menlo,monospace;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent-line);color:var(--text)}
+.row.reo{padding-left:2px}
+.row.reo .acts{display:none}
+.row.dragging,.mrow.dragging{background:var(--row-hover);box-shadow:0 0 0 1px var(--accent-line),0 10px 24px rgba(0,0,0,.45);position:relative;z-index:2}
+.grip{flex:0 0 28px;align-self:stretch;border:0;background:transparent;color:var(--muted);cursor:grab;touch-action:none;display:flex;align-items:center;justify-content:center;border-radius:6px;padding:0}
+.grip:hover,.grip:focus-visible{color:var(--text);background:var(--row-hover)}
+.pulse{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+</style>
+</helmet>
+
+<div class="app" style="{{themeVars}}">
+<div style="min-height: 900px; display: flex; flex-wrap: wrap">
+  <nav aria-label="Projects" style="flex: 0 0 72px; background: var(--rail); display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 0; border-right: 1px solid rgba(0,0,0,.3)">
+    <div style="height: 28px; display: flex; align-items: center; font-weight: 700; font-size: 13px; color: var(--muted)">hqc</div>
+    <div style="width: 28px; height: 1px; background: var(--border); margin-bottom: 4px"></div>
+    <button class="tile other" aria-label="Personal" title="Personal" style="background: rgba(138,147,166,.24)">🏡</button>
+    <button class="tile other" aria-label="physics-mp" title="physics-mp" style="background: rgba(110,155,255,.24)">⚛️</button>
+    <button class="tile other" aria-label="HQC" title="HQC" style="background: rgba(181,123,214,.26)">🛰️</button>
+    <div style="position: relative">
+      <span aria-hidden="true" style="position: absolute; left: -14px; top: 8px; width: 4px; height: 28px; border-radius: 0 4px 4px 0; background: var(--accent); opacity: var(--mark-pill)"></span>
+      <button class="tile" aria-label="ESP" title="ESP" aria-current="page" style="background: var(--mark-bg); box-shadow: var(--mark-shadow)">🔌</button>
+      <span style="position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; border-radius: 9px; background: #F2B35B; color: #1A1206; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 2px solid var(--rail)">1</span>
+    </div>
+    <button class="tile other" aria-label="Tests" title="Tests" style="background: rgba(231,122,154,.24)">🧪</button>
+    <button class="tile" aria-label="New project" style="background: transparent; border: 1px dashed var(--border); color: var(--muted)"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg></button>
+    <div style="flex: 1"></div>
+    <button class="ib" aria-label="Settings" style="color: var(--muted)"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M3 6h14M3 14h14"></path><circle cx="7" cy="6" r="2" fill="currentColor"></circle><circle cx="13" cy="14" r="2" fill="currentColor"></circle></svg></button>
+    <div style="width: 34px; height: 34px; border-radius: 17px; background: #3A352F; color: #F2EEE8; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center">W</div>
+  </nav>
+  <aside aria-label="ESP sessions" style="flex: 1 1 280px; max-width: 310px; background: var(--side); border-right: 1px solid rgba(0,0,0,.3); display: flex; flex-direction: column">
+    <div style="padding: 16px 14px 12px 16px; display: flex; align-items: center; gap: 10px">
+      <span style="flex: 0 0 32px; height: 32px; border-radius: 9px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 17px">🔌</span>
+      <div style="flex: 1; min-width: 0">
+        <div style="font-size: 16px; font-weight: 700">ESP</div>
+        <div style="font-size: 12.5px; color: var(--muted)">{{projSub}}</div>
+      </div>
+      <a class="ib" href="ProjectSettings.dc.html" aria-label="Project settings: appearance, workspaces, rules" title="Project settings"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.6"></circle><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"></path></svg></a>
+      <button class="btn pri" onClick="{{newSession}}" style="height: 34px; padding: 0 12px"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 4v12M4 10h12"></path></svg>New</button>
+    </div>
+    <div style="padding: 0 12px 10px; display: flex; flex-direction: column; gap: 8px">
+      <label style="display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: 8px; background: rgba(0,0,0,.22); border: 1px solid var(--border); color: var(--muted)">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="9" r="5"></circle><path d="M13 13l4 4"></path></svg>
+        <input aria-label="Search sessions and messages" placeholder="Search sessions and messages" style="flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: 13px Inter, system-ui, sans-serif">
+      </label>
+      <sc-if value="{{notReo}}" hint-placeholder-val="{{ true }}">
+        <div style="display: flex; gap: 6px">
+          <div role="group" aria-label="Order" style="flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 9px; background: rgba(0,0,0,.22); border: 1px solid var(--border)">
+            <sc-for list="{{sorts}}" as="m" hint-placeholder-count="3">
+              <button class="{{m.cls}}" aria-pressed="{{m.pressed}}" onClick="{{m.pick}}">{{m.label}}</button>
+            </sc-for>
+          </div>
+          <button class="ib" onClick="{{startReo}}" aria-label="Reorder sessions" title="Reorder" style="width: 38px; height: 38px; border: 1px solid var(--border); background: rgba(0,0,0,.22)"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v14M3.5 6.5L7 3l3.5 3.5M13 17V3M9.5 13.5L13 17l3.5-3.5"></path></svg></button>
+        </div>
+      </sc-if>
+      <sc-if value="{{reo}}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-radius: 9px; background: var(--accent-soft); border: 1px solid var(--accent-line)">
+          <span style="display: flex; color: var(--accent)"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v14M3.5 6.5L7 3l3.5 3.5M13 17V3M9.5 13.5L13 17l3.5-3.5"></path></svg></span>
+          <span style="flex: 1; min-width: 0; font-size: 13px; font-weight: 600">Reorder</span>
+          <button class="btn quiet" onClick="{{cancelReo}}" style="height: 30px; padding: 0 10px">Cancel</button>
+          <button class="btn pri" onClick="{{doneReo}}" style="height: 30px; padding: 0 12px">Done</button>
+        </div>
+      </sc-if>
+    </div>
+    <div onPointerMove="{{dragMove}}" onPointerUp="{{dragEnd}}" onPointerLeave="{{dragEnd}}" onPointerCancel="{{dragEnd}}" style="flex: 1; overflow-y: auto; padding: 4px 8px 8px; display: flex; flex-direction: column; gap: 2px">
+      <sc-for list="{{groups}}" as="g" hint-placeholder-count="2">
+        <div style="display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px">
+          <div style="display: flex; gap: 6px; padding: 4px 8px; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: {{g.color}}"><span>{{g.label}}</span><span style="color: var(--muted)">{{g.count}}</span></div>
+          <sc-for list="{{g.items}}" as="item" hint-placeholder-count="3">
+            <div data-row="1" class="{{item.cls}}">
+              <sc-if value="{{item.reo}}" hint-placeholder-val="{{ false }}">
+                <button class="grip" aria-label="Drag to reorder, or use arrow keys" onPointerDown="{{item.onDown}}" onKeyDown="{{item.onKey}}"><svg aria-hidden="true" width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="2.5" cy="3" r="1.4"></circle><circle cx="7.5" cy="3" r="1.4"></circle><circle cx="2.5" cy="8" r="1.4"></circle><circle cx="7.5" cy="8" r="1.4"></circle><circle cx="2.5" cy="13" r="1.4"></circle><circle cx="7.5" cy="13" r="1.4"></circle></svg></button>
+              </sc-if>
+              <span class="{{item.dotClass}}" style="{{item.dotStyle}}"></span>
+              <div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+                <div style="display: flex; gap: 8px; align-items: baseline">
+                  <a href="{{item.href}}" style="flex: 1; min-width: 0; color: var(--text); text-decoration: none; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.title}}</a>
+                  <span style="flex: 0 0 auto; font-size: 12px; color: var(--muted)">{{item.when}}</span>
+                </div>
+                <span style="font-size: 12.5px; color: {{item.subColor}}">{{item.sub}}</span>
+                <span class="mono" style="font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{item.where}}</span>
+              </div>
+              <div class="acts">
+                <button class="ib" aria-label="Archive session" title="Archive" onClick="{{item.archive}}"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg></button>
+                <button class="ib" aria-label="More: rename, rules, delete" title="More"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><circle cx="4.5" cy="10" r="1.6"></circle><circle cx="10" cy="10" r="1.6"></circle><circle cx="15.5" cy="10" r="1.6"></circle></svg></button>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-for>
+      <sc-if value="{{toastOn}}" hint-placeholder-val="{{ false }}">
+        <div role="status" style="margin-top: 8px; padding: 8px 8px 8px 12px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); display: flex; align-items: center; gap: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.35)">
+          <span style="color: var(--muted); display: flex"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg></span>
+          <span style="flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Archived «{{toastTitle}}»</span>
+          <button class="btn quiet" onClick="{{undo}}" style="height: 30px; padding: 0 10px; color: var(--accent); font-weight: 600">Undo</button>
+        </div>
+      </sc-if>
+      <a class="btn quiet" href="Archive.dc.html" style="margin-top: 10px; align-self: flex-start; height: 32px; padding: 0 10px; color: var(--muted)"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="14" height="4" rx="1"></rect><path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4"></path></svg>Archive<span style="color: var(--muted)">{{archiveCount}}</span></a>
+    </div>
+    <div style="padding: 8px 12px">
+      <a href="#" style="display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 12px; border-radius: 8px; background: var(--row-on); color: var(--text); text-decoration: none; font-weight: 600">
+        <span style="flex: 1">Requests</span>
+        <span style="min-width: 20px; height: 20px; border-radius: 10px; background: #F2B35B; color: #1A1206; font-size: 11.5px; font-weight: 700; display: flex; align-items: center; justify-content: center">1</span>
+      </a>
+    </div>
+    <div style="border-top: 1px solid rgba(0,0,0,.3); padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 8px">
+      <div style="font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted)">Workers</div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 13.5px"><span style="width: 8px; height: 8px; border-radius: 4px; background: #5CC98A"></span><span style="flex: 1">drzlo-mac</span><span style="color: var(--muted); font-size: 12.5px">1 active</span></div>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 13.5px"><span style="width: 8px; height: 8px; border-radius: 4px; background: #5CC98A"></span><span style="flex: 1">home-mac</span><span style="color: var(--muted); font-size: 12.5px">none active</span></div>
+    </div>
+  </aside>
+  <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; background: var(--bg)">
+    <header style="padding: 14px 24px 14px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+        <h1 style="margin: 0; font-size: 17px; font-weight: 700; line-height: 1.3">Файлы в текущей папке</h1>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted)">
+          <span style="display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 11px; font-weight: 600; background: var(--surface); color: var(--text2)"><span style="width: 6px; height: 6px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--muted)"></span>Idle</span>
+          <span style="height: 22px; padding: 0 8px; border-radius: 11px; border: 1px solid var(--border); color: var(--text2); display: inline-flex; align-items: center; font-weight: 500">Auto</span>
+          <span>home-mac</span><span style="opacity: .5">/</span>
+          <span class="mono" style="color: var(--text2)">~/work/c6-displays</span>
+          <button class="ib" aria-label="Copy path" style="width: 24px; height: 24px"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="7" y="7" width="9" height="9" rx="2"></rect><path d="M4 13V5a1 1 0 0 1 1-1h8"></path></svg></button>
+          <span style="opacity: .5">/</span><span>Opus 5.5</span><span style="opacity: .5">/</span><span>$0.28 this session</span>
+        </div>
+      </div>
+      <a class="btn quiet" href="Rules.dc.html" title="Rules for ~/work/c6-displays"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.5l6 2.5v4.5c0 4-2.6 6.8-6 8-3.4-1.2-6-4-6-8V5z"></path></svg>Folder rules</a>
+      <button class="ib" aria-label="More: schedules, switch to Ask, delete" title="More"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 20 20" fill="currentColor"><circle cx="4.5" cy="10" r="1.6"></circle><circle cx="10" cy="10" r="1.6"></circle><circle cx="15.5" cy="10" r="1.6"></circle></svg></button>
+    </header>
+
+    <div style="flex: 1; overflow-y: auto; padding: 26px 28px 32px; display: flex; justify-content: center">
+      <div style="width: 100%; max-width: 780px; display: flex; flex-direction: column; gap: 20px">
+
+        <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px">
+          <div style="max-width: 82%; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--bubble); color: var(--text)">Передай какой-нибудь файл второй сессии в этом проекте, попроси её там что-нибудь изменить и чтобы она передала его тебе обратно.</div>
+          <div style="font-size: 12px; color: var(--muted)">23:10</div>
+        </div>
+
+        <p style="margin: 0; color: var(--text)">Создам тестовый файл и отправлю его сессии <span class="mono">esp/session-5</span>.</p>
+        <button class="btn quiet" style="align-self: flex-start; height: 30px; padding: 0 8px; margin-left: -8px; color: var(--muted)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l5 5-5 5"></path></svg><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="#5CC98A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10l4 4 8-8"></path></svg>2 commands · 1 s</button>
+
+        <!-- Relay: outgoing question -->
+        <section aria-label="Question sent to another session" style="border-radius: 12px; background: rgba(169,155,255,.08); border: 1px solid rgba(169,155,255,.32); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px">
+          <div style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #C4BAFF; flex-wrap: wrap">
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: rgba(169,155,255,.2); display: inline-flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15L15 5M8 5h7v7"></path></svg></span>
+            <span style="font-weight: 600">Sent to</span>
+            <a href="Session.dc.html" class="mono" style="color: #E3DDFF; font-weight: 500; text-decoration: none; border-bottom: 1px solid rgba(169,155,255,.5)">esp/session-5</a>
+            <span style="flex: 1"></span>
+            <span style="color: var(--muted)">delivered 23:11</span>
+          </div>
+          <p style="margin: 0; color: var(--text)">Привет! Это esp/session-4, проверяем обмен файлами через hqc. Прикладываю hqc-xfer-test.txt. Возьми полученную копию, не трогай файлы в репозитории; в своей копии замени «line: original» на «line: edited by esp/session-5» и допиши «checked: &lt;текущее время&gt;». Верни файл через hqc_send или hqc_attach и напиши, по какому пути получил файл и его sha1 до изменения.</p>
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <div style="display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 12px; border-radius: 9px; background: rgba(0,0,0,.25); border: 1px solid rgba(169,155,255,.18); flex-wrap: wrap">
+              <span style="display: flex; color: var(--text2)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6 3h5l4 4v10H6z"></path><path d="M11 3v4h4"></path></svg></span>
+              <span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span class="mono" style="font-size: 13px; color: var(--text)">hqc-xfer-test.txt</span><span style="font-size: 12px; color: var(--muted)">text · 58 B</span></span>
+              <button class="btn quiet" style="height: 30px; padding: 0 10px">Open</button>
+              <button class="btn quiet" style="height: 30px; padding: 0 10px">Download</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Relay: incoming reply -->
+        <section aria-label="Reply from another session" style="border-radius: 12px; background: rgba(169,155,255,.08); border: 1px solid rgba(169,155,255,.32); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px">
+          <div style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #C4BAFF; flex-wrap: wrap">
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: rgba(169,155,255,.2); display: inline-flex; align-items: center; justify-content: center"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5L5 15M12 15H5V8"></path></svg></span>
+            <span style="font-weight: 600">Reply from</span>
+            <a href="Session.dc.html" class="mono" style="color: #E3DDFF; font-weight: 500; text-decoration: none; border-bottom: 1px solid rgba(169,155,255,.5)">esp/session-5</a>
+            <span style="flex: 1"></span>
+            <span style="color: var(--muted)">23:11</span>
+          </div>
+          <p style="margin: 0; color: var(--text)">Готово, изменённый файл во вложении. Файлы репозитория не трогал.</p>
+          <div style="display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 6px 12px; font-size: 13px">
+            <span style="color: var(--muted)">Received at</span><span class="mono" style="color: var(--text2); overflow-wrap: anywhere">.hqc/inbox/571581ad…/hqc-xfer-test.txt</span>
+            <span style="color: var(--muted)">sha1 before</span><span class="mono" style="color: var(--text2); overflow-wrap: anywhere">164101e63be96789e461337c5af034d85464f61d</span>
+            <span style="color: var(--muted)">Changed</span><span style="color: var(--text2)"><code>line: original</code> → <code>line: edited by esp/session-5</code>, added <code>checked: 2026-10-31 23:11:16 GMT</code></span>
+            <span style="color: var(--muted)">sha1 after</span><span class="mono" style="color: var(--text2); overflow-wrap: anywhere">8376c431fb7f454ec97c0522631cdda378cbb45e</span>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 4px">
+            <div style="display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 12px; border-radius: 9px; background: rgba(0,0,0,.25); border: 1px solid rgba(169,155,255,.18); flex-wrap: wrap">
+              <span style="display: flex; color: var(--text2)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M6 3h5l4 4v10H6z"></path><path d="M11 3v4h4"></path></svg></span>
+              <span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span class="mono" style="font-size: 13px; color: var(--text)">hqc-xfer-test.txt</span><span style="font-size: 12px; color: var(--muted)">text · 106 B</span></span>
+              <button class="btn quiet" style="height: 30px; padding: 0 10px">Open</button>
+              <button class="btn quiet" style="height: 30px; padding: 0 10px">Download</button>
+            </div>
+            <span style="font-size: 12.5px; color: var(--muted)">Edited copy: line replaced, checked timestamp appended</span>
+          </div>
+        </section>
+
+        <button class="btn quiet" style="align-self: flex-start; height: 30px; padding: 0 8px; margin-left: -8px; color: var(--muted)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l5 5-5 5"></path></svg><svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="#5CC98A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10l4 4 8-8"></path></svg>1 command · 0.3 s</button>
+
+        <div style="display: flex; flex-direction: column; gap: 4px">
+          <p style="margin: 0; color: var(--text)">Файл вернулся. sha1 исходника у <span class="mono">esp/session-5</span> совпадает с моим, правка на месте: строка заменена, в конце появилась отметка времени. Обмен работает в обе стороны.</p>
+          <div style="font-size: 12px; color: var(--muted)">23:12 · 9 → 318 tokens · cache 88k · $0.041</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding: 12px 28px 18px; border-top: 1px solid var(--border); display: flex; justify-content: center">
+      <div style="width: 100%; max-width: 780px; display: flex; flex-direction: column; gap: 6px; padding: 10px 10px 10px 14px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border)">
+        <textarea aria-label="Message" rows="2" placeholder="Message" style="resize: none; border: 0; outline: 0; background: transparent; color: var(--text); font: 14px/1.5 Inter, system-ui, sans-serif; padding: 2px 0"></textarea>
+        <div style="display: flex; align-items: center; gap: 6px">
+          <button class="ib" aria-label="Attach file"><svg aria-hidden="true" width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15.5 9.5l-5.8 5.8a3.5 3.5 0 0 1-5-5l6.4-6.4a2.3 2.3 0 0 1 3.3 3.3l-6.4 6.4a1.2 1.2 0 0 1-1.7-1.7l5.8-5.8"></path></svg></button>
+          <span style="flex: 1; font-size: 12px; color: var(--muted)">Enter to send, Shift+Enter for a new line</span>
+          <button class="btn pri" aria-label="Send" style="width: 36px; padding: 0; justify-content: center"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 16V4M5 9l5-5 5 5"></path></svg></button>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"color":{"editor":"color","default":"#3FB8A8","options":["#3FB8A8","#B57BD6","#6E9BFF","#E77A9A"]},"base":{"editor":"enum","default":"warm","options":["warm","graphite","contrast"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = this.initSide();
+  }
+  activeId() { return 'files'; }
+
+  theme(color, base) {
+    const BASES = {
+      warm: { bg: '#1D1B18', side: '#191715', rail: '#100E0C', surface: '#282521', border: '#3A352F', text: '#F2EEE8', text2: '#D8D1C7', muted: '#ADA599', code: '#141210' },
+      graphite: { bg: '#1A1C1F', side: '#16181B', rail: '#0E0F11', surface: '#25282C', border: '#353A40', text: '#EDEFF2', text2: '#CDD2D8', muted: '#A3A9B1', code: '#121315' },
+      contrast: { bg: '#121110', side: '#0F0E0D', rail: '#070706', surface: '#211F1C', border: '#4A443C', text: '#FFFFFF', text2: '#E9E4DC', muted: '#C6BEB2', code: '#0A0908' }
+    };
+    const B = BASES[base] || BASES.warm;
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const mix = (a, b, t) => { const A = rgb(a); const C = rgb(b); return '#' + A.map((v, i) => Math.round(v * t + C[i] * (1 - t)).toString(16).padStart(2, '0')).join(''); };
+    const c = /^#[0-9a-fA-F]{6}$/.test(color) ? color : '#3FB8A8';
+    return '--bg:' + B.bg + ';--side:' + mix(c, B.side, 0.12) + ';--side-plain:' + B.side + ';--rail:' + mix(c, B.rail, 0.18) + ';--row-on:' + mix(c, B.side, 0.3) + ';--row-hover:' + mix(c, B.side, 0.18) +
+      ';--surface:' + B.surface + ';--border:' + B.border + ';--text:' + B.text + ';--text2:' + B.text2 + ';--muted:' + B.muted + ';--code:' + B.code +
+      ';--accent:' + c + ';--accent-soft:' + mix(c, B.bg, 0.2) + ';--accent-line:' + mix(c, B.bg, 0.5) + ';--bubble:' + mix(c, B.surface, 0.2) + ';background:' + B.bg + ';' + this.markVars(c, B, mix);
+  }
+  markVars(c, B, mix) {
+    // Current project in the rail: accent pill at the left edge + stronger tile.
+    return '--mark-bg:' + mix(c, B.rail, 0.42) + ';--mark-shadow:none;--mark-pill:1;--mark-other:1;--mark-filter:none;';
+  }
+
+  dragVals() {
+    return {
+      dragMove: (e) => {
+        const d = this.drag;
+        if (!d) return;
+        e.preventDefault();
+        const from = d.base.indexOf(d.id);
+        const to = Math.max(0, Math.min(d.base.length - 1, from + Math.round((e.clientY - d.y) / d.h)));
+        const o = d.base.slice();
+        o.splice(from, 1);
+        o.splice(to, 0, d.id);
+        if (o.join('|') !== this.state.order.join('|')) this.setState({ order: o });
+      },
+      dragEnd: () => { if (this.drag) { this.drag = null; this.setState({ dragId: null }); } }
+    };
+  }
+  handleVals(id) {
+    return {
+      onDown: (e) => {
+        const row = e.currentTarget.closest('[data-row]');
+        this.drag = { id: id, y: e.clientY, h: row ? row.offsetHeight + 2 : 64, base: this.state.order.slice() };
+        e.preventDefault();
+        this.setState({ dragId: id });
+      },
+      onKey: (e) => {
+        const dir = e.key === 'ArrowUp' ? -1 : (e.key === 'ArrowDown' ? 1 : 0);
+        if (!dir) return;
+        e.preventDefault();
+        const o = this.state.order.slice();
+        const i = o.indexOf(id);
+        const j = i + dir;
+        if (j < 0 || j >= o.length) return;
+        o.splice(i, 1);
+        o.splice(j, 0, id);
+        this.setState({ order: o });
+      }
+    };
+  }
+  sortVals() {
+    const st = this.state;
+    return {
+      reo: !!st.reordering,
+      notReo: !st.reordering,
+      sorts: [['state', 'State'], ['recent', 'Recent'], ['custom', 'Custom']].map((m) => ({
+        label: m[1], cls: st.sort === m[0] ? 'seg on' : 'seg', pressed: st.sort === m[0] ? 'true' : 'false',
+        pick: () => this.setState({ sort: m[0] })
+      })),
+      startReo: () => this.setState({ reordering: true, savedOrder: this.state.order.slice() }),
+      cancelReo: () => this.setState({ reordering: false, order: this.state.savedOrder || this.state.order, dragId: null }),
+      doneReo: () => this.setState({ reordering: false, sort: 'custom', dragId: null })
+    };
+  }
+  groupsFor(live, byId, deco) {
+    const st = this.state;
+    const by = (f) => live.filter(f).sort((a, b) => a.rank - b.rank);
+    let g;
+    if (st.reordering || st.sort === 'custom') {
+      g = [{ label: st.reordering ? 'Drag to reorder' : 'Custom order', color: st.reordering ? 'var(--accent)' : 'var(--muted)', items: st.order.filter((id) => byId[id] && live.indexOf(byId[id]) >= 0).map((id) => byId[id]), plain: true }];
+    } else if (st.sort === 'state') {
+      g = [
+        { label: 'Needs you', color: '#F2B35B', items: by((s) => s.state === 'wait') },
+        { label: 'Running', color: 'var(--muted)', items: by((s) => s.state === 'run') },
+        { label: 'Idle', color: 'var(--muted)', items: by((s) => s.state === 'idle') }
+      ];
+    } else {
+      g = [
+        { label: 'Today', color: 'var(--muted)', items: by((s) => s.day === 'today') },
+        { label: 'Earlier', color: 'var(--muted)', items: by((s) => s.day !== 'today') }
+      ];
+    }
+    return g.filter((x) => x.items.length).map((x) => ({ label: x.label, color: x.color, count: x.plain ? '' : String(x.items.length), items: x.items.map(deco) }));
+  }
+
+  sessions() {
+    return [
+      { id: 'xfer', title: 'Обмен файлами hqc-xfer-test через hqc', state: 'wait', sub: 'Waiting for permission', where: 'drzlo-mac · jai/jai', when: 'now', day: 'today', rank: 0, href: 'Session.dc.html' },
+      { id: 'files', title: 'Файлы в текущей папке', state: 'idle', sub: 'Idle', where: 'home-mac · c6-displays', when: '31 min', day: 'today', rank: 1, href: 'AskingSession.dc.html' },
+      { id: 'led', title: 'Драйвер LED-матрицы', state: 'idle', sub: 'Idle', where: 'home-mac · c6-displays', when: '2 h', day: 'today', rank: 2, href: '#' },
+      { id: 'spi', title: 'SPI-шина: таймауты', state: 'idle', sub: 'Idle', where: 'drzlo-mac · jai/jai', when: 'Oct 29', day: 'earlier', rank: 3, href: '#' },
+      { id: 'ota', title: 'Прошивка по воздуху (OTA)', state: 'idle', sub: 'Idle', where: 'home-mac · c6-displays', when: 'Oct 27', day: 'earlier', rank: 4, href: '#' }
+    ].concat((this.state && this.state.extra) || []);
+  }
+  initSide() {
+    return { archived: [], toast: null, sort: 'recent', reordering: false, order: ['xfer', 'led', 'spi', 'files', 'ota'], savedOrder: null, dragId: null, extra: [], lastPos: 0 };
+  }
+  addSession() {
+    const n = (this.state.extra || []).length + 1;
+    const id = 'new' + n;
+    const s = { id: id, title: n === 1 ? 'New session' : 'New session ' + n, state: 'run', sub: 'Starting…', where: 'drzlo-mac · jai/jai', when: 'now', day: 'today', rank: -n, href: '#' };
+    this.setState({ extra: (this.state.extra || []).concat([s]), order: [id].concat(this.state.order) });
+  }
+  sideVals() {
+    const st = this.state;
+    const all = this.sessions();
+    const byId = {};
+    all.forEach((s) => { byId[s.id] = s; });
+    const live = all.filter((s) => st.archived.indexOf(s.id) < 0);
+    const activeId = this.activeId ? this.activeId() : 'xfer';
+    const reo = !!st.reordering;
+    const deco = (s) => Object.assign({
+      title: s.title, when: s.when, sub: s.sub, where: s.where, href: s.href, reo: reo,
+      cls: 'row' + (s.id === activeId ? ' on' : '') + (reo ? ' reo' : '') + (st.dragId === s.id ? ' dragging' : ''),
+      dotStyle: 'flex: 0 0 8px; height: 8px; margin-top: 8px; border-radius: 4px; ' + (s.state === 'wait' ? 'background: #F2B35B' : (s.state === 'run' ? 'background: var(--accent)' : 'box-shadow: inset 0 0 0 1.5px var(--muted)')),
+      dotClass: s.state === 'run' ? 'pulse' : '',
+      subColor: s.state === 'wait' ? '#F2B35B' : 'var(--muted)',
+      archive: () => this.setState({ archived: this.state.archived.concat([s.id]), order: this.state.order.filter((x) => x !== s.id), lastPos: Math.max(0, this.state.order.indexOf(s.id)), toast: s.title })
+    }, this.handleVals(s.id));
+    const wait = live.filter((s) => s.state === 'wait').length;
+    const idle = live.filter((s) => s.state === 'idle').length;
+    const parts = [];
+    if (wait) parts.push(wait + ' needs you');
+    if (idle) parts.push(idle + ' idle');
+    return Object.assign({
+      groups: this.groupsFor(live, byId, deco),
+      projSub: parts.join(' · ') || 'No sessions yet',
+      archiveCount: String(3 + st.archived.length),
+      toastOn: !!st.toast,
+      toastTitle: st.toast || '',
+      undo: () => { const id = this.state.archived[this.state.archived.length - 1]; const o = this.state.order.slice(); if (id) o.splice(Math.min(this.state.lastPos || 0, o.length), 0, id); this.setState({ archived: this.state.archived.slice(0, -1), order: o, toast: null }); },
+      newSession: () => this.addSession()
+    }, this.sortVals(), this.dragVals());
+  }
+
+  renderVals() {
+    return Object.assign({}, this.sideVals(), { themeVars: this.theme(this.props.color ?? '#3FB8A8', this.props.base ?? 'warm') });
+  }
+}
+</script>
+</body>
+</html>

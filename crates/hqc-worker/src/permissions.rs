@@ -18,6 +18,10 @@
 //! understands whole tools, MCP servers and Bash `prefix:*` / glob / exact rules; other
 //! rule contents (file globs, `domain:`) are left to the CLI.
 //!
+//! A session runs with the rules of its folder's environment (T43,
+//! [`Permissions::for_environment`]): `[environments.<name>.permissions]` lift (`unblock`) or
+//! add (`deny`) deny rules and add allow rules, for that environment's folders only.
+//!
 //! hqc's own allow rules of a folder (T48, [`FolderRules`]) never go to `--settings`: the
 //! adapter applies them in `can_use_tool` after the deny check ([`Policy::folder_allows`]).
 //! Their matcher is conservative: [`split_command`] splits a command line into simple parts
@@ -29,7 +33,10 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::bail;
 use hqc_proto::event::{PolicyHint, RuleSuggestion};
-use hqc_proto::frame::{rule_source, CheckResult, InspectResult, RuleSource, Verdict};
+use hqc_proto::frame::{
+    rule_source, CheckResult, EnvPermissions, InspectResult, RuleSource, Verdict,
+    DEFAULT_ENVIRONMENT,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -113,6 +120,39 @@ impl Permissions {
             }
         }
         Ok(p)
+    }
+
+    /// What a session in an environment runs with (T43, SPEC §14): this `deny` without the
+    /// environment's `unblock`, then its `deny`; this `allow`, then its `allow`; the same
+    /// mode. `unblock` may name only rules of this `deny`.
+    pub fn for_environment(&self, env: &EnvPermissions) -> anyhow::Result<Self> {
+        if let Some(r) = env.unblock.iter().find(|r| !self.deny.contains(r)) {
+            bail!("permissions.unblock: {r:?} is not a deny rule of [permissions]");
+        }
+        for (list, rules) in [("allow", &env.allow), ("deny", &env.deny)] {
+            for r in rules {
+                check_rule(r).map_err(|e| anyhow::anyhow!("permissions.{list}: {e}"))?;
+            }
+        }
+        let mut deny: Vec<String> = self
+            .deny
+            .iter()
+            .filter(|r| !env.unblock.contains(r))
+            .cloned()
+            .collect();
+        let mut allow = self.allow.clone();
+        for (to, from) in [(&mut deny, &env.deny), (&mut allow, &env.allow)] {
+            for r in from {
+                if !to.contains(r) {
+                    to.push(r.clone());
+                }
+            }
+        }
+        Ok(Self {
+            allow,
+            deny,
+            ..self.clone()
+        })
     }
 
     /// The mode a session runs in: the one hqc asks for, else `mode`; `auto` only with
@@ -485,24 +525,27 @@ pub fn suggest(tool: &str, input: &Value, root: &Path) -> Option<Vec<RuleSuggest
 }
 
 /// A part and the `(source, rule)` that allows it, if any.
-pub type Covered<'a> = (Part, Option<(&'static str, &'a str)>);
+pub type Covered<'a> = (Part, Option<(&'a str, &'a str)>);
 
 /// Rules with their sources, as the folder's matcher reads them (T48).
 #[derive(Debug, Default, Clone)]
-pub struct RuleSet(Vec<(&'static str, String, Rule)>);
+pub struct RuleSet(Vec<(String, String, Rule)>);
 
 impl RuleSet {
-    pub fn add(&mut self, source: &'static str, rules: &[String]) {
-        self.0
-            .extend(rules.iter().map(|r| (source, r.clone(), parse(r))));
+    pub fn add(&mut self, source: &str, rules: &[String]) {
+        self.0.extend(
+            rules
+                .iter()
+                .map(|r| (source.to_string(), r.clone(), parse(r))),
+        );
     }
 
     /// The first rule that denies the call, as [`Policy::denied_by`] reads a deny rule.
-    pub fn denies(&self, tool: &str, command: Option<&str>) -> Option<(&'static str, &str)> {
+    pub fn denies(&self, tool: &str, command: Option<&str>) -> Option<(&str, &str)> {
         self.0
             .iter()
             .find(|(_, _, r)| deny_hit(r, tool, command))
-            .map(|(s, t, _)| (*s, t.as_str()))
+            .map(|(s, t, _)| (s.as_str(), t.as_str()))
     }
 
     /// Which rule allows each part of the call: one part for a tool, the simple parts of a
@@ -517,7 +560,7 @@ impl RuleSet {
             self.0
                 .iter()
                 .find(|(_, _, r)| f(r))
-                .map(|(s, t, _)| (*s, t.as_str()))
+                .map(|(s, t, _)| (s.as_str(), t.as_str()))
         };
         if tool != "Bash" {
             let part = Part {
@@ -614,25 +657,43 @@ fn settings_rules(source: &str, path: &Path) -> RuleSource {
     out
 }
 
-/// `permissions.inspect` (T48, SPEC §5.3): the rules of `worker.toml`, the user's Claude Code
-/// settings (`<claude_dir>/settings.json`) and the folder's `.claude/settings.local.json`,
-/// with hqc's rules the worker holds for the folder, and a check of `tool` or `command` by
-/// this module's matcher: deny rules of every source first, then every part must be covered
-/// by an allow rule. `root` is the canonical workspace, already checked by the caller.
+/// `permissions.inspect` (T48, SPEC §5.3): the rules of `worker.toml` (`[permissions]`
+/// without what the folder's environment unblocks, then the environment's own as a source of
+/// their own, T43), the user's Claude Code settings (`<claude_dir>/settings.json`) and the
+/// folder's `.claude/settings.local.json`, with hqc's rules the worker holds for the folder,
+/// and a check of `tool` or `command` by this module's matcher: deny rules of every source
+/// first, then every part must be covered by an allow rule. `root` is the canonical
+/// workspace, already checked by the caller.
+#[allow(clippy::too_many_arguments)]
 pub fn inspect(
     perms: &Permissions,
+    env_name: &str,
+    env: &EnvPermissions,
     claude_dir: Option<&Path>,
     root: &Path,
     hqc: Vec<String>,
     command: Option<&str>,
     tool: Option<&str>,
 ) -> InspectResult {
-    let worker = RuleSource {
+    let mut sources = vec![RuleSource {
         source: rule_source::WORKER.into(),
         allow: perms.allow.clone(),
-        deny: perms.deny.clone(),
+        deny: perms
+            .deny
+            .iter()
+            .filter(|r| !env.unblock.contains(r))
+            .cloned()
+            .collect(),
         ..RuleSource::default()
-    };
+    }];
+    if env_name != DEFAULT_ENVIRONMENT {
+        sources.push(RuleSource {
+            source: rule_source::environment(env_name),
+            allow: env.allow.clone(),
+            deny: env.deny.clone(),
+            ..RuleSource::default()
+        });
+    }
     let user = match claude_dir {
         Some(d) => settings_rules(rule_source::USER, &d.join("settings.json")),
         None => RuleSource {
@@ -645,13 +706,7 @@ pub fn inspect(
         rule_source::LOCAL,
         &root.join(".claude").join("settings.local.json"),
     );
-    let sources = vec![worker, user, local];
-    let src = |s: &str| -> &'static str {
-        [rule_source::WORKER, rule_source::USER, rule_source::LOCAL]
-            .into_iter()
-            .find(|x| *x == s)
-            .unwrap_or(rule_source::WORKER)
-    };
+    sources.extend([user, local]);
     let check = match (tool.filter(|t| !t.trim().is_empty()), command) {
         (Some(t), _) => Some((t.trim(), None)),
         (None, Some(c)) if !c.trim().is_empty() => Some(("Bash", Some(c))),
@@ -662,8 +717,8 @@ pub fn inspect(
         let mut allow = RuleSet::default();
         allow.add(rule_source::HQC, &hqc);
         for s in &sources {
-            deny.add(src(&s.source), &s.deny);
-            allow.add(src(&s.source), &s.allow);
+            deny.add(&s.source, &s.deny);
+            allow.add(&s.source, &s.allow);
         }
         let cover = allow.cover(tool, command, root);
         let parts = cover.as_ref().map_or(0, Vec::len) as u32;
@@ -804,7 +859,7 @@ impl Policy {
         set.0.extend(
             self.allow
                 .iter()
-                .map(|(t, r)| (rule_source::WORKER, t.clone(), r.clone())),
+                .map(|(t, r)| (rule_source::WORKER.to_string(), t.clone(), r.clone())),
         );
         let cover = set.cover(tool, input["command"].as_str(), root)?;
         let by: Option<Vec<(&str, &str)>> = cover.iter().map(|(_, by)| *by).collect();
@@ -1155,7 +1210,16 @@ mod tests {
         };
         let hqc = vec!["Bash(python3 *)".to_string()];
         let r = |command: Option<&str>, tool: Option<&str>| {
-            inspect(&perms, Some(&claude), &root, hqc.clone(), command, tool)
+            inspect(
+                &perms,
+                "default",
+                &EnvPermissions::default(),
+                Some(&claude),
+                &root,
+                hqc.clone(),
+                command,
+                tool,
+            )
         };
         let all = r(None, None);
         assert_eq!(all.check, None);
@@ -1218,13 +1282,114 @@ mod tests {
         assert!(bad.sources[2].error.is_some());
         assert_eq!(bad.sources[1].allow, ["Read"]);
         // No user settings file: empty lists, no error.
-        let none = inspect(&perms, Some(tmp.path()), &root, vec![], None, None);
+        let none = inspect(
+            &perms,
+            "default",
+            &EnvPermissions::default(),
+            Some(tmp.path()),
+            &root,
+            vec![],
+            None,
+            None,
+        );
         assert_eq!(
             none.sources[1],
             RuleSource {
                 source: rule_source::USER.into(),
                 ..RuleSource::default()
             }
+        );
+    }
+
+    /// T43: deny minus unblock plus the environment's deny, allow plus its allow; `unblock` of
+    /// a rule not in `deny` is an error.
+    #[test]
+    fn environment_rules() {
+        let worker = Permissions {
+            allow: vec!["Read".into()],
+            ..Permissions::default()
+        };
+        let env = EnvPermissions {
+            unblock: vec!["Bash(ssh:*)".into()],
+            allow: vec!["Bash(ssh debian@192.168.1.20:*)".into(), "Read".into()],
+            deny: vec!["Bash(git push:*)".into()],
+        };
+        let p = worker.for_environment(&env).unwrap();
+        assert!(!p.deny.contains(&"Bash(ssh:*)".to_string()));
+        assert!(p.deny.contains(&"Bash(scp:*)".to_string()));
+        assert_eq!(p.deny.last().unwrap(), "Bash(git push:*)");
+        assert_eq!(p.allow, ["Read", "Bash(ssh debian@192.168.1.20:*)"]);
+        assert_eq!((p.mode, p.allow_auto), (worker.mode, worker.allow_auto));
+        let policy = Policy::new(&p);
+        assert_eq!(
+            policy.denied_by("Bash", &bash("ssh debian@192.168.1.20 true")),
+            None
+        );
+        assert!(policy.denied_by("Bash", &bash("git push origin")).is_some());
+        assert!(Policy::new(&worker)
+            .denied_by("Bash", &bash("ssh debian@192.168.1.20 true"))
+            .is_some());
+
+        let e = worker
+            .for_environment(&EnvPermissions {
+                unblock: vec!["Bash(curl:*)".into()],
+                ..EnvPermissions::default()
+            })
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("unblock"), "{e:#}");
+        assert!(worker
+            .for_environment(&EnvPermissions {
+                allow: vec!["Bash(".into()],
+                ..EnvPermissions::default()
+            })
+            .is_err());
+    }
+
+    /// T43: the screen lists an environment's rules under their own source, the worker's
+    /// without what it unblocks, and the check uses the effective rules.
+    #[test]
+    fn inspect_with_an_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = EnvPermissions {
+            unblock: vec!["Bash(ssh:*)".into()],
+            allow: vec!["Bash(ssh debian@192.168.1.20:*)".into()],
+            deny: vec!["Bash(git push:*)".into()],
+        };
+        let r = |command: &str| {
+            inspect(
+                &Permissions::default(),
+                "infra",
+                &env,
+                Some(tmp.path()),
+                tmp.path(),
+                vec![],
+                Some(command),
+                None,
+            )
+        };
+        let all = r("ssh debian@192.168.1.20 true");
+        let source = rule_source::environment("infra");
+        assert_eq!(source, "worker.toml [environments.infra]");
+        assert_eq!(all.sources[0].source, rule_source::WORKER);
+        assert!(!all.sources[0].deny.contains(&"Bash(ssh:*)".to_string()));
+        assert_eq!(all.sources[1].source, source);
+        assert_eq!(all.sources[1].deny, env.deny);
+        let c = all.check.unwrap();
+        assert_eq!(
+            (c.verdict, c.source.as_deref()),
+            (Verdict::Allow, Some(source.as_str()))
+        );
+        let c = r("ssh other true").check.unwrap();
+        assert_eq!(c.verdict, Verdict::Ask, "unblocked, not allowed");
+        let c = r("git push origin").check.unwrap();
+        assert_eq!(
+            (c.verdict, c.source.as_deref()),
+            (Verdict::Deny, Some(source.as_str()))
+        );
+        let c = r("sudo ls").check.unwrap();
+        assert_eq!(
+            (c.verdict, c.source.as_deref()),
+            (Verdict::Deny, Some(rule_source::WORKER))
         );
     }
 

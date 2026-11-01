@@ -10,6 +10,7 @@ pub mod cleanup;
 pub mod config;
 pub mod connection;
 pub mod enroll;
+pub mod env_cmd;
 pub mod fs;
 pub mod inbox;
 pub mod known_paths;
@@ -35,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::adapter::AdapterFactory;
-use crate::config::{Config, DEFAULT_ENVIRONMENT};
+use crate::config::Config;
 use crate::connection::{ConnOptions, Connection, Status};
 use crate::known_paths::KnownPaths;
 use crate::link::HubLink;
@@ -97,8 +98,9 @@ impl Worker {
             protocol_version: hqc_proto::PROTOCOL_VERSION,
             boot_id: self.boot_id,
             capabilities: self.capabilities.clone(),
-            environments: vec![DEFAULT_ENVIRONMENT.into()],
-            env_bindings: vec![],
+            // Names, bindings and rules; never the values of `env` (SPEC §14).
+            environments: self.config.environments.iter().map(|e| e.info()).collect(),
+            env_bindings: self.config.env_bindings.clone(),
             allowed_roots: Config::path_strings(&self.config.allowed_roots),
             allow_foreign_sessions: self.config.allow_foreign_sessions,
             share_local_models: false,

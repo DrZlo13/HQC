@@ -8,7 +8,6 @@
     "model": "claude-sonnet-5-5",
     "workspace_path": "/Users/home-mac/work/hqc",
     "cwd": ".",
-    "environment": "default",
     "runtime_session_id": "36c72c19-b4ad-4d95-a482-ce4e281952cb",
     "disallowed_tools": [],
     "restricted": false,

@@ -134,7 +134,8 @@ async fn enroll_then_run_says_hello() {
     let hello = c.handshake().await;
     let p = &hello["payload"];
     assert_eq!(p["protocol_version"], 1);
-    assert_eq!(p["environments"], json!(["default"]));
+    assert_eq!(p["environments"], json!([]), "default is implied");
+    assert_eq!(p["env_bindings"], json!([]));
     assert_eq!(
         p["allowed_roots"],
         json!([env.root().display().to_string()])
@@ -519,7 +520,6 @@ async fn start_outside_config_is_rejected() {
         ("workspace_path", json!("root/ws")),
         ("workspace_path", Value::Null),
         ("cwd", json!("../..")),
-        ("environment", json!("infra")),
         ("owner_is_worker_owner", json!(false)),
     ];
     for (field, value) in bad {
@@ -1391,6 +1391,59 @@ async fn a_stopped_agent_starts_in_ask_for_a_capped_input() {
         adapters.start_modes(),
         [(sid, Auto), (sid, Ask), (sid, Auto)]
     );
+    w.stop().await;
+}
+
+// T43: `hello` reports the environments and bindings without the values of `env`; the worker
+// resolves a session's environment itself (an `environment` an older hub still sends is
+// ignored), and `permissions.inspect` shows the environment's rules under their own source.
+#[tokio::test]
+async fn environments_in_hello_and_inspect() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let ws = env.workspace().display().to_string();
+    let config = hqc_worker::config::Config::parse(&format!(
+        "{}[environments.infra]\nenv = {{ GITHUB_TOKEN = \"ghp_t43_secret\" }}\n\
+         [environments.infra.permissions]\nunblock = [\"Bash(ssh:*)\"]\n\
+         allow = [\"Bash(ssh debian@192.168.1.20:*)\"]\n\
+         [[env_bindings]]\npath = {ws:?}\nenvironment = \"infra\"\n",
+        env.config_toml(&hub.url())
+    ))
+    .unwrap();
+    let w = start_worker_with(&env, config, &adapters);
+    let mut c = hub.accept().await;
+    let hello = c.handshake().await;
+    let p = &hello["payload"];
+    assert_eq!(
+        p["environments"],
+        json!([{"name": "infra", "permissions": {
+            "unblock": ["Bash(ssh:*)"], "allow": ["Bash(ssh debian@192.168.1.20:*)"]}}])
+    );
+    assert_eq!(
+        p["env_bindings"],
+        json!([{"path": ws, "environment": "infra"}])
+    );
+    assert!(!hello.to_string().contains("ghp_t43_secret"));
+    assert!(!hello.to_string().contains("GITHUB_TOKEN"));
+
+    let mut start = env.start_payload(Uuid::now_v7());
+    start["environment"] = json!("default");
+    c.frame("session.start", start).await;
+    c.expect("ack").await;
+    c.frame(
+        "permissions.inspect",
+        json!({"request_id": "i-1", "path": ws, "command": "ssh debian@192.168.1.20 true"}),
+    )
+    .await;
+    let p = c.expect("result").await["payload"].clone();
+    assert_eq!(
+        p["sources"][1]["source"],
+        "worker.toml [environments.infra]"
+    );
+    assert_eq!(p["check"]["verdict"], "allow");
+    assert_eq!(p["check"]["source"], "worker.toml [environments.infra]");
+    assert!(!p.to_string().contains("ghp_t43_secret"));
     w.stop().await;
 }
 

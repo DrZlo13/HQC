@@ -8,8 +8,20 @@
       "claude_code": { "version": "2.1.307" },
       "acp_agents": []
     },
-    "environments": ["default"],
-    "env_bindings": [],
+    "environments": [
+      {
+        "name": "infra",
+        "permissions": {
+          "unblock": ["Bash(ssh:*)"],
+          "allow": ["Bash(ssh debian@192.168.1.20:*)"],
+          "deny": ["Bash(git push:*)"]
+        }
+      },
+      { "name": "lab", "allow_local_mcp": true, "permissions": {} }
+    ],
+    "env_bindings": [
+      { "path": "/Users/home-mac/work/lab/infra", "environment": "infra" }
+    ],
     "allowed_roots": ["/Users/home-mac/work"],
     "allow_foreign_sessions": false,
     "share_local_models": false,

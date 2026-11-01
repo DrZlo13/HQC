@@ -578,10 +578,13 @@ pub struct Hello {
     /// `{claude_code?: {version}, acp_agents: []}`. Workspaces are hub objects (SPEC §3);
     /// the worker only checks them against `allowed_roots`.
     pub capabilities: serde_json::Value,
+    /// The environments of `worker.toml` (since SPEC 0.56, T43), without the values of their
+    /// `env`; `default` is implied. A display for the hub: the worker resolves a session's
+    /// environment itself.
     #[serde(default)]
-    pub environments: Vec<String>,
+    pub environments: Vec<EnvironmentInfo>,
     #[serde(default)]
-    pub env_bindings: Vec<serde_json::Value>,
+    pub env_bindings: Vec<EnvBinding>,
     #[serde(default)]
     pub allowed_roots: Vec<String>,
     #[serde(default)]
@@ -594,6 +597,95 @@ pub struct Hello {
     /// the salt `hqc`; the id itself never leaves the machine. Absent from older workers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
+}
+
+/// The environment of a folder with no binding (SPEC §14).
+pub const DEFAULT_ENVIRONMENT: &str = "default";
+
+/// An environment of the worker's `worker.toml` as `hello` reports it (SPEC §5.1, §14): its
+/// name, whether local MCP servers are allowed and its permission rules; never its `env`.
+/// A plain name (`"default"`, as workers before 0.56 send) reads as an environment without
+/// rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "EnvironmentWire")]
+pub struct EnvironmentInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_local_mcp: bool,
+    #[serde(default)]
+    pub permissions: EnvPermissions,
+}
+
+/// `[environments.<name>.permissions]` (SPEC §14).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvPermissions {
+    /// Rules of the worker's `deny` lifted for this environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unblock: Vec<String>,
+    /// Added to the worker's `allow`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Added to the worker's `deny`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EnvironmentWire {
+    Name(String),
+    Full {
+        name: String,
+        #[serde(default)]
+        allow_local_mcp: bool,
+        #[serde(default)]
+        permissions: EnvPermissions,
+    },
+}
+
+impl From<EnvironmentWire> for EnvironmentInfo {
+    fn from(w: EnvironmentWire) -> Self {
+        match w {
+            EnvironmentWire::Name(name) => Self {
+                name,
+                ..Self::default()
+            },
+            EnvironmentWire::Full {
+                name,
+                allow_local_mcp,
+                permissions,
+            } => Self {
+                name,
+                allow_local_mcp,
+                permissions,
+            },
+        }
+    }
+}
+
+/// `[[env_bindings]]` (SPEC §14): the folders of an environment. `path` is canonical on the
+/// worker when it existed at start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvBinding {
+    pub path: String,
+    pub environment: String,
+}
+
+/// The environment of a workspace path (SPEC §14): the binding with the longest path that
+/// equals or contains it, compared by path components (`/a/b` does not contain `/a/bc`);
+/// [`DEFAULT_ENVIRONMENT`] when none does. The worker decides with this for its sessions, the
+/// hub only for display.
+pub fn environment_for<'a>(bindings: &'a [EnvBinding], path: &str) -> &'a str {
+    binding_for(bindings, path).map_or(DEFAULT_ENVIRONMENT, |b| b.environment.as_str())
+}
+
+/// The binding [`environment_for`] goes by.
+pub fn binding_for<'a>(bindings: &'a [EnvBinding], path: &str) -> Option<&'a EnvBinding> {
+    let path = std::path::Path::new(path);
+    bindings
+        .iter()
+        .filter(|b| path.starts_with(&b.path))
+        .max_by_key(|b| std::path::Path::new(&b.path).components().count())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -698,7 +790,6 @@ pub struct SessionStart {
     pub model: Option<String>,
     pub workspace_path: Option<String>,
     pub cwd: String,
-    pub environment: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -756,6 +847,11 @@ pub mod rule_source {
     pub const USER: &str = "~/.claude/settings.json";
     pub const LOCAL: &str = ".claude/settings.local.json";
     pub const HQC: &str = "hqc";
+
+    /// The rules of an environment (since SPEC 0.56, T43): `worker.toml [environments.infra]`.
+    pub fn environment(name: &str) -> String {
+        format!("{WORKER} [environments.{name}]")
+    }
 }
 
 /// Result of `permissions.inspect`.
@@ -1151,6 +1247,41 @@ mod tests {
     #[test]
     fn worker_examples_roundtrip_exactly() {
         check_examples::<WorkerFrame>(WORKER_EXAMPLES, SPEC_WORKER_TYPES, worker_type);
+    }
+
+    /// T43: the longest binding wins, by path components; no binding is `default`.
+    #[test]
+    fn environment_lookup() {
+        let b = |path: &str, environment: &str| EnvBinding {
+            path: path.into(),
+            environment: environment.into(),
+        };
+        let bindings = [b("/a/b", "infra"), b("/a", "lab"), b("/a/b/pub", "default")];
+        let env = |p: &str| environment_for(&bindings, p);
+        assert_eq!(env("/a/b"), "infra");
+        assert_eq!(env("/a/b/c"), "infra");
+        assert_eq!(env("/a/bc"), "lab", "/a/b does not contain /a/bc");
+        assert_eq!(env("/a"), "lab");
+        assert_eq!(
+            env("/a/b/pub/x"),
+            "default",
+            "a binding may give a subfolder back"
+        );
+        assert_eq!(env("/ab"), DEFAULT_ENVIRONMENT);
+        assert_eq!(environment_for(&[], "/a"), DEFAULT_ENVIRONMENT);
+    }
+
+    /// Workers before 0.56 send environment names only.
+    #[test]
+    fn hello_environments_of_older_workers() {
+        let e: Vec<EnvironmentInfo> = serde_json::from_value(json!(["default"])).unwrap();
+        assert_eq!(
+            e,
+            [EnvironmentInfo {
+                name: "default".into(),
+                ..EnvironmentInfo::default()
+            }]
+        );
     }
 
     #[test]

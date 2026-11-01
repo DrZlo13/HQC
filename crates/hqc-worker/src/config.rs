@@ -22,21 +22,35 @@
 //! allow_auto = true              # false: a session that asks for "auto" runs in "ask" (T38)
 //! allow = ["Bash(cargo test:*)"]
 //! # deny: default crate::permissions::DEFAULT_DENY (sudo, ssh, scp, rm -rf /*, ...)
+//!
+//! [environments.infra]           # T43: what sessions in the bound folders run with
+//! env = { GITHUB_TOKEN = "..." } # variables on top of the child allowlist
+//! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
+//! [environments.infra.permissions]
+//! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
+//! allow = ["Bash(ssh debian@192.168.1.20:*)"]
+//! deny = ["Bash(git push:*)"]    # added to the worker's deny
+//!
+//! [[env_bindings]]               # the longest path that contains the workspace wins
+//! path = "/Users/me/work/lab/infra"
+//! environment = "infra"
 //! ```
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
-use hqc_proto::frame::{Runtime, SessionStart};
+use hqc_proto::frame::{
+    EnvBinding, EnvPermissions, EnvironmentInfo, Runtime, SessionStart, DEFAULT_ENVIRONMENT,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::permissions::{PermissionMode, Permissions, RawPermissions};
 use crate::token::Secret;
-
-/// The only environment in iteration 1 (SPEC §14: no `environments{}` / `env_bindings[]` yet).
-pub const DEFAULT_ENVIRONMENT: &str = "default";
 
 /// `$HQC_HOME`, default `~/.hqc`.
 pub fn hqc_home() -> anyhow::Result<PathBuf> {
@@ -80,6 +94,141 @@ struct RawConfig {
     show_in_vscode: bool,
     #[serde(default)]
     permissions: Option<RawPermissions>,
+    #[serde(default)]
+    environments: BTreeMap<String, RawEnvironment>,
+    #[serde(default)]
+    env_bindings: Vec<RawBinding>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEnvironment {
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    allow_local_mcp: bool,
+    #[serde(default)]
+    permissions: RawEnvPermissions,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEnvPermissions {
+    #[serde(default)]
+    unblock: Vec<String>,
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBinding {
+    path: PathBuf,
+    environment: String,
+}
+
+/// Variables of an environment's `env`. Their values go into the agent's process only: not
+/// into `hello`, logs, errors or `hqc-worker env`, and `Debug` prints `***`.
+#[derive(Clone, Default, PartialEq)]
+pub struct EnvVars(BTreeMap<String, String>);
+
+impl EnvVars {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+}
+
+impl fmt::Debug for EnvVars {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map()
+            .entries(self.0.keys().map(|k| (k, "***")))
+            .finish()
+    }
+}
+
+/// An environment (SPEC §14): what the agent process of a session in a bound folder is
+/// launched with. `default` has no variables, no local MCP and the worker's `[permissions]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Environment {
+    pub name: String,
+    pub env: EnvVars,
+    pub allow_local_mcp: bool,
+    /// `[environments.<name>.permissions]` as written.
+    pub rules: EnvPermissions,
+    /// What its sessions run with ([`Permissions::for_environment`]).
+    pub permissions: Permissions,
+}
+
+impl Environment {
+    /// `default` over the worker's `[permissions]`.
+    pub fn default_of(permissions: &Permissions) -> Self {
+        Self {
+            name: DEFAULT_ENVIRONMENT.into(),
+            env: EnvVars::default(),
+            allow_local_mcp: false,
+            rules: EnvPermissions::default(),
+            permissions: permissions.clone(),
+        }
+    }
+
+    /// What `hello` says about it: no values of `env`.
+    pub fn info(&self) -> EnvironmentInfo {
+        EnvironmentInfo {
+            name: self.name.clone(),
+            allow_local_mcp: self.allow_local_mcp,
+            permissions: self.rules.clone(),
+        }
+    }
+}
+
+fn parse_environment(
+    name: &str,
+    raw: RawEnvironment,
+    worker: &Permissions,
+) -> anyhow::Result<Environment> {
+    if name == DEFAULT_ENVIRONMENT {
+        bail!("\"default\" is the environment of unbound folders and cannot be defined");
+    }
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        bail!("{name:?} is not an environment name (letters, digits, _ - .)");
+    }
+    for (k, v) in &raw.env {
+        // Letters, digits and `_`, not starting with a digit; never the worker's own.
+        if k.is_empty()
+            || k.starts_with(|c: char| c.is_ascii_digit())
+            || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            bail!("env: {k:?} is not a variable name (letters, digits and _)");
+        }
+        if k.starts_with("HQC_") {
+            bail!("env: {k}: HQC_* variables are the worker's own");
+        }
+        if v.contains('\0') {
+            bail!("env: {k}: the value contains a NUL character");
+        }
+    }
+    let rules = EnvPermissions {
+        unblock: raw.permissions.unblock,
+        allow: raw.permissions.allow,
+        deny: raw.permissions.deny,
+    };
+    Ok(Environment {
+        name: name.into(),
+        env: EnvVars(raw.env),
+        allow_local_mcp: raw.allow_local_mcp,
+        permissions: worker.for_environment(&rules)?,
+        rules,
+    })
 }
 
 fn default_true() -> bool {
@@ -144,8 +293,15 @@ pub struct Config {
     /// Write transcripts with `entrypoint: claude-vscode`, so sessions run by hqc appear in
     /// the VS Code extension's history (it lists only its own entrypoint, SPEC §9).
     pub show_in_vscode: bool,
-    /// `[permissions]`: allow/deny rules for `--settings` and the ask/auto mode (SPEC §14).
+    /// `[permissions]`: the worker's allow/deny rules and the ask/auto mode (SPEC §14). A
+    /// session runs with its environment's [`Environment::permissions`], built on these.
     pub permissions: Permissions,
+    /// `[environments.*]` by name; `default` is not among them ([`Config::environment`]).
+    pub environments: Vec<Arc<Environment>>,
+    /// `[[env_bindings]]`, paths absolute and canonical when they existed at load.
+    pub env_bindings: Vec<EnvBinding>,
+    /// The environment of unbound folders and of sessions without a workspace.
+    pub default_environment: Arc<Environment>,
     /// Where sessions without a workspace get their empty folder (SPEC §8.4):
     /// `$HQC_HOME/scratch/<session_id>`.
     pub scratch_root: PathBuf,
@@ -163,7 +319,9 @@ pub struct StartSpec {
     /// Canonical `<workspace>/<cwd>`, the process working directory (SPEC §8.1); checked
     /// again before every spawn ([`StartSpec::recheck_workdir`]).
     pub workdir: PathBuf,
-    pub environment: String,
+    /// Resolved by the worker from the canonical workspace path (SPEC §14), never taken
+    /// from the hub.
+    pub environment: Arc<Environment>,
     pub runtime_session_id: Option<String>,
     pub system_prompt: Option<String>,
     pub disallowed_tools: Vec<String>,
@@ -226,6 +384,39 @@ impl Config {
             .iter()
             .map(|p| absolute(p).context("allowed_roots"))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        let permissions = Permissions::from_raw(raw.permissions)?;
+        let environments = raw
+            .environments
+            .into_iter()
+            .map(|(name, e)| {
+                parse_environment(&name, e, &permissions)
+                    .map(Arc::new)
+                    .with_context(|| format!("environments.{name}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut env_bindings: Vec<EnvBinding> = Vec::new();
+        for b in raw.env_bindings {
+            let path = absolute(&b.path).context("env_bindings")?;
+            let path = path
+                .to_str()
+                .with_context(|| format!("env_bindings: {} is not UTF-8", path.display()))?
+                .to_string();
+            if b.environment != DEFAULT_ENVIRONMENT
+                && !environments.iter().any(|e| e.name == b.environment)
+            {
+                bail!(
+                    "env_bindings: {path}: there is no [environments.{}]",
+                    b.environment
+                );
+            }
+            if env_bindings.iter().any(|x| x.path == path) {
+                bail!("env_bindings: {path} is bound twice");
+            }
+            env_bindings.push(EnvBinding {
+                path,
+                environment: b.environment,
+            });
+        }
         Ok(Self {
             hub_url: raw.hub_url.trim_end_matches('/').to_string(),
             allowed_roots,
@@ -236,7 +427,10 @@ impl Config {
             insecure_http: raw.insecure_http,
             allow_native_messaging: raw.allow_native_messaging,
             show_in_vscode: raw.show_in_vscode,
-            permissions: Permissions::from_raw(raw.permissions)?,
+            default_environment: Arc::new(Environment::default_of(&permissions)),
+            permissions,
+            environments,
+            env_bindings,
             max_sessions: raw.max_sessions,
             scratch_root: hqc_home()
                 .unwrap_or_else(|_| std::env::temp_dir().join("hqc"))
@@ -266,12 +460,11 @@ impl Config {
             }
             None => return Err("a session without workspace must be restricted (SPEC §8.4)".into()),
         };
-        if s.environment != DEFAULT_ENVIRONMENT {
-            return Err(format!(
-                "environment {:?} does not match the local binding {DEFAULT_ENVIRONMENT:?}",
-                s.environment
-            ));
-        }
+        // Resolved here on every `session.start`, never taken from the hub (SPEC §2.1).
+        let environment = match &s.workspace_path {
+            Some(_) => self.environment(&ws),
+            None => self.default_environment.clone(),
+        };
         if s.acp_agent.is_some() {
             return Err("acp_agent is not configured on this worker".into());
         }
@@ -284,7 +477,7 @@ impl Config {
             model: s.model.clone(),
             workspace: ws,
             workdir,
-            environment: s.environment.clone(),
+            environment,
             runtime_session_id: s.runtime_session_id.clone(),
             system_prompt: s.system_prompt.clone(),
             disallowed_tools: s.disallowed_tools.clone(),
@@ -296,6 +489,34 @@ impl Config {
             // The supervisor gives a session in a workspace the folder's shared list.
             folder_rules: None,
         })
+    }
+
+    /// The environment of a canonical folder (SPEC §14): the binding with the longest path
+    /// that contains it, by components, else `default`. Binding paths are canonicalized again
+    /// here, so a binding through a symlink made after the start names its target.
+    pub fn environment(&self, path: &Path) -> Arc<Environment> {
+        self.binding(path)
+            .as_ref()
+            .and_then(|b| self.environments.iter().find(|e| e.name == b.environment))
+            .unwrap_or(&self.default_environment)
+            .clone()
+    }
+
+    /// The binding [`Config::environment`] goes by, with its path canonical now.
+    pub fn binding(&self, path: &Path) -> Option<EnvBinding> {
+        let bindings: Vec<EnvBinding> = self
+            .env_bindings
+            .iter()
+            .map(|b| EnvBinding {
+                path: Path::new(&b.path)
+                    .canonicalize()
+                    .ok()
+                    .and_then(|p| p.to_str().map(String::from))
+                    .unwrap_or_else(|| b.path.clone()),
+                environment: b.environment.clone(),
+            })
+            .collect();
+        hqc_proto::frame::binding_for(&bindings, &path.to_string_lossy()).cloned()
     }
 
     /// The mode a session runs in when hqc asks for `asked` (T38): `auto` only with
@@ -512,10 +733,6 @@ mod tests {
         }
 
         let mut s = ok.clone();
-        s.environment = "infra".into();
-        assert!(c.check_start(&s).is_err());
-
-        let mut s = ok.clone();
         s.owner_is_worker_owner = false;
         assert!(c.check_start(&s).is_err());
     }
@@ -714,5 +931,160 @@ mod tests {
         assert!(Config::parse(old).unwrap().legacy_workspace);
         let new = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n";
         assert!(!Config::parse(new).unwrap().legacy_workspace);
+    }
+
+    /// A worker config with environments `infra` (bound to `<root>/a/b`) and `lab` (bound to
+    /// `<root>/a`), and `<root>/a/b/pub` given back to `default`.
+    fn envs(root: &Path) -> Config {
+        for d in ["a/b/pub", "a/bc", "c"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        Config::parse(&format!(
+            r#"hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.infra]
+env = {{ GITHUB_TOKEN = "ghp_never_shown" }}
+[environments.infra.permissions]
+unblock = ["Bash(ssh:*)"]
+allow = ["Bash(ssh debian@192.168.1.20:*)"]
+deny = ["Bash(git push:*)"]
+[environments.lab]
+allow_local_mcp = true
+[[env_bindings]]
+path = "{root}/a/b"
+environment = "infra"
+[[env_bindings]]
+path = "{root}/a"
+environment = "lab"
+[[env_bindings]]
+path = "{root}/a/b/pub"
+environment = "default"
+"#,
+            root = root.display()
+        ))
+        .unwrap()
+    }
+
+    /// T43: the longest binding wins, by components; anything else is `default`.
+    #[test]
+    fn binding_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let c = envs(&root);
+        let env = |p: &str| c.environment(&root.join(p)).name.clone();
+        assert_eq!(env("a/b"), "infra");
+        assert_eq!(env("a/b/pub"), "default");
+        assert_eq!(env("a/bc"), "lab", "/a/b does not contain /a/bc");
+        assert_eq!(env("a"), "lab");
+        assert_eq!(env("c"), "default");
+        let infra = c.environment(&root.join("a/b"));
+        assert!(!infra.permissions.deny.contains(&"Bash(ssh:*)".to_string()));
+        assert!(infra
+            .permissions
+            .deny
+            .contains(&"Bash(git push:*)".to_string()));
+        assert!(c.environment(&root.join("a")).allow_local_mcp);
+        assert_eq!(*c.environment(&root.join("c")), *c.default_environment);
+    }
+
+    /// T43: a session.start resolves the environment from the canonical workspace path,
+    /// whatever the hub's path looked like.
+    #[cfg(unix)]
+    #[test]
+    fn binding_through_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real/infra")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        // The binding names the folder through a link, the session comes by the real path…
+        let c = Config::parse(&format!(
+            "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\n[environments.infra]\n\
+             [[env_bindings]]\npath = \"{}\"\nenvironment = \"infra\"\n",
+            root.join("link/infra").display()
+        ))
+        .unwrap();
+        assert_eq!(
+            c.env_bindings[0].path,
+            root.join("real/infra").display().to_string()
+        );
+        let spec = c.check_start(&start(&root.join("real/infra"))).unwrap();
+        assert_eq!(spec.environment.name, "infra");
+        // …or the other way round: the hub's path is resolved first.
+        let spec = c.check_start(&start(&root.join("link/infra"))).unwrap();
+        assert_eq!(spec.environment.name, "infra");
+        // A link into a bound folder from outside it is that folder.
+        std::os::unix::fs::symlink(root.join("real/infra"), root.join("alias")).unwrap();
+        let spec = c.check_start(&start(&root.join("alias"))).unwrap();
+        assert_eq!(spec.environment.name, "infra");
+        // A binding whose path appears only after the start, through a link, still applies.
+        let c = Config::parse(&format!(
+            "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\n[environments.infra]\n\
+             [[env_bindings]]\npath = \"{}\"\nenvironment = \"infra\"\n",
+            root.join("later").display()
+        ))
+        .unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("later")).unwrap();
+        assert_eq!(c.environment(&root.join("real")).name, "infra");
+        assert_eq!(c.environment(&root.join("other")).name, "default");
+    }
+
+    #[test]
+    fn environment_config_errors() {
+        let base = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n";
+        for (bad, why) in [
+            (
+                "[environments.infra.permissions]\nunblock = [\"Bash(curl:*)\"]\n",
+                "unblock",
+            ),
+            (
+                "[permissions]\ndeny = []\n[environments.infra.permissions]\nunblock = [\"Bash(ssh:*)\"]\n",
+                "unblock",
+            ),
+            ("[environments.infra.permissions]\nallow = [\"Bash(\"]\n", "allow"),
+            ("[environments.default]\n", "default"),
+            ("[environments.\"a b\"]\n", "name"),
+            ("[environments.infra]\nenv = { HQC_HOME = \"/x\" }\n", "HQC_"),
+            ("[environments.infra]\nenv = { \"A-B\" = \"x\" }\n", "variable"),
+            ("[environments.infra]\nsettings = {}\n", "unknown field"),
+            ("[[env_bindings]]\npath = \"/a/x\"\nenvironment = \"infra\"\n", "no [environments.infra]"),
+            ("[[env_bindings]]\npath = \"x\"\nenvironment = \"default\"\n", "absolute"),
+            (
+                "[environments.infra]\n[[env_bindings]]\npath = \"/a/x\"\nenvironment = \"infra\"\n\
+                 [[env_bindings]]\npath = \"/a/x/\"\nenvironment = \"default\"\n",
+                "twice",
+            ),
+        ] {
+            let e = Config::parse(&format!("{base}{bad}")).unwrap_err();
+            assert!(format!("{e:#}").contains(why), "{bad}: {e:#}");
+        }
+        // The unblock rule must be in the worker's deny: the default deny has ssh.
+        let ok = "[environments.infra.permissions]\nunblock = [\"Bash(ssh:*)\"]\n";
+        Config::parse(&format!("{base}{ok}")).unwrap();
+    }
+
+    /// T43: `hello` carries names, bound paths and rules, never the values of `env`; neither
+    /// does a `StartSpec` printed in a log.
+    #[test]
+    fn env_values_stay_on_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let c = envs(&root);
+        let infos: Vec<_> = c.environments.iter().map(|e| e.info()).collect();
+        let hello = serde_json::to_string(&(infos, &c.env_bindings)).unwrap();
+        assert!(
+            hello.contains("\"infra\"") && hello.contains("Bash(ssh:*)"),
+            "{hello}"
+        );
+        assert!(
+            hello.contains(&format!("{}/a/b", root.display())),
+            "{hello}"
+        );
+        assert!(!hello.contains("ghp_never_shown"), "{hello}");
+        assert!(!hello.contains("GITHUB_TOKEN"), "{hello}");
+        let spec = c.check_start(&start(&root.join("a/b"))).unwrap();
+        assert_eq!(spec.environment.name, "infra");
+        let printed = format!("{spec:?} {c:?}");
+        assert!(printed.contains("GITHUB_TOKEN"), "names are fine");
+        assert!(!printed.contains("ghp_never_shown"), "{printed}");
     }
 }

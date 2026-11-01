@@ -8,7 +8,7 @@
       "claude_code": { "version": "2.1.308", "sessions_registry": true },
       "acp_agents": []
     },
-    "environments": ["default"],
+    "environments": [],
     "env_bindings": [],
     "allowed_roots": ["/Users/home-mac/work"],
     "allow_foreign_sessions": false,

@@ -43,7 +43,7 @@ use super::{Adapter, AdapterEvent, AdapterFactory, EventSink};
 use crate::config::{Config, StartSpec};
 use crate::inbox::InboxFile;
 use crate::mirror::OwnRecords;
-use crate::permissions::{PermissionMode, Permissions, Policy};
+use crate::permissions::{PermissionMode, Policy};
 
 /// A live process of transcript `uuid` in [`OwnRecords`]; ends with the monitor, even an
 /// aborted one.
@@ -75,7 +75,8 @@ pub const SETTING_SOURCES: &str = "user,local";
 /// The agent's environment: only these variables of the worker's (SPEC §14), never `HQC_*`
 /// (the worker's token store, config) or other secrets the worker runs with. `SHELL` and
 /// `LOGNAME` are what the CLI's Bash tool and the Keychain lookup need besides the list of
-/// SPEC §14; variables of the workspace's environment come on top (iteration 4).
+/// SPEC §14; the `env` of the session's environment comes on top (T43,
+/// [`ClaudeCodeAdapter::command`]).
 pub fn child_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     const NAMES: &[&str] = &[
         "PATH",
@@ -122,9 +123,6 @@ pub struct ClaudeOptions {
     /// default Claude Code's own cross-session messaging, which bypasses the hub
     /// (`allow_native_messaging` in the worker config keeps it).
     pub always_disallowed: Vec<String>,
-    /// `[permissions]` of the worker config: the lists go to `--settings`, the adapter
-    /// reads them for `policy_hint` ([`Policy`]).
-    pub permissions: Permissions,
     /// Interrupt → SIGINT fallback delay.
     pub stop_grace: Duration,
     /// A process that dies this soon after spawning fails `start` instead of being
@@ -148,7 +146,6 @@ impl Default for ClaudeOptions {
                 .iter()
                 .map(|t| t.to_string())
                 .collect(),
-            permissions: Permissions::default(),
             stop_grace: Duration::from_secs(10),
             early_exit: Duration::from_millis(500),
             own_records: Arc::default(),
@@ -194,14 +191,12 @@ pub fn mcp_tool_timeout_ms(ask_timeout_s: u32) -> u64 {
 #[derive(Clone)]
 pub struct ClaudeCodeAdapters {
     opts: Arc<ClaudeOptions>,
-    policy: Arc<Policy>,
     spawner: Arc<dyn Spawner>,
 }
 
 impl ClaudeCodeAdapters {
     pub fn new(opts: ClaudeOptions, spawner: Arc<dyn Spawner>) -> Self {
         Self {
-            policy: Arc::new(Policy::new(&opts.permissions)),
             opts: Arc::new(opts),
             spawner,
         }
@@ -225,7 +220,6 @@ impl ClaudeCodeAdapters {
                 claude_bin: cfg.claude_bin.clone(),
                 entrypoint: cfg.show_in_vscode.then(|| "claude-vscode".to_string()),
                 ask_mode,
-                permissions: cfg.permissions.clone(),
                 always_disallowed: if cfg.allow_native_messaging {
                     vec![]
                 } else {
@@ -250,7 +244,6 @@ impl AdapterFactory for ClaudeCodeAdapters {
         Box::new(ClaudeCodeAdapter {
             session_id: spec.session_id,
             opts: self.opts.clone(),
-            policy: self.policy.clone(),
             spawner: self.spawner.clone(),
             events,
             proc: None,
@@ -261,7 +254,6 @@ impl AdapterFactory for ClaudeCodeAdapters {
 pub struct ClaudeCodeAdapter {
     session_id: Uuid,
     opts: Arc<ClaudeOptions>,
-    policy: Arc<Policy>,
     spawner: Arc<dyn Spawner>,
     events: EventSink,
     proc: Option<Proc>,
@@ -379,8 +371,11 @@ impl ClaudeCodeAdapter {
     ///   rules `always` writes;
     /// - `restricted` → `--restricted` (no command-running tools, file tools confined to the
     ///   working directory, no settings files; SPEC §8.4);
-    /// - `[permissions]` allow/deny → `--settings`, in restricted mode too (the CLI applies
+    /// - the allow/deny rules of the session's environment (`[permissions]` merged with the
+    ///   environment's, T43) → `--settings`, in restricted mode too (the CLI applies
     ///   `--settings` there, checked on 2.1.308);
+    /// - `--strict-mcp-config` unless the environment has `allow_local_mcp` (the hqc server
+    ///   is in `--mcp-config` either way); the environment's `env` on top of [`child_env`];
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(&self, spec: &StartSpec, uuid: &Uuid, resume: bool) -> CommandSpec {
@@ -396,10 +391,12 @@ impl ClaudeCodeAdapter {
             "host",
             "--permission-prompt-tool",
             "stdio",
-            "--strict-mcp-config",
         ]
         .map(String::from)
         .into();
+        if !spec.environment.allow_local_mcp {
+            args.push("--strict-mcp-config".into());
+        }
         if let Some(m) = &self.opts.mcp {
             args.extend(["--mcp-config".into(), m.config(&spec.session_token)]);
         }
@@ -415,7 +412,7 @@ impl ClaudeCodeAdapter {
             args.push("--disallowedTools".into());
             args.extend(disallowed);
         }
-        if let Some(settings) = self.opts.permissions.settings_json() {
+        if let Some(settings) = spec.environment.permissions.settings_json() {
             args.extend(["--settings".into(), settings]);
         }
         if spec.restricted {
@@ -452,7 +449,12 @@ impl ClaudeCodeAdapter {
             cwd: spec.workdir.clone(),
             env: {
                 let mut env = child_env(std::env::vars());
-                env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT");
+                for (k, v) in spec.environment.env.iter() {
+                    env.retain(|(x, _)| x != k);
+                    env.push((k.into(), v.into()));
+                }
+                // The worker's own come last.
+                env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT" && k != "MCP_TOOL_TIMEOUT");
                 if let Some(e) = &self.opts.entrypoint {
                     env.push(("CLAUDE_CODE_ENTRYPOINT".into(), e.clone()));
                 }
@@ -489,6 +491,7 @@ impl ClaudeCodeAdapter {
             mode = if resume { "resume" } else { "new" },
             why,
             cwd = %spec.workdir.display(),
+            environment = %spec.environment.name,
             "claude started"
         );
 
@@ -502,7 +505,7 @@ impl ClaudeCodeAdapter {
             None => None,
         };
         let mut core = Core::new(self.session_id, spec.restricted)
-            .with_policy(self.policy.clone())
+            .with_policy(Arc::new(Policy::new(&spec.environment.permissions)))
             .with_cost_baseline(cost_baseline);
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());

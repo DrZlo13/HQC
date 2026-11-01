@@ -132,6 +132,11 @@ fn options(config_dir: &std::path::Path) -> ClaudeOptions {
     }
 }
 
+/// The `default` environment over these `[permissions]`.
+fn with_permissions(p: crate::permissions::Permissions) -> Arc<crate::config::Environment> {
+    Arc::new(crate::config::Environment::default_of(&p))
+}
+
 fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> StartSpec {
     // As `Config::check_start` gives it: canonical (/var -> /private/var on macOS).
     let workdir = &workdir.canonicalize().unwrap();
@@ -141,7 +146,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         model: Some("claude-haiku-5-5".into()),
         workspace: workdir.to_path_buf(),
         workdir: workdir.to_path_buf(),
-        environment: "default".into(),
+        environment: with_permissions(crate::permissions::Permissions::default()),
         runtime_session_id: Some(claude_session.to_string()),
         system_prompt: None,
         disallowed_tools: vec![],
@@ -751,15 +756,14 @@ async fn command_line_carries_permissions() {
     let work = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let claude = ScriptedClaude::new("");
-    let mut opts = options(config.path());
-    opts.permissions = Permissions {
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    s.environment = with_permissions(Permissions {
         mode: PermissionMode::Ask,
         allow_auto: true,
         allow: vec!["Bash(cargo test:*)".into(), "Read".into()],
         deny: vec!["Bash(git push:*)".into()],
-    };
-    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
-    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    });
     let (tx, _rx) = mpsc::channel(16);
     let mut a = factory.create(&s, tx);
     let settings = |n: usize| -> Value {
@@ -783,11 +787,10 @@ async fn command_line_carries_permissions() {
     a.kill().await.unwrap();
 
     // Both lists empty: only voice off.
-    let mut opts = options(config.path());
-    opts.permissions.deny.clear();
-    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
-    let (tx, _rx) = mpsc::channel(16);
-    let mut a = factory.create(&s, tx);
+    s.environment = with_permissions(Permissions {
+        deny: vec![],
+        ..Permissions::default()
+    });
     a.start(&s).await.unwrap();
     assert_eq!(settings(2), json!({"voiceEnabled": false}));
     a.kill().await.unwrap();
@@ -800,7 +803,6 @@ async fn command_line_carries_permissions() {
     let cfg = crate::config::Config::parse(&base).unwrap();
     let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
     assert_eq!(f.opts.ask_mode, "manual");
-    assert_eq!(f.opts.permissions, Permissions::default());
     let cfg =
         crate::config::Config::parse(&format!("{base}[permissions]\nmode = \"auto\"\n")).unwrap();
     let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
@@ -813,7 +815,6 @@ async fn command_line_carries_permissions() {
     let a = ClaudeCodeAdapter {
         session_id: s.session_id,
         opts: f.opts.clone(),
-        policy: f.policy.clone(),
         spawner: f.spawner.clone(),
         events: mpsc::channel(1).0,
         proc: None,
@@ -829,6 +830,90 @@ async fn command_line_carries_permissions() {
         .command(&s, &Uuid::nil(), false)
         .args
         .contains(&"--settings".to_string()));
+}
+
+/// T43 (SPEC §14): a session in a bound folder gets its environment's merged rules in
+/// `--settings`, its `env` on top of the child allowlist, and no `--strict-mcp-config` with
+/// `allow_local_mcp`; a session elsewhere on the same worker gets none of it.
+#[tokio::test]
+async fn command_line_follows_the_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    for d in ["infra", "other"] {
+        std::fs::create_dir(root.join(d)).unwrap();
+    }
+    let cfg = crate::config::Config::parse(&format!(
+        r#"hub_url = "https://h"
+allowed_roots = [{root:?}]
+[permissions]
+allow = ["Read"]
+deny = ["Bash(ssh:*)", "Bash(sudo:*)"]
+[environments.infra]
+env = {{ GITHUB_TOKEN = "ghp_t43", PATH = "/opt/infra/bin", MCP_TOOL_TIMEOUT = "1" }}
+allow_local_mcp = true
+[environments.infra.permissions]
+unblock = ["Bash(ssh:*)"]
+allow = ["Bash(ssh debian@192.168.1.20:*)"]
+deny = ["Bash(git push:*)"]
+[[env_bindings]]
+path = "{}"
+environment = "infra"
+"#,
+        root.join("infra").display()
+    ))
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let a = ClaudeCodeAdapter {
+        session_id: Uuid::nil(),
+        opts: factory.opts.clone(),
+        spawner: factory.spawner.clone(),
+        events: mpsc::channel(1).0,
+        proc: None,
+    };
+    let command = |dir: &str| {
+        let mut s = spec(Uuid::now_v7(), &root.join(dir), Uuid::new_v4());
+        s.environment = cfg.environment(&s.workspace);
+        a.command(&s, &Uuid::nil(), false)
+    };
+    let settings = |args: &[String]| -> Value {
+        let i = args.iter().position(|a| a == "--settings").unwrap();
+        serde_json::from_str(&args[i + 1]).unwrap()
+    };
+    let var = |env: &[(String, String)], k: &str| {
+        env.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone())
+    };
+
+    let infra = command("infra");
+    assert_eq!(
+        settings(&infra.args)["permissions"],
+        json!({
+            "allow": ["Read", "Bash(ssh debian@192.168.1.20:*)"],
+            "deny": ["Bash(sudo:*)", "Bash(git push:*)"],
+        })
+    );
+    assert!(!infra.args.contains(&"--strict-mcp-config".to_string()));
+    assert_eq!(var(&infra.env, "GITHUB_TOKEN").as_deref(), Some("ghp_t43"));
+    assert_eq!(var(&infra.env, "PATH").as_deref(), Some("/opt/infra/bin"));
+    assert_eq!(
+        var(&infra.env, "MCP_TOOL_TIMEOUT").as_deref(),
+        Some("660000"),
+        "the worker's own variables win"
+    );
+    assert_eq!(
+        infra.env.iter().filter(|(k, _)| k == "PATH").count(),
+        1,
+        "one PATH"
+    );
+
+    let other = command("other");
+    assert_eq!(
+        settings(&other.args)["permissions"],
+        json!({"allow": ["Read"], "deny": ["Bash(ssh:*)", "Bash(sudo:*)"]})
+    );
+    assert!(other.args.contains(&"--strict-mcp-config".to_string()));
+    assert_eq!(var(&other.env, "GITHUB_TOKEN"), None);
 }
 
 /// T38: a running process switches with `set_permission_mode` (`default` for ask, the

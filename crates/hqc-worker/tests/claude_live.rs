@@ -19,7 +19,8 @@ use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use hqc_worker::adapter::claude_code::process::{CommandSpec, OsSpawner, Spawned, Spawner};
 use hqc_worker::adapter::claude_code::{paths, ClaudeCodeAdapters, ClaudeOptions};
 use hqc_worker::adapter::{AdapterEvent, AdapterFactory};
-use hqc_worker::config::StartSpec;
+use hqc_worker::config::{Environment, StartSpec};
+use hqc_worker::permissions::Permissions;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -114,7 +115,7 @@ async fn live_repo_settings_ignored() {
         model: Some("claude-haiku-5-5".into()),
         workspace: work.clone(),
         workdir: work.clone(),
-        environment: "default".into(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
         runtime_session_id: Some(Uuid::new_v4().to_string()),
         system_prompt: Some("Be brief.".into()),
         disallowed_tools: vec!["WebFetch".into()],
@@ -189,6 +190,161 @@ async fn live_repo_settings_ignored() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+/// T43 (SPEC §14): one worker config, two folders. In the folder bound to an environment that
+/// unblocks `Bash(ssh:*)` an `ssh` call is asked about (answered `deny`, so nothing runs); in
+/// the other folder the worker's default `deny` refuses it without asking. The host is in
+/// `.invalid`, so nothing real could be reached even if it ran. Two runs, haiku, two turns.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_environment_ssh -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_environment_ssh() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tmp")
+        .join(format!("spike-t43-{}", Uuid::now_v7()));
+    for d in ["infra", "other"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+        // Their own repositories: nothing reads or writes the hqc checkout's settings.
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.join(d))
+            .status()
+            .unwrap()
+            .success());
+    }
+    let root = root.canonicalize().unwrap();
+    let cfg = hqc_worker::config::Config::parse(&format!(
+        "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\n\
+         [environments.infra.permissions]\nunblock = [\"Bash(ssh:*)\"]\n\
+         [[env_bindings]]\npath = \"{}\"\nenvironment = \"infra\"\n",
+        root.join("infra").display()
+    ))
+    .unwrap();
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let spawner = Arc::new(Recording::default());
+    let factory = ClaudeCodeAdapters::new(opts, spawner.clone());
+
+    // (approval requests, system codes and texts) of one turn in `dir`.
+    let run = |dir: &'static str| {
+        let (factory, cfg, root) = (factory.clone(), cfg.clone(), root.clone());
+        async move {
+            let work = root.join(dir);
+            let session_id = Uuid::now_v7();
+            let spec = StartSpec {
+                session_id,
+                runtime: Runtime::ClaudeCode,
+                model: Some("claude-haiku-5-5".into()),
+                environment: cfg.environment(&work),
+                workspace: work.clone(),
+                workdir: work,
+                runtime_session_id: Some(Uuid::new_v4().to_string()),
+                system_prompt: None,
+                disallowed_tools: vec![],
+                restricted: false,
+                auto_approve: false,
+                session_token: hqc_worker::token::Secret::new("st"),
+                ask_timeout_s: 600,
+                permission_mode: PermissionMode::Ask,
+                folder_rules: None,
+            };
+            println!("--- {dir}: environment {}", spec.environment.name);
+            let (tx, mut rx) = mpsc::channel(4096);
+            let mut adapter = factory.create(&spec, tx);
+            adapter.start(&spec).await.expect("claude starts");
+            adapter
+                .input(&SessionInput {
+                    session_id,
+                    event_id: Uuid::now_v7(),
+                    text: "Run exactly this shell command once with the Bash tool, verbatim: \
+                           ssh -o BatchMode=yes -o ConnectTimeout=3 hqc-t43.invalid true. \
+                           Then reply with exactly: DONE"
+                        .into(),
+                    artifact_ids: vec![],
+                    peer_prefix: vec![],
+                    peer: None,
+                    permission_cap: None,
+                })
+                .await
+                .unwrap();
+            let (mut asked, mut system) = (Vec::new(), Vec::new());
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+            loop {
+                let ev = tokio::time::timeout_at(deadline, rx.recv())
+                    .await
+                    .expect("turn did not end in 180 s")
+                    .expect("channel closed");
+                match &ev {
+                    AdapterEvent::Event(e) => match &e.kind {
+                        EventKind::ApprovalRequest {
+                            request_id,
+                            description,
+                            ..
+                        } => {
+                            println!("approval.request {description:?} -> deny");
+                            asked.push(description.clone());
+                            adapter
+                                .answer_approval(request_id, "deny", None)
+                                .await
+                                .unwrap();
+                        }
+                        EventKind::System { code, text, .. } => {
+                            println!("system {code}: {text}");
+                            system.push((code.clone(), text.clone()));
+                        }
+                        EventKind::ToolCall { args_preview, .. } => {
+                            println!("tool.call {args_preview}")
+                        }
+                        EventKind::ToolResult { result_preview, .. } => {
+                            println!("tool.result {result_preview}")
+                        }
+                        _ => {}
+                    },
+                    AdapterEvent::TurnEnded => break,
+                    AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+                    _ => {}
+                }
+            }
+            adapter.kill().await.unwrap();
+            (asked, system)
+        }
+    };
+
+    let (asked, system) = run("infra").await;
+    assert!(
+        asked.iter().any(|d| d.contains("ssh")),
+        "infra: ssh was not asked about: {asked:?} {system:?}"
+    );
+    assert!(
+        !system.iter().any(|(c, _)| c == "policy_denied"),
+        "infra: {system:?}"
+    );
+    let (asked, system) = run("other").await;
+    assert!(asked.is_empty(), "other: asked {asked:?}");
+    assert!(
+        system
+            .iter()
+            .any(|(c, t)| c == "policy_denied" && t.contains("ssh")),
+        "other: {system:?}"
+    );
+    let cmds = spawner.0.lock().unwrap().clone();
+    let settings = |c: &CommandSpec| {
+        let i = c.args.iter().position(|a| a == "--settings").unwrap();
+        c.args[i + 1].clone()
+    };
+    assert!(!settings(&cmds[0]).contains("Bash(ssh:*)"));
+    assert!(settings(&cmds[1]).contains("Bash(ssh:*)"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// T48 (SPEC §8.1, §14): the folder's hqc rule `Bash(touch *)` answers the CLI's
 /// `can_use_tool` for a compound `touch a && touch b` without an `approval.request`.
 ///
@@ -226,7 +382,7 @@ async fn live_folder_rules() {
         model: Some("claude-haiku-5-5".into()),
         workspace: work.clone(),
         workdir: work.clone(),
-        environment: "default".into(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
         runtime_session_id: Some(Uuid::new_v4().to_string()),
         system_prompt: None,
         disallowed_tools: vec![],
@@ -324,7 +480,7 @@ async fn live_permission_mode_switch() {
         model: Some("claude-haiku-5-5".into()),
         workspace: work.clone(),
         workdir: work.clone(),
-        environment: "default".into(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
         runtime_session_id: Some(Uuid::new_v4().to_string()),
         system_prompt: None,
         disallowed_tools: vec![],
@@ -471,7 +627,7 @@ async fn live_bash_turn_with_approval() {
         model: Some("claude-haiku-5-5".into()),
         workspace: work.clone(),
         workdir: work.clone(),
-        environment: "default".into(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
         runtime_session_id: Some(claude_session.to_string()),
         system_prompt: None,
         disallowed_tools: vec![],
@@ -666,7 +822,6 @@ async fn live_bash_turn_with_approval() {
 /// ```
 #[tokio::test]
 async fn live_permission_policy() {
-    use hqc_worker::permissions::Permissions;
     if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
         eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
         return;
@@ -688,12 +843,6 @@ async fn live_permission_policy() {
     let opts = ClaudeOptions {
         extra_args: vec!["--max-turns".into(), "2".into()],
         ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
-        permissions: Permissions {
-            mode: PermissionMode::Ask,
-            allow_auto: true,
-            allow: vec!["Bash(touch hqc-allowed:*)".into()],
-            deny,
-        },
         ..ClaudeOptions::default()
     };
     let spawner = Arc::new(Recording::default());
@@ -705,7 +854,12 @@ async fn live_permission_policy() {
         model: Some("claude-haiku-5-5".into()),
         workspace: work.clone(),
         workdir: work.clone(),
-        environment: "default".into(),
+        environment: Arc::new(Environment::default_of(&Permissions {
+            mode: PermissionMode::Ask,
+            allow_auto: true,
+            allow: vec!["Bash(touch hqc-allowed:*)".into()],
+            deny,
+        })),
         runtime_session_id: Some(Uuid::new_v4().to_string()),
         system_prompt: None,
         disallowed_tools: vec![],
@@ -832,7 +986,7 @@ async fn live_ai_title() {
         model: Some("claude-haiku-5-5".into()),
         workspace: work.clone(),
         workdir: work.clone(),
-        environment: "default".into(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
         runtime_session_id: Some(claude_session.to_string()),
         system_prompt: None,
         disallowed_tools: vec![],

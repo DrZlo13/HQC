@@ -537,11 +537,15 @@ impl Supervisor {
                 let folder = self
                     .workspace(&r.path)
                     .and_then(|p| self.folders.get(&p).map(|f| (p, f.list())));
+                let env = folder.as_ref().map(|(p, _)| self.cfg.environment(p));
                 let (perms, claude_dir) = (self.cfg.permissions.clone(), self.claude_dir.clone());
                 self.fs_request(id, r.request_id, move || {
                     let (root, hqc) = folder.ok_or("path is not a workspace of this worker")?;
+                    let env = env.ok_or("path is not a workspace of this worker")?;
                     Ok(ResultBody::Inspect(crate::permissions::inspect(
                         &perms,
+                        &env.name,
+                        &env.rules,
                         claude_dir.as_deref(),
                         &root,
                         hqc,

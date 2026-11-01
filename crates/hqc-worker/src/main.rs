@@ -42,8 +42,17 @@ enum Cmd {
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
     },
-    /// Manage local environments and bindings (SPEC §14).
-    Env,
+    /// List the environments and bindings of worker.toml (SPEC §14); edit them there.
+    Env {
+        #[command(subcommand)]
+        cmd: Option<EnvCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// The environment and the effective rules of a folder.
+    Which { path: std::path::PathBuf },
 }
 
 #[tokio::main]
@@ -120,7 +129,15 @@ async fn main() -> anyhow::Result<()> {
                 .serve(tokio::io::stdin(), tokio::io::stdout())
                 .await
         }
-        Cmd::Env => anyhow::bail!("env: not implemented (iteration 4)"),
+        Cmd::Env { cmd } => {
+            let config = Config::load(&config::config_path()?)?;
+            let out = match cmd {
+                None => hqc_worker::env_cmd::summary(&config),
+                Some(EnvCmd::Which { path }) => hqc_worker::env_cmd::which(&config, &path)?,
+            };
+            print!("{out}");
+            Ok(())
+        }
     }
 }
 
@@ -135,7 +152,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     }
     let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
     let p = &config.permissions;
-    tracing::info!(hub = %config.hub_url, allowed_roots = ?config.allowed_roots, %capabilities, %permission_mode, permissions = ?p.mode, allow_auto = p.allow_auto, allow = p.allow.len(), deny = p.deny.len(), "starting worker");
+    tracing::info!(hub = %config.hub_url, allowed_roots = ?config.allowed_roots, %capabilities, %permission_mode, permissions = ?p.mode, allow_auto = p.allow_auto, allow = p.allow.len(), deny = p.deny.len(), environments = config.environments.len(), env_bindings = config.env_bindings.len(), "starting worker");
     if config.legacy_workspace {
         tracing::warn!("worker.toml has an iteration 1 [workspace] block, which is ignored: add workspaces in the web client and remove the block");
     }

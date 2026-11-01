@@ -443,7 +443,6 @@ impl Env {
             "runtime": "claude_code",
             "workspace_path": self.workspace().display().to_string(),
             "cwd": ".",
-            "environment": "default",
             "runtime_session_id": Uuid::new_v4(),
             "disallowed_tools": [],
             "restricted": false,

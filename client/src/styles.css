@@ -445,13 +445,7 @@ select.input {
 }
 
 .rail-logo {
-  height: 28px;
   display: flex;
-  align-items: center;
-  font-weight: 700;
-  font-size: 13px;
-  color: var(--muted);
-  text-decoration: none;
 }
 
 .rail-sep {

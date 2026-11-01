@@ -14,7 +14,7 @@ import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconInfo, IconPlus, IconShield } from './icons';
 import { homePath } from './labels';
 
-const HQC = 'hqc';
+const HQC = 'HQC';
 const EXAMPLES = ['git status', 'npm install && npm test', 'Edit'];
 const FORMATS = ['Bash(command *)', 'Edit', 'mcp__server'];
 const MODE_LABELS: Record<PermissionMode, string> = { ask: 'Ask', auto: 'Auto' };
@@ -207,7 +207,7 @@ export function RulesScreen({
       <div class="page-scroll">
         <div class="page-body rules-body">
           <p class="rules-intro">
-            hqc rules apply to every session in this folder as soon as you save them, running ones included. Denies in{' '}
+            HQC rules apply to every session in this folder as soon as you save them, running ones included. Denies in{' '}
             <span class="mono">worker.toml</span> always win.
           </p>
           {error && <div class="error-text">{error}</div>}
@@ -273,7 +273,7 @@ export function RulesScreen({
             <ul class="rule-list">{allowed.map(rowView)}</ul>
             {rules && allowed.length === 0 && !offline && inspect.state !== 'loading' && <div class="rules-none">none</div>}
             {offline && (
-              <div class="rules-none">Worker unavailable: rules from files aren’t shown. hqc rules still save and apply when it’s back.</div>
+              <div class="rules-none">Worker unavailable: rules from files aren’t shown. HQC rules still save and apply when it’s back.</div>
             )}
             {unread.map((s) => (
               <div key={s.source} class="rules-none error-text">
@@ -283,7 +283,7 @@ export function RulesScreen({
             <div class="rules-files-note">
               <IconInfo />
               <span>
-                Rules from files are read-only here. Edit them on the worker: <span class="mono">worker.toml</span> in the hqc
+                Rules from files are read-only here. Edit them on the worker: <span class="mono">worker.toml</span> in the HQC
                 worker config, <span class="mono">~/.claude/settings.json</span> for all your Claude Code projects,{' '}
                 <span class="mono">.claude/settings.local.json</span> inside this folder.
               </span>
@@ -336,7 +336,7 @@ function CheckView({
     const by = r.rule && (
       <>
         by rule <span class="mono rule-hit">{r.rule}</span>
-        <span class="muted"> · {r.source}</span>
+        <span class="muted"> · {r.source === 'hqc' ? HQC : r.source}</span>
       </>
     );
     if (r.verdict === 'deny') {

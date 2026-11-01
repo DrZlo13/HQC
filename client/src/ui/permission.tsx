@@ -161,7 +161,7 @@ function FolderForm({
   const note =
     n > 1 ? (
       <>
-        The command has {n} parts. hqc suggests a rule for each; it applies only when every part is allowed. Rules work in
+        The command has {n} parts. HQC suggests a rule for each; it applies only when every part is allowed. Rules work in
         all sessions of <code>{folder.path}</code> right away.
       </>
     ) : (

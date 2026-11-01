@@ -21,9 +21,9 @@ function describe(d) {
     case 'peer.message':
       return { title: 'Message from another session', body: p.text || '' };
     case 'system':
-      return { title: 'hqc', body: p.text || '' };
+      return { title: 'HQC', body: p.text || '' };
     default:
-      return { title: 'hqc', body: '' };
+      return { title: 'HQC', body: '' };
   }
 }
 

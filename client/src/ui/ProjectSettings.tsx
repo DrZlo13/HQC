@@ -189,7 +189,7 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                     </label>
                     <a class="btn btn-small btn-rules" href={`#/p/${projectId}/rules/${w.id}`} title="The folder's permission rules">
                       <IconShield />
-                      Rules · {w.hqc_rules} hqc
+                      Rules · {w.hqc_rules} HQC
                     </a>
                     {!isDefault && (
                       <button type="button" class="btn btn-small btn-make-default" onClick={() => makeDefault(w)}>

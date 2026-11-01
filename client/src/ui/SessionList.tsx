@@ -265,7 +265,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
               </span>
             )}
             <div class="side-title">
-              <div class="project-title">{project ? projectName(project) : 'hqc'}</div>
+              <div class="project-title">{project ? projectName(project) : 'HQC'}</div>
               <div class="side-counts">
                 {counts}
                 {conn}

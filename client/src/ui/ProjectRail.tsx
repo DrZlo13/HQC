@@ -16,8 +16,8 @@ export function ProjectRail({ app }: { app: AppState }) {
   const email = app.me?.email ?? '';
   return (
     <nav class="rail" aria-label="Projects">
-      <a class="rail-logo" href="#/" title="hqc">
-        hqc
+      <a class="rail-logo" href="#/" title="HQC">
+        <img src="/hqc-mark-small.svg" alt="HQC" width="38" height="38" />
       </a>
       <div class="rail-sep" />
       {app.sortedProjects().map((p) => {

@@ -222,8 +222,8 @@ describe('the rules screen', () => {
     ]);
     // hqc first, newest first, with the date and a cross; then the files.
     expect(rows('Allowed')).toEqual([
-      ['Edit', 'hqc'],
-      ['Bash(python3 *)', 'hqc'],
+      ['Edit', 'HQC'],
+      ['Bash(python3 *)', 'HQC'],
       ['Bash(ls *)', 'worker.toml'],
       ['Read', '~/.claude/settings.json'],
       ['mcp__hqc', '.claude/settings.local.json'],
@@ -273,7 +273,7 @@ describe('the rules screen', () => {
     act(() => buttonByText('Save')!.click());
     await flush();
     expect(api.addWorkspaceRules).toHaveBeenCalledWith('w1', ['Bash(git push origin:*)']);
-    expect(rows('Allowed')[0]).toEqual(['Bash(git push origin:*)', 'hqc']);
+    expect(rows('Allowed')[0]).toEqual(['Bash(git push origin:*)', 'HQC']);
     expect($('#rules-new')).toBeNull();
   });
 
@@ -296,8 +296,8 @@ describe('the rules screen', () => {
     expect(rows('Denied')).toEqual([]);
     expect(group('Denied').textContent).toContain('Worker unavailable');
     expect(rows('Allowed')).toEqual([
-      ['Edit', 'hqc'],
-      ['Bash(python3 *)', 'hqc'],
+      ['Edit', 'HQC'],
+      ['Bash(python3 *)', 'HQC'],
     ]);
     expect(group('Allowed').textContent).toContain('hqc rules still save and apply when it’s back');
     expect($<HTMLInputElement>('#rules-check')!.disabled).toBe(true);

@@ -439,6 +439,11 @@ select.input {
   overflow-x: hidden;
 }
 
+/* Full size when the bar overflows and scrolls. */
+.rail > :not(.spacer) {
+  flex: none;
+}
+
 .rail-logo {
   height: 28px;
   display: flex;
@@ -3176,6 +3181,9 @@ a.relay-peer {
   overflow-y: auto;
   display: flex;
   justify-content: center;
+  /* The body takes its content's height and scrolls here; stretched to the page's height,
+     its cards (overflow: hidden) shrank and cut their rows off. */
+  align-items: flex-start;
   padding: 24px 28px 40px;
   padding-bottom: calc(40px + env(safe-area-inset-bottom));
 }

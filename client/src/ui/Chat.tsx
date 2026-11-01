@@ -44,8 +44,11 @@ export function Chat({
     if (!picked.length) return;
     void Promise.all(picked.map(toOutgoing)).then((add) => setFiles((cur) => [...cur, ...add]));
   };
+  // The feed shows once the history is in: page by page it scrolled down for seconds.
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    void chat.open();
+    setLoaded(false);
+    void chat.open().then(() => setLoaded(true));
     return () => chat.close();
   }, [chat]);
   useSubscription((fn) => chat.timeline.onChange(fn), [chat]);
@@ -127,7 +130,7 @@ export function Chat({
     fn().catch((e: Error) => setNotice(`${failed}: ${e.message}`));
 
   const showRetry = !system && (state === 'error' || t.hasFailedDelivery());
-  const items = requestsOnly ? onlyRequests(t.items()) : t.items();
+  const items = !loaded ? [] : requestsOnly ? onlyRequests(t.items()) : t.items();
   const locked = state === 'locked_vscode';
   // SPEC §9.3: read-only while VS Code has it. Open there right now (`held_by`): it has to be
   // closed there first, the hub refuses takeover (`409 vscode_open`). Written from there
@@ -158,6 +161,17 @@ export function Chat({
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
+  // Images and code blocks grow after the render: stay at the bottom while stuck to it.
+  const feed = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || !feed.current || typeof ResizeObserver === 'undefined') return;
+    const o = new ResizeObserver(() => {
+      if (stick.current) el.scrollTop = el.scrollHeight;
+    });
+    o.observe(feed.current);
+    return () => o.disconnect();
+  }, []);
   // The jump to a search hit: the history loads in full on open (ChatSession.open), so the
   // event is there once `lastSeq` reaches it; the block that holds it is the last one that
   // starts at or before it (a hidden event's neighbour).
@@ -335,7 +349,8 @@ export function Chat({
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
-        <div class="feed">
+        <div class="feed" ref={feed}>
+          {!loaded && <div class="empty">Loading…</div>}
           <ChatItems items={items} actions={actions} />
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}

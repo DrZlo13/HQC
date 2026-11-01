@@ -535,3 +535,28 @@ describe('slash command completion (T27)', () => {
     expect(area().hasAttribute('aria-expanded')).toBe(false);
   });
 });
+
+describe('history', () => {
+  it('shows the feed once the whole history is in, not page by page', async () => {
+    const { api, app } = setup('idle');
+    // A full first page, then a second one that waits.
+    const page = Array.from({ length: 200 }, (_, i) => ev('event.agent.message', i + 1));
+    let last!: () => void;
+    api.events.mockImplementationOnce(async () => ({ events: page, invalid: [], maxSeq: 200, count: 200 }));
+    api.events.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          last = () => r({ events: [ev('event.agent.message', 201)], invalid: [], maxSeq: 201, count: 1 });
+        }),
+    );
+    await mount(app);
+    expect(root.querySelector('.feed .empty')?.textContent).toBe('Loading…');
+    expect(root.querySelectorAll('.feed-block').length).toBe(0);
+    await act(async () => {
+      last();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(root.querySelector('.feed .empty')).toBeNull();
+    expect(root.querySelectorAll('.feed-block').length).toBeGreaterThan(0);
+  });
+});

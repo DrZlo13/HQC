@@ -7,6 +7,7 @@ import { useIsPhone, useSubscription } from './hooks';
 import { ProjectRail } from './ProjectRail';
 import { ProjectSettings } from './ProjectSettings';
 import { RequestsScreen } from './requests';
+import { RulesScreen } from './Rules';
 import { SearchScreen } from './Search';
 import { SessionList } from './SessionList';
 import { Settings } from './Settings';
@@ -15,6 +16,7 @@ export type Route =
   | { name: 'list' }
   | { name: 'project'; id: string }
   | { name: 'projectSettings'; projectId: string }
+  | { name: 'rules'; projectId: string; workspaceId: string; sessionId?: string }
   | { name: 'session'; id: string; seq?: number }
   | { name: 'search' }
   | { name: 'requests' }
@@ -22,7 +24,8 @@ export type Route =
   | { name: 'enroll'; code: string };
 
 /** Hash routes, so the hub can serve the client as static files: `#/p/<project>`,
- *  `#/p/<project>/settings` (the project's settings, T49), `#/s/<session>` (`?seq=<seq>`:
+ *  `#/p/<project>/settings` (the project's settings, T49), `#/p/<project>/rules/<workspace>`
+ *  (`?session=<id>`: opened from that session; the folder's rules, T48), `#/s/<session>` (`?seq=<seq>`:
  *  scrolled to that event, a search hit), `#/search` (the phone's search screen),
  *  `#/requests` (every open request, T37), `#/settings`, `#/enroll?code=ABCD-1234`. */
 export function parseRoute(hash: string): Route {
@@ -37,6 +40,10 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === 'requests') return { name: 'requests' };
   if (parts[0] === 'p' && parts[1]) {
     const id = decodeURIComponent(parts[1]);
+    if (parts[2] === 'rules' && parts[3]) {
+      const sessionId = new URLSearchParams(query).get('session') ?? undefined;
+      return { name: 'rules', projectId: id, workspaceId: decodeURIComponent(parts[3]), sessionId };
+    }
     return parts[2] === 'settings' ? { name: 'projectSettings', projectId: id } : { name: 'project', id };
   }
   if (parts[0] === 'settings') return { name: 'settings' };
@@ -70,7 +77,11 @@ export function App({ app }: { app: AppState }) {
   // The left column follows the project of what is open.
   const sessionProject = route.name === 'session' ? app.sessions.get(route.id)?.project_id : undefined;
   const routeProject =
-    route.name === 'project' ? route.id : route.name === 'projectSettings' ? route.projectId : sessionProject;
+    route.name === 'project'
+      ? route.id
+      : route.name === 'projectSettings' || route.name === 'rules'
+        ? route.projectId
+        : sessionProject;
   useEffect(() => {
     if (routeProject) app.selectProject(routeProject);
   }, [app, routeProject]);
@@ -94,6 +105,18 @@ export function App({ app }: { app: AppState }) {
       break;
     case 'projectSettings':
       main = <ProjectSettings key={route.projectId} app={app} projectId={route.projectId} phone={phone} />;
+      break;
+    case 'rules':
+      main = (
+        <RulesScreen
+          key={route.workspaceId}
+          app={app}
+          projectId={route.projectId}
+          workspaceId={route.workspaceId}
+          sessionId={route.sessionId}
+          phone={phone}
+        />
+      );
       break;
     case 'settings':
       main = <Settings app={app} />;

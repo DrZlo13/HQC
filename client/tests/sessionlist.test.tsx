@@ -151,6 +151,7 @@ function makeApp(list = LIST) {
     label: '',
     kind: 'dir',
     mirror_enabled: true,
+    hqc_rules: 0,
     created_at: at(90),
   });
   app.workspaces.set('p1', [ws('w1', 'wk1', '/Users/me/work/games/phys-mp'), ws('w2', 'wk2', '/Users/me/work/games/phys-det')]);

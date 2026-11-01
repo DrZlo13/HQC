@@ -5,8 +5,9 @@
 // request is a bottom sheet in place of the composer.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { ApprovalOption, EventOf } from '../proto';
-import type { ChatActions } from './cards';
+import type { ApprovalOption, EventOf, RuleSuggestion } from '../proto';
+import { ruleError } from '../rules';
+import type { ChatActions, FolderActions } from './cards';
 import { callArgs, callLine, callPaths, outsidePath } from './feed';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconCross, IconInfo, IconShield } from './icons';
@@ -129,6 +130,113 @@ export function PermissionBlock({
   );
 }
 
+/** The patterns of "Allow in this folder" (T48, `Session.dc.html`; on a phone the full-screen
+ *  page of `MSession2.dc.html`): one field per part, each a rule hqc suggests, editable. */
+function FolderForm({
+  sheet,
+  folder,
+  suggestions,
+  patterns,
+  errors,
+  busy,
+  error,
+  canSave,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  sheet?: boolean;
+  folder: FolderActions;
+  suggestions: RuleSuggestion[];
+  patterns: string[];
+  errors: (string | null)[];
+  busy: boolean;
+  error: string | null;
+  canSave: boolean;
+  onChange: (i: number, value: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const n = suggestions.length;
+  const note =
+    n > 1 ? (
+      <>
+        The command has {n} parts. hqc suggests a rule for each; it applies only when every part is allowed. Rules work in
+        all sessions of <code>{folder.path}</code> right away.
+      </>
+    ) : (
+      <>
+        The rule works in all sessions of <code>{folder.path}</code> right away. Denies in <code>worker.toml</code> still
+        win.
+      </>
+    );
+  const fields = (
+    <div class="perm-folder-fields">
+      {suggestions.map((s, i) => (
+        <label key={i} class="perm-folder-field">
+          <span class="perm-folder-part mono" title={s.part}>
+            {s.part}
+          </span>
+          <input
+            class={`input mono ${errors[i] ? 'is-invalid' : ''}`}
+            aria-label={`Rule for part ${i + 1}`}
+            placeholder={s.rule ? '' : 'No pattern: write one or leave empty'}
+            value={patterns[i]}
+            disabled={busy}
+            onInput={(e) => onChange(i, (e.currentTarget as HTMLInputElement).value)}
+          />
+          {errors[i] && <span class="error-text small">{errors[i]}</span>}
+        </label>
+      ))}
+    </div>
+  );
+  const save = (
+    <button type="button" class="btn btn-primary btn-save-folder" disabled={busy || !canSave} onClick={onSave}>
+      Save and allow
+    </button>
+  );
+  if (sheet) {
+    return (
+      <section class="perm-folder-page" aria-label="Allow in this folder">
+        <header class="perm-folder-bar">
+          <button type="button" class="btn btn-ghost" onClick={onCancel}>
+            Back
+          </button>
+          <div class="perm-folder-title">Allow in this folder</div>
+          <span class="perm-folder-pad" />
+        </header>
+        <div class="perm-folder-body">
+          <div class="perm-note">
+            <IconInfo />
+            <span>{note}</span>
+          </div>
+          {fields}
+          <a href={folder.rulesHref}>Open folder rules →</a>
+          {error && <div class="error-text">{error}</div>}
+        </div>
+        <div class="perm-folder-foot">{save}</div>
+      </section>
+    );
+  }
+  return (
+    <div class="perm-folder">
+      <div class="perm-note">
+        <IconInfo />
+        <span>{note}</span>
+      </div>
+      {fields}
+      <div class="perm-folder-actions">
+        {save}
+        <button type="button" class="btn btn-ghost" onClick={onCancel}>
+          Cancel
+        </button>
+        <span class="spacer" />
+        <a href={folder.rulesHref}>Open folder rules →</a>
+      </div>
+    </div>
+  );
+}
+
 function isTyping(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
@@ -163,6 +271,9 @@ function PermissionCard({
   const live = open && !expired;
   const [replying, setReplying] = useState(false);
   const [reply, setReply] = useState('');
+  // "Allow in this folder" (T48): the worker's suggestion per part, editable.
+  const [folderOpen, setFolderOpen] = useState(false);
+  const [patterns, setPatterns] = useState<string[]>(() => (p.rule_suggestions ?? []).map((s) => s.rule ?? ''));
   const card = useRef<HTMLElement>(null);
   const field = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -214,6 +325,33 @@ function PermissionCard({
   const sendReply = () => {
     if (deny && reply.trim()) answer(deny, reply.trim());
   };
+  const folder = actions.folder;
+  const suggestions = p.rule_suggestions ?? [];
+  const canFolder = !!folder && !!once && suggestions.length > 0 && !v.worker;
+  const rules = patterns.map((r) => r.trim()).filter(Boolean);
+  const patternErrors = patterns.map((r) => (r.trim() ? ruleError(r.trim()) : null));
+  // Saved first: a rule the hub did not store allows nothing (T48).
+  const saveAndAllow = () =>
+    run(async () => {
+      if (!folder || !once) return;
+      await folder.save(rules);
+      await actions.approve(p.request_id, once.id);
+    });
+  const folderForm = canFolder && folderOpen && live && (
+    <FolderForm
+      sheet={sheet}
+      folder={folder!}
+      suggestions={suggestions}
+      patterns={patterns}
+      errors={patternErrors}
+      busy={busy}
+      error={sheet ? error : null}
+      canSave={rules.length > 0 && patternErrors.every((e) => !e)}
+      onChange={(i, value) => setPatterns(patterns.map((x, j) => (j === i ? value : x)))}
+      onSave={saveAndAllow}
+      onCancel={() => setFolderOpen(false)}
+    />
+  );
 
   return (
     <section
@@ -282,6 +420,19 @@ function PermissionCard({
                 {optionLabel(o)}
               </button>
             ))}
+            {canFolder && (
+              <button
+                type="button"
+                class={`btn btn-secondary btn-folder ${folderOpen ? 'is-on' : ''}`}
+                aria-expanded={folderOpen}
+                title="Save rules for this folder and allow the call"
+                disabled={busy}
+                onClick={() => setFolderOpen(!folderOpen)}
+              >
+                {!sheet && <IconShield />}
+                {sheet ? 'In this folder…' : 'Allow in this folder'}
+              </button>
+            )}
             {deny && (
               <button
                 type="button"
@@ -299,6 +450,7 @@ function PermissionCard({
           </div>
         </div>
       )}
+      {!replying && folderForm}
       {live && deny && !v.worker && !replying && (
         <button type="button" class="btn-link perm-reply-open" onClick={() => setReplying(true)}>
           Reply with text instead

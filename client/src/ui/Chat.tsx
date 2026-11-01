@@ -8,7 +8,7 @@ import type { Timeline } from '../timeline';
 import { ActivityLine, ChatItems, StreamingMessage, onlyRequests, type ChatActions } from './cards';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
-import { IconAttach, IconBack, IconCode, IconMore, IconSend, IconStop } from './icons';
+import { IconAttach, IconBack, IconCode, IconMore, IconSend, IconShield, IconStop } from './icons';
 import { AUTO_CONFIRM, STATE_LABELS, formatCost, homePath, modelName } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
@@ -59,6 +59,9 @@ export function Chat({
     if (info && !system && !app.workspaces.has(info.project_id)) app.loadWorkspaces(info.project_id).catch(() => {});
   }, [app, info?.project_id, system]);
   const path = info && !system ? app.sessionPath(info) : undefined;
+  // The rules of the session's folder (T48).
+  const workspace = info && !system ? app.workspaces.get(info.project_id)?.find((w) => w.id === info.workspace_id) : undefined;
+  const rulesHref = workspace && `#/p/${workspace.project_id}/rules/${workspace.id}?session=${encodeURIComponent(sessionId)}`;
 
   // The runtime's slash commands come with the session object (T27), which the summary does
   // not refresh: fetch it when an idle session has no list yet (after its first process).
@@ -91,6 +94,16 @@ export function Chat({
     discard: (op) => chat.discard(op),
     artifacts,
     workspaceRoot: path,
+    folder: rulesHref && workspace
+      ? {
+          path: homePath(workspace.path),
+          rulesHref,
+          save: async (rules) => {
+            await app.api.addWorkspaceRules(workspace.id, rules);
+            void app.loadWorkspaces(workspace.project_id).catch(() => {});
+          },
+        }
+      : undefined,
     hotkeyRequest: firstApproval?.payload.request_id,
     sheetRequest,
     openArtifact: (id, download) => {
@@ -272,6 +285,17 @@ export function Chat({
             Requests only
           </button>
         )}
+        {rulesHref &&
+          (phone ? (
+            <a class="icon-btn icon-btn-round btn-folder-rules" href={rulesHref} aria-label="Folder rules" title="Folder rules">
+              <IconShield />
+            </a>
+          ) : (
+            <a class="btn btn-small btn-ghost btn-folder-rules" href={rulesHref} title={`Rules for ${homePath(workspace!.path)}`}>
+              <IconShield />
+              Folder rules
+            </a>
+          ))}
         {showRetry && !phone && (
           <button type="button" class="btn btn-small btn-outline btn-retry" onClick={() => act(() => chat.retry(), 'Retry failed')}>
             Retry

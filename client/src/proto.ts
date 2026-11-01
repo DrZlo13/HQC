@@ -142,6 +142,13 @@ export interface ApprovalRequest {
   expires_at?: string;
   /** A rule of the worker's `[permissions]` matches the call (SPEC §8.1, §14). */
   policy_hint?: PolicyHint;
+  /** hqc rules the worker suggests for "Allow in this folder" (T48), one per part. */
+  rule_suggestions?: RuleSuggestion[];
+}
+/** A simple part of a command and the hqc rule suggested for it (none: no pattern). */
+export interface RuleSuggestion {
+  part: string;
+  rule?: string;
 }
 export interface ApprovalResponse {
   request_id: string;
@@ -366,6 +373,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     }),
     expires_at: optStr(p, 'expires_at'),
     policy_hint: present(p, 'policy_hint') ? tolerantEnum(p, 'policy_hint', POLICY_HINTS) : undefined,
+    rule_suggestions: present(p, 'rule_suggestions') ? parseSuggestions(p, 'rule_suggestions') : undefined,
   }),
   'approval.response': (p) => ({
     request_id: str(p, 'request_id'),
@@ -541,6 +549,17 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'user_text');
     str(p, 'agent_text');
+  },
+  // T48: hqc's allow rules of a folder, and the rules screen's question to the worker.
+  'workspace.rules': (p) => {
+    str(p, 'workspace_path');
+    strArr(p, 'allow_rules');
+  },
+  'permissions.inspect': (p) => {
+    str(p, 'request_id');
+    str(p, 'path');
+    optStr(p, 'command');
+    optStr(p, 'tool');
   },
   // T30: an agent's hqc MCP tool call and its answer (SPEC §5.2).
   'mcp.call': (p) => {
@@ -1064,6 +1083,8 @@ export interface Workspace {
   kind: string;
   /** Its Claude Code sessions are mirrored (imported from VS Code, SPEC §9). */
   mirror_enabled: boolean;
+  /** How many hqc allow rules the folder has (T48). */
+  hqc_rules: number;
   created_at: string;
 }
 
@@ -1077,7 +1098,86 @@ export function parseWorkspace(v: unknown): Workspace {
     label: optStr(o, 'label') ?? '',
     kind: str(o, 'kind'),
     mirror_enabled: o.mirror_enabled === true,
+    hqc_rules: optNum(o, 'hqc_rules') ?? 0,
     created_at: str(o, 'created_at'),
+  };
+}
+
+/** One of hqc's allow rules of a workspace (T48). */
+export interface WorkspaceRule {
+  id: Uuid;
+  rule: string;
+  created_at: string;
+}
+
+/** `{rules: [...]}` of `GET`/`POST /api/workspaces/{id}/rules`, newest first. */
+export function parseWorkspaceRuleList(v: unknown): WorkspaceRule[] {
+  return arr(obj(v, 'rule list'), 'rules').map((e, i) => {
+    const o = obj(e, `rules[${i}]`);
+    return { id: str(o, 'id'), rule: str(o, 'rule'), created_at: str(o, 'created_at') };
+  });
+}
+
+function parseSuggestions(o: Obj, key: string): RuleSuggestion[] {
+  return arr(o, key).map((e, i) => {
+    const s = obj(e, `${key}[${i}]`);
+    return { part: str(s, 'part'), rule: optStr(s, 'rule') };
+  });
+}
+
+/** The rules of one file the worker read (T48): `worker.toml`, `~/.claude/settings.json`,
+ *  `.claude/settings.local.json`. */
+export interface RuleSource {
+  source: string;
+  allow: string[];
+  deny: string[];
+  ask: string[];
+  error?: string;
+}
+
+export const VERDICTS = ['deny', 'allow', 'ask'] as const;
+export type Verdict = (typeof VERDICTS)[number] | Unknown;
+
+/** How the worker's matcher decides a command or tool in the folder. */
+export interface CheckResult {
+  verdict: Verdict;
+  rule?: string;
+  source?: string;
+  parts: number;
+  uncovered: number;
+  suggestions: RuleSuggestion[];
+}
+
+/** `GET /api/workspaces/{id}/permissions` (the worker's `permissions.inspect`, T48). */
+export interface WorkspacePermissions {
+  mode: PermissionMode;
+  allow_auto: boolean;
+  sources: RuleSource[];
+  hqc: string[];
+  check?: CheckResult;
+}
+
+export function parseWorkspacePermissions(v: unknown): WorkspacePermissions {
+  const o = obj(v, 'permissions');
+  const strs = (x: Obj, k: string) =>
+    present(x, k) ? arr(x, k).filter((s): s is string => typeof s === 'string') : [];
+  const c = present(o, 'check') ? obj(o.check, 'check') : undefined;
+  return {
+    mode: o.mode === 'auto' ? 'auto' : 'ask',
+    allow_auto: o.allow_auto !== false,
+    sources: arr(o, 'sources').map((e, i) => {
+      const s = obj(e, `sources[${i}]`);
+      return { source: str(s, 'source'), allow: strs(s, 'allow'), deny: strs(s, 'deny'), ask: strs(s, 'ask'), error: optStr(s, 'error') };
+    }),
+    hqc: strs(o, 'hqc'),
+    check: c && {
+      verdict: tolerantEnum(c, 'verdict', VERDICTS),
+      rule: optStr(c, 'rule'),
+      source: optStr(c, 'source'),
+      parts: num(c, 'parts'),
+      uncovered: optNum(c, 'uncovered') ?? 0,
+      suggestions: present(c, 'suggestions') ? parseSuggestions(c, 'suggestions') : [],
+    },
   };
 }
 

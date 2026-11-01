@@ -5,7 +5,7 @@ import { parseWorkspaceConflict, type Candidate, type DirEntry, type Workspace }
 import { THEMES, colorLabel } from '../theme';
 import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
-import { IconBack, IconPlus } from './icons';
+import { IconBack, IconPlus, IconShield } from './icons';
 import { homePath } from './labels';
 
 /** The workspace's label or its folder's name. */
@@ -187,6 +187,10 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                       />
                       <span>VS Code sessions</span>
                     </label>
+                    <a class="btn btn-small btn-rules" href={`#/p/${projectId}/rules/${w.id}`} title="The folder's permission rules">
+                      <IconShield />
+                      Rules · {w.hqc_rules} hqc
+                    </a>
                     {!isDefault && (
                       <button type="button" class="btn btn-small btn-make-default" onClick={() => makeDefault(w)}>
                         Make default

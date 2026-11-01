@@ -31,6 +31,15 @@ import { CopyButton, Markdown } from './Markdown';
 import { PermissionBlock } from './permission';
 
 /** What cards need from the chat: lookups and actions. */
+export interface FolderActions {
+  /** The folder, as shown (`~/work/x`). */
+  path: string;
+  /** The folder's rules screen. */
+  rulesHref: string;
+  /** Saves hqc rules of the folder; rejects when the hub did not store them. */
+  save(rules: string[]): Promise<void>;
+}
+
 export interface ChatActions {
   timeline: Timeline;
   approve(requestId: string, optionId: string, message?: string): Promise<void>;
@@ -46,6 +55,9 @@ export interface ChatActions {
   /** The session's folder on the worker (absolute): a request touching a path outside it
    *  says so. */
   workspaceRoot?: string;
+  /** The session's workspace (T48): "Allow in this folder" saves hqc rules into it; absent
+   *  without a workspace, and where the card is shown away from its session. */
+  folder?: FolderActions;
   /** The request whose card takes Enter and Esc. */
   hotkeyRequest?: string;
   /** The request shown as the bottom sheet on a phone: not drawn in the feed. */

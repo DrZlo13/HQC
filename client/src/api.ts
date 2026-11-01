@@ -22,6 +22,8 @@ import {
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceList,
+  parseWorkspacePermissions,
+  parseWorkspaceRuleList,
   type Artifact,
   type ArtifactKind,
   type ArtifactUrl,
@@ -40,6 +42,8 @@ import {
   type SessionInfo,
   type Theme,
   type Workspace,
+  type WorkspacePermissions,
+  type WorkspaceRule,
 } from './proto';
 
 export class ApiError extends Error {
@@ -225,6 +229,28 @@ export class Api {
   /** `PATCH /api/workspaces/{id}`: the label, or the switch "VS Code sessions" (T21). */
   async patchWorkspace(id: string, patch: { label?: string; mirror_enabled?: boolean }): Promise<Workspace> {
     return parseWorkspace(await this.req('PATCH', `/api/workspaces/${enc(id)}`, patch));
+  }
+
+  /** hqc's allow rules of the folder (T48), newest first. */
+  async workspaceRules(id: string): Promise<WorkspaceRule[]> {
+    return parseWorkspaceRuleList(await this.req('GET', `/api/workspaces/${enc(id)}/rules`));
+  }
+
+  /** Adds rules (ones the folder has are kept); `422 invalid_rule` saves none. Running
+   *  sessions in the folder use them at their next request. */
+  async addWorkspaceRules(id: string, rules: string[]): Promise<WorkspaceRule[]> {
+    return parseWorkspaceRuleList(await this.req('POST', `/api/workspaces/${enc(id)}/rules`, { rules }));
+  }
+
+  async deleteWorkspaceRule(id: string, ruleId: string): Promise<void> {
+    await this.req('DELETE', `/api/workspaces/${enc(id)}/rules/${enc(ruleId)}`);
+  }
+
+  /** The rules the worker reads for the folder and, with `check`, how it decides a command or
+   *  a tool; `409 worker_offline` when the worker is not connected. */
+  async workspacePermissions(id: string, check?: { command: string } | { tool: string }): Promise<WorkspacePermissions> {
+    const q = check ? `?${new URLSearchParams(check)}` : '';
+    return parseWorkspacePermissions(await this.req('GET', `/api/workspaces/${enc(id)}/permissions${q}`));
   }
 
   /** Folders with Claude Code sessions on the worker (`workspace.list_candidates`, SPEC §9.1). */

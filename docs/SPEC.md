@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.51, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
+Version 0.52, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -208,7 +208,9 @@ workspace are not allowed, §8.4), `cwd` (a relative path inside the workspace, 
 `title`, `title_source` (`default` | `runtime` | `user` — who set the title), `slug`
 (unique in the project, does not change on rename), `agent`,
 `auto_approve`, `wake_on_send` (false by default), `locked_by` (none/hqc/vscode),
-`last_seq`, `archived`, `vscode_active_at` (nullable; when the hub last received a mirror
+`last_seq`, `archived`, `archived_at` (nullable; since 0.52, T50: when it was archived, cleared
+on unarchive; null for sessions archived before hub migration `0026`, the client then shows no
+time; in the API session object as `archived_at?`), `vscode_active_at` (nullable; when the hub last received a mirror
 event with `recent` — a write to the file within the last 30 s; it is how quiet is measured for
 a takeover without registry data, §9.3; not part of the API session object), `held_by` (nullable
 `{entrypoint, status}`: a live Claude Code process outside hqc that has the session's transcript
@@ -912,6 +914,18 @@ the rest is marked "later"):
   manage the session; the service session: `409 system_session`. The reply carries the stored
   `permission_mode` and the `effective_permission_mode` the worker reported so far; its
   confirmation comes as `session.summary`.
+- `GET/PUT /api/projects/{id}/session_order` (since 0.52, T50): the order of the project's
+  session list for the requesting user, one record per user and project → `{mode, session_ids}`
+  (`api.session_order.json`). `mode` is `state` | `recent` | `custom` (the list's switch; it
+  lived in the browser's `localStorage` before); `session_ids` are every unarchived session of
+  the project except the service sessions, in the user's order: those not placed yet (a new
+  session, a restored one) first, newest created first, then the stored order; archived and
+  deleted ones are left out. No record: `state` and the sessions newest first. `PUT` {mode?,
+  session_ids?} (`api.session_order.request.json`; either or both, a missing one keeps its
+  stored value) stores the order as the reply gives it: ids that are not unarchived sessions of
+  this project (another project's, another user's, archived, unknown, repeated) are ignored, the
+  project's sessions missing from the list go first; an unknown `mode` is `422`. Another user's
+  or a nonexistent project: `404`
 - `GET /api/sessions/{id}/events?after_seq=&limit=` — pagination by `seq`, response
   `{events[], last_seq}`
 - `POST /api/sessions/{id}/input` {text, artifact_ids[], client_op_id} → `201 {event}`:
@@ -1021,11 +1035,30 @@ sheet), Workspaces (the workspace records with "VS Code sessions", "Make default
 "Add a workspace", "Import from Claude Code"; they are no longer in the sidebar) and Project
 ("Rename", "Delete project"; not for the personal project).
 
+The session list (since 0.52, T50): a State / Recent / Custom switch (State groups Needs you /
+Running / Idle, Recent Today / Yesterday / Earlier, Custom is one list in the saved order) and a
+Reorder button; Reorder replaces the switch with "Reorder · Cancel · Done" and gives each row a
+handle (on the left on a desktop, on the right on a phone), dragged with pointer events (mouse
+and finger) or moved with ↑/↓ while focused; Done stores the order with `mode: custom`, Cancel
+restores the previous one. Both are `session_order` above. A row shows, on hover or focus, an
+archive button and "⋯" (Rename, Delete with a confirmation in the row); on a phone a long press
+(or a right click) opens a bottom sheet with Archive, Rename and Delete (confirmed in a second
+step). Archiving from a row hides it at once and shows "Archived «title» · Undo" for 5 s; the
+`/archive` call goes only when the toast ends, when another row is archived (the previous one is
+sent first), before Reorder starts, or when the page is hidden or left (`fetch` with
+`keepalive`); Undo cancels it, so nothing reaches the hub and the row is back in its place. The
+session header has no archive, restore or delete. "Archive N" under the list opens archive mode:
+the sidebar without the project tint, a hatched header with a back arrow, "Archive", "<project>
+· N sessions" and "Read-only…", a search, and rows with "Archived <when>" and "Restore" and
+"Delete" always shown (delete confirmed in the row). An open archived session has an "Archived"
+chip in the header, a hatched band "Archived <when> · read-only. Restore or delete it from the
+list on the left." (the time from `archived_at`, none without it), the feed dimmed and no input.
+
 Session object (`GET /api/sessions/{id}`, list, create, `PATCH`, `archive`):
 `{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, title_source, slug, agent: {runtime,
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
-last_seq, archived, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
+last_seq, archived, archived_at?, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
 updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?,
 permission_capped_by?}`.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
@@ -2779,7 +2812,7 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   period. The hub sends nothing to the worker: the process and its input queue are left alone.
 
 ### 17.4 Archiving and deletion
-- Archiving: the hub sends `session.kill`, open requests get
+- Archiving: the hub sets `archived_at` (since 0.52; unarchiving clears it), sends `session.kill`, open requests get
   `approval.cancel`/`clarify.cancel {archived}`, `pending` inputs are marked `failed`,
   the send buffer is cleared. Unarchiving returns `idle`; the process comes back via
   resume on the first input.
@@ -2997,6 +3030,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.51 → 0.52 (T50, archive at hand, archive mode and the custom order)
+§3 Session: `archived_at`. §6: `archived_at?` in the session object, `GET/PUT
+/api/projects/{id}/session_order` (the list's mode and custom order per user and project; the
+mode left `localStorage`), the session list's row actions, the delayed archive with Undo,
+Reorder, archive mode and the archived session view; the session header lost archive, restore
+and delete. §17.4: `archived_at` set and cleared. Hub migration `0026`.
 
 ### 0.50 → 0.51 (T49, the theme and project appearance)
 §3 User: `theme` (`warm` | `graphite` | `contrast`). §3 Project: `color` (8 names, by a hash of

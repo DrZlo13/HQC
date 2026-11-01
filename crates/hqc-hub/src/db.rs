@@ -563,7 +563,8 @@ pub async fn purge_worker(db: &PgPool, id: Uuid) -> sqlx::Result<WorkerPurge> {
 /// leaves it out; its history stays.
 pub async fn archive_system_session(db: &PgPool, session_id: Uuid) -> sqlx::Result<()> {
     sqlx::query(
-        "UPDATE sessions SET archived = true, turn_open = false, updated_at = now()
+        "UPDATE sessions SET archived = true, archived_at = now(), turn_open = false,
+            updated_at = now()
          WHERE id = $1 AND system",
     )
     .bind(session_id)
@@ -764,7 +765,8 @@ pub async fn enroll_confirm(
             .await?;
             let system = create_system_session(&mut tx, wid).await?;
             sqlx::query(
-                "UPDATE sessions SET archived = false, title = $2, updated_at = now()
+                "UPDATE sessions SET archived = false, archived_at = NULL, title = $2,
+                    updated_at = now()
                  WHERE id = $1",
             )
             .bind(system)
@@ -1070,6 +1072,9 @@ pub struct SessionRow {
     pub locked_by: String,
     pub last_seq: i64,
     pub archived: bool,
+    /// When it was archived (T50); null for a live session and for one archived before
+    /// migration `0026`.
+    pub archived_at: Option<DateTime<Utc>>,
     pub runtime: String,
     pub acp_agent: Option<String>,
     pub model: Option<String>,
@@ -1106,7 +1111,7 @@ pub struct SessionRow {
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
-    s.title, s.title_source, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, \
+    s.title, s.title_source, s.slug, s.auto_approve, s.wake_on_send, s.locked_by, s.last_seq, s.archived, s.archived_at, \
     s.runtime, s.acp_agent, s.model, s.runtime_session_id, s.process_state, s.system_prompt, \
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
@@ -1230,6 +1235,58 @@ pub async fn sessions_of_project(db: &PgPool, project: Uuid) -> sqlx::Result<Vec
     .bind(project)
     .fetch_all(db)
     .await
+}
+
+/// The sessions a project's list shows (T50): unarchived, not a worker's service session,
+/// the newest first.
+pub async fn live_session_ids(db: &PgPool, project: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM sessions WHERE project_id = $1 AND NOT archived AND NOT system
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(project)
+    .fetch_all(db)
+    .await
+}
+
+/// The user's order record of the project's list: `(mode, session_ids)` as stored.
+pub async fn session_order(
+    db: &PgPool,
+    user: Uuid,
+    project: Uuid,
+) -> sqlx::Result<Option<(String, Vec<Uuid>)>> {
+    sqlx::query_as(
+        "SELECT mode, session_ids FROM session_orders WHERE user_id = $1 AND project_id = $2",
+    )
+    .bind(user)
+    .bind(project)
+    .fetch_optional(db)
+    .await
+}
+
+/// Sets the mode, the order or both; a field left `None` keeps its stored value.
+pub async fn put_session_order(
+    db: &PgPool,
+    user: Uuid,
+    project: Uuid,
+    mode: Option<&str>,
+    session_ids: Option<&[Uuid]>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO session_orders (user_id, project_id, mode, session_ids)
+         VALUES ($1, $2, COALESCE($3, 'state'), COALESCE($4, '{}'))
+         ON CONFLICT (user_id, project_id) DO UPDATE SET
+            mode = COALESCE($3, session_orders.mode),
+            session_ids = COALESCE($4, session_orders.session_ids),
+            updated_at = now()",
+    )
+    .bind(user)
+    .bind(project)
+    .bind(mode)
+    .bind(session_ids)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// A title from the user (`PATCH`): the runtime's never replaces it.

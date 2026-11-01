@@ -146,6 +146,7 @@ pub async fn views(
                 locked_by: stored_enum(&s.locked_by, LockedBy::None),
                 last_seq: count(s.last_seq),
                 archived: s.archived,
+                archived_at: s.archived_at,
                 state,
                 queue_len: count(a.queue_len),
                 last_read_seq: count(a.last_read_seq),

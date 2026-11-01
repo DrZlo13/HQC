@@ -1,0 +1,32 @@
+{
+  "id": "0199f3a2-7c10-7000-8000-000000000003",
+  "project_id": "0199f3a2-7c10-7000-8000-0000000000d1",
+  "owner_id": "0199f3a2-7c10-7000-8000-0000000000aa",
+  "workspace_id": "0199f3a2-7c10-7000-8000-0000000000e1",
+  "worker_id": "0199f3a2-7c10-7000-8000-0000000000b1",
+  "cwd": ".",
+  "title": "Old SPI experiment",
+  "title_source": "runtime",
+  "slug": "session-3",
+  "agent": {
+    "runtime": "claude_code",
+    "runtime_session_id": "36c72c19-b4ad-4d95-a482-ce4e281952cb",
+    "process_state": "stopped",
+    "disallowed_tools": [],
+    "restricted": false,
+    "start_failures": 0
+  },
+  "auto_approve": false,
+  "wake_on_send": false,
+  "locked_by": "none",
+  "last_seq": 43,
+  "archived": true,
+  "state": "archived",
+  "queue_len": 0,
+  "last_read_seq": 43,
+  "unread": 0,
+  "created_at": "2026-10-22T09:00:00Z",
+  "updated_at": "2026-11-01T22:45:00Z",
+  "permission_mode": "auto",
+  "archived_at": "2026-11-01T22:45:00Z"
+}

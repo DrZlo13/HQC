@@ -35,6 +35,10 @@ pub struct Session {
     pub locked_by: LockedBy,
     pub last_seq: u64,
     pub archived: bool,
+    /// When the session was archived (T50); absent for a live session and for one archived
+    /// before hub migration `0026`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<DateTime<Utc>>,
     pub state: SessionState,
     pub queue_len: u64,
     pub last_read_seq: u64,
@@ -125,6 +129,55 @@ pub struct Agent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionList {
     pub sessions: Vec<Session>,
+}
+
+/// The order of a project's session list (T50, SPEC §6): `GET` and `PUT
+/// /api/projects/{id}/session_order`, per user and project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrderMode {
+    /// Needs you / Running / Idle.
+    #[default]
+    State,
+    /// Today / Yesterday / Earlier.
+    Recent,
+    /// `session_ids` as the user arranged them.
+    Custom,
+}
+
+impl SessionOrderMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionOrderMode::State => "state",
+            SessionOrderMode::Recent => "recent",
+            SessionOrderMode::Custom => "custom",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::State, Self::Recent, Self::Custom]
+            .into_iter()
+            .find(|m| m.as_str() == s)
+    }
+}
+
+/// The reply of `GET`/`PUT /api/projects/{id}/session_order`: every unarchived session of
+/// the project (the service sessions aside) in the user's order, those not placed yet first,
+/// newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionOrder {
+    pub mode: SessionOrderMode,
+    pub session_ids: Vec<Uuid>,
+}
+
+/// `PUT /api/projects/{id}/session_order`: either field or both. Ids that are not unarchived
+/// sessions of the project are ignored; the project's sessions missing from the list go first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PutSessionOrder {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SessionOrderMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ids: Option<Vec<Uuid>>,
 }
 
 /// `POST /api/projects/{id}/sessions`. Without `workspace_id` the project's
@@ -942,6 +995,21 @@ mod tests {
             serde_json::to_string(&VapidKey { public_key: None }).unwrap(),
             r#"{"public_key":null}"#
         );
+    }
+
+    #[test]
+    fn archive_and_order_examples_roundtrip() {
+        let a: Session = roundtrip(include_str!("../examples/wire/api.session.archived.json"));
+        assert!(a.archived && a.archived_at.is_some());
+        let o: SessionOrder = roundtrip(include_str!("../examples/wire/api.session_order.json"));
+        assert_eq!(o.mode, SessionOrderMode::Custom);
+        let put: PutSessionOrder = roundtrip(include_str!(
+            "../examples/wire/api.session_order.request.json"
+        ));
+        assert_eq!(put.session_ids.as_deref(), Some(&o.session_ids[..]));
+        let mode: PutSessionOrder = serde_json::from_str(r#"{"mode":"recent"}"#).unwrap();
+        assert_eq!(mode.mode, Some(SessionOrderMode::Recent));
+        assert!(serde_json::from_str::<PutSessionOrder>(r#"{"mode":"name"}"#).is_err());
     }
 
     #[test]

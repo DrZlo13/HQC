@@ -111,7 +111,7 @@ client tests: each of the four blocks from fixtures of a real exchange (T41/T42 
 folded into a reply, a link to a deleted session; by hand: the iteration 3 exchange (A asks B
 with a file, B returns it) looks like the mockups on both sides, on a desktop and a phone.
 
-## T48. Permission rules in hqc: a rules screen and patterns from the card
+## T48. Permission rules in hqc: a rules screen and patterns from the card (done, SPEC 0.52)
 
 Sections: §2.1, §3 Workspace, §5.3, §6, §8.1, §10.1, §14. Depends on T49. Mockups: `Session`
 (permission card v2), `Rules`, `ProjectSettings`, `MSession2`, `MRules2`, `MSettings2`. The rules
@@ -149,6 +149,21 @@ of the three sources; hub tests: rules CRUD (owner only, per workspace), sent wi
 `session.start` and on change; client tests: the card's pattern, the screen's groups and the
 check; by hand: allow `python3 *` from a card on the phone, the next `python3` call in that
 folder runs without a card, a session in another folder still asks.
+
+Done: `workspace_rules` (migration `0025`) with `GET/POST /api/workspaces/{id}/rules`, `DELETE
+.../rules/{rule_id}` and `hqc_rules` in the workspace object; the rules go to the worker in
+`session.start.allow_rules` and the new `workspace.rules` frame (on change, and for every
+workspace after `hello`); `permissions.inspect` and `GET /api/workspaces/{id}/permissions` for the
+screen. The syntax is `hqc_proto::rules`; the worker's conservative matcher, suggestions and
+inspection are in `permissions.rs`, applied in `can_use_tool` after the deny check (at least one
+part must be covered by an hqc rule, so `worker.toml` alone answers nothing new). The client has
+the card's "Allow in this folder" (save, then allow once), the rules screen
+`#/p/<project>/rules/<workspace>` (desktop and phone), "Rules · N hqc" on workspace rows and
+"Folder rules" in the session header. Tests: hub `tests/t48.rs`; worker `permissions::tests`,
+`folder_rules_in_can_use_tool`, `tests/worker.rs::folder_rules_and_inspect`, one live run
+(`claude_live::live_folder_rules`, an hqc rule answered a real request); client
+`tests/rules.test.tsx`. The check by hand on a phone is still to do. Decisions and differences
+from the mockups in `docs/notes/t48-questions.md`.
 
 ## T43. Environments and bindings on the worker
 

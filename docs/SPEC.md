@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.51, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
+Version 0.52, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -79,7 +79,8 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   session in the `auto` permission mode on a worker with `[permissions] allow_auto = false`
   (since 0.42, T38): the worker runs `ask` and reports it. Where `auto` is allowed, a hub that
   switches a session to it gains nothing it did not have (it can answer `once` itself); the
-  worker's `deny` stays in force in both modes.
+  worker's `deny` stays in force in both modes. The same holds for hqc's allow rules of a folder
+  (since 0.52, T48): standing answers the worker applies after its `deny`, never over it.
 - The promise about local MCP servers holds for Claude Code (`--strict-mcp-config`)
   and Hermes (`HERMES_ACP_SKIP_CONFIGURED_MCP=1`, the worker always sets it). For other
   ACP agents there is no general way: in the local config each `acp_agent` declares
@@ -188,7 +189,22 @@ or letters drops a stored image. Limits: §12.
 `project_id`, `worker_id`, `path`, `label`, `environment` (a name; a display of the binding
 from the worker's local config), `ephemeral`, `created_by_hqc`, `kind`
 (dir/clone/worktree), `origin_workspace_id`, `mirror_enabled` (since 0.23 `true` by default: the
-Claude Code session mirror is on for every workspace; the switch is `PATCH`, §6, §9.2).
+Claude Code session mirror is on for every workspace; the switch is `PATCH`, §6, §9.2), hqc's allow
+rules.
+
+hqc's allow rules (since 0.52, T48; decided 2026-10-31: per folder, not per project or worker) —
+standing answers of the workspace owner (the worker owner in iteration 4) to the permission
+requests of every session in the folder, stored on the hub (table `workspace_rules`, migration
+`0025`) and applied by the worker in `can_use_tool` after its `deny` (§8.1, §14). A rule is a
+strict subset of Claude Code's syntax, so the worker's matcher reads every rule exactly: `Tool`
+(a whole tool, `mcp__server` or `mcp__server__tool`; never `Bash` or another tool that runs
+commands), `Bash(<words>)` (exactly that command), `Bash(<words> *)` or `Bash(<words>:*)` (the
+command with any arguments); `<words>` are words of letters, digits and `-_./=+,@%:~` separated by
+single spaces, without quotes, shell operators or a `*` other than the final one
+(`hqc_proto::rules`). Limits: §20. The rules never go into `--settings`, so a change needs no
+restart and reaches running sessions at their next request. The rules screen (§6) shows them with
+the rules the worker reads for the folder (`worker.toml`, `~/.claude/settings.json`,
+`.claude/settings.local.json`); the hub keeps no copy of those.
 A workspace is a **logical** boundary: all hqc operations (session cwd, inbox, mirror,
 deletion) are confined to its path. It gives no enforced file system isolation.
 A workspace is a hub object **[decision]**: all the worker knows about it is that its path lies
@@ -346,7 +362,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny) | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it |
+| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]` | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived) | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, options?: [string], multi?: bool}]` | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). ACP agents have no source for it |
@@ -653,8 +669,11 @@ MCP calls (worker → hub → worker):
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
   cwd, environment, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?,
-  permission_mode?}
-  — `mode`: `new` | `resume` (§5.2); `permission_mode` (since 0.42, T38) — `ask` | `auto`, the
+  permission_mode?, allow_rules?[]}
+  — `mode`: `new` | `resume` (§5.2); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
+  session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
+  canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
+  syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto`, the
   session's `permission_mode` (§3); absent — the worker's `[permissions] mode`; the worker runs
   `auto` only with `allow_auto` (§14) and reports the mode it runs in `session.state`; `requested_by_owner` (sent only as `true`) — the worker
   owner added the session's workspace: no confirmation of a new folder is needed (§10.2); the worker calls the adapter's `start` or `resume` (§8);
@@ -757,6 +776,30 @@ MCP calls (worker → hub → worker):
   send what the hub already has (§9.1). With `enabled: true` the worker accepts only an existing
   folder inside `allowed_roots` (after resolving symlinks), otherwise `error {invalid_frame}`; it
   keeps the list in memory.
+- `workspace.rules` {workspace_path, allow_rules[]} → `ack` (since 0.52, T48) — the whole current
+  list of hqc's allow rules of a workspace (§3 Workspace). The hub sends it when the list
+  changes (at once if the worker is connected) and after every `hello` for every workspace of the
+  worker, an empty list included, so a list emptied while the worker was away is emptied there.
+  The worker accepts only a folder inside `allowed_roots` (after resolving symlinks), otherwise
+  `error {invalid_frame}`; it replaces the list it keeps for the folder in memory, which running
+  sessions use at their next permission request.
+- `permissions.inspect` {request_id, path, command?, tool?} → `result {request_id, mode,
+  allow_auto, sources[{source, allow[], deny[], ask[], error?}], hqc[], check?{verdict, rule?,
+  source?, parts, uncovered, suggestions[]}}` (since 0.52, T48) — the rules screen (§6). `path` must
+  be a workspace the worker knows (from `session.start` or `workspace.rules`) inside
+  `allowed_roots`, otherwise `error {invalid_frame}` (the worker does not trust the hub's path,
+  §2.1). `sources` — `worker.toml` (`[permissions]` allow/deny, the default deny included),
+  `~/.claude/settings.json` (the user's Claude Code settings in its config folder) and
+  `<workspace>/.claude/settings.local.json`, in this order: the `permissions.allow`, `deny`,
+  `ask` arrays of each file (non-strings skipped; a missing file has empty lists; a file over
+  1 MB or that is not JSON has `error`); nothing else of the files leaves the worker. `hqc` — the
+  hqc rules the worker holds for the folder; `mode`/`allow_auto` — `[permissions]`. With
+  `command` or `tool` the worker's matcher (§8.1) checks the call: `deny` with the first deny rule
+  of any source that matches the command or any part of it; else `allow` when every simple part
+  is covered by an allow rule of any source or hqc (`rule`/`source` for a single part); else
+  `ask`, with `uncovered` parts and the hqc rules suggested for them (`parts: 0`: the matcher could
+  not split the command). `verdict` ∈ `deny` | `allow` | `ask`. The hub waits 10 s, as for `fs.*`,
+  and counts it among the `fs.*` requests in flight (§20).
 - `model.proxy` {request_id, model, body} → a stream of `model.proxy.chunk {request_id, data}`
   and `model.proxy.end {request_id, error?}`
 - `worker.approval.response` {request_id, option_id} → `ack` — the worker owner's answer to a
@@ -828,7 +871,8 @@ MCP calls (worker → hub → worker):
 - `mcp.cancel` {request_id, reason} → `ack {}` — a call that died on the worker's side
   (§5.2, §7.2)
 - `result` {request_id, ...} / `error` to the hub's requests (`fs.stat`, `fs.list_dirs`,
-  `workspace.list_candidates`, `title.request`, §5.3), with the request's `id`.
+  `workspace.list_candidates`, `title.request`, `permissions.inspect`, §5.3), with the request's
+  `id`.
 - Artifact upload: HTTP PUT `/worker/artifacts` with the worker's token, not over WebSocket.
   Artifact limit **100 MB**, no chunking. Since 0.34 (T31), for `hqc_attach` (§7, §12): the
   body is the file, streamed, with `Content-Length`; `x-hqc-session-id` — the session it is
@@ -898,7 +942,30 @@ the rest is marked "later"):
   (§13.2); while it has non-archived sessions: `409 workspace_in_use`; archived ones lose
   `workspace_id` and cannot be unarchived (`409 no_workspace`). The workspace object is `{id,
   project_id, worker_id, path, label, environment, kind, ephemeral, created_by_hqc,
-  mirror_enabled, created_at, updated_at}` (`api.workspace.json`)
+  mirror_enabled, hqc_rules, created_at, updated_at}` (`api.workspace.json`; `hqc_rules` since
+  0.52 — how many hqc rules the folder has)
+- hqc's allow rules of a workspace (since 0.52, T48; §3 Workspace), the workspace owner only
+  (another user's: `404`): `GET /api/workspaces/{id}/rules` → `{rules[{id, rule, created_at}]}`,
+  newest first (`api.workspace.rules.json`); `POST /api/workspaces/{id}/rules` {rules[]}
+  (`api.workspace.rules.request.json`) → the same list: rules the folder has are kept as they are,
+  an empty list is `400`, a rule that is not valid hqc syntax `422 invalid_rule` (nothing saved),
+  more than 200 per folder `422 too_many_rules`; `DELETE /api/workspaces/{id}/rules/{rule_id}` →
+  `204` (unknown: `404`). After a change the hub sends the worker `workspace.rules` (§5.3).
+  `GET /api/workspaces/{id}/permissions?command=|tool=` → the worker's `permissions.inspect`
+  result without `request_id` (`api.workspace.permissions.json`); worker offline `409
+  worker_offline`, no answer `504 worker_timeout`, refused by the worker `400 invalid_path`, the
+  check over 16 KiB `400`.
+  The client: the rules screen `#/p/<project>/rules/<workspace>` (`?session=<id>` when opened
+  from a session), from "Rules · N hqc" on the workspace's row in the project settings and
+  "Folder rules" in the session header; it shows the worker, the path, the environment
+  (`default` until T43), the worker's default mode and the session's; "Check a command" (a
+  command, or a tool name such as `Edit`; the worker's verdict with the rule and its source, "Will
+  ask" with "Allow…" and the suggested rule); then denied, allowed (hqc's rules first, with the
+  date and a remove cross confirmed in the row; the files' rules read-only) and everything else
+  (Ask or Auto, the files' `ask` rules), each rule with its source. "Allow in this folder" adds a
+  rule with a live format check (an error blocks saving), a duplicate is an error, and a deny that
+  would win (checked on the worker) is a warning. Worker offline: hqc's rules only, editable, the
+  check disabled. The permission card's "Allow in this folder": §10.1
 - `GET /api/workers/{id}/dirs?path=` → `{entries[{name, path}]}`: an `fs.list_dirs` frame to
   the worker (§5.3); without `path`: `allowed_roots`; outside them: `400 invalid_path`;
   offline: `409 worker_offline`
@@ -1618,7 +1685,8 @@ is not offered; `session` → allow and a rule in the adapter
 until the process ends; for `Bash` and other tools that run commands, a suggestion without
 `ruleContent` ("the whole tool") is not turned into a session rule — only the exact input is
 remembered. Under `--restricted` (§8.4) local settings do not apply, so
-`always` maps to `session`. The hub does not store permanent permissions. The
+`always` maps to `session`. The hub stores no permissions of Claude Code's own; its only
+standing ones are hqc's allow rules of a folder (since 0.52, below). The
 `AskUserQuestion` tool arrives through the same `can_use_tool`: the adapter turns it into
 a `clarify.request`, assigning its own `id`s to the questions, and returns the answers via
 `updatedInput.answers`, whose keys are the question text and whose values are the option's
@@ -1688,6 +1756,27 @@ answer it) and writes `system policy_denied`; in the other `approval.request`s i
 otherwise the field is absent. The adapter understands a tool name, an MCP server
 (`mcp__hqc`) and `Bash` rules (prefix, `*`, exact command); it leaves the rest
 (`Read(./x/**)`, `WebFetch(domain:…)`) to the CLI.
+
+hqc's allow rules of the folder (since 0.52, T48; §3 Workspace) never go to `--settings`: the
+adapter applies them in `can_use_tool`, after the deny check above and the `session` rules and
+before a card, and answers `allow` without an `approval.request`; the list is read at every
+request, so a change (`workspace.rules`, §5.3) reaches a running process at once. The matcher is
+the worker's own and conservative (`crates/hqc-worker/src/permissions.rs`): a command is split
+into simple parts at `;`, `&&`, `||`, `|`, `&` and new lines, honouring quotes; it gives up — no
+rule covers the command, the card comes — on command substitution (`$( )`, backticks, `$` inside
+double quotes), subshells and `{ }` groups, here-documents, process substitution, comments and a
+redirection to anything but `/dev/null`, another descriptor or a path that stays inside the
+workspace. Every part must be covered by an hqc rule or an `allow` rule of `[permissions]`, at
+least one of them by an hqc rule (a call the CLI asked about although `[permissions]` alone
+allows it is still asked, as before). A rule's words are compared with the part's first words;
+`git -C <path>` is skipped when `<path>` stays inside the workspace (absolute under it, or
+relative without `..` while no earlier part is `cd`, `pushd` or `popd`). Suggestions for the card
+(`approval.request.rule_suggestions`, §4): `Bash(git <subcommand>:*)` for git (none when an option
+stands where the subcommand should, or `-C` points outside), `Bash(<first word> *)` otherwise
+(none for an assignment such as `FOO=1 make` or a word a rule cannot hold), the tool name for
+another tool. In `auto` the CLI sends no `can_use_tool`, so hqc's rules play no part there.
+Checked live on 2.1.308 (`claude_live::live_folder_rules`): `Bash(touch *)` answered the request
+for `touch a && touch b`, no card.
 
 The `auto` mode (`--permission-mode auto`, checked on 2.1.308): the CLI decides itself and
 **never asks**: the classifier let through `rm -rf` outside the workspace, `git push --force`
@@ -2228,6 +2317,17 @@ always and are answered in the target's feed or from the sessions waiting on it.
 a person's own message included, and for a run of an agent's schedule whose creator runs in
 `ask` now or was deleted.
 
+**Allow in this folder** (since 0.52, T48). Next to "Always allow" (the exact command,
+`.claude/settings.local.json`) the card offers "Allow in this folder" when the request has
+`rule_suggestions` (§4) and the session a workspace: a field per part with the rule the worker
+suggests, editable (an invalid one blocks saving; an empty one adds no rule for its part), and a
+note that the rule applies only when every part is allowed; on a phone a full-screen page from
+"In this folder…". "Save and allow" is one user action: the client saves the rules (`POST
+/api/workspaces/{id}/rules`, §6) and only when they are stored answers the request with the
+`canonical: once` option; if saving fails, nothing is answered. This keeps §2.1: a rule is a
+standing answer of the owner within the worker's policy, the hub could answer `once` anyway, and
+no rule lifts the worker's `deny`.
+
 With `auto_approve` the hub answers with the first option with `canonical: once`, `by: auto`
 (calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14);
 only the worker owner can turn the mode on, and it is highlighted in the UI; on a shared
@@ -2558,9 +2658,11 @@ deny = ["Bash(sudo:*)", "Bash(git push:*)"]  # never run and never ask
   validation, and one bad rule would drop the whole `deny`.
 
 Three levels, from strongest to weakest: the worker's `deny` (not run, not asked about, `always`
-and `auto` do not override it) → the worker's `allow` and `always` rules from
-`settings.local.json` (run without asking) → everything else (the owner is asked in `ask`, the
-CLI's classifier decides in `auto`).
+and `auto` do not override it) → the worker's `allow`, the `always` rules from
+`settings.local.json` and (since 0.52, T48) hqc's allow rules of the folder (§3 Workspace, applied
+by the worker in `can_use_tool`, §8.1) (run without asking) → everything else (the owner is asked
+in `ask`, the CLI's classifier decides in `auto`). hqc's rules come from the hub, like the
+owner's answers to requests (§2.1); they cannot lift a `deny`.
 
 An environment defines what the agent process is launched with (Claude Code or an ACP process,
 both launched by the worker):
@@ -2898,7 +3000,10 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   | a worker event of type `user.message`, `approval.response`, `clarify.response`, `peer.message` (§4: only the hub writes them) | forbidden in any session | `error invalid_frame` |
   | a worker event in its service session (§10.2) | only `system` with `code: worker_log` | `error invalid_frame` |
   | a worker event in an archived session (§17.4) | only one that ends a turn: the final `agent.message`, `status idle`/`error` | `ack` without `seq` |
-  | `fs.stat`, `fs.list_dirs`, `workspace.list_candidates` from the API (§5.3, §6) | 4 at once per worker | `429 worker_busy`, no frame goes to the worker |
+  | `fs.stat`, `fs.list_dirs`, `workspace.list_candidates`, `permissions.inspect` (since 0.52) from the API (§5.3, §6) | 4 at once per worker | `429 worker_busy`, no frame goes to the worker |
+  | hqc's allow rules of a workspace (§3 Workspace, since 0.52, T48) | 200 per workspace; a rule at most 256 bytes, hqc syntax only | `422 too_many_rules` / `422 invalid_rule`, nothing saved; the worker drops an invalid rule of `session.start` or `workspace.rules` with a warning |
+  | the check of `GET /api/workspaces/{id}/permissions` | `command` / `tool` up to 16 KiB, no NUL | `400` |
+  | settings files `permissions.inspect` reads | 1 MB each; only the `permissions.allow/deny/ask` strings leave the worker | the source has `error` |
   | takeover without a registry (§9.3): `locked_by: vscode` without `vscode_active_at` | treated as "written just now" | `409 vscode_active`; the transition to `vscode` sets the time, migration `0012` fills it in for old rows |
   | turn watchdog (§17.3) | a pass every `limit / 10`, at least every 10 s, over the partial index `turn_open` | — |
   | attachment download by the worker (§12, `.hqc/inbox`) | 100 MB per artifact, 500 MB per input (since 0.46 the files of its buffered messages included); streamed to disk | the download is aborted, the partial file is deleted, `error` on `session.input` without retry |
@@ -2997,6 +3102,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.51 → 0.52 (T48, permission rules in hqc)
+§3 Workspace: hqc's allow rules per folder (syntax, stored on the hub, applied by the worker,
+never in `--settings`). §4: `approval.request.rule_suggestions`. §5.3: `session.start.allow_rules`,
+the new frames `workspace.rules` (on change and after every `hello`) and `permissions.inspect`
+(the three sources and a check by the worker's matcher). §5.4: `result` of `permissions.inspect`.
+§6: `hqc_rules` in the workspace object, `GET/POST /api/workspaces/{id}/rules`, `DELETE
+.../rules/{rule_id}`, `GET /api/workspaces/{id}/permissions`, the rules screen. §8.1: the matcher,
+where it gives up, `git -C`, the suggestions. §10.1: "Allow in this folder" (save, then allow).
+§2.1, §14: the rules are a standing answer below `deny`. §20: the limits. Hub migration `0025`.
 
 ### 0.50 → 0.51 (T49, the theme and project appearance)
 §3 User: `theme` (`warm` | `graphite` | `contrast`). §3 Project: `color` (8 names, by a hash of

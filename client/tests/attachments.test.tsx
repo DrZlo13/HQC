@@ -436,11 +436,11 @@ describe('rendering attachments', () => {
     );
     await flush();
     await flush();
-    const cards = [...el.querySelectorAll('.card-peer')];
+    const cards = [...el.querySelectorAll('.relay')];
     expect(cards.length).toBe(2);
     expect(cards[0].querySelector<HTMLImageElement>('.attachment-image img')!.alt).toBe('board.png');
     expect(cards[0].querySelector('.card-attachment .card-title')!.textContent).toContain('notes.txt');
-    expect(cards[1].querySelector('.attachments')).toBeNull();
+    expect(cards[1].querySelector('.relay-files')).toBeNull();
   });
 
   it('without a store an attachment is a card from the event alone', () => {

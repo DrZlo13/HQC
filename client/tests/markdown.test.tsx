@@ -243,7 +243,7 @@ describe('messages', () => {
     expect(root.querySelector('.msg-user strong')!.textContent).toBe('run');
     expect(root.querySelector('.msg-interim h2')!.textContent).toBe('Plan');
     expect(root.querySelector('.msg-final .md-code code')!.textContent).toBe('ls -la');
-    expect(root.querySelector('.card-peer em')!.textContent).toBe('from');
+    expect(root.querySelector('.relay em')!.textContent).toBe('from');
     expect(root.querySelector('.line-system code')!.textContent).toBe('home-mac');
   });
 
@@ -258,7 +258,9 @@ describe('messages', () => {
         e.payload.text = 'a note';
       }),
     ]);
-    const titles = [...root.querySelectorAll('.card-peer .card-title')].map((t) => t.textContent);
+    const titles = [...root.querySelectorAll('.relay-head')].map((h) =>
+      [h.querySelector('.relay-label')!.textContent, h.querySelector('.relay-peer')!.textContent].join(' '),
+    );
     expect(titles).toEqual(['Question from hqc/build-bot', 'Message from session 00000002']);
   });
 
@@ -275,7 +277,7 @@ describe('messages', () => {
     for (const [sel, text] of [
       ['.msg-user', 'user *md*'],
       ['.msg-agent', SRC],
-      ['.card-peer', 'peer **md**'],
+      ['.relay-head', 'peer **md**'],
     ]) {
       await act(async () => copy(sel).click());
       expect(writeText).toHaveBeenLastCalledWith(text);

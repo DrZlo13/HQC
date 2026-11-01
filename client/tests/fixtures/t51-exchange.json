@@ -1,0 +1,330 @@
+{
+ "note": "T51: the iteration 3 exchange (A asks B with a file, B returns it with hqc_attach) in the shapes of the T41 live run (docs/notes/t41-questions.md, section 9); the texts follow the mockups.",
+ "asker_id": "0199f3a2-51a0-7000-8000-00000000000a",
+ "helper_id": "0199f3a2-51a0-7000-8000-00000000000b",
+ "asker": [
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000030a",
+   "seq": 1,
+   "ts": "2026-10-31T23:09:00Z",
+   "author": {
+    "kind": "system"
+   },
+   "type": "system",
+   "payload": {
+    "text": "Session created",
+    "code": "session_created"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000030b",
+   "seq": 2,
+   "ts": "2026-10-31T23:10:10Z",
+   "author": {
+    "kind": "user",
+    "id": "0199f3a2-51a0-7000-8000-0000000000aa"
+   },
+   "type": "user.message",
+   "payload": {
+    "text": "Pass some file to the second session in this project, ask it to change something there and to pass it back to you.",
+    "artifact_ids": []
+   },
+   "delivery": "delivered",
+   "delivered_at": "2026-10-31T23:10:11Z"
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000030c",
+   "seq": 3,
+   "ts": "2026-10-31T23:10:20Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "agent.message",
+   "payload": {
+    "text": "I'll create a test file and send it to esp/session-5.",
+    "final": false
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000030d",
+   "seq": 4,
+   "ts": "2026-10-31T23:10:21Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "tool.call",
+   "payload": {
+    "call_id": "toolu_a1",
+    "tool": "Bash",
+    "args_preview": "{\"command\": \"printf 'line: original\\\\n' > hqc-xfer-test.txt && sha1sum hqc-xfer-test.txt\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000030e",
+   "seq": 5,
+   "ts": "2026-10-31T23:10:22Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "tool.result",
+   "payload": {
+    "call_id": "toolu_a1",
+    "error": false,
+    "duration_ms": 35,
+    "result_preview": "164101e63be96789e461337c5af034d85464f61d  hqc-xfer-test.txt"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000030f",
+   "seq": 6,
+   "ts": "2026-10-31T23:11:00Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "tool.call",
+   "payload": {
+    "call_id": "toolu_a2",
+    "tool": "mcp__hqc__hqc_ask",
+    "args_preview": "{\"files\": [\"hqc-xfer-test.txt\"], \"session\": \"esp/session-5\", \"text\": \"Hi! This is esp/session-4, we are checking file exchange through hqc. I attach hqc-xfer-test.txt. Take the copy you got, do not touch the repository's files; in your copy replace \\\"line: original\\\" with \\\"line: edited by esp/session-5\\\" and append \\\"checked: <current time>\\\". Return the file with hqc_send or hqc_attach and tell me the path you got it at and its sha1 before the change.\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000310",
+   "seq": 7,
+   "ts": "2026-10-31T23:11:19Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "tool.result",
+   "payload": {
+    "call_id": "toolu_a2",
+    "error": false,
+    "duration_ms": 19400,
+    "result_preview": "{\"files\": [{\"artifact_id\": \"0199f3a2-51a0-7000-8000-0000000000f2\", \"kind\": \"text\", \"name\": \"hqc-xfer-test.txt\", \"path\": \"/Users/home-mac/work/esp/.hqc/inbox/0199f3a2-51a0-7000-8000-0000000000d1/hqc-xfer-test.txt\", \"size\": 106}], \"from\": \"esp/session-5\", \"message_seq\": 2, \"reply\": \"Done, the edited file is attached. I did not touch the repository's files.\\n\\n| | |\\n|---|---|\\n| Received at | `.hqc/inbox/571581ad/hqc-xfer-test.txt` |\\n| sha1 before | `164101e63be96789e461337c5af034d85464f61d` |\\n| sha1 after | `8376c431fb7f454ec97c0522631cdda378cbb45e` |\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000311",
+   "seq": 8,
+   "ts": "2026-10-31T23:12:00Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "agent.message",
+   "payload": {
+    "text": "The file came back. esp/session-5's sha1 of the original matches mine, and the edit is in place.",
+    "final": true,
+    "in_reply_to": "0199f3a2-51a0-7000-8000-0000000003ff"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000312",
+   "seq": 9,
+   "ts": "2026-10-31T23:12:00Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "usage",
+   "payload": {
+    "input_tokens": 9,
+    "output_tokens": 318,
+    "cache_read": 88000,
+    "cost_usd": 0.041
+   }
+  }
+ ],
+ "helper": [
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000301",
+   "seq": 1,
+   "ts": "2026-10-31T23:05:00Z",
+   "author": {
+    "kind": "system"
+   },
+   "type": "system",
+   "payload": {
+    "text": "Session created",
+    "code": "session_created"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000201",
+   "seq": 2,
+   "ts": "2026-10-31T23:11:02Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000a"
+   },
+   "type": "peer.message",
+   "payload": {
+    "from_session_id": "0199f3a2-51a0-7000-8000-00000000000a",
+    "from": "esp/session-4",
+    "text": "Hi! This is esp/session-4, we are checking file exchange through hqc. I attach hqc-xfer-test.txt. Take the copy you got, do not touch the repository's files; in your copy replace \"line: original\" with \"line: edited by esp/session-5\" and append \"checked: <current time>\". Return the file with hqc_send or hqc_attach and tell me the path you got it at and its sha1 before the change.",
+    "mode": "ask",
+    "request_id": "0199f3a2-51a0-7000-8000-0000000000d1",
+    "artifact_ids": [
+     "0199f3a2-51a0-7000-8000-0000000000f1"
+    ]
+   },
+   "chain": {
+    "chain_id": "0199f3a2-51a0-7000-8000-0000000000c1",
+    "depth": 1,
+    "hops": 1,
+    "permission_cap": "ask",
+    "capped_by": "esp/session-4"
+   },
+   "delivery": "delivered",
+   "delivered_at": "2026-10-31T23:11:03Z"
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000302",
+   "seq": 3,
+   "ts": "2026-10-31T23:11:05Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "agent.message",
+   "payload": {
+    "text": "Checking the file I got and editing my copy.",
+    "final": false
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000303",
+   "seq": 4,
+   "ts": "2026-10-31T23:11:05Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "tool.call",
+   "payload": {
+    "call_id": "toolu_b1",
+    "tool": "Bash",
+    "args_preview": "{\"command\": \"sha1sum .hqc/inbox/571581ad/hqc-xfer-test.txt\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000304",
+   "seq": 5,
+   "ts": "2026-10-31T23:11:06Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "tool.result",
+   "payload": {
+    "call_id": "toolu_b1",
+    "error": false,
+    "duration_ms": 40,
+    "result_preview": "164101e63be96789e461337c5af034d85464f61d  .hqc/inbox/571581ad/hqc-xfer-test.txt"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000305",
+   "seq": 6,
+   "ts": "2026-10-31T23:11:15Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "tool.call",
+   "payload": {
+    "call_id": "toolu_b2",
+    "tool": "mcp__hqc__hqc_attach",
+    "args_preview": "{\"caption\": \"Edited copy: line replaced, checked timestamp appended\", \"path\": \".hqc/outbox/hqc-xfer-test.txt\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000306",
+   "seq": 7,
+   "ts": "2026-10-31T23:11:16Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "attachment",
+   "payload": {
+    "artifact_id": "0199f3a2-51a0-7000-8000-0000000000f2",
+    "kind": "text",
+    "name": "hqc-xfer-test.txt",
+    "caption": "Edited copy: line replaced, checked timestamp appended"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000307",
+   "seq": 8,
+   "ts": "2026-10-31T23:11:16Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "tool.result",
+   "payload": {
+    "call_id": "toolu_b2",
+    "error": false,
+    "duration_ms": 310,
+    "result_preview": "{\"artifact_id\": \"0199f3a2-51a0-7000-8000-0000000000f2\", \"event_id\": \"0199f3a2-51a0-7000-8000-0000000002f0\", \"kind\": \"text\", \"name\": \"hqc-xfer-test.txt\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000308",
+   "seq": 9,
+   "ts": "2026-10-31T23:11:18Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "agent.message",
+   "payload": {
+    "text": "Done, the edited file is attached. I did not touch the repository's files.\n\n| | |\n|---|---|\n| Received at | `.hqc/inbox/571581ad/hqc-xfer-test.txt` |\n| sha1 before | `164101e63be96789e461337c5af034d85464f61d` |\n| sha1 after | `8376c431fb7f454ec97c0522631cdda378cbb45e` |",
+    "final": true,
+    "in_reply_to": "0199f3a2-51a0-7000-8000-000000000201"
+   },
+   "reply_delivered_at": "2026-10-31T23:11:19Z"
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000000b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000309",
+   "seq": 10,
+   "ts": "2026-10-31T23:11:18Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000000b"
+   },
+   "type": "usage",
+   "payload": {
+    "input_tokens": 16,
+    "output_tokens": 2010,
+    "cache_read": 209000,
+    "cost_usd": 0.173
+   }
+  }
+ ]
+}

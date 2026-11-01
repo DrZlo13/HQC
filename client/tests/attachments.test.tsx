@@ -194,7 +194,7 @@ describe('composer', () => {
     const onSend = vi.fn();
     const onRemove = vi.fn();
     const onFiles = vi.fn();
-    const el = mount(<Composer disabled={false} files={picked} onSend={onSend} onFiles={onFiles} onRemove={onRemove} />);
+    const el = mount(<Composer files={picked} onSend={onSend} onFiles={onFiles} onRemove={onRemove} />);
     expect(el.querySelector<HTMLImageElement>('.composer-files img')!.src).toMatch(/^data:image\/png/);
     expect(el.querySelector('.composer-files .attachment-chip')!.textContent).toContain('notes.txt');
     const send = el.querySelector<HTMLButtonElement>('button[type=submit]')!;
@@ -216,7 +216,7 @@ describe('composer', () => {
   });
 
   it('without text and files nothing can be sent', () => {
-    const el = mount(<Composer disabled={false} files={[]} onSend={() => {}} />);
+    const el = mount(<Composer files={[]} onSend={() => {}} />);
     expect(el.querySelector<HTMLButtonElement>('button[type=submit]')!.disabled).toBe(true);
   });
 });

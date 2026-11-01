@@ -1,27 +1,19 @@
 // @vitest-environment happy-dom
-// T26: the session list — the "State" and "Recent" orders (kept in localStorage), the
-// search over title and path, the project's counters, workers with their active sessions,
-// the project rail with its "needs you" badge.
+// T26: the session list — the "State" and "Recent" orders, the search over title and path,
+// the project's counters, workers with their active sessions, the project rail with its
+// "needs you" badge. T50: the order on the hub (State / Recent / Custom, Reorder by the
+// keyboard), the row actions, the delayed archive with Undo, archive mode, the phone's sheet.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import type { Api } from '../src/api';
-import { AppState } from '../src/app';
-import type { SessionInfo, SessionState } from '../src/proto';
+import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
+import type { ListMode, SessionInfo, SessionState } from '../src/proto';
 import type { HubSocket } from '../src/ws';
 import { ProjectRail } from '../src/ui/ProjectRail';
 import { SessionList } from '../src/ui/SessionList';
-import {
-  activeLabel,
-  bucketOf,
-  groupSessions,
-  headCounts,
-  loadMode,
-  matchesQuery,
-  projectInitials,
-  saveMode,
-} from '../src/ui/sessions';
+import { activeLabel, arrange, bucketOf, groupSessions, headCounts, matchesQuery, moveTo, projectInitials } from '../src/ui/sessions';
 
 const NOW = Date.parse('2026-10-24T19:50:00');
 const at = (hoursAgo: number) => new Date(NOW - hoursAgo * 3_600_000).toISOString();
@@ -59,7 +51,6 @@ let root: HTMLElement;
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
-  localStorage.clear();
 });
 afterEach(() => {
   if (root) render(null, root);
@@ -125,19 +116,40 @@ describe('list logic', () => {
     ]);
   });
 
-  it('keeps the mode in localStorage, "State" by default', () => {
-    expect(loadMode()).toBe('state');
-    saveMode('recent');
-    expect(localStorage.getItem('hqc.sessionOrder')).toBe('recent');
-    expect(loadMode()).toBe('recent');
-    localStorage.setItem('hqc.sessionOrder', 'custom');
-    expect(loadMode()).toBe('state');
+  it('custom order: the saved one, a session missing from it on top; moves clamp at the ends', () => {
+    const ids = (l: SessionInfo[]) => l.map((s) => s.id);
+    expect(ids(arrange(LIST, ['cave', 'net', 'gone', 'stones']))).toEqual(['det', 'prof', 'cave', 'net', 'stones']);
+    expect(groupSessions(LIST, 'custom', NOW, ['cave']).map((g) => [g.label, g.plain, ids(g.items)])).toEqual([
+      ['Custom order', true, ['stones', 'det', 'net', 'prof', 'cave']],
+    ]);
+    const o = ['a', 'b', 'c'];
+    expect(moveTo(o, 'a', 1)).toEqual(['b', 'a', 'c']);
+    expect(moveTo(o, 'c', 9)).toBe(o);
+    expect(moveTo(o, 'b', -3)).toEqual(['b', 'a', 'c']);
   });
 });
 
-function makeApp(list = LIST) {
+/** The hub's side of the list (T50): the order record, archive, restore, delete, rename. */
+function hubApi(order: { mode: ListMode; session_ids: string[] } = { mode: 'state', session_ids: [] }) {
+  return {
+    workspaces: async () => [],
+    search: async () => ({ results: [] }),
+    sessionOrder: vi.fn(async () => order),
+    putSessionOrder: vi.fn(async (_p: string, b: { mode?: ListMode; session_ids?: string[] }) => ({
+      mode: b.mode ?? order.mode,
+      session_ids: b.session_ids ?? order.session_ids,
+    })),
+    archive: vi.fn(async (id: string) => ({ ...sess(id, id, 'archived', at(0)), archived_at: at(0) })),
+    unarchive: vi.fn(async (id: string) => sess(id, id, 'idle', at(0))),
+    deleteSession: vi.fn(async () => {}),
+    patchSession: vi.fn(async (id: string, p: { title?: string }) => sess(id, p.title ?? id, 'idle', at(0))),
+    createSession: vi.fn(async (_p: string, title: string) => sess('new', title, 'running', at(0))),
+  };
+}
+
+function makeApp(list = LIST, api = hubApi()) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
-  const app = new AppState({ workspaces: async () => [], search: async () => ({ results: [] }) } as unknown as Api, socket);
+  const app = new AppState(api as unknown as Api, socket);
   app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' };
   app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
@@ -169,7 +181,8 @@ async function mount(node: preact.ComponentChild) {
 const groups = () =>
   [...root.querySelectorAll('.session-group')].map((g) => [
     g.querySelector('.group-label')!.textContent,
-    g.querySelector('.group-count')!.textContent,
+    // A custom order has no count.
+    g.querySelector('.group-count')?.textContent,
     [...g.querySelectorAll('.session-title')].map((t) => t.textContent),
   ]);
 
@@ -199,8 +212,10 @@ describe('SessionList (desktop column)', () => {
     expect(root.querySelector('.session-when')).toBeNull();
   });
 
-  it('switches to "Recent" with times, and keeps the choice in this browser', async () => {
-    await mount(<SessionList app={makeApp()} />);
+  it('switches to "Recent" with times, and keeps the choice on the hub (T50)', async () => {
+    const api = hubApi();
+    await mount(<SessionList app={makeApp(LIST, api)} />);
+    expect(api.sessionOrder).toHaveBeenCalledWith('p1');
     const recent = [...root.querySelectorAll<HTMLButtonElement>('.seg')].find((b) => b.textContent === 'Recent')!;
     await act(async () => recent.click());
     expect(groups().map((g) => g[0])).toEqual(['Today', 'Yesterday', 'Earlier']);
@@ -211,9 +226,10 @@ describe('SessionList (desktop column)', () => {
       'yesterday',
       'Oct 22',
     ]);
-    expect(localStorage.getItem('hqc.sessionOrder')).toBe('recent');
+    expect(api.putSessionOrder).toHaveBeenCalledWith('p1', { mode: 'recent' });
     render(null, root);
-    await mount(<SessionList app={makeApp()} />);
+    // Another device: the hub's record.
+    await mount(<SessionList app={makeApp(LIST, hubApi({ mode: 'recent', session_ids: [] }))} />);
     expect(root.querySelector('.seg[aria-pressed="true"]')!.textContent).toBe('Recent');
     expect(groups()[0][0]).toBe('Today');
   });
@@ -238,6 +254,237 @@ describe('SessionList (desktop column)', () => {
     ]);
     expect(rows[0].querySelector('.dot-offline')).not.toBeNull();
     expect(rows[1].getAttribute('href')).toBe('#/s/sys1');
+  });
+});
+
+const titles = () => [...root.querySelectorAll('.session-title')].map((t) => t.textContent);
+const rowOf = (title: string) =>
+  [...root.querySelectorAll<HTMLElement>('.session-item')].find((r) => r.querySelector('.session-title')!.textContent === title)!;
+/** A click, and the hub's (mocked) replies it waits for. */
+const click = (el: Element | null) =>
+  act(async () => {
+    (el as HTMLElement).click();
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  });
+
+describe('archive from the row (T50)', () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] }));
+
+  it('hides the row at once and archives only when the toast ends; Undo sends nothing', async () => {
+    const api = hubApi();
+    const app = makeApp(LIST, api);
+    await mount(<SessionList app={app} />);
+    const net = rowOf('Network sync');
+    expect(net.querySelector('.btn-row-archive')!.getAttribute('aria-label')).toBe('Archive «Network sync»');
+    expect(net.querySelector('.btn-row-more')).not.toBeNull();
+
+    await click(net.querySelector('.btn-row-archive'));
+    expect(titles()).not.toContain('Network sync');
+    expect(root.querySelector('.toast')!.textContent).toBe('Archived «Network sync»Undo');
+    expect(root.querySelector('.side-counts')!.textContent).toBe('2 running · 2 idle');
+    await act(async () => {
+      vi.advanceTimersByTime(ARCHIVE_UNDO_MS - 1);
+    });
+    expect(api.archive).not.toHaveBeenCalled();
+    await click(root.querySelector('.btn-undo'));
+    expect(root.querySelector('.toast')).toBeNull();
+    expect(groups()[0]).toEqual(['Needs you', '1', ['Network sync']]);
+    await act(async () => {
+      vi.advanceTimersByTime(ARCHIVE_UNDO_MS * 2);
+    });
+    expect(api.archive).not.toHaveBeenCalled();
+
+    // Again, and the toast runs out: now the hub, and the session is in the archive.
+    await click(rowOf('Network sync').querySelector('.btn-row-archive'));
+    await act(async () => {
+      vi.advanceTimersByTime(ARCHIVE_UNDO_MS);
+    });
+    expect(api.archive).toHaveBeenCalledTimes(1);
+    expect(api.archive).toHaveBeenCalledWith('net', false);
+    expect(root.querySelector('.toast')).toBeNull();
+    expect(app.sessions.get('net')!.archived).toBe(true);
+    expect(root.querySelector('.btn-archive-open')!.textContent).toBe('Archive1');
+  });
+
+  it('archiving another row sends the previous one first; leaving the page sends with keepalive', async () => {
+    const api = hubApi();
+    const app = makeApp(LIST, api);
+    const win = new EventTarget() as unknown as Window;
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    Object.defineProperty(win, 'document', { value: doc });
+    app.watchPageLeave(win);
+    await mount(<SessionList app={app} />);
+    await click(rowOf('Network sync').querySelector('.btn-row-archive'));
+    await click(rowOf('Cave scene port').querySelector('.btn-row-archive'));
+    expect(api.archive.mock.calls).toEqual([['net', false]]);
+    expect(root.querySelector('.toast-text')!.textContent).toBe('Archived «Cave scene port»');
+
+    await act(async () => {
+      doc.visibilityState = 'hidden';
+      doc.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(api.archive.mock.calls).toEqual([
+      ['net', false],
+      ['cave', true],
+    ]);
+    expect(root.querySelector('.toast')).toBeNull();
+    await click(rowOf('Stone textures').querySelector('.btn-row-archive'));
+    await act(async () => {
+      win.dispatchEvent(new Event('pagehide'));
+    });
+    expect(api.archive.mock.calls.at(-1)).toEqual(['stones', true]);
+  });
+
+  it('returns an undone session to its place in Custom; a new session goes on top', async () => {
+    const order = { mode: 'custom' as const, session_ids: ['cave', 'net', 'stones', 'det', 'prof'] };
+    const app = makeApp(LIST, hubApi(order));
+    await mount(<SessionList app={app} />);
+    expect(groups()).toEqual([['Custom order', undefined, ['Cave scene port', 'Network sync', 'Stone textures', 'Step determinism', 'Collision profiling']]]);
+    await click(rowOf('Stone textures').querySelector('.btn-row-archive'));
+    expect(titles()).toEqual(['Cave scene port', 'Network sync', 'Step determinism', 'Collision profiling']);
+    await click(root.querySelector('.btn-undo'));
+    expect(titles()).toEqual(['Cave scene port', 'Network sync', 'Stone textures', 'Step determinism', 'Collision profiling']);
+    await act(async () => void (await app.createSession('New session', {}, 'p1')));
+    expect(titles()[0]).toBe('New session');
+  });
+
+  it('deletes from "⋯" with a confirmation in the row, and renames', async () => {
+    const api = hubApi();
+    const app = makeApp(LIST, api);
+    vi.stubGlobal('prompt', () => 'Net sync');
+    await mount(<SessionList app={app} />);
+    await click(rowOf('Network sync').querySelector('.btn-row-more'));
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Rename', 'Delete…']);
+    await click(root.querySelector('.menu .btn-rename'));
+    expect(api.patchSession).toHaveBeenCalledWith('net', { title: 'Net sync' });
+    vi.unstubAllGlobals();
+
+    await click(rowOf('Cave scene port').querySelector('.btn-row-more'));
+    await click(root.querySelector('.menu .btn-delete'));
+    const row = rowOf('Cave scene port');
+    expect(row.classList.contains('is-confirming')).toBe(true);
+    expect(row.querySelector('.row-confirm')!.textContent).toBe('Delete forever?DeleteCancel');
+    expect(row.querySelector('.row-acts')).toBeNull();
+    await click([...row.querySelectorAll('button')].find((b) => b.textContent === 'Cancel')!);
+    expect(api.deleteSession).not.toHaveBeenCalled();
+    await click(rowOf('Cave scene port').querySelector('.btn-row-more'));
+    await click(root.querySelector('.menu .btn-delete'));
+    await click(rowOf('Cave scene port').querySelector('.btn-confirm-delete'));
+    expect(api.deleteSession).toHaveBeenCalledWith('cave');
+    expect(titles()).not.toContain('Cave scene port');
+  });
+});
+
+describe('Reorder (T50)', () => {
+  it('moves a row with the arrow keys on its handle; Done saves the order and turns Custom on', async () => {
+    const api = hubApi();
+    const app = makeApp(LIST, api);
+    await mount(<SessionList app={app} />);
+    await click(root.querySelector('.btn-reorder'));
+    expect(root.querySelector('.reorder-bar')!.textContent).toBe('ReorderCancelDone');
+    expect(root.querySelector('.seg-group')).toBeNull();
+    expect(root.querySelector('.row-acts')).toBeNull();
+    expect(root.querySelector('a.session-row')).toBeNull();
+    // The order so far: no record yet, so newest first.
+    expect(groups()).toEqual([['Drag to reorder', undefined, ['Stone textures', 'Step determinism', 'Network sync', 'Collision profiling', 'Cave scene port']]]);
+    const key = (title: string, k: string) =>
+      act(async () => {
+        rowOf(title).querySelector('.grip')!.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+      });
+    await key('Cave scene port', 'ArrowUp');
+    await key('Cave scene port', 'ArrowUp');
+    await key('Stone textures', 'ArrowDown');
+    await key('Stone textures', 'ArrowLeft');
+    expect(titles()).toEqual(['Step determinism', 'Stone textures', 'Cave scene port', 'Network sync', 'Collision profiling']);
+    // The moved handle keeps the focus.
+    expect(document.activeElement).toBe(rowOf('Stone textures').querySelector('.grip'));
+
+    await click(root.querySelector('.btn-reorder-done'));
+    expect(api.putSessionOrder).toHaveBeenCalledWith('p1', { mode: 'custom', session_ids: ['det', 'stones', 'cave', 'net', 'prof'] });
+    expect(root.querySelector('.seg[aria-pressed="true"]')!.textContent).toBe('Custom');
+    expect(groups()).toEqual([['Custom order', undefined, ['Step determinism', 'Stone textures', 'Cave scene port', 'Network sync', 'Collision profiling']]]);
+  });
+
+  it('drags a row by its handle with pointer events', async () => {
+    await mount(<SessionList app={makeApp()} />);
+    await click(root.querySelector('.btn-reorder'));
+    const grip = rowOf('Stone textures').querySelector<HTMLElement>('.grip')!;
+    const ev = (type: string, y: number) =>
+      act(async () => {
+        grip.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, clientY: y }));
+      });
+    await ev('pointerdown', 100);
+    expect(rowOf('Stone textures').classList.contains('is-dragging')).toBe(true);
+    // A row is 64 px here (no layout in the test): two rows down, then one back.
+    await ev('pointermove', 230);
+    expect(titles().slice(0, 3)).toEqual(['Step determinism', 'Network sync', 'Stone textures']);
+    await ev('pointermove', 170);
+    expect(titles().slice(0, 3)).toEqual(['Step determinism', 'Stone textures', 'Network sync']);
+    await ev('pointerup', 170);
+    expect(root.querySelector('.is-dragging')).toBeNull();
+    await ev('pointermove', 400);
+    expect(titles().slice(0, 3)).toEqual(['Step determinism', 'Stone textures', 'Network sync']);
+  });
+
+  it('Cancel restores the previous order', async () => {
+    const order = { mode: 'custom' as const, session_ids: ['cave', 'net', 'stones', 'det', 'prof'] };
+    const api = hubApi(order);
+    await mount(<SessionList app={makeApp(LIST, api)} />);
+    await click(root.querySelector('.btn-reorder'));
+    await act(async () => {
+      rowOf('Cave scene port').querySelector('.grip')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    });
+    expect(titles()[0]).toBe('Network sync');
+    await click(root.querySelector('.btn-reorder-cancel'));
+    expect(api.putSessionOrder).not.toHaveBeenCalled();
+    expect(titles()).toEqual(['Cave scene port', 'Network sync', 'Stone textures', 'Step determinism', 'Collision profiling']);
+  });
+});
+
+describe('archive mode (T50)', () => {
+  const archived = [
+    sess('old', 'Old SPI experiment', 'archived', at(100), { archived_at: new Date(NOW - 30 * 60_000).toISOString() }),
+    sess('older', 'Test session', 'archived', at(300)),
+  ];
+
+  it('a plain hatched list with Restore and Delete on every row, delete confirmed in the row', async () => {
+    const api = hubApi();
+    const app = makeApp([...LIST, ...archived], api);
+    await mount(<SessionList app={app} current="old" />);
+    await click(root.querySelector('.btn-archive-open'));
+    const side = root.querySelector('.sessions-archive')!;
+    expect(side.querySelector('.archive-head.stripes .project-title')!.textContent).toBe('Archive');
+    expect(side.querySelector('.side-counts')!.textContent).toBe('physics-mp · 2 sessions');
+    expect(side.querySelector('.archive-note')!.textContent).toBe('Read-only. Restore a session to keep working, or delete it for good.');
+    expect(root.querySelector('.worker-list')).toBeNull();
+    expect(root.querySelector('.seg-group')).toBeNull();
+    const rows = () => [...root.querySelectorAll<HTMLElement>('.archive-row')];
+    expect(rows().map((r) => [r.querySelector('.session-title')!.textContent, r.querySelector('.session-sub')!.textContent])).toEqual([
+      ['Old SPI experiment', 'Archived today at 19:20'],
+      ['Test session', 'Archived'],
+    ]);
+    expect(rows()[0].classList.contains('is-current')).toBe(true);
+    expect(rows()[0].querySelector('a')!.getAttribute('href')).toBe('#/s/old');
+    expect(rows().map((r) => [...r.querySelectorAll('.archive-acts button')].map((b) => b.textContent))).toEqual([
+      ['Restore', 'Delete'],
+      ['Restore', 'Delete'],
+    ]);
+
+    await click(rows()[1].querySelector('.btn-delete'));
+    expect(rows()[1].querySelector('.row-confirm')!.textContent).toBe('Delete forever?DeleteCancel');
+    await click(rows()[1].querySelector('.btn-confirm-delete'));
+    expect(api.deleteSession).toHaveBeenCalledWith('older');
+    expect(rows()).toHaveLength(1);
+    expect(root.querySelector('.toast')!.textContent).toBe('Deleted «Test session»');
+
+    await click(rows()[0].querySelector('.btn-restore'));
+    expect(api.unarchive).toHaveBeenCalledWith('old');
+    expect(root.querySelector('.empty')!.textContent).toBe('Archive is empty');
+    expect(root.querySelector('.toast')!.textContent).toBe('Restored «Old SPI experiment» to sessions');
+
+    await click(root.querySelector('.btn-archive-back'));
+    expect(root.querySelector('.sessions-archive')).toBeNull();
+    expect(titles()).toContain('old');
   });
 });
 
@@ -277,5 +524,60 @@ describe('SessionList (phone)', () => {
     // The search is a screen of its own (T33, tests/search.test.tsx).
     expect(root.querySelector('input[aria-label="Search sessions"]')).toBeNull();
     expect(root.querySelector('a[aria-label="Search sessions and messages"]')!.getAttribute('href')).toBe('#/search');
+    expect(root.querySelector('.row-acts')).toBeNull();
+    expect(root.querySelector('.list-hint')!.textContent).toBe('Press and hold a session to archive, rename or delete it.');
+  });
+
+  it('a long press opens the actions sheet: Archive with Undo, Delete in a second step (T50)', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    const api = hubApi();
+    await mount(<SessionList app={makeApp(LIST, api)} phone />);
+    const press = (title: string) =>
+      act(async () => {
+        rowOf(title).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10 }));
+      });
+    // A short press is a tap.
+    await press('Network sync');
+    await act(async () => {
+      rowOf('Network sync').dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(root.querySelector('.action-sheet')).toBeNull();
+
+    await press('Network sync');
+    await act(async () => {
+      vi.advanceTimersByTime(450);
+    });
+    const sheet = root.querySelector('.action-sheet')!;
+    expect(sheet.querySelector('.action-sheet-title')!.textContent).toBe('Network sync');
+    expect([...sheet.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Archive', 'Rename', 'Delete…', 'Cancel']);
+    await click(sheet.querySelector('.btn-sheet-archive'));
+    expect(root.querySelector('.action-sheet')).toBeNull();
+    expect(root.querySelector('.toast-text')!.textContent).toBe('Archived «Network sync»');
+    await click(root.querySelector('.btn-undo'));
+    expect(titles()).toContain('Network sync');
+
+    // A right click opens it too; Delete asks once more.
+    await act(async () => {
+      rowOf('Cave scene port').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    await click(root.querySelector('.btn-sheet-delete'));
+    expect(root.querySelector('.action-sheet-note')!.textContent).toBe(
+      'Delete this session forever? Messages and history go too. Files on disk stay.',
+    );
+    await click(root.querySelector('.btn-sheet-delete-forever'));
+    expect(api.deleteSession).toHaveBeenCalledWith('cave');
+    expect(api.archive).not.toHaveBeenCalled();
+  });
+
+  it('Reorder puts the handle on the right of the row', async () => {
+    await mount(<SessionList app={makeApp()} phone />);
+    await click(root.querySelector('.btn-reorder'));
+    const item = rowOf('Network sync');
+    expect(item.lastElementChild!.classList.contains('grip')).toBe(true);
+    expect(root.querySelector('.fab')).toBeNull();
+    expect(root.querySelector('.list-hint')!.textContent).toBe('Drag the handle on the right. Done saves the order and switches to Custom.');
   });
 });

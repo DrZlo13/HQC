@@ -8,12 +8,13 @@ import type { Timeline } from '../timeline';
 import { ActivityLine, ChatItems, StreamingMessage, onlyRequests, type ChatActions } from './cards';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
-import { IconAttach, IconBack, IconCode, IconMore, IconSend, IconStop } from './icons';
+import { IconArchive, IconAttach, IconBack, IconCode, IconMore, IconSend, IconStop } from './icons';
 import { AUTO_CONFIRM, STATE_LABELS, formatCost, homePath, modelName } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
+import { archivedLabel } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 
@@ -159,20 +160,6 @@ export function Chat({
     target.scrollIntoView?.({ block: 'center' });
   });
 
-  const archive = () => act(() => app.api.archive(sessionId).then(() => app.refreshSessions()), 'Not archived');
-  const unarchive = () => act(() => app.api.unarchive(sessionId).then(() => app.refreshSessions()), 'Not restored');
-  const remove = () => {
-    if (!info || !confirm('Delete the session with its history? This cannot be undone.')) return;
-    const projectId = info.project_id;
-    void act(
-      () =>
-        app.api.deleteSession(sessionId).then(() => {
-          app.removeSession(sessionId);
-          location.hash = `#/p/${projectId}`;
-        }),
-      'Not deleted',
-    );
-  };
   const stop = () => act(() => chat.stop(), 'Not stopped');
   // T38: Ask at once, Auto after a one-line confirmation.
   const setMode = (mode: PermissionMode) => {
@@ -183,11 +170,13 @@ export function Chat({
   const pill = <StatePill state={state} timeline={t} />;
   const conn = app.conn !== 'open' && <span class="conn-lost">offline</span>;
 
-  const disabled = state === 'archived' || locked;
+  // T50: archived — read-only, no input; restore and delete are on the archive's rows.
+  const archived = info?.archived ?? false;
+  const disabled = archived || locked;
   const sheet = sheetRequest && firstApproval?.type === 'approval.request' ? firstApproval : undefined;
   return (
     <section
-      class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''}`}
+      class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
       onDragOver={(e) => {
         if (disabled || !e.dataTransfer?.types.includes('Files')) return;
         e.preventDefault();
@@ -296,14 +285,19 @@ export function Chat({
             model={model}
             cost={cost}
             onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
-            onArchive={archive}
-            onUnarchive={unarchive}
-            onDelete={remove}
             onSchedules={() => setSchedules(true)}
             onPermissionMode={setMode}
           />
         )}
       </header>
+      {archived && info && (
+        <div class="archived-band stripes">
+          <IconArchive />
+          <span>
+            {archivedLabel(info, Date.now())} · read-only. Restore or delete it from {phone ? 'the archive' : 'the list on the left'}.
+          </span>
+        </div>
+      )}
       {schedules && <SchedulesPanel api={app.api} sessionId={sessionId} onClose={() => setSchedules(false)} />}
       <div
         class="timeline"
@@ -358,9 +352,8 @@ export function Chat({
           <PermissionBlock event={sheet} call={approvalCall(items, t, sheet.payload.request_id)} actions={actions} sheet />
         </div>
       )}
-      {!system && !locked && !sheet && (
+      {!system && !disabled && !sheet && (
         <Composer
-          disabled={disabled}
           phone={phone}
           commands={info?.commands}
           files={files}
@@ -443,7 +436,8 @@ export function currentMode(info: SessionInfo): PermissionMode {
   return info.permission_mode ?? info.effective_permission_mode ?? 'ask';
 }
 
-/** "More": archive, restore and delete; on a phone also the path, model and cost. */
+/** "More": schedules and the permission mode; on a phone also the path, model and cost.
+ *  Archiving is on the list's rows, restore and delete on the archive's (T50). */
 function MoreMenu({
   info,
   phone,
@@ -451,9 +445,6 @@ function MoreMenu({
   model,
   cost,
   onRetry,
-  onArchive,
-  onUnarchive,
-  onDelete,
   onSchedules,
   onPermissionMode,
 }: {
@@ -464,9 +455,6 @@ function MoreMenu({
   cost?: number;
   /** On a phone "Retry" lives here, not in the crowded header. */
   onRetry?: () => void;
-  onArchive: () => void;
-  onUnarchive: () => void;
-  onDelete: () => void;
   onSchedules: () => void;
   onPermissionMode: (mode: PermissionMode) => void;
 }) {
@@ -501,7 +489,6 @@ function MoreMenu({
       {label}
     </button>
   );
-  const archived = info.state === 'archived';
   return (
     <div class="menu-box" ref={box}>
       <button
@@ -530,7 +517,7 @@ function MoreMenu({
           )}
           {onRetry && item('btn-retry', 'Retry', onRetry)}
           {item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
-          {!archived &&
+          {!info.archived &&
             (currentMode(info) === 'auto'
               ? item('btn-mode-ask', 'Switch to Ask', () => onPermissionMode('ask'), 'Ask before tool calls outside the worker\'s rules')
               : item(
@@ -539,9 +526,6 @@ function MoreMenu({
                   () => onPermissionMode('auto'),
                   "Claude Code decides tool calls itself; the worker's deny list is the only limit",
                 ))}
-          {!archived && item('btn-archive', 'Archive', onArchive, 'Move the session to the archive; the agent stops')}
-          {archived && item('btn-unarchive', 'Restore', onUnarchive)}
-          {archived && item('btn-delete menu-danger', 'Delete', onDelete)}
         </div>
       )}
     </div>
@@ -584,7 +568,6 @@ export function toOutgoing(file: File): Promise<OutgoingFile> {
 
 export function Composer({
   onSend,
-  disabled,
   placeholder,
   phone = false,
   commands,
@@ -593,7 +576,6 @@ export function Composer({
   onRemove = () => {},
 }: {
   onSend: (text: string) => void;
-  disabled: boolean;
   placeholder?: string;
   phone?: boolean;
   /** The runtime's slash commands: `/` at the start of the text opens a list of them. */
@@ -605,12 +587,12 @@ export function Composer({
   const [text, setText] = useState('');
   const area = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
-  const canSend = !disabled && (text.trim() !== '' || files.length > 0);
+  const canSend = text.trim() !== '' || files.length > 0;
   // The slash command popup (T27): the matches, the highlighted one, and the text Esc closed
   // it at (typing on reopens it).
   const [pick, setPick] = useState(0);
   const [closedAt, setClosedAt] = useState<string | null>(null);
-  const matches = disabled || closedAt === text ? [] : matchCommands(commands, text);
+  const matches = closedAt === text ? [] : matchCommands(commands, text);
   const popup = matches.length > 0;
   const active = Math.min(pick, matches.length - 1);
   const list = useRef<HTMLUListElement>(null);
@@ -645,7 +627,6 @@ export function Composer({
       class="icon-btn btn-attach"
       aria-label="Attach files"
       title="Attach files"
-      disabled={disabled}
       onClick={() => picker.current?.click()}
     >
       <IconAttach />
@@ -666,8 +647,7 @@ export function Composer({
       aria-controls={popup ? 'composer-commands' : undefined}
       aria-activedescendant={popup ? `composer-command-${active}` : undefined}
       rows={phone ? 1 : 2}
-      placeholder={placeholder ?? (disabled ? 'Session archived' : 'Message')}
-      disabled={disabled}
+      placeholder={placeholder ?? 'Message'}
       value={text}
       onInput={(e) => edit((e.currentTarget as HTMLTextAreaElement).value)}
       onPaste={(e) => {
@@ -772,7 +752,7 @@ export function Composer({
             {textarea}
             <div class="composer-row">
               {attach}
-              <span class="composer-hint">{disabled ? '' : 'Enter to send, Shift+Enter for a new line'}</span>
+              <span class="composer-hint">Enter to send, Shift+Enter for a new line</span>
               {send}
             </div>
           </>

@@ -138,6 +138,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
 
   /** @type {Map<string, any>} */
   const sessions = new Map();
+  /** The list order per project (T50): `{mode, session_ids}`; one user here. */
+  const orders = new Map();
   const clients = new Set();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms * speed));
 
@@ -264,6 +266,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       locked_by: s.locked ?? (s.turn ? 'hqc' : 'none'),
       last_seq: s.last_seq,
       archived: s.archived,
+      ...(s.archived_at ? { archived_at: s.archived_at } : {}),
       state: sum.state,
       queue_len: sum.queue_len,
       last_read_seq: s.read_seq,
@@ -594,6 +597,26 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/projects/:pid/sessions', (p) => ({
     sessions: [...sessions.values()].filter((s) => s.project_id === p.pid).map(info),
   }));
+  // The order of the list (T50), by the hub's rules: only the project's unarchived sessions,
+  // the missing ones first, newest first.
+  const orderOf = (pid) => {
+    const live = [...sessions.values()]
+      .filter((s) => s.project_id === pid && !s.archived && !s.system)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map((s) => s.id);
+    const o = orders.get(pid) ?? { mode: 'state', session_ids: [] };
+    const kept = [...new Set(o.session_ids)].filter((id) => live.includes(id));
+    return { mode: o.mode, session_ids: [...live.filter((id) => !kept.includes(id)), ...kept] };
+  };
+  route('GET', '/api/projects/:pid/session_order', (p) => orderOf(projectOr404(p.pid).id));
+  route('PUT', '/api/projects/:pid/session_order', (p, body) => {
+    const pid = projectOr404(p.pid).id;
+    if (body?.mode !== undefined && !['state', 'recent', 'custom'].includes(body.mode)) throw fail(422, 'bad_request', 'unknown mode');
+    const cur = orders.get(pid) ?? { mode: 'state', session_ids: [] };
+    orders.set(pid, { mode: body?.mode ?? cur.mode, session_ids: body?.session_ids ?? cur.session_ids });
+    if (body?.session_ids) orders.set(pid, orderOf(pid));
+    return orderOf(pid);
+  });
   route('POST', '/api/projects/:pid/sessions', (p, body) => {
     const pr = projectOr404(p.pid);
     const wsId = body?.workspace_id ?? pr.default_workspace_id;
@@ -752,6 +775,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/sessions/:id', (p) => info(sessionOr404(p.id)));
   route('PATCH', '/api/sessions/:id', (p, body) => {
     const s = sessionOr404(p.id);
+    if (typeof body?.title === 'string' && body.title.trim()) {
+      s.title = body.title.trim();
+      pushSummary(s);
+    }
     const mode = body?.permission_mode;
     if (mode !== undefined) {
       if (mode !== 'ask' && mode !== 'auto') throw fail(400, 'bad_request', 'permission_mode is ask or auto');
@@ -792,7 +819,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   // Like the hub: open requests are cancelled with `stopped`, the turn ends without a
   // system event (the runtime reports the interrupted turn as `status idle`).
   // Archiving stops the agent and closes open requests; the session stays as history
-  // (SPEC §17.4). Deleting is only for archived sessions.
+  // (SPEC §17.4).
   route('POST', '/api/sessions/:id/archive', (p) => {
     const s = sessionOr404(p.id);
     if (s.system) throw fail(409, 'system_session', "the worker's service session cannot be archived");
@@ -802,18 +829,20 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       s.turn.onAbort?.();
     }
     s.archived = true;
+    s.archived_at = now();
     pushSummary(s);
-    return { archived: true };
+    return info(s);
   });
   route('POST', '/api/sessions/:id/unarchive', (p) => {
     const s = sessionOr404(p.id);
     s.archived = false;
+    delete s.archived_at;
     pushSummary(s);
-    return { archived: false };
+    return info(s);
   });
   route('DELETE', '/api/sessions/:id', (p) => {
     const s = sessionOr404(p.id);
-    if (!s.archived) throw fail(409, 'not_archived', 'archive the session first');
+    if (s.system) throw fail(409, 'system_session', "the worker's service session cannot be deleted");
     sessions.delete(p.id);
     return { deleted: true };
   });

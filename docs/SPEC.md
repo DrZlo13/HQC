@@ -1045,7 +1045,7 @@ archive button and "⋯" (Rename, Delete with a confirmation in the row); on a p
 (or a right click) opens a bottom sheet with Archive, Rename and Delete (confirmed in a second
 step). Archiving from a row hides it at once and shows "Archived «title» · Undo" for 5 s; the
 `/archive` call goes only when the toast ends, when another row is archived (the previous one is
-sent first), before Reorder starts, or when the page is hidden or left (`fetch` with
+sent first), before Reorder or archive mode opens, or when the page is hidden or left (`fetch` with
 `keepalive`); Undo cancels it, so nothing reaches the hub and the row is back in its place. The
 session header has no archive, restore or delete. "Archive N" under the list opens archive mode:
 the sidebar without the project tint, a hatched header with a back arrow, "Archive", "<project>

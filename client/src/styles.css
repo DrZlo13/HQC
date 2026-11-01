@@ -840,9 +840,378 @@ select.input {
   padding: 0 8px;
   font-size: 12px;
 }
-.btn-archive-toggle.is-on {
+
+/* ---- T50: row actions, the delayed archive, Reorder, archive mode ---- */
+
+.btn-danger {
+  color: var(--danger);
+}
+.btn-danger-fill {
+  background: #c8483a;
+  border-color: #c8483a;
+  color: #fff5f2;
+  font-weight: 600;
+}
+
+.order-row {
+  display: flex;
+  gap: 6px;
+}
+.order-row .seg-group {
+  flex: 1;
+}
+.btn-reorder {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.reorder-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+}
+.reorder-icon {
+  display: flex;
+  color: var(--accent);
+}
+.reorder-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.reorder-bar .btn-small {
+  height: 30px;
+  padding: 0 10px;
+}
+.is-reordering .group-reorder .group-label {
+  color: var(--accent);
+}
+
+.session-item {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  border-radius: 8px;
+}
+.session-item > .session-row {
+  flex: 1;
+  min-width: 0;
+}
+.session-item.is-dragging {
+  background: var(--row-hover);
+  box-shadow:
+    0 0 0 1px var(--accent-line),
+    0 10px 24px rgba(0, 0, 0, 0.45);
+  z-index: 2;
+}
+.session-item.is-confirming {
+  background: rgba(200, 72, 58, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(245, 148, 134, 0.35);
+}
+
+/* On hover or focus the time gives way to the archive button and "⋯". */
+.row-acts {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: flex;
+  gap: 2px;
+  padding-left: 6px;
+  border-radius: 8px;
+  background: var(--row-hover);
+  opacity: 0;
+}
+.session-row.is-current ~ .row-acts {
+  background: var(--row-on);
+}
+.session-item:hover .row-acts,
+.session-item:focus-within .row-acts {
+  opacity: 1;
+}
+.row-acts .icon-btn {
+  width: 30px;
+  height: 30px;
+  color: var(--text2);
+}
+
+.row-confirm {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 8px 28px;
+}
+.row-confirm-text {
+  margin-right: 4px;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+.row-confirm .btn-small {
+  height: 30px;
+  padding: 0 10px;
+}
+
+.grip {
+  flex: 0 0 28px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.grip:hover,
+.grip:focus-visible {
   color: var(--text);
   background: var(--row-hover);
+}
+.grip:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.is-dragging .grip {
+  cursor: grabbing;
+}
+
+.toast {
+  margin-top: 8px;
+  padding: 8px 8px 8px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text2);
+}
+.toast .icon {
+  color: var(--muted);
+}
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toast-archive .toast-text {
+  color: var(--text);
+}
+.btn-undo {
+  height: 30px;
+  padding: 0 10px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.btn-archive-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+.archive-count {
+  color: var(--muted);
+}
+
+.list-hint {
+  margin: 8px 16px 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* The phone's bottom sheet of a row (MList2). */
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(6, 5, 4, 0.6);
+}
+.action-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 41;
+  border-radius: 20px 20px 0 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px calc(24px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.45);
+}
+.action-sheet-grab {
+  align-self: center;
+  width: 40px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border);
+  margin-bottom: 10px;
+}
+.action-sheet-head {
+  padding: 0 16px 12px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.action-sheet-title {
+  font-weight: 700;
+  font-size: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.action-sheet-where {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.action-sheet-note {
+  margin: 0;
+  padding: 0 16px 12px;
+  font-size: 14px;
+  color: var(--text2);
+}
+.sheet-btn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  height: 52px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text);
+  font: 500 16px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+.sheet-btn:hover {
+  background: var(--row-hover);
+}
+.sheet-danger {
+  color: var(--danger);
+}
+.btn-large {
+  height: 48px;
+  margin-top: 8px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+
+/* Archive mode (`Archive`, `MArchive2`): no project tint, hatching on top. */
+.stripes {
+  background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0 8px, transparent 8px 16px);
+}
+.sessions-archive,
+.layout-phone .sessions.sessions-archive {
+  background: var(--side-plain);
+}
+.archive-head {
+  flex: none;
+  padding: 14px 14px 14px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.archive-head-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.archive-tile {
+  flex: 0 0 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.archive-note {
+  margin: 0 0 0 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text2);
+}
+.archive-tools {
+  padding-top: 12px;
+}
+.archive-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.archive-row {
+  padding: 10px 10px 10px 8px;
+  border-radius: 8px;
+}
+.archive-row.is-current {
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.archive-row.is-confirming {
+  background: rgba(200, 72, 58, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(245, 148, 134, 0.35);
+}
+.archive-row-main {
+  display: flex;
+  gap: 10px;
+}
+.archive-icon {
+  flex: 0 0 16px;
+  margin-top: 2px;
+  display: flex;
+  color: var(--muted);
+}
+.archive-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  color: inherit;
+  text-decoration: none;
+}
+.archive-row .session-title {
+  color: var(--text2);
+}
+.archive-acts {
+  margin: 8px 0 0 20px;
+  display: flex;
+  gap: 4px;
+}
+.archive-acts .btn-small {
+  height: 30px;
+  padding: 0 10px;
+}
+.btn-restore {
+  color: var(--accent);
+}
+.archive-row .row-confirm {
+  margin: 8px 0 0 26px;
+  padding: 0;
 }
 
 .worker-list {
@@ -1113,6 +1482,99 @@ select.input {
   margin: 0 16px 10px;
 }
 
+.sessions-phone .btn-reorder {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+}
+.sessions-phone .reorder-bar {
+  padding: 4px 4px 4px 14px;
+  border-radius: 10px;
+}
+.sessions-phone .reorder-title {
+  font-size: 15px;
+}
+.sessions-phone .reorder-bar .btn-small {
+  height: 40px;
+  padding: 0 14px;
+}
+/* A long press must not select text or open the browser's own menu. */
+.sessions-phone .session-item {
+  border-radius: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.sessions-phone .grip {
+  flex-basis: 56px;
+  border-radius: 0;
+}
+.sessions-phone .toast {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(92px + env(safe-area-inset-bottom));
+  z-index: 5;
+  margin: 0;
+  padding: 6px 6px 6px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.sessions-phone.sessions-archive .toast {
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  padding: 12px 14px;
+}
+.sessions-phone .btn-undo {
+  height: 40px;
+  font-size: 14px;
+}
+.sessions-phone .btn-archive-open {
+  height: 48px;
+  font-size: 15px;
+  color: var(--text2);
+}
+.sessions-phone .archive-head {
+  padding: 6px 12px 14px 4px;
+  padding-top: calc(6px + env(safe-area-inset-top));
+  gap: 6px;
+}
+.sessions-phone .archive-head .project-title {
+  font-size: 18px;
+}
+.sessions-phone .archive-note {
+  margin-left: 14px;
+  font-size: 13px;
+}
+.sessions-phone .archive-list {
+  gap: 0;
+  padding-top: 8px;
+}
+.sessions-phone .archive-row {
+  padding: 12px 16px;
+  border-radius: 0;
+}
+.sessions-phone .archive-acts,
+.sessions-phone .archive-row .row-confirm {
+  margin: 10px 0 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.sessions-phone .archive-row .row-confirm-text {
+  grid-column: 1 / -1;
+  font-size: 13.5px;
+}
+.sessions-phone .archive-acts .btn-small,
+.sessions-phone .archive-row .row-confirm .btn-small {
+  height: 44px;
+  font-size: 14px;
+}
+.sessions-phone .archive-acts .btn-ghost {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
 .sessions-phone .new-session .input {
   font-size: 16px;
 }
@@ -1290,6 +1752,32 @@ select.input {
 }
 .pill.state-idle .pill-dot {
   background: var(--online);
+}
+/* T50: the "Archived" chip, the hatched band and the dimmed feed. */
+.pill.state-archived {
+  background: var(--surface);
+  color: var(--text2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.pill.state-archived .pill-dot {
+  display: none;
+}
+.archived-band {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 28px;
+  border-bottom: 1px solid var(--border);
+  background-color: var(--side-plain);
+  font-size: 12.5px;
+  color: var(--text2);
+}
+.archived-band .icon {
+  color: var(--muted);
+}
+.chat-archived .feed {
+  opacity: 0.82;
 }
 
 .btn-stop .icon {

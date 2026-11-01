@@ -21,6 +21,7 @@ import {
   parseSearchPage,
   parseServerFrame,
   parseSessionInfo,
+  parseSessionOrder,
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceConflict,
@@ -105,6 +106,13 @@ describe('examples/wire', () => {
   });
 
   // REST bodies (hqc_proto::api).
+  it('reads the list order (T50)', () => {
+    const o = parseSessionOrder(load('api.session_order.json'));
+    expect(o).toEqual(load('api.session_order.request.json'));
+    expect(parseSessionOrder({ mode: 'alphabetical', session_ids: [] }).mode).toBe('state');
+    expect(() => parseSessionOrder({ mode: 'custom', session_ids: [1] })).toThrow();
+  });
+
   it('reads the session object', () => {
     const s = parseSessionInfo(load('api.session.json'));
     expect(s).toMatchObject({ title: 'hqc: run the tests', state: 'running', unread: 1, archived: false });
@@ -120,6 +128,9 @@ describe('examples/wire', () => {
     expect(s.spawned_by).toEqual({ session_id: '0199f3a2-7c10-7000-8000-000000000002', address: 'hqc/planner' });
     expect(sys.spawned_by).toBeUndefined();
     expect(() => parseSessionInfo({ ...(load('api.session.json') as object), commands: [1] })).toThrow();
+    // T50: when it was archived; absent for a live one.
+    expect(parseSessionInfo(load('api.session.archived.json'))).toMatchObject({ archived: true, archived_at: '2026-11-01T22:45:00Z' });
+    expect(s.archived_at).toBeUndefined();
     // T39: a turn capped by a message, in the session and its summary; the cap in a chain.
     expect(s.permission_capped_by).toBe('hqc/build-bot');
     expect(sys.permission_capped_by).toBeUndefined();

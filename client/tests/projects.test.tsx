@@ -328,8 +328,9 @@ it('does not take over a session open in VS Code', async () => {
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
 
-// Archive from the chat header, find the session under "Archive", bring it back, delete it.
-it('archives, restores and deletes a session', async () => {
+// T50: archive from the row (Undo first, then for real by leaving the page), the archived
+// session read-only, restore and delete from archive mode.
+it('archives from the row, restores and deletes from the archive', async () => {
   const personal = projectRow('Personal')!;
   location.hash = personal.getAttribute('href')!;
   const row = await until('a session', () => $$('.session-row').find((r) => r.textContent?.includes('Empty session')));
@@ -338,25 +339,44 @@ it('archives, restores and deletes a session', async () => {
   const pid = app.sessions.get(sid)!.project_id;
   location.hash = href;
   await until('chat with the menu', () => $('.chat') && $('.btn-more'));
-  // "Archive", "Restore", "Delete" live in the "More" menu (T26).
-  expect(await menuItem('.btn-unarchive')).toBeNull();
-  (await menuItem('.btn-archive'))!.click();
-  await until('archived', () => $('.chat .state')?.textContent?.includes('Archived'));
-  await until('gone from the list', () => !$$('.session-row').some((r) => r.getAttribute('href') === href));
-  expect($('.menu')).toBeNull();
+  // Not in the header any more.
   expect(await menuItem('.btn-archive')).toBeNull();
+  expect(await menuItem('.btn-delete')).toBeNull();
+  $<HTMLButtonElement>('.btn-more')!.click();
+  const item = () => $$('.session-item').find((r) => r.querySelector('.session-row')?.getAttribute('href') === href);
+  const archiveRow = () => item()!.querySelector<HTMLButtonElement>('.btn-row-archive')!.click();
 
-  $<HTMLButtonElement>('.btn-archive-toggle')!.click();
-  await until('listed under Archive', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
+  archiveRow();
+  await until('hidden with Undo', () => !item() && $('.toast-archive'));
+  button('Undo')!.click();
+  await until('back', () => item() && !$('.toast-archive'));
+  expect(app.sessions.get(sid)!.archived).toBe(false);
 
-  (await menuItem('.btn-unarchive'))!.click();
-  await until('restored', () => $('.chat .state')?.textContent === 'Idle');
-  $<HTMLButtonElement>('.btn-archive-toggle')!.click();
-  await until('back in the list', () => $$('.session-row').some((r) => r.getAttribute('href') === href));
+  archiveRow();
+  await until('hidden', () => !item());
+  win.dispatchEvent(new win.Event('pagehide'));
+  await until('archived on the hub', () => app.sessions.get(sid)!.archived_at);
+  await until('read-only', () => $('.chat .state')?.textContent === 'Archived' && $('.archived-band') && !$('.chat textarea'));
+  expect($('.archived-band')!.textContent).toMatch(/^Archived today at \d\d:\d\d · read-only\./);
 
-  (await menuItem('.btn-archive'))!.click();
-  await until('archived again', () => $('.chat .state')?.textContent?.includes('Archived'));
-  (await menuItem('.btn-delete'))!.click(); // confirm() is stubbed to true
+  $<HTMLButtonElement>('.btn-archive-open')!.click();
+  const archived = () => $$('.archive-row').find((r) => r.querySelector('a')?.getAttribute('href') === href);
+  await until('listed in the archive', () => $('.sessions-archive') && archived());
+  archived()!.querySelector<HTMLButtonElement>('.btn-restore')!.click();
+  await until('restored', () => $('.chat .state')?.textContent === 'Idle' && !archived());
+  expect($('.chat textarea')).not.toBeNull();
+  $<HTMLButtonElement>('.btn-archive-back')!.click();
+  await until('back in the list', () => item());
+
+  archiveRow();
+  win.dispatchEvent(new win.Event('pagehide'));
+  await until('archived again', () => app.sessions.get(sid)!.archived_at);
+  $<HTMLButtonElement>('.btn-archive-open')!.click();
+  await until('in the archive', () => archived());
+  archived()!.querySelector<HTMLButtonElement>('.btn-delete')!.click();
+  await until('confirm', () => archived()!.querySelector('.btn-confirm-delete'));
+  archived()!.querySelector<HTMLButtonElement>('.btn-confirm-delete')!.click();
   await until('deleted', () => !app.sessions.has(sid));
   expect(location.hash).toBe(`#/p/${pid}`);
+  $<HTMLButtonElement>('.btn-archive-back')?.click();
 });

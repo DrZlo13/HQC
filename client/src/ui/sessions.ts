@@ -1,40 +1,34 @@
-// The session list of a project (T26): two orders — by state ("Needs you", "Running",
-// "Idle") and by recency ("Today", "Yesterday", "Earlier"), the choice kept in this
-// browser's localStorage — a search over title and path, the counters of the header.
-// Pure logic, no DOM.
+// The session list of a project (T26, T50): three orders — by state ("Needs you",
+// "Running", "Idle"), by recency ("Today", "Yesterday", "Earlier") and the user's own
+// ("Custom"), the choice and the custom order kept on the hub per user and project — a search
+// over title and path, the counters of the header. Pure logic, no DOM.
 
-import type { SessionInfo } from '../proto';
-import { daysAgo } from './labels';
-
-export type ListMode = 'state' | 'recent';
+import type { ListMode, SessionInfo } from '../proto';
+import { daysAgo, formatDay } from './labels';
 
 export const LIST_MODES: { id: ListMode; label: string }[] = [
   { id: 'state', label: 'State' },
   { id: 'recent', label: 'Recent' },
+  { id: 'custom', label: 'Custom' },
 ];
 
-const MODE_KEY = 'hqc.sessionOrder';
-
-function storage(): Storage | undefined {
-  try {
-    return globalThis.localStorage ?? undefined;
-  } catch {
-    // Storage may be off (privacy settings): the default order then.
-    return undefined;
-  }
+/** `list` (newest activity first) in the order of `placed`, as the hub orders it: ids not in
+ *  `list` dropped, sessions missing from `placed` (one created since) first. */
+export function arrange(list: SessionInfo[], placed: string[]): SessionInfo[] {
+  const at = new Map(placed.map((id, i) => [id, i]));
+  const missing = list.filter((s) => !at.has(s.id));
+  const kept = list.filter((s) => at.has(s.id)).sort((a, b) => at.get(a.id)! - at.get(b.id)!);
+  return [...missing, ...kept];
 }
 
-export function loadMode(): ListMode {
-  const v = storage()?.getItem(MODE_KEY);
-  return v === 'recent' ? 'recent' : 'state';
-}
-
-export function saveMode(mode: ListMode): void {
-  try {
-    storage()?.setItem(MODE_KEY, mode);
-  } catch {
-    // Full or off: the choice lives until the page reloads.
-  }
+/** `order` with `id` moved to position `to` (clamped); the same array when nothing moves. */
+export function moveTo(order: string[], id: string, to: number): string[] {
+  const from = order.indexOf(id);
+  const j = Math.max(0, Math.min(order.length - 1, to));
+  if (from < 0 || from === j) return order;
+  const out = order.filter((x) => x !== id);
+  out.splice(j, 0, id);
+  return out;
 }
 
 /** Which group of "State" a session is in: it waits for the user (a request or an
@@ -46,6 +40,12 @@ export function bucketOf(s: SessionInfo): Bucket {
   if (s.state === 'running' || s.state === 'queued') return 'run';
   if (s.state === 'locked_vscode' && s.held_by?.status === 'busy') return 'run';
   return 'idle';
+}
+
+/** "Archived today at 23:45"; only "Archived" for a session archived before the hub kept
+ *  the time (T50). */
+export function archivedLabel(s: SessionInfo, now: number): string {
+  return s.archived_at ? `Archived ${formatDay(s.archived_at, now)}` : 'Archived';
 }
 
 /** The line under the title. */
@@ -87,12 +87,18 @@ export interface SessionGroup {
   label: string;
   /** "Needs you" is drawn in amber. */
   wait?: boolean;
+  /** One list in the user's order: no count. */
+  plain?: boolean;
   items: SessionInfo[];
 }
 
-/** Groups of the list in `mode`, empty ones left out; inside a group the newest first. */
-export function groupSessions(list: SessionInfo[], mode: ListMode, now: number): SessionGroup[] {
+/** Groups of the list in `mode`, empty ones left out; inside a group the newest first, in
+ *  Custom the order of `placed`. */
+export function groupSessions(list: SessionInfo[], mode: ListMode, now: number, placed: string[] = []): SessionGroup[] {
   const sorted = [...list].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
+  if (mode === 'custom') {
+    return sorted.length ? [{ id: 'custom', label: 'Custom order', plain: true, items: arrange(sorted, placed) }] : [];
+  }
   const groups: SessionGroup[] =
     mode === 'state'
       ? [

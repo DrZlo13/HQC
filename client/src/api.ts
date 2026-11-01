@@ -19,6 +19,7 @@ import {
   parseSchedule,
   parseSessionInfo,
   parseSessionList,
+  parseSessionOrder,
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceList,
@@ -39,7 +40,9 @@ import {
   type ProjectColor,
   type SearchPage,
   type Schedule,
+  type ListMode,
   type SessionInfo,
+  type SessionOrder,
   type Theme,
   type Workspace,
   type WorkspacePermissions,
@@ -94,12 +97,14 @@ export class Api {
     private readonly fetchImpl: Fetch = (...a) => fetch(...a),
   ) {}
 
-  /** `body`: JSON, or `FormData` sent as multipart (the browser sets its content type). */
-  private async req(method: string, path: string, body?: unknown): Promise<unknown> {
+  /** `body`: JSON, or `FormData` sent as multipart (the browser sets its content type).
+   *  `keepalive`: the request outlives the page (sent while it is being left). */
+  private async req(method: string, path: string, body?: unknown, keepalive = false): Promise<unknown> {
     const form = typeof FormData !== 'undefined' && body instanceof FormData;
     const res = await this.fetchImpl(this.base + path, {
       method,
       credentials: 'include',
+      ...(keepalive ? { keepalive } : {}),
       headers: body === undefined || form ? undefined : { 'content-type': 'application/json' },
       body: body === undefined ? undefined : form ? (body as FormData) : JSON.stringify(body),
     });
@@ -168,8 +173,17 @@ export class Api {
     return parseSessionInfo(data);
   }
 
-  async patchSession(id: string, patch: { permission_mode?: PermissionMode }): Promise<SessionInfo> {
+  async patchSession(id: string, patch: { title?: string; permission_mode?: PermissionMode }): Promise<SessionInfo> {
     return parseSessionInfo(await this.req('PATCH', `/api/sessions/${enc(id)}`, patch));
+  }
+
+  /** The user's order of the project's session list (T50). */
+  async sessionOrder(projectId: string): Promise<SessionOrder> {
+    return parseSessionOrder(await this.req('GET', `/api/projects/${enc(projectId)}/session_order`));
+  }
+
+  async putSessionOrder(projectId: string, body: { mode?: ListMode; session_ids?: string[] }): Promise<SessionOrder> {
+    return parseSessionOrder(await this.req('PUT', `/api/projects/${enc(projectId)}/session_order`, body));
   }
 
   async projects(): Promise<Project[]> {
@@ -342,15 +356,16 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/retry`);
   }
 
-  async archive(id: string): Promise<void> {
-    await this.req('POST', `/api/sessions/${enc(id)}/archive`);
+  /** `keepalive`: sent while the page is left (T50, the delayed archive). */
+  async archive(id: string, keepalive = false): Promise<SessionInfo> {
+    return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/archive`, undefined, keepalive));
   }
 
-  async unarchive(id: string): Promise<void> {
-    await this.req('POST', `/api/sessions/${enc(id)}/unarchive`);
+  async unarchive(id: string): Promise<SessionInfo> {
+    return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/unarchive`));
   }
 
-  /** Deletes an archived session with its history (SPEC §17.4). */
+  /** Deletes a session with its history (SPEC §17.4). */
   async deleteSession(id: string): Promise<void> {
     await this.req('DELETE', `/api/sessions/${enc(id)}`);
   }

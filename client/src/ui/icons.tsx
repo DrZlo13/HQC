@@ -128,6 +128,52 @@ export const IconAttach = ({ size = 17 }: { size?: number }) => (
   </Svg>
 );
 
+export const IconArchive = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <rect x="3" y="4" width="14" height="4" rx="1" />
+    <path d="M4.5 8v7a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V8M8 11.5h4" />
+  </Svg>
+);
+
+export const IconRestore = ({ size = 15 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M4 9.5a6 6 0 1 1 1.8 4.3" />
+    <path d="M4 4.5V9.5h5" />
+  </Svg>
+);
+
+export const IconTrash = ({ size = 15 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M4 6h12M8 6V4h4v2M5.5 6l.8 10a1 1 0 0 0 1 .9h5.4a1 1 0 0 0 1-.9l.8-10" />
+  </Svg>
+);
+
+export const IconRename = ({ size = 15 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M6 3h5l4 4v10H6z" />
+    <path d="M11 3v4h4" />
+  </Svg>
+);
+
+/** Reorder: two arrows, up and down. */
+export const IconReorder = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M7 3v14M3.5 6.5L7 3l3.5 3.5M13 17V3M9.5 13.5L13 17l3.5-3.5" />
+  </Svg>
+);
+
+/** The drag handle: six dots. */
+export const IconGrip = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size} fill>
+    <circle cx="7.5" cy="4" r="1.4" />
+    <circle cx="12.5" cy="4" r="1.4" />
+    <circle cx="7.5" cy="10" r="1.4" />
+    <circle cx="12.5" cy="10" r="1.4" />
+    <circle cx="7.5" cy="16" r="1.4" />
+    <circle cx="12.5" cy="16" r="1.4" />
+  </Svg>
+);
+
 export const IconCode = ({ size = 18 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M7 6l-4 4 4 4M13 6l4 4-4 4" />

@@ -906,6 +906,9 @@ export interface SessionInfo {
   last_seq: number;
   last_read_seq: number;
   archived: boolean;
+  /** When it was archived (T50); absent for a live session and one archived before the
+   *  hub kept the time. */
+  archived_at?: string;
   updated_at: string;
   /** The service session of worker `worker_id` (SPEC §10.2): no input, listed under
    *  "Workers", titled with the worker's name. */
@@ -1001,6 +1004,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     last_seq: num(o, 'last_seq'),
     last_read_seq: num(o, 'last_read_seq'),
     archived: bool(o, 'archived'),
+    archived_at: optStr(o, 'archived_at'),
     updated_at: str(o, 'updated_at'),
     system: optBool(o, 'system') ?? false,
     held_by: optHeldBy(o),
@@ -1021,6 +1025,28 @@ function optSpawnedBy(o: Obj): SpawnedBy | undefined {
 /** `{sessions: [...]}` of `GET /api/projects/{id}/sessions`. */
 export function parseSessionList(v: unknown): SessionInfo[] {
   return arr(obj(v, 'session list'), 'sessions').map(parseSessionInfo);
+}
+
+export const LIST_MODE_NAMES = ['state', 'recent', 'custom'] as const;
+/** How a project's session list is ordered (T50): by state, by recency, or the user's own. */
+export type ListMode = (typeof LIST_MODE_NAMES)[number];
+
+/** `GET/PUT /api/projects/{id}/session_order` (T50): the user's order of a project's list,
+ *  every unarchived session in it, the ones not placed yet first. */
+export interface SessionOrder {
+  mode: ListMode;
+  session_ids: Uuid[];
+}
+
+export function parseSessionOrder(v: unknown): SessionOrder {
+  const o = obj(v, 'session order');
+  return {
+    mode: oneOf(o, 'mode', LIST_MODE_NAMES) ?? 'state',
+    session_ids: arr(o, 'session_ids').map((x, i) => {
+      if (typeof x !== 'string') throw new ProtoError(`session order: session_ids[${i}] is not a string`);
+      return x;
+    }),
+  };
 }
 
 /** A project (SPEC §3 Project, §6). */

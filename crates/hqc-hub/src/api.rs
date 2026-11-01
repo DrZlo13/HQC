@@ -16,7 +16,8 @@ use hqc_proto::{
         self, CandidateList, CreateProject, CreateSessionRequest, CreateWorkspaceImport, DirList,
         EnrollConfirmRequest, EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest,
         EnrollStarted, EventPage, InputRequest, InputResponse, PatchProject, PatchWorkspace,
-        ProjectList, PushSubscription, SessionList, VapidKey, WorkspaceList,
+        ProjectList, PushSubscription, PutSessionOrder, SessionList, SessionOrder,
+        SessionOrderMode, VapidKey, WorkspaceList,
     },
     event::CancelReason,
     frame::{
@@ -605,6 +606,71 @@ pub async fn project_sessions(
     }))
 }
 
+/// `live` (the project's listed sessions, newest first) in the order of `placed`: ids of
+/// `placed` that are not in `live` are dropped, sessions of `live` missing from `placed` go
+/// first, newest first (T50: a new session is on top of a custom order).
+pub(crate) fn arrange(live: &[Uuid], placed: &[Uuid]) -> Vec<Uuid> {
+    let mut kept: Vec<Uuid> = Vec::with_capacity(live.len());
+    for id in placed {
+        if live.contains(id) && !kept.contains(id) {
+            kept.push(*id);
+        }
+    }
+    let mut out: Vec<Uuid> = live
+        .iter()
+        .filter(|id| !kept.contains(id))
+        .copied()
+        .collect();
+    out.extend(kept);
+    out
+}
+
+async fn session_order_of(app: &AppState, user: Uuid, project: Uuid) -> ApiResult<SessionOrder> {
+    let live = db::live_session_ids(&app.db, project).await?;
+    let (mode, placed) = db::session_order(&app.db, user, project)
+        .await?
+        .unwrap_or_default();
+    Ok(SessionOrder {
+        mode: SessionOrderMode::parse(&mode).unwrap_or_default(),
+        session_ids: arrange(&live, &placed),
+    })
+}
+
+/// `GET /api/projects/{id}/session_order` (T50, SPEC §6): the user's order of the list.
+pub async fn get_session_order(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<SessionOrder>> {
+    project_for(&app, &user, id).await?;
+    Ok(Json(session_order_of(&app, user.id, id).await?))
+}
+
+/// `PUT /api/projects/{id}/session_order` {mode?, session_ids?}: only the project's listed
+/// sessions are kept, so another project's, another user's, an archived or an unknown id is
+/// ignored.
+pub async fn put_session_order(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<PutSessionOrder>,
+) -> ApiResult<Json<SessionOrder>> {
+    project_for(&app, &user, id).await?;
+    let ids = match &b.session_ids {
+        Some(placed) => Some(arrange(&db::live_session_ids(&app.db, id).await?, placed)),
+        None => None,
+    };
+    db::put_session_order(
+        &app.db,
+        user.id,
+        id,
+        b.mode.map(SessionOrderMode::as_str),
+        ids.as_deref(),
+    )
+    .await?;
+    Ok(Json(session_order_of(&app, user.id, id).await?))
+}
+
 /// `cwd` is relative to the workspace (SPEC §3 Session); the worker checks it again
 /// against its own config (SPEC §2.1).
 fn valid_cwd(cwd: &str) -> bool {
@@ -1072,7 +1138,9 @@ pub async fn archive(
     let s = session_for(&app, &user, id, Action::Manage).await?;
     not_system(&s)?;
     sqlx::query(
-        "UPDATE sessions SET archived = true, turn_open = false, updated_at = now() WHERE id = $1",
+        "UPDATE sessions SET archived = true, archived_at = now(), turn_open = false,
+            updated_at = now()
+         WHERE id = $1",
     )
     .bind(id)
     .execute(&app.db)
@@ -1103,7 +1171,9 @@ pub async fn unarchive(
             "the session's workspace was removed".into(),
         ));
     }
-    sqlx::query("UPDATE sessions SET archived = false, updated_at = now() WHERE id = $1")
+    sqlx::query(
+        "UPDATE sessions SET archived = false, archived_at = NULL, updated_at = now() WHERE id = $1",
+    )
         .bind(id)
         .execute(&app.db)
         .await?;

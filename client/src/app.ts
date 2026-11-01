@@ -1,21 +1,28 @@
 // Application-wide state: who I am, my projects, the sessions of all of them and their live
-// `state`/`queue_len`/unread from `subscribe_summary` (SPEC §6, §17.1), and the workspaces
-// of the projects that have been looked at.
+// `state`/`queue_len`/unread from `subscribe_summary` (SPEC §6, §17.1), the workspaces and
+// the list order (T50) of the projects that have been looked at, and a session archived from
+// the list that has not gone to the hub yet.
 
 import { Api, ApiError, type NewSessionOptions } from './api';
 import type {
   ClarifyAnswer,
+  ListMode,
   Me,
   OpenRequest,
   PermissionMode,
   Project,
   ProjectColor,
   SessionInfo,
+  SessionOrder,
   SessionSummary,
   Theme,
   Workspace,
 } from './proto';
+import { arrange } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
+
+/** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
+export const ARCHIVE_UNDO_MS = 5000;
 
 export class AppState {
   me: Me | null = null;
@@ -29,6 +36,17 @@ export class AppState {
   conn: ConnState = 'closed';
   /** Every open request of the user, oldest first, as the hub last sent it (T37). */
   requests: OpenRequest[] = [];
+  /** By project id: the user's list order (T50), as the hub last gave it; `loadOrder`. */
+  readonly orders = new Map<string, SessionOrder>();
+  /** Archived from the list, not sent yet: hidden at once, sent when the Undo toast ends,
+   *  when another one is archived, before Reorder or archive mode, or when the page is left
+   *  (T50). */
+  pendingArchive: { id: string; title: string } | null = null;
+  private archiveTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The list shows the project's archive (T50); back to the sessions on a project switch. */
+  archiveMode = false;
+  /** A list action the hub refused (archive, restore, delete, rename, order). */
+  listNotice: string | null = null;
   private readonly listeners = new Set<() => void>();
   private refreshing: Promise<void> | null = null;
 
@@ -64,7 +82,17 @@ export class AppState {
     this.socket.onRequests((list) => this.setRequests(list));
     this.socket.onSummary((list) => this.mergeSummary(list));
     this.socket.start();
+    this.watchPageLeave(globalThis as unknown as Window);
     this.changed();
+  }
+
+  /** Leaving the page (or hiding it: a phone switching apps) within the Undo window archives
+   *  at once; `keepalive` lets the request outlive the page (T50). */
+  watchPageLeave(win: Window): void {
+    win.addEventListener('pagehide', () => this.commitArchive(true));
+    win.document.addEventListener('visibilitychange', () => {
+      if (win.document.visibilityState === 'hidden') this.commitArchive(true);
+    });
   }
 
   /** The hub's zone of the user follows the browser's: schedules default to it (SPEC §16). */
@@ -114,6 +142,8 @@ export class AppState {
         unknown = true;
         continue;
       }
+      // Archived or restored elsewhere: `archived_at` is not in the summary (T50).
+      if (known.archived !== (s.state === 'archived')) void this.refreshSession(s.session_id);
       this.sessions.set(s.session_id, {
         ...known,
         title: s.title,
@@ -185,22 +215,138 @@ export class AppState {
   selectProject(id: string): void {
     if (this.currentProjectId === id) return;
     this.currentProjectId = id;
+    this.archiveMode = false;
+    this.changed();
+  }
+
+  setArchiveMode(on: boolean): void {
+    if (this.archiveMode === on) return;
+    this.archiveMode = on;
     this.changed();
   }
 
   /** Sessions of the project (the current one by default), newest activity first, without
-   *  archived ones and without the workers' service sessions (listed apart, SPEC §10.2). */
+   *  archived ones, the one waiting to be archived and the workers' service sessions
+   *  (listed apart, SPEC §10.2). */
   sortedSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
-      .filter((s) => !s.archived && !s.system && s.project_id === projectId)
+      .filter((s) => !s.archived && !s.system && s.project_id === projectId && s.id !== this.pendingArchive?.id)
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
-  /** Archived sessions of the project, newest first: the "Archive" view of the list. */
+  /** Archived sessions of the project, the last archived first: archive mode (T50). */
   archivedSessions(projectId = this.currentProjectId): SessionInfo[] {
+    const at = (s: SessionInfo) => s.archived_at ?? '';
     return [...this.sessions.values()]
       .filter((s) => s.archived && !s.system && s.project_id === projectId)
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
+      .sort((a, b) => at(b).localeCompare(at(a)) || b.updated_at.localeCompare(a.updated_at));
+  }
+
+  /** The list's mode for the project (T50): `state` until the hub's record is loaded. */
+  listMode(projectId = this.currentProjectId): ListMode {
+    return (projectId && this.orders.get(projectId)?.mode) || 'state';
+  }
+
+  /** The project's sessions in the user's custom order, a new one on top. */
+  orderedSessions(projectId = this.currentProjectId): SessionInfo[] {
+    return arrange(this.sortedSessions(projectId), (projectId && this.orders.get(projectId)?.session_ids) || []);
+  }
+
+  /** Errors are dropped: the list then stays in `state`, the next look tries again. */
+  async loadOrder(projectId: string): Promise<void> {
+    try {
+      this.orders.set(projectId, await this.api.sessionOrder(projectId));
+      this.changed();
+    } catch {
+      // Offline: the default order.
+    }
+  }
+
+  /** State / Recent / Custom: shown at once, stored on the hub. */
+  setListMode(projectId: string, mode: ListMode): Promise<void> {
+    return this.putOrder(projectId, { mode });
+  }
+
+  /** Reorder's "Done": the order, and Custom with it. */
+  saveOrder(projectId: string, sessionIds: string[]): Promise<void> {
+    return this.putOrder(projectId, { mode: 'custom', session_ids: sessionIds });
+  }
+
+  private async putOrder(projectId: string, body: { mode: ListMode; session_ids?: string[] }): Promise<void> {
+    const before = this.orders.get(projectId);
+    this.orders.set(projectId, { mode: body.mode, session_ids: body.session_ids ?? before?.session_ids ?? [] });
+    this.changed();
+    try {
+      this.orders.set(projectId, await this.api.putSessionOrder(projectId, body));
+    } catch (e) {
+      if (before) this.orders.set(projectId, before);
+      else this.orders.delete(projectId);
+      this.listNotice = `Order not saved: ${(e as Error).message}`;
+    }
+    this.changed();
+  }
+
+  /** Archives from the list: hidden at once, sent when the Undo toast ends (T50). The one
+   *  waiting before goes to the hub first. */
+  archiveLater(s: SessionInfo): void {
+    this.commitArchive();
+    this.pendingArchive = { id: s.id, title: s.title || s.slug };
+    this.archiveTimer = setTimeout(() => this.commitArchive(), ARCHIVE_UNDO_MS);
+    this.changed();
+  }
+
+  /** Undo: nothing has reached the hub, the row is back in its place. */
+  undoArchive(): void {
+    clearTimeout(this.archiveTimer);
+    if (!this.pendingArchive) return;
+    this.pendingArchive = null;
+    this.changed();
+  }
+
+  /** Sends the waiting archive now; `keepalive` while the page is being left. */
+  commitArchive(keepalive = false): void {
+    const p = this.pendingArchive;
+    clearTimeout(this.archiveTimer);
+    if (!p) return;
+    this.pendingArchive = null;
+    const s = this.sessions.get(p.id);
+    // In the archive at once; the hub's object replaces this.
+    if (s) this.sessions.set(p.id, { ...s, archived: true, state: 'archived', archived_at: new Date().toISOString() });
+    this.changed();
+    this.api.archive(p.id, keepalive).then(
+      (v) => {
+        this.sessions.set(v.id, v);
+        this.changed();
+      },
+      (e: Error) => {
+        if (s) this.sessions.set(p.id, s);
+        this.listNotice = `Not archived «${p.title}»: ${e.message}`;
+        this.changed();
+      },
+    );
+  }
+
+  /** Back from the archive (`409 no_workspace` once its workspace was removed). */
+  async restoreSession(id: string): Promise<void> {
+    const s = await this.api.unarchive(id);
+    this.sessions.set(s.id, s);
+    this.changed();
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    await this.api.deleteSession(id);
+    this.removeSession(id);
+  }
+
+  async renameSession(id: string, title: string): Promise<void> {
+    const s = await this.api.patchSession(id, { title });
+    this.sessions.set(s.id, s);
+    this.changed();
+  }
+
+  setListNotice(notice: string | null): void {
+    this.listNotice = notice;
+    this.changed();
   }
 
   /** Forgets a session the hub has deleted. */

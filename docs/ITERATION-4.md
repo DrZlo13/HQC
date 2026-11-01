@@ -60,7 +60,7 @@ Tests: hub `tests/t49.rs`, client `tests/theme.test.ts`, `tests/appearance.test.
 by hand on a phone and a desktop is still to do. Decisions and differences from the mockups in
 `docs/notes/t49-questions.md`.
 
-## T50. Session list: archive at hand, archive mode, custom order
+## T50. Session list: archive at hand, archive mode, custom order (done, SPEC 0.53)
 
 Sections: §3 Session, §6, §17.4. Depends on T49. Mockups: `Session` (sidebar), `Archive`,
 `MList2`, `MArchive2`. Archiving takes two clicks far from the session, the archive looks like
@@ -85,6 +85,20 @@ Acceptance: the common checks; hub tests: `archived_at`, the order round trip an
 (another user's sessions, archived ones, a new session on top); client tests: the delayed archive
 and Undo, the archive mode screen, reorder by keyboard and the saved order; by hand on a phone:
 archive by a long press and undo, restore and delete from the archive, reorder with a finger.
+
+Done: `sessions.archived_at` and the table `session_orders` (migration `0026`); `GET/PUT
+/api/projects/{id}/session_order` returns every unarchived session of the project in the user's
+order, the ones not placed yet (new, restored) first, and stores the mode with it, so the
+State/Recent choice left `localStorage`. The client archives from a row (hover buttons, the
+phone's long press sheet) with the 5 s Undo toast and sends the call only when it ends, when
+another row is archived, before Reorder or archive mode, or on `pagehide`/hidden (`keepalive`);
+Reorder drags the handle with pointer events or moves it with ↑/↓; archive mode is
+`src/ui/Archive.tsx`; an archived chat has the chip, the band, the dimmed feed and no input, and
+the header menu lost archive, restore and delete (the composer lost its disabled state with
+them). Tests: hub `tests/t50.rs`; client `tests/sessionlist.test.tsx` (delayed archive and Undo,
+archive mode, reorder by keyboard and pointer, the phone sheet), `tests/chat.test.tsx`, and the
+mock hub flow in `tests/projects.test.tsx`. The check by hand on a phone is still to do.
+Decisions and differences from the mockups in `docs/notes/t50-questions.md`.
 
 ## T51. Messages between sessions in the feed
 

@@ -84,6 +84,10 @@ pub fn router(app: AppState) -> Router {
             get(api::project_sessions).post(api::create_session),
         )
         .route(
+            "/api/projects/{id}/session_order",
+            get(api::get_session_order).put(api::put_session_order),
+        )
+        .route(
             "/api/sessions/{id}",
             get(api::get_session)
                 .patch(api::patch_session)

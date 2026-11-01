@@ -284,7 +284,30 @@ describe('header', () => {
     expect($('.chat-cost')!.textContent).toBe('$0.07 this session');
     expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Switch to Auto', 'Archive']);
+    // T50: archiving is on the list's rows, not in the header.
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Switch to Auto']);
+  });
+
+  it('shows an archived session read-only: the chip, the band with the time, a dimmed feed, no input (T50)', async () => {
+    const { app } = setup('idle');
+    const at = new Date();
+    at.setHours(23, 45, 0, 0);
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived', archived_at: at.toISOString() });
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Archived');
+    expect($('.archived-band')!.textContent).toBe(
+      'Archived today at 23:45 · read-only. Restore or delete it from the list on the left.',
+    );
+    expect($('.chat.chat-archived .feed')).not.toBeNull();
+    expect($('.chat textarea')).toBeNull();
+    await act(async () => $('.btn-more')!.click());
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules']);
+    render(null, root);
+
+    // Archived before the hub kept the time: no time.
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived_at: undefined });
+    await mount(app, true);
+    expect($('.archived-band')!.textContent).toBe('Archived · read-only. Restore or delete it from the archive.');
   });
 
   it('links to the session that started it with hqc_spawn (T34)', async () => {

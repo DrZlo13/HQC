@@ -166,6 +166,7 @@ async fn a_buffer(hub: &TestHub, s: &mut Setup) -> Vec<String> {
 async fn a_send_from_the_answering_turn_joins_the_reply_with_its_files() {
     let hub = TestHub::start().await;
     let mut s = setup(&hub).await;
+    hub.buffer_sends(&s.a.0).await;
     let (b, tb) = s.b.clone();
     let (_, tc) = s.c.clone();
     let (rid, input) = ask(
@@ -248,6 +249,7 @@ async fn a_send_from_the_answering_turn_joins_the_reply_with_its_files() {
 async fn sends_outside_the_answering_turn_are_buffered() {
     let hub = TestHub::start().await;
     let mut s = setup(&hub).await;
+    hub.buffer_sends(&s.a.0).await;
     let (b, tb) = s.b.clone();
 
     // B is in a turn on the user's input when the question comes; a send from that turn is

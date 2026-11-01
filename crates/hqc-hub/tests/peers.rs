@@ -332,6 +332,7 @@ async fn sends_wait_in_the_buffer_for_the_next_input() {
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
     let (_, ta) = started(&hub, &mut w, "Asker", None).await;
     let (b, _) = started(&hub, &mut w, "Helper", None).await;
+    hub.buffer_sends(&b).await;
 
     for n in 1..=3 {
         let r = fast(
@@ -423,6 +424,7 @@ async fn a_full_buffer_drops_the_oldest() {
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
     let (_, ta) = started(&hub, &mut w, "Asker", None).await;
     let (b, _) = started(&hub, &mut w, "Helper", None).await;
+    hub.buffer_sends(&b).await;
 
     for n in 0..51 {
         fast(
@@ -482,18 +484,12 @@ async fn a_full_buffer_drops_the_oldest() {
 }
 
 #[tokio::test]
-async fn wake_on_send_queues_the_message() {
+async fn a_send_wakes_its_target() {
     let hub = TestHub::start().await;
     let (_, t) = hub.enroll("one").await;
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
     let (_, ta) = started(&hub, &mut w, "Asker", None).await;
     let (b, _) = started(&hub, &mut w, "Helper", None).await;
-    sql(
-        &hub,
-        "UPDATE sessions SET wake_on_send = true WHERE id = $1",
-        &b,
-    )
-    .await;
 
     let rid = Uuid::now_v7().to_string();
     let args = json!({"text": "wake up", "session": "personal/helper"});
@@ -722,7 +718,10 @@ async fn chains_are_limited() {
     let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
     let (a, ta) = started(&hub, &mut w, "Asker", None).await;
     let (b, tb) = started(&hub, &mut w, "Helper", None).await;
-    let (_, _) = started(&hub, &mut w, "Third", None).await;
+    let (c, _) = started(&hub, &mut w, "Third", None).await;
+    for s in [&a, &b, &c] {
+        hub.buffer_sends(s).await;
+    }
 
     // A asks B; B's turn runs on that question, so B's messages continue A's chain.
     let (_, input) = ask_same_worker(

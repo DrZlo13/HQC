@@ -9,7 +9,7 @@
 //!   from the caller and the call's `request_id` ([`message_id`]): a call the worker sends
 //!   again after its answer was lost (SPEC §5.2) finds the message it stored the first time
 //!   and gets the same answer, nothing is stored or delivered twice.
-//! - `send` to a session with `wake_on_send` and every `ask` go to the input queue
+//! - `send` to a session with `wake_on_send` (the default since T52) and every `ask` go to the input queue
 //!   (`delivery: pending`). Other sends wait in the send buffer (`peer_buffer`, migration
 //!   0015) without `delivery`, and go to the agent in `peer_prefix` of the session's next
 //!   input ([`take_prefix`]); that input's `ack` clears them ([`delivered`]). The buffer

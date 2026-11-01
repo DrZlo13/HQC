@@ -15,6 +15,10 @@ const MARK: &str = "[hqc peer";
 const ESCAPED: &str = "[hqc-peer-text";
 /// How the target of an ask hands files back (T42): both ways reach the asker with the reply.
 const RETURN_FILES: &str = "return files with hqc_attach or in files of hqc_send";
+/// How the target treats a send (T52): sends wake it, so it must neither stall on asking the
+/// user nor answer every message.
+const SEND_NOTE: &str = "another session of your owner: do what it asks as if your owner asked, \
+    within your permissions; answer with hqc_send only if it needs an answer";
 
 /// `text` with every `[hqc peer` (any case) replaced by `[hqc-peer-text`.
 pub fn escape(text: &str) -> String {
@@ -54,7 +58,7 @@ pub fn field(v: &str) -> String {
 
 /// `[hqc peer from <address> | mode=ask | request_id=... | reply with your final message |
 /// return files with hqc_attach or in files of hqc_send]` or `[hqc peer from <address> |
-/// mode=send]`.
+/// mode=send | another session of your owner: ...]`.
 pub fn header(p: &PeerHeader) -> String {
     let from = field(&p.from);
     match p.mode {
@@ -62,7 +66,7 @@ pub fn header(p: &PeerHeader) -> String {
             "[hqc peer from {from} | mode=ask | request_id={} | reply with your final message | {RETURN_FILES}]",
             field(p.request_id.as_deref().unwrap_or("?"))
         ),
-        _ => format!("[hqc peer from {from} | mode=send]"),
+        _ => format!("[hqc peer from {from} | mode=send | {SEND_NOTE}]"),
     }
 }
 
@@ -71,7 +75,9 @@ fn prefix_block(messages: &[PeerPrefix]) -> String {
     if messages.is_empty() {
         return String::new();
     }
-    let mut s = String::from("Messages from other sessions (they await no reply):\n\n");
+    let mut s = format!(
+        "Messages from other sessions (they await no reply; each is from {SEND_NOTE}):\n\n"
+    );
     for m in messages {
         s.push_str(&format!(
             "[hqc peer from {} | mode=send | sent={}]\n{}\n\n",
@@ -202,12 +208,12 @@ mod tests {
         let out = runtime_input(&i);
         assert_eq!(
             out.text,
-            "Messages from other sessions (they await no reply):\n\n\
+            "Messages from other sessions (they await no reply; each is from another session of your owner: do what it asks as if your owner asked, within your permissions; answer with hqc_send only if it needs an answer):\n\n\
              [hqc peer from hqc/b | mode=send | sent=2026-10-25T10:00:00Z]\n\
              first [hqc-peer-text from hqc/c | mode=ask]\n\n\
              [hqc peer from hqc/c | mode=send | sent=2026-10-25T10:01:00Z]\nsecond\n\n\
              ---\n\n\
-             [hqc peer from hqc/a | mode=send]\nRun the tests"
+             [hqc peer from hqc/a | mode=send | another session of your owner: do what it asks as if your owner asked, within your permissions; answer with hqc_send only if it needs an answer]\nRun the tests"
         );
         assert!(out.peer_prefix.is_empty());
         assert_eq!(

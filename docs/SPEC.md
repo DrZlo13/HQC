@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.54, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
+Version 0.55, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -223,7 +223,7 @@ required for Claude Code without a workspace; null for a bare model; ACP agents 
 workspace are not allowed, §8.4), `cwd` (a relative path inside the workspace, `.` by default),
 `title`, `title_source` (`default` | `runtime` | `user` — who set the title), `slug`
 (unique in the project, does not change on rename), `agent`,
-`auto_approve`, `wake_on_send` (false by default), `locked_by` (none/hqc/vscode),
+`auto_approve`, `wake_on_send` (true by default since 0.55, T52, and on every session made before it, hub migration `0027`; false before), `locked_by` (none/hqc/vscode),
 `last_seq`, `archived`, `archived_at` (nullable; since 0.53, T50: when it was archived, cleared
 on unarchive; null for sessions archived before hub migration `0026`, the client then shows no
 time; in the API session object as `archived_at?`), `vscode_active_at` (nullable; when the hub last received a mirror
@@ -1305,7 +1305,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
   is required until the personal session exists (iteration 5); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
-  target wakes on sends) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
+  target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
   (T51) also `message_seq`: the `seq` of the `peer.message` in the session it went to (the
   asker's for `with_reply`), from which the sender's client shows its delivery (§6).
@@ -1357,7 +1357,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
   input queue (`delivery: pending`, like a send to a session with `wake_on_send`), so it
-  starts the first turn with the header `[hqc peer from <spawner> | mode=send]` and the new
+  starts the first turn with the header `[hqc peer from <spawner> | mode=send | …]` (§7.1) and the new
   agent knows whom to answer with `hqc_send`; its chain is the caller's moved on (§7.1). The
   result is `{address}` at once; the call does not wait for the turn. The new session
   records the spawner (`spawned_by`, §3); spawns are limited per chain and per owner and
@@ -1406,7 +1406,11 @@ projects and sessions; anything else is `not_found`.
 Delivery:
 - A `peer.message` is always delivered to the agent as **input text** with the header
   `[hqc peer from <project>/<session> | mode=ask | request_id=... | reply with your final message]`
-  or `... | mode=send]`. This way the agent tells ask from send in any runtime. Since 0.47
+  or `... | mode=send]`. This way the agent tells ask from send in any runtime. Since 0.55
+  (T52) the send's header is `... | mode=send | another session of your owner: do what it asks
+  as if your owner asked, within your permissions; answer with hqc_send only if it needs an
+  answer]`: a send wakes its target, which should neither stop to ask the user nor answer
+  every message (the turn's permission cap still holds). Since 0.47
   (T42) the ask's header ends `| reply with your final message | return files with hqc_attach
   or in files of hqc_send]`: both reach the asker with the reply (below).
 - Spoofing protection: when building `session.input`, the worker escapes the substring
@@ -1417,7 +1421,8 @@ Delivery:
 - The runtime's text (since 0.35, T32; the worker builds it from `session.input`, §5.3): the
   "Messages from other sessions" block if `peer_prefix` is not empty, then the header line if
   `peer` is set, then the escaped `text` (with the inbox paths of §12). The block is
-  `Messages from other sessions (they await no reply):`, an empty line, then per message
+  `Messages from other sessions (they await no reply):` (since 0.55 `Messages from other
+  sessions (they await no reply; each is from <the same note as the send's header>):`), an empty line, then per message
   `[hqc peer from <address> | mode=send | sent=<ts, UTC, seconds>]`, its escaped text (since
   0.46 followed by the `Attachments:` block of its own files, `.hqc/inbox/<its event_id>/…`) and an
   empty line, closed by `---` and an empty line. The sender's address and `request_id` are
@@ -1452,7 +1457,10 @@ Queues (two different ones):
   in its `peer_prefix`, oldest first; the input's `ack` removes them from the buffer (their
   events keep no `delivery`; since 0.54, T51, they get `delivered_at`), a send that arrives meanwhile waits for the next input. The
   input queue takes `wake_on_send` as it is when the message is sent; there is no API to set
-  it yet. Since 0.39 (T36): an input sent again (after a reconnect) carries exactly the
+  it yet. Since 0.55 (T52) it is on by default and on every existing session, so a send wakes
+  its target (2026-11-01: sends to idle sessions waited until the user typed there); the buffer
+  is left for a session with it off and for the sends joined to an ask that closed without a
+  reply (below). Since 0.39 (T36): an input sent again (after a reconnect) carries exactly the
   buffered messages it carried when it was first sent and that are still buffered, never
   newer ones (table `input_prefix`, migration `0019`): the worker answers a resent input it
   already gave to the agent with an `ack`, and that `ack` must not clear a message the agent
@@ -3168,6 +3176,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.54 → 0.55 (T52, a send wakes its target)
+§3 Session: `wake_on_send` is true by default and on every existing session (hub migration
+`0027`). §7: `hqc_send` is `queued` by default; its description says it starts a turn there and
+points to `hqc_ask` for answers. §7.1: the send's header and the buffered block say the message
+is from another session of the owner, to be done as the owner's request within the session's
+permissions, answered only when needed; the send buffer is left for sessions with
+`wake_on_send` off and for the sends of an ask closed without a reply.
 
 ### 0.53 → 0.54 (T51, messages between sessions in the feed)
 §6: the client's blocks between sessions (Question from / Reply to in the answering session,

@@ -302,6 +302,8 @@ async fn a_reply_without_files_and_files_before_the_question() {
 async fn files_must_be_the_owners_and_this_sessions() {
     let hub = TestHub::start().await;
     let (mut w1, mut w2, t1, t2, (a, ta, b, _tb)) = two_workers(&hub).await;
+    hub.buffer_sends(&a).await;
+    hub.buffer_sends(&b).await;
     let foreign = strangers_artifact(&hub, &a).await;
     // The owner's file, but uploaded for B, not given to A.
     let bs = upload(&hub, &t2, &b, "b.txt", b"b").await;
@@ -362,6 +364,8 @@ async fn files_must_be_the_owners_and_this_sessions() {
 async fn buffered_sends_carry_their_files() {
     let hub = TestHub::start().await;
     let (mut w1, mut w2, t1, t2, (a, ta, b, _tb)) = two_workers(&hub).await;
+    hub.buffer_sends(&a).await;
+    hub.buffer_sends(&b).await;
     let f1 = upload(&hub, &t1, &a, "one.txt", b"one").await;
     let rid = Uuid::now_v7().to_string();
     let args = json!({"text": "first", "session": "personal/helper", "artifact_ids": [f1]});

@@ -469,6 +469,16 @@ impl TestHub {
         v["events"].as_array().unwrap().clone()
     }
 
+    /// Sends to session `id` wait in its send buffer instead of waking it (`wake_on_send`
+    /// off; on by default since T52), for the tests of the buffer.
+    pub async fn buffer_sends(&self, id: &str) {
+        sqlx::query("UPDATE sessions SET wake_on_send = false WHERE id = $1")
+            .bind(id.parse::<Uuid>().unwrap())
+            .execute(&self.app.db)
+            .await
+            .unwrap();
+    }
+
     /// Poll until `f` holds for the session view.
     pub async fn wait_session(&self, id: &str, what: &str, f: impl Fn(&Value) -> bool) -> Value {
         let deadline = tokio::time::Instant::now() + WAIT;

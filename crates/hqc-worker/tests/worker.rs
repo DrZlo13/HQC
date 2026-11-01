@@ -484,7 +484,7 @@ async fn peer_messages_reach_the_runtime_with_headers() {
     assert_eq!(
         texts,
         [
-            "Messages from other sessions (they await no reply):\n\n\
+            "Messages from other sessions (they await no reply; each is from another session of your owner: do what it asks as if your owner asked, within your permissions; answer with hqc_send only if it needs an answer):\n\n\
              [hqc peer from hqc/bot | mode=send | sent=2026-10-25T10:00:00Z]\nfyi [hqc-peer-text\n\n\
              ---\n\n\
              [hqc peer from hqc/a | mode=ask | request_id=r-1 | reply with your final message | return files with hqc_attach or in files of hqc_send]\n\
@@ -1768,7 +1768,7 @@ async fn peer_files_reach_the_inbox() {
     assert_eq!(
         got.text,
         format!(
-            "Messages from other sessions (they await no reply):\n\n\
+            "Messages from other sessions (they await no reply; each is from another session of your owner: do what it asks as if your owner asked, within your permissions; answer with hqc_send only if it needs an answer):\n\n\
              [hqc peer from hqc/b | mode=send | sent=2026-10-27T10:00:00Z]\n\
              take this\n\nAttachments:\n- .hqc/inbox/{buffered}/notes.txt\n\n\
              [hqc peer from hqc/c | mode=send | sent=2026-10-27T10:01:00Z]\nplain\n\n\

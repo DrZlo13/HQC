@@ -179,6 +179,7 @@ async fn a_buffered_send_gets_delivered_at_with_the_input_that_carried_it() {
     let hub = TestHub::start().await;
     let mut s = setup(&hub).await;
     let b = s.b.0.clone();
+    hub.buffer_sends(&b).await;
     let id =
         s.w1.send(
             "mcp.call",

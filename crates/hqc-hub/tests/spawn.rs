@@ -205,12 +205,17 @@ async fn a_spawned_session_runs_its_first_turn_on_the_prompt() {
                    "args": {"session": "personal/spawner", "text": "42 files"}}),
         )
         .await;
-    let res = w.expect("mcp.result").await;
+    // The answer wakes the spawner (T52): its input comes with the call's result.
+    let f = [w.recv().await, w.recv().await];
+    let res = f.iter().find(|x| x["type"] == "mcp.result").unwrap();
     assert_eq!(res["id"], id.as_str());
     assert_eq!(
         res["payload"]["result"],
-        json!({"to": "personal/spawner", "delivery": "buffered", "message_seq": 2})
+        json!({"to": "personal/spawner", "delivery": "queued", "message_seq": 2})
     );
+    let input = f.iter().find(|x| x["type"] == "session.input").unwrap();
+    assert_eq!(input["payload"]["session_id"], a.as_str());
+    assert_eq!(input["payload"]["text"], "42 files");
     hub.finish().await;
 }
 

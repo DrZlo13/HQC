@@ -191,6 +191,30 @@ the card's "Allow in this folder" (save, then allow once), the rules screen
 `tests/rules.test.tsx`. The check by hand on a phone is still to do. Decisions and differences
 from the mockups in `docs/notes/t48-questions.md`.
 
+## T52. A send wakes its target (done, SPEC 0.55)
+
+Found on 2026-11-01 (test/session-2 and test/session-3 swapping a file): a send waited in the
+idle target's buffer until the user typed something there, the target then asked the user
+whether to act on another session's request, and the file it sent back waited in the same way:
+three nudges by hand for one file. SPEC §3 Session, §7, §7.1.
+
+- `wake_on_send` is true by default and on every existing session: a send starts a turn in
+  its target (after the running one), as the prompt of `hqc_spawn` does. The send buffer stays
+  for sessions with it off (no API sets it yet) and for the sends joined to an ask that closed
+  without a reply.
+- The send's header and the buffered block tell the agent the message is from another session
+  of its owner: do what it asks as if the owner asked, within its permissions (the chain's
+  permission cap still applies), and answer with `hqc_send` only if an answer is needed.
+- `hqc_send`'s description: it starts a turn there; use `hqc_ask` when you need the answer or
+  a file back; no sends only to thank or acknowledge.
+
+Acceptance: hub tests (a send to an idle session is `queued` and its input goes out at once;
+the buffer tests set `wake_on_send` off); worker tests of the new header and block; by hand:
+one session asks another for a file with `hqc_send` and gets it with no message typed in either.
+
+Done: hub migration `0027`; `TestHub::buffer_sends` for the buffer tests; the header text is
+`SEND_NOTE` in `hqc-worker/src/peer.rs`.
+
 ## T43. Environments and bindings on the worker
 
 Sections: §2.1, §3 Workspace, §5.1 (`hello`), §5.3 (`session.start`), §8.1, §14. Today the

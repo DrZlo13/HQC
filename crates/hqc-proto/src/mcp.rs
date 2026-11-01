@@ -91,8 +91,10 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: SEND,
         description: "Send a message to another hqc session of your owner without waiting for a \
-            reply. The other agent reads it before its next input (or at once if that session \
-            wakes on messages); it may answer you later with hqc_send. `session` is an address \
+            reply: it starts a turn there (after the turn running now, if any), and the other \
+            agent may answer you later with hqc_send, which starts a turn here. When you need \
+            its answer or a file back to go on, use hqc_ask instead. Do not send only to thank \
+            or acknowledge: every send costs the other session a turn. `session` is an address \
             from hqc_list_sessions (<project-slug>/<session-slug>) or a session id. To hand \
             over files, list them in `files` (paths in your workspace, at most 100 MB each, or \
             artifact ids from hqc_attach); never paste a file's content into `text`. The other \

@@ -395,6 +395,7 @@ async fn a_resent_input_carries_the_prefix_of_its_first_send() {
     let other_ws = workspace_at(&hub, OTHER_PATH).await;
     let (_, ta) = started(&hub, &mut w1, "A", None).await;
     let (b, _) = started(&hub, &mut w2, "Helper", Some(&other_ws)).await;
+    hub.buffer_sends(&b).await;
     let to_b = |text: &str| json!({"text": text, "session": "personal/helper"});
 
     ok(&call(&mut w1, &ta, "hqc_send", to_b("m1")).await);

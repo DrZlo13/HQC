@@ -121,6 +121,9 @@ async fn a_buffered_send_caps_the_input_that_carries_it() {
     let (c, tc) = session(&hub, &mut w, "C", "auto").await;
     let (b, tb) = session(&hub, &mut w, "B", "auto").await;
     let (d, _) = session(&hub, &mut w, "D", "auto").await;
+    for s in [&a, &b, &c, &d] {
+        hub.buffer_sends(s).await;
+    }
     human_input(&hub, &mut w, &a).await;
     human_input(&hub, &mut w, &c).await;
 

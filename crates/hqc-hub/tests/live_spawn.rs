@@ -222,7 +222,7 @@ async fn live_a_spawns_b_and_bs_first_turn_runs() {
     let transcript =
         std::fs::read_to_string(paths::transcript_path(&claude_dir, &ws, &runtime)).unwrap();
     assert!(
-        transcript.contains("[hqc peer from live/spawner | mode=send]"),
+        transcript.contains("[hqc peer from live/spawner | mode=send | "),
         "the header in B's transcript"
     );
 

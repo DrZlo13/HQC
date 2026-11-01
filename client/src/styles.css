@@ -550,6 +550,8 @@ select.input {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* The tile's color shows around the image; its corners follow the tile's, less this. */
+  padding: 4px;
   border-radius: inherit;
 }
 
@@ -1394,6 +1396,7 @@ select.input {
 }
 .chip-icon .glyph-img {
   width: 20px;
+  padding: 0;
   border-radius: 5px;
 }
 .chip-new {

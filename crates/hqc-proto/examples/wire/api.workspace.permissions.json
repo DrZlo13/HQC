@@ -1,0 +1,17 @@
+{
+  "mode": "ask",
+  "allow_auto": true,
+  "sources": [
+    { "source": "worker.toml", "allow": ["Bash(ls *)"], "deny": ["Bash(ssh:*)", "Bash(rm -rf /*)"], "ask": [] },
+    { "source": "~/.claude/settings.json", "allow": ["Read"], "deny": ["Bash(curl:*)"], "ask": [] },
+    { "source": ".claude/settings.local.json", "allow": ["mcp__hqc"], "deny": [], "ask": [] }
+  ],
+  "hqc": ["Edit", "Bash(python3 *)"],
+  "check": {
+    "verdict": "deny",
+    "rule": "Bash(ssh:*)",
+    "source": "worker.toml",
+    "parts": 1,
+    "uncovered": 1
+  }
+}

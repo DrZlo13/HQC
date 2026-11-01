@@ -433,7 +433,7 @@ impl TestHub {
             tokio::select! {
                 r = &mut req => return r,
                 Some(f) = recv_json(&mut w.ws, WAIT) => {
-                    if f["type"] == "mirror.set" {
+                    if f["type"] == "mirror.set" || f["type"] == "workspace.rules" {
                         // Every workspace is mirrored by default (T21).
                         w.queue.push_back(f);
                         continue;
@@ -519,6 +519,10 @@ pub struct FakeWorker {
     /// prompt after `timing.title_request`; [`FakeWorker::see_titles`] shows them.
     pub see_titles: bool,
     pub titles: Vec<Value>,
+    /// The same for `workspace.rules` (T48, sent for every workspace after `hello`):
+    /// [`FakeWorker::see_rules`], `rules`.
+    pub see_rules: bool,
+    pub rules: Vec<Value>,
     /// `allowed_roots` of its `hello`; [`FakeWorker::fs_reply`] answers by them.
     pub roots: Vec<String>,
     /// From `hello.ack`.
@@ -543,6 +547,8 @@ impl FakeWorker {
                 cleanups: vec![],
                 see_titles: false,
                 titles: vec![],
+                see_rules: false,
+                rules: vec![],
                 roots: vec![],
                 worker_id: String::new(),
             }),
@@ -739,6 +745,10 @@ impl FakeWorker {
             }
             if f["type"] == "title.request" && !self.see_titles {
                 self.titles.push(f);
+                continue;
+            }
+            if f["type"] == "workspace.rules" && !self.see_rules {
+                self.rules.push(f);
                 continue;
             }
             return Some(f);

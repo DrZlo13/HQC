@@ -1,0 +1,21 @@
+{
+  "id": "h-16",
+  "type": "result",
+  "payload": {
+    "request_id": "h-16",
+    "mode": "ask",
+    "allow_auto": true,
+    "sources": [
+      { "source": "worker.toml", "allow": ["Bash(cargo test:*)"], "deny": ["Bash(sudo:*)", "Bash(ssh:*)"], "ask": [] },
+      { "source": "~/.claude/settings.json", "allow": ["Read"], "deny": [], "ask": [] },
+      { "source": ".claude/settings.local.json", "allow": [], "deny": [], "ask": [], "error": "expected value at line 1 column 1" }
+    ],
+    "hqc": ["Bash(python3 *)"],
+    "check": {
+      "verdict": "ask",
+      "parts": 2,
+      "uncovered": 1,
+      "suggestions": [{ "part": "git -C sub fetch", "rule": "Bash(git fetch:*)" }]
+    }
+  }
+}

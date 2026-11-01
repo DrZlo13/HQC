@@ -464,6 +464,12 @@ pub enum HubFrame {
     /// Title a session on the worker's Claude Code subscription (T24, SPEC §3 Session, §5.3).
     #[serde(rename = "title.request")]
     TitleRequest(TitleRequest),
+    /// hqc's allow rules of a workspace (T48, SPEC §5.3).
+    #[serde(rename = "workspace.rules")]
+    WorkspaceRules(WorkspaceRules),
+    /// The rules of a workspace and a check, for the rules screen (T48, SPEC §5.3).
+    #[serde(rename = "permissions.inspect")]
+    PermissionsInspect(PermissionsInspect),
     /// The answer to `mcp.call` (SPEC §5.2): under the call's frame `id` for a tool answered
     /// at once; a deferred one (`hqc_ask`) comes as a frame of its own, which the worker acks.
     #[serde(rename = "mcp.result")]
@@ -530,6 +536,7 @@ pub enum ResultBody {
     FsListDirs(FsListDirsResult),
     Candidates(CandidatesResult),
     Title(TitleResult),
+    Inspect(InspectResult),
 }
 
 /// Result of `fs.stat`. `canonical` is the path with symlinks resolved, present when it
@@ -712,6 +719,105 @@ pub struct SessionStart {
     /// `session.state.permission_mode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
+    /// hqc's allow rules of the session's workspace (since SPEC 0.52, T48), as
+    /// [`crate::rules`] writes them; later changes come as `workspace.rules`. Absent when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_rules: Vec<String>,
+}
+
+/// `workspace.rules {workspace_path, allow_rules[]}` -> `ack` (since SPEC 0.52, T48): the
+/// whole current list of hqc's allow rules of a workspace. The hub sends it when the list
+/// changes and, for every workspace of the worker, after `hello`; running sessions in the
+/// folder use it at their next permission check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRules {
+    pub workspace_path: String,
+    #[serde(default)]
+    pub allow_rules: Vec<String>,
+}
+
+/// `permissions.inspect {request_id, path, command?, tool?}` -> `result` [`InspectResult`]
+/// (since SPEC 0.52, T48): the rules that decide tool calls in a workspace, and optionally
+/// how the worker would decide one command or tool. `request_id` equals the frame `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionsInspect {
+    pub request_id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+}
+
+/// Where a rule comes from (`InspectResult.sources[].source`, `CheckResult.source`).
+pub mod rule_source {
+    pub const WORKER: &str = "worker.toml";
+    pub const USER: &str = "~/.claude/settings.json";
+    pub const LOCAL: &str = ".claude/settings.local.json";
+    pub const HQC: &str = "hqc";
+}
+
+/// Result of `permissions.inspect`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectResult {
+    /// `[permissions] mode` of the worker: the mode of a session that asks for none.
+    pub mode: PermissionMode,
+    pub allow_auto: bool,
+    /// `worker.toml`, `~/.claude/settings.json`, `.claude/settings.local.json` of the folder,
+    /// in this order; a file that is absent has empty lists.
+    pub sources: Vec<RuleSource>,
+    /// hqc's rules the worker holds for the folder (the last `workspace.rules`).
+    #[serde(default)]
+    pub hqc: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckResult>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSource {
+    /// One of [`rule_source`].
+    pub source: String,
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+    #[serde(default)]
+    pub ask: Vec<String>,
+    /// The file could not be read or parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// Not run, not asked about.
+    Deny,
+    /// Run without asking.
+    Allow,
+    /// Asked about in `ask`, the classifier decides in `auto`.
+    Ask,
+}
+
+/// How the worker's matcher decides a command or tool in the folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub verdict: Verdict,
+    /// The deciding rule and its source: the deny rule, or the allow rule of a command of one
+    /// part. Absent for `ask` and for a compound command every part of which is allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Simple parts of the command (1 for a tool); 0: the matcher could not split it.
+    pub parts: u32,
+    /// Parts no allow rule covers.
+    #[serde(default)]
+    pub uncovered: u32,
+    /// hqc rules for the uncovered parts, with `ask`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<crate::event::RuleSuggestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -784,6 +890,8 @@ mod tests {
         "mirror.set",
         "session.cleanup",
         "title.request",
+        "workspace.rules",
+        "permissions.inspect",
         "mcp.result",
         "ack",
         "error",
@@ -885,6 +993,14 @@ mod tests {
             include_str!("../examples/wire/hub.title.request.json"),
         ),
         (
+            "workspace.rules",
+            include_str!("../examples/wire/hub.workspace.rules.json"),
+        ),
+        (
+            "permissions.inspect",
+            include_str!("../examples/wire/hub.permissions.inspect.json"),
+        ),
+        (
             "mcp.result",
             include_str!("../examples/wire/hub.mcp.result.json"),
         ),
@@ -939,6 +1055,10 @@ mod tests {
             include_str!("../examples/wire/worker.result.title.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.permissions.inspect.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
         ),
@@ -980,6 +1100,8 @@ mod tests {
             HubFrame::MirrorSet(_) => "mirror.set",
             HubFrame::SessionCleanup(_) => "session.cleanup",
             HubFrame::TitleRequest(_) => "title.request",
+            HubFrame::WorkspaceRules(_) => "workspace.rules",
+            HubFrame::PermissionsInspect(_) => "permissions.inspect",
             HubFrame::McpResult(_) => "mcp.result",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
@@ -1106,6 +1228,10 @@ mod tests {
                 include_str!("../examples/wire/hub.title.request.json"),
                 include_str!("../examples/wire/worker.result.title.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.permissions.inspect.json"),
+                include_str!("../examples/wire/worker.result.permissions.inspect.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -1115,6 +1241,7 @@ mod tests {
                 HubFrame::FsListDirs(r) => (&r.request_id, 1),
                 HubFrame::WorkspaceListCandidates(r) => (&r.request_id, 2),
                 HubFrame::TitleRequest(r) => (&r.request_id, 3),
+                HubFrame::PermissionsInspect(r) => (&r.request_id, 4),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -1127,6 +1254,7 @@ mod tests {
                 ResultBody::FsListDirs(_) => 1,
                 ResultBody::Candidates(_) => 2,
                 ResultBody::Title(_) => 3,
+                ResultBody::Inspect(_) => 4,
             };
             assert_eq!(got, kind);
         }

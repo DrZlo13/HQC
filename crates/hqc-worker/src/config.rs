@@ -175,6 +175,9 @@ pub struct StartSpec {
     /// allows it (T38, [`crate::permissions::Permissions::mode_for`]); a later
     /// `session.permission_mode` changes it.
     pub permission_mode: PermissionMode,
+    /// hqc's allow rules of the workspace (T48), shared by every session in it; `None` for a
+    /// session without workspace.
+    pub folder_rules: Option<crate::permissions::FolderRules>,
 }
 
 impl StartSpec {
@@ -290,6 +293,8 @@ impl Config {
             session_token: Secret::new(s.session_token.clone()),
             ask_timeout_s: s.ask_timeout_s,
             permission_mode: self.permission_mode(s.session_id, s.permission_mode),
+            // The supervisor gives a session in a workspace the folder's shared list.
+            folder_rules: None,
         })
     }
 

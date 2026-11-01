@@ -150,6 +150,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         session_token: crate::token::Secret::new("st"),
         ask_timeout_s: 600,
         permission_mode: crate::permissions::PermissionMode::Ask,
+        folder_rules: None,
     }
 }
 
@@ -1317,6 +1318,75 @@ fn always_is_not_offered_for_denied_calls() {
     // A chained command with a denied part is denied too.
     let a = core.on_line(&can_use_tool_line(&fx, "r2", Some("git add . && git push")));
     assert_eq!((approvals(&a), writes(&a).len()), (0, 1));
+}
+
+/// T48: the folder's hqc rules answer `can_use_tool` with allow, after the deny check and
+/// only when every part of a compound command is covered; a change of the shared list
+/// reaches the running process at its next request; a request that is asked carries the
+/// suggested rules.
+#[test]
+fn folder_rules_in_can_use_tool() {
+    let fx = fixture!("always-git-push", "2.1.308");
+    let rules = crate::permissions::FolderRules::default();
+    rules.set(&["Bash(python3 *)".into(), "Bash(git push *)".into()]);
+    let root = std::path::PathBuf::from("/w/proj");
+    let mut core = Core::new(Uuid::now_v7(), false)
+        .with_policy(policy(&[], &["Bash(git push:*)"]))
+        .with_folder(rules.clone(), root);
+    let allowed = |a: &[Action]| {
+        approvals(a) == 0
+            && writes(a)
+                .first()
+                .is_some_and(|w| w["response"]["response"]["behavior"] == "allow")
+    };
+
+    assert!(allowed(&core.on_line(&can_use_tool_line(
+        &fx,
+        "r1",
+        Some("python3 tools/conv.py x")
+    ))));
+    // `deny` of the worker wins over an hqc rule.
+    let a = core.on_line(&can_use_tool_line(
+        &fx,
+        "r2",
+        Some("git push origin master"),
+    ));
+    assert_eq!(approvals(&a), 0);
+    assert_eq!(writes(&a)[0]["response"]["response"]["behavior"], "deny");
+    // A part no rule covers: asked, with a suggestion per part.
+    let a = core.on_line(&can_use_tool_line(
+        &fx,
+        "r3",
+        Some("python3 x && git -C sub fetch"),
+    ));
+    assert_eq!(approvals(&a), 1);
+    let sugg = a
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::ApprovalRequest {
+                    rule_suggestions, ..
+                } => rule_suggestions.clone(),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("suggestions");
+    let rules_suggested: Vec<_> = sugg.iter().map(|s| s.rule.as_deref()).collect();
+    assert_eq!(
+        rules_suggested,
+        [Some("Bash(python3 *)"), Some("Bash(git fetch:*)")]
+    );
+    // The list changes while the process runs: the next request sees it.
+    rules.set(&["Bash(python3 *)".into(), "Bash(git fetch:*)".into()]);
+    assert!(allowed(&core.on_line(&can_use_tool_line(
+        &fx,
+        "r4",
+        Some("python3 x && git -C sub fetch")
+    ))));
+    rules.set(&[]);
+    let a = core.on_line(&can_use_tool_line(&fx, "r5", Some("python3 x")));
+    assert_eq!(approvals(&a), 1);
 }
 
 /// T12: `approval.request.policy_hint` is `allow` when an allow rule matches a call the CLI

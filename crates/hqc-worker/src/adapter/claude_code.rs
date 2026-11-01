@@ -501,11 +501,13 @@ impl ClaudeCodeAdapter {
                 .and_then(|t| hqc_claude_jsonl::last_cost_total(&t)),
             None => None,
         };
-        let core = Arc::new(Mutex::new(
-            Core::new(self.session_id, spec.restricted)
-                .with_policy(self.policy.clone())
-                .with_cost_baseline(cost_baseline),
-        ));
+        let mut core = Core::new(self.session_id, spec.restricted)
+            .with_policy(self.policy.clone())
+            .with_cost_baseline(cost_baseline);
+        if let Some(rules) = &spec.folder_rules {
+            core = core.with_folder(rules.clone(), spec.workspace.clone());
+        }
+        let core = Arc::new(Mutex::new(core));
         let io = Arc::new(Io {
             session_id: self.session_id,
             stdin: tokio::sync::Mutex::new(spawned.stdin),

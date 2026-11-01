@@ -1,0 +1,8 @@
+{
+  "id": "h-15",
+  "type": "workspace.rules",
+  "payload": {
+    "workspace_path": "/Users/home-mac/work/hqc",
+    "allow_rules": ["Bash(python3 *)", "Bash(git fetch:*)", "Edit"]
+  }
+}

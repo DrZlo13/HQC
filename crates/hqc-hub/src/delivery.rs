@@ -144,6 +144,11 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
     let requested_by_owner = ws
         .as_ref()
         .is_some_and(|w| worker_owner == Some(w.owner_id));
+    // The folder's hqc rules (T48); later changes go as `workspace.rules`.
+    let allow_rules = match &ws {
+        Some(w) => db::workspace_rule_texts(&app.db, w.id).await?,
+        None => vec![],
+    };
     // A fresh token per start: only the current agent process holds a valid one.
     let token = new_secret("hqcs_");
     db::set_session_token_hash(&app.db, s.id, &hash_secret(&token)).await?;
@@ -175,6 +180,7 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         // The worker owner added the folder, so they agreed to sessions in it (SPEC §10.2).
         requested_by_owner,
         permission_mode: s.permission_mode.as_deref().and_then(PermissionMode::parse),
+        allow_rules,
     })
 }
 

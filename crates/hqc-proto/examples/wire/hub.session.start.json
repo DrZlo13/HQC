@@ -16,6 +16,7 @@
     "session_token": "st_example",
     "owner_is_worker_owner": true,
     "ask_timeout_s": 600,
-    "permission_mode": "ask"
+    "permission_mode": "ask",
+    "allow_rules": ["Bash(python3 *)", "Edit"]
   }
 }

@@ -54,6 +54,15 @@ T24: `hub.title.request.json` — the hub asks the session's worker for a title 
 and the first final answer (each cut to 2000 characters); `worker.result.title.json` is the
 answer, one line of at most 60 characters. A failure is a plain `error` with the same `id`.
 
+T48: `hub.session.start.json` carries the workspace's hqc rules (`allow_rules`);
+`hub.workspace.rules.json` is the whole list after a change or `hello`;
+`hub.permissions.inspect.json` (`h-16`) asks for a folder's rules and a check, answered by
+`worker.result.permissions.inspect.json` (a settings file that is not JSON has `error`);
+`event.approval.request.json` has `rule_suggestions`. REST: `api.workspace.rules.json` (`GET` /
+`POST /api/workspaces/{id}/rules`), `api.workspace.rules.request.json`,
+`api.workspace.permissions.json` (`GET /api/workspaces/{id}/permissions`); the workspace object
+has `hqc_rules`.
+
 T39: the chain of `event.peer.message.json` carries a cap (`permission_cap: ask`, `capped_by`),
 which `hub.session.input.peer.json` hands to the worker; `worker.session.state.capped.json` —
 the worker runs that input's turn in `ask` under the cap; `api.session.json` and

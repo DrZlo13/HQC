@@ -13,9 +13,10 @@
 //!   the transcript's last `cost-state` after `--resume`), `session_cost_usd` the total itself;
 //! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
 //!   differ from what this process reported (the CLI sends `init` before every turn);
-//! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint`) /
-//!   `clarify.request`, an immediate allow by a `session` rule, or an immediate deny plus
-//!   `system policy_denied` when a deny rule of `[permissions]` matches;
+//! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
+//!   rules suggested for the call) / `clarify.request`, an immediate allow by a `session`
+//!   rule or by the folder's hqc rules (T48), or an immediate deny plus `system
+//!   policy_denied` when a deny rule of `[permissions]` matches (checked first);
 //! - `system` `permission_denied` (the CLI refused a call by its rules, no request) →
 //!   `system policy_denied`;
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
@@ -43,7 +44,7 @@ use uuid::Uuid;
 
 use super::rules::SessionRules;
 use crate::adapter::{new_event, AdapterEvent};
-use crate::permissions::Policy;
+use crate::permissions::{FolderRules, Policy};
 
 /// `*_preview` limit (SPEC §4).
 pub const PREVIEW_LIMIT: usize = 4096;
@@ -104,6 +105,8 @@ pub struct Core {
     /// `[permissions]` of the worker config, for `policy_hint` and denying what a deny
     /// rule matches.
     policy: Arc<Policy>,
+    /// hqc's allow rules of the session's workspace and its path (T48); `None` without one.
+    folder: Option<(FolderRules, std::path::PathBuf)>,
     model: Option<String>,
     /// The session's cumulative cost as of the last `result` (or the transcript's last
     /// `cost-state` when resumed): the baseline of the next turn's cost.
@@ -135,6 +138,7 @@ impl Core {
             pending: HashMap::new(),
             rules: SessionRules::default(),
             policy: Arc::default(),
+            folder: None,
             model: None,
             cost_total: None,
             commands: None,
@@ -145,6 +149,13 @@ impl Core {
 
     pub fn with_policy(mut self, policy: Arc<Policy>) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// The workspace's hqc rules (T48): applied after the deny check, and the source of
+    /// `approval.request.rule_suggestions`.
+    pub fn with_folder(mut self, rules: FolderRules, root: std::path::PathBuf) -> Self {
+        self.folder = Some((rules, root));
         self
     }
 
@@ -672,7 +683,19 @@ impl Core {
             tracing::info!(session_id = %self.session_id, %tool, "allowed by a session rule");
             return vec![Action::Write(allow(&request_id, &input, None))];
         }
+        // hqc's rules of the folder (T48), read at every call, so a change reaches a running
+        // session at once; every part of a compound command must be covered.
+        if let Some((rules, root)) = &self.folder {
+            if let Some(rule) = self.policy.folder_allows(rules, root, &tool, &input) {
+                tracing::info!(session_id = %self.session_id, %tool, %rule, "allowed by a folder rule");
+                return vec![Action::Write(allow(&request_id, &input, None))];
+            }
+        }
         let policy_hint = self.policy.hint(&tool, &input);
+        let rule_suggestions = self
+            .folder
+            .as_ref()
+            .and_then(|(_, root)| crate::permissions::suggest(&tool, &input, root));
 
         let suggestions = req["permission_suggestions"]
             .as_array()
@@ -721,6 +744,7 @@ impl Core {
             options,
             expires_at: None,
             policy_hint,
+            rule_suggestions,
         })]
     }
 

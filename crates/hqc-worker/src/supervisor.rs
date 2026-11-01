@@ -67,6 +67,7 @@ use crate::config::{Config, StartSpec};
 use crate::inbox::{self, ArtifactClient, InboxFile};
 use crate::known_paths::KnownPaths;
 use crate::link::HubLink;
+use crate::permissions::FolderRules;
 
 /// An input that ends this many turns without being taken is given up (see `end_turn`).
 const MAX_REQUEUES: u8 = 2;
@@ -151,6 +152,11 @@ pub struct Supervisor {
     holders: HashMap<Uuid, HeldBy>,
     /// `title.request` runs (T24).
     titler: Arc<crate::title::Titler>,
+    /// hqc's allow rules by canonical workspace (T48), from `session.start` and
+    /// `workspace.rules`; also the workspaces `permissions.inspect` may look at.
+    folders: HashMap<PathBuf, FolderRules>,
+    /// Claude Code's config folder, for `~/.claude/settings.json` in `permissions.inspect`.
+    claude_dir: Option<PathBuf>,
 }
 
 /// A confirmation asked for and the `session.start` frames that wait for it.
@@ -243,6 +249,8 @@ impl Supervisor {
             outcomes_rx: Some(outcomes_rx),
             mirror: None,
             holders: HashMap::new(),
+            folders: HashMap::new(),
+            claude_dir: crate::adapter::claude_code::paths::default_config_dir(),
         }
     }
 
@@ -349,7 +357,7 @@ impl Supervisor {
         let id = env.id;
         let (session_id, cmd) = match env.body {
             HubFrame::SessionStart(s) => {
-                let spec = match self.cfg.check_start(&s) {
+                let mut spec = match self.cfg.check_start(&s) {
                     Ok(spec) if self.factory.supports(spec.runtime) => spec,
                     Ok(spec) => {
                         let msg =
@@ -375,6 +383,11 @@ impl Supervisor {
                         self.wait_for_owner(id, s, folder);
                         return;
                     }
+                }
+                if s.workspace_path.is_some() {
+                    let rules = self.folders.entry(spec.workspace.clone()).or_default();
+                    rules.set(&s.allow_rules);
+                    spec.folder_rules = Some(rules.clone());
                 }
                 if !self.sessions.contains_key(&sid) {
                     let h = self.spawn_session(&spec);
@@ -497,6 +510,47 @@ impl Supervisor {
                 self.title_request(id, r);
                 return;
             }
+            HubFrame::WorkspaceRules(w) => {
+                match self.workspace(&w.workspace_path) {
+                    Some(path) => {
+                        tracing::info!(path = %path.display(), rules = w.allow_rules.len(), "hqc rules of the folder");
+                        self.folders.entry(path).or_default().set(&w.allow_rules);
+                        self.link.reply(&id, ack(None));
+                    }
+                    None => {
+                        tracing::warn!(path = %w.workspace_path, "workspace.rules refused: not a folder inside allowed_roots");
+                        self.link.reply(
+                            &id,
+                            wire_error(
+                                error_code::INVALID_FRAME,
+                                "workspace_path is not a folder inside allowed_roots",
+                                false,
+                            ),
+                        );
+                    }
+                }
+                return;
+            }
+            HubFrame::PermissionsInspect(r) => {
+                // Only a workspace the hub told about (rules or a session) and that lies
+                // inside `allowed_roots`: the hub is not trusted with paths (SPEC §2.1).
+                let folder = self
+                    .workspace(&r.path)
+                    .and_then(|p| self.folders.get(&p).map(|f| (p, f.list())));
+                let (perms, claude_dir) = (self.cfg.permissions.clone(), self.claude_dir.clone());
+                self.fs_request(id, r.request_id, move || {
+                    let (root, hqc) = folder.ok_or("path is not a workspace of this worker")?;
+                    Ok(ResultBody::Inspect(crate::permissions::inspect(
+                        &perms,
+                        claude_dir.as_deref(),
+                        &root,
+                        hqc,
+                        r.command.as_deref(),
+                        r.tool.as_deref(),
+                    )))
+                });
+                return;
+            }
             other => {
                 tracing::debug!(?other, "frame not for the supervisor");
                 return;
@@ -520,6 +574,14 @@ impl Supervisor {
                 );
             }
         }
+    }
+
+    /// A hub path as the canonical folder it names, if that is a folder inside
+    /// `allowed_roots`.
+    fn workspace(&self, path: &str) -> Option<PathBuf> {
+        let p = Path::new(path);
+        let c = p.canonicalize().ok()?;
+        (p.is_absolute() && c.is_dir() && self.cfg.inside_roots(&c)).then_some(c)
     }
 
     fn remember(&self, folder: &Path) {

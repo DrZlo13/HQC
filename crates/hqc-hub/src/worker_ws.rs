@@ -618,6 +618,7 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         // Nor do the answers to its asks that came while it was away (SPEC §5.2).
         crate::peers::after_hello(app, conn.worker_id).await?;
         crate::mirror::after_hello(app, conn).await?;
+        crate::rules::after_hello(app, conn).await?;
         Ok(())
     }
     .await;

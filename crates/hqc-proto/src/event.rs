@@ -106,6 +106,15 @@ pub enum PolicyHint {
     Unknown,
 }
 
+/// One simple part of a command and the hqc rule the worker suggests for it (T48); `rule`
+/// absent: none (an unknown first word, `git -C` with a path outside the workspace).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSuggestion {
+    pub part: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
 /// Why an open approval or clarify request was closed without an answer (SPEC §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -216,6 +225,11 @@ pub enum EventKind {
         /// when no rule matches.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         policy_hint: Option<PolicyHint>,
+        /// hqc rules the worker suggests for "Allow in this folder" (since SPEC 0.52, T48):
+        /// one per simple part of a Bash command, the tool name for another tool; absent when
+        /// the session has no workspace or the worker cannot split the command.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule_suggestions: Option<Vec<RuleSuggestion>>,
     },
     #[serde(rename = "approval.response")]
     ApprovalResponse {

@@ -123,6 +123,7 @@ async fn live_repo_settings_ignored() {
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
+        folder_rules: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -188,6 +189,103 @@ async fn live_repo_settings_ignored() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+/// T48 (SPEC §8.1, §14): the folder's hqc rule `Bash(touch *)` answers the CLI's
+/// `can_use_tool` for a compound `touch a && touch b` without an `approval.request`.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_folder_rules -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_folder_rules() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    let work = root.join(format!("spike-t48-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&work).unwrap();
+    let work = work.canonicalize().unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&work)
+        .status()
+        .unwrap()
+        .success());
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(OsSpawner));
+    let rules = hqc_worker::permissions::FolderRules::default();
+    rules.set(&["Bash(touch *)".into()]);
+    let session_id = Uuid::now_v7();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: work.clone(),
+        workdir: work.clone(),
+        environment: "default".into(),
+        runtime_session_id: Some(Uuid::new_v4().to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: false,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
+        folder_rules: Some(rules),
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+    adapter
+        .input(&SessionInput {
+            session_id,
+            event_id: Uuid::now_v7(),
+            text: "Run the shell command: touch hqc-t48-a && touch hqc-t48-b. Then reply with exactly: DONE".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+            peer: None,
+            permission_cap: None,
+        })
+        .await
+        .unwrap();
+    let mut asked = vec![];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("turn did not end in 180 s")
+            .expect("channel closed");
+        println!("{}", label(&ev));
+        match &ev {
+            AdapterEvent::Event(e) => {
+                if let EventKind::ApprovalRequest {
+                    request_id,
+                    description,
+                    ..
+                } = &e.kind
+                {
+                    asked.push(description.clone());
+                    adapter
+                        .answer_approval(request_id, "deny", None)
+                        .await
+                        .unwrap();
+                }
+            }
+            AdapterEvent::TurnEnded => break,
+            AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+            _ => {}
+        }
+    }
+    adapter.kill().await.unwrap();
+    assert_eq!(asked, Vec::<String>::new(), "the hqc rule did not answer");
+    assert!(work.join("hqc-t48-a").exists() && work.join("hqc-t48-b").exists());
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// T38 (SPEC §8.1): a running process switches its permission mode between turns with
 /// `set_permission_mode`, and the CLI reports it: ask → auto → ask in one process. In auto
 /// `touch` runs without a request; back in ask the next `touch` is asked about (denied here).
@@ -235,6 +333,7 @@ async fn live_permission_mode_switch() {
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
+        folder_rules: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -381,6 +480,7 @@ async fn live_bash_turn_with_approval() {
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
+        folder_rules: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -614,6 +714,7 @@ async fn live_permission_policy() {
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
+        folder_rules: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -740,6 +841,7 @@ async fn live_ai_title() {
         session_token: hqc_worker::token::Secret::new("st"),
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
+        folder_rules: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);

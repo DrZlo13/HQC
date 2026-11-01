@@ -322,9 +322,38 @@ pub struct Workspace {
     pub ephemeral: bool,
     pub created_by_hqc: bool,
     pub mirror_enabled: bool,
+    /// How many hqc allow rules the folder has (since SPEC 0.52, T48).
+    #[serde(default)]
+    pub hqc_rules: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// One of hqc's allow rules of a workspace (T48, SPEC §3 Workspace).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRule {
+    pub id: Uuid,
+    /// As [`crate::rules`] reads it.
+    pub rule: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `GET /api/workspaces/{id}/rules`, and the answer to `POST` (the whole list, newest first).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceRuleList {
+    pub rules: Vec<WorkspaceRule>,
+}
+
+/// `POST /api/workspaces/{id}/rules`: rules to add; ones the folder has already are kept as
+/// they are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddWorkspaceRules {
+    pub rules: Vec<String>,
+}
+
+/// `GET /api/workspaces/{id}/permissions?command=|tool=`: the worker's
+/// `permissions.inspect` (SPEC §5.3, §6).
+pub type WorkspacePermissions = crate::frame::InspectResult;
 
 /// `GET /api/workspaces?project_id=`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -904,6 +933,20 @@ mod tests {
                 .unwrap();
         assert_eq!(plain.error, "workspace_conflict");
         roundtrip::<DirList>(include_str!("../examples/wire/api.dirs.json"));
+        let rl: WorkspaceRuleList =
+            roundtrip(include_str!("../examples/wire/api.workspace.rules.json"));
+        assert_eq!(rl.rules.len() as u32, w.hqc_rules);
+        roundtrip::<AddWorkspaceRules>(include_str!(
+            "../examples/wire/api.workspace.rules.request.json"
+        ));
+        let wp: WorkspacePermissions = roundtrip(include_str!(
+            "../examples/wire/api.workspace.permissions.json"
+        ));
+        assert_eq!(wp.sources.len(), 3);
+        assert_eq!(
+            wp.check.map(|c| c.verdict),
+            Some(crate::frame::Verdict::Deny)
+        );
         let a: Artifact = roundtrip(include_str!("../examples/wire/api.artifact.json"));
         assert_eq!(a.kind, crate::event::ArtifactKind::Image);
         roundtrip::<ArtifactUrl>(include_str!("../examples/wire/api.artifact.url.json"));

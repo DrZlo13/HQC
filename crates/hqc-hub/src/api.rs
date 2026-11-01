@@ -275,7 +275,7 @@ pub async fn delete_project(
 const WORKER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_PATH: usize = 4096;
 
-async fn workspace_for(
+pub(crate) async fn workspace_for(
     app: &AppState,
     user: &CurrentUser,
     id: Uuid,
@@ -295,7 +295,7 @@ async fn own_worker(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<d
 }
 
 /// Send a request frame to the online worker and wait for its result.
-async fn ask_worker(
+pub(crate) async fn ask_worker(
     app: &AppState,
     worker_id: Uuid,
     build: impl FnOnce(String) -> HubFrame,

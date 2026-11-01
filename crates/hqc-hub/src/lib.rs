@@ -29,6 +29,7 @@ pub mod mirror;
 pub mod peers;
 pub mod push;
 pub mod requests;
+pub mod rules;
 pub mod schedules;
 pub mod search;
 pub mod security;
@@ -69,6 +70,15 @@ pub fn router(app: AppState) -> Router {
             "/api/workspaces/{id}",
             axum::routing::patch(api::patch_workspace).delete(api::delete_workspace),
         )
+        .route(
+            "/api/workspaces/{id}/rules",
+            get(rules::list).post(rules::add),
+        )
+        .route(
+            "/api/workspaces/{id}/rules/{rule_id}",
+            axum::routing::delete(rules::delete),
+        )
+        .route("/api/workspaces/{id}/permissions", get(rules::inspect))
         .route(
             "/api/projects/{id}/sessions",
             get(api::project_sessions).post(api::create_session),

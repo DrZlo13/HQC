@@ -1394,6 +1394,92 @@ async fn a_stopped_agent_starts_in_ask_for_a_capped_input() {
     w.stop().await;
 }
 
+// T48: hqc's rules of a folder come with `session.start` and `workspace.rules`;
+// `permissions.inspect` shows them with the files' rules and checks a command, only for a
+// workspace the worker knows inside allowed_roots.
+#[tokio::test]
+async fn folder_rules_and_inspect() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let ws = env.workspace().display().to_string();
+
+    // Not known yet: refused, though inside allowed_roots.
+    let id = c
+        .frame(
+            "permissions.inspect",
+            json!({"request_id": "i-1", "path": ws}),
+        )
+        .await;
+    let r = c.expect("error").await;
+    assert_eq!(
+        (r["id"].as_str(), r["payload"]["code"].as_str()),
+        (Some(id.as_str()), Some("invalid_frame"))
+    );
+
+    let sid = Uuid::now_v7();
+    let mut start = env.start_payload(sid);
+    start["allow_rules"] = json!(["Bash(python3 *)"]);
+    c.frame("session.start", start).await;
+    c.expect("ack").await;
+    c.frame(
+        "permissions.inspect",
+        json!({"request_id": "i-2", "path": ws, "command": "python3 a.py && sudo ls"}),
+    )
+    .await;
+    let r = c.expect("result").await;
+    let p = &r["payload"];
+    assert_eq!(p["request_id"], "i-2");
+    assert_eq!(p["hqc"], json!(["Bash(python3 *)"]));
+    assert_eq!(p["sources"][0]["source"], "worker.toml");
+    assert_eq!(p["sources"][2]["source"], ".claude/settings.local.json");
+    assert_eq!(p["check"]["verdict"], "deny");
+    assert_eq!(p["check"]["rule"], "Bash(sudo:*)");
+
+    // A change of the list: acked, and what the worker holds from now on.
+    let id = c
+        .frame(
+            "workspace.rules",
+            json!({"workspace_path": format!("{ws}/sub/.."), "allow_rules": ["Bash(git fetch:*)", "Bash", "Edit"]}),
+        )
+        .await;
+    let a = c.expect("ack").await;
+    assert_eq!(a["id"], id.as_str());
+    c.frame(
+        "permissions.inspect",
+        json!({"request_id": "i-3", "path": ws, "command": "git -C sub fetch"}),
+    )
+    .await;
+    let p = c.expect("result").await["payload"].clone();
+    assert_eq!(
+        p["hqc"],
+        json!(["Bash(git fetch:*)", "Edit"]),
+        "invalid rules dropped"
+    );
+    assert_eq!(p["check"]["verdict"], "allow");
+    assert_eq!(p["check"]["source"], "hqc");
+
+    // Outside allowed_roots: neither rules nor inspection.
+    let outside = tempfile::tempdir().unwrap();
+    let outside = outside.path().display().to_string();
+    c.frame(
+        "workspace.rules",
+        json!({"workspace_path": outside, "allow_rules": []}),
+    )
+    .await;
+    assert_eq!(c.expect("error").await["payload"]["code"], "invalid_frame");
+    c.frame(
+        "permissions.inspect",
+        json!({"request_id": "i-4", "path": outside}),
+    )
+    .await;
+    assert_eq!(c.expect("error").await["payload"]["code"], "invalid_frame");
+    w.stop().await;
+}
+
 // T14: the hub asks the worker about folders (SPEC §5.3): `fs.stat` before a workspace is
 // added, `fs.list_dirs` for the folder picker; answers stay inside allowed_roots.
 #[tokio::test]

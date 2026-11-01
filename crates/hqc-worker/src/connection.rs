@@ -612,6 +612,8 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::MirrorSet(_) => "mirror.set",
         HubFrame::SessionCleanup(_) => "session.cleanup",
         HubFrame::TitleRequest(_) => "title.request",
+        HubFrame::WorkspaceRules(_) => "workspace.rules",
+        HubFrame::PermissionsInspect(_) => "permissions.inspect",
         HubFrame::McpResult(_) => "mcp.result",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",

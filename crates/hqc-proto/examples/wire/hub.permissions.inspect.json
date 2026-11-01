@@ -1,0 +1,9 @@
+{
+  "id": "h-16",
+  "type": "permissions.inspect",
+  "payload": {
+    "request_id": "h-16",
+    "path": "/Users/home-mac/work/hqc",
+    "command": "python3 tools/conv.py x && git -C sub fetch"
+  }
+}

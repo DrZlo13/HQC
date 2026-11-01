@@ -880,12 +880,16 @@ pub struct WorkspaceRow {
     pub created_by_hqc: bool,
     pub kind: String,
     pub mirror_enabled: bool,
+    /// How many hqc rules the folder has (T48).
+    pub hqc_rules: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 const WORKSPACE_COLS: &str = "id, project_id, owner_id, worker_id, path, label, environment, \
-    ephemeral, created_by_hqc, kind, mirror_enabled, created_at, updated_at";
+    ephemeral, created_by_hqc, kind, mirror_enabled, \
+    (SELECT count(*)::int FROM workspace_rules r WHERE r.workspace_id = workspaces.id) AS hqc_rules, \
+    created_at, updated_at";
 
 impl WorkspaceRow {
     pub fn to_api(&self) -> hqc_proto::api::Workspace {
@@ -900,10 +904,112 @@ impl WorkspaceRow {
             ephemeral: self.ephemeral,
             created_by_hqc: self.created_by_hqc,
             mirror_enabled: self.mirror_enabled,
+            hqc_rules: self.hqc_rules.max(0) as u32,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
     }
+}
+
+pub async fn workspaces_of_worker(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(worker_id)
+    .fetch_all(db)
+    .await
+}
+
+/// One of hqc's allow rules of a workspace (T48).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RuleRow {
+    pub id: Uuid,
+    pub rule: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl RuleRow {
+    pub fn to_api(&self) -> hqc_proto::api::WorkspaceRule {
+        hqc_proto::api::WorkspaceRule {
+            id: self.id,
+            rule: self.rule.clone(),
+            created_at: self.created_at,
+        }
+    }
+}
+
+/// The workspace's hqc rules, newest first.
+pub async fn workspace_rules(db: &PgPool, workspace_id: Uuid) -> sqlx::Result<Vec<RuleRow>> {
+    sqlx::query_as(
+        "SELECT id, rule, created_at FROM workspace_rules WHERE workspace_id = $1
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(workspace_id)
+    .fetch_all(db)
+    .await
+}
+
+/// The rule texts in the order the worker gets them (oldest first).
+pub async fn workspace_rule_texts(db: &PgPool, workspace_id: Uuid) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT rule FROM workspace_rules WHERE workspace_id = $1 ORDER BY created_at, id",
+    )
+    .bind(workspace_id)
+    .fetch_all(db)
+    .await
+}
+
+/// Add rules the workspace does not have yet; `false` (and nothing added) when the folder
+/// would have more than `max`. Serialized per workspace by locking its row.
+pub async fn add_workspace_rules(
+    db: &PgPool,
+    workspace_id: Uuid,
+    rules: &[String],
+    max: usize,
+) -> sqlx::Result<bool> {
+    let mut tx = db.begin().await?;
+    sqlx::query("SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE")
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+    let have: Vec<String> =
+        sqlx::query_scalar("SELECT rule FROM workspace_rules WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let mut new: Vec<&String> = Vec::new();
+    for r in rules {
+        if !have.contains(r) && !new.contains(&r) {
+            new.push(r);
+        }
+    }
+    if have.len() + new.len() > max {
+        return Ok(false);
+    }
+    for r in new {
+        sqlx::query("INSERT INTO workspace_rules (id, workspace_id, rule) VALUES ($1, $2, $3)")
+            .bind(new_id())
+            .bind(workspace_id)
+            .bind(r)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// `false`: the workspace has no such rule.
+pub async fn delete_workspace_rule(
+    db: &PgPool,
+    workspace_id: Uuid,
+    rule_id: Uuid,
+) -> sqlx::Result<bool> {
+    let r = sqlx::query("DELETE FROM workspace_rules WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace_id)
+        .bind(rule_id)
+        .execute(db)
+        .await?;
+    Ok(r.rows_affected() > 0)
 }
 
 pub async fn workspace(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkspaceRow>> {

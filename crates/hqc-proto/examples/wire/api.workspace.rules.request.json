@@ -1,0 +1,3 @@
+{
+  "rules": ["Bash(python3 *)", "Bash(git fetch:*)"]
+}

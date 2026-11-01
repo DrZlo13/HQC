@@ -8,6 +8,7 @@ pub mod client_frame;
 pub mod event;
 pub mod frame;
 pub mod mcp;
+pub mod rules;
 
 /// Worker <-> hub protocol version (SPEC §5.1). Bump on any incompatible change.
 pub const PROTOCOL_VERSION: u32 = 1;

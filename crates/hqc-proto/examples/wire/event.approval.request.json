@@ -11,5 +11,6 @@
     { "id": "allow_always", "label": "Always allow", "canonical": "always" },
     { "id": "deny", "label": "Deny", "canonical": "deny" },
     { "id": "deny_always", "label": "Always deny", "canonical": "deny_always" }
-  ], "expires_at": "2026-10-22T11:00:00Z", "policy_hint": "allow" }
+  ], "expires_at": "2026-10-22T11:00:00Z", "policy_hint": "allow",
+    "rule_suggestions": [{ "part": "cargo test", "rule": "Bash(cargo test *)" }] }
 }

@@ -6,7 +6,7 @@ import { useSubscription } from './hooks';
 import { colorHex } from '../theme';
 import { ProjectGlyph, projectName } from './Appearance';
 import { ArchiveList } from './Archive';
-import { IconArchive, IconGear, IconGrip, IconMore, IconPlus, IconRename, IconReorder, IconSearch, IconTrash } from './icons';
+import { IconArchive, IconGear, IconGrip, IconMore, IconPlus, IconRename, IconReorder, IconSearch, IconShield, IconTrash } from './icons';
 import { AUTO_CONFIRM, formatWhen, shortPath } from './labels';
 import { workspaceTitle } from './ProjectSettings';
 import { RequestsLink } from './requests';
@@ -28,6 +28,11 @@ export async function newProject(app: AppState, onError: (m: string) => void): P
 
 /** A press this long on a phone row opens its actions (MList2). */
 const LONG_PRESS_MS = 450;
+
+/** The rules screen of the session's folder (T48), if it has one. */
+function rulesHref(s: SessionInfo): string | undefined {
+  return s.workspace_id && `#/p/${s.project_id}/rules/${s.workspace_id}?session=${encodeURIComponent(s.id)}`;
+}
 
 /** Renames a session by a prompt; a refusal goes to the list's notice. */
 function rename(app: AppState, s: SessionInfo): void {
@@ -521,7 +526,7 @@ function SessionRow({
           <button type="button" class="icon-btn btn-row-archive" aria-label={`Archive «${title}»`} title="Archive" onClick={onArchive}>
             <IconArchive />
           </button>
-          <RowMenu onRename={onRename} onDelete={() => setConfirm(true)} />
+          <RowMenu rules={rulesHref(s)} onRename={onRename} onDelete={() => setConfirm(true)} />
         </div>
       )}
       {confirm && (
@@ -546,8 +551,8 @@ function SessionRow({
   );
 }
 
-/** "⋯" of a desktop row: Rename, Delete… (confirmed in the row). */
-function RowMenu({ onRename, onDelete }: { onRename: () => void; onDelete: () => void }) {
+/** "⋯" of a desktop row: Rename, Folder rules, Delete… (confirmed in the row). */
+function RowMenu({ rules, onRename, onDelete }: { rules?: string; onRename: () => void; onDelete: () => void }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -583,7 +588,7 @@ function RowMenu({ onRename, onDelete }: { onRename: () => void; onDelete: () =>
       <button
         type="button"
         class="icon-btn btn-row-more"
-        aria-label="More: rename, delete"
+        aria-label="More: rename, folder rules, delete"
         title="More"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -594,6 +599,7 @@ function RowMenu({ onRename, onDelete }: { onRename: () => void; onDelete: () =>
       {open && (
         <div class="menu" role="menu">
           {item('btn-rename', 'Rename', onRename)}
+          {rules && item('btn-rules', 'Folder rules', () => (location.hash = rules))}
           {item('btn-delete menu-danger', 'Delete…', onDelete)}
         </div>
       )}
@@ -650,6 +656,12 @@ function ActionSheet({
               <IconRename />
               Rename
             </button>
+            {rulesHref(s) && (
+              <a class="sheet-btn btn-sheet-rules" href={rulesHref(s)} onClick={onClose}>
+                <IconShield size={20} />
+                Folder rules
+              </a>
+            )}
             <button type="button" class="sheet-btn sheet-danger btn-sheet-delete" onClick={onAskDelete}>
               <IconTrash />
               Delete…

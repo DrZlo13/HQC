@@ -355,7 +355,7 @@ describe('archive from the row (T50)', () => {
     vi.stubGlobal('prompt', () => 'Net sync');
     await mount(<SessionList app={app} />);
     await click(rowOf('Network sync').querySelector('.btn-row-more'));
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Rename', 'Delete…']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Rename', 'Folder rules', 'Delete…']);
     await click(root.querySelector('.menu .btn-rename'));
     expect(api.patchSession).toHaveBeenCalledWith('net', { title: 'Net sync' });
     vi.unstubAllGlobals();
@@ -554,6 +554,7 @@ describe('SessionList (phone)', () => {
     const sheet = root.querySelector('.action-sheet')!;
     expect(sheet.querySelector('.action-sheet-title')!.textContent).toBe('Network sync');
     expect([...sheet.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Archive', 'Rename', 'Delete…', 'Cancel']);
+    expect(sheet.querySelector('.btn-sheet-rules')!.getAttribute('href')).toBe('#/p/p1/rules/w1?session=net');
     await click(sheet.querySelector('.btn-sheet-archive'));
     expect(root.querySelector('.action-sheet')).toBeNull();
     expect(root.querySelector('.toast-text')!.textContent).toBe('Archived «Network sync»');

@@ -24,7 +24,7 @@ Each task is self-contained: it can be handed to a separate agent together with 
 and the listed sections of `docs/SPEC.md`. Dependencies are stated; T44 and T45 can run in
 parallel after T43; T46 needs T45, T47 needs T46.
 
-## T49. Theme, project appearance and the new layout
+## T49. Theme, project appearance and the new layout (done, SPEC 0.51)
 
 Sections: §3 User, §3 Project, §6, §12. Mockups: all of `docs/design/redesign-2026-11-01`
 for the layout; `Appearance`, `ProjectSettings`, `MSettings2` for the screens. The 2026-10-24
@@ -49,6 +49,16 @@ checks (an SVG, a PNG renamed to `.webp` that is fine, a too large one, a non-sq
 personal project gets appearance too; client tests: tokens per base and color, the dialog, the
 settings page; by hand on a phone and a desktop: switch a project's color and icon and the
 app theme, and see the same on the other device after a reload.
+
+Done: `users.theme`, `projects.color` and `projects.icon` (migration `0024`); the icon image
+lives in its own table, not in the artifact store (cleanup, dedup and link expiry would each
+need an exception), so the object is `{kind: image, url}` and the image goes in by `PUT
+/api/projects/{id}/icon`. The client has `src/theme.ts` (the mockups' `theme.js`, checked
+against it), no palette of its own in `styles.css`, the project bar, sidebar header and rows of
+round 2, and `ProjectSettings.tsx` with the Appearance dialog in place of the Workspaces page.
+Tests: hub `tests/t49.rs`, client `tests/theme.test.ts`, `tests/appearance.test.tsx`. The check
+by hand on a phone and a desktop is still to do. Decisions and differences from the mockups in
+`docs/notes/t49-questions.md`.
 
 ## T50. Session list: archive at hand, archive mode, custom order
 

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.50, 2026-10-31. Status: the architecture agreed after six reviews and a survey of
+Version 0.51, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -128,7 +128,11 @@ it has `author`.
 `email` (from the verified Cloudflare Access JWT), `display_name`, `api_keys`
 (OpenRouter, Anthropic API; encrypted with the hub's master key, which lives in the hub's
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
-project, created on first sign-in; the personal assistant session lives in it).
+project, created on first sign-in; the personal assistant session lives in it), `theme`.
+
+`theme` (since 0.51, T49) — the client's base palette: `warm` (default) | `graphite` |
+`contrast`, all dark; one for the whole app and the same on every device of the user (`PATCH
+/api/me`, §6). The client applies it at start (`warm` until `/api/me` answers) and after a change.
 
 `timezone` (since 0.38, T35) — an IANA name, `UTC` until set; the default zone of new
 schedules (§16). The client sets it to the browser's zone (`PATCH /api/me`, §6) when it starts
@@ -162,12 +166,23 @@ the hub keeps a copy from `hello` for display and early validation.
 ### Project
 `owner_id`, `name` (1–100 characters), `slug` (unique per owner, does not change on
 rename), `description`, `default_workspace_id` (nullable),
-`session_template` (§13.3), `is_personal`. A project's first workspace becomes its
+`session_template` (§13.3), `is_personal`, `color`, `icon`. A project's first workspace becomes its
 `default_workspace_id`; when the default workspace is deleted, the earliest of the remaining
 ones takes its place. The personal project (`is_personal`) cannot be deleted or renamed (`409
 personal_project`); its other fields can change; any number of new projects can be created.
 Deleting a project deletes its workspace records and sessions (with events, as in §17.4); agent
 processes get `session.kill`; folders and transcripts on the workers are left untouched.
+
+`color` and `icon` (since 0.51, T49) — the project's appearance in the client; the personal
+project has them too. `color` is one of `teal`, `plum`, `blue`, `rose`, `moss`, `coral`, `cyan`,
+`slate` (the client's `theme.ts`; no yellows, amber means "waiting for you"); not set, the API
+gives the one at index FNV-1a-32(the id's 16 bytes) mod 8 of that list, so it is stable.
+`icon` is `{kind: emoji, value}` (1–8 characters, at most 32 bytes), `{kind: letters, value}`
+(1–2 characters, kept in upper case) or `{kind: image, url}`; absent, the client shows the first
+letters of the name. The image is stored on the hub in its own table (not an artifact: it
+belongs to no session, the artifact cleanup does not touch it, it goes with the project), one
+per project; `url` is `/api/projects/{id}/icon?v=<first 16 hex of its sha256>`. Setting an emoji
+or letters drops a stored image. Limits: §12.
 
 ### Workspace
 `project_id`, `worker_id`, `path`, `label`, `environment` (a name; a display of the binding
@@ -843,15 +858,25 @@ read them. Unknown fields are ignored in both directions.
 HTTP API (iteration 1 and projects with workspaces from iteration 2; the list is not complete,
 the rest is marked "later"):
 
-- `GET /api/me` → `{id, email, display_name, timezone, personal_project_id}`; `PATCH
-  /api/me` {timezone?} (since 0.38, `api.me.patch.request.json`; an unknown zone: `400`) → the
-  same object; later keys
+- `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme}`
+  (`api.me.json`); `PATCH /api/me` {timezone?, theme?} (since 0.38, `api.me.patch.request.json`;
+  an unknown zone: `400`; `theme` since 0.51, §3 User, another value: `422`) → the same object;
+  later keys
 - `GET /api/projects` → `{projects[]}`, `POST /api/projects` {name, description?} → `201`
   and the project, `GET/PATCH/DELETE /api/projects/{id}` (`PATCH` {name?, description?,
-  default_workspace_id?} — a workspace of this project, otherwise `400`; the personal project:
-  `409 personal_project` on rename and delete; `DELETE` → `204`, §3 Project).
+  default_workspace_id?, color?, icon?} — `default_workspace_id` a workspace of this project,
+  otherwise `400`; `color` one of the 8 names and `icon` an emoji or letters within the limits
+  of §3 Project, otherwise `422` (`{kind: image}` too: an image comes only by `PUT .../icon`);
+  the personal project: `409 personal_project` on rename and delete, its `color` and `icon`
+  change; `DELETE` → `204`, §3 Project).
   The project object is `{id, owner_id, name, slug, description, default_workspace_id?,
-  is_personal, created_at, updated_at}` (`api.project.json`)
+  is_personal, color, icon?, created_at, updated_at}` (`api.project.json`; `color` and `icon`
+  since 0.51)
+- `PUT /api/projects/{id}/icon` (since 0.51, T49; multipart: field `file`, like an attachment)
+  → the project object with `icon: {kind: image, url}`: the image is checked as in §12
+  ("Project icons"), anything else is `422 invalid_icon` with the reason in `message`. `GET
+  /api/projects/{id}/icon` → the image (§12). Another user's or a nonexistent project, or no
+  image: `404`
 - `GET /api/workspaces?project_id=` → `{workspaces[]}` (without `project_id`: all of the
   user's workspaces); `POST /api/workspaces` {project_id, worker_id, path, label?,
   mirror_enabled?} → `201` and the workspace (`kind: dir`, §13.1): the hub sends the worker
@@ -980,6 +1005,22 @@ the rest is marked "later"):
   and deletes a session's schedules from the session's "More" menu ("Schedules")
 - later: `/api/projects/{id}/template`
 
+Client layout (since 0.51, T49, `docs/design/redesign-2026-11-01`): on a desktop the project
+bar (72 px: a tile per project with its icon on its color at ~24 %, the current one more
+saturated with a pill of its color at the left edge, an amber "needs you" badge), the sidebar
+(280–310 px: the project's tile, name and counters, a gear to the project settings, "New";
+rows with a status dot — amber waiting, the project color pulsing while running, an empty ring
+idle — title, time, status and `worker · path` without `~/work/`) and the main column, whose
+feed and input are at most 780 px wide; on a phone one screen at a time, the projects as chips
+with their icons. The theme is the user's `theme` plus the current project's `color`, as CSS
+variables on the document root recomputed when either changes; status colors do not depend on
+them (amber waiting, green online, red danger, violet between sessions). The project settings
+(`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance" dialog: icon as an
+emoji, letters or an image, the color, the app theme, a live preview; on a phone a full-screen
+sheet), Workspaces (the workspace records with "VS Code sessions", "Make default", "Remove";
+"Add a workspace", "Import from Claude Code"; they are no longer in the sidebar) and Project
+("Rename", "Delete project"; not for the personal project).
+
 Session object (`GET /api/sessions/{id}`, list, create, `PATCH`, `archive`):
 `{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, title_source, slug, agent: {runtime,
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
@@ -1064,6 +1105,8 @@ otherwise `400`.
 
 REST errors: `{error: <code>, message}` with an HTTP status (`workspace_conflict` has extra
 fields, `locked_vscode` has `hint` and `held_by?`, `vscode_open` has `held_by`);
+`422`: a body that cannot be read as its type (an unknown `permission_mode`, `theme`, `color`),
+and since 0.51 `invalid_icon` (a project icon refused, §3 Project, §12);
 `413 too_large`: an artifact over the limit (§12); `409` with codes `archived`, `locked_vscode`
 (input to a session VS Code is driving; body `{error, message, hint: "takeover", held_by?}`,
 the client offers "Take over" or, with `held_by`, closing the session in VS Code, §9.3),
@@ -2402,6 +2445,16 @@ are saved as artifacts by the adapter itself (§8.2). Agent → agent (since 0.4
 `.hqc/inbox` like a user's files; the files of a reply into the asker's (§7, §7.1). In the
 feed a `peer.message` shows its files under its text like a `user.message`.
 
+**Project icons** (since 0.51, T49, §3 Project). `PUT /api/projects/{id}/icon` takes PNG, JPEG
+or WebP only, recognized by the content's magic bytes (the name and the declared type do not
+count: a PNG named `.webp` is a PNG; SVG and anything else is refused), square, 128 to 1024 px
+on a side by the image's header, at most 256 KB (the upload stops as soon as it passes that);
+a refusal is `422 invalid_icon`. `GET /api/projects/{id}/icon` is for the project's owner (under
+Access, like the API, not by a signed link) and answers with the checked `Content-Type`,
+`X-Content-Type-Options: nosniff`, the artifact `sandbox` CSP, `ETag` (the sha256; `304` on
+`If-None-Match`) and `Cache-Control: private, max-age=31536000, immutable`: the `?v=` of the
+project's `icon.url` changes with the image.
+
 **Cleanup** (since 0.23, T21). Once a day (the first time right after start) the hub deletes
 artifact records that no event references (`artifact_ids` of `user.message` and, since 0.46,
 `peer.message`, `artifact_id` of
@@ -2944,6 +2997,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.50 → 0.51 (T49, the theme and project appearance)
+§3 User: `theme` (`warm` | `graphite` | `contrast`). §3 Project: `color` (8 names, by a hash of
+the id until set) and `icon` (emoji, letters or an uploaded image), the personal project
+included. §6: both in `GET/PATCH /api/me` and the project object, `PUT/GET
+/api/projects/{id}/icon`, `422 invalid_icon`, the client layout of round 2 (project bar,
+sidebar header and rows, widths, the project settings page with the workspaces moved into it,
+the Appearance dialog). §12: the limits of an icon image and its headers. Hub migration `0024`.
 
 ### 0.49 → 0.50 (iteration 4 planned)
 §14: an environment's free-form `settings` is replaced by `permissions {unblock, allow, deny}`

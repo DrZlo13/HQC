@@ -45,7 +45,7 @@ async fn worker_event_reaches_client() {
     assert_eq!(p["runtime"], "claude_code");
     assert_eq!(p["workspace_path"], WS_PATH);
     assert_eq!(p["cwd"], ".");
-    assert_eq!(p["environment"], "default");
+    assert!(p.get("environment").is_none(), "the worker resolves it (T43)");
     assert_eq!(p["owner_is_worker_owner"], true);
     assert_eq!(p["ask_timeout_s"], 600);
     assert!(p["session_token"].as_str().unwrap().starts_with("hqcs_"));

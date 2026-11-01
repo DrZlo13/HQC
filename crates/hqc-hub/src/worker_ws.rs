@@ -556,6 +556,11 @@ async fn on_hello(
         return Ok(None);
     };
     let restarted = previous_boot != Some(h.boot_id);
+    // The environment each workspace shows follows the worker's bindings (T43).
+    let changed = db::set_workspace_environments(&app.db, conn.worker_id, &h.env_bindings).await?;
+    if changed > 0 {
+        tracing::info!(worker_id = %conn.worker_id, changed, "workspace environments from hello");
+    }
     // The worker reports its holders again after `hello.ack` (SPEC §9.3).
     for sid in db::forget_holders(&app.db, conn.worker_id).await? {
         app.session_changed(sid);

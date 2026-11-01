@@ -166,9 +166,6 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         model: s.model.clone(),
         workspace_path: ws.as_ref().map(|w| w.path.clone()),
         cwd: s.cwd.clone(),
-        environment: ws
-            .map(|w| w.environment)
-            .unwrap_or_else(|| "default".into()),
         runtime_session_id: s.runtime_session_id.clone(),
         system_prompt: s.system_prompt.clone(),
         disallowed_tools: serde_json::from_value(s.disallowed_tools.clone()).unwrap_or_default(),

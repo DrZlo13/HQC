@@ -610,22 +610,26 @@ impl FakeWorker {
     }
 
     pub async fn hello(&mut self, root: &str, boot_id: Uuid) -> Value {
-        let id = self
-            .send(
-                "hello",
-                json!({
-                    "protocol_version": hqc_proto::PROTOCOL_VERSION,
-                    "boot_id": boot_id,
-                    "capabilities": {"claude_code": {"version": "2.1.307"}, "acp_agents": []},
-                    "environments": ["default"],
-                    "env_bindings": [],
-                    "allowed_roots": [root],
-                    "allow_foreign_sessions": false,
-                    "share_local_models": false,
-                    "local_models": []
-                }),
-            )
-            .await;
+        self.hello_with(root, boot_id, json!({})).await
+    }
+
+    /// `hello` with the fields of `extra` replacing the defaults (`environments`, ...).
+    pub async fn hello_with(&mut self, root: &str, boot_id: Uuid, extra: Value) -> Value {
+        let mut payload = json!({
+            "protocol_version": hqc_proto::PROTOCOL_VERSION,
+            "boot_id": boot_id,
+            "capabilities": {"claude_code": {"version": "2.1.307"}, "acp_agents": []},
+            "environments": ["default"],
+            "env_bindings": [],
+            "allowed_roots": [root],
+            "allow_foreign_sessions": false,
+            "share_local_models": false,
+            "local_models": []
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            payload[k] = v.clone();
+        }
+        let id = self.send("hello", payload).await;
         let ack = self.recv().await;
         assert_eq!(ack["type"], "hello.ack", "{ack}");
         assert_eq!(ack["id"], id);

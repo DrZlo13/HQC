@@ -1042,6 +1042,39 @@ pub async fn workspaces_of_owner(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<W
     .await
 }
 
+/// `workers.env_bindings` as stored from `hello`; anything unreadable is no binding.
+fn env_bindings(v: Value) -> Vec<hqc_proto::frame::EnvBinding> {
+    serde_json::from_value(v).unwrap_or_default()
+}
+
+/// Sets `environment` of the worker's workspaces from the bindings of its `hello` (SPEC §3
+/// Workspace, §14: a display; the worker resolves sessions' environments itself). Returns how
+/// many changed.
+pub async fn set_workspace_environments(
+    db: &PgPool,
+    worker_id: Uuid,
+    bindings: &[hqc_proto::frame::EnvBinding],
+) -> sqlx::Result<usize> {
+    let rows: Vec<(Uuid, String, String)> =
+        sqlx::query_as("SELECT id, path, environment FROM workspaces WHERE worker_id = $1")
+            .bind(worker_id)
+            .fetch_all(db)
+            .await?;
+    let mut changed = 0;
+    for (id, path, old) in rows {
+        let env = hqc_proto::frame::environment_for(bindings, &path);
+        if env != old {
+            sqlx::query("UPDATE workspaces SET environment = $2, updated_at = now() WHERE id = $1")
+                .bind(id)
+                .bind(env)
+                .execute(db)
+                .await?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 /// Two folders overlap when they are the same or one lies inside the other (compared by
 /// path components, so `/a/b` and `/a/bc` do not).
 pub fn paths_overlap(a: &str, b: &str) -> bool {
@@ -1088,9 +1121,16 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     {
         return Ok(WorkspaceInsert::Conflict(w));
     }
+    let bindings: Option<Value> =
+        sqlx::query_scalar("SELECT env_bindings FROM workers WHERE id = $1")
+            .bind(n.worker_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let bindings = env_bindings(bindings.unwrap_or_default());
     let row: WorkspaceRow = sqlx::query_as(&format!(
-        "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label, mirror_enabled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {WORKSPACE_COLS}"
+        "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label, mirror_enabled,
+            environment)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {WORKSPACE_COLS}"
     ))
     .bind(new_id())
     .bind(n.project_id)
@@ -1099,6 +1139,7 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     .bind(n.path)
     .bind(n.label)
     .bind(n.mirror_enabled)
+    .bind(hqc_proto::frame::environment_for(&bindings, n.path))
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(

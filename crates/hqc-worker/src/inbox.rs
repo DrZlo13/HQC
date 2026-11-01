@@ -352,6 +352,7 @@ pub async fn fetch_reply(
 ) -> Vec<hqc_proto::mcp::ReplyFile> {
     use hqc_proto::mcp::ReplyFile;
     let failed = |f: &hqc_proto::mcp::ReplyArtifact, e: String| ReplyFile {
+        artifact_id: f.artifact_id,
         name: f.name.clone(),
         kind: f.kind,
         path: None,
@@ -375,6 +376,7 @@ pub async fn fetch_reply(
     for f in files {
         match fetch_one(client, &dir, folder, f.artifact_id, &mut total, &mut taken).await {
             Ok(got) => out.push(ReplyFile {
+                artifact_id: f.artifact_id,
                 name: f.name.clone(),
                 kind: f.kind,
                 path: Some(got.path.display().to_string()),

@@ -209,7 +209,7 @@ async fn a_spawned_session_runs_its_first_turn_on_the_prompt() {
     assert_eq!(res["id"], id.as_str());
     assert_eq!(
         res["payload"]["result"],
-        json!({"to": "personal/spawner", "delivery": "buffered"})
+        json!({"to": "personal/spawner", "delivery": "buffered", "message_seq": 2})
     );
     hub.finish().await;
 }

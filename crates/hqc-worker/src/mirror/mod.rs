@@ -328,6 +328,7 @@ impl Mirror {
             client_op_id: None,
             delivery: None,
             delivered_at: None,
+            reply_delivered_at: None,
         })
     }
 

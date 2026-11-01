@@ -278,9 +278,11 @@ pub struct ReplyArtifact {
 }
 
 /// One file of an [`ASK`] reply as the agent gets it: the local `path` of the download, or
-/// the `error` that stopped it.
+/// the `error` that stopped it. `artifact_id` (T51): the hub's copy, which the asker's client
+/// opens and which the agent may pass on in `files`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplyFile {
+    pub artifact_id: Uuid,
     pub name: String,
     pub kind: crate::event::ArtifactKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]

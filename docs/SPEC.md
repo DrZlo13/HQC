@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.51, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
+Version 0.52, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -342,7 +342,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text`, `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
-| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls |
+| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. Since 0.52 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12) | adapter |
@@ -353,7 +353,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1) |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.52 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result`; for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?` | worker or hub |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
@@ -913,7 +913,9 @@ the rest is marked "later"):
   `permission_mode` and the `effective_permission_mode` the worker reported so far; its
   confirmation comes as `session.summary`.
 - `GET /api/sessions/{id}/events?after_seq=&limit=` — pagination by `seq`, response
-  `{events[], last_seq}`
+  `{events[], last_seq}`. Since 0.52 (T51) a final `agent.message` that answered an
+  `hqc_ask` has `reply_delivered_at` when the asking worker acknowledged the reply (§7.1);
+  the field is not stored, the hub adds it here and on `/api/ws`
 - `POST /api/sessions/{id}/input` {text, artifact_ids[], client_op_id} → `201 {event}`:
   the stored `user.message` with `client_op_id` and `delivery: pending`; a repeat with the same
   `client_op_id` (deduplicated by `(session_id, client_op_id)`) → `200 {event}` with the event
@@ -1021,6 +1023,24 @@ sheet), Workspaces (the workspace records with "VS Code sessions", "Make default
 "Add a workspace", "Import from Claude Code"; they are no longer in the sidebar) and Project
 ("Rename", "Delete project"; not for the personal project).
 
+Messages between sessions in the feed (since 0.52, T51; mockups `Session`, `AskingSession`,
+`MSession2`): violet blocks (`--relay`) with an arrow, ↗ for what left this session and ↙
+for what came into it, and the other session's address as a link to it (plain text when the
+user has no such session: deleted or unknown). In the answering session a `peer.message` is
+"↙ Question from X" (`mode: ask`) or "↙ Message from X" with its text and files, and the final
+`agent.message` whose `in_reply_to` is a question is "↗ Reply to X · delivered <time>"
+(`reply_delivered_at`) with the turn's `attachment`s and token line inside the block; a send
+of that turn that went `with_reply` (§7.1) follows the text after the separator line "sent
+with hqc_send while answering". In the asking session the agent's own `hqc_send` / `hqc_ask`
+call is "↗ Sent to X · delivered <time>" with the call's `text` and files: the `delivered_at`
+and `artifact_ids` of the `peer.message` in X, which the client reads at `message_seq` of the
+result (`GET .../events?after_seq=<message_seq - 1>&limit=1`), else the names in `files`, and
+until then "waiting for a reply" (an ask), "queued", "waits for its next turn" (buffered) or
+"goes with the reply"; the ask's result is "↙ Reply from X" with `reply` (the parts after the
+separator under the same separator line) and `files` (Open / Download by `artifact_id`, the
+local `path` under each). Such a send is also a `peer.message` in the asker; the client leaves
+it out there, as the reply shows it.
+
 Session object (`GET /api/sessions/{id}`, list, create, `PATCH`, `archive`):
 `{id, project_id, owner_id, workspace_id?, worker_id?, cwd, title, title_source, slug, agent: {runtime,
 acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
@@ -1070,7 +1090,10 @@ newer copy).
 - client → hub: `{type: subscribe, session_id, after_seq?}`, `{type: unsubscribe,
   session_id}`, `{type: subscribe_summary}`, `{type: ping}`;
 - hub → client: `{type: event, event}`: the event as stored (§3), `agent.delta` without
-  `seq`; `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
+  `seq`; since 0.52 (T51) the hub sends the final `agent.message` that answered an `hqc_ask`
+  again, the same `seq`, with `reply_delivered_at` once the asker's worker acknowledged the
+  reply, to the subscriptions that already had it (the client takes the field over its copy);
+  `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
   sent, the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
   delivered_at?}`: the delivery of an input changed; the event itself is not resent, the
   client updates `delivery`/`delivered_at` of its event with this `seq`;
@@ -1183,11 +1206,14 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   is required until the personal session exists (iteration 5); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
-  `with_reply`: the send goes back with the reply to the target's open ask (§7.1).
+  `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.52
+  (T51) also `message_seq`: the `seq` of the `peer.message` in the session it went to (the
+  asker's for `with_reply`), from which the sender's client shows its delivery (§6).
 - `hqc_ask(text, session, timeout_s?)` — a message that waits for a reply. To the agent's own
   session: an immediate error. Since 0.35 (T32): the result is `{from, reply}` — the
   target's address and the text of its final answer; `timeout_s` is at least 1 and at most
-  `ask_timeout_s` (a larger value is cut to it), by default `ask_timeout_s`.
+  `ask_timeout_s` (a larger value is cut to it), by default `ask_timeout_s`. Since 0.52 (T51)
+  the result also has `message_seq`, the `seq` of the question in the target (§6).
 - Files between sessions (since 0.46, T41): `hqc_send(text, session, files?)` and
   `hqc_ask(text, session, timeout_s?, files?)`. `files` is a list of at most 32 strings, each
   a path or an artifact id (a uuid, e.g. from an `hqc_attach` result). The sender's worker
@@ -1205,8 +1231,9 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   (§5.3, §12). A repeated call acts once (§5.2). The reply to an `hqc_ask` carries the files
   the target attached during its answering turn (§7.1): the result is `{from, reply,
   files?}`, `files` absent when there are none; the asking worker gives the agent `files:
-  [{name, kind, path, size}]` with `path` absolute, in `<workdir>/.hqc/inbox/<request_id>/`,
-  or `{name, kind, error}` for a file it could not download (the reply text comes back
+  [{artifact_id, name, kind, path, size}]` (`artifact_id` since 0.52, T51: the asker's client
+  opens the file by it, and the agent may pass it on in `files`) with `path` absolute, in
+  `<workdir>/.hqc/inbox/<request_id>/`, or `{artifact_id, name, kind, error}` for a file it could not download (the reply text comes back
   anyway). The tool descriptions tell the agent to hand files over with `files` and never
   paste them into `text`, and that they arrive as local paths. Since 0.47 (T42) they also say
   that while an agent answers an `hqc_ask`, an `hqc_send` to the asker goes back with the reply
@@ -1323,7 +1350,7 @@ Queues (two different ones):
   with it: its entry in `peer_prefix` has its `event_id` and `artifact_ids` (§5.3). When the hub sends an input it marks the buffered
   messages not carried by another input still `pending` as carried by this one and puts them
   in its `peer_prefix`, oldest first; the input's `ack` removes them from the buffer (their
-  events keep no `delivery`), a send that arrives meanwhile waits for the next input. The
+  events keep no `delivery`; since 0.52, T51, they get `delivered_at`), a send that arrives meanwhile waits for the next input. The
   input queue takes `wake_on_send` as it is when the message is sent; there is no API to set
   it yet. Since 0.39 (T36): an input sent again (after a reconnect) carries exactly the
   buffered messages it carried when it was first sent and that are still buffered, never
@@ -1358,7 +1385,13 @@ The reply to an ask:
   local paths (§7, §5.2). The final message has no files of its own: what the target wants to
   hand back it attaches with `hqc_attach` (or, since 0.47, sends to the asker with `hqc_send`
   and `files`, below). The timeout gives
-  `error {code: timeout}`; a reply after it, or after `mcp.cancel`, goes nowhere. A target
+  `error {code: timeout}`; a reply after it, or after `mcp.cancel`, goes nowhere. Since 0.52
+  (T51) the ask keeps the reply's `event_id` (`payload.reply_event_id`), and the asking
+  worker's `ack` of the `mcp.result` (or a repeat of the ask answered from the stored result)
+  is when the reply was delivered: the first such time is kept on the ask
+  (`payload.reply_delivered_at`) and shown on the reply as `reply_delivered_at` (§6). A
+  worker's `error` for the frame and the results dropped after its restart are not a
+  delivery. A target
   whose turn on the question is lost (`system turn_lost`: its process stopped, its worker
   restarted, the watchdog) gives no reply; since 0.39 (T36) the ask then fails at once with
   `unavailable` instead of waiting for its timeout (the question is not delivered again). A
@@ -2997,6 +3030,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.51 → 0.52 (T51, messages between sessions in the feed)
+§6: the client's blocks between sessions (Question from / Reply to in the answering session,
+Sent to / Reply from in the asking one, a send that went with a reply inside it, the other
+session as a link); the events API and `/api/ws` add `reply_delivered_at` to the final message
+that answered an ask, and `/api/ws` sends that event again when the field becomes known. §7:
+the results of `hqc_send` and `hqc_ask` have `message_seq`, a file of an ask's reply has
+`artifact_id`. §7.1: the asking worker's `ack` of the reply is its delivery time (kept on the
+ask); a buffered send gets `delivered_at` with the ack of the input that carried it. §4 follows.
+No migration. Notes in `docs/notes/t51-questions.md`.
 
 ### 0.50 → 0.51 (T49, the theme and project appearance)
 §3 User: `theme` (`warm` | `graphite` | `contrast`). §3 Project: `color` (8 names, by a hash of

@@ -176,9 +176,15 @@ impl Client {
             let Some(&after) = self.subs.get(&session_id) else {
                 return true;
             };
-            let rows = match db::events_after(&self.app.db, session_id, after, BACKFILL_PAGE).await
+            let page = match db::events_after(&self.app.db, session_id, after, BACKFILL_PAGE).await
             {
-                Ok(r) => r,
+                Ok(rows) => db::events_for_clients(&self.app.db, &rows)
+                    .await
+                    .map(|events| (rows, events)),
+                Err(e) => Err(e),
+            };
+            let (rows, events) = match page {
+                Ok(p) => p,
                 Err(e) => {
                     tracing::error!(error = %e, "backfill");
                     return self
@@ -187,8 +193,8 @@ impl Client {
                 }
             };
             let n = rows.len() as i64;
-            for r in rows {
-                if !self.send(ServerFrame::Event { event: r.to_json() }).await {
+            for (r, event) in rows.iter().zip(events) {
+                if !self.send(ServerFrame::Event { event }).await {
                     return false;
                 }
                 self.subs.insert(session_id, r.seq);
@@ -223,6 +229,20 @@ impl Client {
                     Some(_) => self.backfill(*session_id).await,
                 }
             }
+            Notice::Resent {
+                session_id,
+                seq,
+                event,
+            } => match self.subs.get(session_id) {
+                // A later backfill sends the event with the field anyway.
+                Some(&last) if *seq <= last => {
+                    self.send(ServerFrame::Event {
+                        event: event.clone(),
+                    })
+                    .await
+                }
+                _ => true,
+            },
             Notice::Delivery { session_id, .. } => {
                 if !self.subs.contains_key(session_id) {
                     return true;

@@ -417,7 +417,7 @@ async fn after_store(
                 crate::titles::after_first_answer(app, s);
                 // The reply to an `hqc_ask` (SPEC §7.1).
                 if let Some(input) = in_reply_to {
-                    crate::peers::on_final(app, s, *input, text, row.seq).await?;
+                    crate::peers::on_final(app, s, *input, text, (row.event_id, row.seq)).await?;
                 }
             }
         }

@@ -785,7 +785,7 @@ async fn on_ack(app: &AppState, conn: &Arc<WorkerConn>, id: &str, a: Ack) -> any
             }
             delivery::on_input_ack(app, conn, session_id, event_id).await
         }
-        Some(Reply::Result { pending_id }) => Ok(db::result_delivered(&app.db, pending_id).await?),
+        Some(Reply::Result { pending_id }) => crate::peers::result_acked(app, pending_id).await,
         Some(Reply::Other) | None => Ok(()),
     }
 }

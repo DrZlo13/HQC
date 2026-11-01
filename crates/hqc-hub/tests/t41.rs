@@ -220,6 +220,7 @@ async fn files_go_with_the_question_and_come_back_with_the_reply() {
             "from": "personal/helper",
             "reply": "Done.",
             "files": [{"artifact_id": png, "name": "result.png", "kind": "image"}],
+            "message_seq": 2,
         }})
     );
     w1.reply(&r["id"], "ack", json!({})).await;
@@ -290,9 +291,10 @@ async fn a_reply_without_files_and_files_before_the_question() {
     ))
     .await;
     let r = w1.expect("mcp.result").await;
+    let seq = peer_messages(hub.events(&b).await)[0]["seq"].clone();
     assert_eq!(
         r["payload"]["result"],
-        json!({"from": "personal/helper", "reply": "No."})
+        json!({"from": "personal/helper", "reply": "No.", "message_seq": seq})
     );
 }
 
@@ -366,7 +368,7 @@ async fn buffered_sends_carry_their_files() {
     let r = fast(&mut w1, &ta, "hqc_send", args.clone(), &rid).await;
     assert_eq!(
         r["result"],
-        json!({"to": "personal/helper", "delivery": "buffered"})
+        json!({"to": "personal/helper", "delivery": "buffered", "message_seq": 2})
     );
     // A repeat acts once.
     let again = fast(&mut w1, &ta, "hqc_send", args, &rid).await;

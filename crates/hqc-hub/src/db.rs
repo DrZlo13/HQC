@@ -1815,6 +1815,46 @@ impl EventRow {
     }
 }
 
+/// Events as clients get them ([`EventRow::to_json`]), a final `agent.message` that answered an
+/// `hqc_ask` with `reply_delivered_at` once the asking worker acknowledged it (SPEC §6, T51).
+pub async fn events_for_clients(db: &PgPool, rows: &[EventRow]) -> sqlx::Result<Vec<Value>> {
+    let replies: Vec<String> = rows
+        .iter()
+        .filter(|r| {
+            r.kind == "agent.message"
+                && r.payload["final"] == Value::Bool(true)
+                && r.payload["in_reply_to"].is_string()
+        })
+        .map(|r| r.event_id.to_string())
+        .collect();
+    let delivered: std::collections::HashMap<Uuid, DateTime<Utc>> = if replies.is_empty() {
+        Default::default()
+    } else {
+        sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
+            "SELECT (payload ->> 'reply_event_id')::uuid,
+                    (payload ->> 'reply_delivered_at')::timestamptz
+             FROM pending_requests
+             WHERE kind = 'ask' AND payload ->> 'reply_event_id' = ANY($1)
+               AND payload ? 'reply_delivered_at'",
+        )
+        .bind(&replies)
+        .fetch_all(db)
+        .await?
+        .into_iter()
+        .collect()
+    };
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let mut v = r.to_json();
+            if let Some(t) = delivered.get(&r.event_id) {
+                v["reply_delivered_at"] = serde_json::to_value(t).unwrap_or_default();
+            }
+            v
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone)]
 pub struct NewEvent {
     pub event_id: Uuid,

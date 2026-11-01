@@ -251,7 +251,7 @@ describe('the rules screen', () => {
     await flush();
     expect(api.workspacePermissions).toHaveBeenLastCalledWith('w1', { tool: 'Edit' });
     expect($('.rules-result-label')!.textContent).toBe('Allowed');
-    expect($('.rules-result')!.textContent).toContain('by rule Edit · hqc');
+    expect($('.rules-result')!.textContent).toContain('by rule Edit · HQC');
   });
 
   it('adds a rule with a live check, warns about a deny that wins, refuses a duplicate', async () => {
@@ -299,7 +299,7 @@ describe('the rules screen', () => {
       ['Edit', 'HQC'],
       ['Bash(python3 *)', 'HQC'],
     ]);
-    expect(group('Allowed').textContent).toContain('hqc rules still save and apply when it’s back');
+    expect(group('Allowed').textContent).toContain('HQC rules still save and apply when it’s back');
     expect($<HTMLInputElement>('#rules-check')!.disabled).toBe(true);
     expect($('.rules-result-label')!.textContent).toBe('Unavailable');
     // Still editable.

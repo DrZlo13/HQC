@@ -1,7 +1,10 @@
 //! Postgres access (sqlx, runtime queries). Migrations: `crates/hqc-hub/migrations`.
 
 use chrono::{DateTime, Utc};
-use hqc_proto::frame::{PermissionMode, TitleSource};
+use hqc_proto::{
+    api::{ProjectColor, ProjectIcon},
+    frame::{PermissionMode, TitleSource},
+};
 use serde_json::{Map, Value};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
 use uuid::Uuid;
@@ -30,6 +33,8 @@ pub struct UserRow {
     pub display_name: String,
     pub timezone: String,
     pub personal_project_id: Option<Uuid>,
+    /// `warm` | `graphite` | `contrast` (T49).
+    pub theme: String,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -43,6 +48,10 @@ pub struct ProjectRow {
     pub is_personal: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// NULL: by a hash of the id (T49).
+    pub color: Option<String>,
+    /// `{kind: emoji|letters, value}` or `{kind: image, v}` (T49).
+    pub icon: Option<Value>,
 }
 
 /// Find the user by the verified email, creating it and its personal project on first login
@@ -119,8 +128,27 @@ impl ProjectRow {
             description: self.description.clone(),
             default_workspace_id: self.default_workspace_id,
             is_personal: self.is_personal,
+            color: self
+                .color
+                .as_deref()
+                .and_then(ProjectColor::parse)
+                .unwrap_or_else(|| ProjectColor::of_id(self.id)),
+            icon: self.icon.as_ref().and_then(|v| self.icon_api(v)),
             created_at: self.created_at,
             updated_at: self.updated_at,
+        }
+    }
+
+    /// The stored icon as the API gives it: an image gets the URL its `v` versions.
+    fn icon_api(&self, v: &Value) -> Option<ProjectIcon> {
+        let value = || v.get("value")?.as_str().map(String::from);
+        match v.get("kind")?.as_str()? {
+            "emoji" => Some(ProjectIcon::Emoji { value: value()? }),
+            "letters" => Some(ProjectIcon::Letters { value: value()? }),
+            "image" => Some(ProjectIcon::Image {
+                url: format!("/api/projects/{}/icon?v={}", self.id, v.get("v")?.as_str()?),
+            }),
+            _ => None,
         }
     }
 }
@@ -157,25 +185,94 @@ pub async fn create_project(
     unreachable!()
 }
 
+/// The fields `PATCH /api/projects/{id}` changes; `None` keeps the stored value.
+#[derive(Debug, Default)]
+pub struct ProjectUpdate<'a> {
+    pub name: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub default_workspace_id: Option<Uuid>,
+    pub color: Option<ProjectColor>,
+    /// An emoji or letters (stored as `{kind, value}`); a stored image goes with it.
+    pub icon: Option<Value>,
+}
+
 /// `PATCH /api/projects/{id}`: only the given fields change; the slug stays.
 pub async fn update_project(
     db: &PgPool,
     id: Uuid,
-    name: Option<&str>,
-    description: Option<&str>,
-    default_workspace_id: Option<Uuid>,
+    u: ProjectUpdate<'_>,
 ) -> sqlx::Result<ProjectRow> {
-    sqlx::query_as(
+    let mut tx = db.begin().await?;
+    if u.icon.is_some() {
+        sqlx::query("DELETE FROM project_icons WHERE project_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let row = sqlx::query_as(
         "UPDATE projects SET name = coalesce($2, name), description = coalesce($3, description),
-            default_workspace_id = coalesce($4, default_workspace_id), updated_at = now()
+            default_workspace_id = coalesce($4, default_workspace_id),
+            color = coalesce($5, color), icon = coalesce($6, icon), updated_at = now()
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
-    .bind(name)
-    .bind(description)
-    .bind(default_workspace_id)
-    .fetch_one(db)
-    .await
+    .bind(u.name)
+    .bind(u.description)
+    .bind(u.default_workspace_id)
+    .bind(u.color.map(ProjectColor::as_str))
+    .bind(u.icon)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row)
+}
+
+/// A project's icon image (T49): its checked type and bytes.
+#[derive(Debug, Clone, FromRow)]
+pub struct ProjectIconRow {
+    pub mime: String,
+    pub data: Vec<u8>,
+    pub sha256: String,
+}
+
+/// Stores the image and makes it the project's icon.
+pub async fn set_project_icon_image(
+    db: &PgPool,
+    id: Uuid,
+    mime: &str,
+    data: &[u8],
+    sha256: &str,
+) -> sqlx::Result<ProjectRow> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "INSERT INTO project_icons (project_id, mime, data, sha256) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (project_id) DO UPDATE
+            SET mime = $2, data = $3, sha256 = $4, updated_at = now()",
+    )
+    .bind(id)
+    .bind(mime)
+    .bind(data)
+    .bind(sha256)
+    .execute(&mut *tx)
+    .await?;
+    let row = sqlx::query_as(
+        "UPDATE projects SET icon = jsonb_build_object('kind', 'image', 'v', $2::text),
+            updated_at = now()
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(&sha256[..16])
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(row)
+}
+
+pub async fn project_icon_image(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ProjectIconRow>> {
+    sqlx::query_as("SELECT mime, data, sha256 FROM project_icons WHERE project_id = $1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
 }
 
 /// Deletes the project with its workspaces and sessions (their events, cursors and requests

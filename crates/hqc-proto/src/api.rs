@@ -164,8 +164,113 @@ pub struct Project {
     pub default_workspace_id: Option<Uuid>,
     /// The user's implicit project: neither deleted nor renamed.
     pub is_personal: bool,
+    /// The stored color, or one picked by a hash of `id` (T49).
+    pub color: ProjectColor,
+    /// Absent: the client shows the first letters of the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<ProjectIcon>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A project's color (SPEC §3 Project, T49): the names of the client's `theme.ts`. No
+/// yellows: amber means "waiting for you" in every project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectColor {
+    Teal,
+    Plum,
+    Blue,
+    Rose,
+    Moss,
+    Coral,
+    Cyan,
+    Slate,
+}
+
+impl ProjectColor {
+    pub const ALL: [ProjectColor; 8] = [
+        ProjectColor::Teal,
+        ProjectColor::Plum,
+        ProjectColor::Blue,
+        ProjectColor::Rose,
+        ProjectColor::Moss,
+        ProjectColor::Coral,
+        ProjectColor::Cyan,
+        ProjectColor::Slate,
+    ];
+
+    /// The default of a project that has none: FNV-1a over the id's bytes, modulo 8.
+    pub fn of_id(id: Uuid) -> Self {
+        let mut h: u32 = 0x811c_9dc5;
+        for b in id.as_bytes() {
+            h ^= u32::from(*b);
+            h = h.wrapping_mul(0x0100_0193);
+        }
+        Self::ALL[(h % 8) as usize]
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectColor::Teal => "teal",
+            ProjectColor::Plum => "plum",
+            ProjectColor::Blue => "blue",
+            ProjectColor::Rose => "rose",
+            ProjectColor::Moss => "moss",
+            ProjectColor::Coral => "coral",
+            ProjectColor::Cyan => "cyan",
+            ProjectColor::Slate => "slate",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == s)
+    }
+}
+
+/// A project's icon (SPEC §3 Project, T49). `image` is uploaded with `PUT
+/// /api/projects/{id}/icon`; its `url` (`/api/projects/{id}/icon?v=<hash>`) changes with the
+/// image, so it may be cached for good.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectIcon {
+    Emoji {
+        value: String,
+    },
+    /// 1–2 characters, upper case.
+    Letters {
+        value: String,
+    },
+    Image {
+        #[serde(default)]
+        url: String,
+    },
+}
+
+/// The app's base palette (SPEC §3 User, T49), the same on every device of the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Warm,
+    Graphite,
+    Contrast,
+}
+
+impl Theme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::Warm => "warm",
+            Theme::Graphite => "graphite",
+            Theme::Contrast => "contrast",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Theme::Warm, Theme::Graphite, Theme::Contrast]
+            .into_iter()
+            .find(|t| t.as_str() == s)
+    }
 }
 
 /// `GET /api/projects`.
@@ -192,6 +297,13 @@ pub struct PatchProject {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_workspace_id: Option<Uuid>,
+    /// T49; the personal project may change it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<ProjectColor>,
+    /// `emoji` or `letters`; either drops a stored image. An `image` is set only by `PUT
+    /// /api/projects/{id}/icon` (here: `422`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<ProjectIcon>,
 }
 
 /// A workspace (SPEC §3 Workspace): a folder on a worker that belongs to one project.
@@ -504,12 +616,28 @@ pub struct PatchSchedule {
     pub enabled: Option<bool>,
 }
 
+/// `GET /api/me`, and the reply to `PATCH /api/me`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Me {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub timezone: String,
+    pub personal_project_id: Uuid,
+    /// The app's base palette (T49); `warm` from hubs before it.
+    #[serde(default)]
+    pub theme: Theme,
+}
+
 /// `PATCH /api/me`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PatchMe {
     /// IANA name; the default zone of the user's schedules (SPEC §16).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    /// T49: `warm` | `graphite` | `contrast`; anything else `422`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<Theme>,
 }
 
 /// `POST /api/workers/enroll/confirm`; case and the dash of `code` do not matter.
@@ -738,9 +866,19 @@ mod tests {
         assert_eq!(l.projects[1], p);
         assert!(l.projects[0].is_personal && !p.is_personal);
         roundtrip::<CreateProject>(include_str!("../examples/wire/api.project.request.json"));
-        roundtrip::<PatchProject>(include_str!(
+        let patch: PatchProject = roundtrip(include_str!(
             "../examples/wire/api.project.patch.request.json"
         ));
+        assert_eq!(patch.color, Some(ProjectColor::Plum));
+        assert!(matches!(patch.icon, Some(ProjectIcon::Emoji { .. })));
+        assert!(matches!(p.icon, Some(ProjectIcon::Image { .. })));
+        assert!(l.projects[0].icon.is_none(), "absent: the first letters");
+        let letters: PatchProject =
+            serde_json::from_str(r#"{"icon":{"kind":"letters","value":"PM"}}"#).unwrap();
+        assert_eq!(
+            letters.icon,
+            Some(ProjectIcon::Letters { value: "PM".into() })
+        );
         let w: Workspace = roundtrip(include_str!("../examples/wire/api.workspace.json"));
         assert_eq!(p.default_workspace_id, Some(w.id));
         assert_eq!(w.project_id, p.id);
@@ -816,7 +954,24 @@ mod tests {
         roundtrip::<PatchSchedule>(include_str!(
             "../examples/wire/api.schedule.patch.request.json"
         ));
-        roundtrip::<PatchMe>(include_str!("../examples/wire/api.me.patch.request.json"));
+        let m: PatchMe = roundtrip(include_str!("../examples/wire/api.me.patch.request.json"));
+        assert_eq!(m.theme, Some(Theme::Graphite));
+        let me: Me = roundtrip(include_str!("../examples/wire/api.me.json"));
+        assert_eq!(me.theme, Theme::Contrast);
+    }
+
+    #[test]
+    fn project_color_by_id_is_stable_and_spread() {
+        let id: Uuid = "0199f3a2-7c10-7000-8000-0000000000d2".parse().unwrap();
+        assert_eq!(ProjectColor::of_id(id), ProjectColor::of_id(id));
+        let seen: std::collections::HashSet<_> = (0..64u128)
+            .map(|i| ProjectColor::of_id(Uuid::from_u128(i)))
+            .collect();
+        assert_eq!(seen.len(), 8, "every color is reachable");
+        for c in ProjectColor::ALL {
+            assert_eq!(ProjectColor::parse(c.as_str()), Some(c));
+            assert_eq!(serde_json::to_value(c).unwrap(), c.as_str());
+        }
     }
 
     #[test]

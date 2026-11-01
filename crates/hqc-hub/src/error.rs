@@ -19,6 +19,10 @@ pub enum ApiError {
     /// `400` with its own code (`path_not_found`, `outside_allowed_roots`, ...).
     #[error("{1}")]
     Invalid(&'static str, String),
+    /// `422` with its own code: a well-formed body whose content is refused (a project icon
+    /// that is not a small square PNG, JPEG or WebP, T49).
+    #[error("{1}")]
+    Unprocessable(&'static str, String),
     /// The request conflicts with the current state (already answered, archived, ...).
     #[error("{1}")]
     Conflict(&'static str, String),
@@ -62,6 +66,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Invalid(code, _) => (StatusCode::BAD_REQUEST, *code),
+            ApiError::Unprocessable(code, _) => (StatusCode::UNPROCESSABLE_ENTITY, *code),
             ApiError::Conflict(code, _) | ApiError::ConflictWith(code, _, _) => {
                 (StatusCode::CONFLICT, *code)
             }

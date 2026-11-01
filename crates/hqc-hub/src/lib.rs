@@ -23,6 +23,7 @@ pub mod db;
 pub mod delivery;
 pub mod error;
 pub mod events;
+pub mod icons;
 pub mod mcp;
 pub mod mirror;
 pub mod peers;
@@ -53,6 +54,12 @@ pub fn router(app: AppState) -> Router {
             get(api::project)
                 .patch(api::patch_project)
                 .delete(api::delete_project),
+        )
+        .route(
+            "/api/projects/{id}/icon",
+            get(icons::get)
+                .put(icons::put)
+                .layer(axum::extract::DefaultBodyLimit::max(icons::BODY_LIMIT)),
         )
         .route(
             "/api/workspaces",

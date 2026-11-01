@@ -79,22 +79,24 @@ async fn session_for(
 
 // ---------------------------------------------------------------- me, projects
 
-pub async fn me(user: CurrentUser) -> Json<Value> {
-    Json(json!({
-        "id": user.id,
-        "email": user.email,
-        "display_name": user.display_name,
-        "timezone": user.timezone,
-        "personal_project_id": user.personal_project_id,
-    }))
+pub async fn me(user: CurrentUser) -> Json<api::Me> {
+    Json(api::Me {
+        id: user.id,
+        email: user.email,
+        display_name: user.display_name,
+        timezone: user.timezone,
+        personal_project_id: user.personal_project_id,
+        theme: user.theme,
+    })
 }
 
-/// `PATCH /api/me` {timezone?}: an IANA name, the default zone of new schedules (SPEC §16).
+/// `PATCH /api/me` {timezone?, theme?}: an IANA name, the default zone of new schedules (SPEC
+/// §16); the app's base palette (T49).
 pub async fn patch_me(
     State(app): State<AppState>,
     mut user: CurrentUser,
     Json(b): Json<api::PatchMe>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<api::Me>> {
     if let Some(tz) = b.timezone {
         let tz = crate::schedules::parse_tz(&tz).map_err(ApiError::BadRequest)?;
         sqlx::query("UPDATE users SET timezone = $2, updated_at = now() WHERE id = $1")
@@ -104,11 +106,23 @@ pub async fn patch_me(
             .await?;
         user.timezone = tz.name().to_string();
     }
+    if let Some(theme) = b.theme {
+        sqlx::query("UPDATE users SET theme = $2, updated_at = now() WHERE id = $1")
+            .bind(user.id)
+            .bind(theme.as_str())
+            .execute(&app.db)
+            .await?;
+        user.theme = theme;
+    }
     Ok(me(user).await)
 }
 
 /// The user's project; another user's looks like a missing one.
-async fn project_for(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<db::ProjectRow> {
+pub(crate) async fn project_for(
+    app: &AppState,
+    user: &CurrentUser,
+    id: Uuid,
+) -> ApiResult<db::ProjectRow> {
     match db::project(&app.db, id).await? {
         Some(p) if p.owner_id == user.id => Ok(p),
         _ => Err(ApiError::NotFound),
@@ -172,8 +186,8 @@ pub async fn create_project(
     Ok((StatusCode::CREATED, Json(p.to_api())))
 }
 
-/// `PATCH /api/projects/{id}`: name, description, default workspace. The personal project
-/// keeps its name (SPEC §3 User).
+/// `PATCH /api/projects/{id}`: name, description, default workspace, color and icon (T49).
+/// The personal project keeps its name (SPEC §3 User); its appearance changes like any.
 pub async fn patch_project(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -199,12 +213,17 @@ pub async fn patch_project(
             ));
         }
     }
+    let icon = b.icon.map(crate::icons::stored_icon).transpose()?;
     let p = db::update_project(
         &app.db,
         id,
-        name.as_deref(),
-        desc.as_deref(),
-        b.default_workspace_id,
+        db::ProjectUpdate {
+            name: name.as_deref(),
+            description: desc.as_deref(),
+            default_workspace_id: b.default_workspace_id,
+            color: b.color,
+            icon,
+        },
     )
     .await?;
     Ok(Json(p.to_api()))

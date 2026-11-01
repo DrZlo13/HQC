@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use axum::{extract::FromRequestParts, http::request::Parts};
 use base64::Engine;
+use hqc_proto::api::Theme;
 use jsonwebtoken::{jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -203,6 +204,7 @@ pub struct CurrentUser {
     pub display_name: String,
     pub timezone: String,
     pub personal_project_id: Uuid,
+    pub theme: Theme,
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
@@ -228,6 +230,7 @@ impl FromRequestParts<AppState> for CurrentUser {
             email: u.email,
             display_name: u.display_name,
             timezone: u.timezone,
+            theme: Theme::parse(&u.theme).unwrap_or_default(),
             personal_project_id: u.personal_project_id.ok_or_else(|| {
                 ApiError::Internal(anyhow::anyhow!("user without personal project"))
             })?,

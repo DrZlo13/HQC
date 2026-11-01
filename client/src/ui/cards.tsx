@@ -29,6 +29,7 @@ import {
 } from './labels';
 import { CopyButton, Markdown } from './Markdown';
 import { PermissionBlock } from './permission';
+import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
 /** What cards need from the chat: lookups and actions. */
 export interface FolderActions {
@@ -62,6 +63,11 @@ export interface ChatActions {
   hotkeyRequest?: string;
   /** The request shown as the bottom sheet on a phone: not drawn in the feed. */
   sheetRequest?: string;
+  /** A session of the user by id or address, for the other side of a message between
+   *  sessions (T51); undefined for a deleted or unknown one. */
+  findSession?(ref: string): { id: string; address: string } | undefined;
+  /** The event at `seq` of session `sessionId`: a message this session sent there (T51). */
+  peerMessage?(sessionId: string, seq: number): Promise<HqcEvent | undefined>;
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
@@ -82,7 +88,11 @@ function blockSeq(b: Block): number | undefined {
   switch (b.kind) {
     case 'agent':
     case 'approval':
+    case 'reply-to':
       return b.event.seq;
+    case 'sent':
+    case 'reply-from':
+      return (b.kind === 'sent' ? b.call : b.result).seq;
     case 'tools': {
       const first = b.rows[0];
       const row = first?.kind === 'call' ? (first.call ?? first.result) : first?.event;
@@ -99,6 +109,12 @@ function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
       return <AgentMessage event={block.event} usage={block.usage} />;
     case 'tools':
       return <ToolGroup block={block} actions={actions} />;
+    case 'sent':
+      return <SentBlock block={block} actions={actions} />;
+    case 'reply-from':
+      return <ReplyFromBlock block={block} actions={actions} />;
+    case 'reply-to':
+      return <ReplyToBlock block={block} actions={actions} />;
     case 'approval':
       if (block.event.payload.request_id === actions.sheetRequest) return null;
       return <PermissionBlock event={block.event} call={block.call} actions={actions} />;
@@ -214,32 +230,7 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
         />
       );
     case 'peer.message':
-      return (
-        <div class="card card-peer">
-          <div class="card-title">
-            {event.payload.mode === 'ask' ? 'Question' : 'Message'} from{' '}
-            {event.payload.from ? (
-              <code>{event.payload.from}</code>
-            ) : (
-              <>
-                session <code>{event.payload.from_session_id.slice(-8)}</code>
-              </>
-            )}
-          </div>
-          <Markdown class="text" text={event.payload.text} />
-          {event.payload.artifact_ids.length > 0 && (
-            <div class="attachments">
-              {event.payload.artifact_ids.map((id) => (
-                <AttachmentView key={id} id={id} actions={actions} />
-              ))}
-            </div>
-          )}
-          <div class="meta">
-            <CopyButton text={event.payload.text} />
-            {formatTime(event.ts)}
-          </div>
-        </div>
-      );
+      return <PeerMessageBlock event={event} actions={actions} />;
     case 'usage':
       return (
         <div class="line line-usage">
@@ -388,7 +379,7 @@ function PendingBubble({ pending, actions }: { pending: PendingMessage; actions:
 }
 
 /** Tokens, cache and cost of a turn: `2 → 555 tokens · cache 14.4k · $0.073`. */
-function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
+export function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
   const p = usage.payload;
   const parts = [`${formatTokens(p.input_tokens)} → ${formatTokens(p.output_tokens)} tokens`];
   if (p.cache_read) parts.push(`cache ${formatTokens(p.cache_read)}`);

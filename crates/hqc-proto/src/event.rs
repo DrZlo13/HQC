@@ -389,6 +389,10 @@ pub struct Event {
     pub delivery: Option<Delivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_at: Option<DateTime<Utc>>,
+    /// Only on the final `agent.message` that answered an `hqc_ask`, from the hub to clients:
+    /// when the asking worker acknowledged the reply (SPEC §6, §7.1). Never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_delivered_at: Option<DateTime<Utc>>,
 }
 
 /// `system.code` of a fork in a Claude Code transcript (SPEC §4, §9.3). The payload carries,

@@ -95,6 +95,9 @@ export interface EventBase {
   client_op_id?: string;
   delivery?: Delivery;
   delivered_at?: string;
+  /** On the final `agent.message` that answered an `hqc_ask`: when the asking worker
+   *  acknowledged the reply (SPEC §6, T51); absent until then. */
+  reply_delivered_at?: string;
 }
 
 // ---- payloads (SPEC §4) ---------------------------------------------------------------
@@ -474,6 +477,7 @@ export function parseEvent(json: unknown): HqcEvent {
     client_op_id: optStr(e, 'client_op_id'),
     delivery: present(e, 'delivery') ? strictEnum(e, 'delivery', DELIVERIES) : undefined,
     delivered_at: optStr(e, 'delivered_at'),
+    reply_delivered_at: optStr(e, 'reply_delivered_at'),
   };
   const type = str(e, 'type');
   if (!isKnownType(type)) return { ...base, type: 'unknown', wire_type: type, payload: e.payload };

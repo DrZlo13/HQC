@@ -700,11 +700,12 @@ async fn the_files_of_a_reply_are_downloaded_before_the_result() {
     assert_eq!(got["reply"], "yes");
     assert_eq!(
         got["files"][0],
-        json!({"name": "report.txt", "kind": "text",
+        json!({"artifact_id": report, "name": "report.txt", "kind": "text",
                "path": path.display().to_string(), "size": 9})
     );
     assert_eq!(std::fs::read(&path).unwrap(), b"all green");
     assert_eq!(got["files"][1]["name"], "gone.png");
+    assert_eq!(got["files"][1]["artifact_id"], gone.to_string());
     assert!(got["files"][1].get("path").is_none(), "{got}");
     assert!(
         got["files"][1]["error"]

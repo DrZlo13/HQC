@@ -201,9 +201,11 @@ async fn a_send_from_the_answering_turn_joins_the_reply_with_its_files() {
     let send = json!({"text": "Here is the fixed file", "session": "personal/asker",
                       "artifact_ids": [fixed]});
     let r = fast(&mut s.w2, &tb, "hqc_send", send.clone(), &send_rid).await;
+    let seq_in_a = r["result"]["message_seq"].clone();
+    assert!(seq_in_a.is_i64(), "{r}");
     assert_eq!(
         r["result"],
-        json!({"to": "personal/asker", "delivery": "with_reply"})
+        json!({"to": "personal/asker", "delivery": "with_reply", "message_seq": seq_in_a})
     );
     // A repeat acts once and answers the same.
     let again = fast(&mut s.w2, &tb, "hqc_send", send, &send_rid).await;
@@ -229,6 +231,7 @@ async fn a_send_from_the_answering_turn_joins_the_reply_with_its_files() {
                 {"artifact_id": png, "name": "shot.png", "kind": "image"},
                 {"artifact_id": fixed, "name": "fixed.txt", "kind": "text"},
             ],
+            "message_seq": 2,
         }})
     );
     s.w1.reply(&r["id"], "ack", json!({})).await;
@@ -286,7 +289,7 @@ async fn sends_outside_the_answering_turn_are_buffered() {
     let r = s.w1.expect("mcp.result").await;
     assert_eq!(
         r["payload"]["result"],
-        json!({"from": "personal/helper", "reply": "Green."})
+        json!({"from": "personal/helper", "reply": "Green.", "message_seq": 3})
     );
     s.w1.reply(&r["id"], "ack", json!({})).await;
     let r = fast(

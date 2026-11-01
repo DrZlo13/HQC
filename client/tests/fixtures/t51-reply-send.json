@@ -1,0 +1,179 @@
+{
+ "note": "T51: a reply that comes back as a send, in the shapes of the T42 live run (docs/notes/t42-questions.md, section 7).",
+ "asker_id": "0199f3a2-51a0-7000-8000-00000000001a",
+ "helper_id": "0199f3a2-51a0-7000-8000-00000000001b",
+ "asker": [
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001a",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000318",
+   "seq": 1,
+   "ts": "2026-10-31T23:20:00Z",
+   "author": {
+    "kind": "user",
+    "id": "0199f3a2-51a0-7000-8000-0000000000aa"
+   },
+   "type": "user.message",
+   "payload": {
+    "text": "Ask live/helper to send the report back.",
+    "artifact_ids": []
+   },
+   "delivery": "delivered",
+   "delivered_at": "2026-10-31T23:20:01Z"
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001a",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000319",
+   "seq": 2,
+   "ts": "2026-10-31T23:20:09Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001a"
+   },
+   "type": "tool.call",
+   "payload": {
+    "call_id": "toolu_d1",
+    "tool": "mcp__hqc__hqc_ask",
+    "args_preview": "{\"session\": \"live/helper\", \"text\": \"Call the hqc_send tool once with session 'live/asker', text 'fixed' and files ['report.txt'], then reply with exactly one word: done\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000031a",
+   "seq": 3,
+   "ts": "2026-10-31T23:20:15Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001b"
+   },
+   "type": "peer.message",
+   "payload": {
+    "from_session_id": "0199f3a2-51a0-7000-8000-00000000001b",
+    "from": "live/helper",
+    "text": "fixed",
+    "mode": "send",
+    "artifact_ids": [
+     "0199f3a2-51a0-7000-8000-0000000000f3"
+    ]
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001a",
+   "event_id": "0199f3a2-51a0-7000-8000-00000000031b",
+   "seq": 4,
+   "ts": "2026-10-31T23:20:17Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001a"
+   },
+   "type": "tool.result",
+   "payload": {
+    "call_id": "toolu_d1",
+    "error": false,
+    "duration_ms": 8000,
+    "result_preview": "{\"files\": [{\"artifact_id\": \"0199f3a2-51a0-7000-8000-0000000000f3\", \"kind\": \"text\", \"name\": \"report.txt\", \"path\": \"/Users/home-mac/work/hqc/tmp/ws-a/.hqc/inbox/0199f3a2-51a0-7000-8000-0000000000d2/report.txt\", \"size\": 53}], \"from\": \"live/helper\", \"message_seq\": 2, \"reply\": \"done\\n\\n--- sent with hqc_send while answering ---\\nfixed\"}"
+   }
+  }
+ ],
+ "helper": [
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000313",
+   "seq": 1,
+   "ts": "2026-10-31T23:20:00Z",
+   "author": {
+    "kind": "system"
+   },
+   "type": "system",
+   "payload": {
+    "text": "Session created",
+    "code": "session_created"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000202",
+   "seq": 2,
+   "ts": "2026-10-31T23:20:10Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001a"
+   },
+   "type": "peer.message",
+   "payload": {
+    "from_session_id": "0199f3a2-51a0-7000-8000-00000000001a",
+    "from": "live/asker",
+    "text": "Call the hqc_send tool once with session 'live/asker', text 'fixed' and files ['report.txt'], then reply with exactly one word: done",
+    "mode": "ask",
+    "request_id": "0199f3a2-51a0-7000-8000-0000000000d2"
+   },
+   "delivery": "delivered",
+   "delivered_at": "2026-10-31T23:20:11Z"
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000314",
+   "seq": 3,
+   "ts": "2026-10-31T23:20:14Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001b"
+   },
+   "type": "tool.call",
+   "payload": {
+    "call_id": "toolu_c1",
+    "tool": "mcp__hqc__hqc_send",
+    "args_preview": "{\"files\": [\"report.txt\"], \"session\": \"live/asker\", \"text\": \"fixed\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000315",
+   "seq": 4,
+   "ts": "2026-10-31T23:20:15Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001b"
+   },
+   "type": "tool.result",
+   "payload": {
+    "call_id": "toolu_c1",
+    "error": false,
+    "duration_ms": 220,
+    "result_preview": "{\"delivery\": \"with_reply\", \"message_seq\": 3, \"to\": \"live/asker\"}"
+   }
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000316",
+   "seq": 5,
+   "ts": "2026-10-31T23:20:16Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001b"
+   },
+   "type": "agent.message",
+   "payload": {
+    "text": "done",
+    "final": true,
+    "in_reply_to": "0199f3a2-51a0-7000-8000-000000000202"
+   },
+   "reply_delivered_at": "2026-10-31T23:20:17Z"
+  },
+  {
+   "session_id": "0199f3a2-51a0-7000-8000-00000000001b",
+   "event_id": "0199f3a2-51a0-7000-8000-000000000317",
+   "seq": 6,
+   "ts": "2026-10-31T23:20:16Z",
+   "author": {
+    "kind": "agent",
+    "id": "0199f3a2-51a0-7000-8000-00000000001b"
+   },
+   "type": "usage",
+   "payload": {
+    "input_tokens": 4,
+    "output_tokens": 40,
+    "cost_usd": 0.002
+   }
+  }
+ ]
+}

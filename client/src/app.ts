@@ -389,6 +389,22 @@ export class AppState {
     return n;
   }
 
+  /** A session of the user by id or address (`<project-slug>/<session-slug>`, SPEC §7), with
+   *  its address; undefined for a deleted or unknown one. */
+  findSession(ref: string): { id: string; address: string } | undefined {
+    const address = (s: SessionInfo) => {
+      const p = this.projects.get(s.project_id);
+      return p ? `${p.slug}/${s.slug}` : undefined;
+    };
+    const byId = this.sessions.get(ref);
+    if (byId) {
+      const a = address(byId);
+      return a ? { id: byId.id, address: a } : undefined;
+    }
+    for (const s of this.sessions.values()) if (address(s) === ref) return { id: s.id, address: ref };
+    return undefined;
+  }
+
   /** The session's folder on its worker: the workspace path and `cwd` inside it; undefined
    *  until the project's workspaces are loaded. */
   sessionPath(s: SessionInfo): string | undefined {

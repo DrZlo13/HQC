@@ -187,7 +187,8 @@ async fn an_ask_is_answered_by_the_targets_final_message() {
     let r = pick(&f, "mcp.result");
     assert_eq!(
         r["payload"],
-        json!({"request_id": rid, "result": {"from": "personal/helper", "reply": "Yes, green."}})
+        json!({"request_id": rid, "result": {"from": "personal/helper", "reply": "Yes, green.",
+                                              "message_seq": 2}})
     );
     w.reply(&r["id"], "ack", json!({})).await;
     let open = count(
@@ -342,7 +343,7 @@ async fn sends_wait_in_the_buffer_for_the_next_input() {
         .await;
         assert_eq!(
             r["result"],
-            json!({"to": "personal/helper", "delivery": "buffered"})
+            json!({"to": "personal/helper", "delivery": "buffered", "message_seq": n + 1})
         );
     }
     // No turn starts for them.
@@ -502,7 +503,7 @@ async fn wake_on_send_queues_the_message() {
     assert_eq!(r["id"], id.as_str());
     assert_eq!(
         r["payload"]["result"],
-        json!({"to": "personal/helper", "delivery": "queued"})
+        json!({"to": "personal/helper", "delivery": "queued", "message_seq": 2})
     );
     let input = pick(&f, "session.input");
     assert_eq!(

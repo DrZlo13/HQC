@@ -52,7 +52,7 @@ export class Timeline {
   private readonly echoed = new Set<string>();
   private readonly fates = new Map<string, RequestFate>();
   private readonly results = new Map<string, EventOf<"tool.result">>();
-  private readonly calls = new Set<string>();
+  private readonly calls = new Map<string, EventOf<"tool.call">>();
   private readonly requests = new Map<
     string,
     EventOf<"approval.request" | "clarify.request">
@@ -103,19 +103,24 @@ export class Timeline {
     // changes, normally by a `delivery` frame (`applyDelivery`); a frame sent while the socket
     // was down is lost, so a copy the hub sent again carries the current one. The reply to
     // `POST /input` (`advance: false`) may come after newer copies and never overrides them.
+    // The hub also sends a reply to an ask again once it was delivered (`reply_delivered_at`,
+    // SPEC §6), and a later copy keeps a time an earlier one had.
     const seen = this.bySeq.get(ev.seq);
     if (seen) {
       if (advance) {
         this.lastSeq = Math.max(this.lastSeq, ev.seq);
+        const replyAt = ev.reply_delivered_at ?? seen.reply_delivered_at;
         if (
           seen.event_id === ev.event_id &&
           (seen.delivery !== ev.delivery ||
-            seen.delivered_at !== ev.delivered_at)
+            seen.delivered_at !== ev.delivered_at ||
+            seen.reply_delivered_at !== replyAt)
         ) {
           this.bySeq.set(ev.seq, {
             ...seen,
             delivery: ev.delivery,
             delivered_at: ev.delivered_at,
+            reply_delivered_at: replyAt,
           });
           this.sorted = null;
         }
@@ -140,7 +145,7 @@ export class Timeline {
         if (ev.payload.state !== "running") this.streaming = "";
         break;
       case "tool.call":
-        this.calls.add(ev.payload.call_id);
+        this.calls.set(ev.payload.call_id, ev);
         break;
       case "tool.result":
         this.results.set(ev.payload.call_id, ev);
@@ -258,9 +263,9 @@ export class Timeline {
     return { model, cost: total ?? sum };
   }
 
-  /** Results whose call is in the timeline are shown inside the call's card. */
-  hasCall(callId: string): boolean {
-    return this.calls.has(callId);
+  /** The call of a result: results whose call is in the timeline are shown with it. */
+  callFor(callId: string): EventOf<"tool.call"> | undefined {
+    return this.calls.get(callId);
   }
 
   addPending(

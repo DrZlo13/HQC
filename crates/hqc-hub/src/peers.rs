@@ -45,7 +45,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    app::AppState,
+    app::{AppState, Notice},
     db::{self, EventRow, PendingRow, SessionRow},
     delivery, events,
     mcp::{args, internal, Answer},
@@ -513,7 +513,7 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         } else {
             BUFFERED
         };
-        return Ok(Answer::Now(send_result(&to, how)));
+        return Ok(Answer::Now(send_result(&to, how, row.seq)));
     }
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
     let files = checked_files(app, caller, &a.artifact_ids).await?;
@@ -526,9 +526,9 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         with_reply: true,
     };
     if let Some((input, _, _)) = call_input(app, caller, c).await.map_err(internal)? {
-        if join_reply(app, caller, &t, input, &c.request_id, m, &chain).await? {
+        if let Some(seq) = join_reply(app, caller, &t, input, &c.request_id, m, &chain).await? {
             tracing::info!(from = %caller.id, to = %t.id, "peer message goes with the reply");
-            return Ok(Answer::Now(send_result(&to, WITH_REPLY)));
+            return Ok(Answer::Now(send_result(&to, WITH_REPLY, seq)));
         }
     }
     let wake = t.wake_on_send;
@@ -548,6 +548,7 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     Ok(Answer::Now(send_result(
         &to,
         if wake { QUEUED } else { BUFFERED },
+        row.seq,
     )))
 }
 
@@ -556,16 +557,18 @@ const QUEUED: &str = "queued";
 const BUFFERED: &str = "buffered";
 const WITH_REPLY: &str = "with_reply";
 
-fn send_result(to: &str, delivery: &str) -> Value {
-    json!({"to": to, "delivery": delivery})
+/// `message_seq`: the `seq` of the `peer.message` in the session it went to (T51), so the
+/// sender's client can show when it was delivered.
+fn send_result(to: &str, delivery: &str, message_seq: i64) -> Value {
+    json!({"to": to, "delivery": delivery, "message_seq": message_seq})
 }
 
 /// A send of `caller` to `t` from the turn on input `input` (T42, SPEC §7.1): if that input
 /// is the question of an ask of `t` still open, the message is stored in `t` without
 /// `delivery`, kept on the ask (`payload.joined`) instead of the send buffer, and goes with
 /// the reply ([`on_final`]). The ask's row stays locked from the check until the message is
-/// on it, so the reply cannot close the ask in between and leave the message behind. `false`:
-/// no such ask, nothing stored.
+/// on it, so the reply cannot close the ask in between and leave the message behind. The
+/// stored message's `seq`; `None`: no such ask, nothing stored.
 async fn join_reply(
     app: &AppState,
     caller: &SessionRow,
@@ -574,7 +577,7 @@ async fn join_reply(
     request_id: &str,
     m: Message<'_>,
     chain: &Chain,
-) -> Result<bool, McpError> {
+) -> Result<Option<i64>, McpError> {
     let mut tx = app.db.begin().await.map_err(internal)?;
     let ask: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM pending_requests
@@ -589,7 +592,7 @@ async fn join_reply(
     .await
     .map_err(internal)?;
     let Some(ask) = ask else {
-        return Ok(false);
+        return Ok(None);
     };
     let row = store_message(app, caller, t, request_id, m, chain).await?;
     sqlx::query(
@@ -605,7 +608,7 @@ async fn join_reply(
     .await
     .map_err(internal)?;
     tx.commit().await.map_err(internal)?;
-    Ok(true)
+    Ok(Some(row.seq))
 }
 
 /// Whether message `event_id` went with the reply to an ask of session `asker`.
@@ -640,9 +643,7 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         return match (p.closed_at, p.result) {
             (None, _) => Ok(Answer::Later),
             (Some(_), Some(frame)) => {
-                db::result_delivered(&app.db, p.id)
-                    .await
-                    .map_err(internal)?;
+                result_acked(app, p.id).await.map_err(internal)?;
                 let r: McpResult =
                     serde_json::from_value(frame["payload"].clone()).map_err(internal)?;
                 r.outcome().map(Answer::Now)
@@ -839,8 +840,17 @@ pub struct Prefix {
     pub capped_by: Option<String>,
 }
 
-/// Input `input` reached the agent: the messages it carried leave the buffer.
+/// Input `input` reached the agent: the messages it carried leave the buffer. They keep no
+/// `delivery`, but get `delivered_at` (T51), which the sender's client shows.
 pub async fn delivered(app: &AppState, input: Uuid) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE events SET delivered_at = now()
+         WHERE event_id IN (SELECT event_id FROM peer_buffer WHERE carried_by = $1)
+           AND delivered_at IS NULL",
+    )
+    .bind(input)
+    .execute(&app.db)
+    .await?;
     sqlx::query("DELETE FROM peer_buffer WHERE carried_by = $1")
         .bind(input)
         .execute(&app.db)
@@ -856,6 +866,39 @@ pub async fn delivered(app: &AppState, input: Uuid) -> anyhow::Result<()> {
 
 fn result_frame(r: McpResult) -> Value {
     json!({"type": "mcp.result", "payload": r})
+}
+
+/// The worker acknowledged the result of request `id` (a cancellation or rejection is not an
+/// acknowledgement: those call [`db::result_delivered`]). For the reply to an ask this is the
+/// time the reply reached the asker: the first one is kept on the ask
+/// (`payload.reply_delivered_at`), and the target's subscribers get the reply's event again
+/// with `reply_delivered_at` (SPEC §6).
+pub async fn result_acked(app: &AppState, id: Uuid) -> anyhow::Result<()> {
+    let first: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+        "UPDATE pending_requests
+         SET result_delivered_at = now(),
+             payload = payload || jsonb_build_object('reply_delivered_at', now())
+         WHERE id = $1 AND kind = 'ask' AND payload ? 'reply_event_id'
+           AND NOT payload ? 'reply_delivered_at'
+         RETURNING (payload ->> 'reply_event_id')::uuid,
+                   (payload ->> 'reply_delivered_at')::timestamptz",
+    )
+    .bind(id)
+    .fetch_optional(&app.db)
+    .await?;
+    let Some((reply, at)) = first else {
+        return Ok(db::result_delivered(&app.db, id).await?);
+    };
+    if let Some(row) = db::event_by_id(&app.db, reply).await? {
+        let mut event = row.to_json();
+        event["reply_delivered_at"] = json!(at);
+        app.notify(Notice::Resent {
+            session_id: row.session_id,
+            seq: row.seq,
+            event,
+        });
+    }
+    Ok(())
 }
 
 /// Closes an open ask without a reply (`error`) and sends that to the asking worker; the
@@ -932,13 +975,18 @@ pub const JOINED_SEPARATOR: &str = "\n\n--- sent with hqc_send while answering -
 /// answering turn ([`reply_files`]) and the messages the turn sent to the asker (T42), their
 /// texts after `text`. The ask's row is locked from reading its joined messages until it is
 /// closed, so a [`join_reply`] either comes before and is in the reply, or finds it closed.
+///
+/// The ask keeps the final message's id (`payload.reply_event_id`) for the time its result is
+/// acknowledged ([`result_acked`]), and the result has the question's `seq` in the target
+/// (`message_seq`, T51).
 pub async fn on_final(
     app: &AppState,
     s: &SessionRow,
     in_reply_to: Uuid,
     text: &str,
-    seq: i64,
+    reply: (Uuid, i64),
 ) -> anyhow::Result<()> {
+    let (reply_id, seq) = reply;
     let open: Vec<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
          WHERE kind = 'ask' AND closed_at IS NULL AND payload ->> 'event_id' = $1"
@@ -980,13 +1028,18 @@ pub async fn on_final(
         if !files.is_empty() {
             result["files"] = serde_json::to_value(&files)?;
         }
+        if let Some(q) = db::event_by_id(&app.db, in_reply_to).await? {
+            result["message_seq"] = json!(q.seq);
+        }
         let frame = result_frame(McpResult::ok(&p.request_id, result));
         sqlx::query(
-            "UPDATE pending_requests SET closed_at = now(), result = $2, updated_at = now()
+            "UPDATE pending_requests SET closed_at = now(), result = $2, updated_at = now(),
+                    payload = payload || jsonb_build_object('reply_event_id', $3::text)
              WHERE id = $1",
         )
         .bind(p.id)
         .bind(&frame)
+        .bind(reply_id.to_string())
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

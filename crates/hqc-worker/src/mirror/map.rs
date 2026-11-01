@@ -63,6 +63,7 @@ fn event(m: &Message, index: usize, author: Author, kind: EventKind) -> Event {
         client_op_id: None,
         delivery: user.then_some(Delivery::Delivered),
         delivered_at: user.then_some(ts),
+        reply_delivered_at: None,
     }
 }
 

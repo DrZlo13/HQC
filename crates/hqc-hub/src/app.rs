@@ -75,6 +75,13 @@ pub enum Notice {
         seq: Option<i64>,
         event: Value,
     },
+    /// A stored event sent again with a field the hub adds for clients, now known
+    /// (`reply_delivered_at`, SPEC §6): only to subscriptions that already had it.
+    Resent {
+        session_id: Uuid,
+        seq: i64,
+        event: Value,
+    },
     /// `delivery` of an input changed (SPEC §3 Event).
     Delivery {
         session_id: Uuid,

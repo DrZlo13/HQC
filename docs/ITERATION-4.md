@@ -100,7 +100,7 @@ archive mode, reorder by keyboard and pointer, the phone sheet), `tests/chat.tes
 mock hub flow in `tests/projects.test.tsx`. The check by hand on a phone is still to do.
 Decisions and differences from the mockups in `docs/notes/t50-questions.md`.
 
-## T51. Messages between sessions in the feed
+## T51. Messages between sessions in the feed (done, SPEC 0.54)
 
 Sections: §4 (`peer.message`, `agent.message.in_reply_to`), §6, §7, §7.1. Depends on T49.
 Mockups: `Session`, `AskingSession`, `MSession2`. Today a peer message is a card close to the
@@ -124,6 +124,18 @@ Acceptance: the common checks; hub test: `reply_delivered_at` on the reply after
 client tests: each of the four blocks from fixtures of a real exchange (T41/T42 runs), a send
 folded into a reply, a link to a deleted session; by hand: the iteration 3 exchange (A asks B
 with a file, B returns it) looks like the mockups on both sides, on a desktop and a phone.
+
+Done: the four blocks are `src/ui/relay.tsx`, built in `feed.ts` (they replace the peer card,
+the plain reply, the turn's standalone attachments and the calls' rows in the tool groups).
+The asking side learns the delivery time through `message_seq` in the results of `hqc_send` and
+`hqc_ask` (the `seq` of the message in the target, read with the existing events API); a file of
+an ask's reply has `artifact_id` for Open / Download; a buffered send gets `delivered_at` when it
+reaches the agent. `reply_delivered_at` is kept on the ask at the asker's `ack` (an error or a
+drop after a restart is no delivery), added by the events API and `/api/ws`, and the reply is
+sent again to subscribers when it becomes known. No migration. Tests: hub `tests/t51.rs`, client
+`tests/relay.test.tsx` with fixtures in the shapes of the T41/T42 runs. The check by hand on a
+phone and a desktop is still to do. Decisions and differences from the mockups in
+`docs/notes/t51-questions.md`.
 
 ## T48. Permission rules in hqc: a rules screen and patterns from the card (done, SPEC 0.52)
 

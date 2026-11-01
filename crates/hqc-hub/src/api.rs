@@ -981,7 +981,7 @@ pub async fn session_events(
         None => db::events_after(&app.db, id, q.after_seq.unwrap_or(0), limit).await?,
     };
     Ok(Json(EventPage {
-        events: rows.iter().map(|r| r.to_json()).collect(),
+        events: db::events_for_clients(&app.db, &rows).await?,
         last_seq: s.last_seq.max(0) as u64,
     }))
 }

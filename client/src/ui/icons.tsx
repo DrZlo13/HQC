@@ -179,3 +179,16 @@ export const IconCode = ({ size = 18 }: { size?: number }) => (
     <path d="M7 6l-4 4 4 4M13 6l4 4-4 4" />
   </Svg>
 );
+
+/** ↗ / ↙ of the blocks between sessions (T51): left this session, came into it. */
+export const IconArrowOut = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M5 15L15 5M8 5h7v7" />
+  </Svg>
+);
+
+export const IconArrowIn = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M15 5L5 15M12 15H5V8" />
+  </Svg>
+);

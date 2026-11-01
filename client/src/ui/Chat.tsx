@@ -6,6 +6,7 @@ import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
 import type { Timeline } from '../timeline';
 import { ActivityLine, ChatItems, StreamingMessage, onlyRequests, type ChatActions } from './cards';
+import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { IconArchive, IconAttach, IconBack, IconCode, IconMore, IconSend, IconShield, IconStop } from './icons';
@@ -35,6 +36,7 @@ export function Chat({
   const [requestsOnly, setRequestsOnly] = useState(false);
   const [schedules, setSchedules] = useState(false);
   const artifacts = useMemo(() => new ArtifactStore(app.api), [app]);
+  const peerMessage = useMemo(() => peerMessages(app.api), [app]);
   const [files, setFiles] = useState<OutgoingFile[]>([]);
   const [dragging, setDragging] = useState(false);
   const addFiles = (list: FileList | File[] | null | undefined) => {
@@ -107,6 +109,8 @@ export function Chat({
       : undefined,
     hotkeyRequest: firstApproval?.payload.request_id,
     sheetRequest,
+    findSession: (ref) => app.findSession(ref),
+    peerMessage,
     openArtifact: (id, download) => {
       // Open the window synchronously, or mobile browsers block it as a popup.
       const w = window.open('about:blank', '_blank');

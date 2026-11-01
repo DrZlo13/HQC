@@ -1,4 +1,4 @@
-// Line icons of the redesign (docs/design/redesign-2026-10-24), 20×20 viewBox, drawn in
+// Line icons of the redesigns (docs/design/redesign-2026-10-24, redesign-2026-11-01), 20×20 viewBox, drawn in
 // `currentColor`. Decorative: the button around them carries the label.
 
 import type { ComponentChildren } from 'preact';
@@ -31,8 +31,16 @@ export const IconPlus = ({ size }: { size?: number }) => (
 export const IconSettings = ({ size }: { size?: number }) => (
   <Svg size={size}>
     <path d="M3 6h14M3 14h14" />
-    <circle cx="7" cy="6" r="2" fill="var(--rail-bg)" />
-    <circle cx="13" cy="14" r="2" fill="var(--rail-bg)" />
+    <circle cx="7" cy="6" r="2" fill="var(--rail)" />
+    <circle cx="13" cy="14" r="2" fill="var(--rail)" />
+  </Svg>
+);
+
+/** Project settings (T49), the gear of the sidebar header. */
+export const IconGear = ({ size = 17 }: { size?: number }) => (
+  <Svg size={size}>
+    <circle cx="10" cy="10" r="2.6" />
+    <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4" />
   </Svg>
 );
 

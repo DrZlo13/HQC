@@ -28,6 +28,10 @@ import { WebSocketServer } from 'ws';
 
 const WIRE = join(dirname(fileURLToPath(import.meta.url)), '../../crates/hqc-proto/examples/wire');
 const STATUS = Symbol('status');
+/** A reply that is not JSON: `{[RAW]: {type, data}}`. */
+const RAW = Symbol('raw');
+/** Project colors (T49, `hqc_proto::api::ProjectColor`). */
+const COLORS = ['teal', 'plum', 'blue', 'rose', 'moss', 'coral', 'cyan', 'slate'];
 
 /** The answer to a message with "markdown": every element of T11 to look at. */
 export const MARKDOWN_ANSWER = `## Run summary
@@ -94,6 +98,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     email: 'dev@localhost',
     display_name: 'Dev',
     personal_project_id: '0199f3a2-7c10-7000-8000-0000000000d1',
+    theme: 'warm',
   };
   const workerId = ex['hub.hello.ack'].payload.worker_id;
   const now = () => new Date().toISOString();
@@ -518,6 +523,32 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   };
 
   route('GET', '/api/me', () => me);
+  // T49: the app theme; the project's color and icon, the icon image (checked loosely: the
+  // hub checks the magic bytes and the size in pixels).
+  route('PATCH', '/api/me', (_, body) => {
+    if (body?.theme !== undefined) {
+      if (!['warm', 'graphite', 'contrast'].includes(body.theme)) throw fail(422, 'unprocessable', 'unknown theme');
+      me.theme = body.theme;
+    }
+    if (body?.timezone !== undefined) me.timezone = body.timezone;
+    return me;
+  });
+  /** @type {Map<string, Buffer>} */
+  const icons = new Map();
+  route('PUT', '/api/projects/:pid/icon', (p, body) => {
+    const pr = projectOr404(p.pid);
+    const raw = Buffer.isBuffer(body) ? body : Buffer.alloc(0);
+    const start = raw.indexOf(Buffer.from('\x89PNG', 'latin1'));
+    if (start < 0) throw fail(422, 'invalid_icon', 'the image is not a PNG, JPEG or WebP');
+    icons.set(pr.id, raw.subarray(start));
+    pr.icon = { kind: 'image', url: `/api/projects/${pr.id}/icon?v=${icons.size}${Date.now() % 1000}` };
+    return pr;
+  });
+  route('GET', '/api/projects/:pid/icon', (p) => {
+    const data = icons.get(projectOr404(p.pid).id);
+    if (!data) throw fail(404, 'not_found', 'no icon');
+    return { [RAW]: { type: 'image/png', data } };
+  });
   route('GET', '/api/projects', () => ({ projects: [...projects.values()] }));
   route('POST', '/api/projects', (_, body) => {
     const name = String(body?.name ?? '').trim();
@@ -527,7 +558,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     for (let i = 2; [...projects.values()].some((p) => p.slug === slug); i++) slug = `${base}-${i}`;
     const p = {
       id: randomUUID(), owner_id: userId, name, slug, description: String(body?.description ?? ''),
-      is_personal: false, created_at: now(), updated_at: now(),
+      is_personal: false, color: COLORS[projects.size % COLORS.length], created_at: now(), updated_at: now(),
     };
     projects.set(p.id, p);
     return withStatus(201, p);
@@ -541,7 +572,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (body?.default_workspace_id !== undefined && workspaces.get(body.default_workspace_id)?.project_id !== pr.id) {
       throw fail(400, 'bad_request', 'default_workspace_id is not a workspace of this project');
     }
-    for (const k of ['name', 'description', 'default_workspace_id']) if (body?.[k] !== undefined) pr[k] = body[k];
+    if (body?.color !== undefined && !COLORS.includes(body.color)) throw fail(422, 'unprocessable', 'unknown color');
+    if (body?.icon !== undefined) {
+      const ok = ['emoji', 'letters'].includes(body.icon?.kind) && String(body.icon.value ?? '').trim();
+      if (!ok) throw fail(422, 'invalid_icon', 'an emoji or 1-2 letters');
+      icons.delete(pr.id);
+      body.icon = { kind: body.icon.kind, value: body.icon.kind === 'letters' ? body.icon.value.toUpperCase() : body.icon.value };
+    }
+    for (const k of ['name', 'description', 'default_workspace_id', 'color', 'icon']) if (body?.[k] !== undefined) pr[k] = body[k];
     pr.updated_at = now();
     return pr;
   });
@@ -928,12 +966,17 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     try {
       const chunks = [];
       for await (const c of req) chunks.push(c);
-      body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : undefined;
+      const raw = Buffer.concat(chunks);
+      const multipart = String(req.headers['content-type'] ?? '').startsWith('multipart/');
+      body = !chunks.length ? undefined : multipart ? raw : JSON.parse(raw.toString('utf8'));
       const m = url.pathname.match(r.re);
       const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
       log(`${req.method} ${url.pathname}`);
       const out = (await r.fn(params, body, url.searchParams)) ?? {};
-      if (STATUS in out) reply(out[STATUS], out.body);
+      if (RAW in out) {
+        res.writeHead(200, { 'content-type': out[RAW].type, 'x-content-type-options': 'nosniff' });
+        res.end(out[RAW].data);
+      } else if (STATUS in out) reply(out[STATUS], out.body);
       else reply(200, out);
     } catch (e) {
       reply(e.status ?? 500, { ...(e.extra ?? {}), error: e.code ?? 'internal', message: e.message });

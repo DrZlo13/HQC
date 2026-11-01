@@ -1,10 +1,23 @@
 import { useEffect, useState } from 'preact/hooks';
-import { IconBack } from './icons';
 import { ApiError, type WorkerInfo } from '../api';
 import type { AppState } from '../app';
 import { parseWorkspaceConflict, type Candidate, type DirEntry, type Workspace } from '../proto';
+import { THEMES, colorLabel } from '../theme';
+import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
-import { workspaceTitle } from './SessionList';
+import { IconBack, IconPlus } from './icons';
+import { homePath } from './labels';
+
+/** The workspace's label or its folder's name. */
+export function workspaceName(w: Workspace): string {
+  return w.label || w.path.split('/').filter(Boolean).pop() || w.path;
+}
+
+/** The name, then where it is: the choice of the new-session form. */
+export function workspaceTitle(w: Workspace, workers?: WorkerInfo[]): string {
+  const worker = workers?.find((x) => x.id === w.worker_id)?.name;
+  return `${workspaceName(w)} — ${worker ? `${worker}:` : ''}${w.path}`;
+}
 
 /** Why a workspace could not be added, as the user reads it. */
 function addError(e: unknown, app: AppState): { text: string; link?: { href: string; label: string } } {
@@ -12,10 +25,10 @@ function addError(e: unknown, app: AppState): { text: string; link?: { href: str
     const c = parseWorkspaceConflict(e.body);
     if (c) {
       const p = app.projects.get(c.existing_project_id);
-      const where = p ? `project “${p.is_personal ? 'Personal' : p.name}”` : 'another project';
+      const where = p ? `project “${projectName(p)}”` : 'another project';
       return {
         text: `This folder is already in ${where}: ${c.existing_path}. A folder belongs to one project, and so do its subfolders.`,
-        link: { href: `#/p/${c.existing_project_id}/workspaces`, label: 'Open the project' },
+        link: { href: `#/p/${c.existing_project_id}/settings`, label: 'Open the project' },
       };
     }
     if (e.code === 'worker_offline') {
@@ -25,12 +38,16 @@ function addError(e: unknown, app: AppState): { text: string; link?: { href: str
   return { text: (e as Error).message };
 }
 
-/** The project's workspaces (SPEC §3, §13): list, add, make default, remove the record. */
-export function Workspaces({ app, projectId }: { app: AppState; projectId: string }) {
+/** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened with the
+ *  gear of the sidebar header: Appearance (icon, color, the app theme), Workspaces (SPEC §3,
+ *  §13: list, add, import, make default, "VS Code sessions", remove the record) and Project
+ *  (rename, delete; neither for the personal project, SPEC §3). */
+export function ProjectSettings({ app, projectId, phone }: { app: AppState; projectId: string; phone?: boolean }) {
   useSubscription((fn) => app.onChange(fn), [app]);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [appearance, setAppearance] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = app.projects.get(projectId);
   const list = app.workspaces.get(projectId);
@@ -66,7 +83,6 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
   const makeDefault = (w: Workspace) =>
     app.setDefaultWorkspace(projectId, w.id).catch((e: Error) => setError(e.message));
 
-  // The personal project keeps its name (SPEC §3 Project): no button for it.
   const rename = async () => {
     if (!project) return;
     const name = prompt('New project name', project.name);
@@ -91,100 +107,136 @@ export function Workspaces({ app, projectId }: { app: AppState; projectId: strin
     }
   };
 
-  const name = project ? (project.is_personal ? 'Personal' : project.name) : '';
+  const name = project ? projectName(project) : '';
+  const theme = THEMES.find((t) => t.id === app.theme())?.label ?? 'Warm';
+  const look = project && (
+    <>
+      <span class="ps-tile">
+        <ProjectGlyph p={project} />
+      </span>
+      <span class="ps-look-text">
+        <span class="ps-name">{name}</span>
+        <span class="ps-color">
+          <span class="ps-dot" />
+          {colorLabel(project.color)} · {phone ? theme : `${theme} theme`}
+        </span>
+      </span>
+    </>
+  );
   return (
-    <section class="page workspaces">
+    <section class={`page project-settings ${phone ? 'is-phone' : ''}`}>
       <header class="bar">
-        <a class="back icon-btn" href={`#/p/${projectId}`} aria-label="Back to the project">
+        <a class="back icon-btn" href={`#/p/${projectId}`} aria-label="Back to sessions" title="Back">
           <IconBack />
         </a>
         <div class="bar-title">
-          <div class="title">Workspaces</div>
+          <h1 class="title">Project settings</h1>
           <div class="state">{name}</div>
         </div>
       </header>
-      <div class="page-body">
-        <p class="muted">
-          Folders on workers that the project's sessions work in. A folder belongs to one project. Removing one deletes
-          only the record: the folder on disk stays.
-        </p>
-        {list && list.length === 0 && <p class="empty-inline">No workspaces yet.</p>}
-        {list && list.length > 0 && (
-          <ul class="workspace-list">
-            {list.map((w) => {
+      <div class="page-scroll">
+        <div class="page-body">
+          <section class="ps-section" aria-labelledby="ps-look">
+            <h2 id="ps-look">Appearance</h2>
+            {project &&
+              (phone ? (
+                <button type="button" class="ps-look ps-card btn-appearance" onClick={() => setAppearance(true)}>
+                  {look}
+                  <span class="ps-change">Change</span>
+                </button>
+              ) : (
+                <div class="ps-look ps-card">
+                  {look}
+                  <button type="button" class="btn btn-appearance" onClick={() => setAppearance(true)}>
+                    Change icon and color
+                  </button>
+                </div>
+              ))}
+          </section>
+
+          <section class="ps-section workspaces" aria-labelledby="ps-ws">
+            <h2 id="ps-ws">Workspaces</h2>
+            <p class="ps-text">
+              Folders on workers that this project’s sessions work in. A folder belongs to one project. Removing one
+              deletes only the record: the folder on disk stays.
+            </p>
+            {list && list.length === 0 && <p class="empty-inline">No workspaces yet.</p>}
+            {list?.map((w) => {
               const isDefault = w.id === project?.default_workspace_id;
+              const worker = workers?.find((x) => x.id === w.worker_id)?.name;
               return (
-                <li key={w.id} class="workspace-row">
+                <div key={w.id} class="workspace-row ps-card">
                   <div class="workspace-main">
-                    <b>{workspaceTitle(w, workers ?? undefined)}</b>
+                    <span class="workspace-name">{workspaceName(w)}</span>
+                    <span class="workspace-path mono">
+                      {worker ? `${worker}:` : ''}
+                      {homePath(w.path)}
+                    </span>
                     {isDefault && <span class="tag">default</span>}
                   </div>
-                  <label
-                    class="choice mirror-toggle"
-                    title="Show this folder's Claude Code sessions (VS Code, terminal) in the project and take them over"
-                  >
-                    <input
-                      type="checkbox"
-                      name="mirror"
-                      checked={w.mirror_enabled}
-                      onChange={(e) => toggleMirror(w, (e.currentTarget as HTMLInputElement).checked)}
-                    />
-                    <span>VS Code sessions</span>
-                  </label>
-                  <div class="row">
+                  <div class="workspace-actions">
+                    <label
+                      class="mirror-toggle"
+                      title="Show this folder's Claude Code sessions (VS Code, terminal) in the project and take them over"
+                    >
+                      <input
+                        type="checkbox"
+                        name="mirror"
+                        checked={w.mirror_enabled}
+                        onChange={(e) => toggleMirror(w, (e.currentTarget as HTMLInputElement).checked)}
+                      />
+                      <span>VS Code sessions</span>
+                    </label>
                     {!isDefault && (
                       <button type="button" class="btn btn-small btn-make-default" onClick={() => makeDefault(w)}>
                         Make default
                       </button>
                     )}
-                    <button type="button" class="btn btn-small btn-deny btn-remove-workspace" onClick={() => remove(w)}>
+                    <span class="spacer" />
+                    <button type="button" class="btn btn-small btn-ghost btn-remove-workspace" onClick={() => remove(w)}>
                       Remove
                     </button>
                   </div>
-                </li>
+                </div>
               );
             })}
-          </ul>
-        )}
-        {error && <div class="error-text">{error}</div>}
-        {adding ? (
-          <AddWorkspace
-            app={app}
-            projectId={projectId}
-            workers={workers ?? []}
-            onDone={() => setAdding(false)}
-          />
-        ) : importing ? (
-          <ImportFromClaude
-            app={app}
-            projectId={projectId}
-            workers={workers ?? []}
-            onDone={() => setImporting(false)}
-          />
-        ) : (
-          <div class="row">
-            <button type="button" class="btn btn-primary btn-add-workspace" onClick={() => setAdding(true)}>
-              Add a workspace
-            </button>
-            <button type="button" class="btn btn-import-claude" onClick={() => setImporting(true)}>
-              Import from Claude Code
-            </button>
-          </div>
-        )}
-        {project && !project.is_personal && (
-          <>
-            <h2>Project</h2>
-            <div class="row">
-              <button type="button" class="btn btn-rename-project" onClick={rename}>
-                Rename
-              </button>
-              <button type="button" class="btn btn-deny btn-delete-project" onClick={deleteProject}>
-                Delete project
-              </button>
-            </div>
-          </>
-        )}
+            {error && <div class="error-text">{error}</div>}
+            {adding ? (
+              <AddWorkspace app={app} projectId={projectId} workers={workers ?? []} onDone={() => setAdding(false)} />
+            ) : importing ? (
+              <ImportFromClaude app={app} projectId={projectId} workers={workers ?? []} onDone={() => setImporting(false)} />
+            ) : (
+              <div class="row ps-buttons">
+                <button type="button" class="btn btn-primary btn-add-workspace" onClick={() => setAdding(true)}>
+                  <IconPlus size={15} />
+                  Add a workspace
+                </button>
+                <button type="button" class="btn btn-import-claude" onClick={() => setImporting(true)}>
+                  Import from Claude Code
+                </button>
+              </div>
+            )}
+          </section>
+
+          {/* The personal project keeps its name and is not deleted (SPEC §3 Project). */}
+          {project && !project.is_personal && (
+            <section class="ps-section" aria-labelledby="ps-project">
+              <h2 id="ps-project">Project</h2>
+              <div class="row ps-buttons">
+                <button type="button" class="btn btn-rename-project" onClick={rename}>
+                  Rename
+                </button>
+                <button type="button" class="btn btn-delete-project" onClick={deleteProject}>
+                  Delete project
+                </button>
+              </div>
+            </section>
+          )}
+        </div>
       </div>
+      {appearance && project && (
+        <AppearanceDialog app={app} project={project} phone={phone} onClose={() => setAppearance(false)} />
+      )}
     </section>
   );
 }

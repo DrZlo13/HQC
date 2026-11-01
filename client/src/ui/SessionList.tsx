@@ -3,8 +3,11 @@ import type { WorkerInfo } from '../api';
 import type { AppState } from '../app';
 import type { PermissionMode, SessionInfo, Workspace } from '../proto';
 import { useSubscription } from './hooks';
-import { IconPlus, IconSearch } from './icons';
-import { AUTO_CONFIRM, formatWhen, homePath } from './labels';
+import { colorHex } from '../theme';
+import { ProjectGlyph, projectName } from './Appearance';
+import { IconGear, IconPlus, IconSearch } from './icons';
+import { AUTO_CONFIRM, formatWhen, shortPath } from './labels';
+import { workspaceTitle } from './ProjectSettings';
 import { RequestsLink } from './requests';
 import { SearchHits } from './Search';
 import {
@@ -20,21 +23,17 @@ import {
   type ListMode,
 } from './sessions';
 
-/** "+ project": asks for the name, then opens the new project's workspaces — a new project
- *  has none yet, and that is the first thing to add. */
+/** "+ project": asks for the name, then opens the new project's settings — a new project
+ *  has no workspaces yet, and that is the first thing to add. */
 export async function newProject(app: AppState, onError: (m: string) => void): Promise<void> {
   const name = prompt('Project name', '');
   if (!name?.trim()) return;
   try {
     const p = await app.createProject(name.trim());
-    location.hash = `#/p/${p.id}/workspaces`;
+    location.hash = `#/p/${p.id}/settings`;
   } catch (e) {
     onError((e as Error).message);
   }
-}
-
-export function projectName(p: { name: string; is_personal: boolean }): string {
-  return p.is_personal ? 'Personal' : p.name;
 }
 
 /** The sessions of the current project (SPEC §1: projects, in projects sessions), T26: a
@@ -66,7 +65,7 @@ export function SessionList({
     if (project && !app.workspaces.has(project.id)) app.loadWorkspaces(project.id).catch(() => {});
   }, [app, project?.id]);
 
-  const pathOf = (s: SessionInfo) => homePath(app.sessionPath(s) ?? '');
+  const pathOf = (s: SessionInfo) => shortPath(app.sessionPath(s) ?? '');
   const all = showArchived ? archived : app.sortedSessions();
   const list = all.filter((s) => matchesQuery(s, pathOf(s), query));
   const now = Date.now();
@@ -123,6 +122,11 @@ export function SessionList({
             <a class="icon-btn icon-btn-round" href="#/search" aria-label="Search sessions and messages">
               <IconSearch size={20} />
             </a>
+            {project && (
+              <a class="icon-btn icon-btn-round btn-project-settings" href={`#/p/${project.id}/settings`} aria-label="Project settings">
+                <IconGear size={20} />
+              </a>
+            )}
             <a class="icon-btn icon-btn-round" href="#/settings" aria-label="Account and settings">
               <span class="avatar">{(app.me?.email ?? '?').slice(0, 1).toUpperCase()}</span>
             </a>
@@ -134,6 +138,11 @@ export function SessionList({
       ) : (
         <>
           <header class="side-head">
+            {project && (
+              <span class="side-tile" aria-hidden="true">
+                <ProjectGlyph p={project} />
+              </span>
+            )}
             <div class="side-title">
               <div class="project-title">{project ? projectName(project) : 'hqc'}</div>
               <div class="side-counts">
@@ -141,6 +150,16 @@ export function SessionList({
                 {conn}
               </div>
             </div>
+            {project && (
+              <a
+                class="icon-btn btn-project-settings"
+                href={`#/p/${project.id}/settings`}
+                aria-label="Project settings: appearance, workspaces"
+                title="Project settings"
+              >
+                <IconGear />
+              </a>
+            )}
             <button
               type="button"
               class="btn btn-primary btn-small btn-new-session"
@@ -185,20 +204,17 @@ export function SessionList({
           <div class="empty">{query ? 'No sessions match' : showArchived ? 'The archive is empty' : 'No sessions yet'}</div>
         )}
         {!phone && <SearchHits app={app} query={query} />}
-        {project && (
+        {project && (archived.length > 0 || showArchived) && (
           <div class="list-foot">
-            <a href={`#/p/${project.id}/workspaces`}>Project workspaces</a>
-            {(archived.length > 0 || showArchived) && (
-              <button
-                type="button"
-                class={`btn-link btn-archive-toggle ${showArchived ? 'is-on' : ''}`}
-                aria-pressed={showArchived}
-                title="Show archived sessions"
-                onClick={() => setShowArchived(!showArchived)}
-              >
-                {showArchived ? 'Hide archive' : `Archive ${archived.length}`}
-              </button>
-            )}
+            <button
+              type="button"
+              class={`btn-link btn-archive-toggle ${showArchived ? 'is-on' : ''}`}
+              aria-pressed={showArchived}
+              title="Show archived sessions"
+              onClick={() => setShowArchived(!showArchived)}
+            >
+              {showArchived ? 'Hide archive' : `Archive ${archived.length}`}
+            </button>
           </div>
         )}
         {phone && <WorkerList app={app} current={current} />}
@@ -229,7 +245,7 @@ function SessionRow({ s, current, when, where }: { s: SessionInfo; current: bool
         <span class={`dot dot-${bucket} state-${s.state}`} aria-hidden="true" />
         <span class="session-main">
           <span class="session-top">
-            <span class={`session-title ${bucket === 'idle' ? 'is-idle' : ''}`}>{s.title || s.slug || s.id.slice(-8)}</span>
+            <span class="session-title">{s.title || s.slug || s.id.slice(-8)}</span>
             {when && <span class="session-when">{when}</span>}
             {s.unread > 0 && (
               <span class="badge" aria-label={`unread: ${s.unread}`}>
@@ -264,6 +280,10 @@ function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) =>
             aria-label={projectName(p)}
             aria-current={p.id === current ? 'true' : undefined}
           >
+            {/* Without an icon a dot of the project's color: the name is right after it. */}
+            <span class="chip-icon" aria-hidden="true">
+              {p.icon ? <ProjectGlyph p={p} /> : <span class="chip-dot" style={{ background: colorHex(p.color) }} />}
+            </span>
             {projectName(p)}
             {waiting > 0 && (
               <span class="chip-badge" aria-label={`needs you: ${waiting}`}>
@@ -313,13 +333,6 @@ function WorkerList({ app, current }: { app: AppState; current?: string }) {
   );
 }
 
-/** `label` or the folder's name, then where it is. */
-export function workspaceTitle(w: Workspace, workers?: WorkerInfo[]): string {
-  const name = w.label || w.path.split('/').filter(Boolean).pop() || w.path;
-  const worker = workers?.find((x) => x.id === w.worker_id)?.name;
-  return `${name} — ${worker ? `${worker}:` : ''}${w.path}`;
-}
-
 /** New session: title (empty — "Session N", SPEC §3), workspace (the project's default
  *  preselected, SPEC §13.4) and an optional `cwd` inside it. */
 function NewSession({ app, projectId, onDone }: { app: AppState; projectId: string; onDone: () => void }) {
@@ -364,7 +377,7 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
       <div class="new-session">
         <p class="muted">
           The project has no workspaces: a session needs a folder on a worker.{' '}
-          <a href={`#/p/${projectId}/workspaces`}>Add a workspace</a>
+          <a href={`#/p/${projectId}/settings`}>Add a workspace</a>
         </p>
         <button type="button" class="btn btn-small" onClick={onDone}>
           Cancel

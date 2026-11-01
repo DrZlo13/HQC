@@ -138,9 +138,9 @@ describe('list logic', () => {
 function makeApp(list = LIST) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
   const app = new AppState({ workspaces: async () => [], search: async () => ({ results: [] }) } as unknown as Api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0' };
-  app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, created_at: at(100) });
-  app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, created_at: at(90) });
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' };
+  app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', created_at: at(100) });
+  app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
   app.currentProjectId = 'p1';
   app.conn = 'open';
   const ws = (id: string, worker: string, path: string) => ({
@@ -194,7 +194,7 @@ describe('SessionList (desktop column)', () => {
     const net = root.querySelector('.session-row.is-current')!;
     expect(net.getAttribute('aria-current')).toBe('page');
     expect(net.querySelector('.session-sub')!.textContent).toBe('Waiting for reply');
-    expect(net.querySelector('.session-where')!.textContent).toBe('home-mac · ~/work/games/phys-mp/net');
+    expect(net.querySelector('.session-where')!.textContent).toBe('home-mac · games/phys-mp/net');
     expect(net.querySelector('.dot-wait')).not.toBeNull();
     expect(root.querySelector('.session-when')).toBeNull();
   });
@@ -242,14 +242,20 @@ describe('SessionList (desktop column)', () => {
 });
 
 describe('ProjectRail', () => {
-  it('shows initials, the current project and a "needs you" badge', async () => {
+  it('shows icons on the project colors, the current project and a "needs you" badge (T49)', async () => {
     await mount(<ProjectRail app={makeApp()} />);
-    const rows = [...root.querySelectorAll('.rail-project')];
+    const rows = [...root.querySelectorAll<HTMLElement>('.rail-project')];
+    // Without an icon the first letters, as before; an emoji as it is.
     expect(rows.map((r) => [r.getAttribute('aria-label'), r.textContent])).toEqual([
       ['Personal', 'P'],
-      ['physics-mp', 'PM'],
+      ['physics-mp', '⚛️'],
     ]);
     expect(root.querySelector('.rail-project.is-current')!.getAttribute('aria-label')).toBe('physics-mp');
+    // Another project: its color at 24 %; the current one: --mark-bg from CSS and the pill.
+    expect(rows[0].style.background).toBe('rgba(138, 147, 166, 0.24)');
+    expect(rows[1].style.background).toBe('');
+    expect(root.querySelectorAll('.rail-pill')).toHaveLength(1);
+    expect(root.querySelector('.rail-pill')!.nextElementSibling).toBe(rows[1]);
     const badges = [...root.querySelectorAll('.rail-badge')];
     expect(badges.map((b) => b.textContent)).toEqual(['1']);
     expect(badges[0].getAttribute('aria-label')).toBe('needs you: 1');
@@ -262,7 +268,9 @@ describe('SessionList (phone)', () => {
     await mount(<SessionList app={makeApp()} phone />);
     expect(root.querySelector('.m-head h1')!.textContent).toBe('Sessions');
     const chips = [...root.querySelectorAll('.chips .chip.project-row')];
-    expect(chips.map((c) => c.textContent)).toEqual(['Personal', 'physics-mp1']);
+    // T49: the icon before the name; without one a dot of the project's color.
+    expect(chips.map((c) => c.textContent)).toEqual(['Personal', '⚛️physics-mp1']);
+    expect(chips[0].querySelector<HTMLElement>('.chip-dot')!.style.background).toBe('#8A93A6');
     expect(root.querySelector('.chip.is-current .chip-badge')!.textContent).toBe('1');
     expect(groups().map((g) => g[0])).toEqual(['Needs you', 'Running', 'Idle']);
     expect(root.querySelector('.fab')!.textContent).toBe('New');

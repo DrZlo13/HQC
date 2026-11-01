@@ -127,7 +127,7 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   promptAnswer = 'KiCad';
   $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
   await until('workspaces screen', () => $('.workspaces'));
-  expect(location.hash).toMatch(/^#\/p\/[^/]+\/workspaces$/);
+  expect(location.hash).toMatch(/^#\/p\/[^/]+\/settings$/);
   const pid = location.hash.split('/')[2];
   await until('current project', () => $('.project-row.is-current')?.getAttribute('aria-label') === 'KiCad');
   expect($('.project-row.is-current')!.textContent).toBe('KI');
@@ -160,7 +160,7 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   submit('.add-workspace');
   const err = await until('conflict', () => $('.add-workspace .error-text'));
   expect(err.textContent).toContain('This folder is already in project “Personal”');
-  expect(err.querySelector('a')!.getAttribute('href')).toBe(`#/p/${app.me!.personal_project_id}/workspaces`);
+  expect(err.querySelector('a')!.getAttribute('href')).toBe(`#/p/${app.me!.personal_project_id}/settings`);
   button('Cancel', '.add-workspace')!.click();
 
   // A session in that workspace, in a subfolder.
@@ -188,7 +188,7 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   expect($$('.session-row').some((r) => r.textContent?.includes('Empty session'))).toBe(false);
 
   // Its workspace stays while the session lives.
-  location.hash = `#/p/${pid}/workspaces`;
+  location.hash = `#/p/${pid}/settings`;
   (await until('remove button', () => $('.btn-remove-workspace') as HTMLButtonElement | null))!.click();
   await until('in use', () => $('.workspaces .error-text')?.textContent?.includes('Archive these sessions first'));
 });
@@ -198,14 +198,14 @@ it('switches projects from the left column and deletes a project', async () => {
   location.hash = personal.getAttribute('href')!;
   await until('personal sessions', () => $$('.session-row').find((r) => r.textContent?.includes('Empty session')));
   // The personal project has no delete button.
-  location.hash = `#/p/${app.me!.personal_project_id}/workspaces`;
+  location.hash = `#/p/${app.me!.personal_project_id}/settings`;
   await until('personal workspaces', () => $$('.workspace-row').length === 1);
   expect($('.btn-delete-project')).toBeNull();
 
   expect($('.btn-rename-project')).toBeNull();
 
   const kicad = app.sortedProjects().find((p) => p.name === 'KiCad')!;
-  location.hash = `#/p/${kicad.id}/workspaces`;
+  location.hash = `#/p/${kicad.id}/settings`;
   promptAnswer = 'KiCad boards';
   (await until('rename button', () => $('.btn-rename-project') as HTMLButtonElement | null))!.click();
   await until('renamed', () => projectRow('KiCad boards'));

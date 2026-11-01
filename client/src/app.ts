@@ -9,8 +9,10 @@ import type {
   OpenRequest,
   PermissionMode,
   Project,
+  ProjectColor,
   SessionInfo,
   SessionSummary,
+  Theme,
   Workspace,
 } from './proto';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
@@ -271,6 +273,31 @@ export class AppState {
     this.currentProjectId = p.id;
     this.changed();
     return p;
+  }
+
+  /** The app theme (T49): the user's, `warm` until `/api/me` answers. */
+  theme(): Theme {
+    return this.me?.theme ?? 'warm';
+  }
+
+  async setTheme(theme: Theme): Promise<void> {
+    if (theme === this.theme()) return;
+    this.me = await this.api.setTheme(theme);
+    this.changed();
+  }
+
+  /** A project's color and emoji or letters (T49); the personal project's too. */
+  async setAppearance(id: string, patch: { color?: ProjectColor; icon?: { kind: 'emoji' | 'letters'; value: string } }): Promise<void> {
+    const p = await this.api.patchProject(id, patch);
+    this.projects.set(p.id, p);
+    this.changed();
+  }
+
+  /** An image as the project's icon; the hub checks it (`422 invalid_icon`). */
+  async uploadProjectIcon(id: string, file: File): Promise<void> {
+    const p = await this.api.uploadProjectIcon(id, file, file.name);
+    this.projects.set(p.id, p);
+    this.changed();
   }
 
   async renameProject(id: string, name: string): Promise<void> {

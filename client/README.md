@@ -24,6 +24,8 @@ but with GFM it is 59 packages and 110 KB (26 KB gzip) unminified in a trial bui
 end up in the bundle too (the package is one file, tree-shaking does not remove them); if size
 starts to matter, the lexer can be replaced without touching the rendering.
 The T26 redesign added about 7.5 KB gzip of JS (44.5 → 52.1 KB) and 3.6 KB gzip of CSS (4.2 → 7.7 KB);
+T49 (theme, project appearance, the project settings page) 4.0 KB gzip of JS (54.9 → 58.9 KB) and
+1.1 KB gzip of CSS (8.4 → 9.6 KB);
 the fonts (≈180 KB woff2) are loaded by the browser by `unicode-range` and weight, only the ones needed.
 The service worker (`public/sw.js`) is written in plain JS without a build: it is small and handles
 only push.
@@ -50,18 +52,33 @@ only push.
   from the last `seq`; `src/timeline.ts` — what the chat shows (events by `seq`, the
   `agent.delta` stream, optimistic messages by `client_op_id`, the fate of requests);
   `src/session.ts` — the open chat: history over REST, the tail over WS, actions.
-- `src/ui/` — the interface per the T26 mockups (`docs/design/redesign-2026-10-24`, dark theme):
-  - `App.tsx` — layout: on desktop the project rail (`ProjectRail`), the session column
+- `src/theme.ts` — the theme of the round 2 mockups (T49, `docs/design/redesign-2026-11-01/theme.js`,
+  `tests/theme.test.ts` checks they agree): a base palette (`BASES`: Warm, Graphite, High contrast)
+  plus the project color (`PROJECT_COLORS`) → CSS variables (`themeVars`) and the fixed status
+  colors (`statusVars`), put on the document root by `applyTheme`: `main.tsx` at start (Warm),
+  `App.tsx` whenever the user's theme or the current project changes. `styles.css` uses only
+  these variables, no palette of its own.
+- `src/ui/` — the interface per the round 2 mockups (`docs/design/redesign-2026-11-01`; the
+  T26 ones of `redesign-2026-10-24` for what round 2 did not redraw):
+  - `App.tsx` — layout: on desktop the project bar (`ProjectRail`), the sidebar
     (`SessionList`) and the screen; on a phone (narrower than 900px, `useIsPhone`) one screen at a time;
-    widths (T27): the rail is 68px, the session column `clamp(220px, 25vw, 300px)` (narrows
-    with the window), the chat `minmax(0, 1fr)` with no minimum; nothing may set a width, a
+    widths (T49, narrowing as in T27): the bar is 72px, the sidebar `clamp(280px, 25vw, 310px)`, the
+    main column `minmax(0, 1fr)` with no minimum, its feed and input at most 780px; nothing may set a width, a
     minimum width or a flex basis of 300px or more (`tests/layout.test.ts`); long code
     (`.md-code pre`) and wide tables (`.md-table`) scroll inside themselves, everything else
     wraps;
-  - `SessionList.tsx` + `sessions.ts` — the session column: "Status"/"Recent" modes (the choice is in
-    `localStorage`, key `hqc.sessionOrder`), search by title and path, project counters,
-    workers with the number of active sessions (a click opens the service session), the new session form; on a phone
-    projects as chips and a "New" button at the bottom;
+  - `ProjectRail.tsx` — project tiles with their icon on their color, the current one with the
+    pill and `--mark-bg`, the "needs you" badge;
+  - `SessionList.tsx` + `sessions.ts` — the sidebar: the header (the project's tile, name, counters, the gear to
+    the project settings, "New"), "State"/"Recent" modes (the choice is in
+    `localStorage`, key `hqc.sessionOrder`), search by title and path, rows with `worker · path`
+    (without `~/work/`), workers with the number of active sessions (a click opens the service session), the new session form; on a phone
+    projects as chips with their icons and a "New" button at the bottom;
+  - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the
+    project's workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
+    sessions", make default, remove), rename and delete; `Appearance.tsx` — the project's tile
+    (`ProjectGlyph`) and the "Project appearance" dialog (icon, color, app theme, live preview;
+    a full-screen sheet on a phone);
   - `Chat.tsx` — the composer completes `/` from the session's `commands` (T27: arrows, Tab or
     Enter, Esc, a tap);
   - `Chat.tsx` — the header (state pill, worker, path, model and cost from `usage`,
@@ -71,7 +88,7 @@ only push.
     reply, `usage` under the final answer, `tool.call` inside the card of its request;
   - `cards.tsx` — messages, tool groups, service lines, the agent's question;
     `permission.tsx` — the permission card (Enter/Esc, reply with text, collapsed line);
-  - `Workspaces`, `Settings`, `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
+  - `Settings`, `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
     "Copy"; `icons.tsx` — icons; `labels.ts` — labels and formats.
   `src/clipboard.ts` — copying through `navigator.clipboard`, or a hidden textarea if the API is missing
   (http in a LAN).
@@ -80,8 +97,8 @@ only push.
   serves them itself, CSP `font-src 'self'` lets no external fonts in.
 - `mock/` — the mock hub for development and tests.
 
-Routes are in the hash, so the hub can serve the client as static files: `#/` — the list, `#/s/<id>` —
-a chat, `#/settings`, `#/enroll?code=ABCD-1234`.
+Routes are in the hash, so the hub can serve the client as static files: `#/` — the list, `#/p/<id>` —
+a project, `#/p/<id>/settings` — its settings, `#/s/<id>` — a chat, `#/settings`, `#/enroll?code=ABCD-1234`.
 
 ## Mock
 
@@ -97,7 +114,8 @@ final `agent.message` → `usage` → `status idle`. A message containing the wo
 is accepted by the mock and quoted in the final answer. "Stop" during a turn gives
 `approval.cancel {stopped}`. A message containing the word "markdown" gets
 a streamed answer with every markdown element (headings, task lists, a table, code,
-links, a quote, HTML and a `javascript:` link as text) — to check the layout by eye. The mock accepts a worker enrollment code in the form `ABCD-1234`.
+links, a quote, HTML and a `javascript:` link as text) — to check the layout by eye. The mock accepts a worker enrollment code in the form `ABCD-1234`. It keeps the app theme and the projects' color
+and icon (T49); an uploaded icon image only has to contain a PNG signature (the hub checks the content and the size).
 `MOCK_SPEED=0.3 npm run dev:mock` speeds up the scenario, `MOCK_PORT` changes the mock's port.
 
 ## Testing on a phone in the local network

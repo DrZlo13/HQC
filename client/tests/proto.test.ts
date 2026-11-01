@@ -14,6 +14,7 @@ import {
   parseEventPage,
   parseFrame,
   parseInputResponse,
+  parseMe,
   parseProject,
   parseProjectList,
   parsePushMessage,
@@ -156,10 +157,17 @@ describe('examples/wire', () => {
 
   it('reads projects, workspaces, folders and the conflict body (T14)', () => {
     const p = parseProject(load('api.project.json'));
-    expect(p).toMatchObject({ name: 'hqc', is_personal: false });
+    expect(p).toMatchObject({ name: 'hqc', is_personal: false, color: 'plum' });
+    expect(p.icon).toEqual({ kind: 'image', url: `/api/projects/${p.id}/icon?v=9f86d081884c7d65` });
     const list = parseProjectList(load('api.projects.json'));
     expect(list.map((x) => x.is_personal)).toEqual([true, false]);
     expect(list[0].default_workspace_id).toBeUndefined();
+    // T49: no icon, the letters; an unknown color or icon kind does not break the list.
+    expect(list[0]).toMatchObject({ color: 'slate', icon: undefined });
+    const odd = parseProject({ ...(load('api.project.json') as object), color: 'mauve', icon: { kind: 'svg', value: 'x' } });
+    expect(odd).toMatchObject({ color: 'teal', icon: undefined });
+    expect(parseMe(load('api.me.json')).theme).toBe('contrast');
+    expect(parseMe({ ...(load('api.me.json') as object), theme: undefined }).theme).toBe('warm');
     const w = parseWorkspace(load('api.workspace.json'));
     expect(p.default_workspace_id).toBe(w.id);
     expect(w).toMatchObject({ project_id: p.id, kind: 'dir', label: 'home-mac' });

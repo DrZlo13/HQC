@@ -34,9 +34,11 @@ import {
   type Me,
   type PermissionMode,
   type Project,
+  type ProjectColor,
   type SearchPage,
   type Schedule,
   type SessionInfo,
+  type Theme,
   type Workspace,
 } from './proto';
 
@@ -129,6 +131,11 @@ export class Api {
     return parseMe(await this.req('PATCH', '/api/me', { timezone }));
   }
 
+  /** The app theme (T49), the same on every device. */
+  async setTheme(theme: Theme): Promise<Me> {
+    return parseMe(await this.req('PATCH', '/api/me', { theme }));
+  }
+
   async schedules(sessionId: string): Promise<Schedule[]> {
     return parseScheduleList(await this.req('GET', `/api/schedules?session_id=${enc(sessionId)}`));
   }
@@ -172,9 +179,24 @@ export class Api {
 
   async patchProject(
     id: string,
-    patch: { name?: string; description?: string; default_workspace_id?: string },
+    patch: {
+      name?: string;
+      description?: string;
+      default_workspace_id?: string;
+      color?: ProjectColor;
+      /** An emoji or letters; an image goes through {@link Api.uploadProjectIcon}. */
+      icon?: { kind: 'emoji' | 'letters'; value: string };
+    },
   ): Promise<Project> {
     return parseProject(await this.req('PATCH', `/api/projects/${enc(id)}`, patch));
+  }
+
+  /** The project's icon image (T49): PNG, JPEG or WebP, square, 128–1024 px, at most 256 KB;
+   *  anything else `422 invalid_icon` with the reason. Makes it the icon at once. */
+  async uploadProjectIcon(id: string, file: Blob, name: string): Promise<Project> {
+    const form = new FormData();
+    form.append('file', file, name);
+    return parseProject(await this.req('PUT', `/api/projects/${enc(id)}/icon`, form));
   }
 
   /** Deletes the project with its workspace records and sessions (folders stay). */

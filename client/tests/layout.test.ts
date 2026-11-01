@@ -27,20 +27,21 @@ function rule(selector: string): Record<string, string> {
 
 describe('layout widths', () => {
   it('the chat column has no minimum and the session column narrows with the window', () => {
+    // T49: project bar 72px, sidebar 280-310px.
     const cols = rule('.layout')['grid-template-columns'];
-    expect(cols).toBe('68px clamp(220px, 25vw, 300px) minmax(0, 1fr)');
+    expect(cols).toBe('72px clamp(280px, 25vw, 310px) minmax(0, 1fr)');
     expect(rule('.sidebar, .main')['min-width']).toBe('0');
     // At the breakpoint the rail and the sessions leave the chat more than half the window.
     const breakpoint = Number(/max-width: (\d+)px/.exec(HOOKS)![1]) + 1;
     expect(breakpoint).toBe(900);
-    expect(68 + Math.max(220, breakpoint / 4)).toBeLessThan(breakpoint / 2);
+    expect(72 + Math.max(280, breakpoint / 4)).toBeLessThan(breakpoint / 2);
   });
 
   it('no fixed width, minimum width or flex basis of 300px or more anywhere', () => {
     const wide = [...CSS.matchAll(/(?:^|[;{\s])((?:min-)?width|flex-basis|flex)\s*:\s*([^;}]*)/g)]
       .filter(([, , v]) => [...v.matchAll(/(\d+)px/g)].some(([, n]) => Number(n) >= 300))
       .map(([, k, v]) => `${k}: ${v}`);
-    // `max-width` (the 760px feed) caps, it does not push; it is not matched.
+    // `max-width` (the 780px feed) caps, it does not push; it is not matched.
     expect(wide).toEqual([]);
   });
 

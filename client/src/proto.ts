@@ -59,6 +59,12 @@ export const START_MODES = ['new', 'resume'] as const;
 /** A session's permission mode (T38): ask the worker owner, or Claude Code decides. */
 export const PERMISSION_MODES = ['ask', 'auto'] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
+/** The app's base palette (T49). */
+export const THEME_NAMES = ['warm', 'graphite', 'contrast'] as const;
+export type Theme = (typeof THEME_NAMES)[number];
+/** A project's color (T49); `theme.ts` maps it to its hex value. */
+export const PROJECT_COLOR_NAMES = ['teal', 'plum', 'blue', 'rose', 'moss', 'coral', 'cyan', 'slate'] as const;
+export type ProjectColor = (typeof PROJECT_COLOR_NAMES)[number];
 export type StartMode = (typeof START_MODES)[number];
 
 // ---- event envelope -------------------------------------------------------------------
@@ -861,6 +867,8 @@ export interface Me {
   personal_project_id: Uuid;
   /** IANA name; the default zone of the user's schedules (SPEC §16). */
   timezone?: string;
+  /** The app's base palette (T49), the same on every device. */
+  theme: Theme;
 }
 
 /** The fields of the hub's session object (SPEC §6) the client uses. */
@@ -913,7 +921,14 @@ export function parseMe(v: unknown): Me {
     display_name: optStr(o, 'display_name'),
     personal_project_id: str(o, 'personal_project_id'),
     timezone: optStr(o, 'timezone'),
+    theme: oneOf(o, 'theme', THEME_NAMES) ?? 'warm',
   };
+}
+
+/** A value of `values`; absent or one this build does not know: undefined. */
+function oneOf<T extends string>(o: Obj, k: string, values: readonly T[]): T | undefined {
+  const v = optStr(o, k);
+  return (values as readonly string[]).includes(v ?? '') ? (v as T) : undefined;
 }
 
 /** A scheduled message (SPEC §3 ScheduledMessage, §16): exactly one of `cron` and `at`. */
@@ -998,7 +1013,24 @@ export interface Project {
   default_workspace_id?: Uuid;
   /** The user's implicit project: neither renamed nor deleted. */
   is_personal: boolean;
+  /** Stored, or picked by the hub by a hash of the id (T49). */
+  color: ProjectColor;
+  /** Absent: the first letters of the name. */
+  icon?: ProjectIcon;
   created_at: string;
+}
+
+/** A project's icon (T49); `url` of an image changes with the image. */
+export type ProjectIcon = { kind: 'emoji' | 'letters'; value: string } | { kind: 'image'; url: string };
+
+function optProjectIcon(o: Obj): ProjectIcon | undefined {
+  if (!present(o, 'icon')) return undefined;
+  const i = obj(o.icon, 'icon');
+  const kind = optStr(i, 'kind');
+  if (kind === 'emoji' || kind === 'letters') return { kind, value: str(i, 'value') };
+  if (kind === 'image') return { kind, url: str(i, 'url') };
+  // A kind this build does not know: the letters.
+  return undefined;
 }
 
 export function parseProject(v: unknown): Project {
@@ -1010,6 +1042,8 @@ export function parseProject(v: unknown): Project {
     description: optStr(o, 'description') ?? '',
     default_workspace_id: optStr(o, 'default_workspace_id'),
     is_personal: bool(o, 'is_personal'),
+    color: oneOf(o, 'color', PROJECT_COLOR_NAMES) ?? 'teal',
+    icon: optProjectIcon(o),
     created_at: str(o, 'created_at'),
   };
 }

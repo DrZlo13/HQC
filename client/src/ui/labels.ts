@@ -175,6 +175,11 @@ export function oneLine(s: string, max = 80): string {
 }
 
 /** A path with the home folder as `~`: `/Users/me/work/hqc` → `~/work/hqc`. */
+/** The path of a session row (T49): without `~/work/`; elsewhere in the home it keeps `~`. */
+export function shortPath(p: string): string {
+  return homePath(p).replace(/^~\/work\//, '');
+}
+
 export function homePath(p: string): string {
   return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, '~');
 }

@@ -1,19 +1,20 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { applyTheme } from '../theme';
 import { Chat } from './Chat';
 import { Enroll } from './Enroll';
 import { useIsPhone, useSubscription } from './hooks';
 import { ProjectRail } from './ProjectRail';
+import { ProjectSettings } from './ProjectSettings';
 import { RequestsScreen } from './requests';
 import { SearchScreen } from './Search';
 import { SessionList } from './SessionList';
 import { Settings } from './Settings';
-import { Workspaces } from './Workspaces';
 
 export type Route =
   | { name: 'list' }
   | { name: 'project'; id: string }
-  | { name: 'workspaces'; projectId: string }
+  | { name: 'projectSettings'; projectId: string }
   | { name: 'session'; id: string; seq?: number }
   | { name: 'search' }
   | { name: 'requests' }
@@ -21,10 +22,9 @@ export type Route =
   | { name: 'enroll'; code: string };
 
 /** Hash routes, so the hub can serve the client as static files: `#/p/<project>`,
- *  `#/p/<project>/workspaces`, `#/s/<session>` (`?seq=<seq>`: scrolled to that event, a
- *  search hit), `#/search` (the phone's search screen), `#/requests` (every open request,
- *  T37), `#/settings`,
- *  `#/enroll?code=ABCD-1234`. */
+ *  `#/p/<project>/settings` (the project's settings, T49), `#/s/<session>` (`?seq=<seq>`:
+ *  scrolled to that event, a search hit), `#/search` (the phone's search screen),
+ *  `#/requests` (every open request, T37), `#/settings`, `#/enroll?code=ABCD-1234`. */
 export function parseRoute(hash: string): Route {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
   const parts = path.split('/').filter(Boolean);
@@ -37,7 +37,7 @@ export function parseRoute(hash: string): Route {
   if (parts[0] === 'requests') return { name: 'requests' };
   if (parts[0] === 'p' && parts[1]) {
     const id = decodeURIComponent(parts[1]);
-    return parts[2] === 'workspaces' ? { name: 'workspaces', projectId: id } : { name: 'project', id };
+    return parts[2] === 'settings' ? { name: 'projectSettings', projectId: id } : { name: 'project', id };
   }
   if (parts[0] === 'settings') return { name: 'settings' };
   if (parts[0] === 'enroll') return { name: 'enroll', code: new URLSearchParams(query).get('code') ?? '' };
@@ -70,10 +70,15 @@ export function App({ app }: { app: AppState }) {
   // The left column follows the project of what is open.
   const sessionProject = route.name === 'session' ? app.sessions.get(route.id)?.project_id : undefined;
   const routeProject =
-    route.name === 'project' ? route.id : route.name === 'workspaces' ? route.projectId : sessionProject;
+    route.name === 'project' ? route.id : route.name === 'projectSettings' ? route.projectId : sessionProject;
   useEffect(() => {
     if (routeProject) app.selectProject(routeProject);
   }, [app, routeProject]);
+
+  // The theme (T49): the user's base and the current project's color, on the document root.
+  const color = app.currentProject()?.color ?? 'teal';
+  const theme = app.theme();
+  useLayoutEffect(() => applyTheme(document.documentElement, color, theme), [color, theme]);
 
   let main;
   switch (route.name) {
@@ -87,8 +92,8 @@ export function App({ app }: { app: AppState }) {
     case 'requests':
       main = <RequestsScreen app={app} phone={phone} />;
       break;
-    case 'workspaces':
-      main = <Workspaces key={route.projectId} app={app} projectId={route.projectId} />;
+    case 'projectSettings':
+      main = <ProjectSettings key={route.projectId} app={app} projectId={route.projectId} phone={phone} />;
       break;
     case 'settings':
       main = <Settings app={app} />;

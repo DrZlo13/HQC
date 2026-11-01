@@ -500,8 +500,22 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     num(p, 'protocol_version');
     str(p, 'boot_id');
     obj(p.capabilities, 'capabilities');
-    strArr(p, 'environments');
-    arr(p, 'env_bindings');
+    // Since SPEC 0.56 (T43) objects; a plain name from an older worker still reads.
+    for (const e of arr(p, 'environments')) {
+      if (typeof e === 'string') continue;
+      const o = obj(e, 'environment');
+      str(o, 'name');
+      optBool(o, 'allow_local_mcp');
+      if (present(o, 'permissions')) {
+        const r = obj(o.permissions, 'permissions');
+        for (const k of ['unblock', 'allow', 'deny']) optStrArr(r, k);
+      }
+    }
+    for (const b of arr(p, 'env_bindings')) {
+      const o = obj(b, 'env_binding');
+      str(o, 'path');
+      str(o, 'environment');
+    }
     strArr(p, 'allowed_roots');
     bool(p, 'allow_foreign_sessions');
     bool(p, 'share_local_models');
@@ -602,7 +616,6 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'model');
     optStr(p, 'workspace_path');
     str(p, 'cwd');
-    str(p, 'environment');
     optStr(p, 'runtime_session_id');
     optStr(p, 'system_prompt');
     strArr(p, 'disallowed_tools');
@@ -1110,6 +1123,8 @@ export interface Workspace {
   /** Canonical, as the worker reported it. */
   path: string;
   label: string;
+  /** The environment the worker's bindings give the folder (T43; a display, the worker decides). */
+  environment: string;
   kind: string;
   /** Its Claude Code sessions are mirrored (imported from VS Code, SPEC §9). */
   mirror_enabled: boolean;
@@ -1126,6 +1141,7 @@ export function parseWorkspace(v: unknown): Workspace {
     worker_id: str(o, 'worker_id'),
     path: str(o, 'path'),
     label: optStr(o, 'label') ?? '',
+    environment: optStr(o, 'environment') ?? 'default',
     kind: str(o, 'kind'),
     mirror_enabled: o.mirror_enabled === true,
     hqc_rules: optNum(o, 'hqc_rules') ?? 0,

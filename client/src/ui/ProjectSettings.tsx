@@ -173,6 +173,11 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                       {homePath(w.path)}
                     </span>
                     {isDefault && <span class="tag">default</span>}
+                    {w.environment !== 'default' && (
+                      <span class="tag workspace-env" title="Environment from the worker’s worker.toml">
+                        env {w.environment}
+                      </span>
+                    )}
                   </div>
                   <div class="workspace-actions">
                     <label

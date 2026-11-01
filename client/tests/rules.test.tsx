@@ -139,7 +139,7 @@ describe('permission card: Allow in this folder', () => {
 describe('the rules screen', () => {
   const PERMS: WorkspacePermissions = parseWorkspacePermissions(raw('api.workspace.permissions'));
 
-  function setup(opts: { offline?: boolean; rules?: WorkspaceRule[]; phone?: boolean } = {}) {
+  function setup(opts: { offline?: boolean; rules?: WorkspaceRule[]; phone?: boolean; environment?: string; perms?: WorkspacePermissions } = {}) {
     let rules: WorkspaceRule[] = opts.rules ?? [
       { id: 'r2', rule: 'Edit', created_at: '2026-10-30T12:00:00Z' },
       { id: 'r1', rule: 'Bash(python3 *)', created_at: '2026-10-28T09:30:00Z' },
@@ -153,6 +153,7 @@ describe('the rules screen', () => {
           worker_id: 'wk1',
           path: '/Users/me/work/jai',
           label: '',
+          environment: opts.environment ?? 'default',
           kind: 'dir',
           mirror_enabled: true,
           hqc_rules: rules.length,
@@ -171,7 +172,7 @@ describe('the rules screen', () => {
       workspacePermissions: vi.fn(async (_id: string, check?: { command?: string; tool?: string }) => {
         if (opts.offline) throw new ApiError(409, 'the worker is offline', 'worker_offline');
         checks.push(check);
-        if (!check) return { ...PERMS, check: undefined };
+        if (!check) return { ...(opts.perms ?? PERMS), check: undefined };
         if (check.command === 'git push origin' || check.command === 'ssh') {
           return { ...PERMS, check: { verdict: 'deny', rule: 'Bash(ssh:*)', source: 'worker.toml', parts: 1, uncovered: 1, suggestions: [] } };
         }
@@ -230,6 +231,31 @@ describe('the rules screen', () => {
     ]);
     expect(group('Allowed').querySelectorAll('.rule-remove').length).toBe(2);
     expect(group('Everything else').textContent).toContain('This folder runs in Ask');
+  });
+
+  it('shows the environment of the folder and its rules under their own source (T43)', async () => {
+    const env = 'worker.toml [environments.infra]';
+    const [worker, ...files] = PERMS.sources;
+    setup({
+      environment: 'infra',
+      perms: {
+        ...PERMS,
+        sources: [
+          { ...worker, deny: worker.deny.filter((r) => r !== 'Bash(ssh:*)') },
+          { source: env, allow: ['Bash(ssh debian@192.168.1.20:*)'], deny: ['Bash(git push:*)'], ask: [] },
+          ...files,
+        ],
+      },
+    });
+    await flush();
+    await flush();
+    expect($('.rules-env')!.textContent).toBe('infra');
+    expect(rows('Denied')).toEqual([
+      ['Bash(rm -rf /*)', 'worker.toml'],
+      ['Bash(git push:*)', env],
+      ['Bash(curl:*)', '~/.claude/settings.json'],
+    ]);
+    expect(rows('Allowed')).toContainEqual(['Bash(ssh debian@192.168.1.20:*)', env]);
   });
 
   it('checks a command on the worker and offers the suggested rule', async () => {

@@ -161,6 +161,7 @@ function makeApp(list = LIST, api = hubApi()) {
     worker_id: worker,
     path,
     label: '',
+    environment: 'default',
     kind: 'dir',
     mirror_enabled: true,
     hqc_rules: 0,

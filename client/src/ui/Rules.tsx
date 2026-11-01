@@ -195,7 +195,7 @@ export function RulesScreen({
               <>
                 <span class="sep">/</span>
                 <span>
-                  Environment <span class="rules-env">default</span>
+                  Environment <span class="rules-env">{ws?.environment ?? 'default'}</span>
                 </span>
               </>
             )}

@@ -603,6 +603,41 @@ the CLI checks part by part. `Read`, `Edit`, `WebFetch` are the whole tool,
 would silently drop the whole settings file, `deny` included. `Bash(rm -rf /*)` catches any
 absolute path, including inside the workspace; relative ones (`rm -rf target`) pass.
 
+**Environments and bindings** (SPEC §14, T43). `[permissions]` applies to every session on the
+machine; to let one folder do what the others may not (here: `ssh` to one host), give it an
+environment and bind the folder to it:
+
+```toml
+[environments.infra]
+env = { GITHUB_TOKEN = "..." }        # variables for the agent, on top of the allowlist below
+allow_local_mcp = false               # true: the machine's MCP servers too (hqc's stays)
+[environments.infra.permissions]
+unblock = ["Bash(ssh:*)"]             # deny rules of [permissions] lifted here only
+allow = ["Bash(ssh debian@192.168.1.20:*)"]
+deny = ["Bash(git push:*)"]           # added to the deny of [permissions]
+
+[[env_bindings]]
+path = "/Users/me/work/lab/infra"
+environment = "infra"
+```
+
+- A session's environment is the binding with the longest path that contains its workspace
+  (`/a/b` does not contain `/a/bc`; symlinks are resolved), else `default` (no variables, no
+  local MCP, `[permissions]` as it is). A binding may name `default` to give a subfolder back.
+  The worker decides this itself on every start; the hub only shows it (the rules screen's
+  header, "env infra" on the workspace row in the project settings).
+- Effective rules in a bound folder: the deny of `[permissions]` minus `unblock`, plus the
+  environment's `deny`; the allow of `[permissions]` plus the environment's `allow`; then the
+  folder's HQC rules; then the session's mode. `unblock` must name a rule of the `deny` of
+  `[permissions]` exactly (with the default deny: as listed above), otherwise the worker does not
+  start. The rules screen lists the environment's rules with the source
+  `worker.toml [environments.infra]`.
+- `env` values never leave the machine: not in the hub, the logs or `hqc-worker env`. `HQC_*`
+  names are refused. A changed `worker.toml` takes effect after a restart of the worker.
+- `hqc-worker env` lists the environments and bindings; `hqc-worker env which <folder>` shows
+  the environment of a folder, the binding that decided it and the effective rules with their
+  sources.
+
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with
 `entrypoint: sdk-cli`, and the VS Code extension's conversation history shows only its own
@@ -852,11 +887,10 @@ Per §19.1 and the notes `docs/notes/t2..t6-questions.md`:
 - **No mirror and no import of VS Code sessions**, no takeover; a session started in hqc is visible
   in `~/.claude/projects`, but changes made in VS Code do not come back to hqc.
 - **No artifacts**: attachments to messages are not passed to the agent (the worker logs a warn).
-- **Environments**: only `default`; `environments`, `env_bindings`, `ssh_keys`,
-  `allow_local_mcp` are not implemented (`hqc-worker env` prints "not implemented"). The agent
+- **Environments** (since T43, §2.2): `ssh_keys` are not implemented yet (T44). The agent
   process gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`,
-  `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`, `ANTHROPIC_*` from the worker's environment; `HQC_*` and
-  everything else are not passed.
+  `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`, `ANTHROPIC_*` from the worker's environment, plus the
+  `env` of the folder's environment; `HQC_*` and everything else are not passed.
 - **One user**: no sharing and no grants; keep `allow_foreign_sessions` `false`.
 - **Claude Code adapter**: `system_prompt` and `disallowed_tools` are passed
   (`--append-system-prompt`, `--disallowedTools`), `restricted` as `--restricted`;

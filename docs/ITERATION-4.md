@@ -215,7 +215,7 @@ one session asks another for a file with `hqc_send` and gets it with no message 
 Done: hub migration `0027`; `TestHub::buffer_sends` for the buffer tests; the header text is
 `SEND_NOTE` in `hqc-worker/src/peer.rs`.
 
-## T43. Environments and bindings on the worker
+## T43. Environments and bindings on the worker (done, SPEC 0.56)
 
 Sections: §2.1, §3 Workspace, §5.1 (`hello`), §5.3 (`session.start`), §8.1, §14. Today the
 worker knows only `default`, and `[permissions]` applies to every session on the machine, so one
@@ -255,6 +255,21 @@ Acceptance: the common checks; worker unit tests: binding lookup (longest match,
 workspace shows the environment from `hello` and follows a new `hello`; a live run: in a bound
 folder `ssh -o BatchMode=yes <host> true` is asked about or run, in another folder it is denied
 by the worker.
+
+Done: `[environments.*]` and `[[env_bindings]]` in `config.rs` (`Config::environment`, the
+lookup shared with the hub in `hqc_proto::frame::binding_for`), the merged rules in
+`Permissions::for_environment`, per-session `--settings`, policy, `env` and
+`--strict-mcp-config` in the adapter, `hqc-worker env [which <path>]` (`env_cmd.rs`).
+`session.start` lost `environment` (update workers before the hub); `hello` sends environments
+as objects with their rules and the bindings, never `env` values. The hub sets
+`workspaces.environment` from the bindings at creation and on every `hello` (no migration);
+the rules screen and the workspace row show it, `permissions.inspect` lists the environment's
+rules as `worker.toml [environments.<name>]`. Tests: worker `config::tests` (lookup, symlinks,
+config errors, values not in `hello`), `permissions::tests::environment_rules` and
+`inspect_with_an_environment`, `command_line_follows_the_environment`, `env_cmd::tests`,
+`tests/worker.rs::environments_in_hello_and_inspect`, one live run
+(`claude_live::live_environment_ssh`); hub `tests/t43.rs`; client `tests/rules.test.tsx`.
+Decisions in `docs/notes/t43-questions.md`.
 
 ## T44. ssh keys of an environment
 

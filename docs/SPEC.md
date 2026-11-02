@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.55, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
+Version 0.56, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -74,8 +74,10 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   itself, §7; files that reach a worker from the hub are written only into its own
   `.hqc/inbox`, §5.3, §12), pick an environment or a
   Hermes profile for a path the worker owner has not bound locally, or enable
-  the machine's MCP servers. These are set only by the worker's local config (§14); the worker
-  ignores diverging values from `session.start` and answers with an error. Nor can it run a
+  the machine's MCP servers. These are set only by the worker's local config (§14): since 0.56
+  (T43) `session.start` carries no environment, the worker resolves it from the canonical
+  workspace path on every start, and what the hub shows about environments is a display. Nor
+  can it run a
   session in the `auto` permission mode on a worker with `[permissions] allow_auto = false`
   (since 0.42, T38): the worker runs `ask` and reports it. Where `auto` is allowed, a hub that
   switches a session to it gains nothing it did not have (it can answer `once` itself); the
@@ -144,7 +146,9 @@ and the two differ.
 `protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
-`environments[]` (names), `env_bindings[]` (path → environment, Hermes profile),
+`environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
+never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
+Hermes profile in iteration 5),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object).
 
@@ -187,7 +191,8 @@ or letters drops a stored image. Limits: §12.
 
 ### Workspace
 `project_id`, `worker_id`, `path`, `label`, `environment` (a name; a display of the binding
-from the worker's local config), `ephemeral`, `created_by_hqc`, `kind`
+from the worker's local config: since 0.56 the hub sets it from the worker's `env_bindings` when
+the workspace is created and on every `hello`, by the rule of §14; the worker never reads it), `ephemeral`, `created_by_hqc`, `kind`
 (dir/clone/worktree), `origin_workspace_id`, `mirror_enabled` (since 0.23 `true` by default: the
 Claude Code session mirror is on for every workspace; the switch is `PATCH`, §6, §9.2), hqc's allow
 rules.
@@ -669,7 +674,7 @@ MCP calls (worker → hub → worker):
 
 ### 5.3 Hub → worker frames
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
-  cwd, environment, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
+  cwd, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?,
   permission_mode?, allow_rules?[]}
   — `mode`: `new` | `resume` (§5.2); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
@@ -685,7 +690,10 @@ MCP calls (worker → hub → worker):
   runtime's MCP tool timeout (§7.1); without `model` the worker uses the runtime's default
   model. `workspace_path` is the `path` from the session's workspace record; the worker accepts
   it only if the path, with symlinks resolved, is a directory inside `allowed_roots`, and
-  checks `cwd` against it (§8.1), otherwise `error {invalid_frame}`.
+  checks `cwd` against it (§8.1), otherwise `error {invalid_frame}`. The session's environment
+  is the binding of that canonical path in the worker's local config (§14), resolved by the
+  worker on every `session.start`; until 0.56 the frame had an `environment` the worker
+  checked, now a worker ignores one an older hub still sends.
 - `session.input` {session_id, event_id, text, artifact_ids[],
   peer_prefix[{from: "<project-slug>/<session-slug>", text, ts, event_id?, artifact_ids[]?}]} —
   the worker downloads the artifacts via `GET /worker/artifacts/{id}` with its token
@@ -790,8 +798,11 @@ MCP calls (worker → hub → worker):
   source?, parts, uncovered, suggestions[]}}` (since 0.52, T48) — the rules screen (§6). `path` must
   be a workspace the worker knows (from `session.start` or `workspace.rules`) inside
   `allowed_roots`, otherwise `error {invalid_frame}` (the worker does not trust the hub's path,
-  §2.1). `sources` — `worker.toml` (`[permissions]` allow/deny, the default deny included),
-  `~/.claude/settings.json` (the user's Claude Code settings in its config folder) and
+  §2.1). `sources` — `worker.toml` (`[permissions]` allow/deny, the default deny included;
+  since 0.56 without the rules the folder's environment `unblock`s), then for a folder bound to
+  an environment other than `default` its own `worker.toml [environments.<name>]` (its `allow`
+  and `deny`, §14), `~/.claude/settings.json` (the user's Claude Code settings in its config
+  folder) and
   `<workspace>/.claude/settings.local.json`, in this order: the `permissions.allow`, `deny`,
   `ask` arrays of each file (non-strings skipped; a missing file has empty lists; a file over
   1 MB or that is not JSON has `error`); nothing else of the files leaves the worker. `hqc` — the
@@ -819,6 +830,12 @@ MCP calls (worker → hub → worker):
   of that process (§5.2, §17.3); `machine_id` — the machine fingerprint (since 0.23, §5.1). `capabilities` — `{claude_code?: {version,
   sessions_registry?}, acp_agents[]}`; `sessions_registry: true` — the worker reads the Claude
   Code live sessions registry and reports holders (§9.3).
+  `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
+  allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
+  values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
+  environment without rules. `env_bindings` — `{path, environment}`, the path canonical when it
+  existed at the worker's start (`worker.hello.json`). The hub keeps both on the worker and sets
+  each workspace's `environment` from the bindings (§3 Workspace).
   The worker does not report workspaces (since 0.16; the hub no longer reads the iteration 1
   field `capabilities.workspace_path`): workspaces are created in the hub (§3, §6) and checked by
   the worker against `allowed_roots`.
@@ -959,8 +976,8 @@ the rest is marked "later"):
   check over 16 KiB `400`.
   The client: the rules screen `#/p/<project>/rules/<workspace>` (`?session=<id>` when opened
   from a session), from "Rules · N hqc" on the workspace's row in the project settings and
-  "Folder rules" in the session header; it shows the worker, the path, the environment
-  (`default` until T43), the worker's default mode and the session's; "Check a command" (a
+  "Folder rules" in the session header; it shows the worker, the path, the workspace's
+  environment (since 0.56), the worker's default mode and the session's; "Check a command" (a
   command, or a tool name such as `Edit`; the worker's verdict with the rule and its source, "Will
   ask" with "Allow…" and the suggested rule); then denied, allowed (hqc's rules first, with the
   date and a remove cross confirmed in the row; the files' rules read-only) and everything else
@@ -1646,8 +1663,8 @@ worker's responsibility, not the adapter's (§17.2).
 ### 8.1 Claude Code
 The process `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
---permission-prompt-tool stdio --strict-mcp-config --mcp-config '<json>'
---allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json [permissions]>']
+--permission-prompt-tool stdio [--strict-mcp-config] --mcp-config '<json>'
+--allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules>']
 (--setting-sources user,local | --restricted) --permission-mode <"ask" mode | auto>
 [--append-system-prompt <text>] --session-id <uuid>` for a new session
 (the hub assigns the uuid and puts it in `runtime_session_id`) and `--resume <uuid>` to
@@ -1663,7 +1680,10 @@ allows all tools of the hqc MCP server so their calls do not go through `can_use
 MCP tool call arrives as `can_use_tool`. Checked on 2.1.300: `--resume` continues the same uuid and appends to the same
 jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
-`allow_local_mcp`). In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
+`allow_local_mcp`: since 0.56 such a session runs without the flag, the hqc server still comes
+in `--mcp-config`). `--settings` carries the effective rules of the session's environment
+(§14: `[permissions]` merged with the environment's), and the adapter's own policy (deny
+before asking, `policy_hint`) reads the same merged lists. In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
 1e8 ms, minimum 1000 ms (checked on 2.1.307).
 
 The hqc MCP server (since 0.33, T30): `--mcp-config '{"mcpServers": {"hqc": {"type": "stdio",
@@ -1708,7 +1728,9 @@ fixture `always-git-push`): with `--setting-sources user,local --permission-mode
 `system/init` as `"permissionMode": "default"`.
 The process environment is scrubbed: from the worker's environment only `PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`,
-`ANTHROPIC_*` pass, then the workspace's environment variables (§14); `HQC_*` never. The worker
+`ANTHROPIC_*` pass, then the `env` of the session's environment (§14; it may replace one of
+those, e.g. `PATH`), then the worker's own `CLAUDE_CODE_ENTRYPOINT` and `MCP_TOOL_TIMEOUT`;
+`HQC_*` never. The worker
 stores the working directory in canonical form, requires it to exist and rechecks it before
 every process start (a symlink could have changed). At most `max_sessions`
 (local config, default 8) agent processes at once; the next start gets
@@ -2685,23 +2707,32 @@ The worker's local config is the only source of truth for:
   inside the session's workspace) must lie inside (§5.3). Since 0.16 `worker.toml` has no
   `[workspace]` block: workspaces are created in the hub (§3, §13.1); the iteration 1 block in an
   old file is ignored with a warning in the log at start;
-- `environments{}` — named environments;
-- `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`.
-  A binding is looked up **by the workspace path** (not by the session's `cwd`); the longest
-  match wins, otherwise `default`. `environment` from `session.start` is only checked against it;
+- `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
+- `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
+  (`[[env_bindings]]`; the profiles are iteration 5). A binding is looked up **by the workspace
+  path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
+  resolved again at every lookup, so a binding through a symlink names its target); the longest
+  binding that equals or contains the path wins, compared by path components (`/a/b` does not
+  contain `/a/bc`), otherwise `default`. A binding may name `default` to give a subfolder of a
+  bound folder back. The worker resolves it itself on every `session.start` (since 0.56 the frame
+  carries no environment). A binding to an environment the file does not define, or the same
+  path bound twice, is a config error;
 - `acp_agents{}` — `{name: {command: <absolute path>, args[], isolation:
   verified|none}}`;
 - `allow_foreign_sessions`, `share_local_models`;
 - `max_sessions` (agent processes at once, default 8) and `insecure_http`
   (`http://` to a non-loopback hub, §5.1);
-- `[permissions]` — the Claude Code permission policy (below; not sent in `hello`
-  yet).
+- `[permissions]` — the Claude Code permission policy (below; not sent in `hello`; the
+  rules screen gets it through `permissions.inspect`, §5.3).
 
-The hub gets a copy in `hello` and shows it; only the worker owner can change it, on the
-machine (`hqc-worker env ...`).
+The hub gets a copy in `hello` (environments with their rules but never the values of `env`,
+bindings; §5.4) and shows it; only the worker owner can change it, by editing `worker.toml` on
+the machine and restarting the worker. `hqc-worker env` lists the environments (variables as
+`NAME=***`) and the bindings; `hqc-worker env which <path>` prints the environment of a folder
+(and the binding that decided it) and its effective rules, each with its source.
 
 Permission policy `[permissions]` (in effect since 0.14 for all of the worker's Claude Code
-sessions; since iteration 4 an environment can extend it with its own `permissions`, below):
+sessions; since 0.56 an environment can extend it with its own `permissions`, below):
 
 ```toml
 [permissions]
@@ -2741,19 +2772,43 @@ owner's answers to requests (§2.1); they cannot lift a `deny`.
 An environment defines what the agent process is launched with (Claude Code or an ACP process,
 both launched by the worker):
 
+```toml
+[environments.infra]
+env = { GITHUB_TOKEN = "..." }        # variables on top of the child allowlist
+allow_local_mcp = false
+[environments.infra.permissions]
+unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
+allow = ["Bash(ssh debian@192.168.1.20:*)"]
+deny = ["Bash(git push:*)"]           # added to the worker's deny
+
+[[env_bindings]]
+path = "/Users/drzlo/work/lab/infra"
+environment = "infra"
+```
+
 - `ssh_keys`: keys handed out through a separate ssh-agent socket to this process only;
-  by default there is no agent;
-- `env`: variables and tokens (GitHub etc.);
-- `permissions` (since 0.50, replaces the earlier free-form `settings`): `unblock` — rules of the
-  worker's `deny` lifted for this environment only (a rule not in that `deny` is a config error),
-  `allow` and `deny` — added to the worker's lists; the effective order stays the three levels
-  above. **Claude Code only**, ACP agents have no equivalent, so for them the `default`
-  environment is weaker: the only boundary is the absence of keys;
+  by default there is no agent (T44);
+- `env`: variables and tokens (GitHub etc.), put into the agent's process on top of the child
+  allowlist (§8.1); names of letters, digits and `_`, never `HQC_*`. The values stay on the
+  worker: not in `hello`, logs, errors or `hqc-worker env` (`***`);
+- `permissions` (since 0.50, replaces the earlier free-form `settings`; in effect since 0.56):
+  `unblock` — rules of the worker's `deny` lifted for this environment only (a rule not in that
+  `deny` is a config error), `allow` and `deny` — added to the worker's lists. The effective
+  rules of a session: the worker's `deny` minus `unblock`, plus the environment's `deny`; then
+  the worker's `allow` and the environment's `allow`; then hqc's folder rules (applied in
+  `can_use_tool` below every deny, §3 Workspace); then the session's mode. They go to
+  `--settings` and to the adapter's policy (§8.1); the three levels below stay. **Claude Code
+  only**, ACP agents have no equivalent, so for them the `default` environment is weaker: the
+  only boundary is the absence of keys;
 - `allow_local_mcp`: allow MCP servers from the machine (Claude Code: without
-  `--strict-mcp-config`; Hermes: without `HERMES_ACP_SKIP_CONFIGURED_MCP`); default
-  false;
+  `--strict-mcp-config`, the hqc server stays; Hermes: without
+  `HERMES_ACP_SKIP_CONFIGURED_MCP`); default false;
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
+
+`ssh_keys` (T44) and `launch` are not accepted in `worker.toml` yet. `default` cannot be
+defined in the file; the name of an environment is letters, digits, `_`,
+`-` and `.`; an unknown field is a config error (as in `[permissions]`).
 
 The `default` environment: no keys, no tokens, `deny` from `[permissions]` (by default it
 includes ssh/scp too), local MCP off. Keys of one project (for example `infra`) are moved out of
@@ -2764,7 +2819,7 @@ with that environment.
 Limitation: without a container or a separate OS user the agent sees the files
 and the process environment of the user, including other workspaces and session tokens on the
 same machine. The boundary is the absence of keys; prohibitions in settings are the first line,
-not a boundary. Windows in the first version: only `env` and `settings`, no `ssh_keys`.
+not a boundary. Windows in the first version: only `env` and `permissions`, no `ssh_keys`.
 
 ## 15. Search
 
@@ -3122,8 +3177,9 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   `*.notify.windows.com`; redirects are not followed when sending.
 - Access JWKS: keys are refreshed outside the cache lock, on a refresh error the previous set
   stays, retries with a growing pause (5 s … 5 min).
-- Worker: `hub_url` is `https` only (§5.1), the agent's environment is an allowlist (§8.1), the
-  outbox is a 0700 directory, files 0600.
+- Worker: `hub_url` is `https` only (§5.1), the agent's environment is an allowlist (§8.1) plus
+  the `env` of its environment, whose values never leave the worker (§14), the outbox is a 0700
+  directory, files 0600.
 - Users' `api_keys` are encrypted with a master key from the hub's env.
 - Cloudflare Tunnel: request body limit ~100 MB (matches the artifact limit),
   long-lived connections need heartbeats and reconnects.
@@ -3176,6 +3232,24 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.55 → 0.56 (T43, environments and bindings on the worker)
+§14: `[environments.<name>]` (`env`, `allow_local_mcp`, `permissions {unblock, allow, deny}`) and
+`[[env_bindings]]` are read and in effect; the effective rules of a session are the worker's deny
+minus `unblock` plus the environment's deny, then both allow lists, then hqc's folder rules, then
+the mode; `unblock` of a rule not in the worker's deny, a binding to an unknown environment, a
+path bound twice, a defined `default` and `HQC_*` in `env` are config errors; `hqc-worker env`
+and `env which <path>` (values as `***`). §2.1, §5.3: `session.start` loses `environment`; the
+worker resolves it from the canonical workspace path on every start (longest binding by path
+components, symlinks resolved). §3 Worker, §5.4: `hello.environments` are objects with name,
+`allow_local_mcp` and rules (a plain name from an older worker still reads), `env_bindings` are
+`{path, environment}`; never `env` values. §3 Workspace, §6: the hub sets each workspace's
+`environment` from the bindings at creation and on every `hello` (no migration: the column was
+there); the rules screen shows it, `permissions.inspect` lists the environment's rules as
+`worker.toml [environments.<name>]` and checks with the effective rules. §8.1: `--settings` and
+the adapter's policy carry the environment's rules, `allow_local_mcp` drops
+`--strict-mcp-config`, `env` goes on top of the child allowlist. §20: `env` values stay on the
+worker.
 
 ### 0.54 → 0.55 (T52, a send wakes its target)
 §3 Session: `wake_on_send` is true by default and on every existing session (hub migration

@@ -7,6 +7,7 @@
   "environment": "default",
   "kind": "clone",
   "ephemeral": false,
+  "marked_for_deletion": false,
   "created_by_hqc": true,
   "mirror_enabled": true,
   "hqc_rules": 0,

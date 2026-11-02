@@ -15,6 +15,10 @@
 //!   ([`once_id`]) and a repeat answers from what the first call wrote.
 //! - A deferred tool (`hqc_ask`) answers [`Answer::Later`]: the hub acks the call frame and
 //!   sends `mcp.result` on its own later.
+//! - A tool that waits for the worker (`hqc_spawn` with a worktree, T47) answers
+//!   [`Answer::Wait`]: the connection goes on reading frames, and the result goes under the
+//!   call's frame id once the wait is over; if the connection closes first, nothing is sent
+//!   and the worker sends the call again after its next `hello`.
 //!
 //! [`REGISTRY`] is the hub's half of [`hqc_proto::mcp::TOOLS`]: a tool lands in both at once.
 
@@ -38,12 +42,23 @@ use crate::{
 type ToolResult = Result<Value, McpError>;
 
 /// What a tool answers.
-#[derive(Debug)]
 pub enum Answer {
     /// `mcp.result` under the call's frame id.
     Now(Value),
     /// Deferred: `ack {}` now, `mcp.result` as a frame of its own later (SPEC §5.2).
     Later,
+    /// `mcp.result` under the call's frame id once this is done, off the connection's loop.
+    Wait(BoxFuture<'static, ToolResult>),
+}
+
+/// What the connection does with an `mcp.call` ([`call`]).
+pub enum Called {
+    /// Send this `mcp.result` under the call's frame id.
+    Now(McpResult),
+    /// Ack the frame; the result comes later.
+    Later,
+    /// Send its `mcp.result` under the call's frame id when it is done.
+    Wait(BoxFuture<'static, McpResult>),
 }
 
 /// A tool's implementation: the calling session and the call (its `request_id`, `args`).
@@ -113,25 +128,37 @@ pub(crate) fn internal(e: impl std::fmt::Display) -> McpError {
     err(error_code::INTERNAL, "internal error")
 }
 
-/// `mcp.call` from `worker_id`: the `mcp.result`, or `None` for a deferred call (`ack {}`).
-pub async fn call(app: &AppState, worker_id: Uuid, c: &McpCall) -> Option<McpResult> {
-    let outcome = run(app, worker_id, c).await;
-    match &outcome {
-        Ok(_) => {
-            tracing::info!(%worker_id, request_id = %c.request_id, tool = %c.tool, "mcp call")
+/// `mcp.call` from `worker_id`: what to answer it with.
+pub async fn call(app: &AppState, worker_id: Uuid, c: &McpCall) -> Called {
+    match run(app, worker_id, c).await {
+        Ok(Answer::Now(v)) => Called::Now(finished(worker_id, c, Ok(v))),
+        Ok(Answer::Later) => {
+            tracing::info!(%worker_id, request_id = %c.request_id, tool = %c.tool, "mcp call");
+            Called::Later
+        }
+        Ok(Answer::Wait(f)) => {
+            let c = c.clone();
+            Called::Wait(Box::pin(async move { finished(worker_id, &c, f.await) }))
+        }
+        Err(e) => Called::Now(finished(worker_id, c, Err(e))),
+    }
+}
+
+/// Logs the call's outcome; its `mcp.result`.
+fn finished(worker_id: Uuid, c: &McpCall, outcome: ToolResult) -> McpResult {
+    match outcome {
+        Ok(v) => {
+            tracing::info!(%worker_id, request_id = %c.request_id, tool = %c.tool, "mcp call");
+            McpResult::ok(&c.request_id, v)
         }
         Err(e) => {
-            tracing::info!(%worker_id, request_id = %c.request_id, tool = %c.tool, code = %e.code, "mcp call refused: {}", e.message)
+            tracing::info!(%worker_id, request_id = %c.request_id, tool = %c.tool, code = %e.code, "mcp call refused: {}", e.message);
+            McpResult {
+                request_id: c.request_id.clone(),
+                result: None,
+                error: Some(e),
+            }
         }
-    }
-    match outcome {
-        Ok(Answer::Now(v)) => Some(McpResult::ok(&c.request_id, v)),
-        Ok(Answer::Later) => None,
-        Err(e) => Some(McpResult {
-            request_id: c.request_id.clone(),
-            result: None,
-            error: Some(e),
-        }),
     }
 }
 

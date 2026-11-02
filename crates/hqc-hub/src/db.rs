@@ -878,7 +878,10 @@ pub struct WorkspaceRow {
     pub path: String,
     pub label: String,
     pub environment: String,
+    /// A worktree `hqc_spawn` made for its session (T47).
     pub ephemeral: bool,
+    /// Ephemeral, ready and without a session that is not archived (T47): computed.
+    pub marked_for_deletion: bool,
     pub created_by_hqc: bool,
     pub kind: String,
     pub mirror_enabled: bool,
@@ -902,6 +905,8 @@ pub struct WorkspaceRow {
 
 const WORKSPACE_COLS: &str = "id, project_id, owner_id, worker_id, path, label, environment, \
     ephemeral, created_by_hqc, kind, mirror_enabled, \
+    (ephemeral AND state = 'ready' AND NOT EXISTS (SELECT 1 FROM sessions s \
+        WHERE s.workspace_id = workspaces.id AND NOT s.archived)) AS marked_for_deletion, \
     (SELECT count(*)::int FROM workspace_rules r WHERE r.workspace_id = workspaces.id) AS hqc_rules, \
     state, error, clone_url, branch, origin_workspace_id, new_branch, created_at, updated_at";
 
@@ -922,6 +927,7 @@ impl WorkspaceRow {
             origin_workspace_id: self.origin_workspace_id,
             branch: self.branch.clone(),
             ephemeral: self.ephemeral,
+            marked_for_deletion: self.marked_for_deletion,
             created_by_hqc: self.created_by_hqc,
             mirror_enabled: self.mirror_enabled,
             hqc_rules: self.hqc_rules.max(0) as u32,
@@ -1158,6 +1164,9 @@ pub struct NewWorkspace<'a> {
     /// On by default since T21 (SPEC §9.2).
     pub mirror_enabled: bool,
     pub source: Source<'a>,
+    /// The id of an ephemeral worktree of `hqc_spawn`, derived from the call so a repeat finds
+    /// it (T47); `None` for every other workspace.
+    pub ephemeral: Option<Uuid>,
 }
 
 /// What a new workspace is: an existing folder, or one hqc makes, `creating` and
@@ -1225,11 +1234,11 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     let row: WorkspaceRow = sqlx::query_as(&format!(
         "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label, mirror_enabled,
             environment, kind, created_by_hqc, state, clone_url, branch, origin_workspace_id,
-            new_branch)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            new_branch, ephemeral)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
          RETURNING {WORKSPACE_COLS}"
     ))
-    .bind(new_id())
+    .bind(n.ephemeral.unwrap_or_else(new_id))
     .bind(n.project_id)
     .bind(n.owner_id)
     .bind(n.worker_id)
@@ -1251,6 +1260,7 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     .bind(branch)
     .bind(origin)
     .bind(new_branch)
+    .bind(n.ephemeral.is_some())
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
@@ -1439,6 +1449,9 @@ pub struct Spawn {
     pub id: Uuid,
     pub by: Uuid,
     pub chain_id: Uuid,
+    /// The N of "Session N" chosen before the session, when its worktree's branch was named
+    /// after the slug (T47); `None`: counted now.
+    pub number: Option<i64>,
 }
 
 /// Creates the session with a slug unique in the project (SPEC §3 Session) and a
@@ -1457,12 +1470,10 @@ pub async fn create_spawned_session(
     let (title, source, base) = match n.title {
         Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
         None => {
-            let num: i64 = sqlx::query_scalar(
-                "SELECT count(*) + 1 FROM sessions WHERE project_id = $1 AND NOT system",
-            )
-            .bind(n.project_id)
-            .fetch_one(db)
-            .await?;
+            let num = match spawn.and_then(|s| s.number) {
+                Some(num) => num,
+                None => next_session_number(db, n.project_id).await?,
+            };
             (
                 format!("Session {num}"),
                 TitleSource::Default,
@@ -1507,6 +1518,15 @@ pub async fn create_spawned_session(
         }
     }
     unreachable!()
+}
+
+/// N of the default title "Session N": the session's number in the project, the workers'
+/// service sessions left out (SPEC §3 Session).
+pub async fn next_session_number(db: &PgPool, project_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT count(*) + 1 FROM sessions WHERE project_id = $1 AND NOT system")
+        .bind(project_id)
+        .fetch_one(db)
+        .await
 }
 
 pub async fn sessions_of_owner(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<SessionRow>> {

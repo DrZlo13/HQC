@@ -72,6 +72,7 @@ pub async fn create_clone(
             label,
             mirror_enabled,
             source: db::Source::Clone { url, branch },
+            ephemeral: None,
         },
     )
     .await
@@ -81,7 +82,9 @@ pub async fn create_clone(
 /// (T46): the origin is a ready workspace of the same project and worker and not a worktree
 /// itself (`400 invalid_origin`); whether it is a git repository only the worker knows (the
 /// worktree fails then). `path` defaults to `<origin-parent>/<origin-name>-<branch>` with the
-/// branch's slashes as `-`, and is checked as a clone's ([`new_folder`]).
+/// branch's slashes as `-`, and is checked as a clone's ([`new_folder`]). `ephemeral`: the id
+/// of `hqc_spawn`'s worktree for the session it starts (T47).
+#[allow(clippy::too_many_arguments)]
 pub async fn create_worktree(
     app: &AppState,
     project: &db::ProjectRow,
@@ -90,6 +93,7 @@ pub async fn create_worktree(
     b: CreateWorkspace,
     label: &str,
     mirror_enabled: bool,
+    ephemeral: Option<Uuid>,
 ) -> ApiResult<(StatusCode, Json<api::Workspace>)> {
     let invalid = |m: &str| ApiError::Invalid("invalid_origin", m.into());
     let id = b
@@ -133,6 +137,7 @@ pub async fn create_worktree(
                 branch,
                 new_branch: b.new_branch,
             },
+            ephemeral,
         },
     )
     .await

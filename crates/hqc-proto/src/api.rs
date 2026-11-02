@@ -380,7 +380,12 @@ pub struct Workspace {
     /// The branch a clone was asked for, or the worktree's branch (T46).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// A worktree `hqc_spawn` made for the session it started (T47).
     pub ephemeral: bool,
+    /// An ephemeral workspace that is ready and has no session that is not archived: shown
+    /// for deletion, never deleted automatically (T47, SPEC §13.2). Computed by the hub.
+    #[serde(default)]
+    pub marked_for_deletion: bool,
     pub created_by_hqc: bool,
     pub mirror_enabled: bool,
     /// How many hqc allow rules the folder has (since SPEC 0.52, T48).
@@ -1088,6 +1093,14 @@ mod tests {
         assert_eq!(ww.branch, wr.branch);
         assert_eq!(ww.path, format!("{}-hqc-fix-backlight", cw.path));
         assert_eq!(ww.state, WorkspaceState::Creating);
+        assert!(!ww.ephemeral && !ww.marked_for_deletion);
+        // T47: the worktree of a spawned session, whose sessions are all archived.
+        let we: Workspace = roundtrip(include_str!(
+            "../examples/wire/api.workspace.ephemeral.json"
+        ));
+        assert_eq!(we.origin_workspace_id, Some(cw.id));
+        assert!(we.ephemeral && we.marked_for_deletion);
+        assert_eq!(we.branch.as_deref(), Some("hqc/session-7"));
         let wi: WorkspaceInspection =
             roundtrip(include_str!("../examples/wire/api.workspace.inspect.json"));
         assert_eq!(wi.dirty.len() as u32, wi.dirty_count);

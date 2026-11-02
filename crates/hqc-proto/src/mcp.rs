@@ -189,7 +189,12 @@ pub const TOOLS: &[Tool] = &[
             turn; it can answer you with hqc_send. Returns the new session's address at once \
             and does not wait for its work. The session runs in a workspace of `project` (the \
             project's default workspace when `workspace` is absent) on that workspace's \
-            machine, with your model unless `model` is given.",
+            machine, with your model unless `model` is given. With `isolation: \"worktree\"` \
+            the new session works in a git worktree of that workspace of its own, on a new \
+            branch (hqc/<session-slug> unless `branch` is given), so it does not edit the \
+            checkout you work in; the call then waits until the worktree is made and also \
+            returns its `worktree` path and branch. The new agent's commits stay on that \
+            branch for your owner to merge; the worktree is not deleted automatically.",
         input_schema: || {
             json!({
                 "type": "object",
@@ -205,7 +210,16 @@ pub const TOOLS: &[Tool] = &[
                         "description": "The agent's runtime; claude_code is the only one so far."
                     },
                     "model": {"type": "string", "description": "The new agent's model."},
-                    "prompt": {"type": "string", "description": "The new agent's first task."}
+                    "prompt": {"type": "string", "description": "The new agent's first task."},
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["worktree"],
+                        "description": "worktree: a new git worktree of the workspace for the new session."
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "With isolation: the worktree's new branch; hqc/<session-slug> when absent."
+                    }
                 },
                 "required": ["project", "prompt"],
                 "additionalProperties": false

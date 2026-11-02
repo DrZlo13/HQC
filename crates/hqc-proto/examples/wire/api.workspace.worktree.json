@@ -9,6 +9,7 @@
   "origin_workspace_id": "0199f3a2-7c10-7000-8000-0000000000e2",
   "branch": "hqc/fix-backlight",
   "ephemeral": false,
+  "marked_for_deletion": false,
   "created_by_hqc": true,
   "mirror_enabled": true,
   "hqc_rules": 0,

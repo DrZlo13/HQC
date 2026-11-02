@@ -404,6 +404,7 @@ pub async fn create_workspace(
                 b.clone(),
                 &label,
                 body.mirror_enabled,
+                None,
             )
             .await
         }
@@ -472,6 +473,7 @@ pub async fn create_workspace(
             label: &label,
             mirror_enabled: body.mirror_enabled,
             source: db::Source::Dir,
+            ephemeral: None,
         },
     )
     .await?;

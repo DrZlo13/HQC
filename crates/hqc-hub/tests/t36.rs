@@ -529,7 +529,10 @@ async fn at_once(
     });
     let mut out = Vec::new();
     for h in futures_util::future::join_all(calls).await {
-        out.push(serde_json::to_value(h.unwrap().expect("a fast tool")).unwrap());
+        let hqc_hub::mcp::Called::Now(r) = h.unwrap() else {
+            panic!("not a fast tool")
+        };
+        out.push(serde_json::to_value(r).unwrap());
     }
     out
 }

@@ -53,6 +53,11 @@ enum Cmd {
 enum EnvCmd {
     /// The environment and the effective rules of a folder.
     Which { path: std::path::PathBuf },
+    /// Copy a private key into the store `$HQC_HOME/keys/` (0600), for `ssh_keys`.
+    AddKey {
+        name: String,
+        file: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -130,10 +135,16 @@ async fn main() -> anyhow::Result<()> {
                 .await
         }
         Cmd::Env { cmd } => {
-            let config = Config::load(&config::config_path()?)?;
+            let load = || Config::load(&config::config_path()?);
             let out = match cmd {
-                None => hqc_worker::env_cmd::summary(&config),
-                Some(EnvCmd::Which { path }) => hqc_worker::env_cmd::which(&config, &path)?,
+                None => hqc_worker::env_cmd::summary(&load()?),
+                Some(EnvCmd::Which { path }) => hqc_worker::env_cmd::which(&load()?, &path)?,
+                // The store needs no worker.toml.
+                Some(EnvCmd::AddKey { name, file }) => hqc_worker::env_cmd::add_key(
+                    &hqc_worker::ssh::Store::in_home(&config::hqc_home()?),
+                    &name,
+                    &file,
+                )?,
             };
             print!("{out}");
             Ok(())
@@ -163,6 +174,14 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     }
     // The agents' hqc MCP server is this binary (SPEC §7.2).
     let mcp_socket = hqc_worker::mcp::socket_path(&config::hqc_home()?);
+    // ssh-agents a worker that died left behind (T44); not those of a live daemon, which
+    // stops this one when it binds the MCP socket.
+    if !hqc_worker::mcp::daemon::served(&mcp_socket) {
+        let n = config.ssh.clean_agents().context("ssh-agent sockets")?;
+        if n > 0 {
+            tracing::info!(removed = n, "stale ssh-agent sockets removed");
+        }
+    }
     let adapters = Arc::new(
         BuiltinAdapters::from_config(&config, permission_mode).with_mcp(McpLaunch {
             program: std::env::current_exe().context("the worker's own binary")?,

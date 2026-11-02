@@ -25,6 +25,7 @@
 //!
 //! [environments.infra]           # T43: what sessions in the bound folders run with
 //! env = { GITHUB_TOKEN = "..." } # variables on top of the child allowlist
+//! ssh_keys = ["infra_ed25519"]   # T44: keys of $HQC_HOME/keys/, an ssh-agent per process
 //! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
 //! [environments.infra.permissions]
 //! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
@@ -106,6 +107,8 @@ struct RawEnvironment {
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
+    ssh_keys: Vec<String>,
+    #[serde(default)]
     allow_local_mcp: bool,
     #[serde(default)]
     permissions: RawEnvPermissions,
@@ -153,11 +156,15 @@ impl fmt::Debug for EnvVars {
 }
 
 /// An environment (SPEC §14): what the agent process of a session in a bound folder is
-/// launched with. `default` has no variables, no local MCP and the worker's `[permissions]`.
+/// launched with. `default` has no variables, no keys, no local MCP and the worker's
+/// `[permissions]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Environment {
     pub name: String,
     pub env: EnvVars,
+    /// Names of keys in the worker's store ([`crate::ssh`]); each agent process gets an
+    /// ssh-agent of its own with them. Empty: no `SSH_AUTH_SOCK` at all.
+    pub ssh_keys: Vec<String>,
     pub allow_local_mcp: bool,
     /// `[environments.<name>.permissions]` as written.
     pub rules: EnvPermissions,
@@ -171,6 +178,7 @@ impl Environment {
         Self {
             name: DEFAULT_ENVIRONMENT.into(),
             env: EnvVars::default(),
+            ssh_keys: vec![],
             allow_local_mcp: false,
             rules: EnvPermissions::default(),
             permissions: permissions.clone(),
@@ -213,9 +221,17 @@ fn parse_environment(
         if k.starts_with("HQC_") {
             bail!("env: {k}: HQC_* variables are the worker's own");
         }
+        if k == crate::ssh::SSH_AUTH_SOCK {
+            bail!("env: {k}: the worker sets it for an environment with ssh_keys only");
+        }
         if v.contains('\0') {
             bail!("env: {k}: the value contains a NUL character");
         }
+    }
+    if let Some(k) = raw.ssh_keys.iter().find(|k| !crate::ssh::valid_key_name(k)) {
+        bail!(
+            "ssh_keys: {k:?} is not a key name (letters, digits, _ - ., not starting with . or -)"
+        );
     }
     let rules = EnvPermissions {
         unblock: raw.permissions.unblock,
@@ -225,6 +241,7 @@ fn parse_environment(
     Ok(Environment {
         name: name.into(),
         env: EnvVars(raw.env),
+        ssh_keys: raw.ssh_keys,
         allow_local_mcp: raw.allow_local_mcp,
         permissions: worker.for_environment(&rules)?,
         rules,
@@ -305,6 +322,8 @@ pub struct Config {
     /// Where sessions without a workspace get their empty folder (SPEC §8.4):
     /// `$HQC_HOME/scratch/<session_id>`.
     pub scratch_root: PathBuf,
+    /// The key store `$HQC_HOME/keys` and the agent sockets `$HQC_HOME/agents` (T44).
+    pub ssh: crate::ssh::Store,
 }
 
 /// What a session may be started with, after checking `session.start` against the config.
@@ -364,10 +383,26 @@ pub fn recheck_workdir(workspace: &Path, workdir: &Path) -> anyhow::Result<()> {
 }
 
 impl Config {
+    /// [`Config::parse`] the file, then [`Config::check_ssh`]: the worker does not start
+    /// (and `hqc-worker env` does not print) with a key store others could read.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading worker config {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("worker config {}", path.display()))
+        let cfg =
+            Self::parse(&text).with_context(|| format!("worker config {}", path.display()))?;
+        cfg.check_ssh()
+            .with_context(|| format!("worker config {}", path.display()))?;
+        Ok(cfg)
+    }
+
+    /// The modes of the key store and the agents folder, and every `ssh_keys` name is in the
+    /// store ([`crate::ssh::Store::check`]).
+    pub fn check_ssh(&self) -> anyhow::Result<()> {
+        self.ssh.check(
+            self.environments
+                .iter()
+                .flat_map(|e| e.ssh_keys.iter().map(|k| k.as_str())),
+        )
     }
 
     pub fn parse(text: &str) -> anyhow::Result<Self> {
@@ -417,6 +452,7 @@ impl Config {
                 environment: b.environment,
             });
         }
+        let home = hqc_home().unwrap_or_else(|_| std::env::temp_dir().join("hqc"));
         Ok(Self {
             hub_url: raw.hub_url.trim_end_matches('/').to_string(),
             allowed_roots,
@@ -432,9 +468,8 @@ impl Config {
             environments,
             env_bindings,
             max_sessions: raw.max_sessions,
-            scratch_root: hqc_home()
-                .unwrap_or_else(|_| std::env::temp_dir().join("hqc"))
-                .join("scratch"),
+            scratch_root: home.join("scratch"),
+            ssh: crate::ssh::Store::in_home(&home),
         })
     }
 
@@ -1045,6 +1080,9 @@ environment = "default"
             ("[environments.\"a b\"]\n", "name"),
             ("[environments.infra]\nenv = { HQC_HOME = \"/x\" }\n", "HQC_"),
             ("[environments.infra]\nenv = { \"A-B\" = \"x\" }\n", "variable"),
+            ("[environments.infra]\nenv = { SSH_AUTH_SOCK = \"/x\" }\n", "ssh_keys only"),
+            ("[environments.infra]\nssh_keys = [\"../id\"]\n", "key name"),
+            ("[environments.infra]\nlaunch = \"process\"\n", "unknown field"),
             ("[environments.infra]\nsettings = {}\n", "unknown field"),
             ("[[env_bindings]]\npath = \"/a/x\"\nenvironment = \"infra\"\n", "no [environments.infra]"),
             ("[[env_bindings]]\npath = \"x\"\nenvironment = \"default\"\n", "absolute"),
@@ -1060,6 +1098,28 @@ environment = "default"
         // The unblock rule must be in the worker's deny: the default deny has ssh.
         let ok = "[environments.infra.permissions]\nunblock = [\"Bash(ssh:*)\"]\n";
         Config::parse(&format!("{base}{ok}")).unwrap();
+    }
+
+    /// T44: a key named in `ssh_keys` must be in the store when the config is loaded.
+    #[test]
+    fn ssh_keys_must_be_in_the_store() {
+        let home = tempfile::tempdir().unwrap();
+        let mut c = Config::parse(
+            "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n\
+             [environments.infra]\nssh_keys = [\"infra_ed25519\"]\n",
+        )
+        .unwrap();
+        assert_eq!(c.environments[0].ssh_keys, ["infra_ed25519"]);
+        c.ssh = crate::ssh::Store::in_home(home.path());
+        let e = c.check_ssh().unwrap_err();
+        assert!(
+            format!("{e:#}").contains("\"infra_ed25519\" is not in the key store"),
+            "{e:#}"
+        );
+        let key = home.path().join("k");
+        std::fs::write(&key, "key").unwrap();
+        c.ssh.add_key("infra_ed25519", &key).unwrap();
+        c.check_ssh().unwrap();
     }
 
     /// T43: `hello` carries names, bound paths and rules, never the values of `env`; neither

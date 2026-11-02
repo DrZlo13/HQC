@@ -72,22 +72,15 @@ const STDERR_TAIL: usize = 2048;
 /// `always` writes, SPEC §8.1), not the repository's `.claude/settings.json`.
 pub const SETTING_SOURCES: &str = "user,local";
 
-/// The agent's environment: only these variables of the worker's (SPEC §14), never `HQC_*`
+/// The agent's environment: only these variables of the worker's (SPEC §8.1), never `HQC_*`
 /// (the worker's token store, config) or other secrets the worker runs with. `SHELL` and
-/// `LOGNAME` are what the CLI's Bash tool and the Keychain lookup need besides the list of
-/// SPEC §14; the `env` of the session's environment comes on top (T43,
+/// `LOGNAME` are what the CLI's Bash tool and the Keychain lookup need. Not the user's
+/// `SSH_AUTH_SOCK` either (T44): a session gets the socket of its own ssh-agent, and only in
+/// an environment with `ssh_keys`. The `env` of the session's environment comes on top (T43,
 /// [`ClaudeCodeAdapter::command`]).
 pub fn child_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     const NAMES: &[&str] = &[
-        "PATH",
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "SHELL",
-        "LANG",
-        "TERM",
-        "TMPDIR",
-        "SSH_AUTH_SOCK",
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR",
     ];
     const PREFIXES: &[&str] = &["LC_", "CLAUDE_", "ANTHROPIC_"];
     let mut env: Vec<(String, String)> = vars
@@ -131,6 +124,9 @@ pub struct ClaudeOptions {
     /// Shared with the mirror: which transcripts a process of this worker writes now and
     /// which records it wrote (SPEC §9.3).
     pub own_records: Arc<OwnRecords>,
+    /// The key store and the agents' sockets, for a session whose environment has
+    /// `ssh_keys` (T44).
+    pub ssh: crate::ssh::Store,
 }
 
 impl Default for ClaudeOptions {
@@ -149,6 +145,9 @@ impl Default for ClaudeOptions {
             stop_grace: Duration::from_secs(10),
             early_exit: Duration::from_millis(500),
             own_records: Arc::default(),
+            ssh: crate::ssh::Store::in_home(
+                &crate::config::hqc_home().unwrap_or_else(|_| std::env::temp_dir().join("hqc")),
+            ),
         }
     }
 }
@@ -220,6 +219,7 @@ impl ClaudeCodeAdapters {
                 claude_bin: cfg.claude_bin.clone(),
                 entrypoint: cfg.show_in_vscode.then(|| "claude-vscode".to_string()),
                 ask_mode,
+                ssh: cfg.ssh.clone(),
                 always_disallowed: if cfg.allow_native_messaging {
                     vec![]
                 } else {
@@ -376,9 +376,16 @@ impl ClaudeCodeAdapter {
     ///   `--settings` there, checked on 2.1.308);
     /// - `--strict-mcp-config` unless the environment has `allow_local_mcp` (the hqc server
     ///   is in `--mcp-config` either way); the environment's `env` on top of [`child_env`];
+    ///   `SSH_AUTH_SOCK` only as `ssh_agent`, the socket of the process's own ssh-agent (T44);
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
-    pub fn command(&self, spec: &StartSpec, uuid: &Uuid, resume: bool) -> CommandSpec {
+    pub fn command(
+        &self,
+        spec: &StartSpec,
+        uuid: &Uuid,
+        resume: bool,
+        ssh_agent: Option<&std::path::Path>,
+    ) -> CommandSpec {
         let mut args: Vec<String> = [
             "-p",
             "--output-format",
@@ -455,6 +462,9 @@ impl ClaudeCodeAdapter {
                 }
                 // The worker's own come last.
                 env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT" && k != "MCP_TOOL_TIMEOUT");
+                if let Some(sock) = ssh_agent {
+                    env.push((crate::ssh::SSH_AUTH_SOCK.into(), sock.display().to_string()));
+                }
                 if let Some(e) = &self.opts.entrypoint {
                     env.push(("CLAUDE_CODE_ENTRYPOINT".into(), e.clone()));
                 }
@@ -480,7 +490,19 @@ impl ClaudeCodeAdapter {
             .as_deref()
             .map(|d| paths::transcript_path(d, &spec.workdir, &uuid));
         let resume = transcript.as_ref().is_some_and(|p| p.exists());
-        let cmd = self.command(spec, &uuid, resume);
+        // T44: an ssh-agent of this process's own; it stops when the process has exited
+        // (the monitor drops it), or right here if the spawn fails.
+        let ssh_agent = match spec.environment.ssh_keys.as_slice() {
+            [] => None,
+            keys => Some(
+                self.opts
+                    .ssh
+                    .start_agent(keys)
+                    .await
+                    .context("the environment's ssh keys")?,
+            ),
+        };
+        let cmd = self.command(spec, &uuid, resume, ssh_agent.as_ref().map(|a| a.socket()));
         let spawned = self
             .spawner
             .spawn(&cmd)
@@ -492,6 +514,7 @@ impl ClaudeCodeAdapter {
             why,
             cwd = %spec.workdir.display(),
             environment = %spec.environment.name,
+            ssh_keys = ?spec.environment.ssh_keys,
             "claude started"
         );
 
@@ -553,6 +576,7 @@ impl ClaudeCodeAdapter {
             gate,
             stderr_tail.clone(),
             live,
+            ssh_agent,
         ));
         let mut proc = Proc {
             core,
@@ -765,6 +789,7 @@ async fn monitor(
     mut gate: watch::Receiver<bool>,
     stderr_tail: Arc<Mutex<String>>,
     live: Live,
+    ssh_agent: Option<crate::ssh::SshAgent>,
 ) {
     let mut rd = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -805,6 +830,8 @@ async fn monitor(
     // The process wrote its last record: the mirror may treat what follows as another
     // writer's.
     drop(live);
+    // Its ssh-agent goes with it (T44).
+    drop(ssh_agent);
     let actions = lock(&core).on_exit();
     let _ = io.run(actions).await;
     let _ = gate.wait_for(|started| *started).await;

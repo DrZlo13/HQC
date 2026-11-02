@@ -45,6 +45,11 @@ const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// worker has finished starting it.
 const PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// A live daemon answers on `path`: another worker runs with this `HQC_HOME`.
+pub fn served(path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
 /// The bound socket; the file is removed when this is dropped.
 pub struct McpSocket {
     listener: UnixListener,
@@ -56,7 +61,7 @@ impl McpSocket {
     /// one a live daemon answers on is not.
     pub fn bind(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
-            if std::os::unix::net::UnixStream::connect(path).is_ok() {
+            if served(path) {
                 anyhow::bail!(
                     "another worker daemon serves {}; one daemon per HQC_HOME",
                     path.display()

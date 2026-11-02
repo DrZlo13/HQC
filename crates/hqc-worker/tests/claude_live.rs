@@ -345,6 +345,231 @@ async fn live_environment_ssh() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// T44 (SPEC §14): one worker config, two folders, a test `sshd` on loopback that accepts only
+/// a key of the worker's store (`~/.ssh` has none for it: checked first, without an agent).
+/// In the folder bound to `infra` (`ssh_keys`, `Bash(ssh:*)` unblocked) the session's agent
+/// lists the store key and `ssh -o BatchMode=yes` logs in with it; in the other folder there
+/// is no agent at all. Two runs, haiku, two turns.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_environment_ssh_keys -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_environment_ssh_keys() {
+    use std::process::{Command, Stdio};
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    // Short: the agent sockets live in `<root>/home/agents`.
+    let id = Uuid::now_v7().simple().to_string();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tmp")
+        .join(format!("spike-t44-{}", &id[id.len() - 8..]));
+    for d in ["infra", "other", "sshd", "gen"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    for d in ["infra", "other"] {
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root.join(d))
+            .status()
+            .unwrap()
+            .success());
+    }
+    let root = root.canonicalize().unwrap();
+    let keygen = |path: &std::path::Path, comment: &str| {
+        assert!(Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", comment, "-f"])
+            .arg(path)
+            .status()
+            .unwrap()
+            .success());
+    };
+    // The key goes into the store and nowhere else; sshd knows only its public half.
+    keygen(&root.join("gen/t44"), "hqc-t44-store-key");
+    let mut cfg = hqc_worker::config::Config::parse(&format!(
+        "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\n\
+         [environments.infra]\nssh_keys = [\"t44_ed25519\"]\n\
+         [environments.infra.permissions]\nunblock = [\"Bash(ssh:*)\"]\n\
+         [[env_bindings]]\npath = \"{}\"\nenvironment = \"infra\"\n",
+        root.join("infra").display()
+    ))
+    .unwrap();
+    cfg.ssh = hqc_worker::ssh::Store::in_home(&root.join("home"));
+    cfg.ssh
+        .add_key("t44_ed25519", &root.join("gen/t44"))
+        .unwrap();
+    std::fs::copy(root.join("gen/t44.pub"), root.join("sshd/authorized_keys")).unwrap();
+    std::fs::remove_dir_all(root.join("gen")).unwrap();
+    cfg.check_ssh().unwrap();
+    assert_eq!(cfg.ssh.clean_agents().unwrap(), 0);
+
+    keygen(&root.join("sshd/host"), "host");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let d = root.join("sshd");
+    std::fs::write(
+        d.join("sshd_config"),
+        format!(
+            "Port {port}\nListenAddress 127.0.0.1\nHostKey {0}/host\nPidFile {0}/sshd.pid\n\
+             AuthorizedKeysFile {0}/authorized_keys\nUsePAM no\nStrictModes no\n\
+             PasswordAuthentication no\nKbdInteractiveAuthentication no\nMaxAuthTries 20\n",
+            d.display()
+        ),
+    )
+    .unwrap();
+    let mut sshd = Command::new("/usr/sbin/sshd")
+        .args(["-D", "-e", "-f"])
+        .arg(d.join("sshd_config"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sshd");
+    std::thread::sleep(Duration::from_secs(1));
+    let ssh = format!(
+        "ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+         -o UserKnownHostsFile=/dev/null -p {port} 127.0.0.1 echo hqc-t44-ok"
+    );
+    // Without the store's agent the user's own keys get nowhere.
+    let out = Command::new("sh")
+        .args(["-c", &ssh])
+        .env_remove("SSH_AUTH_SOCK")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "~/.ssh logs in by itself: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ssh: cfg.ssh.clone(),
+        ..ClaudeOptions::default()
+    };
+    let spawner = Arc::new(Recording::default());
+    let factory = ClaudeCodeAdapters::new(opts, spawner.clone());
+
+    // The tool results of one turn in `dir`, approving every request once.
+    let run = |dir: &'static str, command: String| {
+        let (factory, cfg, root) = (factory.clone(), cfg.clone(), root.clone());
+        async move {
+            let work = root.join(dir);
+            let session_id = Uuid::now_v7();
+            let spec = StartSpec {
+                session_id,
+                runtime: Runtime::ClaudeCode,
+                model: Some("claude-haiku-5-5".into()),
+                environment: cfg.environment(&work),
+                workspace: work.clone(),
+                workdir: work,
+                runtime_session_id: Some(Uuid::new_v4().to_string()),
+                system_prompt: None,
+                disallowed_tools: vec![],
+                restricted: false,
+                auto_approve: false,
+                session_token: hqc_worker::token::Secret::new("st"),
+                ask_timeout_s: 600,
+                permission_mode: PermissionMode::Ask,
+                folder_rules: None,
+            };
+            println!("--- {dir}: environment {}", spec.environment.name);
+            let (tx, mut rx) = mpsc::channel(4096);
+            let mut adapter = factory.create(&spec, tx);
+            adapter.start(&spec).await.expect("claude starts");
+            adapter
+                .input(&SessionInput {
+                    session_id,
+                    event_id: Uuid::now_v7(),
+                    text: format!(
+                        "Run exactly this shell command once with the Bash tool, verbatim: \
+                         {command}. Then reply with exactly: DONE"
+                    ),
+                    artifact_ids: vec![],
+                    peer_prefix: vec![],
+                    peer: None,
+                    permission_cap: None,
+                })
+                .await
+                .unwrap();
+            let mut results = Vec::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+            loop {
+                let ev = tokio::time::timeout_at(deadline, rx.recv())
+                    .await
+                    .expect("turn did not end in 180 s")
+                    .expect("channel closed");
+                match &ev {
+                    AdapterEvent::Event(e) => match &e.kind {
+                        EventKind::ApprovalRequest {
+                            request_id,
+                            description,
+                            ..
+                        } => {
+                            println!("approval.request {description:?} -> once");
+                            adapter
+                                .answer_approval(request_id, "once", None)
+                                .await
+                                .unwrap();
+                        }
+                        EventKind::System { code, text, .. } => println!("system {code}: {text}"),
+                        EventKind::ToolCall { args_preview, .. } => {
+                            println!("tool.call {args_preview}")
+                        }
+                        EventKind::ToolResult { result_preview, .. } => {
+                            println!("tool.result {result_preview}");
+                            results.push(result_preview.clone());
+                        }
+                        _ => {}
+                    },
+                    AdapterEvent::TurnEnded => break,
+                    AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+                    _ => {}
+                }
+            }
+            adapter.kill().await.unwrap();
+            results.join("\n")
+        }
+    };
+
+    let infra = run("infra", format!("ssh-add -l; {ssh}")).await;
+    let other = run("other", "ssh-add -l".into()).await;
+    let _ = sshd.kill();
+    let log = String::from_utf8_lossy(&sshd.wait_with_output().unwrap().stderr).into_owned();
+    println!("--- sshd\n{log}");
+
+    let cmds = spawner.0.lock().unwrap().clone();
+    let sock = |c: &CommandSpec| {
+        c.env
+            .iter()
+            .find(|(k, _)| k == "SSH_AUTH_SOCK")
+            .map(|(_, v)| v.clone())
+    };
+    let agent = sock(&cmds[0]).expect("infra: SSH_AUTH_SOCK");
+    assert!(
+        agent.starts_with(&cfg.ssh.agents.display().to_string()),
+        "{agent}"
+    );
+    assert!(
+        !std::path::Path::new(&agent).exists(),
+        "the agent went with the process"
+    );
+    assert_eq!(sock(&cmds[1]), None, "other: SSH_AUTH_SOCK");
+    assert!(infra.contains("hqc-t44-store-key"), "infra: {infra}");
+    assert!(infra.contains("hqc-t44-ok"), "infra: {infra}");
+    assert!(log.contains("Accepted publickey"), "{log}");
+    assert!(!other.contains("hqc-t44-store-key"), "other: {other}");
+    assert!(
+        other.contains("Could not open a connection") || other.contains("Error connecting"),
+        "other: {other}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// T48 (SPEC §8.1, §14): the folder's hqc rule `Bash(touch *)` answers the CLI's
 /// `can_use_tool` for a compound `touch a && touch b` without an `approval.request`.
 ///

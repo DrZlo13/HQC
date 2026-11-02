@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::engine::{Action, Core};
-use super::process::Sig;
+use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
 use super::{ClaudeCodeAdapter, ClaudeCodeAdapters, ClaudeOptions};
 use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
@@ -808,7 +808,7 @@ async fn command_line_carries_permissions() {
     let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
     assert_eq!(f.opts.ask_mode, "manual");
     let mode = |a: &ClaudeCodeAdapter, s: &StartSpec| -> String {
-        let args = a.command(s, &Uuid::nil(), false).args;
+        let args = a.command(s, &Uuid::nil(), false, None).args;
         let i = args.iter().position(|a| a == "--permission-mode").unwrap();
         args[i + 1].clone()
     };
@@ -827,7 +827,7 @@ async fn command_line_carries_permissions() {
     assert_eq!(mode(&a, &s), "auto");
     // The deny list goes with auto as with ask.
     assert!(a
-        .command(&s, &Uuid::nil(), false)
+        .command(&s, &Uuid::nil(), false, None)
         .args
         .contains(&"--settings".to_string()));
 }
@@ -875,7 +875,7 @@ environment = "infra"
     let command = |dir: &str| {
         let mut s = spec(Uuid::now_v7(), &root.join(dir), Uuid::new_v4());
         s.environment = cfg.environment(&s.workspace);
-        a.command(&s, &Uuid::nil(), false)
+        a.command(&s, &Uuid::nil(), false, None)
     };
     let settings = |args: &[String]| -> Value {
         let i = args.iter().position(|a| a == "--settings").unwrap();
@@ -1072,7 +1072,6 @@ async fn child_environment_is_an_allowlist() {
             "LANG",
             "LC_ALL",
             "PATH",
-            "SSH_AUTH_SOCK",
             "TERM",
             "TMPDIR",
             "USER"
@@ -1092,6 +1091,129 @@ async fn child_environment_is_an_allowlist() {
     assert!(env.iter().any(|(k, _)| k == "PATH"));
     assert!(env.iter().all(|(k, _)| !k.starts_with("HQC_")), "{env:?}");
     a.kill().await.unwrap();
+}
+
+/// T44: a worker config with `infra` (key `infra_ed25519`) bound to `<root>/infra`, its
+/// store in `<root>/home`, and an adapter factory over the scripted CLI. Under `/tmp`: the
+/// agent sockets need a short path.
+fn with_keys() -> (
+    tempfile::TempDir,
+    crate::config::Config,
+    ClaudeCodeAdapters,
+    ScriptedClaude,
+) {
+    let dir = tempfile::Builder::new()
+        .prefix("hqc-t44-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    for d in ["infra", "other", "config"] {
+        std::fs::create_dir(root.join(d)).unwrap();
+    }
+    let mut cfg = crate::config::Config::parse(&format!(
+        "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\n[environments.infra]\n\
+         ssh_keys = [\"infra_ed25519\"]\n[[env_bindings]]\npath = \"{}\"\nenvironment = \"infra\"\n",
+        root.join("infra").display()
+    ))
+    .unwrap();
+    cfg.ssh = crate::ssh::Store::in_home(&root.join("home"));
+    let key = crate::ssh::tests::keygen(&root, "t44-key");
+    cfg.ssh.add_key("infra_ed25519", &key).unwrap();
+    cfg.check_ssh().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            ssh: cfg.ssh.clone(),
+            ..options(&root.join("config"))
+        },
+        Arc::new(claude.clone()),
+    );
+    (dir, cfg, factory, claude)
+}
+
+fn auth_sock(cmd: &CommandSpec) -> Option<std::path::PathBuf> {
+    cmd.env
+        .iter()
+        .find(|(k, _)| k == "SSH_AUTH_SOCK")
+        .map(|(_, v)| v.into())
+}
+
+/// T44: a session whose environment has keys gets `SSH_AUTH_SOCK` of an ssh-agent with
+/// them; the agent and its socket go when the process is killed. Two sessions of one
+/// environment never share an agent.
+#[tokio::test]
+async fn ssh_agent_lives_and_dies_with_the_process() {
+    let (dir, cfg, factory, claude) = with_keys();
+    let root = dir.path().canonicalize().unwrap();
+    let infra = |id| {
+        let mut s = spec(id, &root.join("infra"), Uuid::new_v4());
+        s.environment = cfg.environment(&s.workspace);
+        s
+    };
+    let (s1, s2) = (infra(Uuid::now_v7()), infra(Uuid::now_v7()));
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a1 = factory.create(&s1, tx.clone());
+    let mut a2 = factory.create(&s2, tx);
+    a1.start(&s1).await.unwrap();
+    a2.start(&s2).await.unwrap();
+    let cmds = claude.commands();
+    let (sock1, sock2) = (
+        auth_sock(&cmds[0]).expect("SSH_AUTH_SOCK"),
+        auth_sock(&cmds[1]).expect("SSH_AUTH_SOCK"),
+    );
+    assert_ne!(sock1, sock2, "one agent per session");
+    assert!(sock1.starts_with(&cfg.ssh.agents), "{}", sock1.display());
+    for s in [&sock1, &sock2] {
+        let keys = crate::ssh::tests::listed(s).expect("an agent listens");
+        assert!(keys.contains("t44-key"), "{keys}");
+    }
+
+    a1.kill().await.unwrap();
+    assert!(!sock1.exists(), "the agent went with the process");
+    assert_eq!(crate::ssh::tests::listed(&sock1), None);
+    assert!(
+        crate::ssh::tests::listed(&sock2).is_some(),
+        "the other's lives on"
+    );
+    a2.kill().await.unwrap();
+    assert!(!sock2.exists());
+    assert_eq!(std::fs::read_dir(&cfg.ssh.agents).unwrap().count(), 0);
+}
+
+/// T44: without keys there is no `SSH_AUTH_SOCK` at all, whatever the worker runs with; a
+/// spawn that fails leaves no agent behind.
+#[tokio::test]
+async fn no_keys_no_ssh_auth_sock() {
+    let (dir, cfg, factory, claude) = with_keys();
+    let root = dir.path().canonicalize().unwrap();
+    let mut s = spec(Uuid::now_v7(), &root.join("other"), Uuid::new_v4());
+    s.environment = cfg.environment(&s.workspace);
+    assert_eq!(s.environment.name, "default");
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx.clone());
+    a.start(&s).await.unwrap();
+    assert_eq!(auth_sock(&claude.commands()[0]), None);
+    a.kill().await.unwrap();
+
+    // The worker's own SSH_AUTH_SOCK (the user's agent) is not in the allowlist.
+    let env = super::child_env(
+        [("SSH_AUTH_SOCK".to_string(), "/tmp/user-agent".to_string())].into_iter(),
+    );
+    assert!(env.is_empty(), "{env:?}");
+
+    let missing = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            ssh: cfg.ssh.clone(),
+            claude_bin: Some(root.join("no-such-claude")),
+            ..options(&root.join("config"))
+        },
+        Arc::new(OsSpawner),
+    );
+    let mut s = spec(Uuid::now_v7(), &root.join("infra"), Uuid::new_v4());
+    s.environment = cfg.environment(&s.workspace);
+    let mut a = missing.create(&s, tx);
+    assert!(a.start(&s).await.is_err());
+    assert_eq!(std::fs::read_dir(&cfg.ssh.agents).unwrap().count(), 0);
 }
 
 /// The working directory is checked again before each spawn.

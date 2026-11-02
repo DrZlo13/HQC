@@ -21,6 +21,7 @@ pub mod mirror;
 pub mod outbox;
 pub mod peer;
 pub mod permissions;
+pub mod ssh;
 pub mod supervisor;
 pub mod title;
 pub mod token;

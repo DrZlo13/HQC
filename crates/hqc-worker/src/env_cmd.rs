@@ -1,6 +1,7 @@
 //! `hqc-worker env` (T43, SPEC §14): the environments and bindings of `worker.toml`, and
 //! `env which <path>` with the environment and the effective rules of a folder. Values of
-//! `env` are printed as `***`; editing stays in `worker.toml`.
+//! `env` are printed as `***`, ssh keys by name; editing stays in `worker.toml`. `env add-key
+//! <name> <file>` puts a key into the store (T44).
 
 use std::fmt::Write;
 use std::path::Path;
@@ -9,11 +10,19 @@ use anyhow::Context;
 use hqc_proto::frame::{rule_source, DEFAULT_ENVIRONMENT};
 
 use crate::config::{Config, Environment};
+use crate::ssh::Store;
 
 fn vars(out: &mut String, e: &Environment) {
     let names: Vec<String> = e.env.names().map(|n| format!("{n}=***")).collect();
     if !names.is_empty() {
         let _ = writeln!(out, "    env: {}", names.join(" "));
+    }
+    if !e.ssh_keys.is_empty() {
+        let _ = writeln!(
+            out,
+            "    ssh_keys: {} (an ssh-agent of its own per session)",
+            e.ssh_keys.join(", ")
+        );
     }
 }
 
@@ -28,7 +37,7 @@ pub fn summary(cfg: &Config) -> String {
     let mut out = String::from("environments:\n");
     let _ = writeln!(
         out,
-        "  {DEFAULT_ENVIRONMENT}: folders without a binding; [permissions] only, no local MCP"
+        "  {DEFAULT_ENVIRONMENT}: folders without a binding; [permissions] only, no ssh keys, no local MCP"
     );
     for e in &cfg.environments {
         let _ = writeln!(out, "  {}:", e.name);
@@ -67,6 +76,9 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
         }
     }
     vars(&mut out, &e);
+    if e.ssh_keys.is_empty() {
+        out.push_str("    ssh keys: none (no SSH_AUTH_SOCK)\n");
+    }
     let _ = writeln!(
         out,
         "    local MCP servers: {}",
@@ -106,6 +118,16 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
         "Claude Code's settings files and hqc's folder rules come on top (the rules screen shows them).\n",
     );
     Ok(out)
+}
+
+/// `hqc-worker env add-key <name> <file>`: what was done and how to use it.
+pub fn add_key(store: &Store, name: &str, file: &Path) -> anyhow::Result<String> {
+    let dest = store.add_key(name, file)?;
+    Ok(format!(
+        "added {} (0600)\nuse it with ssh_keys = [\"{name}\"] in an [environments.<name>] of \
+         worker.toml and restart the worker\n",
+        dest.display()
+    ))
 }
 
 #[cfg(test)]
@@ -152,5 +174,31 @@ environment = "infra"
         for out in [s, w, d, format!("{cfg:?}")] {
             assert!(!out.contains("ghp_secret_value"), "{out}");
         }
+    }
+
+    /// T44: keys are listed by name; `add-key` says where the key went, never what it is.
+    #[test]
+    fn ssh_keys_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("infra")).unwrap();
+        let cfg = Config::parse(&format!(
+            "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\n[environments.infra]\n\
+             ssh_keys = [\"infra_ed25519\"]\n[[env_bindings]]\npath = \"{}\"\nenvironment = \"infra\"\n",
+            root.join("infra").display()
+        ))
+        .unwrap();
+        let s = summary(&cfg);
+        assert!(s.contains("ssh_keys: infra_ed25519"), "{s}");
+        let w = which(&cfg, &root.join("infra")).unwrap();
+        assert!(w.contains("ssh_keys: infra_ed25519"), "{w}");
+        let d = which(&cfg, &root).unwrap();
+        assert!(d.contains("ssh keys: none (no SSH_AUTH_SOCK)"), "{d}");
+
+        let store = Store::in_home(&root.join("home"));
+        std::fs::write(root.join("k"), "PRIVATE KEY MATERIAL").unwrap();
+        let out = add_key(&store, "infra_ed25519", &root.join("k")).unwrap();
+        assert!(out.contains("keys/infra_ed25519 (0600)"), "{out}");
+        assert!(!out.contains("MATERIAL"), "{out}");
     }
 }

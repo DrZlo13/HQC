@@ -1323,6 +1323,36 @@ mod tests {
         assert_eq!(ws.created(), [c6, fix, side, feature, y]);
     }
 
+    /// The branch `hqc_spawn` names a worktree after (T47): `hqc/` and the session's slug, new
+    /// from the origin's `HEAD`, in the hub's default folder; the same name again (a slug used
+    /// once more after its session was deleted) is refused, since the branch outlives its
+    /// worktree.
+    #[tokio::test]
+    async fn worktree_on_a_spawn_branch() {
+        let fx = Fx::new();
+        let ws = fx.workspaces(fx.config(""));
+        let c6 = origin(&fx, &ws).await;
+        let head = git_read(&c6, &["rev-parse", "HEAD"]);
+        let wt = fx.root.join("c6-hqc-session-12");
+        ws.make(&worktree_req(&wt, &c6, "hqc/session-12", true), &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            git_read(&wt, &["symbolic-ref", "HEAD"]).as_deref(),
+            Some("refs/heads/hqc/session-12")
+        );
+        assert_eq!(git_read(&wt, &["rev-parse", "HEAD"]), head);
+        ws.delete(&del(&wt)).unwrap();
+        assert!(!wt.exists());
+        assert!(git_read(&c6, &["rev-parse", "--verify", "refs/heads/hqc/session-12"]).is_some());
+        let e = ws
+            .make(&worktree_req(&wt, &c6, "hqc/session-12", true), &[])
+            .await
+            .unwrap_err();
+        assert!(e.contains("exists already"), "{e}");
+        assert!(!wt.exists());
+    }
+
     /// `git worktree add` runs in the environment of the new path (its `env` reaches the
     /// origin's `post-checkout` hook), not of the origin.
     #[cfg(unix)]

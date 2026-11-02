@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.58, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
+Version 0.59, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -75,7 +75,9 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   `.hqc/inbox`, §5.3, §12; a clone goes only into a new folder the worker checks itself, from
   `https`/`ssh` or a `file` URL inside `allowed_roots`, and only a folder the worker created
   and listed itself is ever deleted, never one because the hub named it, §5.3, §13; since 0.58,
-  T45), pick an environment or a
+  T45; a worktree only of a git workspace the worker knows, into a new folder checked the same
+  way, and it is removed only by `git worktree remove` in the origin the worker recorded, since
+  0.59, T46), pick an environment or a
   Hermes profile for a path the worker owner has not bound locally, hand a session an ssh key
   (since 0.57 only an environment's `ssh_keys` give a process an ssh-agent, and without them it
   gets none, not even the user's), or enable
@@ -198,15 +200,24 @@ or letters drops a stored image. Limits: §12.
 `project_id`, `worker_id`, `path`, `label`, `environment` (a name; a display of the binding
 from the worker's local config: since 0.56 the hub sets it from the worker's `env_bindings` when
 the workspace is created and on every `hello`, by the rule of §14; the worker never reads it), `ephemeral`, `created_by_hqc`, `kind`
-(dir/clone/worktree), `origin_workspace_id`, `mirror_enabled` (since 0.23 `true` by default: the
+(dir/clone/worktree), `origin_workspace_id` and `branch` (since 0.59, T46; hub migration `0029`),
+`mirror_enabled` (since 0.23 `true` by default: the
 Claude Code session mirror is on for every workspace; the switch is `PATCH`, §6, §9.2), hqc's allow
 rules, `state` and `error` (since 0.58, T45; hub migration `0028`).
 
 `state` — `ready` (the folder exists; every workspace before 0.58), or for a folder hqc makes
-(`kind: clone`, `created_by_hqc: true`) `creating` while the worker clones and `failed` when it
+(`kind: clone` or `worktree`, `created_by_hqc: true`) `creating` while the worker clones or adds
+the worktree and `failed` when it
 could not, with the worker's reason in `error`; only the record is left then (the worker removed
 what it had created). Only a `ready` workspace takes sessions (`409 workspace_not_ready`) and gets
 `mirror.set` and `workspace.rules`; a `creating` one is not deleted (`409 workspace_creating`).
+
+`origin_workspace_id` (since 0.59, T46) — for `kind: worktree`, the workspace it is a git worktree
+of: a `ready` workspace of the same project and worker that is not a worktree itself (decided for
+T46: one level, so the tree in the client is two levels and deleting goes worktrees first). While
+any worktree record names it, the origin is not deleted (`409 workspace_in_use`, §6). `branch` —
+the worktree's branch, or the branch a clone was asked for (T45's `clone_branch`, renamed by
+`0029`).
 
 hqc's allow rules (since 0.52, T48; decided 2026-10-31: per folder, not per project or worker) —
 standing answers of the workspace owner (the worker owner in iteration 4) to the permission
@@ -781,8 +792,9 @@ MCP calls (worker → hub → worker):
   outside `allowed_roots` (after resolving symlinks) gets `error {invalid_frame}`.
   For both frames `request_id` equals the frame's `id`; the answer is `result` or `error` with
   the same `id`. The hub waits 10 s for the answer (`504 worker_timeout` in REST, §6).
-- `workspace.create` {request_id, kind: clone, path, url, branch?} → `ack`, then
-  `workspace.created` (§5.4) (since 0.58, T45; `kind: worktree` is T46) — a new folder for a
+- `workspace.create` {request_id, kind: clone, path, url, branch?} or {request_id, kind:
+  worktree, path, origin, branch, new_branch?} → `ack`, then
+  `workspace.created` (§5.4) (since 0.58, T45; `kind: worktree` since 0.59, T46) — a new folder for a
   workspace (§13.1). `request_id` is the workspace's id, not the frame's. The worker checks
   `path` itself (§2.1): absolute without `.`/`..`, its parent with symlinks resolved a folder
   inside `allowed_roots` (a parent outside and a missing one get the same answer), the path not
@@ -805,20 +817,44 @@ MCP calls (worker → hub → worker):
   survives a dropped connection. A worker that starts and finds a clone recorded as creating
   removes its folder; the hub fails such a clone on the new `boot_id` (§17.3). A worker before
   0.58 answers `error {invalid_frame}`, which fails the workspace.
+  `kind: worktree` (since 0.59, T46): `origin` is the canonical path of the origin workspace; the
+  worker takes it only if it is a workspace it knows (as above, so the hub sends the origin's
+  `workspace.rules` right before the request), still resolves to itself inside `allowed_roots` and
+  is the top folder of a git repository (`git rev-parse --show-toplevel`). `branch` passes
+  `check_branch` and `git check-ref-format --branch`; with `new_branch` it must not exist and is
+  made from the origin's `HEAD` (`-b <branch> ... HEAD`); without, it is a local branch that no
+  worktree has checked out (the worker reads `git worktree list --porcelain` and answers "the
+  branch … is already checked out at …"), or a branch of exactly one remote, which becomes a
+  local branch tracking it (`--track -b <branch> ... refs/remotes/<remote>/<branch>`). `path` is
+  checked and created as for a clone and recorded with its origin; then `git worktree add --quiet
+  [<options>] -- <path> <commit>` runs in the origin, without a shell, in the environment of
+  `path` (its `env`, and an ssh-agent of its own if the environment has `ssh_keys`, as for a
+  clone, although the command needs no network) and with the same prompt rules and timeout. A
+  failed one removes the folder and runs `git worktree prune` in the origin; so does a worker that
+  starts and finds one recorded as creating. A worker before 0.59 refuses the frame (`error
+  {invalid_frame}`), which fails the workspace.
 - `workspace.inspect` {request_id, path} → `result {request_id, git, dirty[], dirty_count,
   unpushed[{branch, commits}]}` (since 0.58, T45) — what deleting a folder would lose, for the
   confirmation (§13.2). `path` a folder inside `allowed_roots`, otherwise `error {invalid_frame}`;
   without `.git` it is `git: false` with empty lists. `dirty` — the paths of `git status
   --porcelain` (untracked ones included; at most 200, all counted in `dirty_count`); `unpushed`
   — local branches with commits that are on no remote branch (`git rev-list --count <branch>
-  --not --remotes`; at most 100). Run read-only (`GIT_OPTIONAL_LOCKS=0`) in the folder's
+  --not --remotes`; at most 100); in a linked worktree (`.git` is a file; since 0.59) only the
+  branch it has checked out, since the others belong to the repository (none when `HEAD` is
+  detached). Run read-only (`GIT_OPTIONAL_LOCKS=0`) in the folder's
   environment. The hub waits 10 s, as for `fs.*`, and counts it among them (§20).
-- `workspace.delete` {request_id, path} → `result {request_id, removed}` (since 0.58, T45;
+- `workspace.delete` {request_id, path, force?} → `result {request_id, removed}` (since 0.58, T45;
   §13.2) — the worker deletes `path` only if it is in its `created_workspaces.json` as written
   there (canonical, the clone finished) and still resolves to itself inside `allowed_roots`: a
   path it did not create, one swapped for a symlink since, or a clone still running gets `error
   {invalid_frame}`. A listed path that is gone already is `removed: false` and leaves the list.
-  The hub waits 60 s.
+  The hub waits 60 s. A worktree (since 0.59, T46) is removed by `git worktree remove [--force]
+  -- <path>` in the origin recorded with it (which must still resolve to itself inside
+  `allowed_roots`), then `git worktree prune`; its branch stays. Without `force` git refuses a
+  worktree with uncommitted or untracked files and the worker answers `error {invalid_frame}`
+  with git's message; `force` (only when the user confirmed the files the inspection listed, §6)
+  removes them. A worktree folder that is gone already is pruned and `removed: false`. `force`
+  changes nothing for a clone.
 - `workspace.list_candidates` {request_id} → `result {request_id, candidates[{path,
   sessions_count, last_active}]}` — folders with Claude Code transcripts (§9.1): `path` is the
   records' `cwd`, only inside `allowed_roots`, sorted by path; `last_active` is the modification
@@ -938,7 +974,8 @@ MCP calls (worker → hub → worker):
   (§5.2, §7.2)
 - `workspace.created` {request_id, canonical | error} → `ack {}` (since 0.58, T45) — the outcome
   of `workspace.create`: the folder is ready at `canonical`, or it was not made (`error`, a
-  message for the user; nothing is left on disk). Sent directly when the clone ends and again
+  message for the user; nothing is left on disk). Sent directly when the clone (or since 0.59 the
+  `git worktree add`) ends and again
   for every repeated `workspace.create`; the hub makes the workspace `ready` at `canonical` (and
   sends `mirror.set` when it is mirrored) or `failed` with the error (up to 2000 characters), and
   ignores an outcome for a workspace that is not `creating` any more.
@@ -1013,26 +1050,41 @@ the rest is marked "later"):
   parent (the codes above) and of the new path (`400 path_exists`), stores the canonical parent
   plus the name as `creating` with `kind: clone`, `created_by_hqc: true` (the same
   `workspace_conflict` check) and sends `workspace.create` (§5.3); `201` with the workspace
-  `creating`, which the client reads again until it is `ready` or `failed`. Another `kind`:
+  `creating`, which the client reads again until it is `ready` or `failed`. Since 0.59 (T46)
+  `{kind: worktree, project_id, worker_id, origin_workspace_id, branch, new_branch?, path?,
+  label?, mirror_enabled?}` (`api.workspace.worktree.request.json`): the origin must be the
+  user's `ready` workspace of this project and worker and not a worktree (`400 invalid_origin`,
+  also without `origin_workspace_id`), `branch` passes `check_branch` (`400 invalid_branch`);
+  without `path` the new folder is `<origin-parent>/<origin-name>-<branch>` with the branch's
+  `/` as `-`. The path is checked as a clone's, the workspace stored `creating` with `kind:
+  worktree`, `created_by_hqc: true`, `origin_workspace_id`, `branch`, and the hub sends the
+  origin's `workspace.rules` and then `workspace.create` (also when it repeats it after
+  `hello`); the worker's refusals (not a git repository, a branch checked out elsewhere, one
+  that exists or does not) come back as `failed` with its reason. Another `kind`:
   `400`. `PATCH /api/workspaces/{id}` {label?,
   mirror_enabled?} → workspace (`api.workspace.patch*.request.json`): changing `mirror_enabled`
   is the "VS Code sessions" switch (since 0.23, §9.2); the hub sends the worker `mirror.set`
   (at once if connected, otherwise after `hello`); the same value sends nothing. `DELETE
-  /api/workspaces/{id}?remove_folder=` → `204`: the record, the folder is left alone
+  /api/workspaces/{id}?remove_folder=&force=` → `204`: the record, the folder is left alone
   (§13.2); while it has non-archived sessions: `409 workspace_in_use`; archived ones lose
   `workspace_id` and cannot be unarchived (`409 no_workspace`); while it is `creating`: `409
-  workspace_creating`. `remove_folder=true` (since 0.58, T45) only for a `ready` workspace with
+  workspace_creating`; while worktree records name it as their origin (since 0.59, any state):
+  `409 workspace_in_use` ("N worktree(s) of this workspace exist; delete them first"), checked
+  before the worker is asked. `remove_folder=true` (since 0.58, T45) only for a `ready` workspace with
   `created_by_hqc` (else `400`): after the session check the hub sends `workspace.delete` (§5.3)
   and deletes the record once the worker answered; worker offline `409 worker_offline`, no
-  answer in 60 s `504 worker_timeout`, refused by the worker `400 invalid_path` — the record
-  stays in all three. `GET /api/workspaces/{id}/inspect` (since 0.58, T45) → the worker's
+  answer in 60 s `504 worker_timeout`, refused by the worker `400 invalid_path` (also a worktree
+  with uncommitted files without `force`) — the record stays in all three. `force=true` (since
+  0.59, T46) goes into `workspace.delete` as `force`: the client sets it only when the dialog
+  showed uncommitted files. `GET /api/workspaces/{id}/inspect` (since 0.58, T45) → the worker's
   `workspace.inspect` without `request_id` (`api.workspace.inspect.json`), only for a `ready`
   workspace with `created_by_hqc` (else `400`); offline `409 worker_offline`, no answer `504
   worker_timeout`. The workspace object is `{id, project_id, worker_id, path, label,
-  environment, kind, ephemeral, created_by_hqc, mirror_enabled, hqc_rules, state, error?,
-  created_at, updated_at}` (`api.workspace.json`; `hqc_rules` since 0.52 — how many hqc rules
+  environment, kind, origin_workspace_id?, branch?, ephemeral, created_by_hqc, mirror_enabled,
+  hqc_rules, state, error?, created_at, updated_at}` (`api.workspace.json`,
+  `api.workspace.worktree.json`; `hqc_rules` since 0.52 — how many hqc rules
   the folder has; `state`, `error` since 0.58, §3 Workspace; a client reads a missing `state`
-  as `ready`). The client (project settings, `ProjectSettings.dc.html`): "Clone a repository"
+  as `ready`; `origin_workspace_id`, `branch` since 0.59). The client (project settings, `ProjectSettings.dc.html`): "Clone a repository"
   next to "Add a workspace" — the worker, the URL, the parent folder from the same folder tree
   (or typed), the folder name (the repository's by default) and an optional branch; a clone's
   row shows "Cloning…" (the list is read again every second meanwhile), then the workspace, or
@@ -1040,7 +1092,15 @@ the rest is marked "later"):
   folder hqc created opens a dialog with the worker's inspection — the uncommitted files ("and N
   more"), the branches with their commits on no remote, "not a git repository", or that nothing
   would be lost — and "Delete folder", "Remove from project only", "Cancel"; with the worker
-  offline the check fails and only the record can be removed
+  offline the check fails and only the record can be removed. Since 0.59 (T46): "New worktree"
+  on a ready workspace that is not a worktree (the client cannot tell a git folder; the worker
+  can, and the worktree fails otherwise) opens a form under its row — the branch, "New, from the
+  current commit" or "Existing branch", and the folder, showing the hub's default until edited
+  (sent only when edited). Worktrees are listed right under their origin, indented, with their
+  branch; while the worker adds one the row says "Adding worktree…", then the workspace or
+  "Worktree failed" with the reason. The deletion dialog of a worktree says it goes with `git
+  worktree remove` and its branch and commits stay, lists the worktree's own branch with its
+  commits on no remote, and deletes with `force=true` only when it listed uncommitted files
 - hqc's allow rules of a workspace (since 0.52, T48; §3 Workspace), the workspace owner only
   (another user's: `404`): `GET /api/workspaces/{id}/rules` → `{rules[{id, rule, created_at}]}`,
   newest first (`api.workspace.rules.json`); `POST /api/workspaces/{id}/rules` {rules[]}
@@ -1338,7 +1398,7 @@ connected worker, §5.1), `worker_not_revoked` and `worker_has_sessions` (deleti
 latter with `sessions_count`); `400`: `bad_request`,
 `unknown_artifact` (§12) and the path check codes (`outside_allowed_roots`, `path_not_found`,
 `not_a_directory`, `invalid_path`, and since 0.58 `path_exists`, `invalid_url`,
-`invalid_branch`); `504
+`invalid_branch`, since 0.59 `invalid_origin`); `504
 worker_timeout`: the worker did not answer a hub request; `403`: a foreign `Origin` (§20); `429` and
 `503`: limits (§20). An Access JWT verification error
 is returned with a generic text; the reason goes to the hub log. `GET .../events`
@@ -2758,7 +2818,12 @@ the sharing of iteration 6 a worker has no other users), so there is no confirma
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
-environment (§5.3); the workspace becomes `ready` or `failed` (§3 Workspace). `worktree`: T46.
+environment (§5.3); the workspace becomes `ready` or `failed` (§3 Workspace). Since 0.59 (T46)
+`worktree`: the client gives the origin workspace, the branch (new from the origin's `HEAD`, or
+an existing one) and optionally the folder (by default next to the origin,
+`<origin-name>-<branch>`); the hub checks the origin (§3 Workspace) and the parent, the worker
+checks the origin, the branch and the new path itself and runs `git worktree add` in the origin
+with the environment of the new path (§5.3), through the same `creating` → `ready` | `failed`.
 
 ### 13.2 Deletion
 `dir`: only the hub's record is deleted, the folder is left alone; while the workspace has
@@ -2770,7 +2835,12 @@ contains a warning. Since 0.58 (T45), for `clone`: the confirmation is the owner
 client (iteration 4, `docs/ITERATION-4.md`), fed by `workspace.inspect`; deleting the folder is
 `DELETE ...?remove_folder=true`, which sends `workspace.delete`, and the worker deletes only a
 canonical path of its own `created_workspaces.json` (§5.3, §14). Without `remove_folder` the
-folder stays, as for `dir`. A `failed` clone is only a record. An `ephemeral` workspace is **not deleted automatically** when its last
+folder stays, as for `dir`. A `failed` clone is only a record. Since 0.59 (T46), for
+`worktree`: the same dialog and `remove_folder`; the worker runs `git worktree remove` in the
+origin (`--force` only with `force`, which the client sends when the dialog listed uncommitted
+files) and `git worktree prune`, and keeps the branch; the inspection lists only the worktree's
+own branch. An origin is not deleted, record or folder, while worktree records of it exist
+(`409 workspace_in_use`): worktrees go first. An `ephemeral` workspace is **not deleted automatically** when its last
 session is archived; it is marked "for deletion" and shows a button;
 deletion is always confirmed.
 
@@ -2810,7 +2880,7 @@ The worker's local config is the only source of truth for:
 - `allow_foreign_sessions`, `share_local_models`;
 - `max_sessions` (agent processes at once, default 8) and `insecure_http`
   (`http://` to a non-loopback hub, §5.1);
-- `clone_timeout` (since 0.58, T45) — seconds a `git clone` of a new workspace may take, default
+- `clone_timeout` (since 0.58, T45) — seconds a `git clone` (since 0.59 also a `git worktree add`) of a new workspace may take, default
   600, at least 1 (§5.3);
 - `[permissions]` — the Claude Code permission policy (below; not sent in `hello`; the
   rules screen gets it through `permissions.inspect`, §5.3).
@@ -2915,10 +2985,15 @@ defined in the file; the name of an environment is letters, digits, `_`,
 
 The folders the worker created for workspaces (since 0.58, T45) are in
 `$HQC_HOME/created_workspaces.json` (canonical paths, a clone that runs marked as creating;
+since 0.59 a worktree with the canonical path of its origin;
 written to a temporary file and renamed, 0600), next to `known_workspaces.json`: the only
 folders `workspace.delete` removes; at start the worker removes the folder of every entry still
-marked as creating. `git` for a workspace (§5.3) runs with the same process environment as an
-agent of that folder's environment (`Environment::process_env`), where its keys come in (T44).
+marked as creating (and prunes a worktree's origin). `git` for a workspace (§5.3) runs with the same process environment as an
+agent of that folder's environment (`Environment::process_env`), where its keys come in (T44);
+`git worktree add` with the environment of the new folder, not the origin's. A worktree shares
+the origin's `.git` (config, hooks, filters), so whatever runs in one folder's sessions can
+plant what git runs in the other's environment: two folders bound to different environments are
+not separated by making one a worktree of the other.
 
 The `default` environment: no keys, no tokens, `deny` from `[permissions]` (by default it
 includes ssh/scp too), local MCP off. Keys of one project (for example `infra`) are moved out of
@@ -3193,7 +3268,7 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
    MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 6).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
-4. Workspaces: ~~clone~~ (0.58, T45), worktree, ephemeral. Environments and bindings on the worker. Moved
+4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.59, T46), ephemeral. Environments and bindings on the worker. Moved
    ahead of the agents on 2026-10-31; the session template (§13.3) went to `docs/BACKLOG.md`.
    Tasks: `docs/ITERATION-4.md`.
 5. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
@@ -3251,6 +3326,7 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   | a worker event in an archived session (§17.4) | only one that ends a turn: the final `agent.message`, `status idle`/`error` | `ack` without `seq` |
   | `fs.stat`, `fs.list_dirs`, `workspace.list_candidates`, `permissions.inspect` (since 0.52), `workspace.inspect` and `workspace.delete` (since 0.58) from the API (§5.3, §6) | 4 at once per worker | `429 worker_busy`, no frame goes to the worker |
   | a clone (§5.3, since 0.58, T45) | `url` up to 2048 bytes by `check_clone_url`, `branch` up to 255 by `check_branch`; `clone_timeout` (default 600 s) on the worker | `400 invalid_url` / `invalid_branch`; the worker kills `git` and removes the folder, `failed` |
+  | a worktree (§5.3, since 0.59, T46) | `branch` by `check_branch` and `git check-ref-format --branch`; `git worktree add` within `clone_timeout` | `400 invalid_branch`, or `failed` with the worker's reason; on a timeout the worker kills `git`, removes the folder and prunes the origin |
   | `workspace.inspect` | 200 dirty paths (all counted), 100 branches | the rest left out |
   | `workspace.created.error` | stored up to 2000 characters | cut |
   | hqc's allow rules of a workspace (§3 Workspace, since 0.52, T48) | 200 per workspace; a rule at most 256 bytes, hqc syntax only | `422 too_many_rules` / `422 invalid_rule`, nothing saved; the worker drops an invalid rule of `session.start` or `workspace.rules` with a warning |
@@ -3358,6 +3434,29 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.58 → 0.59 (T46, worktree workspaces)
+§3 Workspace: `origin_workspace_id` and `branch` in effect (hub migration `0029`: the column
+`origin_workspace_id` keyed to the origin, `new_branch`, T45's `clone_branch` renamed to
+`branch`); a worktree's origin is a ready workspace of the same project and worker that is not a
+worktree itself, and is not deleted while worktree records of it exist. §5.3: `workspace.create
+{kind: worktree, path, origin, branch, new_branch?}` — the worker takes only an origin it knows,
+inside `allowed_roots`, at the top of a git repository, checks the branch (`check_branch`, `git
+check-ref-format`, new and absent, or existing and not checked out in another worktree, or on
+exactly one remote) and the new path as for a clone, records the worktree with its origin and
+runs `git worktree add` in the origin with the environment of the new path; the hub sends the
+origin's `workspace.rules` first. `workspace.delete` gets `force`; a worktree goes by `git
+worktree remove [--force]` in its origin and `git worktree prune`, its branch stays.
+`workspace.inspect` of a linked worktree lists only its own branch. §5.4: `workspace.created`
+also ends a worktree. §6: `POST /api/workspaces {kind: worktree, origin_workspace_id, branch,
+new_branch?, path?}` (`400 invalid_origin`; the default path `<origin-parent>/<origin-name>-<branch>`),
+`DELETE ...&force=true`, `409 workspace_in_use` for an origin with worktrees, the workspace
+object's `origin_workspace_id` and `branch`, "New worktree", the worktrees under their origin
+and the dialog for a worktree in the client. §2.1: the hub cannot make a worktree of a folder
+the worker does not know nor remove one but through git in the recorded origin. §13.1, §13.2:
+`worktree` implemented. §14: `clone_timeout` covers `git worktree add`, `created_workspaces.json`
+keeps a worktree's origin, and a worktree shares the origin's `.git` across environments. §19:
+worktree done. §20: the worktree limits.
 
 ### 0.57 → 0.58 (T45, clone workspaces and deleting what hqc created)
 §3 Workspace: `state` (`creating` | `ready` | `failed`) and `error` (hub migration `0028`); only

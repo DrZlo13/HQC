@@ -511,10 +511,11 @@ hub_url = "https://hqc.example.com"
 # `agent_start_failed` (retryable) and retries later. Default 8.
 # max_sessions = 8
 
-# Seconds a `git clone` of a workspace made with "Clone a repository" may take; then git is
-# killed and the half-cloned folder removed. Default 600. The clone runs in the environment
-# of the new folder, never prompts, and the folders the worker created are listed in
-# $HQC_HOME/created_workspaces.json (the only ones it ever deletes).
+# Seconds a `git clone` of a workspace made with "Clone a repository", or a `git worktree add`
+# of one made with "New worktree", may take; then git is killed and the half-made folder
+# removed. Default 600. Both run in the environment of the new folder, never prompt, and the
+# folders the worker created are listed in $HQC_HOME/created_workspaces.json (the only ones it
+# ever deletes; a worktree only through `git worktree remove` in its origin).
 # clone_timeout = 600
 
 # Roots sessions never leave. Absolute paths; symlinks are resolved.

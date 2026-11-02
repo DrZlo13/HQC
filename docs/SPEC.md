@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.60, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
+Version 0.61, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -218,6 +218,15 @@ T46: one level, so the tree in the client is two levels and deleting goes worktr
 any worktree record names it, the origin is not deleted (`409 workspace_in_use`, §6). `branch` —
 the worktree's branch, or the branch a clone was asked for (T45's `clone_branch`, renamed by
 `0029`).
+
+`ephemeral` (since 0.61, T47) — a worktree `hqc_spawn` made with `isolation: "worktree"` for the
+session it started (§7); otherwise like any worktree (sessions can be started there, the same
+deletion). It is **never deleted automatically**. `marked_for_deletion` — not stored: the hub
+computes it when serving, true for an `ephemeral`, `ready` workspace without a session that is
+not archived. So archiving its last session marks it, unarchiving (or a new session there) clears
+the mark, and a worktree whose spawn gave up before the session was created (§7) is marked from
+the start. The client shows a marked workspace for deletion (§6), and deleting it goes through
+the dialog of §13.2.
 
 hqc's allow rules (since 0.52, T48; decided 2026-10-31: per folder, not per project or worker) —
 standing answers of the workspace owner (the worker owner in iteration 4) to the permission
@@ -638,7 +647,12 @@ MCP calls (worker → hub → worker):
   the `event_id` of the input whose turn made the call, as the worker handed it to the runtime;
   the hub takes the call's chain from it (§7.1). Fast tools (`attach`,
   `list`, `search`, `schedule`, `send`, `spawn`) are answered at once: `mcp.result` comes as
-  the reply to the call frame, under its `id`. `ask` is deferred: the hub answers the call
+  the reply to the call frame, under its `id`. Since 0.61 (T47) `spawn` with `isolation:
+  "worktree"` waits for the worktree (§7): its `mcp.result` also comes under the call frame's
+  `id`, but once the worker made the worktree; the hub reads the worker's other frames
+  meanwhile (its `fs.stat` answers and `workspace.created` come on the same connection). If
+  the connection closes first nothing is sent, and the call comes again after the next `hello`
+  (below). `ask` is deferred: the hub answers the call
   frame with `ack {}`, creates a `PendingRequest`
   with `worker_id` and sends `mcp.result` as a frame of its own only when the answer has arrived or the timeout has
   expired. If the worker is offline at that moment, the result waits in `PendingRequest.result`
@@ -662,7 +676,9 @@ MCP calls (worker → hub → worker):
   the worker downloads again into the same folder). `hqc_spawn` (since 0.37) keys the new
   session's id (`hqc_spawn` as the tool) and its first `peer.message` (as `hqc_send`): a
   repeat finds the session, stores the message if the first call did not get that far, and
-  answers the same `{address}`. The same `request_id` from another
+  answers the same `{address}`; since 0.61 (T47) the ephemeral worktree of a spawn with
+  isolation is keyed too (`hqc_spawn worktree` as the tool), so a repeat waits for the same
+  worktree instead of making another. The same `request_id` from another
   session is another call.
 - A deferred answer (since 0.35): the hub keeps the `mcp.result` frame in
   `PendingRequest.result` and sends it to the asking session's worker, now if it is
@@ -1080,11 +1096,13 @@ the rest is marked "later"):
   `workspace.inspect` without `request_id` (`api.workspace.inspect.json`), only for a `ready`
   workspace with `created_by_hqc` (else `400`); offline `409 worker_offline`, no answer `504
   worker_timeout`. The workspace object is `{id, project_id, worker_id, path, label,
-  environment, kind, origin_workspace_id?, branch?, ephemeral, created_by_hqc, mirror_enabled,
-  hqc_rules, state, error?, created_at, updated_at}` (`api.workspace.json`,
-  `api.workspace.worktree.json`; `hqc_rules` since 0.52 — how many hqc rules
+  environment, kind, origin_workspace_id?, branch?, ephemeral, marked_for_deletion,
+  created_by_hqc, mirror_enabled, hqc_rules, state, error?, created_at, updated_at}`
+  (`api.workspace.json`, `api.workspace.worktree.json`, `api.workspace.ephemeral.json`;
+  `hqc_rules` since 0.52 — how many hqc rules
   the folder has; `state`, `error` since 0.58, §3 Workspace; a client reads a missing `state`
-  as `ready`; `origin_workspace_id`, `branch` since 0.60). The client (project settings, `ProjectSettings.dc.html`): "Clone a repository"
+  as `ready`; `origin_workspace_id`, `branch` since 0.60; `marked_for_deletion` since 0.61, §3
+  Workspace, a client reads a missing one as `false`). The client (project settings, `ProjectSettings.dc.html`): "Clone a repository"
   next to "Add a workspace" — the worker, the URL, the parent folder from the same folder tree
   (or typed), the folder name (the repository's by default) and an optional branch; a clone's
   row shows "Cloning…" (the list is read again every second meanwhile), then the workspace, or
@@ -1100,7 +1118,11 @@ the rest is marked "later"):
   branch; while the worker adds one the row says "Adding worktree…", then the workspace or
   "Worktree failed" with the reason. The deletion dialog of a worktree says it goes with `git
   worktree remove` and its branch and commits stay, lists the worktree's own branch with its
-  commits on no remote, and deletes with `force=true` only when it listed uncommitted files
+  commits on no remote, and deletes with `force=true` only when it listed uncommitted files.
+  Since 0.61 (T47): an `ephemeral` worktree has the tag "spawned" on its row; a marked one also
+  "for deletion", the line "Its sessions are archived. hqc keeps the worktree and its branch
+  until you delete it." and "Delete" instead of "Remove", which opens the same dialog (it adds
+  that hqc made the worktree for a session an agent started)
 - hqc's allow rules of a workspace (since 0.52, T48; §3 Workspace), the workspace owner only
   (another user's: `404`): `GET /api/workspaces/{id}/rules` → `{rules[{id, rule, created_at}]}`,
   newest first (`api.workspace.rules.json`); `POST /api/workspaces/{id}/rules` {rules[]}
@@ -1520,6 +1542,27 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   records the spawner (`spawned_by`, §3); spawns are limited per chain and per owner and
   hour (§20, `limit_exceeded`). A worker that is offline gets the session when it connects,
   as for the API.
+  Since 0.61 (T47): `hqc_spawn(project, workspace?, runtime?, model?, prompt, isolation?,
+  branch?)`. `isolation: "worktree"` (the only value; another is `invalid_args`, as is
+  `branch` without isolation) puts the new session in an `ephemeral` worktree of its own (§3
+  Workspace), so a helper does not edit the checkout its spawner works in. The origin is the
+  workspace the call would use without isolation; T46's rules apply to it (a `ready` workspace
+  that is not a worktree itself, else `invalid_args`; only the worker can tell it is a git
+  repository), and its worker must be online (else `unavailable`). The branch is new, from the
+  origin's `HEAD`: `branch` (checked like T46's, `invalid_args`), by default `hqc/<slug>` with the
+  slug the new session gets, `session-N` (N past the slugs of the project and the branches of
+  its workspaces, so parallel spawns get their own); the folder is T46's default
+  `<origin-path>-<branch with / as ->`. The hub stores the worktree `creating` (`created_by_hqc`,
+  mirror off) and sends `workspace.create` as for the API (§5.3); the call waits until the worker
+  answers, then creates the session there (titled "Session N" with that N) and its first input,
+  and returns `{address, worktree: {path, branch}}`. A failed worktree fails the call with the
+  worker's reason (`unavailable`, "the worktree could not be made: …") and leaves neither a
+  session nor the record; a worktree not made in 15 minutes fails the call too and stays (it is
+  marked for deletion once ready, as it has no session). The description of the tool says that
+  the helper's commits stay on its branch for the owner to merge and that the worktree is not
+  deleted automatically. A branch outlives its worktree (§13.2), so a default name used again
+  (a slug taken again after its session was deleted) is refused by the worker; the agent gives
+  `branch` then.
 - `hqc_list_sessions(project?)` — addresses, titles, statuses. Since 0.33 (T30): `project` is
   a slug or an id of the owner's project (another owner's or an unknown one: `not_found`); the
   result is `{sessions: [{address, title, status, current?}], truncated}`: the owner's
@@ -2826,6 +2869,8 @@ an existing one) and optionally the folder (by default next to the origin,
 `<origin-name>-<branch>`); the hub checks the origin (§3 Workspace) and the parent, the worker
 checks the origin, the branch and the new path itself and runs `git worktree add` in the origin
 with the environment of the new path (§5.3), through the same `creating` → `ready` | `failed`.
+Since 0.61 (T47) `hqc_spawn` with `isolation: "worktree"` makes an `ephemeral` worktree the same
+way for the session it starts (§7); the owner's agent asks for it, so there is no confirmation.
 
 ### 13.2 Deletion
 `dir`: only the hub's record is deleted, the folder is left alone; while the workspace has
@@ -2844,7 +2889,9 @@ files) and `git worktree prune`, and keeps the branch; the inspection lists only
 own branch. An origin is not deleted, record or folder, while worktree records of it exist
 (`409 workspace_in_use`): worktrees go first. An `ephemeral` workspace is **not deleted automatically** when its last
 session is archived; it is marked "for deletion" and shows a button;
-deletion is always confirmed.
+deletion is always confirmed. Since 0.61 (T47): the mark is `marked_for_deletion`, computed by
+the hub (§3 Workspace), and the button is "Delete" on the workspace's row in the project
+settings, which opens the dialog above; the folder goes only through it.
 
 ### 13.3 Project session template (backlog since 0.50)
 An optional project setting: `{workspace_id, cwd_pattern: "<slug>", prompt}`.
@@ -3210,7 +3257,8 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
 - Archiving: the hub sets `archived_at` (since 0.53; unarchiving clears it), sends `session.kill`, open requests get
   `approval.cancel`/`clarify.cancel {archived}`, `pending` inputs are marked `failed`,
   the send buffer is cleared. Unarchiving returns `idle`; the process comes back via
-  resume on the first input.
+  resume on the first input. Since 0.61 (T47): archiving the last unarchived session of an
+  `ephemeral` workspace marks the workspace for deletion, and unarchiving one clears the mark (`marked_for_deletion`, §3 Workspace); nothing is sent to the worker for it.
 - Session deletion: events, `ReadCursor`, `PendingRequest`, the session's artifacts
   (unless another session references them) are deleted; jsonl files on the worker
   are **left alone**; late events from the worker's outbox get `ack` and are dropped
@@ -3270,7 +3318,7 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
    MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 6).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
-4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ephemeral. Environments and bindings on the worker. Moved
+4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
    ahead of the agents on 2026-10-31; the session template (§13.3) went to `docs/BACKLOG.md`.
    Tasks: `docs/ITERATION-4.md`.
 5. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
@@ -3345,7 +3393,7 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   | `hqc_ask.timeout_s` (§7) | 1 … `ask_timeout_s` (600 s), larger cut to it | `0`: `error invalid_args` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
   | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
-  | `hqc_spawn` (§7, since 0.37): sessions spawned in one chain (§7.1; a human's turn is one chain) | 5 | `mcp.result` `error limit_exceeded`, nothing is created |
+  | `hqc_spawn` (§7, since 0.37): sessions spawned in one chain (§7.1; a human's turn is one chain); since 0.61 (T47) the owner's ephemeral worktrees still being made count in both spawn limits, in every chain, as the sessions they will get (no limit of their own) | 5 | `mcp.result` `error limit_exceeded`, nothing is created |
   | … sessions spawned per owner | 20 in the last hour (sliding, by `created_at`; deleted sessions no longer count); since 0.39 counted and created under a per-owner lock, so parallel calls cannot overshoot | same |
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
   | `PUT /worker/artifacts` (§5.4) | 100 MB (`Content-Length` checked first, then the stream); a session of this worker | `413 too_large` / `404` |
@@ -3436,6 +3484,22 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.60 → 0.61 (T47, ephemeral worktrees for spawned sessions)
+§7: `hqc_spawn` gets `isolation: "worktree"` and `branch?`: an `ephemeral` worktree of the
+workspace the spawn would use (T46's origin rules), on a new branch, `hqc/session-N` with the new
+session's slug by default; the call waits for the worker, then creates the session there and
+returns `{address, worktree: {path, branch}}`; a failed worktree fails the call with the worker's
+reason and leaves no session and no record. The tool's description says what isolation does and
+that the helper's commits stay on its branch for the owner to merge. §5.2: the result of a spawn
+with isolation comes under the call frame's `id` once the worktree is made, while the hub keeps
+reading the connection; the worktree is keyed by `once_id` like the session. §3 Workspace:
+`ephemeral` in effect, `marked_for_deletion` computed by the hub (ephemeral, ready, no
+unarchived session), never deleted automatically. §6: the workspace object's
+`marked_for_deletion` (`api.workspace.ephemeral.json`), "spawned", "for deletion" and "Delete" on
+the row in the client. §13.1, §13.2, §17.4: the ephemeral worktree, its mark and its deletion
+through the dialog. §19: ephemeral done. §20: worktrees being made count in the spawn limits. No
+migration (`ephemeral` is in `0001`), no new frame, no worker change.
 
 ### 0.60 → 0.60 (T46, worktree workspaces)
 §3 Workspace: `origin_workspace_id` and `branch` in effect (hub migration `0029`: the column

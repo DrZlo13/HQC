@@ -378,7 +378,7 @@ row, worktrees under their origin, the dialog's worktree text and `force`. Tests
 `tests/proto.test.ts`. The iteration criterion by hand (phone, ssh host, commit, deletion) is
 still open. Decisions in `docs/notes/t46-questions.md`.
 
-## T47. Ephemeral worktrees for spawned sessions
+## T47. Ephemeral worktrees for spawned sessions (done, SPEC 0.61)
 
 Sections: §3 Workspace (`ephemeral`), §7 (`hqc_spawn`), §13.2, §17.4. Depends on T46.
 - `hqc_spawn(..., isolation: "worktree", branch?)`: the hub creates an ephemeral worktree of the
@@ -389,3 +389,16 @@ Sections: §3 Workspace (`ephemeral`), §7 (`hqc_spawn`), §13.2, §17.4. Depend
 Acceptance: the common checks; hub tests: spawn with isolation creates and links the worktree,
 archiving the last session marks it; worker test for the branch name; a live run (haiku, two
 turns): a spawned session reports a path that is a worktree of the spawner's workspace.
+
+Done: `isolation` and `branch` in `hqc_proto::mcp` (`hqc_spawn`'s schema and description) and
+`marked_for_deletion` on `api::Workspace`. Hub: `spawn.rs` makes the worktree through T46's
+`create_worktree` (`ephemeral` id from `once_id`, branch `hqc/session-N` from
+`default_branch`), waits for it (`ready`) and creates the session with that N
+(`db::Spawn::number`); `mcp::Answer::Wait` / `Called::Wait` let a tool answer under the call's
+frame id from a task while the connection reads on; the spawn limits count ephemeral worktrees
+being made; `marked_for_deletion` is computed in `WORKSPACE_COLS`. No migration, no frame, no
+worker code. Client: "spawned", "for deletion" and "Delete" on the row, the dialog's text; the
+mock's `spawnWorktree`. Tests: hub `tests/t47.rs`; worker
+`workspaces::tests::worktree_on_a_spawn_branch`; client `tests/projects.test.tsx` and
+`tests/proto.test.ts`; one live run (`tests/live_worktree.rs`, passed). Decisions in
+`docs/notes/t47-questions.md`.

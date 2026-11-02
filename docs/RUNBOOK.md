@@ -678,7 +678,8 @@ rm /tmp/infra_ed25519                                              # the store h
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with
 `entrypoint: sdk-cli`, and the VS Code extension's conversation history shows only its own
 sessions (verified 2026-10-24 on 2.1.309). The worker always puts `voiceEnabled: false` into
-`--settings`: otherwise macOS asks for microphone access on behalf of `hqc-worker`.
+`--settings`, the title runs below included: otherwise macOS asks for microphone access on
+behalf of `hqc-worker`.
 
 Session titles (SPEC §3 Session, §8.1, T24) are made up by the worker on the same subscription:
 after the session's first reply the hub sends `title.request`, and the worker runs `claude -p --model

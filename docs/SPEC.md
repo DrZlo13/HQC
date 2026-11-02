@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.58, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
+Version 0.59, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1837,7 +1837,9 @@ one input (case-insensitively) get `-2`, `-3`… before the extension. The direc
 may be a symlink; the file is written to a temporary file and renamed into
 place. If the workspace is a git repository (a `.git` directory, or a `.git` file of a
 worktree, in which case the common git directory from `commondir`), the line `.hqc/` is added to
-its `info/exclude`. A block is appended to the input text: an empty line, `Attachments:` and a
+its `info/exclude`; since 0.59 also on every input of a workspace that has a `.hqc/` folder, files
+or not, so a repository made after the first file came (the agent's `git init` writes a fresh
+`info/exclude`) gets it before the next turn. A block is appended to the input text: an empty line, `Attachments:` and a
 `- <path>` line per file, paths relative to the working directory
 (`.hqc/inbox/<event_id>/<name>`); an empty text gives only the block. Images (`kind: image`,
 `image/png|jpeg|gif|webp`, up to 5 MB) also go into the stream-json user message: `content` is
@@ -3358,6 +3360,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.58 → 0.59 (`.hqc/` excluded on every input)
+§12: the worker adds `.hqc/` to `info/exclude` on every input of a workspace that has the folder,
+not only when a file comes (2026-11-02: a session got an image, then its agent ran `git init`, and
+`git add -A` took the inbox in). No protocol change.
 
 ### 0.57 → 0.58 (T45, clone workspaces and deleting what hqc created)
 §3 Workspace: `state` (`creating` | `ready` | `failed`) and `error` (hub migration `0028`); only

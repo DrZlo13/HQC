@@ -47,6 +47,9 @@ pub fn args() -> Vec<String> {
         "",
         "--tools",
         "",
+        // Without it macOS asks for the microphone on behalf of hqc-worker (RUNBOOK §2.2).
+        "--settings",
+        r#"{"voiceEnabled":false}"#,
         "--system-prompt",
         SYSTEM_PROMPT,
         "--output-format",
@@ -257,6 +260,7 @@ mod tests {
             ("--max-turns", "1"),
             ("--setting-sources", ""),
             ("--tools", ""),
+            ("--settings", r#"{"voiceEnabled":false}"#),
             ("--system-prompt", SYSTEM_PROMPT),
             ("--output-format", "json"),
         ];
@@ -271,16 +275,10 @@ mod tests {
         assert!(a.contains(&"--no-session-persistence".to_string()));
         assert!(a.contains(&"--strict-mcp-config".to_string()));
         // Nothing that would resume, persist or load anything else.
-        for no in [
-            "--resume",
-            "--session-id",
-            "--mcp-config",
-            "--settings",
-            "--verbose",
-        ] {
+        for no in ["--resume", "--session-id", "--mcp-config", "--verbose"] {
             assert!(!a.contains(&no.to_string()), "{no}");
         }
-        assert_eq!(a.len(), 15);
+        assert_eq!(a.len(), 17);
     }
 
     #[test]

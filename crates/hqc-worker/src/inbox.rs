@@ -281,13 +281,28 @@ fn touch(client: &ArtifactClient, workspace: &Path, workdir: &Path, allowed_root
             tracing::warn!(workdir = %workdir.display(), "inbox folder not remembered: {e:#}");
         }
     }
+    exclude_logged(workspace, allowed_roots);
+}
+
+/// [`exclude_hqc`] for a workspace that already has a `.hqc/` folder; nothing otherwise.
+fn exclude_existing(workspace: &Path, allowed_roots: &[PathBuf]) {
+    if workspace.join(".hqc").is_dir() {
+        exclude_logged(workspace, allowed_roots);
+    }
+}
+
+fn exclude_logged(workspace: &Path, allowed_roots: &[PathBuf]) {
     if let Err(e) = exclude_hqc(workspace, allowed_roots) {
         tracing::warn!(workspace = %workspace.display(), "cannot add .hqc/ to .git/info/exclude: {e:#}");
     }
 }
 
 /// The input as the runtime gets it: the text with the block of paths, and the files.
-/// Without artifacts the input is unchanged and nothing is touched on disk.
+/// Without artifacts the input is unchanged and nothing is written but the exclude (below).
+///
+/// Every input of a workspace that has a `.hqc/` checks that git excludes it: a repository
+/// made after the first file came (`git init` by the agent) has a fresh `info/exclude`, and
+/// `git add -A` would take the inbox in.
 ///
 /// The files of a buffered message in `peer_prefix` (T41) go to the folder of that message
 /// (`.hqc/inbox/<its event_id>/`) and their block follows its text; the limit per input
@@ -300,6 +315,7 @@ pub async fn prepare(
 ) -> Result<(SessionInput, Vec<InboxFile>), InboxError> {
     let own = distinct(&input.artifact_ids);
     if own.is_empty() && input.peer_prefix.iter().all(|p| p.artifact_ids.is_empty()) {
+        exclude_existing(&spec.workspace, allowed_roots);
         return Ok((input.clone(), vec![]));
     }
     touch(client, &spec.workspace, &spec.workdir, allowed_roots);
@@ -809,6 +825,28 @@ mod tests {
             "look\n\nAttachments:\n- .hqc/inbox/e/a.png\n- .hqc/inbox/e/b.txt"
         );
         assert_eq!(with_block("  ", &[f("x")]), "Attachments:\n- x");
+    }
+
+    #[test]
+    fn a_repository_made_after_the_inbox_gets_the_exclude() {
+        let d = tempfile::tempdir().unwrap();
+        let roots = vec![d.path().to_path_buf()];
+        let exclude = d.path().join(".git/info/exclude");
+        // No .hqc/ yet: the exclude is left alone.
+        std::fs::create_dir_all(d.path().join(".git/info")).unwrap();
+        std::fs::write(&exclude, "# git's template\n").unwrap();
+        exclude_existing(d.path(), &roots);
+        assert_eq!(
+            std::fs::read_to_string(&exclude).unwrap(),
+            "# git's template\n"
+        );
+        // The inbox came before `git init`, whose fresh exclude does not have it.
+        std::fs::create_dir_all(d.path().join(".hqc/inbox")).unwrap();
+        exclude_existing(d.path(), &roots);
+        assert!(std::fs::read_to_string(&exclude)
+            .unwrap()
+            .lines()
+            .any(|l| l == ".hqc/"));
     }
 
     #[test]

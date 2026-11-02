@@ -5011,3 +5011,56 @@ button.ps-look {
 .modal-phone .confirm-foot .btn {
   height: 48px;
 }
+
+/* ---- T46: worktrees under their origin, the "New worktree" form ---- */
+
+.workspace-row.is-worktree {
+  margin-left: 24px;
+  border-left: 3px solid var(--accent-soft);
+}
+
+.workspace-branch {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.new-worktree {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.worktree-branch-kind {
+  flex: 1 1 200px;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 13.5px;
+  color: var(--text2);
+}
+
+.worktree-branch-kind label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.worktree-branch-kind input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.is-phone .workspace-row.is-worktree {
+  margin-left: 14px;
+}
+
+.is-phone .new-worktree {
+  padding: 12px 14px;
+}
+
+.is-phone .worktree-branch-kind label {
+  min-height: 36px;
+}

@@ -7,8 +7,10 @@
 //! Typed here: the frames of iteration 1 (docs/ITERATION-1.md, T1) and the folder requests
 //! `fs.stat` / `fs.list_dirs` with their `result` (T14), confirmations outside a session
 //! `worker.approval.request` / `worker.approval.response` (T17), `title.request` with its
-//! `result` (T24), the MCP calls `mcp.call` / `mcp.cancel` and `mcp.result` (T30). Later
-//! iterations: hub -> worker `session.steer`, `workspace.*`, `model.proxy`.
+//! `result` (T24), the MCP calls `mcp.call` / `mcp.cancel` and `mcp.result` (T30), the
+//! workspaces hqc creates and deletes `workspace.create` / `workspace.created`,
+//! `workspace.inspect`, `workspace.delete` (T45). Later iterations: hub -> worker
+//! `session.steer`, `model.proxy`.
 
 use std::collections::BTreeMap;
 
@@ -143,6 +145,10 @@ pub enum WorkerFrame {
     /// it open (SPEC §5.2, §7.2); answered with `ack {}`.
     #[serde(rename = "mcp.cancel")]
     McpCancel(McpCancel),
+    /// The outcome of `workspace.create` (T45, SPEC §5.4); answered with `ack {}`. Sent when
+    /// the clone ends and again whenever the hub repeats the `workspace.create`.
+    #[serde(rename = "workspace.created")]
+    WorkspaceCreated(WorkspaceCreated),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -474,10 +480,180 @@ pub enum HubFrame {
     /// at once; a deferred one (`hqc_ask`) comes as a frame of its own, which the worker acks.
     #[serde(rename = "mcp.result")]
     McpResult(McpResult),
+    /// Make a new folder for a workspace (T45, SPEC §5.3, §13.1): acked at once, the outcome
+    /// comes later as `workspace.created`.
+    #[serde(rename = "workspace.create")]
+    WorkspaceCreate(WorkspaceCreate),
+    /// Uncommitted changes and unpushed commits of a folder, before it is deleted (T45).
+    #[serde(rename = "workspace.inspect")]
+    WorkspaceInspect(WorkspacePath),
+    /// Delete a folder the worker created (T45, SPEC §13.2).
+    #[serde(rename = "workspace.delete")]
+    WorkspaceDelete(WorkspacePath),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
     Error(WireError),
+}
+
+/// `workspace.create {request_id, kind, path, ...}` -> `ack`, then `workspace.created` (T45,
+/// SPEC §5.3). `request_id` is the workspace's id, not the frame's: the hub repeats the frame
+/// after every `hello` while the workspace is `creating`, and the worker answers a request it
+/// knows with its outcome instead of starting it again. `path` is the new folder: the worker
+/// checks it itself (inside `allowed_roots` after resolving its parent, not existing, not
+/// overlapping a workspace it knows) and creates it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreate {
+    pub request_id: String,
+    pub path: String,
+    #[serde(flatten)]
+    pub source: WorkspaceSource,
+}
+
+/// What a new workspace is made from (`kind`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceSource {
+    /// `git clone [--branch <branch>] -- <url> <path>` in the environment of `path`; `url` as
+    /// [`check_clone_url`] allows it.
+    Clone {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+}
+
+/// `workspace.created {request_id, canonical | error}` (T45, SPEC §5.4): the folder is ready at
+/// `canonical`, or it was not made (`error`, a message for the user; the worker removed what it
+/// had created).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreated {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// `workspace.inspect {request_id, path}` -> `result` [`WorkspaceInspectResult`];
+/// `workspace.delete {request_id, path}` -> `result` [`WorkspaceDeleteResult`] (T45, SPEC
+/// §5.3). `request_id` equals the frame `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePath {
+    pub request_id: String,
+    pub path: String,
+}
+
+/// Result of `workspace.inspect`: what deleting the folder would lose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceInspectResult {
+    /// The folder is a git work tree (it has a `.git`); otherwise the lists are empty.
+    pub git: bool,
+    /// Paths with uncommitted changes, untracked ones included (`git status --porcelain`), at
+    /// most [`MAX_DIRTY`].
+    pub dirty: Vec<String>,
+    /// All of them, also those beyond [`MAX_DIRTY`].
+    pub dirty_count: u32,
+    /// Local branches with commits that are on no remote branch, at most [`MAX_UNPUSHED`].
+    pub unpushed: Vec<Unpushed>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unpushed {
+    pub branch: String,
+    pub commits: u32,
+}
+
+/// Most dirty paths one `workspace.inspect` lists.
+pub const MAX_DIRTY: usize = 200;
+/// Most branches one `workspace.inspect` lists.
+pub const MAX_UNPUSHED: usize = 100;
+
+/// Result of `workspace.delete`: `removed: false` when the folder was gone already.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceDeleteResult {
+    pub removed: bool,
+}
+
+/// Longest clone URL.
+pub const MAX_CLONE_URL: usize = 2048;
+
+/// Where [`check_clone_url`] says a clone comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloneFrom {
+    /// `https://`, `ssh://` or scp-like `[user@]host:path`.
+    Remote,
+    /// `file:///<path>`: the worker clones it only from inside its `allowed_roots`.
+    File(String),
+}
+
+/// A clone URL hqc passes to `git clone` (T45, SPEC §5.3): `https://`, `ssh://`, scp-like
+/// `[user@]host:path` and `file:///<absolute path>`. Refused: other schemes (`http`, `git`,
+/// `ext::` and every `<transport>::` remote helper, which can run commands), plain local
+/// paths, a leading `-`, a host starting with `-`, whitespace and control characters.
+pub fn check_clone_url(url: &str) -> Result<CloneFrom, String> {
+    if url.is_empty() || url.len() > MAX_CLONE_URL {
+        return Err(format!("the URL must be 1..{MAX_CLONE_URL} bytes"));
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("the URL contains whitespace or control characters".into());
+    }
+    if url.starts_with('-') {
+        return Err("the URL starts with -".into());
+    }
+    let host_ok = |authority: &str| {
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        !host.is_empty() && !host.starts_with('-')
+    };
+    if let Some((scheme, rest)) = url.split_once("://") {
+        return match scheme.to_ascii_lowercase().as_str() {
+            "https" | "ssh" => {
+                let authority = rest.split('/').next().unwrap_or("");
+                if host_ok(authority) {
+                    Ok(CloneFrom::Remote)
+                } else {
+                    Err("the URL has no host, or one starting with -".into())
+                }
+            }
+            "file" if rest.starts_with('/') && !rest.contains('%') => {
+                Ok(CloneFrom::File(rest.to_string()))
+            }
+            "file" => Err("a file URL is file:///<absolute path>, without %".into()),
+            s => Err(format!(
+                "{s}:// is not allowed: use https://, ssh:// or user@host:path"
+            )),
+        };
+    }
+    if url.contains("::") {
+        return Err("<transport>::<address> URLs are not allowed".into());
+    }
+    // scp-like: a `:` before any `/`, as git reads it.
+    match url.split_once(':') {
+        Some((authority, path))
+            if !authority.contains('/') && !path.is_empty() && host_ok(authority) =>
+        {
+            Ok(CloneFrom::Remote)
+        }
+        _ => Err("not a clone URL: use https://, ssh:// or user@host:path".into()),
+    }
+}
+
+/// A branch name for `git clone --branch` (T45): letters, digits and `._/-`, not starting
+/// with `-` or `/`, without `..` or `//`, not ending with `/` or `.lock`, at most 255 bytes.
+pub fn check_branch(b: &str) -> Result<(), String> {
+    let ok = (1..=255).contains(&b.len())
+        && b.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'/' | b'-'))
+        && !b.starts_with(['-', '/'])
+        && !b.ends_with('/')
+        && !b.ends_with(".lock")
+        && !b.contains("..")
+        && !b.contains("//");
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("{b:?} is not a branch name"))
+    }
 }
 
 /// `title.request {request_id, session_id, user_text, agent_text}` -> `result {request_id,
@@ -537,6 +713,8 @@ pub enum ResultBody {
     Candidates(CandidatesResult),
     Title(TitleResult),
     Inspect(InspectResult),
+    WorkspaceInspect(WorkspaceInspectResult),
+    WorkspaceDelete(WorkspaceDeleteResult),
 }
 
 /// Result of `fs.stat`. `canonical` is the path with symlinks resolved, present when it
@@ -989,6 +1167,9 @@ mod tests {
         "workspace.rules",
         "permissions.inspect",
         "mcp.result",
+        "workspace.create",
+        "workspace.inspect",
+        "workspace.delete",
         "ack",
         "error",
     ];
@@ -1001,6 +1182,7 @@ mod tests {
         "mirror.event",
         "mcp.call",
         "mcp.cancel",
+        "workspace.created",
         "ack",
         "error",
     ];
@@ -1104,6 +1286,18 @@ mod tests {
             "mcp.result",
             include_str!("../examples/wire/hub.mcp.result.error.json"),
         ),
+        (
+            "workspace.create",
+            include_str!("../examples/wire/hub.workspace.create.json"),
+        ),
+        (
+            "workspace.inspect",
+            include_str!("../examples/wire/hub.workspace.inspect.json"),
+        ),
+        (
+            "workspace.delete",
+            include_str!("../examples/wire/hub.workspace.delete.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -1155,6 +1349,14 @@ mod tests {
             include_str!("../examples/wire/worker.result.permissions.inspect.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.workspace.inspect.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.workspace.delete.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
         ),
@@ -1173,6 +1375,14 @@ mod tests {
         (
             "mcp.cancel",
             include_str!("../examples/wire/worker.mcp.cancel.json"),
+        ),
+        (
+            "workspace.created",
+            include_str!("../examples/wire/worker.workspace.created.json"),
+        ),
+        (
+            "workspace.created",
+            include_str!("../examples/wire/worker.workspace.created.error.json"),
         ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         ("error", include_str!("../examples/wire/worker.error.json")),
@@ -1199,6 +1409,9 @@ mod tests {
             HubFrame::WorkspaceRules(_) => "workspace.rules",
             HubFrame::PermissionsInspect(_) => "permissions.inspect",
             HubFrame::McpResult(_) => "mcp.result",
+            HubFrame::WorkspaceCreate(_) => "workspace.create",
+            HubFrame::WorkspaceInspect(_) => "workspace.inspect",
+            HubFrame::WorkspaceDelete(_) => "workspace.delete",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -1214,6 +1427,7 @@ mod tests {
             WorkerFrame::MirrorEvent(_) => "mirror.event",
             WorkerFrame::McpCall(_) => "mcp.call",
             WorkerFrame::McpCancel(_) => "mcp.cancel",
+            WorkerFrame::WorkspaceCreated(_) => "workspace.created",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }
@@ -1282,6 +1496,106 @@ mod tests {
                 ..EnvironmentInfo::default()
             }]
         );
+    }
+
+    /// T45: the clone frame carries its kind, and its outcome is a path or an error.
+    #[test]
+    fn workspace_create_and_created() {
+        let c: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.workspace.create.json"))
+                .unwrap();
+        let HubFrame::WorkspaceCreate(c) = c.body else {
+            panic!("not workspace.create");
+        };
+        let WorkspaceSource::Clone { url, branch } = &c.source;
+        assert_eq!(check_clone_url(url), Ok(CloneFrom::Remote));
+        assert!(check_branch(branch.as_deref().unwrap()).is_ok());
+        for (src, ok) in [
+            (
+                include_str!("../examples/wire/worker.workspace.created.json"),
+                true,
+            ),
+            (
+                include_str!("../examples/wire/worker.workspace.created.error.json"),
+                false,
+            ),
+        ] {
+            let f: Envelope<WorkerFrame> = serde_json::from_str(src).unwrap();
+            let WorkerFrame::WorkspaceCreated(r) = f.body else {
+                panic!("not workspace.created");
+            };
+            assert_eq!(r.request_id, c.request_id);
+            assert_eq!((r.canonical.is_some(), r.error.is_none()), (ok, ok));
+        }
+    }
+
+    #[test]
+    fn clone_urls() {
+        for ok in [
+            "https://github.com/drzlo/hqc.git",
+            "HTTPS://github.com/drzlo/hqc",
+            "https://user:token@git.example.com/a/b.git",
+            "ssh://git@github.com/drzlo/hqc.git",
+            "ssh://git@[::1]:2222/x.git",
+            "git@github.com:drzlo/hqc.git",
+            "github.com:drzlo/hqc.git",
+        ] {
+            assert_eq!(check_clone_url(ok), Ok(CloneFrom::Remote), "{ok}");
+        }
+        assert_eq!(
+            check_clone_url("file:///Users/me/work/repos/a.git"),
+            Ok(CloneFrom::File("/Users/me/work/repos/a.git".into()))
+        );
+        for bad in [
+            "",
+            "ext::sh -c touch% /tmp/pwned",
+            "ext::sh",
+            "fd::7",
+            "http://github.com/a/b",
+            "git://github.com/a/b",
+            "ftp://h/a",
+            "/Users/me/work/repo",
+            "./repo",
+            "../repo",
+            "repo",
+            "-uhttps://x/y",
+            "ssh://-oProxyCommand=touch/x",
+            "ssh://git@-oProxyCommand=x/y",
+            "-oProxyCommand=x:path",
+            "git@-oProxy:path",
+            "git@host:",
+            "file://relative/path",
+            "file:///a%2e%2e/b",
+            "https://",
+            "https://host/a b",
+            "https://host/a\nb",
+            "a/b:c",
+        ] {
+            assert!(check_clone_url(bad).is_err(), "{bad:?} must be refused");
+        }
+        assert!(check_clone_url(&format!("https://h/{}", "a".repeat(MAX_CLONE_URL))).is_err());
+    }
+
+    #[test]
+    fn branch_names() {
+        for ok in ["main", "hqc/fix-backlight", "v1.2.3", "release_2026"] {
+            assert!(check_branch(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "-b",
+            "--upload-pack=x",
+            "/a",
+            "a/",
+            "a..b",
+            "a//b",
+            "a.lock",
+            "a b",
+            "a~1",
+            "a:b",
+        ] {
+            assert!(check_branch(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -1363,6 +1677,14 @@ mod tests {
                 include_str!("../examples/wire/hub.permissions.inspect.json"),
                 include_str!("../examples/wire/worker.result.permissions.inspect.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.workspace.inspect.json"),
+                include_str!("../examples/wire/worker.result.workspace.inspect.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.workspace.delete.json"),
+                include_str!("../examples/wire/worker.result.workspace.delete.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -1373,6 +1695,8 @@ mod tests {
                 HubFrame::WorkspaceListCandidates(r) => (&r.request_id, 2),
                 HubFrame::TitleRequest(r) => (&r.request_id, 3),
                 HubFrame::PermissionsInspect(r) => (&r.request_id, 4),
+                HubFrame::WorkspaceInspect(r) => (&r.request_id, 5),
+                HubFrame::WorkspaceDelete(r) => (&r.request_id, 6),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -1386,6 +1710,8 @@ mod tests {
                 ResultBody::Candidates(_) => 2,
                 ResultBody::Title(_) => 3,
                 ResultBody::Inspect(_) => 4,
+                ResultBody::WorkspaceInspect(_) => 5,
+                ResultBody::WorkspaceDelete(_) => 6,
             };
             assert_eq!(got, kind);
         }

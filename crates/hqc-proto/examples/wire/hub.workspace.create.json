@@ -1,0 +1,11 @@
+{
+  "id": "h-21",
+  "type": "workspace.create",
+  "payload": {
+    "request_id": "0199f3a2-7c10-7000-8000-0000000000e2",
+    "kind": "clone",
+    "path": "/Users/home-mac/work/c6-displays",
+    "url": "git@github.com:drzlo/c6-displays.git",
+    "branch": "main"
+  }
+}

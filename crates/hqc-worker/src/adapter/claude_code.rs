@@ -375,7 +375,7 @@ impl ClaudeCodeAdapter {
     ///   environment's, T43) → `--settings`, in restricted mode too (the CLI applies
     ///   `--settings` there, checked on 2.1.308);
     /// - `--strict-mcp-config` unless the environment has `allow_local_mcp` (the hqc server
-    ///   is in `--mcp-config` either way); the environment's `env` on top of [`child_env`];
+    ///   is in `--mcp-config` either way); [`crate::config::Environment::process_env`];
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(&self, spec: &StartSpec, uuid: &Uuid, resume: bool) -> CommandSpec {
@@ -448,11 +448,7 @@ impl ClaudeCodeAdapter {
             args,
             cwd: spec.workdir.clone(),
             env: {
-                let mut env = child_env(std::env::vars());
-                for (k, v) in spec.environment.env.iter() {
-                    env.retain(|(x, _)| x != k);
-                    env.push((k.into(), v.into()));
-                }
+                let mut env = spec.environment.process_env();
                 // The worker's own come last.
                 env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT" && k != "MCP_TOOL_TIMEOUT");
                 if let Some(e) = &self.opts.entrypoint {

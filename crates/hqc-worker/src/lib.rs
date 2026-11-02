@@ -25,6 +25,7 @@ pub mod supervisor;
 pub mod title;
 pub mod token;
 pub mod worker_log;
+pub mod workspaces;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,7 +57,8 @@ pub struct Worker {
     /// Directory of the outbox database (`$HQC_HOME/outbox`).
     pub outbox_dir: PathBuf,
     /// Folders the worker runs sessions in without asking (`$HQC_HOME/known_workspaces.json`,
-    /// SPEC §10.2).
+    /// SPEC §10.2); the folders it created for workspaces are listed next to it
+    /// ([`workspaces::CREATED_FILE`], T45).
     pub known_paths_file: PathBuf,
     /// Warn/error lines of the worker's own log, for its service session (SPEC §10.2);
     /// `None`: not forwarded.
@@ -121,6 +123,13 @@ impl Worker {
             tracing::info!(pending, "outbox has events from a previous run");
         }
         let known = Arc::new(KnownPaths::load(&self.known_paths_file)?);
+        // Removes the folders of clones a previous run did not finish (T45).
+        let created = workspaces::Created::load(
+            &self
+                .known_paths_file
+                .with_file_name(workspaces::CREATED_FILE),
+            &self.config,
+        )?;
         // Working directories the worker wrote inboxes into (T21).
         let inboxes = Arc::new(KnownPaths::load(
             &self.known_paths_file.with_file_name("inbox_dirs.json"),
@@ -188,6 +197,7 @@ impl Worker {
             artifacts,
             self.shutdown_timeout,
             known,
+            created,
         );
         let mirror_stop = CancellationToken::new();
         let mut mirror_task = None;

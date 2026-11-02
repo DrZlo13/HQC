@@ -1,0 +1,17 @@
+{
+  "id": "0199f3a2-7c10-7000-8000-0000000000e2",
+  "project_id": "0199f3a2-7c10-7000-8000-0000000000d2",
+  "worker_id": "0199f3a2-7c10-7000-8000-0000000000b1",
+  "path": "/Users/home-mac/work/c6-displays",
+  "label": "",
+  "environment": "default",
+  "kind": "clone",
+  "ephemeral": false,
+  "created_by_hqc": true,
+  "mirror_enabled": true,
+  "hqc_rules": 0,
+  "state": "failed",
+  "error": "git clone failed: fatal: Could not read from remote repository.",
+  "created_at": "2026-11-02T10:15:00Z",
+  "updated_at": "2026-11-02T10:15:04Z"
+}

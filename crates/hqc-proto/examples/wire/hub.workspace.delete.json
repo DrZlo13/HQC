@@ -1,0 +1,5 @@
+{
+  "id": "h-23",
+  "type": "workspace.delete",
+  "payload": { "request_id": "h-23", "path": "/Users/home-mac/work/c6-displays" }
+}

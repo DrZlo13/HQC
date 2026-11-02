@@ -546,44 +546,44 @@ describe("tool groups (T26)", () => {
     expect(root.querySelectorAll(".tool-group")).toHaveLength(1);
   });
 
-  it("captions a group with the interim message before it, cut to one line", async () => {
+  it("keeps an interim message as a message of its own, the group under it", async () => {
     const t = new Timeline();
     t.apply(
       agentText(
         1,
-        "Rebuilding the project.\nThen running the **tests**.",
+        "The encoders are wired right.\nFixing the **config**.",
         false,
       ),
     );
     t.apply(call(2, "a", "Bash", { command: "ninja -C build" }));
     t.apply(result(4, "a"));
-    t.apply(call(5, "b", "Bash", { command: "ctest" }));
+    t.apply(call(5, "b", "Bash", { command: "python3 - <<'EOF'\nimport sys\n\nprint(sys.argv)\nEOF" }));
     t.apply(result(40, "b"));
     t.apply(agentText(41, "Done.", true));
     show(t);
+    // Both messages are messages; the group says only what ran.
+    const msgs = root.querySelectorAll(".msg-agent");
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0].querySelector("strong")!.textContent).toBe("config");
     const g = root.querySelector(".tool-group")!;
-    expect(g.querySelector(".tool-caption")!.textContent).toBe(
-      "Rebuilding the project. Then running the tests .",
-    );
     expect(g.querySelector(".tool-stats")!.textContent).toBe(
-      "· 2 commands · 38 s",
+      "2 commands · 38 s",
     );
     expect(g.querySelector(".mark-ok")).not.toBeNull();
-    // The interim message is the caption, not a message of its own.
-    expect(root.querySelectorAll(".msg-agent")).toHaveLength(1);
     await act(async () =>
       g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
     );
-    expect(g.querySelector(".tool-group-text strong")!.textContent).toBe(
-      "tests",
-    );
-    const rows = [...g.querySelectorAll(".tool-row summary")].map(
-      (s) => s.querySelector(".tool-line")!.textContent,
-    );
-    expect(rows).toEqual(["ninja -C build", "ctest"]);
+    const rows = [...g.querySelectorAll(".tool-row summary")];
+    expect(rows.map((s) => s.querySelector(".tool-line")!.textContent)).toEqual([
+      "ninja -C build",
+      "python3 - <<'EOF'",
+    ]);
+    // A script: its first line and how many follow (blank lines not counted).
+    expect(rows[0].querySelector(".tool-more")).toBeNull();
+    expect(rows[1].querySelector(".tool-more")!.textContent).toBe("+3 lines");
   });
 
-  it('without an interim message says "N commands · time"; other tools show their argument', async () => {
+  it('says "N commands · time"; other tools show their argument', async () => {
     const t = new Timeline();
     t.apply(agentText(1, "Done.", true));
     t.apply(call(2, "a", "Read", { file_path: "Cargo.toml" }));
@@ -592,7 +592,6 @@ describe("tool groups (T26)", () => {
     t.apply(result(5, "b", true));
     show(t);
     const g = root.querySelector(".tool-group")!;
-    expect(g.querySelector(".tool-caption")).toBeNull();
     expect(g.querySelector(".tool-stats")!.textContent).toBe(
       "2 commands · 3 s",
     );
@@ -606,7 +605,7 @@ describe("tool groups (T26)", () => {
     expect(rows[1].querySelector(".mark-error")).not.toBeNull();
   });
 
-  it("a final answer is not a caption, and the next message closes the group", () => {
+  it("a message closes the group", () => {
     const t = new Timeline();
     t.apply(call(1, "a", "Bash", { command: "ls" }));
     t.apply(result(2, "a"));
@@ -615,10 +614,7 @@ describe("tool groups (T26)", () => {
     show(t);
     const groups = root.querySelectorAll(".tool-group");
     expect(groups).toHaveLength(2);
-    expect(groups[0].querySelector(".tool-caption")).toBeNull();
-    expect(groups[1].querySelector(".tool-caption")!.textContent).toBe(
-      "Looking further.",
-    );
+    expect(root.querySelector(".msg-agent")!.textContent).toContain("Looking further.");
     expect(groups[1].classList.contains("tool-running")).toBe(true);
   });
 });

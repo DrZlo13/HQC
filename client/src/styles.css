@@ -2080,13 +2080,6 @@ select.input {
   transform: rotate(90deg);
 }
 
-.tool-caption {
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .tool-stats {
   flex: none;
   color: var(--muted);
@@ -2116,12 +2109,6 @@ select.input {
   flex-direction: column;
   gap: 8px;
   box-shadow: inset 1px 0 0 var(--border);
-}
-
-.tool-group-text {
-  font-size: 13px;
-  color: var(--muted);
-  font-style: italic;
 }
 
 .tool-row summary {
@@ -2163,6 +2150,7 @@ select.input {
   text-overflow: ellipsis;
 }
 
+.tool-more,
 .tool-time {
   flex: none;
   color: var(--muted);

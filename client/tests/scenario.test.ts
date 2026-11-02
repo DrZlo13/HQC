@@ -105,11 +105,11 @@ describe('mock scenario', () => {
     // What the user sees: render the timeline and look for the cards.
     const { renderChatToElement } = await import('./render-helpers');
     const el = renderChatToElement(chat);
-    // The Read call in a group captioned by the interim message; the Bash call is the
-    // approval card, folded after the answer.
+    // The interim message is a message; the Read call is a group under it; the Bash call is
+    // the approval card, folded after the answer.
+    expect(el.querySelector('.msg-agent')!.textContent).toContain('Let me look at the project and run the tests.');
     const group = el.querySelector('.tool-group')!;
-    expect(group.querySelector('.tool-caption')!.textContent).toBe('Let me look at the project and run the tests.');
-    expect(group.querySelector('.tool-stats')!.textContent).toMatch(/^· 1 command\b/);
+    expect(group.querySelector('.tool-stats')!.textContent).toMatch(/^1 command\b/);
     expect(el.querySelector('.perm-done-row')!.textContent).toContain('$ cargo test');
     expect(el.querySelector('.perm-done-row')!.textContent).toContain('· allowed');
     expect(el.textContent).toContain('All 42 tests passed.');

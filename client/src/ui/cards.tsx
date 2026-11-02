@@ -8,7 +8,7 @@ import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } 
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import { AttachmentView, PendingAttachments } from './attachments';
-import { askTarget, buildFeed, callLine, callRows, captionText, groupDuration, groupState, type Block, type ToolRow } from './feed';
+import { askTarget, buildFeed, callLine, callRows, groupDuration, groupState, type Block, type ToolRow } from './feed';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconChevron, IconCross, IconWarn } from './icons';
 import {
@@ -96,7 +96,7 @@ function blockSeq(b: Block): number | undefined {
     case 'tools': {
       const first = b.rows[0];
       const row = first?.kind === 'call' ? (first.call ?? first.result) : first?.event;
-      return b.caption?.seq ?? row?.seq;
+      return row?.seq;
     }
     case 'item':
       return b.item.kind === 'event' ? b.item.event.seq : undefined;
@@ -435,8 +435,7 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
   );
 }
 
-/** A run of tool calls, collapsed: the interim message before it as the caption, else
- *  "N commands · time"; open, a row per call (T26). */
+/** A run of tool calls, collapsed: "N commands · time"; open, a row per call (T26). */
 function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const calls = callRows(block.rows);
@@ -451,22 +450,10 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
           <IconChevron />
         </span>
         <StateMark state={state} />
-        {block.caption ? (
-          <>
-            <span class="tool-caption">{captionText(block.caption)}</span>
-            <span class="tool-stats">· {stats}</span>
-          </>
-        ) : (
-          <span class="tool-stats">{stats}</span>
-        )}
+        <span class="tool-stats">{stats}</span>
       </button>
       {open && (
         <div class="tool-group-body">
-          {block.caption && !fitsCaption(block.caption) && (
-            <div class="tool-group-text">
-              <Markdown class="text" text={block.caption.payload.text} />
-            </div>
-          )}
           {block.rows.map((r) => (
             <ToolRowView key={r.key} row={r} actions={actions} />
           ))}
@@ -474,12 +461,6 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
       )}
     </div>
   );
-}
-
-/** The caption already says all of a short one-line message: no need to repeat it inside. */
-function fitsCaption(m: EventOf<'agent.message'>): boolean {
-  const t = m.payload.text.trim();
-  return !t.includes('\n') && !/[#*_`>[\]]/.test(t) && captionText(m) === t;
 }
 
 function StateMark({ state }: { state: 'running' | 'error' | 'ok' }) {
@@ -509,6 +490,7 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
           <span class="tool-name">{call?.payload.tool ?? 'Tool result'}</span>
         )}
         <span class="tool-line mono">{line ? line.text : oneLine(r?.result_preview ?? '', 80)}</span>
+        {line?.more && <span class="tool-more">+{line.more} {line.more === 1 ? 'line' : 'lines'}</span>}
         {r?.duration_ms !== undefined && <span class="tool-time">{formatDuration(r.duration_ms)}</span>}
         <StateMark state={state} />
       </summary>

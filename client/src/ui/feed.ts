@@ -1,5 +1,6 @@
 // What the feed draws, built from the timeline's items (T26): runs of tool calls fold into
-// one group, captioned by the interim agent message right before them; the `usage` after a
+// one group, and every agent message stays a message of its own (the agent narrates in its
+// thinking, which goes into the group; what it writes is for the user); the `usage` after a
 // final answer goes into the answer's meta line; a `tool.call` followed at once by the
 // `approval.request` for it is shown by the request card, not as a row of its own. Messages
 // between sessions (T51) are blocks of their own: the agent's `hqc_send` / `hqc_ask` call and
@@ -23,7 +24,7 @@ export interface PeerCall {
 export type Block =
   | { kind: 'item'; key: string; item: Item }
   | { kind: 'agent'; key: string; event: EventOf<'agent.message'>; usage?: EventOf<'usage'> }
-  | { kind: 'tools'; key: string; caption?: EventOf<'agent.message'>; rows: ToolRow[] }
+  | { kind: 'tools'; key: string; rows: ToolRow[] }
   | { kind: 'approval'; key: string; event: EventOf<'approval.request'>; call?: EventOf<'tool.call'> }
   /** "↗ Sent to X": a call of `hqc_send` / `hqc_ask`. */
   | ({ kind: 'sent'; key: string } & PeerCall)
@@ -136,11 +137,6 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         }
         if (!group) {
           group = { kind: 'tools', key: it.key, rows: [] };
-          const prev = out.at(-1);
-          if (prev?.kind === 'agent' && !prev.event.payload.final && !prev.usage) {
-            out.pop();
-            group.caption = prev.event;
-          }
           out.push(group);
         }
         group.rows.push(
@@ -163,11 +159,7 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         if (g && last?.kind === 'call' && last.call?.payload.tool === e.payload.tool) {
           call = last.call;
           g.rows.pop();
-          if (!g.rows.some((r) => r.kind === 'call')) {
-            // Nothing left but the caption: the message is drawn as itself again.
-            out.splice(out.indexOf(g), 1);
-            if (g.caption) out.push({ kind: 'agent', key: `e${g.caption.seq}`, event: g.caption });
-          }
+          if (!g.rows.some((r) => r.kind === 'call')) out.splice(out.indexOf(g), 1);
         }
         close();
         out.push({ kind: 'approval', key: it.key, event: e, call });
@@ -218,10 +210,6 @@ export function groupDuration(rows: ToolRow[]): number | undefined {
 }
 
 /** The interim message as a one-line caption. */
-export function captionText(m: EventOf<'agent.message'>, max = 140): string {
-  return oneLine(m.payload.text.replace(/[#*_`>]+/g, ' '), max);
-}
-
 /** The arguments of a call: `args_preview` is the input as JSON, cut at 4 KB (SPEC §4), so a
  *  long one may not parse. */
 export function callArgs(argsPreview: string): Record<string, unknown> {
@@ -246,9 +234,14 @@ export function callArgs(argsPreview: string): Record<string, unknown> {
 const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt'];
 
 /** One line for a call: `$ command` for Bash, else the tool and its main argument. */
-export function callLine(tool: string, argsPreview: string): { shell: boolean; text: string } {
+export function callLine(tool: string, argsPreview: string): { shell: boolean; text: string; more?: number } {
   const args = callArgs(argsPreview);
-  if (tool === 'Bash' && typeof args.command === 'string') return { shell: true, text: oneLine(args.command, 400) };
+  if (tool === 'Bash' && typeof args.command === 'string') {
+    // A script (a heredoc, several commands) shows its first line and how many follow.
+    const lines = args.command.trim().split('\n');
+    const more = lines.slice(1).filter((l) => l.trim()).length;
+    return { shell: true, text: oneLine(lines[0], 400), more: more || undefined };
+  }
   const key = BRIEF_KEYS.find((k) => typeof args[k] === 'string' && args[k]);
   return { shell: false, text: key ? oneLine(String(args[key]), 400) : '' };
 }

@@ -1162,6 +1162,11 @@ export interface Workspace {
   origin_workspace_id?: Uuid;
   /** The branch a clone was asked for, or the worktree's (T46). */
   branch?: string;
+  /** A worktree hqc_spawn made for the session it started (T47). */
+  ephemeral: boolean;
+  /** Ephemeral, ready and without a session that is not archived: shown for deletion, which
+   *  the user confirms (T47, SPEC §13.2). */
+  marked_for_deletion: boolean;
   /** hqc made the folder (T45): deleting the workspace can delete it. */
   created_by_hqc: boolean;
   /** Its Claude Code sessions are mirrored (imported from VS Code, SPEC §9). */
@@ -1189,6 +1194,8 @@ export function parseWorkspace(v: unknown): Workspace {
     kind: str(o, 'kind'),
     origin_workspace_id: optStr(o, 'origin_workspace_id'),
     branch: optStr(o, 'branch'),
+    ephemeral: o.ephemeral === true,
+    marked_for_deletion: o.marked_for_deletion === true,
     created_by_hqc: o.created_by_hqc === true,
     mirror_enabled: o.mirror_enabled === true,
     hqc_rules: optNum(o, 'hqc_rules') ?? 0,

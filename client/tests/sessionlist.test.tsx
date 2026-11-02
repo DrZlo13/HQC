@@ -163,6 +163,8 @@ function makeApp(list = LIST, api = hubApi()) {
     label: '',
     environment: 'default',
     kind: 'dir',
+    ephemeral: false,
+    marked_for_deletion: false,
     created_by_hqc: false,
     mirror_enabled: true,
     hqc_rules: 0,

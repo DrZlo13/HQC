@@ -248,6 +248,12 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                         {w.branch}
                       </span>
                     )}
+                    {w.ephemeral && (
+                      <span class="tag workspace-ephemeral" title="hqc_spawn made this worktree for the session it started">
+                        spawned
+                      </span>
+                    )}
+                    {w.marked_for_deletion && <span class="tag tag-failed workspace-marked">for deletion</span>}
                     {isDefault && <span class="tag">default</span>}
                     {w.environment !== 'default' && (
                       <span class="tag workspace-env" title="Environment from the worker’s worker.toml">
@@ -258,6 +264,11 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                     {w.state === 'failed' && <span class="tag tag-failed">{text.failed}</span>}
                   </div>
                   {w.state === 'failed' && <div class="error-text workspace-error">{w.error ?? 'The worker could not make it.'}</div>}
+                  {w.marked_for_deletion && (
+                    <div class="muted small workspace-note">
+                      Its sessions are archived. hqc keeps the worktree and its branch until you delete it.
+                    </div>
+                  )}
                   {w.state === 'creating' ? (
                     <div class="muted small workspace-note">{text.note}</div>
                   ) : (
@@ -299,8 +310,12 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                         </>
                       )}
                       <span class="spacer" />
-                      <button type="button" class="btn btn-small btn-ghost btn-remove-workspace" onClick={() => remove(w)}>
-                        Remove
+                      <button
+                        type="button"
+                        class={`btn btn-small btn-remove-workspace ${w.marked_for_deletion ? 'btn-danger-fill' : 'btn-ghost'}`}
+                        onClick={() => remove(w)}
+                      >
+                        {w.marked_for_deletion ? 'Delete' : 'Remove'}
                       </button>
                     </div>
                   )}
@@ -946,7 +961,8 @@ function DeleteFolderDialog({
         <div class="confirm-body">
           {worktree ? (
             <p class="delete-what">
-              hqc made this worktree{origin ? ` of ${workspaceName(origin)}` : ''}. Deleting it removes the folder with{' '}
+              hqc made this worktree{origin ? ` of ${workspaceName(origin)}` : ''}
+              {w.ephemeral ? ' for a session an agent started' : ''}. Deleting it removes the folder with{' '}
               <span class="mono">git worktree remove</span>; the branch <span class="mono">{w.branch}</span> and its
               commits stay in the repository. Removing it from the project keeps the folder.
             </p>

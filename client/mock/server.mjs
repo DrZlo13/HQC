@@ -638,7 +638,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return withStatus(201, info(s));
   });
   route('GET', '/api/workspaces', (_, __, q) => ({
-    workspaces: [...workspaces.values()].filter((w) => !q.get('project_id') || w.project_id === q.get('project_id')),
+    workspaces: [...workspaces.values()]
+      .filter((w) => !q.get('project_id') || w.project_id === q.get('project_id'))
+      // T47: an ephemeral worktree whose sessions are all archived is shown for deletion.
+      .map((w) => ({
+        ...w,
+        marked_for_deletion:
+          w.ephemeral && w.state === 'ready' && ![...sessions.values()].some((s) => s.workspace_id === w.id && !s.archived),
+      })),
   }));
   route('POST', '/api/workspaces', (_, body) => {
     const pr = projectOr404(String(body?.project_id));
@@ -1147,6 +1154,24 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     /** Ends the clones and worktrees that wait (a URL or branch with `hold`). */
     finishCreating() {
       for (const f of held.splice(0)) f();
+    },
+    /** What `hqc_spawn` with `isolation: "worktree"` leaves (T47): an ephemeral worktree of
+     *  `originId` on `hqc/<slug>` and the spawned session in it; the session's id. */
+    spawnWorktree(originId, title) {
+      const origin = workspaces.get(originId);
+      const s = newSession(title, randomUUID(), { project_id: origin.project_id });
+      const path = `${origin.path}-hqc-${s.slug}`;
+      const w = {
+        ...origin, id: randomUUID(), path, label: '', kind: 'worktree', origin_workspace_id: origin.id,
+        branch: `hqc/${s.slug}`, ephemeral: true, created_by_hqc: true, mirror_enabled: false, hqc_rules: 0,
+        state: 'ready', created_at: now(), updated_at: now(),
+      };
+      workspaces.set(w.id, w);
+      const cut = path.lastIndexOf('/');
+      (TREE[path.slice(0, cut)] ??= []).push(path.slice(cut + 1));
+      s.workspace_id = w.id;
+      pushSummary(s);
+      return s.id;
     },
     /** Drops every client socket, to exercise reconnect. */
     dropClients() {

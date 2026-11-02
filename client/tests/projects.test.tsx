@@ -18,6 +18,7 @@ let mock: {
   closeVsCode(id: string): void;
   hideHolder(id: string, hidden: boolean): void;
   finishCreating(): void;
+  spawnWorktree(originId: string, title: string): string;
   removedWorkspaces: { path: string; folder_removed?: boolean; forced?: boolean }[];
 };
 let win: Window;
@@ -531,4 +532,43 @@ it('makes a worktree of a workspace, shows it under its origin and deletes it th
   button('Delete folder', '.delete-folder')!.click();
   await until('dirty deleted', () => !row('/work/wt-dirty') && !$('.delete-folder'));
   expect(mock.removedWorkspaces.find((w) => w.path.endsWith('/wt-dirty'))).toMatchObject({ folder_removed: true, forced: true });
+});
+
+it('shows a spawned session’s worktree for deletion once its sessions are archived (T47)', async () => {
+  const pid = app.currentProjectId!;
+  const row = (end: string) => $$('.workspace-row').find((r) => r.querySelector('.workspace-path')?.textContent?.endsWith(end));
+  const origin = app.workspaces.get(pid)!.find((w) => w.path.endsWith('/work/hold-wt'))!;
+  // What hqc_spawn with a worktree leaves: the worktree under its origin, and its session.
+  const sid = mock.spawnWorktree(origin.id, 'Session 5');
+  await app.loadWorkspaces(pid);
+  const end = '/work/hold-wt-hqc-session-5';
+  await until('spawned worktree', () => row(end));
+  expect(row(end)!.querySelector('.workspace-ephemeral')!.textContent).toBe('spawned');
+  expect(row(end)!.querySelector('.workspace-branch')!.textContent).toBe('hqc/session-5');
+  expect(row(end)!.querySelector('.workspace-marked')).toBeNull();
+  expect(row(end)!.querySelector('.btn-remove-workspace')!.textContent).toBe('Remove');
+
+  // Its last session archived: marked, with the deletion at hand; unarchived: not any more.
+  await app.api.archive(sid);
+  await app.loadWorkspaces(pid);
+  await until('marked', () => row(end)?.querySelector('.workspace-marked'));
+  expect(row(end)!.querySelector('.workspace-marked')!.textContent).toBe('for deletion');
+  expect(row(end)!.querySelector('.workspace-note')!.textContent).toContain('Its sessions are archived');
+  expect(row(end)!.querySelector('.btn-remove-workspace')!.textContent).toBe('Delete');
+  await app.api.unarchive(sid);
+  await app.loadWorkspaces(pid);
+  await until('unmarked', () => row(end) && !row(end)!.querySelector('.workspace-marked'));
+  await app.api.archive(sid);
+  await app.loadWorkspaces(pid);
+  await until('marked again', () => row(end)?.querySelector('.workspace-marked'));
+
+  // Deleting it is the worktree's dialog; nothing went without it.
+  expect(mock.removedWorkspaces.find((w) => w.path.endsWith(end))).toBeUndefined();
+  row(end)!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
+  await until('dialog checked', () => $('.delete-folder .delete-unpushed'));
+  expect($('.delete-what')!.textContent).toContain('for a session an agent started');
+  expect($('.delete-unpushed')!.textContent).toContain('hqc/session-5 — 1 commit');
+  button('Delete folder', '.delete-folder')!.click();
+  await until('deleted', () => !row(end) && !$('.delete-folder'));
+  expect(mock.removedWorkspaces.find((w) => w.path.endsWith(end))).toMatchObject({ folder_removed: true });
 });

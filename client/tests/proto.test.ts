@@ -201,6 +201,15 @@ describe('examples/wire', () => {
       state: 'creating',
     });
     expect(w.origin_workspace_id).toBeUndefined();
+    // T47: the worktree of a spawned session, marked once its sessions are archived.
+    expect(parseWorkspace(load('api.workspace.ephemeral.json'))).toMatchObject({
+      kind: 'worktree',
+      origin_workspace_id: clone.id,
+      branch: 'hqc/session-7',
+      ephemeral: true,
+      marked_for_deletion: true,
+    });
+    expect(w).toMatchObject({ ephemeral: false, marked_for_deletion: false });
     const { state: _, ...old } = load('api.workspace.json') as Record<string, unknown>;
     expect(parseWorkspace(old).state).toBe('ready');
     expect(parseWorkspace({ ...old, state: 'moving' }).state).toBe('unknown');

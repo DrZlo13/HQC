@@ -13,6 +13,7 @@
 //! allow_foreign_sessions = false
 //! # claude_bin = "/opt/homebrew/bin/claude"   # default: `claude` from PATH
 //! # max_sessions = 8             # agent processes at once
+//! # clone_timeout = 600          # seconds a `git clone` of a new workspace may take (T45)
 //! # insecure_http = false        # allow http:// to a non-loopback hub (never in production)
 //! # allow_native_messaging = false  # keep Claude Code's ListAgents/SendMessage (bypass the hub)
 //! # show_in_vscode = true          # sessions run by hqc appear in VS Code's history
@@ -50,6 +51,7 @@ use hqc_proto::frame::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::adapter::claude_code::child_env;
 use crate::permissions::{PermissionMode, Permissions, RawPermissions};
 use crate::token::Secret;
 
@@ -89,6 +91,8 @@ struct RawConfig {
     insecure_http: bool,
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
+    #[serde(default = "default_clone_timeout")]
+    clone_timeout: u64,
     #[serde(default)]
     allow_native_messaging: bool,
     #[serde(default = "default_true")]
@@ -185,6 +189,19 @@ impl Environment {
         }
     }
 
+    /// The environment of a process the worker starts for this environment: the agent
+    /// (its adapter adds its own variables after these) and `git` for a workspace (T45). The
+    /// child allowlist of the worker's own environment ([`child_env`]) with `env` on top.
+    pub fn process_env(&self) -> Vec<(String, String)> {
+        let mut env = child_env(std::env::vars());
+        for (k, v) in self.env.iter() {
+            env.retain(|(x, _)| x != k);
+            env.push((k.into(), v.into()));
+        }
+        env.sort();
+        env
+    }
+
     /// What `hello` says about it: no values of `env`.
     pub fn info(&self) -> EnvironmentInfo {
         EnvironmentInfo {
@@ -256,6 +273,13 @@ fn default_max_sessions() -> usize {
     DEFAULT_MAX_SESSIONS
 }
 
+fn default_clone_timeout() -> u64 {
+    DEFAULT_CLONE_TIMEOUT.as_secs()
+}
+
+/// How long `git clone` of a new workspace may take, unless `clone_timeout` says otherwise.
+pub const DEFAULT_CLONE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Agent processes running at once, unless `max_sessions` says otherwise.
 pub const DEFAULT_MAX_SESSIONS: usize = 8;
 
@@ -303,6 +327,8 @@ pub struct Config {
     pub insecure_http: bool,
     /// Agent processes running at once; more are refused with `agent_start_failed`.
     pub max_sessions: usize,
+    /// How long `git clone` of a new workspace may take before it is killed (T45).
+    pub clone_timeout: Duration,
     /// Keep Claude Code's own cross-session tools (`ListAgents`, `SendMessage`). Off by
     /// default: they bypass the hub, so the other session's history misses the input that
     /// started its turn. Agent-to-agent traffic goes through `hqc_send`/`hqc_ask` (SPEC §7).
@@ -411,6 +437,9 @@ impl Config {
         if raw.max_sessions == 0 {
             bail!("max_sessions must be at least 1");
         }
+        if raw.clone_timeout == 0 {
+            bail!("clone_timeout must be at least 1 second");
+        }
         if raw.allowed_roots.is_empty() {
             bail!("allowed_roots is empty");
         }
@@ -468,6 +497,7 @@ impl Config {
             environments,
             env_bindings,
             max_sessions: raw.max_sessions,
+            clone_timeout: Duration::from_secs(raw.clone_timeout),
             scratch_root: home.join("scratch"),
             ssh: crate::ssh::Store::in_home(&home),
         })
@@ -867,6 +897,7 @@ mod tests {
         .unwrap();
         assert!(c.insecure_http);
         assert_eq!(c.max_sessions, DEFAULT_MAX_SESSIONS);
+        assert_eq!(c.clone_timeout, DEFAULT_CLONE_TIMEOUT);
         let c = Config::parse(&format!(
             "hub_url = \"https://h\"\nmax_sessions = 2\n{roots}"
         ))

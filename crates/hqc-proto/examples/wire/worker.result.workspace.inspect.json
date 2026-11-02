@@ -1,0 +1,11 @@
+{
+  "id": "h-22",
+  "type": "result",
+  "payload": {
+    "request_id": "h-22",
+    "git": true,
+    "dirty": ["src/panel.rs", "notes.txt"],
+    "dirty_count": 2,
+    "unpushed": [{ "branch": "hqc/fix-backlight", "commits": 3 }]
+  }
+}

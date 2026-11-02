@@ -615,6 +615,9 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::WorkspaceRules(_) => "workspace.rules",
         HubFrame::PermissionsInspect(_) => "permissions.inspect",
         HubFrame::McpResult(_) => "mcp.result",
+        HubFrame::WorkspaceCreate(_) => "workspace.create",
+        HubFrame::WorkspaceInspect(_) => "workspace.inspect",
+        HubFrame::WorkspaceDelete(_) => "workspace.delete",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

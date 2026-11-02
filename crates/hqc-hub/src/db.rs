@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use hqc_proto::{
-    api::{ProjectColor, ProjectIcon},
+    api::{ProjectColor, ProjectIcon, WorkspaceState},
     frame::{PermissionMode, TitleSource},
 };
 use serde_json::{Map, Value};
@@ -884,6 +884,13 @@ pub struct WorkspaceRow {
     pub mirror_enabled: bool,
     /// How many hqc rules the folder has (T48).
     pub hqc_rules: i32,
+    /// `creating` | `ready` | `failed` (T45).
+    pub state: String,
+    /// Why the worker could not make the folder (`failed`).
+    pub error: Option<String>,
+    /// What `workspace.create` clones (T45), repeated after `hello` while `creating`.
+    pub clone_url: Option<String>,
+    pub clone_branch: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -891,9 +898,13 @@ pub struct WorkspaceRow {
 const WORKSPACE_COLS: &str = "id, project_id, owner_id, worker_id, path, label, environment, \
     ephemeral, created_by_hqc, kind, mirror_enabled, \
     (SELECT count(*)::int FROM workspace_rules r WHERE r.workspace_id = workspaces.id) AS hqc_rules, \
-    created_at, updated_at";
+    state, error, clone_url, clone_branch, created_at, updated_at";
 
 impl WorkspaceRow {
+    pub fn state(&self) -> WorkspaceState {
+        WorkspaceState::parse(&self.state).unwrap_or_default()
+    }
+
     pub fn to_api(&self) -> hqc_proto::api::Workspace {
         hqc_proto::api::Workspace {
             id: self.id,
@@ -907,18 +918,66 @@ impl WorkspaceRow {
             created_by_hqc: self.created_by_hqc,
             mirror_enabled: self.mirror_enabled,
             hqc_rules: self.hqc_rules.max(0) as u32,
+            state: self.state(),
+            error: self.error.clone(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
     }
 }
 
+/// The worker's workspaces whose folder exists (`ready`), oldest first.
 pub async fn workspaces_of_worker(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<WorkspaceRow>> {
     sqlx::query_as(&format!(
-        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 ORDER BY created_at, id"
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 AND state = 'ready'
+         ORDER BY created_at, id"
     ))
     .bind(worker_id)
     .fetch_all(db)
+    .await
+}
+
+/// The worker's clones that wait for `workspace.created` (T45).
+pub async fn creating_workspaces(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 AND state = 'creating'
+         ORDER BY created_at, id"
+    ))
+    .bind(worker_id)
+    .fetch_all(db)
+    .await
+}
+
+/// The clone is ready at `canonical` (`workspace.created`); `None` if the workspace is not
+/// `creating` (any more).
+pub async fn workspace_created(
+    db: &PgPool,
+    id: Uuid,
+    canonical: &str,
+) -> sqlx::Result<Option<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "UPDATE workspaces SET state = 'ready', path = $2, error = NULL, updated_at = now()
+         WHERE id = $1 AND state = 'creating' RETURNING {WORKSPACE_COLS}"
+    ))
+    .bind(id)
+    .bind(canonical)
+    .fetch_optional(db)
+    .await
+}
+
+/// The worker could not make the folder; `None` if the workspace is not `creating`.
+pub async fn workspace_failed(
+    db: &PgPool,
+    id: Uuid,
+    error: &str,
+) -> sqlx::Result<Option<WorkspaceRow>> {
+    sqlx::query_as(&format!(
+        "UPDATE workspaces SET state = 'failed', error = $2, updated_at = now()
+         WHERE id = $1 AND state = 'creating' RETURNING {WORKSPACE_COLS}"
+    ))
+    .bind(id)
+    .bind(error)
+    .fetch_optional(db)
     .await
 }
 
@@ -1091,6 +1150,9 @@ pub struct NewWorkspace<'a> {
     pub label: &'a str,
     /// On by default since T21 (SPEC §9.2).
     pub mirror_enabled: bool,
+    /// `Some((url, branch))`: a clone (T45), `creating` and `created_by_hqc` until the worker
+    /// answers.
+    pub clone: Option<(&'a str, Option<&'a str>)>,
 }
 
 pub enum WorkspaceInsert {
@@ -1129,8 +1191,8 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     let bindings = env_bindings(bindings.unwrap_or_default());
     let row: WorkspaceRow = sqlx::query_as(&format!(
         "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label, mirror_enabled,
-            environment)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {WORKSPACE_COLS}"
+            environment, kind, created_by_hqc, state, clone_url, clone_branch)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING {WORKSPACE_COLS}"
     ))
     .bind(new_id())
     .bind(n.project_id)
@@ -1140,6 +1202,18 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     .bind(n.label)
     .bind(n.mirror_enabled)
     .bind(hqc_proto::frame::environment_for(&bindings, n.path))
+    .bind(if n.clone.is_some() { "clone" } else { "dir" })
+    .bind(n.clone.is_some())
+    .bind(
+        if n.clone.is_some() {
+            WorkspaceState::Creating
+        } else {
+            WorkspaceState::Ready
+        }
+        .as_str(),
+    )
+    .bind(n.clone.map(|c| c.0))
+    .bind(n.clone.and_then(|c| c.1))
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
@@ -1162,6 +1236,14 @@ pub async fn set_workspace_label(db: &PgPool, id: Uuid, label: &str) -> sqlx::Re
     .bind(label)
     .fetch_one(db)
     .await
+}
+
+/// Sessions that are not archived in the workspace.
+pub async fn live_sessions_in_workspace(db: &PgPool, id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT count(*) FROM sessions WHERE workspace_id = $1 AND NOT archived")
+        .bind(id)
+        .fetch_one(db)
+        .await
 }
 
 pub enum WorkspaceDelete {
@@ -1816,7 +1898,7 @@ pub async fn workspace_by_path(
 pub async fn mirrored_workspaces(db: &PgPool, worker_id: Uuid) -> sqlx::Result<Vec<WorkspaceRow>> {
     sqlx::query_as(&format!(
         "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 AND mirror_enabled
-         ORDER BY created_at, id"
+         AND state = 'ready' ORDER BY created_at, id"
     ))
     .bind(worker_id)
     .fetch_all(db)

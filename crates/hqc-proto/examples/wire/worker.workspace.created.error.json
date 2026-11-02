@@ -1,0 +1,8 @@
+{
+  "id": "w-32",
+  "type": "workspace.created",
+  "payload": {
+    "request_id": "0199f3a2-7c10-7000-8000-0000000000e2",
+    "error": "git clone failed: fatal: repository 'https://github.com/drzlo/c6-displayz.git/' not found"
+  }
+}

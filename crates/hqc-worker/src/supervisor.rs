@@ -37,6 +37,9 @@
 //! - `idle_timeout` (SPEC §17.3): an idle process is killed, the next input resumes it.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
+//! - Workspaces hqc makes and deletes (T45): `workspace.create` is acked at once and runs in
+//!   the background ([`crate::workspaces`]); `workspace.inspect` and `workspace.delete` are
+//!   answered like `fs.*`.
 //! - Holders (SPEC §9.3): the mirror tells the hub (a holder report through the outbox:
 //!   `session.state` with the nil `session_id`, the transcript's `runtime_session_id` and
 //!   `held_by`) and the supervisor when a live Claude Code process outside the worker opens
@@ -157,6 +160,8 @@ pub struct Supervisor {
     folders: HashMap<PathBuf, FolderRules>,
     /// Claude Code's config folder, for `~/.claude/settings.json` in `permissions.inspect`.
     claude_dir: Option<PathBuf>,
+    /// The folders it creates and deletes for workspaces (T45).
+    workspaces: Arc<crate::workspaces::Workspaces>,
 }
 
 /// A confirmation asked for and the `session.start` frames that wait for it.
@@ -231,9 +236,11 @@ impl Supervisor {
         artifacts: ArtifactClient,
         shutdown_timeout: Duration,
         known: Arc<KnownPaths>,
+        created: crate::workspaces::Created,
     ) -> Self {
         let (outcomes_tx, outcomes_rx) = mpsc::unbounded_channel();
         Self {
+            workspaces: crate::workspaces::Workspaces::new(cfg.clone(), created, link.clone()),
             artifacts,
             slots: Arc::new(Semaphore::new(cfg.max_sessions)),
             titler: Arc::new(crate::title::Titler::from_config(&cfg)),
@@ -552,6 +559,28 @@ impl Supervisor {
                         r.command.as_deref(),
                         r.tool.as_deref(),
                     )))
+                });
+                return;
+            }
+            HubFrame::WorkspaceCreate(c) => {
+                // The outcome comes as `workspace.created`, also for a repeated request.
+                self.link.reply(&id, ack(None));
+                let mut known: Vec<PathBuf> = self.folders.keys().cloned().collect();
+                known.extend(self.known.paths());
+                self.workspaces.create(c, known);
+                return;
+            }
+            HubFrame::WorkspaceInspect(r) => {
+                let cfg = self.cfg.clone();
+                self.fs_request(id, r.request_id, move || {
+                    crate::workspaces::inspect(&cfg, &r.path).map(ResultBody::WorkspaceInspect)
+                });
+                return;
+            }
+            HubFrame::WorkspaceDelete(r) => {
+                let ws = self.workspaces.clone();
+                self.fs_request(id, r.request_id, move || {
+                    ws.delete(&r.path).map(ResultBody::WorkspaceDelete)
                 });
                 return;
             }

@@ -1,0 +1,6 @@
+{
+  "git": true,
+  "dirty": ["src/panel.rs", "notes.txt"],
+  "dirty_count": 2,
+  "unpushed": [{ "branch": "hqc/fix-backlight", "commits": 3 }]
+}

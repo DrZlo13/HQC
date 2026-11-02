@@ -1924,3 +1924,116 @@ async fn title_request_runs_claude_once() {
     assert!(adapters.calls().is_empty(), "{:?}", adapters.calls());
     w.stop().await;
 }
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=hqc",
+            "-c",
+            "user.email=hqc@example.invalid",
+        ])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+// T45: a clone into a new folder through the hub's frames. `workspace.create` is acked at once
+// and answered with `workspace.created`; the same request again gets the same outcome without
+// a second clone; a folder inside a workspace the worker runs sessions in is refused;
+// `workspace.inspect` and `workspace.delete` answer like `fs.*`, and the worker deletes only
+// what it created.
+#[tokio::test]
+async fn clone_inspect_and_delete_through_frames() {
+    let env = Env::new();
+    let root = env.root();
+    std::fs::create_dir_all(root.join("repos/src")).unwrap();
+    git(&root.join("repos/src"), &["init", "-q"]);
+    std::fs::write(root.join("repos/src/a.txt"), "a").unwrap();
+    git(&root.join("repos/src"), &["add", "a.txt"]);
+    git(&root.join("repos/src"), &["commit", "-q", "-m", "a"]);
+    git(
+        &root.join("repos"),
+        &["clone", "-q", "--bare", "src", "origin.git"],
+    );
+    let url = format!("file://{}", root.join("repos/origin.git").display());
+
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    // A session makes `root/ws` a workspace the worker knows.
+    c.frame("session.start", env.start_payload(Uuid::now_v7()))
+        .await;
+    c.expect("ack").await;
+
+    let target = root.join("c6").display().to_string();
+    let create = json!({"request_id": "ws-1", "kind": "clone", "path": target, "url": url});
+    for round in 0..2 {
+        let id = c.frame("workspace.create", create.clone()).await;
+        let ack = c.expect("ack").await;
+        assert_eq!(ack["id"], id);
+        let done = c.expect("workspace.created").await;
+        assert_eq!(
+            done["payload"],
+            json!({"request_id": "ws-1", "canonical": target}),
+            "round {round}"
+        );
+    }
+    assert!(root.join("c6/a.txt").exists());
+    let created = std::fs::read_to_string(env.dir.path().join("created_workspaces.json")).unwrap();
+    assert!(created.contains(&target), "{created}");
+
+    let inside = env.workspace().join("nested").display().to_string();
+    c.frame(
+        "workspace.create",
+        json!({"request_id": "ws-2", "kind": "clone", "path": inside, "url": url}),
+    )
+    .await;
+    c.expect("ack").await;
+    let refused = c.expect("workspace.created").await["payload"].clone();
+    assert!(refused["canonical"].is_null());
+    assert!(
+        refused["error"].as_str().unwrap().contains("overlaps"),
+        "{refused}"
+    );
+    assert!(!env.workspace().join("nested").exists());
+
+    std::fs::write(root.join("c6/a.txt"), "changed").unwrap();
+    c.frame(
+        "workspace.inspect",
+        json!({"request_id": "i-1", "path": target}),
+    )
+    .await;
+    let r = c.expect("result").await["payload"].clone();
+    assert_eq!(
+        r,
+        json!({"request_id": "i-1", "git": true, "dirty": ["a.txt"], "dirty_count": 1, "unpushed": []})
+    );
+
+    let ws = env.workspace().display().to_string();
+    c.frame("workspace.delete", json!({"request_id": "d-1", "path": ws}))
+        .await;
+    let e = c.expect("error").await;
+    assert_eq!(e["payload"]["code"], "invalid_frame");
+    assert!(env.workspace().exists());
+    c.frame(
+        "workspace.delete",
+        json!({"request_id": "d-2", "path": target}),
+    )
+    .await;
+    let r = c.expect("result").await["payload"].clone();
+    assert_eq!(r, json!({"request_id": "d-2", "removed": true}));
+    assert!(!root.join("c6").exists());
+    w.stop().await;
+}

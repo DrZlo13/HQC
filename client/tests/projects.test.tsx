@@ -12,7 +12,14 @@ import { AppState } from '../src/app';
 import { App } from '../src/ui/App';
 import { HubSocket } from '../src/ws';
 
-let mock: { url: string; close(): Promise<void>; closeVsCode(id: string): void; hideHolder(id: string, hidden: boolean): void };
+let mock: {
+  url: string;
+  close(): Promise<void>;
+  closeVsCode(id: string): void;
+  hideHolder(id: string, hidden: boolean): void;
+  finishClones(): void;
+  removedWorkspaces: { path: string; folder_removed?: boolean }[];
+};
 let win: Window;
 let app: AppState;
 let root: HTMLElement;
@@ -379,4 +386,63 @@ it('archives from the row, restores and deletes from the archive', async () => {
   await until('deleted', () => !app.sessions.has(sid));
   expect(location.hash).toBe(`#/p/${pid}`);
   $<HTMLButtonElement>('.btn-archive-back')?.click();
+});
+
+it('clones a repository into a folder of the tree, follows it on the row and deletes it with its folder (T45)', async () => {
+  promptAnswer = 'Clones';
+  $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
+  await until('new project settings', () => $('.workspaces') && $('.project-row.is-current')?.getAttribute('aria-label') === 'Clones');
+  await until('no workspaces yet', () => $('.workspaces .empty-inline'));
+
+  button('Clone a repository')!.click();
+  await until('clone form', () => $('.clone-repository input[name=url]'));
+  type('.clone-repository input[name=url]', 'git@github.com:drzlo/hold-c6.git');
+  await settle();
+  expect($<HTMLInputElement>('.clone-repository input[name=name]')!.value).toBe('hold-c6');
+  const entry = (name: string) => $$('.clone-repository .dir-entry').find((b) => b.textContent?.includes(name));
+  (await until('roots', () => entry('work')))!.click();
+  (await until('work/', () => entry('kicad')))!.click();
+  await until('kicad/', () => entry('power-board'));
+  button('Pick this folder', '.clone-repository')!.click();
+  await until('parent picked', () => $<HTMLInputElement>('.clone-repository input[name=parent]')?.value === '/Users/home-mac/work/kicad');
+  expect($('.clone-target')!.textContent).toBe('Clones into /Users/home-mac/work/kicad/hold-c6');
+  await settle();
+  submit('.clone-repository');
+
+  // The row shows the clone while the worker runs it, without actions, then the workspace.
+  const row = (end: string) => $$('.workspace-row').find((r) => r.querySelector('.workspace-path')?.textContent?.endsWith(end));
+  await until('cloning on the row', () => row('/kicad/hold-c6')?.querySelector('.workspace-cloning'));
+  expect($('.clone-repository')).toBeNull();
+  expect(row('/kicad/hold-c6')!.querySelector('.btn-remove-workspace')).toBeNull();
+  mock.finishClones();
+  await until('ready', () => !row('/kicad/hold-c6')!.querySelector('.workspace-cloning') && row('/kicad/hold-c6')!.querySelector('.btn-rules'));
+
+  // A folder that exists already is refused in the form.
+  button('Clone a repository')!.click();
+  await until('clone form', () => $('.clone-repository input[name=url]'));
+  type('.clone-repository input[name=url]', 'https://github.com/drzlo/kicad.git');
+  type('.clone-repository input[name=parent]', '/Users/home-mac/work');
+  await settle();
+  submit('.clone-repository');
+  await until('exists', () => $('.clone-repository .error-text')?.textContent?.includes('already exists'));
+
+  // A clone that fails: the reason on the row, and Remove takes the record away.
+  type('.clone-repository input[name=url]', 'https://github.com/drzlo/missing-repo.git');
+  await settle();
+  submit('.clone-repository');
+  await until('failed on the row', () => row('/work/missing-repo')?.querySelector('.workspace-error')?.textContent?.includes('repository not found'));
+  row('/work/missing-repo')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
+  await until('failed one removed', () => !row('/work/missing-repo'));
+
+  // Deleting the clone: the dialog shows what the folder would lose, then the worker deletes it.
+  row('/kicad/hold-c6')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
+  await until('dialog checked', () => $('.delete-folder .delete-dirty'));
+  expect($('.delete-dirty')!.textContent).toContain('Uncommitted changes (2)');
+  expect($$('.delete-dirty li').map((l) => l.textContent)).toEqual(['src/panel.rs', 'notes.txt']);
+  expect($('.delete-unpushed')!.textContent).toContain('hqc/fix-backlight — 3 commits');
+  button('Delete folder', '.delete-folder')!.click();
+  await until('deleted', () => !row('/kicad/hold-c6') && !$('.delete-folder'));
+  const gone = mock.removedWorkspaces.find((w) => w.path.endsWith('/kicad/hold-c6'));
+  expect(gone?.folder_removed).toBe(true);
+  expect(mock.removedWorkspaces.find((w) => w.path.endsWith('/missing-repo'))?.folder_removed).toBeUndefined();
 });

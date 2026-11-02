@@ -1,12 +1,21 @@
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, type WorkerInfo } from '../api';
 import type { AppState } from '../app';
-import { parseWorkspaceConflict, type Candidate, type DirEntry, type Workspace } from '../proto';
+import {
+  parseWorkspaceConflict,
+  type Candidate,
+  type DirEntry,
+  type Workspace,
+  type WorkspaceInspection,
+} from '../proto';
 import { THEMES, colorLabel } from '../theme';
 import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
-import { IconBack, IconPlus, IconShield } from './icons';
+import { IconBack, IconCross, IconPlus, IconShield } from './icons';
 import { homePath } from './labels';
+
+/** How often the list is read again while a clone runs (T45). */
+const CLONE_POLL_MS = 1000;
 
 /** The workspace's label or its folder's name. */
 export function workspaceName(w: Workspace): string {
@@ -38,6 +47,12 @@ function addError(e: unknown, app: AppState): { text: string; link?: { href: str
   return { text: (e as Error).message };
 }
 
+/** The folder name a clone of `url` gets by default, as `git clone` names it. */
+export function cloneName(url: string): string {
+  const last = url.trim().replace(/\/+$/, '').split(/[/:]/).pop() ?? '';
+  return last.replace(/\.git$/, '');
+}
+
 /** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened with the
  *  gear of the sidebar header: Appearance (icon, color, the app theme), Workspaces (SPEC §3,
  *  §13: list, add, import, make default, "VS Code sessions", remove the record) and Project
@@ -46,7 +61,9 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
   useSubscription((fn) => app.onChange(fn), [app]);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
   const [adding, setAdding] = useState(false);
+  const [cloning, setCloning] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [deleting, setDeleting] = useState<Workspace | null>(null);
   const [appearance, setAppearance] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = app.projects.get(projectId);
@@ -57,8 +74,25 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
     app.api.workers().then(setWorkers, () => setWorkers([]));
   }, [app, projectId]);
 
+  // A clone runs on the worker (T45): its row follows until it is ready or failed.
+  const creating = !!list?.some((w) => w.state === 'creating');
+  useEffect(() => {
+    if (!creating) return;
+    const t = setInterval(() => app.loadWorkspaces(projectId).catch(() => {}), CLONE_POLL_MS);
+    return () => clearInterval(t);
+  }, [app, projectId, creating]);
+
   const remove = async (w: Workspace) => {
-    if (!confirm(`Remove workspace ${w.path} from the project? The folder on the worker stays.`)) return;
+    // A folder hqc made: the dialog says what deleting it would lose (T45).
+    if (w.created_by_hqc && w.state === 'ready') {
+      setDeleting(w);
+      return;
+    }
+    const what =
+      w.state === 'failed'
+        ? `Remove the failed clone ${w.path} from the project?`
+        : `Remove workspace ${w.path} from the project? The folder on the worker stays.`;
+    if (!confirm(what)) return;
     setError(null);
     try {
       await app.api.deleteWorkspace(w.id);
@@ -158,14 +192,15 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
             <h2 id="ps-ws">Workspaces</h2>
             <p class="ps-text">
               Folders on workers that this project’s sessions work in. A folder belongs to one project. Removing one
-              deletes only the record: the folder on disk stays.
+              deletes only the record: the folder on disk stays, unless hqc cloned it and you delete it too.
             </p>
             {list && list.length === 0 && <p class="empty-inline">No workspaces yet.</p>}
             {list?.map((w) => {
               const isDefault = w.id === project?.default_workspace_id;
               const worker = workers?.find((x) => x.id === w.worker_id)?.name;
+              const ready = w.state === 'ready';
               return (
-                <div key={w.id} class="workspace-row ps-card">
+                <div key={w.id} class={`workspace-row ps-card ${ready ? '' : `is-${w.state}`}`}>
                   <div class="workspace-main">
                     <span class="workspace-name">{workspaceName(w)}</span>
                     <span class="workspace-path mono">
@@ -178,40 +213,53 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                         env {w.environment}
                       </span>
                     )}
+                    {w.state === 'creating' && <span class="tag tag-progress workspace-cloning">Cloning…</span>}
+                    {w.state === 'failed' && <span class="tag tag-failed">Clone failed</span>}
                   </div>
-                  <div class="workspace-actions">
-                    <label
-                      class="mirror-toggle"
-                      title="Show this folder's Claude Code sessions (VS Code, terminal) in the project and take them over"
-                    >
-                      <input
-                        type="checkbox"
-                        name="mirror"
-                        checked={w.mirror_enabled}
-                        onChange={(e) => toggleMirror(w, (e.currentTarget as HTMLInputElement).checked)}
-                      />
-                      <span>VS Code sessions</span>
-                    </label>
-                    <a class="btn btn-small btn-rules" href={`#/p/${projectId}/rules/${w.id}`} title="The folder's permission rules">
-                      <IconShield />
-                      Rules · {w.hqc_rules} HQC
-                    </a>
-                    {!isDefault && (
-                      <button type="button" class="btn btn-small btn-make-default" onClick={() => makeDefault(w)}>
-                        Make default
+                  {w.state === 'failed' && <div class="error-text workspace-error">{w.error ?? 'The worker could not clone it.'}</div>}
+                  {w.state === 'creating' ? (
+                    <div class="muted small workspace-note">The worker is cloning the repository; sessions can start once it is done.</div>
+                  ) : (
+                    <div class="workspace-actions">
+                      {ready && (
+                        <>
+                          <label
+                            class="mirror-toggle"
+                            title="Show this folder's Claude Code sessions (VS Code, terminal) in the project and take them over"
+                          >
+                            <input
+                              type="checkbox"
+                              name="mirror"
+                              checked={w.mirror_enabled}
+                              onChange={(e) => toggleMirror(w, (e.currentTarget as HTMLInputElement).checked)}
+                            />
+                            <span>VS Code sessions</span>
+                          </label>
+                          <a class="btn btn-small btn-rules" href={`#/p/${projectId}/rules/${w.id}`} title="The folder's permission rules">
+                            <IconShield />
+                            Rules · {w.hqc_rules} HQC
+                          </a>
+                          {!isDefault && (
+                            <button type="button" class="btn btn-small btn-make-default" onClick={() => makeDefault(w)}>
+                              Make default
+                            </button>
+                          )}
+                        </>
+                      )}
+                      <span class="spacer" />
+                      <button type="button" class="btn btn-small btn-ghost btn-remove-workspace" onClick={() => remove(w)}>
+                        Remove
                       </button>
-                    )}
-                    <span class="spacer" />
-                    <button type="button" class="btn btn-small btn-ghost btn-remove-workspace" onClick={() => remove(w)}>
-                      Remove
-                    </button>
-                  </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
             {error && <div class="error-text">{error}</div>}
             {adding ? (
               <AddWorkspace app={app} projectId={projectId} workers={workers ?? []} onDone={() => setAdding(false)} />
+            ) : cloning ? (
+              <CloneRepository app={app} projectId={projectId} workers={workers ?? []} onDone={() => setCloning(false)} />
             ) : importing ? (
               <ImportFromClaude app={app} projectId={projectId} workers={workers ?? []} onDone={() => setImporting(false)} />
             ) : (
@@ -219,6 +267,9 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                 <button type="button" class="btn btn-primary btn-add-workspace" onClick={() => setAdding(true)}>
                   <IconPlus size={15} />
                   Add a workspace
+                </button>
+                <button type="button" class="btn btn-clone" onClick={() => setCloning(true)}>
+                  Clone a repository
                 </button>
                 <button type="button" class="btn btn-import-claude" onClick={() => setImporting(true)}>
                   Import from Claude Code
@@ -245,6 +296,19 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
       </div>
       {appearance && project && (
         <AppearanceDialog app={app} project={project} phone={phone} onClose={() => setAppearance(false)} />
+      )}
+      {deleting && (
+        <DeleteFolderDialog
+          app={app}
+          workspace={deleting}
+          worker={workers?.find((x) => x.id === deleting.worker_id)?.name}
+          phone={phone}
+          onClose={() => setDeleting(null)}
+          onDone={() => {
+            setDeleting(null);
+            app.workspacesChanged(projectId).catch((e: Error) => setError(e.message));
+          }}
+        />
       )}
     </section>
   );
@@ -378,34 +442,14 @@ function ImportFromClaude({
   );
 }
 
-/** Pick a worker, then a folder: from the tree the worker lists (`fs.list_dirs`), or typed
- *  by hand. The worker checks it again when it is added (`fs.stat`). */
-function AddWorkspace({
-  app,
-  projectId,
-  workers,
-  onDone,
-}: {
-  app: AppState;
-  projectId: string;
-  workers: WorkerInfo[];
-  onDone: () => void;
-}) {
-  const online = workers.filter((w) => w.status === 'online');
-  const [worker, setWorker] = useState(online[0]?.id ?? workers[0]?.id ?? '');
+/** The worker's folders (`fs.list_dirs`), from its allowed_roots down; "Pick this folder"
+ *  (or a double click on one) hands a path to the form. Mount it with `key={worker}`. */
+function FolderTree({ app, worker, onPick }: { app: AppState; worker: string; onPick: (path: string) => void }) {
   // `null`: the worker's allowed_roots.
   const [dir, setDir] = useState<string | null>(null);
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   const [roots, setRoots] = useState<string[]>([]);
   const [browseError, setBrowseError] = useState<string | null>(null);
-  const [path, setPath] = useState('');
-  const [label, setLabel] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<ReturnType<typeof addError> | null>(null);
-
-  useEffect(() => {
-    if (!worker && workers[0]) setWorker(online[0]?.id ?? workers[0].id);
-  }, [workers]);
 
   useEffect(() => {
     if (!worker) return;
@@ -421,6 +465,94 @@ function AddWorkspace({
   }, [app, worker, dir]);
 
   const parent = dir === null ? null : dir.replace(/\/[^/]+\/?$/, '') || '/';
+  return (
+    <div class="dir-browser">
+      <div class="dir-path">
+        <span class="muted small">{dir ?? "The worker's allowed roots"}</span>
+        {dir !== null && (
+          <button type="button" class="btn btn-small btn-ghost btn-dir-up" onClick={() => setDir(roots.includes(dir) ? null : parent)}>
+            ↑ Up
+          </button>
+        )}
+        {dir !== null && (
+          <button type="button" class="btn btn-small btn-pick-dir" onClick={() => onPick(dir)}>
+            Pick this folder
+          </button>
+        )}
+      </div>
+      {browseError && <div class="error-text">{browseError}</div>}
+      {entries === null && !browseError && <div class="muted small">…</div>}
+      {entries && entries.length === 0 && !browseError && <div class="muted small">No subfolders</div>}
+      {entries && entries.length > 0 && (
+        <ul class="dir-list">
+          {entries.map((d) => (
+            <li key={d.path}>
+              <button type="button" class="dir-entry" onClick={() => setDir(d.path)} onDblClick={() => onPick(d.path)}>
+                📁 {d.name}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** The worker select of the add and clone forms. */
+function WorkerSelect({ workers, value, onChange }: { workers: WorkerInfo[]; value: string; onChange: (id: string) => void }) {
+  return (
+    <label class="field">
+      <span class="muted small">Worker</span>
+      <select class="input" name="worker" value={value} onChange={(e) => onChange((e.target as HTMLSelectElement).value)}>
+        {workers.map((w) => (
+          <option key={w.id} value={w.id}>
+            {w.name}
+            {w.status === 'online' ? '' : ' (offline)'}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** No workers to pick a folder on: a link to enroll one. */
+function NoWorkers({ cls, onDone }: { cls: string; onDone: () => void }) {
+  return (
+    <div class={cls}>
+      <p class="muted">
+        No workers yet. <a href="#/settings">Enroll a machine</a> to pick a folder on it.
+      </p>
+      <button type="button" class="btn btn-small" onClick={onDone}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+/** Pick a worker, then a folder: from the tree the worker lists (`fs.list_dirs`), or typed
+ *  by hand. The worker checks it again when it is added (`fs.stat`). */
+function AddWorkspace({
+  app,
+  projectId,
+  workers,
+  onDone,
+}: {
+  app: AppState;
+  projectId: string;
+  workers: WorkerInfo[];
+  onDone: () => void;
+}) {
+  const online = workers.filter((w) => w.status === 'online');
+  const [worker, setWorker] = useState(online[0]?.id ?? workers[0]?.id ?? '');
+  const [path, setPath] = useState('');
+  const [label, setLabel] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ReturnType<typeof addError> | null>(null);
+
+  useEffect(() => {
+    if (!worker && workers[0]) setWorker(online[0]?.id ?? workers[0].id);
+  }, [workers]);
+
   const add = async (e: Event) => {
     e.preventDefault();
     setBusy(true);
@@ -436,68 +568,11 @@ function AddWorkspace({
     }
   };
 
-  if (workers.length === 0) {
-    return (
-      <div class="add-workspace">
-        <p class="muted">
-          No workers yet. <a href="#/settings">Enroll a machine</a> to pick a folder on it.
-        </p>
-        <button type="button" class="btn btn-small" onClick={onDone}>
-          Cancel
-        </button>
-      </div>
-    );
-  }
+  if (workers.length === 0) return <NoWorkers cls="add-workspace" onDone={onDone} />;
   return (
     <form class="add-workspace" onSubmit={add}>
-      <label class="field">
-        <span class="muted small">Worker</span>
-        <select
-          class="input"
-          name="worker"
-          value={worker}
-          onChange={(e) => {
-            setWorker((e.target as HTMLSelectElement).value);
-            setDir(null);
-          }}
-        >
-          {workers.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name}
-              {w.status === 'online' ? '' : ' (offline)'}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div class="dir-browser">
-        <div class="dir-path">
-          <span class="muted small">{dir ?? "The worker's allowed roots"}</span>
-          {dir !== null && (
-            <button type="button" class="btn btn-small btn-ghost btn-dir-up" onClick={() => setDir(roots.includes(dir) ? null : parent)}>
-              ↑ Up
-            </button>
-          )}
-          {dir !== null && (
-            <button type="button" class="btn btn-small btn-pick-dir" onClick={() => setPath(dir)}>
-              Pick this folder
-            </button>
-          )}
-        </div>
-        {browseError && <div class="error-text">{browseError}</div>}
-        {entries === null && !browseError && <div class="muted small">…</div>}
-        {entries && entries.length === 0 && !browseError && <div class="muted small">No subfolders</div>}
-        {entries && entries.length > 0 && (
-          <ul class="dir-list">
-            {entries.map((d) => (
-              <li key={d.path}>
-                <button type="button" class="dir-entry" onClick={() => setDir(d.path)} onDblClick={() => setPath(d.path)}>
-                  📁 {d.name}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <WorkerSelect workers={workers} value={worker} onChange={setWorker} />
+      <FolderTree key={worker} app={app} worker={worker} onPick={setPath} />
       <label class="field">
         <span class="muted small">Path on the worker</span>
         <input
@@ -526,5 +601,232 @@ function AddWorkspace({
         </button>
       </div>
     </form>
+  );
+}
+
+/** "Clone a repository" (T45, SPEC §13.1): the URL, the parent folder from the tree (or
+ *  typed) and the new folder's name, by default the repository's. The worker clones into
+ *  the new folder in the environment of its path; the row shows the clone until it is
+ *  ready or failed. */
+function CloneRepository({
+  app,
+  projectId,
+  workers,
+  onDone,
+}: {
+  app: AppState;
+  projectId: string;
+  workers: WorkerInfo[];
+  onDone: () => void;
+}) {
+  const online = workers.filter((w) => w.status === 'online');
+  const [worker, setWorker] = useState(online[0]?.id ?? workers[0]?.id ?? '');
+  const [url, setUrl] = useState('');
+  const [parent, setParent] = useState('');
+  // `null`: the repository's name, following the URL.
+  const [name, setName] = useState<string | null>(null);
+  const [branch, setBranch] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ReturnType<typeof addError> | null>(null);
+
+  useEffect(() => {
+    if (!worker && workers[0]) setWorker(online[0]?.id ?? workers[0].id);
+  }, [workers]);
+
+  const folder = (name ?? cloneName(url)).trim();
+  const path = parent.trim() && folder ? `${parent.trim().replace(/\/+$/, '')}/${folder}` : '';
+  const clone = async (e: Event) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await app.api.createWorkspace({
+        kind: 'clone',
+        project_id: projectId,
+        worker_id: worker,
+        path,
+        url: url.trim(),
+        branch: branch.trim() || undefined,
+      });
+      await app.workspacesChanged(projectId);
+      onDone();
+    } catch (err) {
+      setError(addError(err, app));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (workers.length === 0) return <NoWorkers cls="add-workspace clone-repository" onDone={onDone} />;
+  return (
+    <form class="add-workspace clone-repository" onSubmit={clone}>
+      <WorkerSelect workers={workers} value={worker} onChange={setWorker} />
+      <label class="field">
+        <span class="muted small">Repository URL</span>
+        <input
+          class="input mono"
+          name="url"
+          placeholder="git@github.com:me/project.git"
+          autocomplete="off"
+          value={url}
+          onInput={(e) => setUrl((e.target as HTMLInputElement).value)}
+        />
+      </label>
+      <FolderTree key={worker} app={app} worker={worker} onPick={setParent} />
+      <label class="field">
+        <span class="muted small">Parent folder on the worker</span>
+        <input
+          class="input"
+          name="parent"
+          placeholder="/Users/me/work"
+          value={parent}
+          onInput={(e) => setParent((e.target as HTMLInputElement).value)}
+        />
+      </label>
+      <div class="row clone-fields">
+        <label class="field">
+          <span class="muted small">Folder name</span>
+          <input class="input" name="name" value={folder} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
+        </label>
+        <label class="field">
+          <span class="muted small">Branch (optional)</span>
+          <input
+            class="input"
+            name="branch"
+            placeholder="the default branch"
+            value={branch}
+            onInput={(e) => setBranch((e.target as HTMLInputElement).value)}
+          />
+        </label>
+      </div>
+      {path && <div class="muted small mono clone-target">Clones into {path}</div>}
+      {error && (
+        <div class="error-text">
+          {error.text} {error.link && <a href={error.link.href}>{error.link.label}</a>}
+        </div>
+      )}
+      <div class="row">
+        <button type="submit" class="btn btn-small btn-primary" disabled={busy || !worker || !url.trim() || !path}>
+          Clone
+        </button>
+        <button type="button" class="btn btn-small" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** Deleting a workspace hqc cloned (T45, SPEC §13.2): the worker says first what the folder
+ *  would lose — uncommitted changes and commits that are on no remote branch — then the
+ *  folder can be deleted with the record, or only the record removed. */
+function DeleteFolderDialog({
+  app,
+  workspace: w,
+  worker,
+  phone,
+  onClose,
+  onDone,
+}: {
+  app: AppState;
+  workspace: Workspace;
+  worker?: string;
+  phone?: boolean;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [info, setInfo] = useState<WorkspaceInspection | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    app.api.inspectWorkspace(w.id).then(setInfo, (e) =>
+      setCheckError(
+        e instanceof ApiError && e.code === 'worker_offline'
+          ? 'Worker offline: the folder can be checked and deleted once it is connected.'
+          : `The worker could not check the folder: ${(e as Error).message}`,
+      ),
+    );
+  }, [app, w.id]);
+
+  const run = async (removeFolder: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await app.api.deleteWorkspace(w.id, removeFolder);
+      onDone();
+    } catch (e) {
+      const busyWs = e instanceof ApiError && e.code === 'workspace_in_use';
+      setError(busyWs ? `${(e as Error).message}. Archive these sessions first.` : (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const more = info ? info.dirty_count - info.dirty.length : 0;
+  const clean = info && info.git && info.dirty_count === 0 && info.unpushed.length === 0;
+  return (
+    <div class={`modal-scrim ${phone ? 'modal-phone' : ''}`} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <section class="confirm-dialog delete-folder" role="dialog" aria-modal="true" aria-label="Delete workspace">
+        <header class="confirm-head">
+          <div class="confirm-title">
+            <div class="title">Delete {workspaceName(w)}?</div>
+            <div class="sub mono">
+              {worker ? `${worker}:` : ''}
+              {homePath(w.path)}
+            </div>
+          </div>
+          <button type="button" class="icon-btn" aria-label="Close" onClick={onClose}>
+            <IconCross size={13} />
+          </button>
+        </header>
+        <div class="confirm-body">
+          <p>
+            hqc cloned this folder. Deleting it removes the folder from the worker’s disk; removing it from the project
+            keeps the folder.
+          </p>
+          {!info && !checkError && <p class="muted">Checking the folder on the worker…</p>}
+          {checkError && <p class="error-text">{checkError}</p>}
+          {info && !info.git && <p class="delete-warn">Not a git repository: everything in it is lost.</p>}
+          {clean && <p class="delete-clean">No uncommitted changes, and every commit is on a remote branch.</p>}
+          {info && info.dirty_count > 0 && (
+            <div class="delete-warn delete-dirty">
+              <b>Uncommitted changes ({info.dirty_count})</b>
+              <ul class="mono">
+                {info.dirty.map((f) => (
+                  <li key={f}>{f}</li>
+                ))}
+              </ul>
+              {more > 0 && <div class="muted small">and {more} more</div>}
+            </div>
+          )}
+          {info && info.unpushed.length > 0 && (
+            <div class="delete-warn delete-unpushed">
+              <b>Commits on no remote branch</b>
+              <ul>
+                {info.unpushed.map((u) => (
+                  <li key={u.branch}>
+                    <span class="mono">{u.branch}</span> — {u.commits} {u.commits === 1 ? 'commit' : 'commits'}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {error && <div class="error-text">{error}</div>}
+        </div>
+        <footer class="confirm-foot">
+          <button type="button" class="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" class="btn btn-remove-record" disabled={busy} onClick={() => run(false)}>
+            Remove from project only
+          </button>
+          <button type="button" class="btn btn-danger-fill btn-delete-folder" disabled={busy || !info} onClick={() => run(true)}>
+            Delete folder
+          </button>
+        </footer>
+      </section>
+    </div>
   );
 }

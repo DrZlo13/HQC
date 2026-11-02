@@ -433,8 +433,12 @@ impl TestHub {
             tokio::select! {
                 r = &mut req => return r,
                 Some(f) = recv_json(&mut w.ws, WAIT) => {
-                    if f["type"] == "mirror.set" || f["type"] == "workspace.rules" {
-                        // Every workspace is mirrored by default (T21).
+                    if f["type"] == "mirror.set"
+                        || f["type"] == "workspace.rules"
+                        || f["type"] == "workspace.create"
+                    {
+                        // Every workspace is mirrored by default (T21); a clone is asked for
+                        // before the answer (T45).
                         w.queue.push_back(f);
                         continue;
                     }

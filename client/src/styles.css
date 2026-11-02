@@ -4871,3 +4871,143 @@ button.ps-look {
 .requests-link-phone .requests-label {
   flex: none;
 }
+
+/* ---- T45: clones on the workspace row, the clone form, deleting a folder hqc made ---- */
+
+.tag-progress {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tag-failed {
+  background: rgba(200, 72, 58, 0.14);
+  color: var(--danger);
+}
+
+.workspace-row.is-failed {
+  border-color: rgba(200, 72, 58, 0.45);
+}
+
+.workspace-error,
+.workspace-note {
+  overflow-wrap: anywhere;
+}
+
+.is-phone .workspace-error,
+.is-phone .workspace-note {
+  padding: 0 14px 12px;
+}
+
+.clone-fields {
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.clone-fields .field {
+  flex: 1 1 200px;
+}
+
+.clone-target {
+  overflow-wrap: anywhere;
+}
+
+.confirm-dialog {
+  width: 100%;
+  max-width: 560px;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.confirm-head {
+  flex: none;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.confirm-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.confirm-title .title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.confirm-title .sub {
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.confirm-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 14px;
+  color: var(--text2);
+}
+
+.confirm-body p {
+  margin: 0;
+}
+
+.delete-warn {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--waiting);
+  color: var(--text);
+}
+
+.delete-warn ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 30vh;
+  overflow-y: auto;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.delete-clean {
+  color: var(--allowed-text);
+}
+
+.confirm-foot {
+  flex: none;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-phone .confirm-dialog {
+  max-width: none;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  font-size: 15px;
+}
+
+.modal-phone .confirm-foot {
+  flex-direction: column-reverse;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom));
+}
+
+.modal-phone .confirm-foot .btn {
+  height: 48px;
+}

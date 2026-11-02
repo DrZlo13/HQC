@@ -107,6 +107,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   const projects = new Map();
   /** @type {Map<string, any>} */
   const workspaces = new Map();
+  /** Deleted workspaces, `folder_removed` when the worker deleted the folder (tests). */
+  const removedWorkspaces = [];
+  /** Clones that wait for `finishClones()`. */
+  const heldClones = [];
   const project = {
     ...ex['api.projects'].projects[0],
     id: me.personal_project_id,
@@ -623,6 +627,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     const ws = workspaces.get(wsId);
     if (!wsId) throw fail(409, 'no_workspace', 'the project has no workspace; add one first');
     if (!ws || ws.project_id !== pr.id) throw fail(400, 'bad_request', 'workspace_id is not a workspace of this project');
+    if (ws.state && ws.state !== 'ready') throw fail(409, 'workspace_not_ready', `the worker is still cloning ${ws.path}`);
     const n = [...sessions.values()].filter((s) => s.project_id === pr.id).length + 1;
     const mode = body?.permission_mode;
     if (mode !== undefined && mode !== 'ask' && mode !== 'auto') throw fail(400, 'bad_request', 'permission_mode is ask or auto');
@@ -647,7 +652,14 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (!inRoot(path)) throw fail(400, 'outside_allowed_roots', `${path} is outside the worker's allowed_roots`);
     const cut = path.lastIndexOf('/');
     const known = path in TREE || (TREE[path.slice(0, cut)] ?? []).includes(path.slice(cut + 1));
-    if (!known) throw fail(400, 'path_not_found', `${path} does not exist on the worker`);
+    const clone = body?.kind === 'clone';
+    if (clone) {
+      // T45: the parent must be a folder of the tree, the new one must not exist.
+      const url = String(body?.url ?? '');
+      if (!/^(https:\/\/|ssh:\/\/|[\w.-]+@[\w.-]+:)/.test(url)) throw fail(400, 'invalid_url', 'use https://, ssh:// or user@host:path');
+      if (!(path.slice(0, cut) in TREE) && path.slice(0, cut) !== ROOT) throw fail(400, 'path_not_found', 'the parent folder does not exist on the worker');
+      if (known) throw fail(400, 'path_exists', `${path} already exists on the worker`);
+    } else if (!known) throw fail(400, 'path_not_found', `${path} does not exist on the worker`);
     const x = [...workspaces.values()].find((w) => w.worker_id === body.worker_id && overlap(w.path, path));
     if (x) {
       const name = projects.get(x.project_id)?.name ?? '';
@@ -661,10 +673,35 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       label: String(body?.label ?? ''), mirror_enabled: body?.mirror_enabled !== false,
       created_at: now(), updated_at: now(),
     };
+    if (clone) {
+      // The worker clones for a moment; a URL with `missing` in it is not found, one with
+      // `hold` waits for `finishClones()` (tests).
+      Object.assign(w, { kind: 'clone', created_by_hqc: true, state: 'creating', hqc_rules: 0 });
+      const finish = () => {
+        if (workspaces.get(w.id) !== w) return;
+        if (String(body.url).includes('missing')) {
+          Object.assign(w, { state: 'failed', error: 'git clone failed: fatal: repository not found' });
+        } else {
+          w.state = 'ready';
+          (TREE[path.slice(0, cut)] ??= []).push(path.slice(cut + 1));
+        }
+        w.updated_at = now();
+      };
+      if (String(body.url).includes('hold')) heldClones.push(finish);
+      else setTimeout(finish, 400 * speed);
+    }
     workspaces.set(w.id, w);
     pr.default_workspace_id ??= w.id;
     if (body?.mirror_enabled === true) importClaude(w);
     return withStatus(201, w);
+  });
+  // T45: what deleting a folder hqc cloned would lose (`workspace.inspect`).
+  route('GET', '/api/workspaces/:id/inspect', (p) => {
+    const w = workspaces.get(p.id);
+    if (!w) throw fail(404, 'not_found', 'unknown workspace');
+    if (!w.created_by_hqc || w.state !== 'ready') throw fail(400, 'bad_request', 'only a ready folder hqc created is inspected');
+    if (!workerOnline(w.worker_id)) throw fail(409, 'worker_offline', 'the worker is offline');
+    return ex['api.workspace.inspect'];
   });
   // The import from Claude Code (SPEC §9.1): what the worker's mirror would send for the
   // folder: one session with its history, driven by VS Code, quiet for a minute.
@@ -752,11 +789,21 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (typeof body?.mirror_enabled === 'boolean') w.mirror_enabled = body.mirror_enabled;
     return w;
   });
-  route('DELETE', '/api/workspaces/:id', (p) => {
+  route('DELETE', '/api/workspaces/:id', (p, _, q) => {
     const w = workspaces.get(p.id);
     if (!w) throw fail(404, 'not_found', 'unknown workspace');
+    if (w.state === 'creating') throw fail(409, 'workspace_creating', 'the worker is still cloning this workspace');
     const live = [...sessions.values()].filter((s) => s.workspace_id === w.id && !s.archived).length;
     if (live) throw fail(409, 'workspace_in_use', `${live} session(s) still work in this workspace; archive them first`);
+    if (q.get('remove_folder') === 'true') {
+      if (!w.created_by_hqc || w.state !== 'ready') throw fail(400, 'bad_request', 'remove_folder: only a ready folder hqc created is deleted');
+      if (!workerOnline(w.worker_id)) throw fail(409, 'worker_offline', 'the worker is offline');
+      const cut = w.path.lastIndexOf('/');
+      const names = TREE[w.path.slice(0, cut)] ?? [];
+      names.splice(names.indexOf(w.path.slice(cut + 1)) >>> 0, 1);
+      w.folder_removed = true;
+    }
+    removedWorkspaces.push(w);
     workspaces.delete(w.id);
     const pr = projects.get(w.project_id);
     if (pr?.default_workspace_id === w.id) {
@@ -1069,6 +1116,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     pushSubscriptions,
     closeVsCode,
     hideHolder,
+    removedWorkspaces,
+    /** Ends the clones that wait (a URL with `hold`). */
+    finishClones() {
+      for (const f of heldClones.splice(0)) f();
+    },
     /** Drops every client socket, to exercise reconnect. */
     dropClients() {
       for (const c of clients) c.ws.terminate();

@@ -17,7 +17,7 @@ use hqc_proto::{
         EnrollConfirmRequest, EnrollConfirmed, EnrollInfo, EnrollPollRequest, EnrollRequest,
         EnrollStarted, EventPage, InputRequest, InputResponse, PatchProject, PatchWorkspace,
         ProjectList, PushSubscription, PutSessionOrder, SessionList, SessionOrder,
-        SessionOrderMode, VapidKey, WorkspaceList,
+        SessionOrderMode, VapidKey, WorkspaceList, WorkspaceState,
     },
     event::CancelReason,
     frame::{
@@ -301,6 +301,16 @@ pub(crate) async fn ask_worker(
     worker_id: Uuid,
     build: impl FnOnce(String) -> HubFrame,
 ) -> ApiResult<ResultBody> {
+    ask_worker_for(app, worker_id, WORKER_REQUEST_TIMEOUT, build).await
+}
+
+/// [`ask_worker`] with its own timeout.
+pub(crate) async fn ask_worker_for(
+    app: &AppState,
+    worker_id: Uuid,
+    timeout: std::time::Duration,
+    build: impl FnOnce(String) -> HubFrame,
+) -> ApiResult<ResultBody> {
     let offline = || ApiError::Conflict("worker_offline", "the worker is offline".into());
     let conn = app.workers.get(worker_id).ok_or_else(offline)?;
     // A slow or hostile worker does not tie up the hub with waiting requests (SPEC §20).
@@ -310,7 +320,7 @@ pub(crate) async fn ask_worker(
             "too many requests to this worker in flight, retry later".into(),
         ));
     };
-    match conn.request(build, WORKER_REQUEST_TIMEOUT).await {
+    match conn.request(build, timeout).await {
         Ok(body) => Ok(body),
         Err(RequestError::Offline) => Err(offline()),
         Err(RequestError::Timeout) => Err(ApiError::WorkerTimeout),
@@ -318,7 +328,7 @@ pub(crate) async fn ask_worker(
     }
 }
 
-fn check_path(p: &str) -> ApiResult<&str> {
+pub(crate) fn check_path(p: &str) -> ApiResult<&str> {
     let p = p.trim();
     if p.is_empty() || p.len() > MAX_PATH || p.contains('\0') {
         return Err(ApiError::BadRequest(format!(
@@ -354,12 +364,13 @@ pub async fn workspaces(
 /// `POST /api/workspaces` (SPEC §6, §13.1, `kind: dir`): the worker checks the folder with
 /// `fs.stat` and the hub stores the canonical path it reports. The worker must be online;
 /// a path that equals, lies inside or contains a workspace of the same worker is
-/// `409 workspace_conflict` (a folder belongs to one project, SPEC §3 Workspace).
+/// `409 workspace_conflict` (a folder belongs to one project, SPEC §3 Workspace). `kind:
+/// clone` (T45): [`crate::workspaces::create_clone`].
 pub async fn create_workspace(
     State(app): State<AppState>,
     user: CurrentUser,
     Json(body): Json<CreateWorkspaceImport>,
-) -> ApiResult<impl IntoResponse> {
+) -> ApiResult<(StatusCode, Json<api::Workspace>)> {
     let b = body.workspace;
     let project = project_for(&app, &user, b.project_id).await?;
     let worker = own_worker(&app, &user, b.worker_id).await?;
@@ -369,6 +380,27 @@ pub async fn create_workspace(
         return Err(ApiError::BadRequest(format!(
             "label is longer than {MAX_LABEL} characters"
         )));
+    }
+    let label = hqc_proto::replace_nul(label);
+    match b.kind.as_deref() {
+        None | Some("dir") => {}
+        Some("clone") => {
+            return crate::workspaces::create_clone(
+                &app,
+                &project,
+                &worker,
+                user.id,
+                b.clone(),
+                &label,
+                body.mirror_enabled,
+            )
+            .await
+        }
+        Some(k) => {
+            return Err(ApiError::BadRequest(format!(
+                "kind {k:?}: a workspace is a dir or a clone"
+            )))
+        }
     }
     let request = path.to_string();
     let st = match ask_worker(&app, worker.id, |request_id| {
@@ -418,43 +450,19 @@ pub async fn create_workspace(
             format!("the worker reported {canonical}, which is not a canonical path"),
         ));
     }
-    let r = db::create_workspace(
-        &app.db,
+    let ws = workspace_insert(
+        &app,
         db::NewWorkspace {
             project_id: project.id,
             owner_id: user.id,
             worker_id: worker.id,
             path: canonical,
-            label: &hqc_proto::replace_nul(label),
+            label: &label,
             mirror_enabled: body.mirror_enabled,
+            clone: None,
         },
     )
     .await?;
-    let ws = match r {
-        db::WorkspaceInsert::Created(ws) => ws,
-        db::WorkspaceInsert::Conflict(x) => {
-            let name = db::project(&app.db, x.project_id)
-                .await?
-                .map(|p| p.name)
-                .unwrap_or_default();
-            let how = if x.path == canonical {
-                "is already"
-            } else if std::path::Path::new(canonical).starts_with(&x.path) {
-                "is inside"
-            } else {
-                "contains"
-            };
-            let mut extra = serde_json::Map::new();
-            extra.insert("existing_workspace_id".into(), json!(x.id));
-            extra.insert("existing_project_id".into(), json!(x.project_id));
-            extra.insert("existing_path".into(), json!(x.path));
-            return Err(ApiError::ConflictWith(
-                "workspace_conflict",
-                format!("{canonical} {how} workspace {} of project {name}", x.path),
-                extra,
-            ));
-        }
-    };
     // Mirrored by default (T21; the import of SPEC §9.1): the worker follows the folder's
     // transcripts and sends their history.
     if ws.mirror_enabled {
@@ -464,6 +472,39 @@ pub async fn create_workspace(
     }
     tracing::info!(workspace_id = %ws.id, project_id = %ws.project_id, worker_id = %ws.worker_id, path = %ws.path, mirror = ws.mirror_enabled, "workspace added");
     Ok((StatusCode::CREATED, Json(ws.to_api())))
+}
+
+/// Stores a new workspace; one that overlaps a workspace of the same worker is `409
+/// workspace_conflict` with that workspace in the body (SPEC §6).
+pub(crate) async fn workspace_insert(
+    app: &AppState,
+    n: db::NewWorkspace<'_>,
+) -> ApiResult<db::WorkspaceRow> {
+    let path = n.path.to_string();
+    let x = match db::create_workspace(&app.db, n).await? {
+        db::WorkspaceInsert::Created(ws) => return Ok(ws),
+        db::WorkspaceInsert::Conflict(x) => x,
+    };
+    let name = db::project(&app.db, x.project_id)
+        .await?
+        .map(|p| p.name)
+        .unwrap_or_default();
+    let how = if x.path == path {
+        "is already"
+    } else if std::path::Path::new(&path).starts_with(&x.path) {
+        "is inside"
+    } else {
+        "contains"
+    };
+    let mut extra = serde_json::Map::new();
+    extra.insert("existing_workspace_id".into(), json!(x.id));
+    extra.insert("existing_project_id".into(), json!(x.project_id));
+    extra.insert("existing_path".into(), json!(x.path));
+    Err(ApiError::ConflictWith(
+        "workspace_conflict",
+        format!("{path} {how} workspace {} of project {name}", x.path),
+        extra,
+    ))
 }
 
 pub async fn patch_workspace(
@@ -496,14 +537,51 @@ pub async fn patch_workspace(
     Ok(Json(ws.to_api()))
 }
 
-/// `DELETE /api/workspaces/{id}`: only the record (`kind: dir`, SPEC §13.2), the folder
-/// stays. `409 workspace_in_use` while a session that is not archived runs there.
+#[derive(Debug, Deserialize)]
+pub struct DeleteWorkspaceQuery {
+    #[serde(default)]
+    pub remove_folder: bool,
+}
+
+/// `DELETE /api/workspaces/{id}?remove_folder=`: the record (SPEC §13.2); the folder stays
+/// unless `remove_folder` is set for a folder hqc created (T45), which the worker deletes
+/// first (`workspace.delete`; offline: `409 worker_offline`, nothing deleted). `409
+/// workspace_in_use` while a session that is not archived runs there, `409 workspace_creating`
+/// while the clone runs.
 pub async fn delete_workspace(
     State(app): State<AppState>,
     user: CurrentUser,
     Path(id): Path<Uuid>,
+    Query(q): Query<DeleteWorkspaceQuery>,
 ) -> ApiResult<StatusCode> {
     let ws = workspace_for(&app, &user, id).await?;
+    let in_use = |n: i64| {
+        ApiError::Conflict(
+            "workspace_in_use",
+            format!("{n} session(s) still work in this workspace; archive them first"),
+        )
+    };
+    match ws.state() {
+        WorkspaceState::Creating => {
+            return Err(ApiError::Conflict(
+                "workspace_creating",
+                "the worker is still cloning this workspace".into(),
+            ))
+        }
+        WorkspaceState::Ready if q.remove_folder && ws.created_by_hqc => {
+            let n = db::live_sessions_in_workspace(&app.db, ws.id).await?;
+            if n > 0 {
+                return Err(in_use(n));
+            }
+            crate::workspaces::remove_folder(&app, &ws).await?;
+        }
+        _ if q.remove_folder => {
+            return Err(ApiError::BadRequest(
+                "remove_folder: only a ready folder hqc created is deleted".into(),
+            ))
+        }
+        _ => {}
+    }
     match db::delete_workspace(&app.db, &ws).await? {
         db::WorkspaceDelete::Deleted => {
             if ws.mirror_enabled {
@@ -514,10 +592,7 @@ pub async fn delete_workspace(
             tracing::info!(workspace_id = %id, path = %ws.path, "workspace removed");
             Ok(StatusCode::NO_CONTENT)
         }
-        db::WorkspaceDelete::InUse(n) => Err(ApiError::Conflict(
-            "workspace_in_use",
-            format!("{n} session(s) still work in this workspace; archive them first"),
-        )),
+        db::WorkspaceDelete::InUse(n) => Err(in_use(n)),
     }
 }
 
@@ -712,13 +787,33 @@ async fn session_workspace(
             "the project has no workspace; add one first".into(),
         )
     };
+    let w = picked_workspace(app, project, b).await?.ok_or_else(none)?;
+    // A clone that runs or failed has no folder to start in (T45).
+    match w.state() {
+        WorkspaceState::Ready => Ok(w),
+        WorkspaceState::Creating => Err(ApiError::Conflict(
+            "workspace_not_ready",
+            format!("the worker is still cloning {}", w.path),
+        )),
+        WorkspaceState::Failed => Err(ApiError::Conflict(
+            "workspace_not_ready",
+            format!("{} could not be cloned; remove it", w.path),
+        )),
+    }
+}
+
+async fn picked_workspace(
+    app: &AppState,
+    project: &db::ProjectRow,
+    b: &CreateSessionRequest,
+) -> ApiResult<Option<db::WorkspaceRow>> {
     if let Some(id) = b.workspace_id {
         return match db::workspace(&app.db, id).await? {
             Some(w)
                 if w.project_id == project.id
                     && b.worker_id.is_none_or(|wid| wid == w.worker_id) =>
             {
-                Ok(w)
+                Ok(Some(w))
             }
             _ => Err(ApiError::BadRequest(
                 "workspace_id is not a workspace of this project on this worker".into(),
@@ -734,12 +829,12 @@ async fn session_workspace(
         .iter()
         .position(|w| Some(w.id) == project.default_workspace_id)
     {
-        return Ok(on.swap_remove(i));
+        return Ok(Some(on.swap_remove(i)));
     }
     if b.worker_id.is_some() {
-        return on.into_iter().next().ok_or_else(none);
+        return Ok(on.into_iter().next());
     }
-    Err(none())
+    Ok(None)
 }
 
 pub async fn create_session(

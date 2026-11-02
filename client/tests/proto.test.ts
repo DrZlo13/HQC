@@ -25,6 +25,7 @@ import {
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceConflict,
+  parseWorkspaceInspection,
   parseWorkspaceList,
   ProtoError,
   type ClientFrame,
@@ -183,6 +184,23 @@ describe('examples/wire', () => {
     expect(p.default_workspace_id).toBe(w.id);
     expect(w).toMatchObject({ project_id: p.id, kind: 'dir', label: 'home-mac' });
     expect(parseWorkspaceList(load('api.workspaces.json'))).toEqual([w]);
+    // T45: a clone's state and error; a hub before T45 sends no state.
+    expect(w).toMatchObject({ state: 'ready', created_by_hqc: false });
+    expect(parseWorkspace(load('api.workspace.clone.json'))).toMatchObject({
+      kind: 'clone',
+      created_by_hqc: true,
+      state: 'failed',
+      error: 'git clone failed: fatal: Could not read from remote repository.',
+    });
+    const { state: _, ...old } = load('api.workspace.json') as Record<string, unknown>;
+    expect(parseWorkspace(old).state).toBe('ready');
+    expect(parseWorkspace({ ...old, state: 'moving' }).state).toBe('unknown');
+    expect(parseWorkspaceInspection(load('api.workspace.inspect.json'))).toEqual({
+      git: true,
+      dirty: ['src/panel.rs', 'notes.txt'],
+      dirty_count: 2,
+      unpushed: [{ branch: 'hqc/fix-backlight', commits: 3 }],
+    });
     expect(parseDirList(load('api.dirs.json')).map((d) => d.name)).toEqual(['cad', 'hqc']);
     expect(parseWorkspaceConflict(load('api.workspace.conflict.json'))).toEqual({
       existing_workspace_id: w.id,

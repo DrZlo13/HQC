@@ -63,6 +63,16 @@ T48: `hub.session.start.json` carries the workspace's hqc rules (`allow_rules`);
 `api.workspace.permissions.json` (`GET /api/workspaces/{id}/permissions`); the workspace object
 has `hqc_rules`.
 
+T45: `hub.workspace.create.json` asks the worker to clone into a new folder (`request_id` is the
+workspace's id; repeated after `hello` while it is `creating`), `worker.workspace.created.json`
+and `worker.workspace.created.error.json` are the two outcomes; `hub.workspace.inspect.json` /
+`worker.result.workspace.inspect.json` and `hub.workspace.delete.json` /
+`worker.result.workspace.delete.json` come before and with the deletion of a folder hqc created.
+REST: `api.workspace.clone.request.json` (`POST /api/workspaces` with `kind: clone`),
+`api.workspace.clone.json` (a clone that failed: `state` and `error`),
+`api.workspace.inspect.json` (`GET /api/workspaces/{id}/inspect`); the workspace object has
+`state`.
+
 T39: the chain of `event.peer.message.json` carries a cap (`permission_cap: ask`, `capped_by`),
 which `hub.session.input.peer.json` hands to the worker; `worker.session.state.capped.json` —
 the worker runs that input's turn in `ask` under the cap; `api.session.json` and

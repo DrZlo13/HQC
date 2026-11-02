@@ -360,7 +360,8 @@ pub struct PatchProject {
 }
 
 /// A workspace (SPEC §3 Workspace): a folder on a worker that belongs to one project.
-/// `path` is the canonical path the worker reported in `fs.stat`.
+/// `path` is the canonical path the worker reported in `fs.stat` (for a clone: in
+/// `workspace.created`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: Uuid,
@@ -370,7 +371,7 @@ pub struct Workspace {
     #[serde(default)]
     pub label: String,
     pub environment: String,
-    /// `dir` | `clone` | `worktree`; only `dir` for now.
+    /// `dir` | `clone` (since SPEC 0.58, T45) | `worktree` (later).
     pub kind: String,
     pub ephemeral: bool,
     pub created_by_hqc: bool,
@@ -378,9 +379,50 @@ pub struct Workspace {
     /// How many hqc allow rules the folder has (since SPEC 0.52, T48).
     #[serde(default)]
     pub hqc_rules: u32,
+    /// `ready`, or for a folder hqc makes (T45) `creating` until the worker answers and
+    /// `failed` when it could not (the reason in `error`).
+    #[serde(default)]
+    pub state: WorkspaceState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// `Workspace.state` (T45, SPEC §3 Workspace).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceState {
+    /// The worker is making the folder (a clone runs).
+    Creating,
+    #[default]
+    Ready,
+    /// The worker could not make it; only the record is left.
+    Failed,
+}
+
+impl WorkspaceState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Creating => "creating",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "creating" => Some(Self::Creating),
+            "ready" => Some(Self::Ready),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// `GET /api/workspaces/{id}/inspect` (T45): the worker's `workspace.inspect` of a folder hqc
+/// created, for the confirmation before it is deleted.
+pub type WorkspaceInspection = crate::frame::WorkspaceInspectResult;
 
 /// One of hqc's allow rules of a workspace (T48, SPEC §3 Workspace).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -414,15 +456,23 @@ pub struct WorkspaceList {
     pub workspaces: Vec<Workspace>,
 }
 
-/// `POST /api/workspaces`: an existing folder (`kind: dir`). The hub checks it with
-/// `fs.stat` on the worker, which must be online (`409 worker_offline`).
+/// `POST /api/workspaces`: an existing folder (`kind: dir`, the default) or a new one the
+/// worker clones into (`kind: clone` with `url` and `branch?`, T45). The hub checks the path
+/// (for a clone: its parent) with `fs.stat` on the worker, which must be online (`409
+/// worker_offline`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateWorkspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub project_id: Uuid,
     pub worker_id: Uuid,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// `PATCH /api/workspaces/{id}`.
@@ -986,6 +1036,32 @@ mod tests {
                 .unwrap();
         assert_eq!(plain.error, "workspace_conflict");
         roundtrip::<DirList>(include_str!("../examples/wire/api.dirs.json"));
+        // T45: a clone, its outcome on the workspace, and the inspection before deletion.
+        let cr: CreateWorkspace = roundtrip(include_str!(
+            "../examples/wire/api.workspace.clone.request.json"
+        ));
+        assert_eq!(cr.kind.as_deref(), Some("clone"));
+        assert!(crate::frame::check_clone_url(cr.url.as_deref().unwrap()).is_ok());
+        let cw: Workspace = roundtrip(include_str!("../examples/wire/api.workspace.clone.json"));
+        assert_eq!((cw.kind.as_str(), cw.created_by_hqc), ("clone", true));
+        assert_eq!(cw.state, WorkspaceState::Failed);
+        assert!(cw.error.is_some() && w.error.is_none());
+        assert_eq!(w.state, WorkspaceState::Ready);
+        let old: Workspace = serde_json::from_value({
+            let mut v: Value =
+                serde_json::from_str(include_str!("../examples/wire/api.workspace.json")).unwrap();
+            v.as_object_mut().unwrap().remove("state");
+            v
+        })
+        .unwrap();
+        assert_eq!(
+            old.state,
+            WorkspaceState::Ready,
+            "a hub before T45 sends no state"
+        );
+        let wi: WorkspaceInspection =
+            roundtrip(include_str!("../examples/wire/api.workspace.inspect.json"));
+        assert_eq!(wi.dirty.len() as u32, wi.dirty_count);
         let rl: WorkspaceRuleList =
             roundtrip(include_str!("../examples/wire/api.workspace.rules.json"));
         assert_eq!(rl.rules.len() as u32, w.hqc_rules);

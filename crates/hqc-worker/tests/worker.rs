@@ -2037,3 +2037,96 @@ async fn clone_inspect_and_delete_through_frames() {
     assert!(!root.join("c6").exists());
     w.stop().await;
 }
+
+// T46: a worktree of a repository the hub told about with `workspace.rules`, through the
+// frames: the origin unknown before that is refused; the inspection lists the worktree's own
+// branch; `workspace.delete` refuses uncommitted files until `force`, and the branch stays.
+#[tokio::test]
+async fn worktree_through_frames() {
+    let env = Env::new();
+    let root = env.root();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
+    let repo_s = repo.display().to_string();
+    let target = root.join("repo-hqc-fix").display().to_string();
+
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let create = json!({"request_id": "wt-1", "kind": "worktree", "path": target,
+                        "origin": repo_s, "branch": "hqc/fix", "new_branch": true});
+    c.frame("workspace.create", create).await;
+    c.expect("ack").await;
+    let refused = c.expect("workspace.created").await["payload"].clone();
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a workspace of this worker"),
+        "{refused}"
+    );
+
+    // The hub sends the origin's rules first: from then on it is a workspace the worker knows.
+    c.frame(
+        "workspace.rules",
+        json!({"workspace_path": repo_s, "allow_rules": []}),
+    )
+    .await;
+    c.expect("ack").await;
+    let create = json!({"request_id": "wt-2", "kind": "worktree", "path": target,
+                        "origin": repo_s, "branch": "hqc/fix", "new_branch": true});
+    c.frame("workspace.create", create).await;
+    c.expect("ack").await;
+    let done = c.expect("workspace.created").await;
+    assert_eq!(
+        done["payload"],
+        json!({"request_id": "wt-2", "canonical": target})
+    );
+    let wt = root.join("repo-hqc-fix");
+    git(&wt, &["commit", "-q", "--allow-empty", "-m", "fix"]);
+    std::fs::write(wt.join("notes.txt"), "x").unwrap();
+
+    c.frame(
+        "workspace.inspect",
+        json!({"request_id": "i-1", "path": target}),
+    )
+    .await;
+    let r = c.expect("result").await["payload"].clone();
+    // No remote: both commits of the branch are on none; `main` is not the worktree's.
+    assert_eq!(
+        r,
+        json!({"request_id": "i-1", "git": true, "dirty": ["notes.txt"], "dirty_count": 1,
+               "unpushed": [{"branch": "hqc/fix", "commits": 2}]})
+    );
+    c.frame(
+        "workspace.delete",
+        json!({"request_id": "d-1", "path": target}),
+    )
+    .await;
+    let e = c.expect("error").await;
+    assert!(
+        e["payload"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("modified or untracked"),
+        "{e}"
+    );
+    assert!(wt.exists());
+    c.frame(
+        "workspace.delete",
+        json!({"request_id": "d-2", "path": target, "force": true}),
+    )
+    .await;
+    let r = c.expect("result").await["payload"].clone();
+    assert_eq!(r, json!({"request_id": "d-2", "removed": true}));
+    assert!(!wt.exists());
+    git(
+        &repo,
+        &["rev-parse", "--verify", "-q", "refs/heads/hqc/fix"],
+    );
+    w.stop().await;
+}

@@ -914,6 +914,8 @@ impl WorkspaceRow {
             label: self.label.clone(),
             environment: self.environment.clone(),
             kind: self.kind.clone(),
+            origin_workspace_id: None,
+            branch: self.clone_branch.clone(),
             ephemeral: self.ephemeral,
             created_by_hqc: self.created_by_hqc,
             mirror_enabled: self.mirror_enabled,

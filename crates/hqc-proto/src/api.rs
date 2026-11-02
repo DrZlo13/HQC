@@ -371,8 +371,15 @@ pub struct Workspace {
     #[serde(default)]
     pub label: String,
     pub environment: String,
-    /// `dir` | `clone` (since SPEC 0.58, T45) | `worktree` (later).
+    /// `dir` | `clone` (since SPEC 0.58, T45) | `worktree` (since 0.59, T46).
     pub kind: String,
+    /// A worktree's origin: the git workspace of the same project and worker it was made from
+    /// (T46).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_workspace_id: Option<Uuid>,
+    /// The branch a clone was asked for, or the worktree's branch (T46).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub ephemeral: bool,
     pub created_by_hqc: bool,
     pub mirror_enabled: bool,
@@ -456,9 +463,11 @@ pub struct WorkspaceList {
     pub workspaces: Vec<Workspace>,
 }
 
-/// `POST /api/workspaces`: an existing folder (`kind: dir`, the default) or a new one the
-/// worker clones into (`kind: clone` with `url` and `branch?`, T45). The hub checks the path
-/// (for a clone: its parent) with `fs.stat` on the worker, which must be online (`409
+/// `POST /api/workspaces`: an existing folder (`kind: dir`, the default), a new one the
+/// worker clones into (`kind: clone` with `url` and `branch?`, T45) or a worktree of a git
+/// workspace (`kind: worktree` with `origin_workspace_id`, `branch`, `new_branch`, T46; `path`
+/// may be left empty for `<origin-parent>/<origin-name>-<branch>`). The hub checks the path
+/// (for a new folder: its parent) with `fs.stat` on the worker, which must be online (`409
 /// worker_offline`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateWorkspace {
@@ -466,7 +475,13 @@ pub struct CreateWorkspace {
     pub kind: Option<String>,
     pub project_id: Uuid,
     pub worker_id: Uuid,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_workspace_id: Option<Uuid>,
+    /// A worktree on a branch it creates from the origin's `HEAD` (T46).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_branch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1059,6 +1074,20 @@ mod tests {
             WorkspaceState::Ready,
             "a hub before T45 sends no state"
         );
+        // T46: a worktree of the clone, by the origin's id; the path is the hub's default.
+        let wr: CreateWorkspace = roundtrip(include_str!(
+            "../examples/wire/api.workspace.worktree.request.json"
+        ));
+        assert_eq!(
+            (wr.kind.as_deref(), wr.origin_workspace_id, wr.new_branch),
+            (Some("worktree"), Some(cw.id), true)
+        );
+        assert!(wr.path.is_empty());
+        let ww: Workspace = roundtrip(include_str!("../examples/wire/api.workspace.worktree.json"));
+        assert_eq!(ww.origin_workspace_id, Some(cw.id));
+        assert_eq!(ww.branch, wr.branch);
+        assert_eq!(ww.path, format!("{}-hqc-fix-backlight", cw.path));
+        assert_eq!(ww.state, WorkspaceState::Creating);
         let wi: WorkspaceInspection =
             roundtrip(include_str!("../examples/wire/api.workspace.inspect.json"));
         assert_eq!(wi.dirty.len() as u32, wi.dirty_count);

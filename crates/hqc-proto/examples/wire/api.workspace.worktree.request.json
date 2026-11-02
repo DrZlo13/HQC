@@ -1,0 +1,8 @@
+{
+  "kind": "worktree",
+  "project_id": "0199f3a2-7c10-7000-8000-0000000000d2",
+  "worker_id": "0199f3a2-7c10-7000-8000-0000000000b1",
+  "origin_workspace_id": "0199f3a2-7c10-7000-8000-0000000000e2",
+  "branch": "hqc/fix-backlight",
+  "new_branch": true
+}

@@ -1,0 +1,18 @@
+{
+  "id": "0199f3a2-7c10-7000-8000-0000000000e3",
+  "project_id": "0199f3a2-7c10-7000-8000-0000000000d2",
+  "worker_id": "0199f3a2-7c10-7000-8000-0000000000b1",
+  "path": "/Users/home-mac/work/c6-displays-hqc-fix-backlight",
+  "label": "",
+  "environment": "default",
+  "kind": "worktree",
+  "origin_workspace_id": "0199f3a2-7c10-7000-8000-0000000000e2",
+  "branch": "hqc/fix-backlight",
+  "ephemeral": false,
+  "created_by_hqc": true,
+  "mirror_enabled": true,
+  "hqc_rules": 0,
+  "state": "creating",
+  "created_at": "2026-11-02T10:20:00Z",
+  "updated_at": "2026-11-02T10:20:00Z"
+}

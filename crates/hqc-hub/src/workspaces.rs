@@ -20,7 +20,7 @@ use hqc_proto::{
     api::{self, CreateWorkspace, WorkspaceInspection, WorkspaceState},
     frame::{
         check_branch, check_clone_url, FsStat, HubFrame, ResultBody, WorkspaceCreate,
-        WorkspaceCreated, WorkspacePath, WorkspaceSource,
+        WorkspaceCreated, WorkspaceDelete, WorkspacePath, WorkspaceSource,
     },
 };
 use uuid::Uuid;
@@ -274,7 +274,11 @@ pub async fn inspect(
 pub async fn remove_folder(app: &AppState, ws: &db::WorkspaceRow) -> ApiResult<()> {
     let path = ws.path.clone();
     match ask_worker_for(app, ws.worker_id, DELETE_TIMEOUT, |request_id| {
-        HubFrame::WorkspaceDelete(WorkspacePath { request_id, path })
+        HubFrame::WorkspaceDelete(WorkspaceDelete {
+            request_id,
+            path,
+            force: false,
+        })
     })
     .await?
     {

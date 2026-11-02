@@ -11,18 +11,6 @@ use serde_json::{json, Value};
 const ROOT: &str = "/w";
 const URL: &str = "git@github.com:drzlo/c6-displays.git";
 
-async fn workspace(hub: &TestHub, id: &str) -> Value {
-    let (s, list) = hub.get("/api/workspaces").await;
-    assert_eq!(s, 200, "{list}");
-    list["workspaces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|w| w["id"] == id)
-        .cloned()
-        .unwrap_or(Value::Null)
-}
-
 /// `POST /api/workspaces {kind: clone}` while the worker answers the `fs.stat`s (the fake says
 /// a path containing `missing` does not exist).
 async fn clone(
@@ -36,38 +24,6 @@ async fn clone(
                       "path": path, "url": url});
     hub.while_worker_answers(w, hub.post("/api/workspaces", body))
         .await
-}
-
-/// The `workspace.create` for `id`, acked like the worker does.
-async fn create_frame(w: &mut FakeWorker, id: &str) -> Value {
-    let f = w.expect("workspace.create").await;
-    assert_eq!(f["payload"]["request_id"], id, "{f}");
-    w.reply(&f["id"], "ack", json!({})).await;
-    f
-}
-
-async fn created(w: &mut FakeWorker, payload: Value) {
-    let id = w.send("workspace.created", payload).await;
-    let ack = w.expect("ack").await;
-    assert_eq!(ack["id"], id);
-}
-
-/// Run `req` while the worker answers the one frame of type `ty` it gets with `answer`.
-async fn while_answering<T>(
-    w: &mut FakeWorker,
-    ty: &str,
-    answer: Value,
-    req: impl std::future::Future<Output = T>,
-) -> (T, Value) {
-    tokio::pin!(req);
-    let f = tokio::select! {
-        _ = &mut req => panic!("answered before the worker got {ty}"),
-        f = next_of(w, ty) => f,
-    };
-    let mut payload = answer;
-    payload["request_id"] = f["payload"]["request_id"].clone();
-    w.reply(&f["id"], "result", payload).await;
-    (req.await, f)
 }
 
 #[tokio::test]
@@ -197,32 +153,6 @@ async fn clone_becomes_ready_or_failed() {
         .await;
     assert_eq!((s, v["error"].as_str()), (409, Some("worker_offline")));
     hub.finish().await;
-}
-
-/// The workspace once `pred` holds for it (the hub handles a worker's `error` on its own time).
-async fn workspace_when(hub: &TestHub, id: &str, pred: impl Fn(&Value) -> bool) -> Value {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    loop {
-        let ws = workspace(hub, id).await;
-        if pred(&ws) {
-            return ws;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "workspace stays {ws}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-/// The next frame of type `ty`, skipping others (`session.kill` of an archived session).
-async fn next_of(w: &mut FakeWorker, ty: &str) -> Value {
-    loop {
-        let f = w.recv().await;
-        if f["type"] == ty {
-            return f;
-        }
-    }
 }
 
 /// A clone in progress survives a dropped connection: the hub asks again after `hello` and

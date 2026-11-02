@@ -292,7 +292,7 @@ sessions of one environment do not share a socket, a session without keys has no
 `SSH_AUTH_SOCK`, wrong modes refuse to start; a live run: a session in the bound folder runs `ssh
 -o BatchMode=yes` to a test host with the store's key while `~/.ssh` has no key for it.
 
-## T45. Clone workspaces, and deleting what hqc created
+## T45. Clone workspaces, and deleting what hqc created (done, SPEC 0.58)
 
 Sections: §3 Workspace, §5.3, §5.4, §6, §13.1, §13.2, §20. Depends on T43 (the clone runs in the
 environment of the target path, so a private repository gets its keys from T44 once that is in).
@@ -314,6 +314,21 @@ Acceptance: the common checks; worker tests: clone into a new folder, refusals (
 existing, overlapping), the timeout, delete only of a folder from its own list, dirty and
 unpushed detection; hub tests: `creating` → ready and → failed, reconnect during a clone,
 deletion with `remove_folder`; client tests for the form and the dialog.
+
+Done: frames in `hqc_proto::frame` (`WorkspaceCreate` with an internally tagged `kind` for T46,
+`WorkspaceCreated`, `WorkspacePath` for inspect/delete, `check_clone_url`, `check_branch`). The
+worker's `workspaces.rs`: `Created` (`$HQC_HOME/created_workspaces.json`, atomic, unfinished
+clones removed at start) and `Workspaces` (checks, `create_dir`, `git clone` in
+`Environment::process_env` without prompts and with `clone_timeout`, outcomes kept per
+`request_id`, `delete` of listed canonical paths, `inspect`). The hub's `workspaces.rs`
+(`create_clone`, `created`, `after_hello`: resend on a reconnect, fail on a restart; `inspect`,
+`remove_folder`), migration `0028` (`state`, `error`, `clone_url`, `clone_branch`), `409
+workspace_not_ready` / `workspace_creating`. Client: "Clone a repository" with the shared folder
+tree, the row's progress and error, the deletion dialog. Tests: worker `workspaces::tests`
+(clone, refusals, timeout in a bound environment, delete only its own, restart, dirty and
+unpushed) and `tests/worker.rs::clone_inspect_and_delete_through_frames`; hub `tests/t45.rs`;
+client `tests/projects.test.tsx` (clone form, row, dialog) and `tests/proto.test.ts`. Decisions
+in `docs/notes/t45-questions.md`.
 
 ## T46. Worktree workspaces
 

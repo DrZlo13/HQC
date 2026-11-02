@@ -452,6 +452,8 @@ it('makes a worktree of a workspace, shows it under its origin and deletes it th
   promptAnswer = 'Worktrees';
   $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
   await until('new project settings', () => $('.workspaces') && $('.project-row.is-current')?.getAttribute('aria-label') === 'Worktrees');
+  // As in the clone test: the settings of the new project, not the previous one's, before a click.
+  await until('no workspaces yet', () => $('.workspaces .empty-inline'));
   const row = (end: string) => $$('.workspace-row').find((r) => r.querySelector('.workspace-path')?.textContent?.endsWith(end));
   // The origin: a clone, ready.
   button('Clone a repository')!.click();

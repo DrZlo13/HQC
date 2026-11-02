@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.56, 2026-11-01. Status: the architecture agreed after six reviews and a survey of
+Version 0.57, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -73,7 +73,9 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   `hqc_attach` or the `files` of `hqc_send`/`hqc_ask`: the worker resolves and reads the path
   itself, §7; files that reach a worker from the hub are written only into its own
   `.hqc/inbox`, §5.3, §12), pick an environment or a
-  Hermes profile for a path the worker owner has not bound locally, or enable
+  Hermes profile for a path the worker owner has not bound locally, hand a session an ssh key
+  (since 0.57 only an environment's `ssh_keys` give a process an ssh-agent, and without them it
+  gets none, not even the user's), or enable
   the machine's MCP servers. These are set only by the worker's local config (§14): since 0.56
   (T43) `session.start` carries no environment, the worker resolves it from the canonical
   workspace path on every start, and what the hub shows about environments is a display. Nor
@@ -1727,9 +1729,11 @@ fixture `always-git-push`): with `--setting-sources user,local --permission-mode
 `always` is still offered and writes the rule to `settings.local.json`; `manual` shows in
 `system/init` as `"permissionMode": "default"`.
 The process environment is scrubbed: from the worker's environment only `PATH`, `HOME`, `USER`,
-`LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`,
+`LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `CLAUDE_*`,
 `ANTHROPIC_*` pass, then the `env` of the session's environment (§14; it may replace one of
-those, e.g. `PATH`), then the worker's own `CLAUDE_CODE_ENTRYPOINT` and `MCP_TOOL_TIMEOUT`;
+those, e.g. `PATH`), then the worker's own `SSH_AUTH_SOCK` (only in an environment with
+`ssh_keys`: the socket of this process's own ssh-agent, §14; since 0.57 the user's
+`SSH_AUTH_SOCK` no longer passes), `CLAUDE_CODE_ENTRYPOINT` and `MCP_TOOL_TIMEOUT`;
 `HQC_*` never. The worker
 stores the working directory in canonical form, requires it to exist and rechecks it before
 every process start (a symlink could have changed). At most `max_sessions`
@@ -2728,8 +2732,10 @@ The worker's local config is the only source of truth for:
 The hub gets a copy in `hello` (environments with their rules but never the values of `env`,
 bindings; §5.4) and shows it; only the worker owner can change it, by editing `worker.toml` on
 the machine and restarting the worker. `hqc-worker env` lists the environments (variables as
-`NAME=***`) and the bindings; `hqc-worker env which <path>` prints the environment of a folder
-(and the binding that decided it) and its effective rules, each with its source.
+`NAME=***`, ssh keys by name) and the bindings; `hqc-worker env which <path>` prints the
+environment of a folder (and the binding that decided it), its keys by name and its effective
+rules, each with its source. `hqc-worker env add-key <name> <file>` puts a key into the store
+(below; since 0.57, T44).
 
 Permission policy `[permissions]` (in effect since 0.14 for all of the worker's Claude Code
 sessions; since 0.56 an environment can extend it with its own `permissions`, below):
@@ -2775,6 +2781,7 @@ both launched by the worker):
 ```toml
 [environments.infra]
 env = { GITHUB_TOKEN = "..." }        # variables on top of the child allowlist
+ssh_keys = ["infra_ed25519"]          # keys of the worker's store, $HQC_HOME/keys/
 allow_local_mcp = false
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
@@ -2786,11 +2793,21 @@ path = "/Users/drzlo/work/lab/infra"
 environment = "infra"
 ```
 
-- `ssh_keys`: keys handed out through a separate ssh-agent socket to this process only;
-  by default there is no agent (T44);
+- `ssh_keys` (since 0.57, T44): names of keys in the worker's store (below). Every agent process
+  of a session in the environment gets an `ssh-agent` of its own (one per process, never shared,
+  not even between sessions of one environment) on a socket in `$HQC_HOME/agents/` (0700), with
+  the keys loaded by `ssh-add` (a key with a passphrase fails the start, nothing prompts), and
+  `SSH_AUTH_SOCK` of that socket in its environment only. The ssh-agent stops when the process
+  ends (stop, kill, crash, idle stop, worker shutdown); a worker that died leaves sockets behind,
+  and its next start empties those agents of their keys and removes the sockets. Without keys
+  `SSH_AUTH_SOCK` is not passed at all: since 0.57 a process the worker runs no longer gets the
+  user's agent (§8.1), so `git` over ssh works only in a folder whose environment has a key.
+  Processes the user starts (a terminal, VS Code) are not touched. A key name is letters,
+  digits, `_`, `-` and `.`, not starting with `.` or `-`; the names are not in `hello`;
 - `env`: variables and tokens (GitHub etc.), put into the agent's process on top of the child
-  allowlist (§8.1); names of letters, digits and `_`, never `HQC_*`. The values stay on the
-  worker: not in `hello`, logs, errors or `hqc-worker env` (`***`);
+  allowlist (§8.1); names of letters, digits and `_`, never `HQC_*` and never `SSH_AUTH_SOCK`
+  (since 0.57). The values stay on the worker: not in `hello`, logs, errors or `hqc-worker env`
+  (`***`);
 - `permissions` (since 0.50, replaces the earlier free-form `settings`; in effect since 0.56):
   `unblock` — rules of the worker's `deny` lifted for this environment only (a rule not in that
   `deny` is a config error), `allow` and `deny` — added to the worker's lists. The effective
@@ -2806,7 +2823,7 @@ environment = "infra"
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
 
-`ssh_keys` (T44) and `launch` are not accepted in `worker.toml` yet. `default` cannot be
+`launch` is not accepted in `worker.toml` yet. `default` cannot be
 defined in the file; the name of an environment is letters, digits, `_`,
 `-` and `.`; an unknown field is a config error (as in `[permissions]`).
 
@@ -2814,12 +2831,22 @@ The `default` environment: no keys, no tokens, `deny` from `[permissions]` (by d
 includes ssh/scp too), local MCP off. Keys of one project (for example `infra`) are moved out of
 `~/.ssh` into the worker's store (files in `$HQC_HOME/keys/`, 0700 and 0600, decided on
 2026-10-31: Keychain is locked in ssh sessions on a Mac) and are available only to sessions on paths
-with that environment.
+with that environment. The store holds one private key per file, named as in `ssh_keys`;
+`hqc-worker env add-key <name> <file>` creates it with these modes and copies the key in with
+0600, and never replaces a key of the same name. The worker does not start (and `hqc-worker env`
+does not print) when the store, a file in it or `$HQC_HOME/agents/` is open to group or others,
+is a link or belongs to another user (the message names the `chmod`), or when a name in
+`ssh_keys` is not in the store. The worker reads key material only in `add-key`; logs, frames
+and `hqc-worker env` carry key names, never keys.
 
 Limitation: without a container or a separate OS user the agent sees the files
 and the process environment of the user, including other workspaces and session tokens on the
 same machine. The boundary is the absence of keys; prohibitions in settings are the first line,
-not a boundary. Windows in the first version: only `env` and `permissions`, no `ssh_keys`.
+not a boundary. So without a separate OS user the agent can still read `~/.ssh` and use the keys
+there directly: a project's keys must be moved out of it into the store, and only then does a
+folder without them lose ssh to that host. Likewise a session can reach another session's
+ssh-agent socket while that process runs (same OS user, §2.1). Windows in the first version:
+only `env` and `permissions`, no `ssh_keys`.
 
 ## 15. Search
 
@@ -3179,7 +3206,10 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   stays, retries with a growing pause (5 s … 5 min).
 - Worker: `hub_url` is `https` only (§5.1), the agent's environment is an allowlist (§8.1) plus
   the `env` of its environment, whose values never leave the worker (§14), the outbox is a 0700
-  directory, files 0600.
+  directory, files 0600. The ssh key store `$HQC_HOME/keys/` is 0700 with 0600 files and the
+  agent sockets live in `$HQC_HOME/agents/` (0700); wider modes, links or another owner stop the
+  worker at start (since 0.57, T44); a process gets `SSH_AUTH_SOCK` only of its own ssh-agent,
+  and only with `ssh_keys` (§14).
 - Users' `api_keys` are encrypted with a master key from the hub's env.
 - Cloudflare Tunnel: request body limit ~100 MB (matches the artifact limit),
   long-lived connections need heartbeats and reconnects.
@@ -3232,6 +3262,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.56 → 0.57 (T44, ssh keys of an environment)
+§14: `ssh_keys` of `[environments.<name>]` are read and in effect: names of keys in the store
+`$HQC_HOME/keys/` (0700, files 0600), which `hqc-worker env add-key <name> <file>` creates and
+fills without overwriting; wider modes, links, another owner or a name not in the store stop the
+worker at start. Every agent process with keys gets its own `ssh-agent` on a socket in
+`$HQC_HOME/agents/` (0700) with the keys loaded by `ssh-add`; it stops with the process, and the
+sockets a dead worker left are emptied and removed at the next start. `hqc-worker env` and
+`env which` list key names; `SSH_AUTH_SOCK` in `env` is a config error. The limitation keeps
+`~/.ssh` readable by the agent without a separate OS user. §8.1: `SSH_AUTH_SOCK` leaves the child
+allowlist; only the session's own agent socket is passed. §2.1: the hub cannot hand a session a
+key. §20: the store and the agents folder.
 
 ### 0.55 → 0.56 (T43, environments and bindings on the worker)
 §14: `[environments.<name>]` (`env`, `allow_local_mcp`, `permissions {unblock, allow, deny}`) and

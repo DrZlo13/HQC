@@ -610,6 +610,7 @@ environment and bind the folder to it:
 ```toml
 [environments.infra]
 env = { GITHUB_TOKEN = "..." }        # variables for the agent, on top of the allowlist below
+ssh_keys = ["infra_ed25519"]          # keys of the store $HQC_HOME/keys/ (below)
 allow_local_mcp = false               # true: the machine's MCP servers too (hqc's stays)
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # deny rules of [permissions] lifted here only
@@ -634,9 +635,38 @@ environment = "infra"
   `worker.toml [environments.infra]`.
 - `env` values never leave the machine: not in the hub, the logs or `hqc-worker env`. `HQC_*`
   names are refused. A changed `worker.toml` takes effect after a restart of the worker.
-- `hqc-worker env` lists the environments and bindings; `hqc-worker env which <folder>` shows
-  the environment of a folder, the binding that decided it and the effective rules with their
-  sources.
+- `hqc-worker env` lists the environments (keys by name) and bindings; `hqc-worker env which
+  <folder>` shows the environment of a folder, the binding that decided it, its keys and the
+  effective rules with their sources.
+
+**ssh keys of an environment** (SPEC §14, T44). A session gets no ssh-agent unless its folder's
+environment has `ssh_keys`: the user's own agent (`SSH_AUTH_SOCK` of the worker) is never passed,
+so `git` over ssh and `ssh` from an agent work only in such a folder. Your terminal and VS Code
+are not affected. To give `infra` a key of its own:
+
+```sh
+ssh-keygen -t ed25519 -N "" -C hqc-infra -f /tmp/infra_ed25519   # or an existing key without passphrase
+hqc-worker env add-key infra_ed25519 /tmp/infra_ed25519
+rm /tmp/infra_ed25519                                              # the store has the copy
+# add the public half (/tmp/infra_ed25519.pub) to the host's authorized_keys, then
+# ssh_keys = ["infra_ed25519"] in [environments.infra], and restart the worker
+```
+
+- The store is `$HQC_HOME/keys/` (`~/.hqc/keys/`): 0700, one key per file, 0600, the file name is
+  the key name. `add-key` creates it with these modes and refuses to replace a key of the same
+  name (remove the file first). A key with a passphrase does not work: nothing can prompt for
+  it, and the session fails to start with `ssh-add`'s message.
+- The worker refuses to start (and `hqc-worker env` refuses to print) if the store, a file in
+  it or `$HQC_HOME/agents/` is readable by group or others, is a symlink or belongs to another
+  user; the message says which `chmod` fixes it. A name in `ssh_keys` that is not in the store
+  also stops it.
+- Every process of a session in the environment gets its own `ssh-agent` on a socket in
+  `$HQC_HOME/agents/` with the keys loaded; it stops when the process does (stop, kill, crash,
+  idle stop, worker shutdown). After a crash of the worker the next start empties the agents it
+  left and removes their sockets (`stale ssh-agent sockets removed` in the log).
+- Move the project's key out of `~/.ssh`: without a separate OS user the agent can still read
+  `~/.ssh` and use what is there; the store only helps for keys that are no longer there.
+- `hqc-worker env` and the logs show key names, never keys; `hello` carries no key names.
 
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with
@@ -887,10 +917,11 @@ Per §19.1 and the notes `docs/notes/t2..t6-questions.md`:
 - **No mirror and no import of VS Code sessions**, no takeover; a session started in hqc is visible
   in `~/.claude/projects`, but changes made in VS Code do not come back to hqc.
 - **No artifacts**: attachments to messages are not passed to the agent (the worker logs a warn).
-- **Environments** (since T43, §2.2): `ssh_keys` are not implemented yet (T44). The agent
-  process gets only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`,
-  `TMPDIR`, `SSH_AUTH_SOCK`, `CLAUDE_*`, `ANTHROPIC_*` from the worker's environment, plus the
-  `env` of the folder's environment; `HQC_*` and everything else are not passed.
+- **Environments** (since T43, §2.2): the agent process gets only `PATH`, `HOME`, `USER`,
+  `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `CLAUDE_*`, `ANTHROPIC_*` from the
+  worker's environment, plus the `env` of the folder's environment, plus (since T44)
+  `SSH_AUTH_SOCK` of its own ssh-agent if the environment has `ssh_keys`; `HQC_*`, the user's
+  `SSH_AUTH_SOCK` and everything else are not passed.
 - **One user**: no sharing and no grants; keep `allow_foreign_sessions` `false`.
 - **Claude Code adapter**: `system_prompt` and `disallowed_tools` are passed
   (`--append-system-prompt`, `--disallowedTools`), `restricted` as `--restricted`;

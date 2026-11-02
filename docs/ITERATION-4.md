@@ -271,7 +271,7 @@ config errors, values not in `hello`), `permissions::tests::environment_rules` a
 (`claude_live::live_environment_ssh`); hub `tests/t43.rs`; client `tests/rules.test.tsx`.
 Decisions in `docs/notes/t43-questions.md`.
 
-## T44. ssh keys of an environment
+## T44. ssh keys of an environment (done, SPEC 0.57)
 
 Sections: §2.1, §14, §20. Depends on T43. Today a session either has no ssh (the default
 `deny`) or the user's whole `~/.ssh` through `SSH_AUTH_SOCK`.
@@ -291,6 +291,20 @@ Acceptance: the common checks; worker tests: the socket lives and dies with the 
 sessions of one environment do not share a socket, a session without keys has no
 `SSH_AUTH_SOCK`, wrong modes refuse to start; a live run: a session in the bound folder runs `ssh
 -o BatchMode=yes` to a test host with the store's key while `~/.ssh` has no key for it.
+
+Done: `ssh_keys` in `config.rs` (`Environment::ssh_keys`, `Config::check_ssh` in
+`Config::load`), the store and the agents in `ssh.rs` (`Store::check`, `add_key`,
+`start_agent`, `clean_agents`; `SshAgent` stops its ssh-agent and removes the socket on drop).
+The adapter starts an agent per process for an environment with keys, passes its socket as
+`SSH_AUTH_SOCK` and drops it in the monitor after the process exits; `SSH_AUTH_SOCK` left the
+child allowlist and is refused in `env`. `hqc-worker run` cleans stale sockets before the
+supervisor starts; `hqc-worker env add-key <name> <file>`, `env` and `env which` list key names.
+Worker only: no protocol, hub or client change. Tests: `ssh::tests` (modes, `add-key`, an
+agent per guard, stale agents), `config::tests::ssh_keys_must_be_in_the_store` and the new
+config errors, `env_cmd::tests::ssh_keys_by_name`,
+`adapter::claude_code::tests::ssh_agent_lives_and_dies_with_the_process` and
+`no_keys_no_ssh_auth_sock`; one live run (`claude_live::live_environment_ssh_keys`, with a test
+`sshd`). Decisions in `docs/notes/t44-questions.md`.
 
 ## T45. Clone workspaces, and deleting what hqc created
 

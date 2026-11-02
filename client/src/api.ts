@@ -22,6 +22,7 @@ import {
   parseSessionOrder,
   parseVapidKey,
   parseWorkspace,
+  parseWorkspaceInspection,
   parseWorkspaceList,
   parseWorkspacePermissions,
   parseWorkspaceRuleList,
@@ -45,6 +46,7 @@ import {
   type SessionOrder,
   type Theme,
   type Workspace,
+  type WorkspaceInspection,
   type WorkspacePermissions,
   type WorkspaceRule,
 } from './proto';
@@ -227,12 +229,17 @@ export class Api {
   }
 
   /** The worker checks the folder (`fs.stat`); `409 workspace_conflict` carries the
-   *  workspace that already holds it in `ApiError.body` (`parseWorkspaceConflict`). */
+   *  workspace that already holds it in `ApiError.body` (`parseWorkspaceConflict`). `kind:
+   *  clone` (T45): `path` is the new folder, the worker clones `url` into it and the workspace
+   *  is `creating` until it is done. */
   async createWorkspace(w: {
     project_id: string;
     worker_id: string;
     path: string;
     label?: string;
+    kind?: 'clone';
+    url?: string;
+    branch?: string;
     /** The worker mirrors the folder's Claude Code sessions (SPEC §9.1); on by default
      *  since T21. */
     mirror_enabled?: boolean;
@@ -278,9 +285,16 @@ export class Api {
     return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/takeover`));
   }
 
-  /** Removes the record only; the folder is not touched (SPEC §13.2). */
-  async deleteWorkspace(id: string): Promise<void> {
-    await this.req('DELETE', `/api/workspaces/${enc(id)}`);
+  /** Removes the record; the folder is not touched (SPEC §13.2) unless `removeFolder` is set
+   *  for a folder hqc created, which the worker then deletes (T45). */
+  async deleteWorkspace(id: string, removeFolder = false): Promise<void> {
+    await this.req('DELETE', `/api/workspaces/${enc(id)}${removeFolder ? '?remove_folder=true' : ''}`);
+  }
+
+  /** Uncommitted changes and unpushed commits of a folder hqc created (T45); `409
+   *  worker_offline` when the worker is not connected. */
+  async inspectWorkspace(id: string): Promise<WorkspaceInspection> {
+    return parseWorkspaceInspection(await this.req('GET', `/api/workspaces/${enc(id)}/inspect`));
   }
 
   /** Folders on the worker (`fs.list_dirs`): its allowed_roots without `path`. */

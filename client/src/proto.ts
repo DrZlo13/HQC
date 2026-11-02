@@ -579,6 +579,31 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'command');
     optStr(p, 'tool');
   },
+  // T45: a clone into a new folder and its outcome; the check and the deletion of a folder hqc
+  // created.
+  'workspace.create': (p) => {
+    str(p, 'request_id');
+    str(p, 'kind');
+    str(p, 'path');
+    str(p, 'url');
+    optStr(p, 'branch');
+  },
+  'workspace.created': (p) => {
+    str(p, 'request_id');
+    if ((p.canonical === undefined) === (p.error === undefined)) {
+      throw new ProtoError('workspace.created: canonical or error');
+    }
+    optStr(p, 'canonical');
+    optStr(p, 'error');
+  },
+  'workspace.inspect': (p) => {
+    str(p, 'request_id');
+    str(p, 'path');
+  },
+  'workspace.delete': (p) => {
+    str(p, 'request_id');
+    str(p, 'path');
+  },
   // T30: an agent's hqc MCP tool call and its answer (SPEC §5.2).
   'mcp.call': (p) => {
     str(p, 'request_id');
@@ -1125,13 +1150,22 @@ export interface Workspace {
   label: string;
   /** The environment the worker's bindings give the folder (T43; a display, the worker decides). */
   environment: string;
+  /** `dir` | `clone` (T45) | `worktree` (later). */
   kind: string;
+  /** hqc made the folder (T45): deleting the workspace can delete it. */
+  created_by_hqc: boolean;
   /** Its Claude Code sessions are mirrored (imported from VS Code, SPEC §9). */
   mirror_enabled: boolean;
   /** How many hqc allow rules the folder has (T48). */
   hqc_rules: number;
+  /** `creating` while the worker clones, `failed` with `error` when it could not (T45). */
+  state: WorkspaceState | Unknown;
+  error?: string;
   created_at: string;
 }
+
+export const WORKSPACE_STATES = ['creating', 'ready', 'failed'] as const;
+export type WorkspaceState = (typeof WORKSPACE_STATES)[number];
 
 export function parseWorkspace(v: unknown): Workspace {
   const o = obj(v, 'workspace');
@@ -1143,9 +1177,38 @@ export function parseWorkspace(v: unknown): Workspace {
     label: optStr(o, 'label') ?? '',
     environment: optStr(o, 'environment') ?? 'default',
     kind: str(o, 'kind'),
+    created_by_hqc: o.created_by_hqc === true,
     mirror_enabled: o.mirror_enabled === true,
     hqc_rules: optNum(o, 'hqc_rules') ?? 0,
+    // A hub before T45 sends none: every folder it knows exists.
+    state: present(o, 'state') ? tolerantEnum(o, 'state', WORKSPACE_STATES) : 'ready',
+    error: optStr(o, 'error'),
     created_at: str(o, 'created_at'),
+  };
+}
+
+/** `GET /api/workspaces/{id}/inspect` (T45): what deleting a folder hqc created would lose. */
+export interface WorkspaceInspection {
+  /** Not a git folder: nothing to warn about but the folder itself. */
+  git: boolean;
+  /** Paths with uncommitted changes (at most 200 of `dirty_count`). */
+  dirty: string[];
+  dirty_count: number;
+  /** Local branches with commits on no remote branch. */
+  unpushed: { branch: string; commits: number }[];
+}
+
+export function parseWorkspaceInspection(v: unknown): WorkspaceInspection {
+  const o = obj(v, 'inspection');
+  const dirty = arr(o, 'dirty').filter((s): s is string => typeof s === 'string');
+  return {
+    git: o.git === true,
+    dirty,
+    dirty_count: optNum(o, 'dirty_count') ?? dirty.length,
+    unpushed: arr(o, 'unpushed').map((e, i) => {
+      const u = obj(e, `unpushed[${i}]`);
+      return { branch: str(u, 'branch'), commits: num(u, 'commits') };
+    }),
   };
 }
 

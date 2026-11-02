@@ -38,6 +38,7 @@ pub mod state;
 pub mod titles;
 pub mod watchdog;
 pub mod worker_ws;
+pub mod workspaces;
 
 pub use app::AppState;
 pub use config::Config;
@@ -79,6 +80,7 @@ pub fn router(app: AppState) -> Router {
             axum::routing::delete(rules::delete),
         )
         .route("/api/workspaces/{id}/permissions", get(rules::inspect))
+        .route("/api/workspaces/{id}/inspect", get(workspaces::inspect))
         .route(
             "/api/projects/{id}/sessions",
             get(api::project_sessions).post(api::create_session),

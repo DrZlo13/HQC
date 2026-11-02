@@ -58,6 +58,10 @@ pub enum Reply {
     Result {
         pending_id: Uuid,
     },
+    /// `workspace.create` (T45): an `error` to it fails the workspace.
+    WorkspaceCreate {
+        workspace_id: Uuid,
+    },
     Other,
 }
 
@@ -529,6 +533,19 @@ async fn handle_text(
             conn.reply(&id, HubFrame::Ack(Ack::default()));
             r
         }
+        WorkerFrame::WorkspaceCreated(c) => {
+            match crate::workspaces::created(app, conn, &c).await {
+                Ok(()) => {
+                    conn.reply(&id, HubFrame::Ack(Ack::default()));
+                    Ok(())
+                }
+                // Not acked: the worker answers again when the request comes after `hello`.
+                Err(e) => {
+                    conn.error(&id, error_code::INTERNAL, "outcome not stored", true);
+                    Err(e)
+                }
+            }
+        }
         WorkerFrame::Ack(a) => on_ack(app, conn, &id, a).await,
         WorkerFrame::Error(e) => on_error(app, conn, &id, e).await,
     };
@@ -624,6 +641,7 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         crate::peers::after_hello(app, conn.worker_id).await?;
         crate::mirror::after_hello(app, conn).await?;
         crate::rules::after_hello(app, conn).await?;
+        crate::workspaces::after_hello(app, conn, restarted).await?;
         Ok(())
     }
     .await;
@@ -792,7 +810,8 @@ async fn on_ack(app: &AppState, conn: &Arc<WorkerConn>, id: &str, a: Ack) -> any
             delivery::on_input_ack(app, conn, session_id, event_id).await
         }
         Some(Reply::Result { pending_id }) => crate::peers::result_acked(app, pending_id).await,
-        Some(Reply::Other) | None => Ok(()),
+        // The outcome comes as `workspace.created`.
+        Some(Reply::WorkspaceCreate { .. }) | Some(Reply::Other) | None => Ok(()),
     }
 }
 
@@ -822,6 +841,10 @@ async fn on_error(
             // The worker no longer holds the request (restarted); stop re-sending.
             tracing::info!(%pending_id, code = %e.code, "worker rejected a request result");
             Ok(db::result_delivered(&app.db, pending_id).await?)
+        }
+        Some(Reply::WorkspaceCreate { workspace_id }) => {
+            tracing::warn!(%workspace_id, code = %e.code, message = %e.message, "worker refused workspace.create");
+            crate::workspaces::refused(app, workspace_id, &e.message).await
         }
         Some(Reply::Other) | None => {
             tracing::warn!(worker_id = %conn.worker_id, frame = id, code = %e.code, message = %e.message, "worker error");

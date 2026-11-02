@@ -579,8 +579,8 @@ impl Supervisor {
             }
             HubFrame::WorkspaceDelete(r) => {
                 let ws = self.workspaces.clone();
-                self.fs_request(id, r.request_id, move || {
-                    ws.delete(&r.path).map(ResultBody::WorkspaceDelete)
+                self.fs_request(id, r.request_id.clone(), move || {
+                    ws.delete(&r).map(ResultBody::WorkspaceDelete)
                 });
                 return;
             }

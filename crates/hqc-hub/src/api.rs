@@ -374,7 +374,6 @@ pub async fn create_workspace(
     let b = body.workspace;
     let project = project_for(&app, &user, b.project_id).await?;
     let worker = own_worker(&app, &user, b.worker_id).await?;
-    let path = check_path(&b.path)?;
     let label = b.label.as_deref().unwrap_or("").trim();
     if label.chars().count() > MAX_LABEL {
         return Err(ApiError::BadRequest(format!(
@@ -396,12 +395,25 @@ pub async fn create_workspace(
             )
             .await
         }
+        Some("worktree") => {
+            return crate::workspaces::create_worktree(
+                &app,
+                &project,
+                &worker,
+                user.id,
+                b.clone(),
+                &label,
+                body.mirror_enabled,
+            )
+            .await
+        }
         Some(k) => {
             return Err(ApiError::BadRequest(format!(
-                "kind {k:?}: a workspace is a dir or a clone"
+                "kind {k:?}: a workspace is a dir, a clone or a worktree"
             )))
         }
     }
+    let path = check_path(&b.path)?;
     let request = path.to_string();
     let st = match ask_worker(&app, worker.id, |request_id| {
         HubFrame::FsStat(FsStat {
@@ -459,7 +471,7 @@ pub async fn create_workspace(
             path: canonical,
             label: &label,
             mirror_enabled: body.mirror_enabled,
-            clone: None,
+            source: db::Source::Dir,
         },
     )
     .await?;
@@ -541,13 +553,17 @@ pub async fn patch_workspace(
 pub struct DeleteWorkspaceQuery {
     #[serde(default)]
     pub remove_folder: bool,
+    /// With `remove_folder`: the user confirmed the uncommitted files (T46).
+    #[serde(default)]
+    pub force: bool,
 }
 
-/// `DELETE /api/workspaces/{id}?remove_folder=`: the record (SPEC §13.2); the folder stays
-/// unless `remove_folder` is set for a folder hqc created (T45), which the worker deletes
-/// first (`workspace.delete`; offline: `409 worker_offline`, nothing deleted). `409
-/// workspace_in_use` while a session that is not archived runs there, `409 workspace_creating`
-/// while the clone runs.
+/// `DELETE /api/workspaces/{id}?remove_folder=&force=`: the record (SPEC §13.2); the folder
+/// stays unless `remove_folder` is set for a folder hqc created (T45), which the worker
+/// deletes first (`workspace.delete`; offline: `409 worker_offline`, nothing deleted; `force`
+/// for a worktree with uncommitted files, T46). `409 workspace_in_use` while a session that is
+/// not archived runs there or worktrees of it exist (T46), `409 workspace_creating` while the
+/// worker makes it.
 pub async fn delete_workspace(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -561,19 +577,29 @@ pub async fn delete_workspace(
             format!("{n} session(s) still work in this workspace; archive them first"),
         )
     };
+    let has_worktrees = |n: i64| {
+        ApiError::Conflict(
+            "workspace_in_use",
+            format!("{n} worktree(s) of this workspace exist; delete them first"),
+        )
+    };
+    if ws.state() == WorkspaceState::Creating {
+        return Err(ApiError::Conflict(
+            "workspace_creating",
+            "the worker is still making this workspace".into(),
+        ));
+    }
+    let n = db::worktrees_of(&app.db, ws.id).await?;
+    if n > 0 {
+        return Err(has_worktrees(n));
+    }
     match ws.state() {
-        WorkspaceState::Creating => {
-            return Err(ApiError::Conflict(
-                "workspace_creating",
-                "the worker is still cloning this workspace".into(),
-            ))
-        }
         WorkspaceState::Ready if q.remove_folder && ws.created_by_hqc => {
             let n = db::live_sessions_in_workspace(&app.db, ws.id).await?;
             if n > 0 {
                 return Err(in_use(n));
             }
-            crate::workspaces::remove_folder(&app, &ws).await?;
+            crate::workspaces::remove_folder(&app, &ws, q.force).await?;
         }
         _ if q.remove_folder => {
             return Err(ApiError::BadRequest(
@@ -593,6 +619,7 @@ pub async fn delete_workspace(
             Ok(StatusCode::NO_CONTENT)
         }
         db::WorkspaceDelete::InUse(n) => Err(in_use(n)),
+        db::WorkspaceDelete::HasWorktrees(n) => Err(has_worktrees(n)),
     }
 }
 
@@ -793,7 +820,7 @@ async fn session_workspace(
         WorkspaceState::Ready => Ok(w),
         WorkspaceState::Creating => Err(ApiError::Conflict(
             "workspace_not_ready",
-            format!("the worker is still cloning {}", w.path),
+            format!("the worker is still making {}", w.path),
         )),
         WorkspaceState::Failed => Err(ApiError::Conflict(
             "workspace_not_ready",

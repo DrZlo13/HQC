@@ -487,9 +487,10 @@ pub enum HubFrame {
     /// Uncommitted changes and unpushed commits of a folder, before it is deleted (T45).
     #[serde(rename = "workspace.inspect")]
     WorkspaceInspect(WorkspacePath),
-    /// Delete a folder the worker created (T45, SPEC §13.2).
+    /// Delete a folder the worker created (T45, SPEC §13.2); a worktree with `git worktree
+    /// remove` (T46).
     #[serde(rename = "workspace.delete")]
-    WorkspaceDelete(WorkspacePath),
+    WorkspaceDelete(WorkspaceDelete),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -521,6 +522,16 @@ pub enum WorkspaceSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    /// `git worktree add` in `origin`, a git workspace the worker knows (T46): `branch` checked
+    /// out at `path`, or with `new_branch` created there from the origin's `HEAD`. Runs in the
+    /// environment of `path`.
+    Worktree {
+        /// The origin workspace's canonical path.
+        origin: String,
+        branch: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        new_branch: bool,
+    },
 }
 
 /// `workspace.created {request_id, canonical | error}` (T45, SPEC §5.4): the folder is ready at
@@ -535,13 +546,24 @@ pub struct WorkspaceCreated {
     pub error: Option<String>,
 }
 
-/// `workspace.inspect {request_id, path}` -> `result` [`WorkspaceInspectResult`];
-/// `workspace.delete {request_id, path}` -> `result` [`WorkspaceDeleteResult`] (T45, SPEC
+/// `workspace.inspect {request_id, path}` -> `result` [`WorkspaceInspectResult`] (T45, SPEC
 /// §5.3). `request_id` equals the frame `id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePath {
     pub request_id: String,
     pub path: String,
+}
+
+/// `workspace.delete {request_id, path, force?}` -> `result` [`WorkspaceDeleteResult`] (T45,
+/// SPEC §5.3). `request_id` equals the frame `id`. `force` (T46): the user confirmed the
+/// uncommitted files, so a worktree is removed with `git worktree remove --force`; a clone's
+/// folder is deleted either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceDelete {
+    pub request_id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
 }
 
 /// Result of `workspace.inspect`: what deleting the folder would lose.
@@ -554,7 +576,8 @@ pub struct WorkspaceInspectResult {
     pub dirty: Vec<String>,
     /// All of them, also those beyond [`MAX_DIRTY`].
     pub dirty_count: u32,
-    /// Local branches with commits that are on no remote branch, at most [`MAX_UNPUSHED`].
+    /// Local branches with commits that are on no remote branch, at most [`MAX_UNPUSHED`]; in
+    /// a linked worktree (T46) only the branch it has checked out: the others are not its own.
     pub unpushed: Vec<Unpushed>,
 }
 
@@ -638,7 +661,7 @@ pub fn check_clone_url(url: &str) -> Result<CloneFrom, String> {
     }
 }
 
-/// A branch name for `git clone --branch` (T45): letters, digits and `._/-`, not starting
+/// A branch name for `git clone --branch` (T45) and `git worktree add` (T46): letters, digits and `._/-`, not starting
 /// with `-` or `/`, without `..` or `//`, not ending with `/` or `.lock`, at most 255 bytes.
 pub fn check_branch(b: &str) -> Result<(), String> {
     let ok = (1..=255).contains(&b.len())
@@ -1291,6 +1314,10 @@ mod tests {
             include_str!("../examples/wire/hub.workspace.create.json"),
         ),
         (
+            "workspace.create",
+            include_str!("../examples/wire/hub.workspace.create.worktree.json"),
+        ),
+        (
             "workspace.inspect",
             include_str!("../examples/wire/hub.workspace.inspect.json"),
         ),
@@ -1507,9 +1534,39 @@ mod tests {
         let HubFrame::WorkspaceCreate(c) = c.body else {
             panic!("not workspace.create");
         };
-        let WorkspaceSource::Clone { url, branch } = &c.source;
+        let WorkspaceSource::Clone { url, branch } = &c.source else {
+            panic!("not a clone");
+        };
         assert_eq!(check_clone_url(url), Ok(CloneFrom::Remote));
         assert!(check_branch(branch.as_deref().unwrap()).is_ok());
+        // T46: a worktree names its origin by path.
+        let w: Envelope<HubFrame> = serde_json::from_str(include_str!(
+            "../examples/wire/hub.workspace.create.worktree.json"
+        ))
+        .unwrap();
+        let HubFrame::WorkspaceCreate(w) = w.body else {
+            panic!("not workspace.create");
+        };
+        let WorkspaceSource::Worktree {
+            origin,
+            branch,
+            new_branch,
+        } = &w.source
+        else {
+            panic!("not a worktree");
+        };
+        assert!(check_branch(branch).is_ok() && *new_branch);
+        assert!(w.path.starts_with(&format!("{origin}-")));
+        let d: Envelope<HubFrame> =
+            serde_json::from_str(include_str!("../examples/wire/hub.workspace.delete.json"))
+                .unwrap();
+        let HubFrame::WorkspaceDelete(d) = d.body else {
+            panic!("not workspace.delete");
+        };
+        assert!(d.force);
+        let plain: WorkspaceDelete =
+            serde_json::from_value(json!({"request_id": "h-1", "path": "/a"})).unwrap();
+        assert!(!plain.force, "force is off unless the hub says so");
         for (src, ok) in [
             (
                 include_str!("../examples/wire/worker.workspace.created.json"),

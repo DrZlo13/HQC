@@ -139,7 +139,11 @@ pub async fn send(app: &AppState, ws: &db::WorkspaceRow) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn send_to(app: &AppState, conn: &WorkerConn, ws: &db::WorkspaceRow) -> anyhow::Result<()> {
+pub(crate) async fn send_to(
+    app: &AppState,
+    conn: &WorkerConn,
+    ws: &db::WorkspaceRow,
+) -> anyhow::Result<()> {
     conn.send(HubFrame::WorkspaceRules(WorkspaceRules {
         workspace_path: ws.path.clone(),
         allow_rules: db::workspace_rule_texts(&app.db, ws.id).await?,

@@ -231,15 +231,19 @@ export class Api {
   /** The worker checks the folder (`fs.stat`); `409 workspace_conflict` carries the
    *  workspace that already holds it in `ApiError.body` (`parseWorkspaceConflict`). `kind:
    *  clone` (T45): `path` is the new folder, the worker clones `url` into it and the workspace
-   *  is `creating` until it is done. */
+   *  is `creating` until it is done. `kind: worktree` (T46): a worktree of
+   *  `origin_workspace_id` on `branch` (`new_branch`: made from the origin's HEAD); without
+   *  `path` the hub puts it next to the origin, `<origin-name>-<branch>`. */
   async createWorkspace(w: {
     project_id: string;
     worker_id: string;
-    path: string;
+    path?: string;
     label?: string;
-    kind?: 'clone';
+    kind?: 'clone' | 'worktree';
     url?: string;
     branch?: string;
+    origin_workspace_id?: string;
+    new_branch?: boolean;
     /** The worker mirrors the folder's Claude Code sessions (SPEC §9.1); on by default
      *  since T21. */
     mirror_enabled?: boolean;
@@ -286,9 +290,11 @@ export class Api {
   }
 
   /** Removes the record; the folder is not touched (SPEC §13.2) unless `removeFolder` is set
-   *  for a folder hqc created, which the worker then deletes (T45). */
-  async deleteWorkspace(id: string, removeFolder = false): Promise<void> {
-    await this.req('DELETE', `/api/workspaces/${enc(id)}${removeFolder ? '?remove_folder=true' : ''}`);
+   *  for a folder hqc created, which the worker then deletes (T45). `force`: the user saw and
+   *  confirmed the uncommitted files, which `git worktree remove` keeps otherwise (T46). */
+  async deleteWorkspace(id: string, removeFolder = false, force = false): Promise<void> {
+    const q = removeFolder ? `?remove_folder=true${force ? '&force=true' : ''}` : '';
+    await this.req('DELETE', `/api/workspaces/${enc(id)}${q}`);
   }
 
   /** Uncommitted changes and unpushed commits of a folder hqc created (T45); `409

@@ -17,8 +17,8 @@ let mock: {
   close(): Promise<void>;
   closeVsCode(id: string): void;
   hideHolder(id: string, hidden: boolean): void;
-  finishClones(): void;
-  removedWorkspaces: { path: string; folder_removed?: boolean }[];
+  finishCreating(): void;
+  removedWorkspaces: { path: string; folder_removed?: boolean; forced?: boolean }[];
 };
 let win: Window;
 let app: AppState;
@@ -197,7 +197,7 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   // Its workspace stays while the session lives.
   location.hash = `#/p/${pid}/settings`;
   (await until('remove button', () => $('.btn-remove-workspace') as HTMLButtonElement | null))!.click();
-  await until('in use', () => $('.workspaces .error-text')?.textContent?.includes('Archive these sessions first'));
+  await until('in use', () => $('.workspaces .error-text')?.textContent?.includes('archive them first'));
 });
 
 it('switches projects from the left column and deletes a project', async () => {
@@ -411,11 +411,11 @@ it('clones a repository into a folder of the tree, follows it on the row and del
 
   // The row shows the clone while the worker runs it, without actions, then the workspace.
   const row = (end: string) => $$('.workspace-row').find((r) => r.querySelector('.workspace-path')?.textContent?.endsWith(end));
-  await until('cloning on the row', () => row('/kicad/hold-c6')?.querySelector('.workspace-cloning'));
+  await until('cloning on the row', () => row('/kicad/hold-c6')?.querySelector('.workspace-progress'));
   expect($('.clone-repository')).toBeNull();
   expect(row('/kicad/hold-c6')!.querySelector('.btn-remove-workspace')).toBeNull();
-  mock.finishClones();
-  await until('ready', () => !row('/kicad/hold-c6')!.querySelector('.workspace-cloning') && row('/kicad/hold-c6')!.querySelector('.btn-rules'));
+  mock.finishCreating();
+  await until('ready', () => !row('/kicad/hold-c6')!.querySelector('.workspace-progress') && row('/kicad/hold-c6')!.querySelector('.btn-rules'));
 
   // A folder that exists already is refused in the form.
   button('Clone a repository')!.click();
@@ -445,4 +445,90 @@ it('clones a repository into a folder of the tree, follows it on the row and del
   const gone = mock.removedWorkspaces.find((w) => w.path.endsWith('/kicad/hold-c6'));
   expect(gone?.folder_removed).toBe(true);
   expect(mock.removedWorkspaces.find((w) => w.path.endsWith('/missing-repo'))?.folder_removed).toBeUndefined();
+});
+
+it('makes a worktree of a workspace, shows it under its origin and deletes it through the dialog (T46)', async () => {
+  promptAnswer = 'Worktrees';
+  $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
+  await until('new project settings', () => $('.workspaces') && $('.project-row.is-current')?.getAttribute('aria-label') === 'Worktrees');
+  const row = (end: string) => $$('.workspace-row').find((r) => r.querySelector('.workspace-path')?.textContent?.endsWith(end));
+  // The origin: a clone, ready.
+  button('Clone a repository')!.click();
+  await until('clone form', () => $('.clone-repository input[name=url]'));
+  type('.clone-repository input[name=url]', 'git@github.com:drzlo/hold-wt.git');
+  type('.clone-repository input[name=parent]', '/Users/home-mac/work');
+  await settle();
+  submit('.clone-repository');
+  await until('origin cloning', () => row('/work/hold-wt'));
+  expect(row('/work/hold-wt')!.querySelector('.btn-new-worktree')).toBeNull();
+  mock.finishCreating();
+  await until('origin ready', () => row('/work/hold-wt')?.querySelector('.btn-new-worktree'));
+
+  // A new branch: the folder follows the branch until it is edited.
+  row('/work/hold-wt')!.querySelector<HTMLButtonElement>('.btn-new-worktree')!.click();
+  await until('worktree form', () => $('.new-worktree input[name=branch]'));
+  type('.new-worktree input[name=branch]', 'hqc/hold-fix');
+  await settle();
+  expect($<HTMLInputElement>('.new-worktree input[name=path]')!.value).toBe('/Users/home-mac/work/hold-wt-hqc-hold-fix');
+  submit('.new-worktree');
+  await until('worktree adding', () => row('/work/hold-wt-hqc-hold-fix')?.querySelector('.workspace-progress'));
+  expect($('.new-worktree')).toBeNull();
+  const wt = row('/work/hold-wt-hqc-hold-fix')!;
+  expect(wt.classList.contains('is-worktree')).toBe(true);
+  expect(wt.querySelector('.workspace-progress')!.textContent).toBe('Adding worktree…');
+  expect(wt.querySelector('.workspace-branch')!.textContent).toBe('hqc/hold-fix');
+  // Under its origin, before the rows that came after the origin.
+  const paths = () => $$('.workspace-row .workspace-path').map((p) => p.textContent);
+  mock.finishCreating();
+  await until('worktree ready', () => row('/work/hold-wt-hqc-hold-fix')?.querySelector('.btn-rules'));
+  expect(row('/work/hold-wt-hqc-hold-fix')!.querySelector('.btn-new-worktree')).toBeNull();
+
+  // An existing branch with an edited folder; another one checked out elsewhere fails.
+  row('/work/hold-wt')!.querySelector<HTMLButtonElement>('.btn-new-worktree')!.click();
+  await until('worktree form', () => $('.new-worktree input[name=branch]'));
+  type('.new-worktree input[name=branch]', 'dirty');
+  $<HTMLInputElement>('.new-worktree input[value=existing]')!.click();
+  type('.new-worktree input[name=path]', '/Users/home-mac/work/wt-dirty');
+  await settle();
+  submit('.new-worktree');
+  await until('edited folder', () => row('/work/wt-dirty')?.querySelector('.btn-rules'));
+  row('/work/hold-wt')!.querySelector<HTMLButtonElement>('.btn-new-worktree')!.click();
+  await until('worktree form', () => $('.new-worktree input[name=branch]'));
+  type('.new-worktree input[name=branch]', 'taken');
+  $<HTMLInputElement>('.new-worktree input[value=existing]')!.click();
+  await settle();
+  submit('.new-worktree');
+  await until('failed on the row', () => row('/work/hold-wt-taken')?.querySelector('.workspace-error')?.textContent?.includes('already checked out'));
+  expect(row('/work/hold-wt-taken')!.querySelector('.tag-failed')!.textContent).toBe('Worktree failed');
+  expect(paths().slice(0, 4).map((p) => p?.split('/').pop())).toEqual(['hold-wt', 'hold-wt-hqc-hold-fix', 'wt-dirty', 'hold-wt-taken']);
+  row('/work/hold-wt-taken')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
+  await until('failed one removed', () => !row('/work/hold-wt-taken'));
+
+  // The origin stays while its worktrees exist.
+  row('/work/hold-wt')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
+  await until('origin dialog', () => button('Remove from project only', '.delete-folder'));
+  button('Remove from project only', '.delete-folder')!.click();
+  await until('refused', () => $('.delete-folder .error-text')?.textContent?.includes('2 worktree(s) of this workspace exist'));
+  $<HTMLButtonElement>('.delete-folder button[aria-label=Close]')!.click();
+  await until('closed', () => !$('.delete-folder'));
+
+  // Deleting a worktree: its own branch with the unpushed commit, which stays; no force
+  // without uncommitted files.
+  row('/work/hold-wt-hqc-hold-fix')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
+  await until('dialog checked', () => $('.delete-folder .delete-unpushed'));
+  expect($('.delete-what')!.textContent).toContain('git worktree remove');
+  expect($('.delete-what')!.textContent).toContain('the branch hqc/hold-fix and its commits stay');
+  expect($('.delete-unpushed')!.textContent).toContain('hqc/hold-fix — 1 commit');
+  expect($('.delete-dirty')).toBeNull();
+  button('Delete folder', '.delete-folder')!.click();
+  await until('deleted', () => !row('/work/hold-wt-hqc-hold-fix') && !$('.delete-folder'));
+  const fix = mock.removedWorkspaces.find((w) => w.path.endsWith('/hold-wt-hqc-hold-fix')) as { folder_removed?: boolean; forced?: boolean };
+  expect(fix).toMatchObject({ folder_removed: true });
+  expect(fix.forced).toBeUndefined();
+  // Uncommitted files shown in the dialog: deleting them is confirming them (force).
+  row('/work/wt-dirty')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
+  await until('dirty dialog', () => $('.delete-folder .delete-dirty'));
+  button('Delete folder', '.delete-folder')!.click();
+  await until('dirty deleted', () => !row('/work/wt-dirty') && !$('.delete-folder'));
+  expect(mock.removedWorkspaces.find((w) => w.path.endsWith('/wt-dirty'))).toMatchObject({ folder_removed: true, forced: true });
 });

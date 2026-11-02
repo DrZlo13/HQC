@@ -192,6 +192,15 @@ describe('examples/wire', () => {
       state: 'failed',
       error: 'git clone failed: fatal: Could not read from remote repository.',
     });
+    // T46: a worktree names its origin and branch.
+    const clone = parseWorkspace(load('api.workspace.clone.json'));
+    expect(parseWorkspace(load('api.workspace.worktree.json'))).toMatchObject({
+      kind: 'worktree',
+      origin_workspace_id: clone.id,
+      branch: 'hqc/fix-backlight',
+      state: 'creating',
+    });
+    expect(w.origin_workspace_id).toBeUndefined();
     const { state: _, ...old } = load('api.workspace.json') as Record<string, unknown>;
     expect(parseWorkspace(old).state).toBe('ready');
     expect(parseWorkspace({ ...old, state: 'moving' }).state).toBe('unknown');

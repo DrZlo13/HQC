@@ -890,7 +890,12 @@ pub struct WorkspaceRow {
     pub error: Option<String>,
     /// What `workspace.create` clones (T45), repeated after `hello` while `creating`.
     pub clone_url: Option<String>,
-    pub clone_branch: Option<String>,
+    /// The clone's branch, or the worktree's (T46).
+    pub branch: Option<String>,
+    /// A worktree's origin workspace (T46).
+    pub origin_workspace_id: Option<Uuid>,
+    /// The worktree creates `branch` (T46).
+    pub new_branch: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -898,7 +903,7 @@ pub struct WorkspaceRow {
 const WORKSPACE_COLS: &str = "id, project_id, owner_id, worker_id, path, label, environment, \
     ephemeral, created_by_hqc, kind, mirror_enabled, \
     (SELECT count(*)::int FROM workspace_rules r WHERE r.workspace_id = workspaces.id) AS hqc_rules, \
-    state, error, clone_url, clone_branch, created_at, updated_at";
+    state, error, clone_url, branch, origin_workspace_id, new_branch, created_at, updated_at";
 
 impl WorkspaceRow {
     pub fn state(&self) -> WorkspaceState {
@@ -914,6 +919,8 @@ impl WorkspaceRow {
             label: self.label.clone(),
             environment: self.environment.clone(),
             kind: self.kind.clone(),
+            origin_workspace_id: self.origin_workspace_id,
+            branch: self.branch.clone(),
             ephemeral: self.ephemeral,
             created_by_hqc: self.created_by_hqc,
             mirror_enabled: self.mirror_enabled,
@@ -948,7 +955,7 @@ pub async fn creating_workspaces(db: &PgPool, worker_id: Uuid) -> sqlx::Result<V
     .await
 }
 
-/// The clone is ready at `canonical` (`workspace.created`); `None` if the workspace is not
+/// The folder is ready at `canonical` (`workspace.created`); `None` if the workspace is not
 /// `creating` (any more).
 pub async fn workspace_created(
     db: &PgPool,
@@ -1150,9 +1157,25 @@ pub struct NewWorkspace<'a> {
     pub label: &'a str,
     /// On by default since T21 (SPEC §9.2).
     pub mirror_enabled: bool,
-    /// `Some((url, branch))`: a clone (T45), `creating` and `created_by_hqc` until the worker
-    /// answers.
-    pub clone: Option<(&'a str, Option<&'a str>)>,
+    pub source: Source<'a>,
+}
+
+/// What a new workspace is: an existing folder, or one hqc makes, `creating` and
+/// `created_by_hqc` until the worker answers.
+#[derive(Debug, Clone, Copy)]
+pub enum Source<'a> {
+    Dir,
+    /// T45.
+    Clone {
+        url: &'a str,
+        branch: Option<&'a str>,
+    },
+    /// T46.
+    Worktree {
+        origin: Uuid,
+        branch: &'a str,
+        new_branch: bool,
+    },
 }
 
 pub enum WorkspaceInsert {
@@ -1189,10 +1212,22 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
             .fetch_optional(&mut *tx)
             .await?;
     let bindings = env_bindings(bindings.unwrap_or_default());
+    let (kind, url, branch, origin, new_branch) = match n.source {
+        Source::Dir => ("dir", None, None, None, false),
+        Source::Clone { url, branch } => ("clone", Some(url), branch, None, false),
+        Source::Worktree {
+            origin,
+            branch,
+            new_branch,
+        } => ("worktree", None, Some(branch), Some(origin), new_branch),
+    };
+    let made = !matches!(n.source, Source::Dir);
     let row: WorkspaceRow = sqlx::query_as(&format!(
         "INSERT INTO workspaces (id, project_id, owner_id, worker_id, path, label, mirror_enabled,
-            environment, kind, created_by_hqc, state, clone_url, clone_branch)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING {WORKSPACE_COLS}"
+            environment, kind, created_by_hqc, state, clone_url, branch, origin_workspace_id,
+            new_branch)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING {WORKSPACE_COLS}"
     ))
     .bind(new_id())
     .bind(n.project_id)
@@ -1202,18 +1237,20 @@ pub async fn create_workspace(db: &PgPool, n: NewWorkspace<'_>) -> sqlx::Result<
     .bind(n.label)
     .bind(n.mirror_enabled)
     .bind(hqc_proto::frame::environment_for(&bindings, n.path))
-    .bind(if n.clone.is_some() { "clone" } else { "dir" })
-    .bind(n.clone.is_some())
+    .bind(kind)
+    .bind(made)
     .bind(
-        if n.clone.is_some() {
+        if made {
             WorkspaceState::Creating
         } else {
             WorkspaceState::Ready
         }
         .as_str(),
     )
-    .bind(n.clone.map(|c| c.0))
-    .bind(n.clone.and_then(|c| c.1))
+    .bind(url)
+    .bind(branch)
+    .bind(origin)
+    .bind(new_branch)
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
@@ -1246,17 +1283,33 @@ pub async fn live_sessions_in_workspace(db: &PgPool, id: Uuid) -> sqlx::Result<i
         .await
 }
 
+/// Worktree records made from the workspace (T46), in any state.
+pub async fn worktrees_of(db: &PgPool, id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE origin_workspace_id = $1")
+        .bind(id)
+        .fetch_one(db)
+        .await
+}
+
 pub enum WorkspaceDelete {
     Deleted,
     /// Sessions that are not archived still run there.
     InUse(i64),
+    /// Worktrees of it still exist (T46).
+    HasWorktrees(i64),
 }
 
 /// Deletes the record only; the folder is not touched (SPEC §13.2). Refused while a
-/// session that is not archived uses it; archived ones lose their workspace. A default
-/// workspace is replaced by the project's oldest remaining one.
+/// session that is not archived uses it (archived ones lose their workspace) and while
+/// worktrees of it exist. A default workspace is replaced by the project's oldest remaining
+/// one.
 pub async fn delete_workspace(db: &PgPool, ws: &WorkspaceRow) -> sqlx::Result<WorkspaceDelete> {
     let mut tx = db.begin().await?;
+    // Serialized with new workspaces of the worker, so no worktree of it appears meanwhile.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 14))")
+        .bind(ws.worker_id)
+        .execute(&mut *tx)
+        .await?;
     let live: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM sessions WHERE workspace_id = $1 AND NOT archived",
     )
@@ -1265,6 +1318,14 @@ pub async fn delete_workspace(db: &PgPool, ws: &WorkspaceRow) -> sqlx::Result<Wo
     .await?;
     if live > 0 {
         return Ok(WorkspaceDelete::InUse(live));
+    }
+    let worktrees: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE origin_workspace_id = $1")
+            .bind(ws.id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if worktrees > 0 {
+        return Ok(WorkspaceDelete::HasWorktrees(worktrees));
     }
     sqlx::query("DELETE FROM workspaces WHERE id = $1")
         .bind(ws.id)

@@ -344,7 +344,7 @@ unpushed) and `tests/worker.rs::clone_inspect_and_delete_through_frames`; hub `t
 client `tests/projects.test.tsx` (clone form, row, dialog) and `tests/proto.test.ts`. Decisions
 in `docs/notes/t45-questions.md`.
 
-## T46. Worktree workspaces
+## T46. Worktree workspaces (done, SPEC 0.60)
 
 Sections: §3 Workspace (`origin_workspace_id`), §13.1, §13.2. Depends on T45.
 - `POST /api/workspaces {kind: worktree, origin_workspace_id, branch, new_branch: bool, path?}`:
@@ -358,6 +358,25 @@ Sections: §3 Workspace (`origin_workspace_id`), §13.1, §13.2. Depends on T45.
 Acceptance: the common checks; worker tests: add on a new and an existing branch, a branch
 already checked out elsewhere is refused, remove with and without changes; hub tests: origin
 rules and the migration; the iteration criterion by hand.
+
+Done: `WorkspaceSource::Worktree {origin, branch, new_branch}` and `WorkspaceDelete {force}` in
+`hqc_proto::frame`; `origin_workspace_id`, `branch` on the workspace and in `CreateWorkspace`. The
+worker's `workspaces.rs`: `Workspaces::origin` (a known workspace, inside the roots, the top of a
+git repository), `worktree_args` (new from `HEAD`, a local branch not checked out elsewhere, or
+one remote's), `git_run` for clone and `git worktree add` (environment of the new path),
+`created_workspaces.json` entries with their `origin`, `delete` by `git worktree remove
+[--force]` and `prune` in that origin, inspection of a linked worktree by its own branch. Hub:
+`create_worktree` (origin rules, `400 invalid_origin`, the default path, shared `new_folder`),
+the origin's `workspace.rules` before every worktree `workspace.create`, `remove_folder` with
+`force`, `409 workspace_in_use` for an origin with worktrees; migration `0029`
+(`origin_workspace_id`, `new_branch`, `clone_branch` → `branch`). Client: "New worktree" under a
+row, worktrees under their origin, the dialog's worktree text and `force`. Tests: worker
+`workspaces::tests` (`worktree_on_a_new_and_an_existing_branch`,
+`worktree_runs_in_the_environment_of_its_path`, `remove_worktree_with_and_without_changes`,
+`unfinished_worktree_removed_at_start`) and `tests/worker.rs::worktree_through_frames`; hub
+`tests/t46.rs` (T45's helpers moved to `tests/common`); client `tests/projects.test.tsx` and
+`tests/proto.test.ts`. The iteration criterion by hand (phone, ssh host, commit, deletion) is
+still open. Decisions in `docs/notes/t46-questions.md`.
 
 ## T47. Ephemeral worktrees for spawned sessions
 

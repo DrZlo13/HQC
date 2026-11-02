@@ -53,6 +53,34 @@ export function cloneName(url: string): string {
   return last.replace(/\.git$/, '');
 }
 
+/** Where the hub puts a worktree without a path (T46): next to its origin,
+ *  `<origin-name>-<branch>` with the branch's slashes as `-`. */
+export function worktreePath(origin: string, branch: string): string {
+  return branch ? `${origin.replace(/\/+$/, '')}-${branch.replace(/\//g, '-')}` : '';
+}
+
+/** The list with each worktree right under its origin (T46), in the hub's order otherwise. */
+export function underOrigins(list: Workspace[]): Workspace[] {
+  const ids = new Set(list.map((w) => w.id));
+  const originOf = (w: Workspace) => (w.kind === 'worktree' && w.origin_workspace_id && ids.has(w.origin_workspace_id) ? w.origin_workspace_id : null);
+  return list.filter((w) => !originOf(w)).flatMap((w) => [w, ...list.filter((x) => originOf(x) === w.id)]);
+}
+
+/** What the row says while the worker makes the folder, and when it could not (T45, T46). */
+function making(w: Workspace): { tag: string; failed: string; note: string } {
+  return w.kind === 'worktree'
+    ? {
+        tag: 'Adding worktree…',
+        failed: 'Worktree failed',
+        note: 'The worker is adding the worktree; sessions can start once it is done.',
+      }
+    : {
+        tag: 'Cloning…',
+        failed: 'Clone failed',
+        note: 'The worker is cloning the repository; sessions can start once it is done.',
+      };
+}
+
 /** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened with the
  *  gear of the sidebar header: Appearance (icon, color, the app theme), Workspaces (SPEC §3,
  *  §13: list, add, import, make default, "VS Code sessions", remove the record) and Project
@@ -64,6 +92,8 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
   const [cloning, setCloning] = useState(false);
   const [importing, setImporting] = useState(false);
   const [deleting, setDeleting] = useState<Workspace | null>(null);
+  // The workspace whose "New worktree" form is open (T46).
+  const [branching, setBranching] = useState<string | null>(null);
   const [appearance, setAppearance] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = app.projects.get(projectId);
@@ -74,7 +104,8 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
     app.api.workers().then(setWorkers, () => setWorkers([]));
   }, [app, projectId]);
 
-  // A clone runs on the worker (T45): its row follows until it is ready or failed.
+  // A clone or a worktree is made on the worker (T45, T46): its row follows until it is ready
+  // or failed.
   const creating = !!list?.some((w) => w.state === 'creating');
   useEffect(() => {
     if (!creating) return;
@@ -90,7 +121,7 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
     }
     const what =
       w.state === 'failed'
-        ? `Remove the failed clone ${w.path} from the project?`
+        ? `Remove the failed ${w.kind === 'worktree' ? 'worktree' : 'clone'} ${w.path} from the project?`
         : `Remove workspace ${w.path} from the project? The folder on the worker stays.`;
     if (!confirm(what)) return;
     setError(null);
@@ -98,8 +129,8 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
       await app.api.deleteWorkspace(w.id);
       await app.workspacesChanged(projectId);
     } catch (e) {
-      const busy = e instanceof ApiError && e.code === 'workspace_in_use';
-      setError(busy ? `${e.message}. Archive these sessions first.` : (e as Error).message);
+      // `workspace_in_use` says what holds it: sessions to archive or worktrees to delete.
+      setError((e as Error).message);
     }
   };
 
@@ -192,33 +223,43 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
             <h2 id="ps-ws">Workspaces</h2>
             <p class="ps-text">
               Folders on workers that this project’s sessions work in. A folder belongs to one project. Removing one
-              deletes only the record: the folder on disk stays, unless hqc cloned it and you delete it too.
+              deletes only the record: the folder on disk stays, unless hqc made it (a clone or a worktree) and you delete
+              it too.
             </p>
             {list && list.length === 0 && <p class="empty-inline">No workspaces yet.</p>}
-            {list?.map((w) => {
+            {list &&
+              underOrigins(list).map((w) => {
               const isDefault = w.id === project?.default_workspace_id;
               const worker = workers?.find((x) => x.id === w.worker_id)?.name;
               const ready = w.state === 'ready';
+              const worktree = w.kind === 'worktree';
+              const origin = worktree ? list.find((x) => x.id === w.origin_workspace_id) : undefined;
+              const text = making(w);
               return (
-                <div key={w.id} class={`workspace-row ps-card ${ready ? '' : `is-${w.state}`}`}>
+                <div key={w.id} class={`workspace-row ps-card ${ready ? '' : `is-${w.state}`} ${worktree ? 'is-worktree' : ''}`}>
                   <div class="workspace-main">
                     <span class="workspace-name">{workspaceName(w)}</span>
                     <span class="workspace-path mono">
                       {worker ? `${worker}:` : ''}
                       {homePath(w.path)}
                     </span>
+                    {worktree && w.branch && (
+                      <span class="tag workspace-branch mono" title={origin ? `Worktree of ${workspaceName(origin)}` : 'Worktree'}>
+                        {w.branch}
+                      </span>
+                    )}
                     {isDefault && <span class="tag">default</span>}
                     {w.environment !== 'default' && (
                       <span class="tag workspace-env" title="Environment from the worker’s worker.toml">
                         env {w.environment}
                       </span>
                     )}
-                    {w.state === 'creating' && <span class="tag tag-progress workspace-cloning">Cloning…</span>}
-                    {w.state === 'failed' && <span class="tag tag-failed">Clone failed</span>}
+                    {w.state === 'creating' && <span class="tag tag-progress workspace-progress">{text.tag}</span>}
+                    {w.state === 'failed' && <span class="tag tag-failed">{text.failed}</span>}
                   </div>
-                  {w.state === 'failed' && <div class="error-text workspace-error">{w.error ?? 'The worker could not clone it.'}</div>}
+                  {w.state === 'failed' && <div class="error-text workspace-error">{w.error ?? 'The worker could not make it.'}</div>}
                   {w.state === 'creating' ? (
-                    <div class="muted small workspace-note">The worker is cloning the repository; sessions can start once it is done.</div>
+                    <div class="muted small workspace-note">{text.note}</div>
                   ) : (
                     <div class="workspace-actions">
                       {ready && (
@@ -244,6 +285,17 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                               Make default
                             </button>
                           )}
+                          {!worktree && (
+                            <button
+                              type="button"
+                              class="btn btn-small btn-new-worktree"
+                              title="A git worktree of this folder on another branch, as a workspace of its own"
+                              onClick={() => setBranching(branching === w.id ? null : w.id)}
+                            >
+                              <IconPlus size={13} />
+                              New worktree
+                            </button>
+                          )}
                         </>
                       )}
                       <span class="spacer" />
@@ -251,6 +303,9 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
                         Remove
                       </button>
                     </div>
+                  )}
+                  {branching === w.id && ready && (
+                    <NewWorktree app={app} projectId={projectId} origin={w} onDone={() => setBranching(null)} />
                   )}
                 </div>
               );
@@ -299,8 +354,10 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
       )}
       {deleting && (
         <DeleteFolderDialog
+          key={deleting.id}
           app={app}
           workspace={deleting}
+          origin={list?.find((x) => x.id === deleting.origin_workspace_id)}
           worker={workers?.find((x) => x.id === deleting.worker_id)?.name}
           phone={phone}
           onClose={() => setDeleting(null)}
@@ -717,12 +774,114 @@ function CloneRepository({
   );
 }
 
-/** Deleting a workspace hqc cloned (T45, SPEC §13.2): the worker says first what the folder
+/** "New worktree" of a workspace (T46, SPEC §13.1), under its row: a branch, new (made from
+ *  the origin's current commit) or existing, and the folder, by default next to the origin
+ *  (`<origin-name>-<branch>`, following the branch until it is edited). The worker checks the
+ *  origin is a git repository and the branch is not checked out elsewhere; the new row shows
+ *  the worktree until it is added, or why it was not. */
+function NewWorktree({
+  app,
+  projectId,
+  origin,
+  onDone,
+}: {
+  app: AppState;
+  projectId: string;
+  origin: Workspace;
+  onDone: () => void;
+}) {
+  const [branch, setBranch] = useState('');
+  const [isNew, setIsNew] = useState(true);
+  // `null`: the hub's default, shown as it will be.
+  const [path, setPath] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ReturnType<typeof addError> | null>(null);
+
+  const shown = path ?? worktreePath(origin.path, branch.trim());
+  const create = async (e: Event) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await app.api.createWorkspace({
+        kind: 'worktree',
+        project_id: projectId,
+        worker_id: origin.worker_id,
+        origin_workspace_id: origin.id,
+        branch: branch.trim(),
+        new_branch: isNew,
+        path: path?.trim() || undefined,
+      });
+      await app.workspacesChanged(projectId);
+      onDone();
+    } catch (err) {
+      setError(addError(err, app));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form class="new-worktree" onSubmit={create}>
+      <div class="row clone-fields">
+        <label class="field">
+          <span class="muted small">Branch</span>
+          <input
+            class="input mono"
+            name="branch"
+            placeholder="hqc/fix"
+            autocomplete="off"
+            value={branch}
+            onInput={(e) => setBranch((e.target as HTMLInputElement).value)}
+          />
+        </label>
+        <div class="field worktree-branch-kind" role="radiogroup" aria-label="New or existing branch">
+          <label>
+            <input type="radio" name="branch-kind" value="new" checked={isNew} onChange={() => setIsNew(true)} />
+            New, from the current commit
+          </label>
+          <label>
+            <input type="radio" name="branch-kind" value="existing" checked={!isNew} onChange={() => setIsNew(false)} />
+            Existing branch
+          </label>
+        </div>
+      </div>
+      <label class="field">
+        <span class="muted small">Folder on the worker</span>
+        <input
+          class="input mono"
+          name="path"
+          placeholder={worktreePath(origin.path, 'branch')}
+          value={shown}
+          onInput={(e) => setPath((e.target as HTMLInputElement).value)}
+        />
+      </label>
+      {error && (
+        <div class="error-text">
+          {error.text} {error.link && <a href={error.link.href}>{error.link.label}</a>}
+        </div>
+      )}
+      <div class="row">
+        <button type="submit" class="btn btn-small btn-primary" disabled={busy || !branch.trim() || !shown.trim()}>
+          Create worktree
+        </button>
+        <button type="button" class="btn btn-small" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** Deleting a workspace hqc made (T45, T46, SPEC §13.2): the worker says first what the folder
  *  would lose — uncommitted changes and commits that are on no remote branch — then the
- *  folder can be deleted with the record, or only the record removed. */
+ *  folder can be deleted with the record, or only the record removed. A worktree goes with
+ *  `git worktree remove` and keeps its branch; uncommitted files the dialog showed are
+ *  removed with it (`force`). */
 function DeleteFolderDialog({
   app,
   workspace: w,
+  origin,
   worker,
   phone,
   onClose,
@@ -730,6 +889,8 @@ function DeleteFolderDialog({
 }: {
   app: AppState;
   workspace: Workspace;
+  /** A worktree's origin. */
+  origin?: Workspace;
   worker?: string;
   phone?: boolean;
   onClose: () => void;
@@ -754,16 +915,17 @@ function DeleteFolderDialog({
     setBusy(true);
     setError(null);
     try {
-      await app.api.deleteWorkspace(w.id, removeFolder);
+      // The uncommitted files are listed above the button: deleting is confirming them.
+      await app.api.deleteWorkspace(w.id, removeFolder, removeFolder && !!info && info.dirty_count > 0);
       onDone();
     } catch (e) {
-      const busyWs = e instanceof ApiError && e.code === 'workspace_in_use';
-      setError(busyWs ? `${(e as Error).message}. Archive these sessions first.` : (e as Error).message);
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
 
+  const worktree = w.kind === 'worktree';
   const more = info ? info.dirty_count - info.dirty.length : 0;
   const clean = info && info.git && info.dirty_count === 0 && info.unpushed.length === 0;
   return (
@@ -782,10 +944,18 @@ function DeleteFolderDialog({
           </button>
         </header>
         <div class="confirm-body">
-          <p>
-            hqc cloned this folder. Deleting it removes the folder from the worker’s disk; removing it from the project
-            keeps the folder.
-          </p>
+          {worktree ? (
+            <p class="delete-what">
+              hqc made this worktree{origin ? ` of ${workspaceName(origin)}` : ''}. Deleting it removes the folder with{' '}
+              <span class="mono">git worktree remove</span>; the branch <span class="mono">{w.branch}</span> and its
+              commits stay in the repository. Removing it from the project keeps the folder.
+            </p>
+          ) : (
+            <p class="delete-what">
+              hqc cloned this folder. Deleting it removes the folder from the worker’s disk; removing it from the project
+              keeps the folder.
+            </p>
+          )}
           {!info && !checkError && <p class="muted">Checking the folder on the worker…</p>}
           {checkError && <p class="error-text">{checkError}</p>}
           {info && !info.git && <p class="delete-warn">Not a git repository: everything in it is lost.</p>}

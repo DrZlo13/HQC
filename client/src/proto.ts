@@ -580,13 +580,18 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'tool');
   },
   // T45: a clone into a new folder and its outcome; the check and the deletion of a folder hqc
-  // created.
+  // created. T46: a worktree of an origin folder, and `force` of the deletion.
   'workspace.create': (p) => {
     str(p, 'request_id');
-    str(p, 'kind');
     str(p, 'path');
-    str(p, 'url');
-    optStr(p, 'branch');
+    if (str(p, 'kind') === 'worktree') {
+      str(p, 'origin');
+      str(p, 'branch');
+      optBool(p, 'new_branch');
+    } else {
+      str(p, 'url');
+      optStr(p, 'branch');
+    }
   },
   'workspace.created': (p) => {
     str(p, 'request_id');
@@ -603,6 +608,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'workspace.delete': (p) => {
     str(p, 'request_id');
     str(p, 'path');
+    optBool(p, 'force');
   },
   // T30: an agent's hqc MCP tool call and its answer (SPEC §5.2).
   'mcp.call': (p) => {
@@ -1150,8 +1156,12 @@ export interface Workspace {
   label: string;
   /** The environment the worker's bindings give the folder (T43; a display, the worker decides). */
   environment: string;
-  /** `dir` | `clone` (T45) | `worktree` (later). */
+  /** `dir` | `clone` (T45) | `worktree` (T46). */
   kind: string;
+  /** A worktree's origin, a workspace of the same project and worker (T46). */
+  origin_workspace_id?: Uuid;
+  /** The branch a clone was asked for, or the worktree's (T46). */
+  branch?: string;
   /** hqc made the folder (T45): deleting the workspace can delete it. */
   created_by_hqc: boolean;
   /** Its Claude Code sessions are mirrored (imported from VS Code, SPEC §9). */
@@ -1177,6 +1187,8 @@ export function parseWorkspace(v: unknown): Workspace {
     label: optStr(o, 'label') ?? '',
     environment: optStr(o, 'environment') ?? 'default',
     kind: str(o, 'kind'),
+    origin_workspace_id: optStr(o, 'origin_workspace_id'),
+    branch: optStr(o, 'branch'),
     created_by_hqc: o.created_by_hqc === true,
     mirror_enabled: o.mirror_enabled === true,
     hqc_rules: optNum(o, 'hqc_rules') ?? 0,
@@ -1194,7 +1206,7 @@ export interface WorkspaceInspection {
   /** Paths with uncommitted changes (at most 200 of `dirty_count`). */
   dirty: string[];
   dirty_count: number;
-  /** Local branches with commits on no remote branch. */
+  /** Local branches with commits on no remote branch; of a worktree only its own (T46). */
   unpushed: { branch: string; commits: number }[];
 }
 

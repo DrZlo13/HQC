@@ -1,0 +1,12 @@
+{
+  "id": "h-24",
+  "type": "workspace.create",
+  "payload": {
+    "request_id": "0199f3a2-7c10-7000-8000-0000000000e3",
+    "kind": "worktree",
+    "path": "/Users/home-mac/work/c6-displays-hqc-fix-backlight",
+    "origin": "/Users/home-mac/work/c6-displays",
+    "branch": "hqc/fix-backlight",
+    "new_branch": true
+  }
+}

@@ -4397,6 +4397,19 @@ button.ps-look {
   vertical-align: middle;
 }
 
+/* Formulas: MathML in the system's math font; a wide one scrolls inside itself. */
+.md math {
+  font-family: 'STIX Two Math', 'Cambria Math', math;
+  font-size: 1.1em;
+}
+
+.md-math-display {
+  display: block;
+  margin: 0.75em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .md blockquote {
   padding: 0 0 0 12px;
   border-left: 3px solid var(--border);

@@ -378,3 +378,59 @@ describe('delta stream', () => {
     expect(root.querySelector('.md-code code')!.textContent).toBe('let a = "<script>";');
   });
 });
+
+describe('formulas', () => {
+  // happy-dom has no `compatMode`, and Temml refuses to render in quirks mode; its MathML
+  // elements have no `style`, which Temml sets on a display formula.
+  Object.defineProperty(document, 'compatMode', { value: 'CSS1Compat', configurable: true });
+  if (!('style' in document.createElementNS('http://www.w3.org/1998/Math/MathML', 'math'))) {
+    Object.defineProperty(Element.prototype, 'style', {
+      get(this: Element & { _style?: object }) {
+        return (this._style ??= {});
+      },
+      configurable: true,
+    });
+  }
+  const math = (text: string) =>
+    parseMarkdown(text)
+      .flatMap((t: any) => [t, ...(t.tokens ?? [])])
+      .filter((t: any) => t.type === 'math');
+
+  it('finds display and inline TeX and keeps its backslashes', () => {
+    const tokens = parseMarkdown('Hence:\n\n$$V = 0.8 \\cdot \\frac{R}{8.2\\,k}$$\n\nand $a_1 + b$ or \\(x^2\\).');
+    expect(tokens.map((t) => t.type)).toEqual(['paragraph', 'space', 'math', 'paragraph']);
+    expect(tokens[2]).toMatchObject({ tex: 'V = 0.8 \\cdot \\frac{R}{8.2\\,k}', display: true });
+    expect(math('and $a_1 + b$ or \\(x^2\\).').map((t: any) => [t.tex, t.display])).toEqual([
+      ['a_1 + b', false],
+      ['x^2', false],
+    ]);
+    expect(math('\\[x\\]')[0]).toMatchObject({ tex: 'x', display: true });
+  });
+
+  it('leaves dollars that are not formulas as text', () => {
+    for (const s of ['costs $5 and $10', '$5-$10', 'echo $PATH/$HOME', '$ x $', 'a \\$x$ b', '`$x$`', '$a\nb$']) {
+      expect(math(s), s).toEqual([]);
+    }
+  });
+
+  it('renders MathML once Temml is loaded, the source until then', async () => {
+    const el = md('Hence:\n\n$$\\frac{R}{8.2\\,k}$$\n\nand $x^2$.');
+    expect(el.querySelector('.md-math-display .md-math-src')!.textContent).toBe('$$\\frac{R}{8.2\\,k}$$');
+    await vi.waitFor(() => expect(el.querySelectorAll('math').length).toBe(2));
+    expect(el.querySelector('.md-math-display math')!.getAttribute('display')).toBe('block');
+    expect(el.querySelector('.md-math-display mfrac')).not.toBeNull();
+    expect(el.querySelector('p .md-math msup')).not.toBeNull();
+    expect(el.querySelector('.md-math-src')).toBeNull();
+  });
+
+  it('shows the source of a formula Temml rejects, and no link from \\href', async () => {
+    const el = md('$\\frac{a$ and $\\href{https://e.com}{x}$');
+    await import('temml');
+    await new Promise((r) => setTimeout(r, 0));
+    expect([...el.querySelectorAll('.md-math-src')].map((e) => e.textContent)).toEqual([
+      '$\\frac{a$',
+      '$\\href{https://e.com}{x}$',
+    ]);
+    expect(el.querySelector('math, a')).toBeNull();
+  });
+});

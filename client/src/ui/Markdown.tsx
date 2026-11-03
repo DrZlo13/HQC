@@ -4,16 +4,67 @@
 // Paths of files in the working copy (a relative link, or inline code like
 // `src/main.rs:42`) are buttons that copy the path (T16; opening the file comes later).
 // Code blocks marked `diff` or `patch` colour added and removed lines.
+// TeX between `$$…$$`, `\[…\]` (display) or `$…$`, `\(…\)` (inline) becomes MathML by
+// Temml, loaded on the first formula; until then, and if it fails, the source is shown.
 
-import { Lexer, getDefaults, type MarkedToken, type Token, type Tokens } from 'marked';
+import { Marked, type MarkedToken, type Token, type TokenizerExtension, type Tokens } from 'marked';
 import type { ComponentChildren } from 'preact';
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { copyText } from '../clipboard';
 import { IconCopy } from './icons';
 
-/** GFM with single newlines as <br>, as chat messages are written. */
+interface MathToken {
+  type: 'math';
+  raw: string;
+  tex: string;
+  display: boolean;
+}
+
+/** `$…$` stays on one line, opens on a non-space and closes on a non-space not followed by
+ *  a letter or digit, so "$5 and $10" and "$PATH/$HOME" stay text. Inside, `\$` is a dollar. */
+const MATH_RULES: [RegExp, boolean][] = [
+  [/^\$\$([\s\S]+?)\$\$/, true],
+  [/^\\\[([\s\S]+?)\\\]/, true],
+  [/^\\\(([\s\S]+?)\\\)/, false],
+  [/^\$(?=[^\s$])((?:\\.|[^\\\n$])*?[^\s\\$])\$(?!\w)/, false],
+];
+
+function mathToken(src: string): MathToken | undefined {
+  for (const [re, display] of MATH_RULES) {
+    const m = re.exec(src);
+    if (m && m[1].trim()) return { type: 'math', raw: m[0], tex: m[1].trim(), display };
+  }
+  return undefined;
+}
+
+/** A formula on lines of its own; one inside a paragraph is found by `mathInline`. */
+const mathBlock: TokenizerExtension = {
+  name: 'math',
+  level: 'block',
+  tokenizer(src) {
+    if (!src.startsWith('$$') && !src.startsWith('\\[')) return undefined;
+    const t = mathToken(src);
+    const rest = t && /^[ \t]*(?:\n|$)/.exec(src.slice(t.raw.length));
+    return t && rest ? { ...t, raw: t.raw + rest[0] } : undefined;
+  },
+};
+
+const mathInline: TokenizerExtension = {
+  name: 'math',
+  level: 'inline',
+  start: (src) => src.match(/\$|\\[([]/)?.index,
+  tokenizer: (src) => mathToken(src),
+};
+
+const marked = new Marked({ gfm: true, breaks: true, extensions: [mathBlock, mathInline] });
+
+/** GFM with single newlines as <br>, as chat messages are written, and formulas. */
 export function parseMarkdown(src: string): Token[] {
-  return Lexer.lex(src, { ...getDefaults(), gfm: true, breaks: true });
+  return marked.lexer(src);
+}
+
+function isMath(t: Token): t is Token & MathToken {
+  return t.type === 'math';
 }
 
 export function Markdown({ text, class: cls }: { text: string; class?: string }) {
@@ -43,7 +94,7 @@ export function safeHref(href: string): string | null {
 }
 
 function blocks(tokens: Token[]): ComponentChildren[] {
-  return tokens.map((t, i) => block(t as MarkedToken, i));
+  return tokens.map((t, i) => (isMath(t) ? <TeX key={i} token={t} /> : block(t as MarkedToken, i)));
 }
 
 function block(t: MarkedToken, key: number): ComponentChildren {
@@ -119,7 +170,45 @@ function block(t: MarkedToken, key: number): ComponentChildren {
 }
 
 function inline(tokens: Token[] | undefined): ComponentChildren[] {
-  return (tokens ?? []).map((t, i) => inlineToken(t as MarkedToken, i));
+  return (tokens ?? []).map((t, i) =>
+    isMath(t) ? <TeX key={i} token={t} /> : inlineToken(t as MarkedToken, i),
+  );
+}
+
+let temml: Promise<typeof import('temml').default> | undefined;
+
+/** A formula: MathML once Temml has rendered it, else its source. Temml builds the nodes
+ *  itself (no HTML is parsed) into an element Preact leaves empty; `trust` stays off, so
+ *  `\href` and the like are errors. */
+function TeX({ token }: { token: MathToken }) {
+  const out = useRef<HTMLSpanElement>(null);
+  const [state, setState] = useState<'source' | 'math'>('source');
+  useEffect(() => {
+    let live = true;
+    setState('source');
+    (temml ??= import('temml').then((m) => m.default)).then(
+      (t) => {
+        if (!live || !out.current) return;
+        try {
+          t.render(token.tex, out.current, { displayMode: token.display, throwOnError: true });
+          setState('math');
+        } catch {
+          out.current.textContent = '';
+        }
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [token.tex, token.display]);
+  const cls = token.display ? 'md-math md-math-display' : 'md-math';
+  return (
+    <span class={cls}>
+      {state === 'source' && <code class="md-math-src">{token.raw.trim()}</code>}
+      <span ref={out} />
+    </span>
+  );
 }
 
 function inlineToken(t: MarkedToken, key: number): ComponentChildren {

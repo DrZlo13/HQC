@@ -39,6 +39,7 @@ function installGlobals(w: Window) {
     confirm: () => true,
     requestAnimationFrame: w.requestAnimationFrame.bind(w),
     cancelAnimationFrame: w.cancelAnimationFrame.bind(w),
+    localStorage: w.localStorage,
   };
   for (const [k, v] of Object.entries(map)) {
     saved[k] = Object.getOwnPropertyDescriptor(g, k);
@@ -588,4 +589,17 @@ it('shows a spawned session’s worktree for deletion once its sessions are arch
   button('Delete folder', '.delete-folder')!.click();
   await until('deleted', () => !row(end) && !$('.delete-folder'));
   expect(mock.removedWorkspaces.find((w) => w.path.endsWith(end))).toMatchObject({ folder_removed: true });
+});
+
+it('opens the session last open in a project', async () => {
+  const personal = app.me!.personal_project_id;
+  const s = app.sessions.get([...app.sessions.values()].find((x) => x.project_id === personal && !x.archived && !x.system)!.id)!;
+  location.hash = `#/s/${s.id}`;
+  await until('chat', () => $('.chat'));
+  const other = app.sortedProjects().find((p) => p.id !== personal)!;
+  location.hash = `#/p/${other.id}`;
+  // It opens its own last session, if it has one.
+  await until('other project', () => app.currentProject()?.id === other.id);
+  location.hash = `#/p/${personal}`;
+  await until('reopened', () => location.hash === `#/s/${s.id}`);
 });

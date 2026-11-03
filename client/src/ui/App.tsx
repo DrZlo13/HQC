@@ -54,6 +54,24 @@ export function parseRoute(hash: string): Route {
 /** Routes whose screen is the session list (on a phone, one screen at a time). */
 const SIDEBAR_ROUTES = new Set<Route['name']>(['list', 'project']);
 
+/** The session last open in each project, on this device: a convenience, so storage that
+ *  fails or is empty only means the project opens without one. */
+const LAST_KEY = 'hqc.lastSession';
+function lastSessions(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_KEY) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+function rememberSession(projectId: string, sessionId: string) {
+  try {
+    localStorage.setItem(LAST_KEY, JSON.stringify({ ...lastSessions(), [projectId]: sessionId }));
+  } catch {
+    // Not kept: the project opens without it.
+  }
+}
+
 export function App({ app }: { app: AppState }) {
   const [route, setRoute] = useState(() => parseRoute(location.hash));
   const phone = useIsPhone();
@@ -85,6 +103,17 @@ export function App({ app }: { app: AppState }) {
   useEffect(() => {
     if (routeProject) app.selectProject(routeProject);
   }, [app, routeProject]);
+
+  // A project opens its last session (on a desktop; a phone's project screen is its list).
+  useEffect(() => {
+    if (route.name === 'session' && sessionProject) rememberSession(sessionProject, route.id);
+  }, [route, sessionProject]);
+  const opened = route.name === 'project' && !phone ? route.id : undefined;
+  const last = opened ? app.sessions.get(lastSessions()[opened] ?? '') : undefined;
+  const reopen = last && last.project_id === opened && !last.archived ? last.id : undefined;
+  useEffect(() => {
+    if (reopen) location.replace(`#/s/${reopen}`);
+  }, [reopen]);
 
   // The theme (T49): the user's base and the current project's color, on the document root.
   const color = app.currentProject()?.color ?? 'teal';

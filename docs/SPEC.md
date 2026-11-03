@@ -1281,7 +1281,9 @@ saturated with a pill of its color at the left edge, an amber "needs you" badge)
 rows with a status dot — amber waiting, the project color pulsing while running, an empty ring
 idle — title, time, status and `worker · path` without `~/work/`) and the main column, whose
 feed and input are at most 780 px wide; on a phone one screen at a time, the projects as chips
-with their icons. The theme is the user's `theme` plus the current project's `color`, as CSS
+with their icons. Since 0.64 a project opened on a desktop opens the session last open in it
+on this device (kept in the browser's storage; none, archived or deleted: the empty main
+column); a phone's project screen stays its session list. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on
 them (amber waiting, green online, red danger, violet between sessions). The project settings
 (`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance" dialog: the name,

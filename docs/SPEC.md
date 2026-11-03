@@ -1278,8 +1278,9 @@ variables on the document root recomputed when either changes; status colors do 
 them (amber waiting, green online, red danger, violet between sessions). The project settings
 (`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance" dialog: the name,
 icon as an emoji, letters or an image, the color, the app theme, a live preview; on a phone a
-full-screen sheet; "Delete project" next to the button that opens it; since 0.64 no name field
-and no delete for the personal project) and Workspaces (the workspace records with "VS Code
+full-screen sheet; "Delete project" next to the button that opens it; since 0.64, before it a
+section "Project" had "Rename" and "Delete project"; the personal project has neither the name
+field nor the delete) and Workspaces (the workspace records with "VS Code
 sessions", "Make default", "Remove"; "Add a workspace", "Import from Claude Code"; they are no
 longer in the sidebar).
 

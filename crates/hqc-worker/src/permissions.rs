@@ -603,10 +603,29 @@ fn deny_hit(r: &Rule, tool: &str, command: Option<&str>) -> bool {
     match (r, command) {
         (Rule::Tool(_) | Rule::Opaque, _) => tool_matches(r, tool),
         (_, Some(c)) if tool == "Bash" => {
-            bash_matches(r, c) || c.split(SHELL_META).any(|part| bash_matches(r, part))
+            bash_matches(r, c)
+                || c.split(SHELL_META)
+                    .any(|part| bash_matches(r, without_keywords(part)))
         }
         _ => false,
     }
+}
+
+/// Shell words that may come before a command in a part: `for h in x; do ssh $h; done` gives
+/// the part `do ssh `, which a deny rule must still see as `ssh`.
+const SHELL_KEYWORDS: &[&str] = &[
+    "do", "then", "else", "elif", "if", "while", "until", "!", "{", "time",
+];
+
+fn without_keywords(part: &str) -> &str {
+    let mut rest = part.trim_start();
+    while let Some(k) = SHELL_KEYWORDS.iter().find(|k| {
+        rest.strip_prefix(**k)
+            .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t']))
+    }) {
+        rest = rest[k.len()..].trim_start();
+    }
+    rest
 }
 
 /// Largest settings file `permissions.inspect` reads.
@@ -1003,6 +1022,11 @@ mod tests {
             "git push -f",
             "cd x && sudo rm y",
             "echo $(sudo id)",
+            "for h in a b; do ssh $h true; done",
+            "if true; then ssh host; fi",
+            "while true; do { ssh host; }; done",
+            "! ssh host",
+            "time  scp a b:",
         ] {
             assert!(p.denied_by("Bash", &bash(c)).is_some(), "{c}");
         }
@@ -1013,6 +1037,8 @@ mod tests {
             "curl https://example.com",
             "echo sudo",
             "sshfs",
+            "done",
+            "echo do ssh",
         ] {
             assert_eq!(p.denied_by("Bash", &bash(c)), None, "{c}");
         }

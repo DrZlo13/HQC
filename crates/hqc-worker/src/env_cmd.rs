@@ -39,8 +39,17 @@ pub fn summary(cfg: &Config) -> String {
         out,
         "  {DEFAULT_ENVIRONMENT}: folders without a binding; [permissions] only, no ssh keys, no local MCP"
     );
+    let unbound = cfg.unbound_environments();
     for e in &cfg.environments {
-        let _ = writeln!(out, "  {}:", e.name);
+        if unbound.contains(&e.name.as_str()) {
+            let _ = writeln!(
+                out,
+                "  {}: (no binding names it: no folder runs in it)",
+                e.name
+            );
+        } else {
+            let _ = writeln!(out, "  {}:", e.name);
+        }
         vars(&mut out, e);
         let _ = writeln!(out, "    allow_local_mcp: {}", e.allow_local_mcp);
         list(&mut out, "unblock", &e.rules.unblock);
@@ -158,6 +167,7 @@ environment = "infra"
         let s = summary(&cfg);
         assert!(s.contains("GITHUB_TOKEN=***"), "{s}");
         assert!(s.contains(&format!("{} -> infra", root.join("infra").display())));
+        assert!(!s.contains("no binding names it"), "{s}");
         let w = which(&cfg, &root.join("infra/sub")).unwrap();
         assert!(w.contains("environment: infra (binding"), "{w}");
         assert!(w.contains("GITHUB_TOKEN=***"), "{w}");
@@ -174,6 +184,24 @@ environment = "infra"
         for out in [s, w, d, format!("{cfg:?}")] {
             assert!(!out.contains("ghp_secret_value"), "{out}");
         }
+    }
+
+    /// A permissions table under another environment's name makes an environment no folder
+    /// runs in; the listing says so.
+    #[test]
+    fn unbound_environment_is_marked() {
+        let cfg = Config::parse(
+            "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n[environments.infra]\n\
+             allow_local_mcp = true\n[environments.homemac.permissions]\nunblock = [\"Bash(ssh:*)\"]\n\
+             [[env_bindings]]\npath = \"/a/infra\"\nenvironment = \"infra\"\n",
+        )
+        .unwrap();
+        let s = summary(&cfg);
+        assert!(
+            s.contains("  homemac: (no binding names it: no folder runs in it)"),
+            "{s}"
+        );
+        assert!(s.contains("  infra:\n"), "{s}");
     }
 
     /// T44: keys are listed by name; `add-key` says where the key went, never what it is.

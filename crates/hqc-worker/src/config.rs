@@ -584,6 +584,16 @@ impl Config {
         hqc_proto::frame::binding_for(&bindings, &path.to_string_lossy()).cloned()
     }
 
+    /// Environments no `[[env_bindings]]` names: no session runs in them, which is most
+    /// often a misnamed table (`[environments.x.permissions]` under `[environments.y]`).
+    pub fn unbound_environments(&self) -> Vec<&str> {
+        self.environments
+            .iter()
+            .map(|e| e.name.as_str())
+            .filter(|n| !self.env_bindings.iter().any(|b| b.environment == *n))
+            .collect()
+    }
+
     /// The mode a session runs in when hqc asks for `asked` (T38): `auto` only with
     /// `[permissions] allow_auto`; a refusal is logged, the session runs in `ask`.
     pub fn permission_mode(
@@ -1051,6 +1061,28 @@ environment = "default"
             .contains(&"Bash(git push:*)".to_string()));
         assert!(c.environment(&root.join("a")).allow_local_mcp);
         assert_eq!(*c.environment(&root.join("c")), *c.default_environment);
+        assert!(c.unbound_environments().is_empty());
+    }
+
+    /// An environment no binding names is reported: here the permissions table names
+    /// another environment than the one with the keys.
+    #[test]
+    fn unbound_environment() {
+        let c = Config::parse(
+            r#"
+hub_url = "https://h"
+allowed_roots = ["/a"]
+[environments.infra]
+allow_local_mcp = true
+[environments.homemac.permissions]
+unblock = ["Bash(ssh:*)"]
+[[env_bindings]]
+path = "/a/infra"
+environment = "infra"
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.unbound_environments(), vec!["homemac"]);
     }
 
     /// T43: a session.start resolves the environment from the canonical workspace path,

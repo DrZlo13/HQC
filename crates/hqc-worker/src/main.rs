@@ -167,6 +167,11 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     if config.legacy_workspace {
         tracing::warn!("worker.toml has an iteration 1 [workspace] block, which is ignored: add workspaces in the web client and remove the block");
     }
+    for name in config.unbound_environments() {
+        tracing::warn!(
+            "worker.toml: no [[env_bindings]] names [environments.{name}], so no folder runs in it"
+        );
+    }
     if p.mode == hqc_worker::permissions::PermissionMode::Auto {
         tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call");
     } else if p.allow_auto {

@@ -20,6 +20,13 @@ async fn main() -> anyhow::Result<()> {
     if let AuthConfig::Dev { email } = &config.auth {
         tracing::warn!(%email, "HQC_DEV=1: Cloudflare Access is OFF, every request is this user");
     }
+    // `/.dockerenv`: in a container a store outside a volume is lost on redeploy (T53).
+    let root = std::path::Path::new("/.dockerenv")
+        .exists()
+        .then_some(std::path::Path::new("/"));
+    if let Some(w) = hqc_hub::artifacts::storage_warning(&config.artifacts.dir, root) {
+        tracing::warn!("{w}");
+    }
     let pool = db::connect(&config.database_url).await?;
     let push = push::from_config(config.vapid.as_ref())?;
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;

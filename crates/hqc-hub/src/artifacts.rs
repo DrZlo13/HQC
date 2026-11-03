@@ -21,7 +21,7 @@
 //! `Content-Disposition` by kind. HTML is inline only on a separate artifact domain;
 //! on the hub's own domain it is always an attachment.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::{
     body::Body,
@@ -196,6 +196,35 @@ async fn worker_may_read(db: &PgPool, worker_id: Uuid, artifact_id: Uuid) -> sql
 }
 
 // ---------------------------------------------------------------- kind, name, store
+
+/// What is wrong with the store for a hub about to serve (T53, SPEC §12), logged as a warning
+/// at start: a store the hub cannot write to fails every upload, and in a container (`root` is
+/// `Some("/")` then) a store on the same device as the root is the container's own layer, so
+/// its files go with the next deploy while the database keeps their rows.
+pub fn storage_warning(dir: &Path, root: Option<&Path>) -> Option<String> {
+    let probe = dir.join(".hqc-write-check");
+    if let Err(e) = std::fs::write(&probe, b"").and_then(|()| std::fs::remove_file(&probe)) {
+        return Some(format!(
+            "HQC_ARTIFACT_DIR={} is not writable ({e}): uploads will fail",
+            dir.display()
+        ));
+    }
+    #[cfg(unix)]
+    if let Some(root) = root {
+        use std::os::unix::fs::MetadataExt;
+        let dev = |p: &Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+        if dev(dir).is_some() && dev(dir) == dev(root) {
+            return Some(format!(
+                "HQC_ARTIFACT_DIR={} is in the container's own layer, not a volume: attachments \
+                 are lost on the next deploy (RUNBOOK §1.8, volume hqc-artifacts)",
+                dir.display()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+    None
+}
 
 /// `kind` by mime and extension (SPEC §12): `image/*` image; `.diff`/`.patch` diff;
 /// `text/html` html; other `text/*` text; the rest file.
@@ -1006,6 +1035,31 @@ pub fn upload_body_limit(cfg: &ArtifactConfig) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T53: a store on the root's device is reported in a container only; an unwritable
+    /// store always.
+    #[test]
+    fn storage_warnings() {
+        let base = std::env::temp_dir().join(format!("hqc-store-{}", Uuid::new_v4()));
+        let dir = base.join("artifacts");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(storage_warning(&dir, None), None);
+        let w = storage_warning(&dir, Some(&base)).unwrap();
+        assert!(w.contains("container's own layer"), "{w}");
+        assert!(!dir.join(".hqc-write-check").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+            // root writes anyway: nothing to check then.
+            if std::fs::write(dir.join("x"), b"").is_err() {
+                let w = storage_warning(&dir, None).unwrap();
+                assert!(w.contains("not writable"), "{w}");
+            }
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn kinds() {

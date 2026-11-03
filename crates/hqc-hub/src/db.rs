@@ -104,11 +104,32 @@ pub async fn ensure_user(db: &PgPool, email: &str) -> sqlx::Result<UserRow> {
     Ok(u)
 }
 
+/// In the user's order (`project_order`), the projects missing from it last, oldest first.
 pub async fn projects_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<ProjectRow>> {
-    sqlx::query_as("SELECT * FROM projects WHERE owner_id = $1 ORDER BY created_at")
-        .bind(owner)
-        .fetch_all(db)
-        .await
+    sqlx::query_as(
+        "SELECT p.* FROM projects p JOIN users u ON u.id = p.owner_id
+         WHERE p.owner_id = $1
+         ORDER BY array_position(u.project_order, p.id) NULLS LAST, p.created_at",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
+/// Keeps the user's own projects of `ids`, each once, in their order.
+pub async fn put_project_order(db: &PgPool, owner: Uuid, ids: &[Uuid]) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE users SET project_order = ARRAY(
+            SELECT t.id FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id, n)
+            WHERE t.id IN (SELECT id FROM projects WHERE owner_id = $1)
+            GROUP BY t.id ORDER BY min(t.n))
+         WHERE id = $1",
+    )
+    .bind(owner)
+    .bind(ids)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 pub async fn project(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ProjectRow>> {

@@ -603,3 +603,27 @@ it('opens the session last open in a project', async () => {
   location.hash = `#/p/${personal}`;
   await until('reopened', () => location.hash === `#/s/${s.id}`);
 });
+
+it('reorders the project bar and keeps the order in the hub', async () => {
+  const names = () => $$('.rail .project-row').map((r) => r.getAttribute('title'));
+  const before = names();
+  expect(before.length).toBeGreaterThan(1);
+  $<HTMLButtonElement>('.rail-reorder')!.click();
+  const last = await until('reorder mode', () => $$('.rail .rail-drag').at(-1));
+  expect($('.rail a.project-row')).toBeNull();
+  last.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }) as unknown as Event);
+  const moved = [...before];
+  moved.splice(-2, 2, before.at(-1)!, before.at(-2)!);
+  await until('moved', () => names().join() === moved.join());
+  // Cancel drops it.
+  $<HTMLButtonElement>('.rail button[aria-label=Cancel]')!.click();
+  await until('cancelled', () => names().join() === before.join() && $('.rail a.project-row'));
+
+  $<HTMLButtonElement>('.rail-reorder')!.click();
+  const first = await until('reorder again', () => $$('.rail .rail-drag').at(-1));
+  first.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }) as unknown as Event);
+  await until('moved again', () => names().join() === moved.join());
+  $<HTMLButtonElement>('.rail-done')!.click();
+  await until('saved', () => $('.rail a.project-row') && names().join() === moved.join());
+  expect((await app.api.projects()).map((p) => p.name)).toEqual(moved);
+});

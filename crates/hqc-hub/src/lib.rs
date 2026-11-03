@@ -47,6 +47,7 @@ pub fn router(app: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/api/me", get(api::me).patch(api::patch_me))
+        .route("/api/me/project_order", put(api::put_project_order))
         .route(
             "/api/projects",
             get(api::projects).post(api::create_project),

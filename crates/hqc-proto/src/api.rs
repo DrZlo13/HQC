@@ -180,6 +180,14 @@ pub struct PutSessionOrder {
     pub session_ids: Option<Vec<Uuid>>,
 }
 
+/// `PUT /api/me/project_order` (since SPEC 0.64): the user's projects in the order of the
+/// project bar. Ids that are not the user's projects are ignored; projects missing from the
+/// list go last, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PutProjectOrder {
+    pub project_ids: Vec<Uuid>,
+}
+
 /// `POST /api/projects/{id}/sessions`. Without `workspace_id` the project's
 /// `default_workspace_id`; with only `worker_id` a workspace of the project on that worker
 /// (SPEC §6, §13.4). `cwd` is relative to the workspace, `.` by default.
@@ -1171,6 +1179,10 @@ mod tests {
         let mode: PutSessionOrder = serde_json::from_str(r#"{"mode":"recent"}"#).unwrap();
         assert_eq!(mode.mode, Some(SessionOrderMode::Recent));
         assert!(serde_json::from_str::<PutSessionOrder>(r#"{"mode":"name"}"#).is_err());
+        let p: PutProjectOrder = roundtrip(include_str!(
+            "../examples/wire/api.project_order.request.json"
+        ));
+        assert_eq!(p.project_ids.len(), 2);
     }
 
     #[test]

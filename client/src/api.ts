@@ -192,6 +192,11 @@ export class Api {
     return parseProjectList(await this.req('GET', '/api/projects'));
   }
 
+  /** The order of the project bar (since SPEC 0.64): the reply is the list in it. */
+  async putProjectOrder(projectIds: string[]): Promise<Project[]> {
+    return parseProjectList(await this.req('PUT', '/api/me/project_order', { project_ids: projectIds }));
+  }
+
   async createProject(name: string, description?: string): Promise<Project> {
     const body = description ? { name, description } : { name };
     return parseProject(await this.req('POST', '/api/projects', body));

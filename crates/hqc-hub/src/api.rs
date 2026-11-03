@@ -140,6 +140,17 @@ pub async fn projects(
     }))
 }
 
+/// `PUT /api/me/project_order` {project_ids} (SPEC §6, since 0.64): the order of the project
+/// bar; the reply is the list in it.
+pub async fn put_project_order(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Json(b): Json<api::PutProjectOrder>,
+) -> ApiResult<Json<ProjectList>> {
+    db::put_project_order(&app.db, user.id, &b.project_ids).await?;
+    projects(State(app), user).await
+}
+
 pub async fn project(
     State(app): State<AppState>,
     user: CurrentUser,

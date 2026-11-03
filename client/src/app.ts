@@ -208,6 +208,18 @@ export class AppState {
     return [...this.projects.values()];
   }
 
+  /** The project bar in the order of `ids` at once, then as the hub keeps it. */
+  async saveProjectOrder(ids: string[]): Promise<void> {
+    const put = (list: Project[]) => {
+      this.projects.clear();
+      for (const p of list) this.projects.set(p.id, p);
+      this.changed();
+    };
+    const known = ids.map((id) => this.projects.get(id)).filter((p): p is Project => !!p);
+    put([...known, ...[...this.projects.values()].filter((p) => !ids.includes(p.id))]);
+    put(await this.api.putProjectOrder(ids));
+  }
+
   currentProject(): Project | undefined {
     return this.currentProjectId ? this.projects.get(this.currentProjectId) : undefined;
   }

@@ -396,6 +396,30 @@ async fn project_crud() {
         .collect();
     assert_eq!(names, ["Personal", "KiCad boards", "KiCad boards", "Платы"]);
 
+    // The user's order of the project bar: unknown and repeated ids are dropped, the projects
+    // missing from it go last, oldest first.
+    let names_of = |list: &Value| -> Vec<String> {
+        list["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (s, list) = hub
+        .put(
+            "/api/me/project_order",
+            json!({"project_ids": [p3["id"], Uuid::now_v7(), personal, p3["id"]]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{list}");
+    assert_eq!(
+        names_of(&list),
+        ["Платы", "Personal", "KiCad boards", "KiCad boards"]
+    );
+    let (_, list) = hub.get("/api/projects").await;
+    assert_eq!(names_of(&list)[0], "Платы");
+
     let id = p["id"].as_str().unwrap();
     let (s, v) = hub
         .patch(&format!("/api/projects/{id}"), json!({"name": "Boards"}))

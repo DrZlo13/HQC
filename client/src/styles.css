@@ -516,6 +516,19 @@ select.input {
   border: 1px dashed var(--border);
 }
 
+/* Reorder mode: the tiles are dragged, not opened. */
+.rail-drag {
+  cursor: grab;
+  touch-action: none;
+}
+.rail-item.is-dragging .rail-drag {
+  cursor: grabbing;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.rail-done {
+  color: var(--accent);
+}
+
 .rail-badge {
   position: absolute;
   top: -6px;

@@ -1030,8 +1030,12 @@ the rest is marked "later"):
 - `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme}`
   (`api.me.json`); `PATCH /api/me` {timezone?, theme?} (since 0.38, `api.me.patch.request.json`;
   an unknown zone: `400`; `theme` since 0.51, §3 User, another value: `422`) → the same object;
-  later keys
-- `GET /api/projects` → `{projects[]}`, `POST /api/projects` {name, description?} → `201`
+  later keys; `PUT /api/me/project_order` {project_ids} (since 0.64,
+  `api.project_order.request.json`) → `{projects[]}` in that order: the order of the project
+  bar, kept per user (`users.project_order`); ids that are not the user's projects and repeats
+  are dropped
+- `GET /api/projects` → `{projects[]}` in the user's order, the projects missing from it last,
+  oldest first (since 0.64; before it oldest first), `POST /api/projects` {name, description?} → `201`
   and the project, `GET/PATCH/DELETE /api/projects/{id}` (`PATCH` {name?, description?,
   default_workspace_id?, color?, icon?} — `default_workspace_id` a workspace of this project,
   otherwise `400`; `color` one of the 8 names and `icon` an emoji or letters within the limits
@@ -1281,7 +1285,9 @@ saturated with a pill of its color at the left edge, an amber "needs you" badge)
 rows with a status dot — amber waiting, the project color pulsing while running, an empty ring
 idle — title, time, status and `worker · path` without `~/work/`) and the main column, whose
 feed and input are at most 780 px wide; on a phone one screen at a time, the projects as chips
-with their icons. Since 0.64 a project opened on a desktop opens the session last open in it
+with their icons. Since 0.64 the project bar has "Reorder projects" (⇅ under "+"): the tiles
+are dragged (or moved with ↑/↓ when focused) instead of opened, ✓ stores the order with `PUT
+/api/me/project_order`, ✕ drops it; a phone's chips follow the same order. Since 0.64 a project opened on a desktop opens the session last open in it
 on this device (kept in the browser's storage; none, archived or deleted: the empty main
 column); a phone's project screen stays its session list. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on

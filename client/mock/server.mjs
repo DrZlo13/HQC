@@ -556,7 +556,17 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (!data) throw fail(404, 'not_found', 'no icon');
     return { [RAW]: { type: 'image/png', data } };
   });
-  route('GET', '/api/projects', () => ({ projects: [...projects.values()] }));
+  // The user's order of the project bar (SPEC 0.64): the rest last, oldest first.
+  let projectOrder = [];
+  const orderedProjects = () => {
+    const placed = projectOrder.map((id) => projects.get(id)).filter(Boolean);
+    return [...placed, ...[...projects.values()].filter((p) => !projectOrder.includes(p.id))];
+  };
+  route('GET', '/api/projects', () => ({ projects: orderedProjects() }));
+  route('PUT', '/api/me/project_order', (_, body) => {
+    projectOrder = [...new Set(body?.project_ids ?? [])].filter((id) => projects.has(id));
+    return { projects: orderedProjects() };
+  });
   route('POST', '/api/projects', (_, body) => {
     const name = String(body?.name ?? '').trim();
     if (!name) throw fail(400, 'bad_request', 'name must not be empty');

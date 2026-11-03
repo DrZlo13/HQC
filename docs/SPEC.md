@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.64, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
+Version 0.65, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3359,7 +3359,8 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
    ahead of the agents on 2026-10-31; the session template (§13.3) went to `docs/BACKLOG.md`.
-   Tasks: `docs/ITERATION-4.md`.
+   Tasks: `docs/ITERATION-4.md`. Criterion checked by hand on the production hub on 2026-11-03.
+   Closed on 2026-11-03.
 5. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; bare model and local models through a proxy; the personal assistant session
    (moved from 3: its default runtime is the bare model, §8.3), until then `hqc_send` needs
@@ -3523,6 +3524,10 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.64 → 0.65 (iteration 4 closed)
+§19: iteration 4 is closed; its criterion was checked by hand on the production hub. No
+behaviour change.
 
 ### 0.63 → 0.64 (small UI changes, archiving with a workspace, project order, made folders)
 §6, client: a message between sessions names the other session by its title, the address in the

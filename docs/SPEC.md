@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.63, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
+Version 0.64, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3523,6 +3523,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.63 → 0.64 (small UI changes, archiving with a workspace, project order, made folders)
+§6, client: a message between sessions names the other session by its title, the address in the
+tooltip; a tool group's mark is its last call's; the project is renamed in the appearance dialog
+and deleted next to its button (the "Project" section is gone); the deletion dialog says what
+"Delete folder" does with each thing it lists (a worktree's unpushed commits stay on its branch,
+a clone's go with the folder); a desktop project opens the session last open in it on this
+device. §6, §13.2: `DELETE /api/workspaces/{id}?archive_sessions=true` archives the workspace's
+sessions first, and the client's dialog lists them (and the worktrees to delete first). §6:
+`PUT /api/me/project_order` and `GET /api/projects` in that order, the rail's "Reorder
+projects"; migration `0030_project_order` (`users.project_order`). §5.3, §6, §13.1: `fs.stat`
+`create` and `POST /api/workspaces` `create`: the worker makes a missing folder inside
+`allowed_roots`, offered by the add form after `path_not_found`; it is an ordinary `dir`.
 
 ### 0.62 → 0.63 (T53, warn when the artifact store is not a volume)
 §12: at start the hub checks that the store is writable and, in a container, not on the root's

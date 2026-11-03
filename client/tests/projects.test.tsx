@@ -209,13 +209,20 @@ it('switches projects from the left column and deletes a project', async () => {
   location.hash = `#/p/${app.me!.personal_project_id}/settings`;
   await until('personal workspaces', () => $$('.workspace-row').length === 1);
   expect($('.btn-delete-project')).toBeNull();
+  // Its name stays: the dialog has no name field.
+  button('Change icon and color')!.click();
+  await until('dialog', () => $('[role=dialog][aria-label="Project appearance"]'));
+  expect($('input[name=project-name]')).toBeNull();
+  button('Cancel', '[role=dialog]')!.click();
 
-  expect($('.btn-rename-project')).toBeNull();
-
+  // A project is renamed in the appearance dialog.
   const kicad = app.sortedProjects().find((p) => p.name === 'KiCad')!;
   location.hash = `#/p/${kicad.id}/settings`;
-  promptAnswer = 'KiCad boards';
-  (await until('rename button', () => $('.btn-rename-project') as HTMLButtonElement | null))!.click();
+  (await until('edit button', () => button('Change name, icon and color')))!.click();
+  expect((await until('name field', () => $<HTMLInputElement>('input[name=project-name]'))).value).toBe('KiCad');
+  type('input[name=project-name]', 'KiCad boards');
+  await until('preview', () => $('.preview-name')?.textContent === 'KiCad boards');
+  button('Save', '[role=dialog]')!.click();
   await until('renamed', () => projectRow('KiCad boards'));
   expect((await app.api.projects()).find((p) => p.id === kicad.id)!.slug).toBe('kicad');
   $<HTMLButtonElement>('.btn-delete-project')!.click();

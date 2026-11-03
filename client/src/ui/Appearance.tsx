@@ -63,6 +63,7 @@ export function AppearanceDialog({
   const [letters, setLetters] = useState(icon?.kind === 'letters' ? icon.value : initials);
   const [file, setFile] = useState<File | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
+  const [title, setTitle] = useState(project.name);
   const [color, setColor] = useState<ProjectColor>(project.color);
   const [base, setBase] = useState<Theme>(app.theme());
   const [busy, setBusy] = useState(false);
@@ -103,6 +104,8 @@ export function AppearanceDialog({
     setBusy(true);
     setError(null);
     try {
+      const newName = title.trim();
+      if (!project.is_personal && !newName) throw new Error('The project needs a name');
       if (mode === 'image') {
         if (file) await app.uploadProjectIcon(project.id, file);
         else if (icon?.kind !== 'image') throw new Error('Choose an image first');
@@ -115,6 +118,7 @@ export function AppearanceDialog({
         if (!(icon?.kind === 'letters' && icon.value === lettersValue)) patch.icon = { kind: 'letters', value: lettersValue };
       }
       if (patch.color || patch.icon) await app.setAppearance(project.id, patch);
+      if (!project.is_personal && newName !== project.name) await app.renameProject(project.id, newName);
       await app.setTheme(base);
       onClose();
     } catch (e) {
@@ -147,6 +151,18 @@ export function AppearanceDialog({
         </header>
         <div class="appearance-body">
           <div class="appearance-form">
+            {/* The personal project keeps its name (SPEC §3 Project). */}
+            {!project.is_personal && (
+              <label class="ap-section">
+                <span class="ap-label">Name</span>
+                <input
+                  class="input"
+                  name="project-name"
+                  value={title}
+                  onInput={(e) => setTitle((e.currentTarget as HTMLInputElement).value)}
+                />
+              </label>
+            )}
             <div class="ap-section">
               <div class="ap-row">
                 <span class="ap-label">Icon</span>
@@ -288,7 +304,7 @@ export function AppearanceDialog({
               </div>
               <div class="preview-side">
                 <div class="preview-head">
-                  <span class="preview-name">{name}</span>
+                  <span class="preview-name">{title.trim() || name}</span>
                   <span class="preview-new">+ New</span>
                 </div>
                 <PreviewRow on dot="run" title="A running session" sub="Running" />

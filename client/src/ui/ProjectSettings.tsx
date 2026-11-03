@@ -82,9 +82,10 @@ function making(w: Workspace): { tag: string; failed: string; note: string } {
 }
 
 /** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened with the
- *  gear of the sidebar header: Appearance (icon, color, the app theme), Workspaces (SPEC §3,
- *  §13: list, add, import, make default, "VS Code sessions", remove the record) and Project
- *  (rename, delete; neither for the personal project, SPEC §3). */
+ *  gear of the sidebar header: Appearance (the dialog for name, icon, color and the app theme,
+ *  and deleting the project; no rename or delete for the personal project, SPEC §3) and
+ *  Workspaces (SPEC §3, §13: list, add, import, make default, "VS Code sessions", remove the
+ *  record). */
 export function ProjectSettings({ app, projectId, phone }: { app: AppState; projectId: string; phone?: boolean }) {
   useSubscription((fn) => app.onChange(fn), [app]);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
@@ -148,18 +149,6 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
   const makeDefault = (w: Workspace) =>
     app.setDefaultWorkspace(projectId, w.id).catch((e: Error) => setError(e.message));
 
-  const rename = async () => {
-    if (!project) return;
-    const name = prompt('New project name', project.name);
-    if (!name?.trim() || name.trim() === project.name) return;
-    setError(null);
-    try {
-      await app.renameProject(projectId, name.trim());
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
   const deleteProject = async () => {
     if (!project) return;
     const n = [...app.sessions.values()].filter((s) => s.project_id === projectId).length;
@@ -173,6 +162,13 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
   };
 
   const name = project ? projectName(project) : '';
+  // The personal project keeps its name and is not deleted (SPEC §3 Project).
+  const own = project && !project.is_personal;
+  const del = own && (
+    <button type="button" class="btn btn-delete-project" onClick={deleteProject}>
+      Delete project
+    </button>
+  );
   const theme = THEMES.find((t) => t.id === app.theme())?.label ?? 'Warm';
   const look = project && (
     <>
@@ -205,16 +201,22 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
             <h2 id="ps-look">Appearance</h2>
             {project &&
               (phone ? (
-                <button type="button" class="ps-look ps-card btn-appearance" onClick={() => setAppearance(true)}>
-                  {look}
-                  <span class="ps-change">Change</span>
-                </button>
+                <>
+                  <button type="button" class="ps-look ps-card btn-appearance" onClick={() => setAppearance(true)}>
+                    {look}
+                    <span class="ps-change">Change</span>
+                  </button>
+                  {del && <div class="row ps-buttons">{del}</div>}
+                </>
               ) : (
                 <div class="ps-look ps-card">
                   {look}
-                  <button type="button" class="btn btn-appearance" onClick={() => setAppearance(true)}>
-                    Change icon and color
-                  </button>
+                  <div class="row ps-buttons">
+                    <button type="button" class="btn btn-appearance" onClick={() => setAppearance(true)}>
+                      {own ? 'Change name, icon and color' : 'Change icon and color'}
+                    </button>
+                    {del}
+                  </div>
                 </div>
               ))}
           </section>
@@ -347,21 +349,6 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
               </div>
             )}
           </section>
-
-          {/* The personal project keeps its name and is not deleted (SPEC §3 Project). */}
-          {project && !project.is_personal && (
-            <section class="ps-section" aria-labelledby="ps-project">
-              <h2 id="ps-project">Project</h2>
-              <div class="row ps-buttons">
-                <button type="button" class="btn btn-rename-project" onClick={rename}>
-                  Rename
-                </button>
-                <button type="button" class="btn btn-delete-project" onClick={deleteProject}>
-                  Delete project
-                </button>
-              </div>
-            </section>
-          )}
         </div>
       </div>
       {appearance && project && (

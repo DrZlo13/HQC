@@ -1276,11 +1276,12 @@ feed and input are at most 780 px wide; on a phone one screen at a time, the pro
 with their icons. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on
 them (amber waiting, green online, red danger, violet between sessions). The project settings
-(`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance" dialog: icon as an
-emoji, letters or an image, the color, the app theme, a live preview; on a phone a full-screen
-sheet), Workspaces (the workspace records with "VS Code sessions", "Make default", "Remove";
-"Add a workspace", "Import from Claude Code"; they are no longer in the sidebar) and Project
-("Rename", "Delete project"; not for the personal project).
+(`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance" dialog: the name,
+icon as an emoji, letters or an image, the color, the app theme, a live preview; on a phone a
+full-screen sheet; "Delete project" next to the button that opens it; since 0.64 no name field
+and no delete for the personal project) and Workspaces (the workspace records with "VS Code
+sessions", "Make default", "Remove"; "Add a workspace", "Import from Claude Code"; they are no
+longer in the sidebar).
 
 The session list (since 0.53, T50): a State / Recent / Custom switch (State groups Needs you /
 Running / Idle, Recent Today / Yesterday / Earlier, Custom is one list in the saved order) and a

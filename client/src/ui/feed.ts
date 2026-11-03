@@ -191,11 +191,11 @@ export function callRows(rows: ToolRow[]): Extract<ToolRow, { kind: 'call' }>[] 
   return rows.filter((r): r is Extract<ToolRow, { kind: 'call' }> => r.kind === 'call');
 }
 
-/** `running` while a call has no result, `error` if any failed, else `ok`. */
+/** `running` while a call has no result, else `error` or `ok` by the last call. */
 export function groupState(rows: ToolRow[]): 'running' | 'error' | 'ok' {
   const calls = callRows(rows);
   if (calls.some((r) => !r.result)) return 'running';
-  return calls.some((r) => r.result!.payload.error) ? 'error' : 'ok';
+  return calls.at(-1)?.result!.payload.error ? 'error' : 'ok';
 }
 
 /** From the first call to the last result; the sum of `duration_ms` if the times say nothing. */

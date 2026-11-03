@@ -605,6 +605,18 @@ describe("tool groups (T26)", () => {
     expect(rows[1].querySelector(".mark-error")).not.toBeNull();
   });
 
+  it("takes its mark from the last call", () => {
+    const t = new Timeline();
+    t.apply(call(1, "a", "Bash", { command: "cat README.md" }));
+    t.apply(result(2, "a", true));
+    t.apply(call(3, "b", "Bash", { command: "ls" }));
+    t.apply(result(4, "b"));
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    expect(g.classList.contains("tool-ok")).toBe(true);
+    expect(g.querySelector(".tool-group-head .mark-ok")).not.toBeNull();
+  });
+
   it("a message closes the group", () => {
     const t = new Timeline();
     t.apply(call(1, "a", "Bash", { command: "ls" }));

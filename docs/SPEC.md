@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.62, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
+Version 0.63, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2772,6 +2772,10 @@ later), keyed by sha256, one content per hash. Kinds: file, image, diff, html, t
 Artifact limit 100 MB (the stream is written to a temporary file while sha256 is computed;
 exceeding it gives `413 too_large` and the file is deleted). Record: §3 Artifact; uploading
 the same file again by the same user under the same name returns the existing record.
+At start (since 0.63, T53) the hub writes and removes a probe file in the store and, in a
+container (`/.dockerenv`), compares the store's device with the root's: a store it cannot
+write to, or one on the root's device (the container's own layer, gone with the next deploy
+while the rows stay), is a warning in the log. The hub starts anyway.
 
 `kind` on upload: the client's explicit `kind` field; otherwise from the multipart type (empty
 and `application/octet-stream` are guessed from the extension): `image/*` → image; `.diff`,
@@ -3492,6 +3496,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.62 → 0.63 (T53, warn when the artifact store is not a volume)
+§12: at start the hub checks that the store is writable and, in a container, not on the root's
+device, and logs a warning otherwise (production ran without the `hqc-artifacts` volume, and a
+deploy lost the files of every attachment). No migration, no frame change.
 
 ### 0.61 → 0.62 (deny matching after shell words, unbound environments, multi-line check)
 §8.1: a `Bash` deny rule skips the shell's words before a command in each piece (`do`, `then`,

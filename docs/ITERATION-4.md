@@ -402,3 +402,17 @@ mock's `spawnWorktree`. Tests: hub `tests/t47.rs`; worker
 `workspaces::tests::worktree_on_a_spawn_branch`; client `tests/projects.test.tsx` and
 `tests/proto.test.ts`; one live run (`tests/live_worktree.rs`, passed). Decisions in
 `docs/notes/t47-questions.md`.
+
+## T53. Warn when the artifact store is not a volume (done, SPEC 0.63)
+
+Sections: §12. From the backlog (2026-11-03): production ran without the `hqc-artifacts`
+volume, so a deploy lost the files of every attachment while their rows stayed.
+- At start the hub writes and removes a probe file in `HQC_ARTIFACT_DIR`, and in a container
+  (`/.dockerenv`) compares the store's device with the root's; either problem is a warning in
+  the log, the hub still starts.
+Acceptance: the common checks; a unit test of both warnings; the device comparison checked in
+Docker (llm-server: `/` and a folder in the layer on device 67, a named volume on 64512).
+
+Done: `artifacts::storage_warning(dir, root)`, called in `main.rs` with `Some("/")` when
+`/.dockerenv` exists. Test `artifacts::tests::storage_warnings`. What the client shows for an
+attachment whose file is gone stays in the backlog.

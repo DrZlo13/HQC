@@ -1293,6 +1293,16 @@ pub async fn live_sessions_in_workspace(db: &PgPool, id: Uuid) -> sqlx::Result<i
         .await
 }
 
+/// The sessions that work in the workspace, not archived, oldest first.
+pub async fn live_session_ids_in_workspace(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM sessions WHERE workspace_id = $1 AND NOT archived ORDER BY created_at, id",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+}
+
 /// Worktree records made from the workspace (T46), in any state.
 pub async fn worktrees_of(db: &PgPool, id: Uuid) -> sqlx::Result<i64> {
     sqlx::query_scalar("SELECT count(*) FROM workspaces WHERE origin_workspace_id = $1")

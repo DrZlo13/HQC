@@ -558,14 +558,17 @@ pub struct DeleteWorkspaceQuery {
     /// With `remove_folder`: the user confirmed the uncommitted files (T46).
     #[serde(default)]
     pub force: bool,
+    /// The user confirmed archiving the sessions that work in it (SPEC §13.2, since 0.64).
+    #[serde(default)]
+    pub archive_sessions: bool,
 }
 
 /// `DELETE /api/workspaces/{id}?remove_folder=&force=`: the record (SPEC §13.2); the folder
 /// stays unless `remove_folder` is set for a folder hqc created (T45), which the worker
 /// deletes first (`workspace.delete`; offline: `409 worker_offline`, nothing deleted; `force`
 /// for a worktree with uncommitted files, T46). `409 workspace_in_use` while a session that is
-/// not archived runs there or worktrees of it exist (T46), `409 workspace_creating` while the
-/// worker makes it.
+/// not archived runs there (unless `archive_sessions`, which archives them first) or worktrees
+/// of it exist (T46), `409 workspace_creating` while the worker makes it.
 pub async fn delete_workspace(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -594,6 +597,14 @@ pub async fn delete_workspace(
     let n = db::worktrees_of(&app.db, ws.id).await?;
     if n > 0 {
         return Err(has_worktrees(n));
+    }
+    if q.archive_sessions {
+        // Before the folder goes: their processes are killed first.
+        for sid in db::live_session_ids_in_workspace(&app.db, ws.id).await? {
+            let s = session_for(&app, &user, sid, Action::Manage).await?;
+            not_system(&s)?;
+            archive_session(&app, &s).await?;
+        }
     }
     match ws.state() {
         WorkspaceState::Ready if q.remove_folder && ws.created_by_hqc => {
@@ -1253,7 +1264,6 @@ pub async fn retry(
     Ok(Json(json!({ "requeued": n })))
 }
 
-/// SPEC §17.4: kill the process, cancel open requests, fail pending input.
 pub async fn archive(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1261,6 +1271,14 @@ pub async fn archive(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
     not_system(&s)?;
+    archive_session(&app, &s).await?;
+    let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
+    Ok(Json(json!(state::view(&app, user.id, s).await?)))
+}
+
+/// SPEC §17.4: kill the process, cancel open requests, fail pending input.
+async fn archive_session(app: &AppState, s: &SessionRow) -> ApiResult<()> {
+    let id = s.id;
     sqlx::query(
         "UPDATE sessions SET archived = true, archived_at = now(), turn_open = false,
             updated_at = now()
@@ -1269,17 +1287,16 @@ pub async fn archive(
     .bind(id)
     .execute(&app.db)
     .await?;
-    send_to_worker(&app, &s, HubFrame::SessionKill { session_id: id });
-    if let Some(f) = cleanup_frame(&app, &s).await? {
-        send_to_worker(&app, &s, f);
+    send_to_worker(app, s, HubFrame::SessionKill { session_id: id });
+    if let Some(f) = cleanup_frame(app, s).await? {
+        send_to_worker(app, s, f);
     }
-    requests::cancel_open_of_session(&app, id, CancelReason::Archived).await?;
+    requests::cancel_open_of_session(app, id, CancelReason::Archived).await?;
     for row in db::move_inputs(&app.db, id, "pending", "failed").await? {
-        delivery::notify_delivery(&app, &row);
+        delivery::notify_delivery(app, &row);
     }
     app.session_changed(id);
-    let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
-    Ok(Json(json!(state::view(&app, user.id, s).await?)))
+    Ok(())
 }
 
 pub async fn unarchive(

@@ -825,8 +825,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (w.state === 'creating') throw fail(409, 'workspace_creating', 'the worker is still making this workspace');
     const worktrees = [...workspaces.values()].filter((x) => x.origin_workspace_id === w.id).length;
     if (worktrees) throw fail(409, 'workspace_in_use', `${worktrees} worktree(s) of this workspace exist; delete them first`);
-    const live = [...sessions.values()].filter((s) => s.workspace_id === w.id && !s.archived).length;
-    if (live) throw fail(409, 'workspace_in_use', `${live} session(s) still work in this workspace; archive them first`);
+    const live = [...sessions.values()].filter((s) => s.workspace_id === w.id && !s.archived);
+    if (live.length && q.get('archive_sessions') !== 'true')
+      throw fail(409, 'workspace_in_use', `${live.length} session(s) still work in this workspace; archive them first`);
+    live.forEach(archiveSession);
     if (q.get('remove_folder') === 'true') {
       if (!w.created_by_hqc || w.state !== 'ready') throw fail(400, 'bad_request', 'remove_folder: only a ready folder hqc created is deleted');
       if (!workerOnline(w.worker_id)) throw fail(409, 'worker_offline', 'the worker is offline');
@@ -901,9 +903,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   // system event (the runtime reports the interrupted turn as `status idle`).
   // Archiving stops the agent and closes open requests; the session stays as history
   // (SPEC §17.4).
-  route('POST', '/api/sessions/:id/archive', (p) => {
-    const s = sessionOr404(p.id);
-    if (s.system) throw fail(409, 'system_session', "the worker's service session cannot be archived");
+  const archiveSession = (s) => {
     if (s.turn) {
       s.turn.aborted = true;
       cancelOpen(s, 'archived');
@@ -912,6 +912,11 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     s.archived = true;
     s.archived_at = now();
     pushSummary(s);
+  };
+  route('POST', '/api/sessions/:id/archive', (p) => {
+    const s = sessionOr404(p.id);
+    if (s.system) throw fail(409, 'system_session', "the worker's service session cannot be archived");
+    archiveSession(s);
     return info(s);
   });
   route('POST', '/api/sessions/:id/unarchive', (p) => {

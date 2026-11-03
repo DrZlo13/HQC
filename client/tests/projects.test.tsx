@@ -195,10 +195,17 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   // The personal project's sessions are not shown here.
   expect($$('.session-row').some((r) => r.textContent?.includes('Empty session'))).toBe(false);
 
-  // Its workspace stays while the session lives.
+  // Removing its workspace says the session is archived with it; Cancel keeps both.
   location.hash = `#/p/${pid}/settings`;
   (await until('remove button', () => $('.btn-remove-workspace') as HTMLButtonElement | null))!.click();
-  await until('in use', () => $('.workspaces .error-text')?.textContent?.includes('archive them first'));
+  const sessions = await until('sessions listed', () => $('.delete-folder .delete-sessions'));
+  expect(sessions.textContent).toContain('1 session works in this folder, removing it archives it');
+  expect($$('.delete-sessions li').map((l) => l.textContent)).toEqual([s.title]);
+  expect($('.delete-what')!.textContent).toBe('Removing it deletes only the record: the folder on the worker stays.');
+  expect(button('Delete folder', '.delete-folder')).toBeUndefined();
+  button('Cancel', '.delete-folder')!.click();
+  await until('closed', () => !$('.delete-folder'));
+  expect((await app.api.session(sid)).archived).toBe(false);
 });
 
 it('switches projects from the left column and deletes a project', async () => {
@@ -515,11 +522,12 @@ it('makes a worktree of a workspace, shows it under its origin and deletes it th
   row('/work/hold-wt-taken')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
   await until('failed one removed', () => !row('/work/hold-wt-taken'));
 
-  // The origin stays while its worktrees exist.
+  // The origin stays while its worktrees exist: the dialog lists them, nothing to press.
   row('/work/hold-wt')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
-  await until('origin dialog', () => button('Remove from project only', '.delete-folder'));
-  button('Remove from project only', '.delete-folder')!.click();
-  await until('refused', () => $('.delete-folder .error-text')?.textContent?.includes('2 worktree(s) of this workspace exist'));
+  const wts = await until('origin dialog', () => $('.delete-folder .delete-worktrees'));
+  expect(wts.textContent).toContain('2 worktrees of this folder, delete them first');
+  expect(button('Remove from project only', '.delete-folder')!.disabled).toBe(true);
+  expect(button('Delete folder', '.delete-folder')!.disabled).toBe(true);
   $<HTMLButtonElement>('.delete-folder button[aria-label=Close]')!.click();
   await until('closed', () => !$('.delete-folder'));
 

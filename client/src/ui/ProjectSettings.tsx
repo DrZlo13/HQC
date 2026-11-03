@@ -115,8 +115,9 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
   }, [app, projectId, creating]);
 
   const remove = async (w: Workspace) => {
-    // A folder hqc made: the dialog says what deleting it would lose (T45).
-    if (w.created_by_hqc && w.state === 'ready') {
+    // A folder hqc made: the dialog says what deleting it would lose (T45); one with sessions
+    // or worktrees: what goes with it, or what goes first.
+    if ((w.created_by_hqc && w.state === 'ready') || liveSessions(app, w.id).length || list?.some((x) => x.origin_workspace_id === w.id)) {
       setDeleting(w);
       return;
     }
@@ -360,6 +361,7 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
           app={app}
           workspace={deleting}
           origin={list?.find((x) => x.id === deleting.origin_workspace_id)}
+          worktrees={list?.filter((x) => x.origin_workspace_id === deleting.id) ?? []}
           worker={workers?.find((x) => x.id === deleting.worker_id)?.name}
           phone={phone}
           onClose={() => setDeleting(null)}
@@ -875,15 +877,22 @@ function NewWorktree({
   );
 }
 
-/** Deleting a workspace hqc made (T45, T46, SPEC §13.2): the worker says first what the folder
- *  would lose — uncommitted changes and commits that are on no remote branch — then the
- *  folder can be deleted with the record, or only the record removed. A worktree goes with
- *  `git worktree remove` and keeps its branch; uncommitted files the dialog showed are
- *  removed with it (`force`). */
+/** The sessions that work in the workspace: not archived, not a worker's service session. */
+function liveSessions(app: AppState, workspaceId: string) {
+  return [...app.sessions.values()].filter((s) => s.workspace_id === workspaceId && !s.archived && !s.system);
+}
+
+/** Removing a workspace with sessions, worktrees, or a folder hqc made (T45, T46, SPEC §13.2).
+ *  Its sessions are archived with it (since 0.64); its worktrees are deleted first. For a
+ *  folder hqc made the worker says first what the folder would lose — uncommitted changes and
+ *  commits that are on no remote branch — then the folder can be deleted with the record, or
+ *  only the record removed. A worktree goes with `git worktree remove` and keeps its branch;
+ *  uncommitted files the dialog showed are removed with it (`force`). */
 function DeleteFolderDialog({
   app,
   workspace: w,
   origin,
+  worktrees,
   worker,
   phone,
   onClose,
@@ -893,6 +902,8 @@ function DeleteFolderDialog({
   workspace: Workspace;
   /** A worktree's origin. */
   origin?: Workspace;
+  /** Worktrees of this workspace, which go first. */
+  worktrees: Workspace[];
   worker?: string;
   phone?: boolean;
   onClose: () => void;
@@ -903,7 +914,13 @@ function DeleteFolderDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Only a folder hqc made can be deleted; any other loses only its record.
+  const folder = w.created_by_hqc && w.state === 'ready';
+  const sessions = liveSessions(app, w.id);
+  const blocked = worktrees.length > 0;
+
   useEffect(() => {
+    if (!folder || blocked) return;
     app.api.inspectWorkspace(w.id).then(setInfo, (e) =>
       setCheckError(
         e instanceof ApiError && e.code === 'worker_offline'
@@ -918,7 +935,7 @@ function DeleteFolderDialog({
     setError(null);
     try {
       // The uncommitted files are listed above the button: deleting is confirming them.
-      await app.api.deleteWorkspace(w.id, removeFolder, removeFolder && !!info && info.dirty_count > 0);
+      await app.api.deleteWorkspace(w.id, removeFolder, removeFolder && !!info && info.dirty_count > 0, sessions.length > 0);
       onDone();
     } catch (e) {
       setError((e as Error).message);
@@ -937,7 +954,9 @@ function DeleteFolderDialog({
       <section class="confirm-dialog delete-folder" role="dialog" aria-modal="true" aria-label="Delete workspace">
         <header class="confirm-head">
           <div class="confirm-title">
-            <div class="title">Delete {workspaceName(w)}?</div>
+            <div class="title">
+              {folder ? 'Delete' : 'Remove'} {workspaceName(w)}?
+            </div>
             <div class="sub mono">
               {worker ? `${worker}:` : ''}
               {homePath(w.path)}
@@ -949,11 +968,45 @@ function DeleteFolderDialog({
         </header>
         <div class="confirm-body">
           <p class="delete-what">
-            {worktree
-              ? `A worktree of ${repo} that hqc made${w.ephemeral ? ' for a session an agent started' : ''}.`
-              : 'A clone that hqc made.'}
+            {!folder
+              ? 'Removing it deletes only the record: the folder on the worker stays.'
+              : worktree
+                ? `A worktree of ${repo} that hqc made${w.ephemeral ? ' for a session an agent started' : ''}.`
+                : 'A clone that hqc made.'}
           </p>
-          {!info && !checkError && <p class="muted">Checking the folder on the worker…</p>}
+          {blocked && (
+            <div class="delete-warn delete-worktrees">
+              <b>
+                {worktrees.length} {worktrees.length === 1 ? 'worktree' : 'worktrees'} of this folder
+              </b>
+              , delete {worktrees.length === 1 ? 'it' : 'them'} first:
+              <ul class="mono">
+                {worktrees.map((x) => (
+                  <li key={x.id}>{workspaceName(x)}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {!blocked && sessions.length > 0 && (
+            <div class="delete-warn delete-sessions">
+              <b>
+                {sessions.length} {sessions.length === 1 ? 'session works' : 'sessions work'} in this folder
+              </b>
+              , removing it archives {sessions.length === 1 ? 'it' : 'them'}: the history stays in Archive, but{' '}
+              {sessions.length === 1 ? 'it' : 'they'} can’t be reopened without the folder.
+              <ul>
+                {sessions.map((s) => (
+                  <li key={s.id}>
+                    {s.title || s.slug}
+                    {(s.state === 'running' || s.state === 'waiting' || s.state === 'queued') && (
+                      <span class="muted"> — running, will be stopped</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {folder && !blocked && !info && !checkError && <p class="muted">Checking the folder on the worker…</p>}
           {checkError && <p class="error-text">{checkError}</p>}
           {info && !info.git && <p class="delete-warn">Not a git repository: Delete folder deletes everything in it.</p>}
           {clean && <p class="delete-clean">Nothing is lost: no uncommitted changes, and every commit is pushed.</p>}
@@ -998,12 +1051,20 @@ function DeleteFolderDialog({
           <button type="button" class="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="button" class="btn btn-remove-record" disabled={busy} onClick={() => run(false)}>
-            Remove from project only
-          </button>
-          <button type="button" class="btn btn-danger-fill btn-delete-folder" disabled={busy || !info} onClick={() => run(true)}>
-            Delete folder
-          </button>
+          {folder ? (
+            <>
+              <button type="button" class="btn btn-remove-record" disabled={busy || blocked} onClick={() => run(false)}>
+                Remove from project only
+              </button>
+              <button type="button" class="btn btn-danger-fill btn-delete-folder" disabled={busy || blocked || !info} onClick={() => run(true)}>
+                Delete folder
+              </button>
+            </>
+          ) : (
+            <button type="button" class="btn btn-danger-fill btn-remove-record" disabled={busy || blocked} onClick={() => run(false)}>
+              Remove from project
+            </button>
+          )}
         </footer>
       </section>
     </div>

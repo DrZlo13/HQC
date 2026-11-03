@@ -291,10 +291,14 @@ export class Api {
 
   /** Removes the record; the folder is not touched (SPEC §13.2) unless `removeFolder` is set
    *  for a folder hqc created, which the worker then deletes (T45). `force`: the user saw and
-   *  confirmed the uncommitted files, which `git worktree remove` keeps otherwise (T46). */
-  async deleteWorkspace(id: string, removeFolder = false, force = false): Promise<void> {
-    const q = removeFolder ? `?remove_folder=true${force ? '&force=true' : ''}` : '';
-    await this.req('DELETE', `/api/workspaces/${enc(id)}${q}`);
+   *  confirmed the uncommitted files, which `git worktree remove` keeps otherwise (T46).
+   *  `archiveSessions`: the user confirmed archiving the sessions that work in it. */
+  async deleteWorkspace(id: string, removeFolder = false, force = false, archiveSessions = false): Promise<void> {
+    const q = new URLSearchParams();
+    if (removeFolder) q.set('remove_folder', 'true');
+    if (removeFolder && force) q.set('force', 'true');
+    if (archiveSessions) q.set('archive_sessions', 'true');
+    await this.req('DELETE', `/api/workspaces/${enc(id)}${q.size ? `?${q}` : ''}`);
   }
 
   /** Uncommitted changes and unpushed commits of a folder hqc created (T45); `409

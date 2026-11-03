@@ -1082,7 +1082,9 @@ the rest is marked "later"):
   is the "VS Code sessions" switch (since 0.23, §9.2); the hub sends the worker `mirror.set`
   (at once if connected, otherwise after `hello`); the same value sends nothing. `DELETE
   /api/workspaces/{id}?remove_folder=&force=` → `204`: the record, the folder is left alone
-  (§13.2); while it has non-archived sessions: `409 workspace_in_use`; archived ones lose
+  (§13.2); while it has non-archived sessions: `409 workspace_in_use`, unless
+  `archive_sessions=true` (since 0.64: the user confirmed it), which archives them first as
+  `POST /archive` does (§17.4), before the folder is removed; archived ones lose
   `workspace_id` and cannot be unarchived (`409 no_workspace`); while it is `creating`: `409
   workspace_creating`; while worktree records name it as their origin (since 0.60, any state):
   `409 workspace_in_use` ("N worktree(s) of this workspace exist; delete them first"), checked
@@ -1110,7 +1112,11 @@ the rest is marked "later"):
   folder hqc created opens a dialog with the worker's inspection — the uncommitted files ("and N
   more"), the branches with their commits on no remote, "not a git repository", or that nothing
   would be lost — and "Delete folder", "Remove from project only", "Cancel"; with the worker
-  offline the check fails and only the record can be removed. Since 0.60 (T46): "New worktree"
+  offline the check fails and only the record can be removed. Since 0.64 "Remove" on a
+  workspace with non-archived sessions or worktrees opens the dialog too (for a folder hqc did
+  not create: "Remove from project", "Cancel"): it lists the sessions, says they are archived
+  with it and marks one with a turn on "running, will be stopped", and the removal sends
+  `archive_sessions=true`; worktrees of it are listed to delete first, with the buttons off. Since 0.60 (T46): "New worktree"
   on a ready workspace that is not a worktree (the client cannot tell a git folder; the worker
   can, and the worktree fails otherwise) opens a form under its row — the branch, "New, from the
   current commit" or "Existing branch", and the folder, showing the hub's default until edited
@@ -2887,7 +2893,8 @@ way for the session it starts (§7); the owner's agent asks for it, so there is 
 
 ### 13.2 Deletion
 `dir`: only the hub's record is deleted, the folder is left alone; while the workspace has
-non-archived sessions — `409 workspace_in_use` (§6), archived ones stay without a workspace. `clone` and `worktree`
+non-archived sessions — `409 workspace_in_use` (§6) unless the user confirmed archiving them
+(`archive_sessions`, since 0.64), archived ones stay without a workspace. `clone` and `worktree`
 are deleted from disk only with `created_by_hqc: true`: `worktree` via
 `git worktree remove`, `clone` by deleting the folder. Before deletion the worker checks for
 uncommitted changes and unpushed commits; if there are any, the confirmation request

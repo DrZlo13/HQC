@@ -332,14 +332,16 @@ async fn sessions_run_in_their_workspace() {
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["error"], "workspace_in_use");
 
-    // Archived, the session lets it go and cannot come back without it.
-    let (s, _) = hub
-        .post(&format!("/api/sessions/{sid}/archive"), json!({}))
-        .await;
-    assert_eq!(s, 200);
+    // Confirmed, the removal archives the session first; it cannot come back without it.
+    assert_eq!(
+        hub.delete(&format!("{cad_path}?archive_sessions=true"))
+            .await,
+        204
+    );
     w.expect("session.kill").await;
-    assert_eq!(hub.delete(&cad_path).await, 204);
-    assert!(hub.session(&sid).await.get("workspace_id").is_none());
+    let gone = hub.session(&sid).await;
+    assert_eq!(gone["archived"], true, "{gone}");
+    assert!(gone.get("workspace_id").is_none());
     let (s, v) = hub
         .post(&format!("/api/sessions/{sid}/unarchive"), json!({}))
         .await;

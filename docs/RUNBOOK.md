@@ -644,7 +644,9 @@ environment = "infra"
   names are refused. A changed `worker.toml` takes effect after a restart of the worker.
 - `hqc-worker env` lists the environments (keys by name) and bindings; `hqc-worker env which
   <folder>` shows the environment of a folder, the binding that decided it, its keys and the
-  effective rules with their sources.
+  effective rules with their sources. An environment no binding names is marked there ("no
+  binding names it") and logged as a warning at start: check the table names, a
+  `[environments.x.permissions]` under `[environments.y]` makes a separate environment `x`.
 
 **ssh keys of an environment** (SPEC §14, T44). A session gets no ssh-agent unless its folder's
 environment has `ssh_keys`: the user's own agent (`SSH_AUTH_SOCK` of the worker) is never passed,

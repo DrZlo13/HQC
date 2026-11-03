@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.61, 2026-11-02. Status: the architecture agreed after six reviews and a survey of
+Version 0.62, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1138,7 +1138,8 @@ the rest is marked "later"):
   from a session), from "Rules · N hqc" on the workspace's row in the project settings and
   "Folder rules" in the session header; it shows the worker, the path, the workspace's
   environment (since 0.56), the worker's default mode and the session's; "Check a command" (a
-  command, or a tool name such as `Edit`; the worker's verdict with the rule and its source, "Will
+  command, or a tool name such as `Edit`; a multi-line field since 0.62, so a pasted script keeps
+  the line breaks that separate its commands; the worker's verdict with the rule and its source, "Will
   ask" with "Allow…" and the suggested rule); then denied, allowed (hqc's rules first, with the
   date and a remove cross confirmed in the row; the files' rules read-only) and everything else
   (Ask or Auto, the files' `ask` rules), each rule with its source. "Allow in this folder" adds a
@@ -2038,7 +2039,11 @@ answer it) and writes `system policy_denied`; in the other `approval.request`s i
 `policy_hint`: `allow` if the call matches an `allow` rule entirely (the CLI asked anyway),
 otherwise the field is absent. The adapter understands a tool name, an MCP server
 (`mcp__hqc`) and `Bash` rules (prefix, `*`, exact command); it leaves the rest
-(`Read(./x/**)`, `WebFetch(domain:…)`) to the CLI.
+(`Read(./x/**)`, `WebFetch(domain:…)`) to the CLI. A `Bash` deny rule is matched against the
+whole command and against each piece between `;`, `&`, `|`, backticks, `$`, parentheses,
+redirections and new lines; since 0.62 the shell's words that may stand before a command in a
+piece (`do`, `then`, `else`, `elif`, `if`, `while`, `until`, `!`, `{`, `time`) are skipped first,
+so `for h in a; do ssh $h; done` hits `Bash(ssh:*)` as the CLI's own parser does.
 
 hqc's allow rules of the folder (since 0.52, T48; §3 Workspace) never go to `--settings`: the
 adapter applies them in `can_use_tool`, after the deny check above and the `session` rules and
@@ -3030,7 +3035,10 @@ environment = "infra"
 
 `launch` is not accepted in `worker.toml` yet. `default` cannot be
 defined in the file; the name of an environment is letters, digits, `_`,
-`-` and `.`; an unknown field is a config error (as in `[permissions]`).
+`-` and `.`; an unknown field is a config error (as in `[permissions]`). An environment no
+`[[env_bindings]]` names (since 0.62) is not an error, but no folder runs in it: the worker
+logs a warning at start and `hqc-worker env` marks it, since it is most often a table under the
+wrong name (`[environments.x.permissions]` after `[environments.y]`).
 
 The folders the worker created for workspaces (since 0.58, T45) are in
 `$HQC_HOME/created_workspaces.json` (canonical paths, a clone that runs marked as creating;
@@ -3484,6 +3492,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.61 → 0.62 (deny matching after shell words, unbound environments, multi-line check)
+§8.1: a `Bash` deny rule skips the shell's words before a command in each piece (`do`, `then`,
+`else`, `elif`, `if`, `while`, `until`, `!`, `{`, `time`), so `for …; do ssh $h; done` is denied
+by the adapter and reported as denied by the rules screen's check, as the CLI already denied it.
+§14: an environment no binding names gives a warning at start and a mark in `hqc-worker env`.
+§6: "Check a command" is a multi-line field (a pasted script lost its line breaks and was
+checked as one line). No migration, no frame change.
 
 ### 0.60 → 0.61 (T47, ephemeral worktrees for spawned sessions)
 §7: `hqc_spawn` gets `isolation: "worktree"` and `branch?`: an `ephemeral` worktree of the

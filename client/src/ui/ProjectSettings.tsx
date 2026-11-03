@@ -928,6 +928,8 @@ function DeleteFolderDialog({
   };
 
   const worktree = w.kind === 'worktree';
+  const repo = origin ? workspaceName(origin) : 'the repository';
+  const commits = (n: number) => `${n} ${n === 1 ? 'commit' : 'commits'}`;
   const more = info ? info.dirty_count - info.dirty.length : 0;
   const clean = info && info.git && info.dirty_count === 0 && info.unpushed.length === 0;
   return (
@@ -946,44 +948,48 @@ function DeleteFolderDialog({
           </button>
         </header>
         <div class="confirm-body">
-          {worktree ? (
-            <p class="delete-what">
-              hqc made this worktree{origin ? ` of ${workspaceName(origin)}` : ''}
-              {w.ephemeral ? ' for a session an agent started' : ''}. Deleting it removes the folder with{' '}
-              <span class="mono">git worktree remove</span>; the branch <span class="mono">{w.branch}</span> and its
-              commits stay in the repository. Removing it from the project keeps the folder.
-            </p>
-          ) : (
-            <p class="delete-what">
-              hqc cloned this folder. Deleting it removes the folder from the worker’s disk; removing it from the project
-              keeps the folder.
-            </p>
-          )}
+          <p class="delete-what">
+            {worktree
+              ? `A worktree of ${repo} that hqc made${w.ephemeral ? ' for a session an agent started' : ''}.`
+              : 'A clone that hqc made.'}
+          </p>
           {!info && !checkError && <p class="muted">Checking the folder on the worker…</p>}
           {checkError && <p class="error-text">{checkError}</p>}
-          {info && !info.git && <p class="delete-warn">Not a git repository: everything in it is lost.</p>}
-          {clean && <p class="delete-clean">No uncommitted changes, and every commit is on a remote branch.</p>}
+          {info && !info.git && <p class="delete-warn">Not a git repository: Delete folder deletes everything in it.</p>}
+          {clean && <p class="delete-clean">Nothing is lost: no uncommitted changes, and every commit is pushed.</p>}
+          {info && info.unpushed.length > 0 && (
+            <div class="delete-warn delete-unpushed">
+              {info.unpushed.length === 1 ? (
+                <>
+                  <b>{commits(info.unpushed[0].commits)} not pushed</b> on{' '}
+                  <span class="mono">{info.unpushed[0].branch}</span>.{' '}
+                </>
+              ) : (
+                <b>Commits not pushed. </b>
+              )}
+              {worktree
+                ? `Delete folder keeps ${info.unpushed.length === 1 && info.unpushed[0].commits === 1 ? 'it' : 'them'}: the branch stays in ${repo}, only the folder is removed.`
+                : `Delete folder deletes ${info.unpushed.length === 1 && info.unpushed[0].commits === 1 ? 'it' : 'them'} with the folder.`}
+              {info.unpushed.length > 1 && (
+                <ul>
+                  {info.unpushed.map((u) => (
+                    <li key={u.branch}>
+                      <span class="mono">{u.branch}</span> — {commits(u.commits)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {info && info.dirty_count > 0 && (
             <div class="delete-warn delete-dirty">
-              <b>Uncommitted changes ({info.dirty_count})</b>
+              <b>Uncommitted changes ({info.dirty_count})</b>, Delete folder discards them:
               <ul class="mono">
                 {info.dirty.map((f) => (
                   <li key={f}>{f}</li>
                 ))}
               </ul>
               {more > 0 && <div class="muted small">and {more} more</div>}
-            </div>
-          )}
-          {info && info.unpushed.length > 0 && (
-            <div class="delete-warn delete-unpushed">
-              <b>Commits on no remote branch</b>
-              <ul>
-                {info.unpushed.map((u) => (
-                  <li key={u.branch}>
-                    <span class="mono">{u.branch}</span> — {u.commits} {u.commits === 1 ? 'commit' : 'commits'}
-                  </li>
-                ))}
-              </ul>
             </div>
           )}
           {error && <div class="error-text">{error}</div>}

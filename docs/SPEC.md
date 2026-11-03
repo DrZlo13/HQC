@@ -1116,9 +1116,11 @@ the rest is marked "later"):
   current commit" or "Existing branch", and the folder, showing the hub's default until edited
   (sent only when edited). Worktrees are listed right under their origin, indented, with their
   branch; while the worker adds one the row says "Adding worktree…", then the workspace or
-  "Worktree failed" with the reason. The deletion dialog of a worktree says it goes with `git
-  worktree remove` and its branch and commits stay, lists the worktree's own branch with its
-  commits on no remote, and deletes with `force=true` only when it listed uncommitted files.
+  "Worktree failed" with the reason. The deletion dialog of a worktree lists the worktree's own
+  branch with its commits on no remote and says they stay (the branch stays in the origin, only
+  the folder goes with `git worktree remove`; a clone's dialog says its unpushed commits go with
+  the folder; each warning says what "Delete folder" does with what it lists, since 0.64), and
+  deletes with `force=true` only when it listed uncommitted files.
   Since 0.61 (T47): an `ephemeral` worktree has the tag "spawned" on its row; a marked one also
   "for deletion", the line "Its sessions are archived. hqc keeps the worktree and its branch
   until you delete it." and "Delete" instead of "Remove", which opens the same dialog (it adds

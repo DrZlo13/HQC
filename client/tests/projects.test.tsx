@@ -445,9 +445,10 @@ it('clones a repository into a folder of the tree, follows it on the row and del
   // Deleting the clone: the dialog shows what the folder would lose, then the worker deletes it.
   row('/kicad/hold-c6')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
   await until('dialog checked', () => $('.delete-folder .delete-dirty'));
-  expect($('.delete-dirty')!.textContent).toContain('Uncommitted changes (2)');
+  expect($('.delete-what')!.textContent).toBe('A clone that hqc made.');
+  expect($('.delete-dirty')!.textContent).toContain('Uncommitted changes (2), Delete folder discards them');
   expect($$('.delete-dirty li').map((l) => l.textContent)).toEqual(['src/panel.rs', 'notes.txt']);
-  expect($('.delete-unpushed')!.textContent).toContain('hqc/fix-backlight — 3 commits');
+  expect($('.delete-unpushed')!.textContent).toBe('3 commits not pushed on hqc/fix-backlight. Delete folder deletes them with the folder.');
   button('Delete folder', '.delete-folder')!.click();
   await until('deleted', () => !row('/kicad/hold-c6') && !$('.delete-folder'));
   const gone = mock.removedWorkspaces.find((w) => w.path.endsWith('/kicad/hold-c6'));
@@ -526,9 +527,8 @@ it('makes a worktree of a workspace, shows it under its origin and deletes it th
   // without uncommitted files.
   row('/work/hold-wt-hqc-hold-fix')!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
   await until('dialog checked', () => $('.delete-folder .delete-unpushed'));
-  expect($('.delete-what')!.textContent).toContain('git worktree remove');
-  expect($('.delete-what')!.textContent).toContain('the branch hqc/hold-fix and its commits stay');
-  expect($('.delete-unpushed')!.textContent).toContain('hqc/hold-fix — 1 commit');
+  expect($('.delete-what')!.textContent).toMatch(/^A worktree of .+ that hqc made\.$/);
+  expect($('.delete-unpushed')!.textContent).toMatch(/^1 commit not pushed on hqc\/hold-fix\. Delete folder keeps it: the branch stays in .+, only the folder is removed\.$/);
   expect($('.delete-dirty')).toBeNull();
   button('Delete folder', '.delete-folder')!.click();
   await until('deleted', () => !row('/work/hold-wt-hqc-hold-fix') && !$('.delete-folder'));
@@ -576,7 +576,7 @@ it('shows a spawned session’s worktree for deletion once its sessions are arch
   row(end)!.querySelector<HTMLButtonElement>('.btn-remove-workspace')!.click();
   await until('dialog checked', () => $('.delete-folder .delete-unpushed'));
   expect($('.delete-what')!.textContent).toContain('for a session an agent started');
-  expect($('.delete-unpushed')!.textContent).toContain('hqc/session-5 — 1 commit');
+  expect($('.delete-unpushed')!.textContent).toContain('1 commit not pushed on hqc/session-5.');
   button('Delete folder', '.delete-folder')!.click();
   await until('deleted', () => !row(end) && !$('.delete-folder'));
   expect(mock.removedWorkspaces.find((w) => w.path.endsWith(end))).toMatchObject({ folder_removed: true });

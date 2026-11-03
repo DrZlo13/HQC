@@ -25,10 +25,9 @@ and the listed sections of `docs/SPEC.md`. Dependencies are stated; T44 and T45 
 parallel after T43; T46 needs T45, T47 needs T46.
 
 Closed on 2026-11-03. The criterion was checked by hand on the production hub: a worktree of a
-project's workspace on drzlo-mac, made from the client, with a session in it; the session's
-environment (`infra`, its ssh keys) reached a host that other sessions on the worker were
-refused; the session committed on its branch, and deleting the worktree warned about the
-unpushed commit before removing the folder. Also merged after T47: T53 (the artifact store
+project's workspace on drzlo-mac with a session in it that committed on its branch, and
+deleting the worktree warned about the unpushed commit before removing the folder; an
+environment's ssh keys reached a host that sessions outside it were refused. Also merged after T47: T53 (the artifact store
 check) and the small UI changes of SPEC 0.64.
 
 ## T49. Theme, project appearance and the new layout (done, SPEC 0.51)

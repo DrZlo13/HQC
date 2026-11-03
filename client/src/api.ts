@@ -249,6 +249,8 @@ export class Api {
     branch?: string;
     origin_workspace_id?: string;
     new_branch?: boolean;
+    /** A missing folder is made by the worker (since SPEC 0.64). */
+    create?: boolean;
     /** The worker mirrors the folder's Claude Code sessions (SPEC §9.1); on by default
      *  since T21. */
     mirror_enabled?: boolean;

@@ -66,6 +66,22 @@ async fn workspace_is_checked_by_the_worker() {
     }
     let (s, v) = hub.add_workspace(&mut w, &pid, "").await;
     assert_eq!(s, 400, "{v}");
+    // Asked to, the worker makes the missing folder: an ordinary folder, not hqc's.
+    let body = json!({"project_id": pid, "worker_id": w.worker_id, "path": "/w/missing/new",
+                      "create": true});
+    let (s, made) = hub
+        .while_worker_answers(&mut w, hub.post("/api/workspaces", body))
+        .await;
+    assert_eq!(s, 201, "{made}");
+    assert_eq!(
+        (made["kind"].as_str(), made["created_by_hqc"].as_bool()),
+        (Some("dir"), Some(false))
+    );
+    assert_eq!(
+        hub.delete(&format!("/api/workspaces/{}", made["id"].as_str().unwrap()))
+            .await,
+        204
+    );
 
     // A second workspace does not take over the default.
     let (s, second) = hub.add_workspace(&mut w, &pid, "/w/cad").await;

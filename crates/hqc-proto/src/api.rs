@@ -497,6 +497,9 @@ pub struct CreateWorkspace {
     pub new_branch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// A `dir` that is missing is made by the worker (since SPEC 0.64; `fs.stat` `create`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

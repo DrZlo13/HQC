@@ -665,7 +665,8 @@ impl FakeWorker {
                                "inside_allowed_roots": false}),
                     );
                 }
-                if path.contains("missing") {
+                // `create` (SPEC 0.64): the worker makes a missing folder.
+                if path.contains("missing") && p["create"] != true {
                     return (
                         "result",
                         json!({"request_id": rid, "exists": false, "is_dir": false,

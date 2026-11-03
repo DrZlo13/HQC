@@ -795,12 +795,17 @@ MCP calls (worker → hub → worker):
   `clarify.cancel` event and sends `clarify.response` with `answers: {}` — an empty object means
   cancellation; the Claude Code adapter answers the `can_use_tool` for `AskUserQuestion` with
   the `deny` behavior, and the model continues the turn without answers.
-- `fs.stat` {request_id, path} → `result {request_id, exists, is_dir, canonical?,
+- `fs.stat` {request_id, path, create?} → `result {request_id, exists, is_dir, canonical?,
   inside_allowed_roots}` — checking a folder before creating a workspace (§13.1). `canonical` —
   the path with symlinks resolved, present if the path exists; `inside_allowed_roots` is computed
   from it (for a non-existent path — from the nearest existing ancestor). Outside `allowed_roots`
   the worker reports nothing about the path: `{exists: false, is_dir: false, inside_allowed_roots:
-  false}`. A relative path gets `error {invalid_frame}`.
+  false}`. A relative path gets `error {invalid_frame}`. Since 0.64 `create: true` (only when
+  the user asked for it) makes a missing folder with its missing parents first, at the path its
+  existing ancestor resolves to and only when that is inside `allowed_roots` (the worker's own
+  check, §2.1); the answer is then the made folder's, and a folder that cannot be made gets
+  `error {invalid_frame}` with the reason. An older worker ignores the field and answers
+  `exists: false`.
 - `fs.list_dirs` {request_id, path | null} → `result {request_id, entries[{name, path}]}`
   — the folder tree for picking a workspace in the client: with `path: null` — `allowed_roots`,
   otherwise the subdirectories of `path` (directories only, no hidden ones, symlinks only to
@@ -1052,8 +1057,9 @@ the rest is marked "later"):
   image: `404`
 - `GET /api/workspaces?project_id=` → `{workspaces[]}` (without `project_id`: all of the
   user's workspaces); `POST /api/workspaces` {project_id, worker_id, path, label?,
-  mirror_enabled?} → `201` and the workspace (`kind: dir`, §13.1): the hub sends the worker
-  `fs.stat` and stores `canonical`; `mirror_enabled` (since 0.23 defaults to `true`; `false`
+  mirror_enabled?, create?} → `201` and the workspace (`kind: dir`, §13.1): the hub sends the worker
+  `fs.stat` (with `create` since 0.64: the worker makes a missing folder; it is an ordinary
+  `dir`, `created_by_hqc: false`) and stores `canonical`; `mirror_enabled` (since 0.23 defaults to `true`; `false`
   means no mirror) controls the mirror and the import from Claude Code
   (`CreateWorkspaceImport`, §9.1): the hub sends the worker `mirror.set`, and when such a
   workspace is deleted, `mirror.set` with `enabled: false`. Worker not connected: `409
@@ -2885,7 +2891,9 @@ worker owner through the service session (§10.2), unless the owner is the one w
 initiated it.
 Since 0.16 `dir` is implemented (`POST /api/workspaces`, §6): the folder is picked in the client
 from the `fs.list_dirs` tree or its path is typed in, the worker checks it with `fs.stat` (§5.3),
-the hub stores the canonical path. Only the worker's owner can add a workspace to a worker (until
+the hub stores the canonical path. Since 0.64, when the folder is missing (`400
+path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
+or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
 the sharing of iteration 6 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and

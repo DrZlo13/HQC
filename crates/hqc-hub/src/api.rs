@@ -431,6 +431,7 @@ pub async fn create_workspace(
         HubFrame::FsStat(FsStat {
             request_id,
             path: request,
+            create: b.create,
         })
     })
     .await?

@@ -472,7 +472,7 @@ impl Supervisor {
             HubFrame::FsStat(r) => {
                 let cfg = self.cfg.clone();
                 self.fs_request(id, r.request_id, move || {
-                    crate::fs::stat(&cfg, &r.path).map(ResultBody::FsStat)
+                    crate::fs::stat(&cfg, &r.path, r.create).map(ResultBody::FsStat)
                 });
                 return;
             }

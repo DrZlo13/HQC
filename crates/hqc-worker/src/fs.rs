@@ -9,11 +9,20 @@ use hqc_proto::frame::{DirEntry, FsListDirsResult, FsStatResult, MAX_DIR_ENTRIES
 
 use crate::config::Config;
 
-/// `fs.stat`. `Err` (a relative or non-UTF-8 path) is answered with `error {invalid_frame}`.
-pub fn stat(cfg: &Config, path: &str) -> Result<FsStatResult, String> {
+/// `fs.stat`; with `create` a missing folder inside `allowed_roots` is made first, at the
+/// path its existing ancestor resolves to. `Err` (a relative or non-UTF-8 path, a folder that
+/// could not be made) is answered with `error {invalid_frame}`.
+pub fn stat(cfg: &Config, path: &str, create: bool) -> Result<FsStatResult, String> {
     let p = Path::new(path);
     if !p.is_absolute() {
         return Err(format!("{path} is not an absolute path"));
+    }
+    if create && p.canonicalize().is_err() {
+        let target = resolve_missing(p);
+        if cfg.inside_roots(&target) {
+            std::fs::create_dir_all(&target).map_err(|e| format!("cannot make {path}: {e}"))?;
+            tracing::info!(path = %target.display(), "folder made for a workspace");
+        }
     }
     let outside = FsStatResult {
         exists: false,
@@ -160,7 +169,7 @@ mod tests {
         std::fs::write(root.join("notes.txt"), "").unwrap();
         let c = cfg(&root);
         let root = c.allowed_roots[0].clone();
-        let s = |p: &Path| stat(&c, p.to_str().unwrap()).unwrap();
+        let s = |p: &Path| stat(&c, p.to_str().unwrap(), false).unwrap();
 
         let r = s(&root.join("hqc/."));
         assert!(r.exists && r.is_dir && r.inside_allowed_roots);
@@ -169,6 +178,13 @@ mod tests {
         assert!(r.exists && !r.is_dir && r.inside_allowed_roots);
         let r = s(&root.join("missing/deeper"));
         assert!(!r.exists && r.inside_allowed_roots && r.canonical.is_none());
+        // Made on request, with its parents, only inside.
+        let r = stat(&c, root.join("missing/deeper").to_str().unwrap(), true).unwrap();
+        assert!(r.exists && r.is_dir && r.inside_allowed_roots);
+        assert_eq!(r.canonical.as_deref(), root.join("missing/deeper").to_str());
+        let r = stat(&c, dir.path().join("made-outside").to_str().unwrap(), true).unwrap();
+        assert!(!r.exists && !r.inside_allowed_roots);
+        assert!(!dir.path().join("made-outside").exists());
         // Outside: not even whether it exists.
         for p in [
             dir.path().to_path_buf(),
@@ -187,7 +203,7 @@ mod tests {
                 p.display()
             );
         }
-        assert!(stat(&c, "relative/path").is_err());
+        assert!(stat(&c, "relative/path", false).is_err());
     }
 
     #[cfg(unix)]
@@ -202,12 +218,18 @@ mod tests {
         let c = cfg(&root);
         let root = c.allowed_roots[0].clone();
 
-        let r = stat(&c, root.join("link").to_str().unwrap()).unwrap();
+        let r = stat(&c, root.join("link").to_str().unwrap(), false).unwrap();
         assert_eq!(r.canonical.as_deref(), root.join("real").to_str());
-        let r = stat(&c, root.join("out").to_str().unwrap()).unwrap();
+        let r = stat(&c, root.join("out").to_str().unwrap(), false).unwrap();
         assert!(!r.inside_allowed_roots && !r.exists);
-        let r = stat(&c, root.join("out/missing").to_str().unwrap()).unwrap();
+        let r = stat(&c, root.join("out/missing").to_str().unwrap(), false).unwrap();
         assert!(!r.inside_allowed_roots, "missing below a link out");
+        // Nor made there.
+        let r = stat(&c, root.join("out/missing").to_str().unwrap(), true).unwrap();
+        assert!(!r.inside_allowed_roots && !r.exists);
+        assert!(!dir.path().join("secret/missing").exists());
+        let r = stat(&c, root.join("link/made").to_str().unwrap(), true).unwrap();
+        assert_eq!(r.canonical.as_deref(), root.join("real/made").to_str());
 
         let names: Vec<String> = list_dirs(&c, root.to_str())
             .unwrap()

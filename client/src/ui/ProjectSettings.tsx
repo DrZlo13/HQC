@@ -609,21 +609,31 @@ function AddWorkspace({
   const [label, setLabel] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ReturnType<typeof addError> | null>(null);
+  // The worker said the folder is missing: it can make it (SPEC 0.64).
+  const [missing, setMissing] = useState(false);
 
   useEffect(() => {
     if (!worker && workers[0]) setWorker(online[0]?.id ?? workers[0].id);
   }, [workers]);
 
-  const add = async (e: Event) => {
+  const add = async (e: Event, create = false) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    setMissing(false);
     try {
-      await app.api.createWorkspace({ project_id: projectId, worker_id: worker, path: path.trim(), label: label.trim() || undefined });
+      await app.api.createWorkspace({
+        project_id: projectId,
+        worker_id: worker,
+        path: path.trim(),
+        label: label.trim() || undefined,
+        create: create || undefined,
+      });
       await app.workspacesChanged(projectId);
       onDone();
     } catch (err) {
       setError(addError(err, app));
+      setMissing(err instanceof ApiError && err.code === 'path_not_found');
     } finally {
       setBusy(false);
     }
@@ -632,8 +642,23 @@ function AddWorkspace({
   if (workers.length === 0) return <NoWorkers cls="add-workspace" onDone={onDone} />;
   return (
     <form class="add-workspace" onSubmit={add}>
-      <WorkerSelect workers={workers} value={worker} onChange={setWorker} />
-      <FolderTree key={worker} app={app} worker={worker} onPick={setPath} />
+      <WorkerSelect
+        workers={workers}
+        value={worker}
+        onChange={(id) => {
+          setWorker(id);
+          setMissing(false);
+        }}
+      />
+      <FolderTree
+        key={worker}
+        app={app}
+        worker={worker}
+        onPick={(p) => {
+          setPath(p);
+          setMissing(false);
+        }}
+      />
       <label class="field">
         <span class="muted small">Path on the worker</span>
         <input
@@ -641,7 +666,10 @@ function AddWorkspace({
           name="path"
           placeholder="/Users/me/work/project"
           value={path}
-          onInput={(e) => setPath((e.target as HTMLInputElement).value)}
+          onInput={(e) => {
+            setPath((e.target as HTMLInputElement).value);
+            setMissing(false);
+          }}
         />
       </label>
       <label class="field">
@@ -654,9 +682,15 @@ function AddWorkspace({
         </div>
       )}
       <div class="row">
-        <button type="submit" class="btn btn-small btn-primary" disabled={busy || !worker || !path.trim()}>
-          Add
-        </button>
+        {missing ? (
+          <button type="button" class="btn btn-small btn-primary btn-create-folder" disabled={busy} onClick={(e) => add(e, true)}>
+            Create the folder and add
+          </button>
+        ) : (
+          <button type="submit" class="btn btn-small btn-primary" disabled={busy || !worker || !path.trim()}>
+            Add
+          </button>
+        )}
         <button type="button" class="btn btn-small" onClick={onDone}>
           Cancel
         </button>

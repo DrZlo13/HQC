@@ -627,3 +627,21 @@ it('reorders the project bar and keeps the order in the hub', async () => {
   await until('saved', () => $('.rail a.project-row') && names().join() === moved.join());
   expect((await app.api.projects()).map((p) => p.name)).toEqual(moved);
 });
+
+it('makes a missing folder for a workspace when asked', async () => {
+  const pid = app.me!.personal_project_id;
+  location.hash = `#/p/${pid}/settings`;
+  (await until('add button', () => button('Add a workspace')))!.click();
+  await until('add form', () => $('.add-workspace input[name=path]'));
+  type('.add-workspace input[name=path]', '/Users/home-mac/work/notes/new');
+  await until('add enabled', () => !button('Add', '.add-workspace')?.disabled);
+  submit('.add-workspace');
+  await until('missing', () => $('.add-workspace .error-text')?.textContent?.includes('does not exist on the worker'));
+  // Editing the path takes the offer back.
+  type('.add-workspace input[name=path]', '/Users/home-mac/work/notes/new2');
+  await until('offer gone', () => !$('.btn-create-folder'));
+  submit('.add-workspace');
+  (await until('offer', () => $<HTMLButtonElement>('.btn-create-folder')))!.click();
+  await until('workspace listed', () => $$('.workspace-row').find((r) => r.textContent?.includes('/notes/new2')));
+  expect($('.add-workspace')).toBeNull();
+});

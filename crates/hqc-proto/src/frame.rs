@@ -709,6 +709,11 @@ pub struct FsStat {
     pub request_id: String,
     /// Absolute path on the worker.
     pub path: String,
+    /// Make the folder, with its missing parents, when it is missing and would be inside
+    /// `allowed_roots` (since SPEC 0.64: the user asked for it); the result is then the made
+    /// folder's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub create: bool,
 }
 
 /// `fs.list_dirs {request_id, path | null}` -> `result` [`FsListDirsResult`]: `null` lists

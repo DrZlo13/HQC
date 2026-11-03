@@ -224,7 +224,11 @@ async fn stat(
 ) -> ApiResult<hqc_proto::frame::FsStatResult> {
     let path = path.to_string();
     match ask_worker(app, worker_id, |request_id| {
-        HubFrame::FsStat(FsStat { request_id, path })
+        HubFrame::FsStat(FsStat {
+            request_id,
+            path,
+            create: false,
+        })
     })
     .await?
     {

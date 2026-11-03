@@ -302,6 +302,7 @@ async fn worktree(
         origin_workspace_id: Some(origin.id),
         new_branch: true,
         label: None,
+        create: false,
         url: None,
         branch: Some(branch),
     };

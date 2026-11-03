@@ -690,6 +690,9 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       if (!/^(https:\/\/|ssh:\/\/|[\w.-]+@[\w.-]+:)/.test(url)) throw fail(400, 'invalid_url', 'use https://, ssh:// or user@host:path');
       if (!(path.slice(0, cut) in TREE) && path.slice(0, cut) !== ROOT) throw fail(400, 'path_not_found', 'the parent folder does not exist on the worker');
       if (known) throw fail(400, 'path_exists', `${path} already exists on the worker`);
+    } else if (!known && !worktree && body?.create) {
+      // SPEC 0.64: the worker makes the missing folder.
+      (TREE[path.slice(0, cut)] ??= []).push(path.slice(cut + 1));
     } else if (!known && !worktree) throw fail(400, 'path_not_found', `${path} does not exist on the worker`);
     const x = [...workspaces.values()].find((w) => w.worker_id === body.worker_id && overlap(w.path, path));
     if (x) {

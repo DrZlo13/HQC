@@ -216,13 +216,15 @@ export function RulesScreen({
             <label for="rules-check" class="rules-check-label">
               Check a command
             </label>
-            <input
+            {/* A textarea: a pasted script keeps its line breaks, which separate commands. */}
+            <textarea
               id="rules-check"
               class="input mono"
+              rows={1}
               placeholder="Command or tool name, e.g. git push or Edit"
               value={q}
               disabled={offline}
-              onInput={(e) => setQ((e.currentTarget as HTMLInputElement).value)}
+              onInput={(e) => setQ((e.currentTarget as HTMLTextAreaElement).value)}
             />
             <div class="rules-chips">
               {EXAMPLES.map((t) => (

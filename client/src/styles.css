@@ -3489,7 +3489,10 @@ button.ps-look {
   font-weight: 600;
 }
 .rules-check .input {
-  height: 42px;
+  min-height: 42px;
+  max-height: 200px;
+  field-sizing: content;
+  resize: vertical;
 }
 .rules-chips {
   display: flex;

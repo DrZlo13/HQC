@@ -32,7 +32,7 @@ const $ = <E extends Element = HTMLElement>(sel: string) => root.querySelector<E
 const $$ = (sel: string) => [...root.querySelectorAll<HTMLElement>(sel)];
 const buttonByText = (text: string) => $$('button').find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
 const flush = () => act(async () => void (await new Promise((r) => setTimeout(r, 0))));
-const typeInto = (el: HTMLInputElement, value: string) =>
+const typeInto = (el: HTMLInputElement | HTMLTextAreaElement, value: string) =>
   act(() => {
     el.value = value;
     el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -262,7 +262,7 @@ describe('the rules screen', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { api } = setup();
     await flush();
-    const field = $<HTMLInputElement>('#rules-check')!;
+    const field = $<HTMLTextAreaElement>('#rules-check')!;
     await typeInto(field, 'npm install && npm test');
     await act(async () => void vi.advanceTimersByTime(CHECK_DELAY + 10));
     await flush();
@@ -278,6 +278,14 @@ describe('the rules screen', () => {
     expect(api.workspacePermissions).toHaveBeenLastCalledWith('w1', { tool: 'Edit' });
     expect($('.rules-result-label')!.textContent).toBe('Allowed');
     expect($('.rules-result')!.textContent).toContain('by rule Edit · HQC');
+
+    // Line breaks of a pasted script reach the worker: they separate its commands.
+    await typeInto(field, 'ssh-add -l\nfor h in a b; do\n  ssh $h true\ndone');
+    await act(async () => void vi.advanceTimersByTime(CHECK_DELAY + 10));
+    await flush();
+    expect(api.workspacePermissions).toHaveBeenLastCalledWith('w1', {
+      command: 'ssh-add -l\nfor h in a b; do\n  ssh $h true\ndone',
+    });
   });
 
   it('adds a rule with a live check, warns about a deny that wins, refuses a duplicate', async () => {
@@ -326,7 +334,7 @@ describe('the rules screen', () => {
       ['Bash(python3 *)', 'HQC'],
     ]);
     expect(group('Allowed').textContent).toContain('HQC rules still save and apply when it’s back');
-    expect($<HTMLInputElement>('#rules-check')!.disabled).toBe(true);
+    expect($<HTMLTextAreaElement>('#rules-check')!.disabled).toBe(true);
     expect($('.rules-result-label')!.textContent).toBe('Unavailable');
     // Still editable.
     expect(buttonByText('Allow in this folder')).toBeDefined();

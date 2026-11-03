@@ -1303,8 +1303,8 @@ list on the left." (the time from `archived_at`, none without it), the feed dimm
 
 Messages between sessions in the feed (since 0.54, T51; mockups `Session`, `AskingSession`,
 `MSession2`): violet blocks (`--relay`) with an arrow, ↗ for what left this session and ↙
-for what came into it, and the other session's address as a link to it (plain text when the
-user has no such session: deleted or unknown). In the answering session a `peer.message` is
+for what came into it, and the other session's title as a link to it, its address in the
+tooltip (since 0.64; plain address text when the user has no such session: deleted or unknown). In the answering session a `peer.message` is
 "↙ Question from X" (`mode: ask`) or "↙ Message from X" with its text and files, and the final
 `agent.message` whose `in_reply_to` is a question is "↗ Reply to X · delivered <time>"
 (`reply_delivered_at`) with the turn's `attachment`s and token line inside the block; a send

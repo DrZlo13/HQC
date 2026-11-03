@@ -83,13 +83,14 @@ function Relay({
   );
 }
 
-/** The other session: a link while the user has it, else `label` (or `target`) as text. */
+/** The other session: a link with its title (the address in the tooltip) while the user has
+ *  it, else `label` (or `target`) as text. */
 function PeerLink({ target, label, actions }: { target: string; label?: string; actions: ChatActions }) {
   const s = target ? actions.findSession?.(target) : undefined;
   if (s)
     return (
-      <a class="relay-peer mono" href={`#/s/${s.id}`}>
-        {s.address}
+      <a class={s.title ? 'relay-peer' : 'relay-peer mono'} href={`#/s/${s.id}`} title={s.address}>
+        {s.title || s.address}
       </a>
     );
   return <span class="relay-peer mono">{label ?? target}</span>;

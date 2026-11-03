@@ -65,7 +65,7 @@ export interface ChatActions {
   sheetRequest?: string;
   /** A session of the user by id or address, for the other side of a message between
    *  sessions (T51); undefined for a deleted or unknown one. */
-  findSession?(ref: string): { id: string; address: string } | undefined;
+  findSession?(ref: string): { id: string; address: string; title?: string } | undefined;
   /** The event at `seq` of session `sessionId`: a message this session sent there (T51). */
   peerMessage?(sessionId: string, seq: number): Promise<HqcEvent | undefined>;
 }

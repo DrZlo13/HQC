@@ -390,8 +390,8 @@ export class AppState {
   }
 
   /** A session of the user by id or address (`<project-slug>/<session-slug>`, SPEC §7), with
-   *  its address; undefined for a deleted or unknown one. */
-  findSession(ref: string): { id: string; address: string } | undefined {
+   *  its address and title; undefined for a deleted or unknown one. */
+  findSession(ref: string): { id: string; address: string; title: string } | undefined {
     const address = (s: SessionInfo) => {
       const p = this.projects.get(s.project_id);
       return p ? `${p.slug}/${s.slug}` : undefined;
@@ -399,9 +399,10 @@ export class AppState {
     const byId = this.sessions.get(ref);
     if (byId) {
       const a = address(byId);
-      return a ? { id: byId.id, address: a } : undefined;
+      return a ? { id: byId.id, address: a, title: byId.title || byId.slug } : undefined;
     }
-    for (const s of this.sessions.values()) if (address(s) === ref) return { id: s.id, address: ref };
+    for (const s of this.sessions.values())
+      if (address(s) === ref) return { id: s.id, address: ref, title: s.title || s.slug };
     return undefined;
   }
 

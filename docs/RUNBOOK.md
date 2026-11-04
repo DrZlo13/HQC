@@ -79,8 +79,11 @@ The hub is configured by environment variables only; it takes a single command-l
 |---|---|---|
 | `HQC_DATABASE_URL` | yes | Postgres connection string, e.g. `postgresql://hqc:<password>@127.0.0.1/hqc` |
 | `HQC_HUB_LISTEN` | no, `127.0.0.1:8080` | HTTP address and port. The hub listens only on the interface `cloudflared` connects to (§20); with the tunnel on the same host, loopback. In the Docker image it is `0.0.0.0:8080` inside the container, and the port is not published (§1.8) |
-| `HQC_ACCESS_TEAM_DOMAIN` | yes (without `HQC_DEV`) | Cloudflare Zero Trust team domain, `<team>.cloudflareaccess.com` (`https://` and `/` are allowed; the hub strips them). From it the hub derives the issuer `https://<team>.cloudflareaccess.com` and the JWKS `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` |
-| `HQC_ACCESS_AUD` | yes (without `HQC_DEV`) | Application Audience (AUD) tag of the hub's Access application; the hub checks `aud` in the `Cf-Access-Jwt-Assertion` JWT |
+| `HQC_ACCESS_TEAM_DOMAIN` | yes (without `HQC_DEV` or `HQC_OIDC_*`) | Cloudflare Zero Trust team domain, `<team>.cloudflareaccess.com` (`https://` and `/` are allowed; the hub strips them). From it the hub derives the issuer `https://<team>.cloudflareaccess.com` and the JWKS `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` |
+| `HQC_ACCESS_AUD` | yes (without `HQC_DEV` or `HQC_OIDC_*`) | Application Audience (AUD) tag of the hub's Access application; the hub checks `aud` in the `Cf-Access-Jwt-Assertion` JWT |
+| `HQC_OIDC_ISSUER` | instead of `HQC_ACCESS_*` | OIDC mode (SPEC §6), for a hub behind a reverse proxy that signs people in with an OIDC provider: the exact `iss` of the provider's ID tokens, e.g. `https://auth.example.com/realms/<realm>` for Keycloak. Set together with the two below or none of them; with `HQC_ACCESS_*` or `HQC_DEV=1` the hub does not start. The hub reads the token from `Authorization: Bearer` on `/api/*` and `/api/ws`; the proxy must renew it before it expires (oauth2-proxy `--set-authorization-header` with `--cookie-refresh` shorter than the token lifetime, e.g. `4m` against Keycloak's default 5-minute Access Token Lifespan), otherwise `/api/*` answers `401` a few minutes after sign-in |
+| `HQC_OIDC_AUD` | with `HQC_OIDC_ISSUER` | the expected `aud` of the ID token: the client id the proxy signs in with |
+| `HQC_OIDC_JWKS_URL` | with `HQC_OIDC_ISSUER` | the provider's JWKS, e.g. `https://auth.example.com/realms/<realm>/protocol/openid-connect/certs` for Keycloak; no discovery |
 | `HQC_VAPID_PRIVATE` | no | VAPID private key for Web Push: a 32-byte P-256 scalar, base64url without `=` (§1.5). Set together with `HQC_VAPID_PUBLIC` or not at all; otherwise the hub does not start |
 | `HQC_VAPID_PUBLIC` | no | VAPID public key: an uncompressed P-256 point (65 bytes), base64url without `=`. Served by `GET /api/push/vapid`. Without the key pair push is off, and the client says "VAPID keys are not configured on the hub" |
 | `HQC_VAPID_SUBJECT` | no, `mailto:hqc@localhost` | `sub` in the VAPID signature: `mailto:` or `https:`. Set a real address: push services (Apple especially) may reject signatures with a made-up one |
@@ -344,7 +347,8 @@ client in `/opt/hqc/client`, user `hqc` (uid/gid 10001), port 8080, and from pac
 | `RUST_LOG` | `info` |
 | `NO_COLOR` | `1`: logs without ANSI colours |
 
-You must set: `HQC_DATABASE_URL`, `HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD`; for push,
+You must set: `HQC_DATABASE_URL`, `HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD` (or the three
+`HQC_OIDC_*` instead of the last two); for push,
 `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT` (§1.5). `HQC_DEV` does not work
 in the container and is not needed: with `0.0.0.0` the hub refuses to start in dev mode.
 

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.67, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.68, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1017,12 +1017,25 @@ MCP calls (worker → hub → worker):
 Authentication: the hub verifies the signature of the `Cf-Access-Jwt-Assertion` JWT against
 Cloudflare's JWKS (issuer and audience from the config) and takes the email from the token. An
 email header without a JWT is not accepted. The worker route `/worker/*` is excluded from Access
-and accepts only worker tokens; the human route `/api/*` accepts only Access JWTs. The hub
-listens only on the tunnel interface.
+and accepts only worker tokens; the human route `/api/*` accepts only Access JWTs (in OIDC mode,
+below, the provider's ID tokens). The hub listens only on the tunnel interface.
+
+OIDC mode (since 0.68), for a hub behind a reverse proxy that signs people in with an OIDC
+provider instead of Cloudflare Access (Traefik forwardAuth with oauth2-proxy and Keycloak, for
+example): `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD` and `HQC_OIDC_JWKS_URL`, all three. `/api/*`, the
+`/api/ws` WebSocket included, then takes the provider's ID token from `Authorization: Bearer`
+and checks it the same way: an RS256 signature by a key of that JWKS, exactly that `iss`, the
+`aud`, `exp`, and the email from the `email` claim; `Cf-Access-Jwt-Assertion` is not read. The
+proxy puts the token there (oauth2-proxy `--set-authorization-header`) and lets `/worker/*`
+through without its sign-in. It must also renew the token before it expires: the hub refuses an
+expired one with `401`, and oauth2-proxy keeps handing over the token it got at sign-in unless
+`--cookie-refresh` is shorter than the token's lifetime (in Keycloak the Access Token Lifespan,
+5 minutes by default). Only some of the three variables, or them together with
+`HQC_ACCESS_*` or `HQC_DEV=1`, and the hub does not start.
 
 Dev mode (local development without Access): `HQC_DEV=1` together with `HQC_DEV_USER=<email>`;
-all `/api/*` requests come from that user. The hub refuses to start if `HQC_ACCESS_*` is also
-set or `HQC_HUB_LISTEN` is not loopback (`127.0.0.0/8`, `[::1]`, `localhost`); on start it
+all `/api/*` requests come from that user. The hub refuses to start if `HQC_ACCESS_*` or
+`HQC_OIDC_*` is also set or `HQC_HUB_LISTEN` is not loopback (`127.0.0.0/8`, `[::1]`, `localhost`); on start it
 logs a loud warning (§20).
 
 REST bodies and `/api/ws` frames are typed in `hqc-proto` (`api`, `client_frame`); the
@@ -3381,10 +3394,12 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
 ## 20. Hosting and security
 
 - The hub listens only on the tunnel interface; `/api/*` is behind Cloudflare Access with JWT
-  verification; `/worker/*` is outside Access, worker tokens only, rate limit on enroll;
+  verification (in OIDC mode, behind the proxy's sign-in, the hub verifying the provider's ID
+  token, §6); `/worker/*` is outside Access, worker tokens only, rate limit on enroll;
   `artifacts.<hub-domain>` is public, signed links with a TTL only.
 - The hub's dev mode (`HQC_DEV=1`, no Access) is allowed only on a loopback
-  `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*`; otherwise the hub does not start (§6).
+  `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
+  not start (§6).
 - Worker tokens: random 256 bits, only the hash in the database; revocation from the UI.
 - `Origin` **[decision]**: a WebSocket upgrade of `/api/ws` without `Origin`, or with an `Origin`
   that does not match the request's `Host`, gets `403`; non-GET `/api/*` requests with a foreign
@@ -3533,6 +3548,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.67 → 0.68 (OIDC sign-in behind a reverse proxy)
+§6, §20: a third way to authenticate people besides Cloudflare Access and dev mode:
+`HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, the provider's ID token from
+`Authorization: Bearer`, put there by a proxy such as oauth2-proxy with Keycloak. Access and dev
+mode are unchanged. RUNBOOK §1.2.
 
 ### 0.66 → 0.67 (unread projects)
 §6 client layout: a project tile with no session waiting shows a dot when one of its sessions

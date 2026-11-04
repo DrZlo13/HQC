@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hqc_proto::frame::McpError;
-use hqc_proto::mcp::{error_code, MAX_ARGS, TOOLS};
+use hqc_proto::mcp::{error_code, INSTRUCTIONS, MAX_ARGS, TOOLS};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -198,7 +198,7 @@ impl Session<'_> {
                         "protocolVersion": version,
                         "capabilities": {"tools": {"listChanged": false}},
                         "serverInfo": {"name": "hqc", "version": env!("CARGO_PKG_VERSION")},
-                        "instructions": "hqc tools act with the rights of this session's owner.",
+                        "instructions": INSTRUCTIONS,
                     }),
                 );
             }

@@ -32,6 +32,19 @@ stayed, and Open/Download on those cards fail (T53 now warns at start). Open: wh
 shows for such an attachment, and whether to remove the rows (the owner decides; nothing is
 deleted automatically).
 
+## Paste long text as an attachment (2026-11-04)
+
+Pasting a large block of text into the composer (Ctrl+V / Cmd+V) turns it into a text attachment
+of the message instead of inserting it into the input; the composer shows it as a chip with the
+size and the first line. Ctrl+Shift+V (Cmd+Shift+V) always pastes into the text, whatever the size.
+
+Open: the threshold. Candidates: by characters (e.g. > 2–4 KB) and/or by lines (e.g. > 40–50
+lines), whichever comes first; maybe a setting later.
+Specs: §6 (composer), §12 (artifacts and attachments).
+Acceptance: a paste over the threshold becomes an attachment the agent receives like any other
+text attachment; below it, and with Shift always, the text lands in the input; the attachment
+can be removed before sending.
+
 ## Earlier
 
 - Tombstones of deleted sessions, so the mirror does not bring them back:

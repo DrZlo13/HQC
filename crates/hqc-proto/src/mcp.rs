@@ -33,6 +33,13 @@ pub const ASK: &str = "hqc_ask";
 pub const SEARCH_HISTORY: &str = "hqc_search_history";
 pub const SPAWN: &str = "hqc_spawn";
 pub const SCHEDULE: &str = "hqc_schedule";
+/// `instructions` of `initialize` (SPEC §7.2): the runtime keeps them in the system prompt while
+/// the tools themselves wait behind its tool search, so each tool is named here by its use.
+pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's owner; the user \
+    reads this session in the hqc chat. Show the user files you make (images, charts, reports, \
+    diffs) with hqc_attach, not just a path. Other sessions: hqc_list_sessions, hqc_send, \
+    hqc_ask, hqc_spawn; history: hqc_search_history; later or recurring messages: hqc_schedule.";
+
 pub const TOOLS: &[Tool] = &[
     Tool {
         name: LIST_SESSIONS,
@@ -379,5 +386,12 @@ mod tests {
         assert!(tool(ATTACH).is_some());
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
         assert!(tool(SEARCH_HISTORY).is_some());
+    }
+
+    #[test]
+    fn instructions_name_every_tool() {
+        for t in TOOLS {
+            assert!(INSTRUCTIONS.contains(t.name), "{}", t.name);
+        }
     }
 }

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.65, 2026-11-03. Status: the architecture agreed after six reviews and a survey of
+Version 0.66, 2026-11-04. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1823,6 +1823,14 @@ Chains:
   else the newest; Claude Code 2.1.308 asks for `2025-11-25`), `ping`, `tools/list`,
   `tools/call`, `notifications/cancelled`; another method gets `-32601`, an unlisted tool
   `-32602`. Hand-written (no MCP SDK crate) since 0.33, T30.
+- `initialize` gives `instructions` (since 0.66): that the tools act with the owner's rights,
+  that the user reads the session in the hqc chat, that files made for the user (images,
+  charts, reports, diffs) go through `hqc_attach` rather than as a path, and every other tool by
+  its use (`hqc_proto::mcp::INSTRUCTIONS`, a test checks each tool is named). Claude Code keeps
+  server instructions in the system prompt while the tools wait behind `ToolSearch` (§8.1), so
+  the agent knows them from the first turn; without them it did not attach files unasked
+  (checked on 2026-11-04 with Claude Code 2.1.310: haiku quoted them with only the tool names
+  visible).
 - Gets `session_token` only from `HQC_SESSION_TOKEN`; does not write it to tool
   results, runtime logs or files (§7).
 - Forwards every call to the worker daemon over a Unix socket `$HQC_HOME/mcp.sock` (mode
@@ -3524,6 +3532,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.65 → 0.66 (MCP server instructions)
+§7.2: the hqc MCP server's `initialize` gives `instructions` that name every tool by its use and
+send files made for the user through `hqc_attach`; before, it said only that the tools act with
+the owner's rights.
 
 ### 0.64 → 0.65 (iteration 4 closed)
 §19: iteration 4 is closed; its criterion was checked by hand on the production hub. No

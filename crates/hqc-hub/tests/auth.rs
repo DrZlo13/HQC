@@ -1,13 +1,16 @@
-//! Cloudflare Access JWT, worker enrollment and the worker token (SPEC §5.1, §6, §20).
+//! Cloudflare Access JWT, OIDC ID token, worker enrollment and the worker token (SPEC §5.1,
+//! §6, §20).
 
 mod common;
 
 use axum::{routing::get, Json, Router};
 use base64::Engine;
 use common::*;
+use futures_util::{SinkExt, StreamExt};
 use hqc_hub::config::AuthConfig;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{json, Value};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 const TEAM: &str = "test-team.cloudflareaccess.com";
 const AUD: &str = "test-aud-tag";
@@ -116,6 +119,71 @@ async fn access_jwt_is_verified() {
     assert_eq!(c.recv().await["type"], "pong");
 
     // /worker/* does not accept Access tokens.
+    assert!(FakeWorker::connect(&hub, &good).await.is_err());
+    hub.finish().await;
+}
+
+/// `HQC_OIDC_*` behind oauth2-proxy: the ID token comes in `Authorization: Bearer`, the
+/// Access header is not read.
+#[tokio::test]
+async fn oidc_bearer_token_is_verified() {
+    const ISSUER: &str = "https://auth.example.com/realms/home";
+    let auth = AuthConfig::Oidc {
+        issuer: ISSUER.into(),
+        aud: AUD.into(),
+        jwks_url: jwks_server().await,
+    };
+    let hub = TestHub::start_with(auth, String::new()).await;
+    // Keycloak's shape: `aud` is the client id as a string.
+    let oidc_claims = |iss: &str, aud: &str| {
+        let mut c = claims("bob@example.com", aud, 600);
+        c["iss"] = json!(iss);
+        c["aud"] = json!(aud);
+        c
+    };
+    let good = token(oidc_claims(ISSUER, AUD));
+    let bearer = format!("Bearer {good}");
+    let (s, v) = me(&hub, None, Some(("Authorization", &bearer))).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["email"], "bob@example.com");
+
+    assert_eq!(me(&hub, None, None).await.0, 401);
+    assert_eq!(me(&hub, Some(&good), None).await.0, 401);
+    assert_eq!(me(&hub, None, Some(("Authorization", &good))).await.0, 401);
+    for bad in [
+        oidc_claims("https://auth.example.com/realms/other", AUD),
+        oidc_claims(ISSUER, "other-client"),
+    ] {
+        let h = format!("Bearer {}", token(bad));
+        assert_eq!(me(&hub, None, Some(("Authorization", &h))).await.0, 401);
+    }
+
+    let ws = |authorization: Option<String>| {
+        let mut req = format!("{}/api/ws", hub.ws_base)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("Origin", hub.base.parse().unwrap());
+        if let Some(a) = authorization {
+            req.headers_mut()
+                .insert("Authorization", a.parse().unwrap());
+        }
+        tokio_tungstenite::connect_async(req)
+    };
+    assert!(ws(None).await.is_err());
+    assert!(FakeClient::connect_with(&hub, Some(&good)).await.is_err());
+    let (mut c, _) = ws(Some(bearer)).await.unwrap();
+    c.send(Message::Text(json!({"type": "ping"}).to_string().into()))
+        .await
+        .unwrap();
+    let pong = loop {
+        if let Message::Text(t) = c.next().await.unwrap().unwrap() {
+            break serde_json::from_str::<Value>(t.as_str()).unwrap();
+        }
+    };
+    assert_eq!(pong["type"], "pong");
+
+    // /worker/* reads the same header but does not accept OIDC tokens.
     assert!(FakeWorker::connect(&hub, &good).await.is_err());
     hub.finish().await;
 }

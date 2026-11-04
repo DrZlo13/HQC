@@ -2,7 +2,10 @@
 //!
 //! People: the Cloudflare Access JWT from `Cf-Access-Jwt-Assertion`, signature checked
 //! against the team's JWKS, issuer and audience from config; an email header without a JWT
-//! is never accepted. `HQC_DEV=1` replaces this with a fixed user for local development.
+//! is never accepted. With `HQC_OIDC_*` it is instead an OIDC ID token from
+//! `Authorization: Bearer` (put there by a reverse proxy such as oauth2-proxy), checked the
+//! same way against the configured issuer, audience and JWKS URL; `Cf-Access-Jwt-Assertion`
+//! is then not read. `HQC_DEV=1` replaces this with a fixed user for local development.
 //!
 //! Workers: a random 256-bit bearer token; the database keeps only its sha256.
 
@@ -28,6 +31,7 @@ const JWKS_MAX_AGE: Duration = Duration::from_secs(3600);
 
 pub enum Auth {
     Access(Box<AccessVerifier>),
+    Oidc(Box<AccessVerifier>),
     Dev { email: String },
 }
 
@@ -43,6 +47,11 @@ impl Auth {
                 aud,
                 jwks_url.clone(),
             ))),
+            AuthConfig::Oidc {
+                issuer,
+                aud,
+                jwks_url,
+            } => Auth::Oidc(Box::new(AccessVerifier::with_issuer(issuer, aud, jwks_url))),
             AuthConfig::Dev { email } => Auth::Dev {
                 email: email.clone(),
             },
@@ -86,10 +95,15 @@ impl AccessVerifier {
     pub fn new(team_domain: &str, aud: &str, jwks_url: Option<String>) -> Self {
         let issuer = format!("https://{team_domain}");
         let certs_url = jwks_url.unwrap_or_else(|| format!("{issuer}/cdn-cgi/access/certs"));
+        Self::with_issuer(&issuer, aud, &certs_url)
+    }
+
+    /// Tokens of exactly `issuer` for `aud`, signed by a key from the JWKS at `certs_url`.
+    pub fn with_issuer(issuer: &str, aud: &str, certs_url: &str) -> Self {
         Self {
-            issuer,
+            issuer: issuer.to_string(),
             aud: aud.to_string(),
-            certs_url,
+            certs_url: certs_url.to_string(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -221,6 +235,11 @@ impl FromRequestParts<AppState> for CurrentUser {
                     .ok_or_else(|| {
                         ApiError::Unauthorized("missing Cf-Access-Jwt-Assertion".into())
                     })?;
+                v.verify(token).await?
+            }
+            Auth::Oidc(v) => {
+                let token = bearer(&parts.headers)
+                    .ok_or_else(|| ApiError::Unauthorized("missing bearer token".into()))?;
                 v.verify(token).await?
             }
         };

@@ -194,6 +194,16 @@ pub enum AuthConfig {
         /// Override of `https://<team_domain>/cdn-cgi/access/certs`; tests only.
         jwks_url: Option<String>,
     },
+    /// An OIDC provider behind a reverse proxy (oauth2-proxy with Keycloak, for example): the
+    /// ID token from `Authorization: Bearer`, checked against the provider's JWKS.
+    Oidc {
+        /// The exact expected `iss` (`https://auth.example.com/realms/<realm>`).
+        issuer: String,
+        /// The expected `aud`: the client id.
+        aud: String,
+        /// The provider's JWKS (no discovery).
+        jwks_url: String,
+    },
     /// Local development without Access: every request is this user. Only with `HQC_DEV=1`.
     Dev { email: String },
 }
@@ -272,40 +282,15 @@ pub fn turn_watchdog_from(v: Option<&str>) -> anyhow::Result<Option<Duration>> {
 
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
-    /// `HQC_ACCESS_AUD`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`,
-    /// `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`,
-    /// `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`, `HQC_ARTIFACT_RETENTION_DAYS`,
-    /// `HQC_PUBLIC_ORIGINS`.
+    /// `HQC_ACCESS_AUD`, `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, `HQC_DEV`,
+    /// `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`,
+    /// `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`,
+    /// `HQC_ARTIFACT_KEY`, `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
         let listen = var("HQC_HUB_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into());
-
-        let dev = var("HQC_DEV").as_deref() == Some("1");
-        let team_domain = var("HQC_ACCESS_TEAM_DOMAIN");
-        let aud = var("HQC_ACCESS_AUD");
-        let auth = if dev {
-            if team_domain.is_some() || aud.is_some() {
-                bail!("HQC_DEV=1 together with HQC_ACCESS_*: refusing to start in an ambiguous auth mode");
-            }
-            let email = var("HQC_DEV_USER").context("HQC_DEV=1 requires HQC_DEV_USER=<email>")?;
-            // Without Access every request is HQC_DEV_USER: never reachable from outside.
-            if !is_loopback_listen(&listen) {
-                bail!("HQC_DEV=1 requires a loopback HQC_HUB_LISTEN (127.0.0.1, [::1] or localhost), got {listen}");
-            }
-            AuthConfig::Dev { email }
-        } else {
-            if var("HQC_DEV_USER").is_some() {
-                tracing::warn!("HQC_DEV_USER is ignored without HQC_DEV=1");
-            }
-            AuthConfig::Access {
-                team_domain: normalize_team_domain(
-                    &team_domain.context("HQC_ACCESS_TEAM_DOMAIN is not set")?,
-                ),
-                aud: aud.context("HQC_ACCESS_AUD is not set")?,
-                jwks_url: None,
-            }
-        };
+        let auth = auth_from(var, &listen)?;
 
         let vapid = match (var("HQC_VAPID_PRIVATE"), var("HQC_VAPID_PUBLIC")) {
             (Some(private_key), Some(public_key)) => Some(VapidConfig {
@@ -364,6 +349,72 @@ impl Config {
             public_origins: public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?,
         })
     }
+}
+
+/// How people are authenticated, from `var` (unset or blank: `None`): Cloudflare Access
+/// (`HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD`), an OIDC ID token (`HQC_OIDC_ISSUER`,
+/// `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, all three) or `HQC_DEV=1` with `HQC_DEV_USER` on a
+/// loopback `listen`. Variables of two modes at once refuse to start.
+fn auth_from(var: impl Fn(&str) -> Option<String>, listen: &str) -> anyhow::Result<AuthConfig> {
+    let dev = var("HQC_DEV").as_deref() == Some("1");
+    let team_domain = var("HQC_ACCESS_TEAM_DOMAIN");
+    let aud = var("HQC_ACCESS_AUD");
+    let oidc = ["HQC_OIDC_ISSUER", "HQC_OIDC_AUD", "HQC_OIDC_JWKS_URL"]
+        .map(|k| (k, var(k).map(|v| v.trim().to_string())));
+    let oidc_set = oidc.iter().any(|(_, v)| v.is_some());
+    let auth = if dev {
+        if team_domain.is_some() || aud.is_some() {
+            bail!(
+                "HQC_DEV=1 together with HQC_ACCESS_*: refusing to start in an ambiguous auth mode"
+            );
+        }
+        if oidc_set {
+            bail!(
+                "HQC_DEV=1 together with HQC_OIDC_*: refusing to start in an ambiguous auth mode"
+            );
+        }
+        let email = var("HQC_DEV_USER").context("HQC_DEV=1 requires HQC_DEV_USER=<email>")?;
+        // Without Access every request is HQC_DEV_USER: never reachable from outside.
+        if !is_loopback_listen(listen) {
+            bail!("HQC_DEV=1 requires a loopback HQC_HUB_LISTEN (127.0.0.1, [::1] or localhost), got {listen}");
+        }
+        AuthConfig::Dev { email }
+    } else {
+        if var("HQC_DEV_USER").is_some() {
+            tracing::warn!("HQC_DEV_USER is ignored without HQC_DEV=1");
+        }
+        if oidc_set {
+            if team_domain.is_some() || aud.is_some() {
+                bail!("HQC_OIDC_* together with HQC_ACCESS_*: refusing to start in an ambiguous auth mode");
+            }
+            let missing: Vec<&str> = oidc
+                .iter()
+                .filter(|(_, v)| v.is_none())
+                .map(|(k, _)| *k)
+                .collect();
+            if !missing.is_empty() {
+                bail!(
+                    "HQC_OIDC_* needs all three variables, not set: {}",
+                    missing.join(", ")
+                );
+            }
+            let [issuer, aud, jwks_url] = oidc.map(|(_, v)| v.unwrap_or_default());
+            AuthConfig::Oidc {
+                issuer,
+                aud,
+                jwks_url,
+            }
+        } else {
+            AuthConfig::Access {
+                team_domain: normalize_team_domain(
+                    &team_domain.context("HQC_ACCESS_TEAM_DOMAIN is not set")?,
+                ),
+                aud: aud.context("HQC_ACCESS_AUD is not set")?,
+                jwks_url: None,
+            }
+        }
+    };
+    Ok(auth)
 }
 
 /// `HQC_PUBLIC_ORIGINS`: comma-separated `https://host[:port]` (or `http://` on loopback),
@@ -463,6 +514,103 @@ mod tests {
         let mut c = ArtifactConfig::new("x".into());
         c.public_base = Some("https://Artifacts.example.com:8443".into());
         assert_eq!(c.public_host().unwrap(), "artifacts.example.com:8443");
+    }
+
+    const OIDC: [(&str, &str); 3] = [
+        ("HQC_OIDC_ISSUER", " https://auth.example.com/realms/home "),
+        ("HQC_OIDC_AUD", "hqc"),
+        (
+            "HQC_OIDC_JWKS_URL",
+            "https://auth.example.com/realms/home/protocol/openid-connect/certs",
+        ),
+    ];
+
+    fn auth(vars: &[(&str, &str)], listen: &str) -> anyhow::Result<AuthConfig> {
+        auth_from(
+            |k| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            },
+            listen,
+        )
+    }
+
+    #[test]
+    fn oidc_mode_with_all_three_variables() {
+        match auth(&OIDC, "0.0.0.0:8080").unwrap() {
+            AuthConfig::Oidc {
+                issuer,
+                aud,
+                jwks_url,
+            } => {
+                assert_eq!(issuer, "https://auth.example.com/realms/home");
+                assert_eq!(aud, "hqc");
+                assert_eq!(jwks_url, OIDC[2].1);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn oidc_mode_partly_set_names_the_missing() {
+        let e = auth(&OIDC[..2], "0.0.0.0:8080").unwrap_err().to_string();
+        assert!(
+            e.contains("HQC_OIDC_JWKS_URL") && !e.contains("HQC_OIDC_AUD"),
+            "{e}"
+        );
+        let e = auth(&OIDC[2..], "0.0.0.0:8080").unwrap_err().to_string();
+        assert!(
+            e.contains("HQC_OIDC_ISSUER") && e.contains("HQC_OIDC_AUD"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn oidc_mode_with_access_is_ambiguous() {
+        for access in [
+            ("HQC_ACCESS_TEAM_DOMAIN", "team.cloudflareaccess.com"),
+            ("HQC_ACCESS_AUD", "tag"),
+        ] {
+            let mut vars = OIDC.to_vec();
+            vars.push(access);
+            let e = auth(&vars, "0.0.0.0:8080").unwrap_err().to_string();
+            assert!(e.contains("ambiguous"), "{e}");
+        }
+    }
+
+    #[test]
+    fn oidc_mode_with_dev_is_ambiguous() {
+        let mut vars = OIDC.to_vec();
+        vars.extend([("HQC_DEV", "1"), ("HQC_DEV_USER", "dev@example.com")]);
+        let e = auth(&vars, "127.0.0.1:8080").unwrap_err().to_string();
+        assert!(e.contains("ambiguous"), "{e}");
+    }
+
+    #[test]
+    fn access_and_dev_modes_are_selected_as_before() {
+        let access = [
+            ("HQC_ACCESS_TEAM_DOMAIN", "https://t.cloudflareaccess.com/"),
+            ("HQC_ACCESS_AUD", "a"),
+        ];
+        match auth(&access, "0.0.0.0:8080").unwrap() {
+            AuthConfig::Access {
+                team_domain, aud, ..
+            } => {
+                assert_eq!(team_domain, "t.cloudflareaccess.com");
+                assert_eq!(aud, "a");
+            }
+            other => panic!("{other:?}"),
+        }
+        let e = auth(&[], "0.0.0.0:8080").unwrap_err().to_string();
+        assert!(e.contains("HQC_ACCESS_TEAM_DOMAIN"), "{e}");
+        let dev = [("HQC_DEV", "1"), ("HQC_DEV_USER", "dev@example.com")];
+        let e = auth(&dev, "0.0.0.0:8080").unwrap_err().to_string();
+        assert!(e.contains("loopback"), "{e}");
+        let mut vars = dev.to_vec();
+        vars.push(access[1]);
+        let e = auth(&vars, "127.0.0.1:8080").unwrap_err().to_string();
+        assert!(e.contains("ambiguous"), "{e}");
     }
 
     #[test]

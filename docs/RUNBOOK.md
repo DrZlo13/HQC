@@ -470,6 +470,104 @@ through `pg_dump`/`pg_restore` into a new volume, not by changing the tag.
 To build the image yourself: `docker build -t hqc-hub .` at the repository root (on a machine
 with the same architecture as the server, or with `--platform linux/amd64`).
 
+### 1.9 Behind Traefik with oauth2-proxy and Keycloak
+
+Instead of Cloudflare Tunnel and Access (§1.6): Traefik sends every request for the site through
+a forwardAuth middleware to oauth2-proxy, which signs people in with Keycloak and hands the hub
+the ID token as `Authorization: Bearer`; the hub runs in OIDC mode (§1.2) and verifies the token
+itself. Workers keep their own tokens: `/worker/*` has a router of its own without the
+middleware. Everyone who can sign in to the realm gets into the hub.
+
+The Keycloak client, in the realm the hub trusts:
+
+- Client ID `hqc` (it is `HQC_OIDC_AUD`), Client authentication on, Standard flow only.
+- Valid redirect URIs `https://hqc.example.com/oauth2/callback`, Web origins
+  `https://hqc.example.com`.
+- Advanced → Proof Key for Code Exchange Code Challenge Method: `S256`.
+- `offline_access` among the client's optional scopes (it is there by default): with it the
+  refresh token outlives the SSO session, and the phone stays signed in for the cookie's
+  lifetime.
+
+The compose file of §1.8, with `HQC_OIDC_*` in place of `HQC_ACCESS_*` and oauth2-proxy added;
+`proxy` is the network Traefik sees the containers on:
+
+```yaml
+  hqc-hub:
+    # image, restart, depends_on, env_file and volumes as in §1.8
+    environment:
+      HQC_OIDC_ISSUER: https://auth.example.com/realms/<realm>
+      HQC_OIDC_AUD: hqc
+      HQC_OIDC_JWKS_URL: https://auth.example.com/realms/<realm>/protocol/openid-connect/certs
+    networks: [default, proxy]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: proxy
+      # People: the whole site behind the sign-in.
+      traefik.http.routers.hqc.rule: Host(`hqc.example.com`)
+      traefik.http.routers.hqc.entrypoints: websecure
+      traefik.http.routers.hqc.tls.certresolver: letsencrypt
+      traefik.http.routers.hqc.middlewares: hqc-auth
+      traefik.http.routers.hqc.service: hqc-hub
+      # Workers: their own token, no sign-in (the longer rule wins over the one above).
+      traefik.http.routers.hqc-worker.rule: Host(`hqc.example.com`) && PathPrefix(`/worker/`)
+      traefik.http.routers.hqc-worker.entrypoints: websecure
+      traefik.http.routers.hqc-worker.tls.certresolver: letsencrypt
+      traefik.http.routers.hqc-worker.service: hqc-hub
+      traefik.http.services.hqc-hub.loadbalancer.server.port: "8080"
+      traefik.http.middlewares.hqc-auth.forwardauth.address: http://hqc-oauth2-proxy:4180/
+      traefik.http.middlewares.hqc-auth.forwardauth.trustForwardHeader: "true"
+      traefik.http.middlewares.hqc-auth.forwardauth.authResponseHeaders: Authorization
+
+  hqc-oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    restart: unless-stopped
+    env_file: oauth2-proxy.env   # OAUTH2_PROXY_CLIENT_SECRET, OAUTH2_PROXY_COOKIE_SECRET
+    environment:
+      OAUTH2_PROXY_PROVIDER: keycloak-oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: https://auth.example.com/realms/<realm>
+      OAUTH2_PROXY_CLIENT_ID: hqc
+      OAUTH2_PROXY_REDIRECT_URL: https://hqc.example.com/oauth2/callback
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_WHITELIST_DOMAINS: hqc.example.com
+      OAUTH2_PROXY_UPSTREAMS: static://202
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_SET_AUTHORIZATION_HEADER: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_SCOPE: openid email profile offline_access
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_COOKIE_EXPIRE: 720h
+      OAUTH2_PROXY_COOKIE_REFRESH: 4m
+      OAUTH2_PROXY_COOKIE_SAMESITE: lax
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+    networks: [proxy]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: proxy
+      traefik.http.routers.hqc-oauth2.rule: Host(`hqc.example.com`) && PathPrefix(`/oauth2/`)
+      traefik.http.routers.hqc-oauth2.entrypoints: websecure
+      traefik.http.routers.hqc-oauth2.tls.certresolver: letsencrypt
+      traefik.http.services.hqc-oauth2.loadbalancer.server.port: "4180"
+```
+
+- `OAUTH2_PROXY_COOKIE_REFRESH` shorter than the ID token lifetime, see `HQC_OIDC_ISSUER` in §1.2.
+- Without `OAUTH2_PROXY_WHITELIST_DOMAINS` oauth2-proxy refuses to return to the requested page
+  after sign-in (`Rejecting invalid redirect … domain not in whitelist` in its log).
+- `upstreams static://202`: oauth2-proxy only answers the forwardAuth check and proxies nothing.
+- `OAUTH2_PROXY_COOKIE_SECRET`: 32 random bytes, `openssl rand -base64 32 | tr -- '+/' '-_'`;
+  `OAUTH2_PROXY_CLIENT_SECRET`: Credentials of the Keycloak client.
+
+Check from outside:
+
+```sh
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://hqc.example.com/
+#   302 https://auth.example.com/realms/<realm>/protocol/openid-connect/auth?...client_id=hqc...
+curl -s -o /dev/null -w '%{http_code}\n' https://hqc.example.com/worker/enroll
+#   the hub's own 405, not a 302 to the sign-in
+```
+
+In the browser, after the sign-in the client opens and Settings shows the signed-in address.
+
 ## 2. Worker on macOS
 
 ### 2.1 Installation

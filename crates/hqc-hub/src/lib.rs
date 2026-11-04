@@ -1,6 +1,7 @@
 //! hqc hub core (SPEC §2, §5, §6, §10.1, §16, §17, §20; docs/ITERATION-1.md T2).
 //!
-//! - `/api/*` — people, authenticated by Cloudflare Access (or `HQC_DEV=1`);
+//! - `/api/*` — people, authenticated by Cloudflare Access or an OIDC bearer token (or
+//!   `HQC_DEV=1`);
 //! - `/worker/*` — workers: enrollment and the `/worker/ws` WebSocket with a bearer token;
 //! - everything else — the web client from `HQC_CLIENT_DIR`, if set.
 

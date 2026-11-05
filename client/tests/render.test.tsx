@@ -16,6 +16,7 @@ import {
   type ChatActions,
 } from "../src/ui/cards";
 import { CANONICAL_LABELS } from "../src/ui/labels";
+import { cutJson } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
 const raw = (name: string): any =>
@@ -470,8 +471,9 @@ describe("clarify.request", () => {
     const { actions } = show(t);
     const qs = root.querySelectorAll(".card-clarify fieldset");
     expect(qs.length).toBe(3);
-    expect(qs[0].querySelectorAll("input[type=radio]").length).toBe(2);
-    expect(qs[1].querySelectorAll("input[type=checkbox]").length).toBe(3);
+    // The options and Other.
+    expect(qs[0].querySelectorAll("input[type=radio]").length).toBe(3);
+    expect(qs[1].querySelectorAll("input[type=checkbox]").length).toBe(4);
     expect(qs[2].querySelectorAll("input[type=text]").length).toBe(1);
 
     const click = (sel: string) =>
@@ -980,5 +982,324 @@ describe("fork of a transcript (T20, SPEC §9.3)", () => {
     t2.apply(ev("event.system", withSeq(1)));
     show(t2);
     expect(root.querySelector(".line-warning")).toBeNull();
+  });
+});
+
+describe("the feed like the Claude Code tab", () => {
+  const system = (seq: number, code: string, text: string) =>
+    ev("event.system", (e) => {
+      e.seq = seq;
+      e.payload = { code, text };
+    });
+
+  it("folds a background task's notification into a line with its summary as the peek", () => {
+    const t = new Timeline();
+    t.apply(
+      system(
+        1,
+        "task_notification",
+        'Background command "npm test" completed (exit code 0)\nAll 12 suites passed',
+      ),
+    );
+    show(t);
+    const fold = root.querySelector("details.line-system-task_notification")!;
+    expect(fold.querySelector("summary .fold-label")!.textContent).toBe(
+      "Background task",
+    );
+    expect(fold.querySelector("summary .fold-peek")!.textContent).toBe(
+      'Background command "npm test" completed (exit code 0)',
+    );
+    expect(fold.querySelector(".fold-text")!.textContent).toBe(
+      'Background command "npm test" completed (exit code 0)\nAll 12 suites passed',
+    );
+    expect(root.querySelector(".msg-agent")).toBeNull();
+  });
+
+  it("draws the compaction of the context as a divider", () => {
+    const t = new Timeline();
+    t.apply(system(1, "context_compacted", "Context compacted"));
+    show(t);
+    const line = root.querySelector(".line.line-system-context_compacted")!;
+    expect(line.textContent).toBe("Context compacted");
+  });
+
+  it("shows a reply Claude Code wrote itself as an error-style service line, not a message", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.agent.message", (e) => {
+        e.seq = 1;
+        e.payload = { text: "Credit balance is too low", final: true, runtime: true };
+      }),
+    );
+    show(t);
+    const line = root.querySelector(".line.line-system.line-runtime")!;
+    expect(line.textContent).toBe("Credit balance is too low");
+    expect(root.querySelector(".msg-agent")).toBeNull();
+  });
+
+  const clarify = () =>
+    ev("event.clarify.request", (e) => {
+      e.seq = 1;
+      e.payload.questions[0].header = "Focus";
+      e.payload.questions[0].option_descriptions = [
+        "axum + Postgres hub work",
+        "",
+      ];
+      e.payload.questions[1].header = "Checks";
+    });
+  const type = (field: HTMLInputElement, value: string) =>
+    act(() => {
+      field.value = value;
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+  it("shows a question's header and each option's description under its label", () => {
+    const t = new Timeline();
+    t.apply(clarify());
+    show(t);
+    const qs = root.querySelectorAll(".card-clarify fieldset");
+    expect(qs[0].querySelector("legend .question-header")!.textContent).toBe(
+      "Focus",
+    );
+    expect(qs[0].querySelector("legend .question-text")!.textContent).toBe(
+      "Which area should I focus on first?",
+    );
+    const choices = [...qs[0].querySelectorAll(".choice:not(.choice-other)")];
+    expect(
+      choices.map((c) => c.querySelector(".choice-label")!.textContent),
+    ).toEqual(["Hub", "Worker"]);
+    expect(choices[0].querySelector(".choice-desc")!.textContent).toBe(
+      "axum + Postgres hub work",
+    );
+    expect(choices[1].querySelector(".choice-desc")).toBeNull();
+    // Checkboxes for a multi question, Other among them; a question without options has
+    // its text field only.
+    expect(qs[1].querySelectorAll("input[type=checkbox]")).toHaveLength(4);
+    expect(qs[2].querySelector(".question-header")).toBeNull();
+    expect(qs[2].querySelector(".choice-other")).toBeNull();
+  });
+
+  it("sends the text of Other as the answer, for a multi question beside the checked labels", async () => {
+    const t = new Timeline();
+    t.apply(clarify());
+    const { actions } = show(t);
+    const qs = root.querySelectorAll(".card-clarify fieldset");
+    const hub = () => root.querySelector<HTMLInputElement>('input[value="Hub"]')!;
+    await act(() => hub().click());
+    // Typing into Other chooses it in place of Hub.
+    await type(
+      qs[0].querySelector<HTMLInputElement>(".choice-other input[type=text]")!,
+      "Both, hub first",
+    );
+    expect(hub().checked).toBe(false);
+    expect(
+      qs[0].querySelector<HTMLInputElement>(".choice-other input[type=radio]")!
+        .checked,
+    ).toBe(true);
+    await act(() =>
+      root.querySelector<HTMLInputElement>('input[value="clippy"]')!.click(),
+    );
+    await type(
+      qs[1].querySelector<HTMLInputElement>(".choice-other input[type=text]")!,
+      "miri",
+    );
+    await type(qs[2].querySelector<HTMLInputElement>("input[type=text]")!, "no");
+    await act(async () =>
+      root
+        .querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!
+        .click(),
+    );
+    expect(actions.answer).toHaveBeenCalledWith("req-2", {
+      q1: "Both, hub first",
+      q2: ["clippy", "miri"],
+      q3: "no",
+    });
+  });
+
+  it("an answered question shows a typed answer in Other", () => {
+    const t = new Timeline();
+    t.apply(clarify());
+    t.apply(
+      ev("event.clarify.response", (e) => {
+        e.seq = 2;
+        e.payload.answers = { q1: "Both, hub first", q2: ["fmt", "miri"] };
+      }),
+    );
+    show(t);
+    const qs = root.querySelectorAll(".card-clarify fieldset");
+    const other = (i: number, sel: string) =>
+      qs[i].querySelector<HTMLInputElement>(`.choice-other ${sel}`)!;
+    expect(other(0, "input[type=radio]").checked).toBe(true);
+    expect(other(0, "input[type=text]").value).toBe("Both, hub first");
+    expect(
+      qs[1].querySelector<HTMLInputElement>('input[value="fmt"]')!.checked,
+    ).toBe(true);
+    expect(other(1, "input[type=checkbox]").checked).toBe(true);
+    expect(other(1, "input[type=text]").value).toBe("miri");
+  });
+
+  // The worker writes `args_preview` as compact JSON with the keys sorted (serde_json).
+  const approvalFor = (seq: number, tool: string) =>
+    ev("event.approval.request", (e) => {
+      e.seq = seq;
+      e.payload.request_id = `req-${seq}`;
+      e.payload.tool = tool;
+      e.payload.description = "/Users/me/work/hqc/src/main.rs";
+      delete e.payload.policy_hint;
+      delete e.payload.rule_suggestions;
+    });
+  const rawCall = (seq: number, tool: string, args_preview: string) =>
+    ev("event.tool.call", (e) => {
+      e.seq = seq;
+      e.payload = { call_id: `c${seq}`, tool, args_preview };
+    });
+
+  it("shows an Edit as a diff of old_string and new_string", () => {
+    const t = new Timeline();
+    t.apply(
+      call(1, "c1", "Edit", {
+        file_path: "/Users/me/work/hqc/src/main.rs",
+        new_string: "fn main() {\n    run();\n}",
+        old_string: "fn main() {\n    todo!();\n}",
+        replace_all: false,
+      }),
+    );
+    t.apply(approvalFor(2, "Edit"));
+    show(t);
+    const diff = root.querySelector(".perm-change .md-code-diff")!;
+    expect(diff.querySelector("pre")!.textContent).toBe(
+      " fn main() {\n-    todo!();\n+    run();\n }",
+    );
+    expect(
+      [...diff.querySelectorAll(".diff-del")].map((l) => l.textContent),
+    ).toEqual(["-    todo!();\n"]);
+    expect(
+      [...diff.querySelectorAll(".diff-add")].map((l) => l.textContent),
+    ).toEqual(["+    run();\n"]);
+    expect(root.querySelector(".perm-cut")).toBeNull();
+  });
+
+  it("shows each edit of a MultiEdit and the content of a Write", () => {
+    const t = new Timeline();
+    t.apply(
+      call(1, "c1", "MultiEdit", {
+        edits: [
+          { new_string: "a2", old_string: "a1" },
+          { new_string: "b2", old_string: "---\nb1", replace_all: true },
+        ],
+        file_path: "/x/y.md",
+      }),
+    );
+    t.apply(approvalFor(2, "MultiEdit"));
+    t.apply(call(3, "c3", "Write", { content: "line 1\nline 2", file_path: "/x/z.md" }));
+    t.apply(approvalFor(4, "Write"));
+    show(t);
+    const cards = [...root.querySelectorAll(".perm")];
+    expect(cards).toHaveLength(2);
+    const edits = [...cards[0].querySelectorAll(".perm-change .md-code")];
+    expect(edits.map((d) => d.querySelector("pre")!.textContent)).toEqual([
+      "-a1\n+a2",
+      "----\n-b1\n+b2",
+    ]);
+    expect(
+      edits.map((d) => d.querySelector(".md-code-lang")!.textContent),
+    ).toEqual(["Edit 1 of 2", "Edit 2 of 2"]);
+    // A removed `---` line is a removed line, not a file header.
+    expect(edits[1].querySelector(".diff-file")).toBeNull();
+    expect(edits[1].querySelectorAll(".diff-del")).toHaveLength(2);
+    const content = cards[1].querySelector(".perm-change .md-code")!;
+    expect(content.classList.contains("md-code-diff")).toBe(false);
+    expect(content.querySelector(".md-code-lang")!.textContent).toBe("Content");
+    expect(content.querySelector("pre")!.textContent).toBe("line 1\nline 2");
+  });
+
+  it("shows what a preview cut at 4 KB has and says it is cut", () => {
+    const full = JSON.stringify({
+      file_path: "/x/y.ts",
+      new_string: "fixed();",
+      old_string: "old line\n".repeat(600),
+      replace_all: false,
+    });
+    const t = new Timeline();
+    t.apply(rawCall(1, "Edit", full.slice(0, 4096)));
+    t.apply(approvalFor(2, "Edit"));
+    show(t);
+    const pre = root.querySelector(".perm-change pre")!.textContent!;
+    expect(pre.startsWith("-old line\n-old line\n")).toBe(true);
+    expect(pre.endsWith("\n+fixed();")).toBe(true);
+    expect(root.querySelector(".perm-cut")!.textContent).toBe(
+      "The preview is cut at 4 KB: the rest of the change is not shown.",
+    );
+  });
+
+  it("reads a JSON preview cut anywhere: an open string ends, a dangling key goes", () => {
+    expect(cutJson('{"a":"x\\')).toEqual({ value: { a: "x" }, cut: true });
+    expect(cutJson('{"a":"x\\u00')).toEqual({ value: { a: "x" }, cut: true });
+    expect(cutJson('{"a":"x\\\\')).toEqual({ value: { a: "x\\" }, cut: true });
+    expect(cutJson('{"edits":[{"new_string":"ab","old_st')).toEqual({
+      value: { edits: [{ new_string: "ab" }] },
+      cut: true,
+    });
+    expect(cutJson('{"a":1,"b":tru')).toEqual({ value: { a: 1 }, cut: true });
+    expect(cutJson('{"a":"x",')).toEqual({ value: { a: "x" }, cut: true });
+    expect(cutJson('{"a":"x"}')).toEqual({ value: { a: "x" }, cut: false });
+    expect(cutJson("not json")).toBeUndefined();
+  });
+
+  it("the group's header shows its last call; MCP tools by name and server, paths relative to the session's folder", async () => {
+    const t = new Timeline();
+    t.apply(call(1, "a", "Read", { file_path: "/Users/me/work/hqc/src/main.rs" }));
+    t.apply(result(2, "a"));
+    t.apply(
+      call(3, "b", "mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot", {
+        filePath: "/tmp/s.png",
+      }),
+    );
+    t.apply(result(4, "b"));
+    t.apply(
+      call(5, "c", "Bash", {
+        command: "cat /Users/me/work/hqc/Cargo.toml /Users/me/work/hqc-old/x",
+      }),
+    );
+    t.apply(result(6, "c"));
+    t.apply(agentText(7, "Next.", false));
+    t.apply(call(8, "d", "mcp__gitea__list_issues", { query: "label:bug" }));
+    t.apply(result(9, "d"));
+    show(t, { workspaceRoot: "/Users/me/work/hqc" });
+    const [g, g2] = [...root.querySelectorAll(".tool-group")];
+    expect(g.querySelector(".tool-group-head .tool-peek")!.textContent).toBe(
+      "$ cat Cargo.toml /Users/me/work/hqc-old/x",
+    );
+    expect(g2.querySelector(".tool-group-head .tool-peek")!.textContent).toBe(
+      "list_issues (gitea) label:bug",
+    );
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const rows = [...g.querySelectorAll(".tool-row summary")];
+    expect(rows[0].querySelector(".tool-line")!.textContent).toBe("src/main.rs");
+    expect(rows[1].querySelector(".tool-name")!.textContent).toBe(
+      "take_screenshot (chrome-devtools)",
+    );
+    expect(rows[2].querySelector(".tool-line")!.textContent).toBe(
+      "cat Cargo.toml /Users/me/work/hqc-old/x",
+    );
+  });
+
+  it("shows the user's own message as typed: no Markdown, line breaks kept", () => {
+    const text = "**not bold** and `code`\n- not a list";
+    const t = new Timeline();
+    t.apply(
+      ev("event.user.message", (e) => {
+        e.payload.text = text;
+        e.payload.artifact_ids = [];
+      }),
+    );
+    t.addPending("op-2", "_still_ typed");
+    show(t);
+    const [sent, pending] = [...root.querySelectorAll(".msg-user .msg-bubble")];
+    expect(sent.querySelector(".msg-text")!.textContent).toBe(text);
+    expect(pending.querySelector(".msg-text")!.textContent).toBe("_still_ typed");
+    expect(root.querySelector(".msg-user strong, .msg-user em, .msg-user li, .msg-user code")).toBeNull();
   });
 });

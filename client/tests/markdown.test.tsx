@@ -231,7 +231,7 @@ describe('HTML is text', () => {
 describe('messages', () => {
   const SRC = '## Plan\n\n- **one**\n- `two`\n\n```sh\nls -la\n```';
 
-  it('agent, user, peer and system texts are markdown', () => {
+  it("agent, peer and system texts are markdown, the user's own text is as typed", () => {
     const root = chat([
       ev('event.user.message', (e) => (e.payload.text = 'please **run**')),
       ev('event.agent.message', (e) => ((e.payload.text = SRC), (e.payload.final = false))),
@@ -240,7 +240,8 @@ describe('messages', () => {
       // `session_created` is the divider "Session started …"; other codes show their text.
       ev('event.system', (e) => (e.payload = { text: 'worker `home-mac` is **offline**', code: 'agent_exited' })),
     ]);
-    expect(root.querySelector('.msg-user strong')!.textContent).toBe('run');
+    expect(root.querySelector('.msg-user .msg-text')!.textContent).toBe('please **run**');
+    expect(root.querySelector('.msg-user strong')).toBeNull();
     expect(root.querySelector('.msg-interim h2')!.textContent).toBe('Plan');
     expect(root.querySelector('.msg-final .md-code code')!.textContent).toBe('ls -la');
     expect(root.querySelector('.relay em')!.textContent).toBe('from');

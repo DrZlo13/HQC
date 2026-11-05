@@ -8,7 +8,19 @@ import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } 
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import { AttachmentView, PendingAttachments } from './attachments';
-import { askTarget, buildFeed, callLine, callRows, groupDuration, groupState, type Block, type ToolRow } from './feed';
+import {
+  askTarget,
+  buildFeed,
+  callLine,
+  callPeek,
+  callRows,
+  groupDuration,
+  groupState,
+  relativePaths,
+  toolLabel,
+  type Block,
+  type ToolRow,
+} from './feed';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconChevron, IconCross, IconWarn } from './icons';
 import {
@@ -188,6 +200,9 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
     case 'agent.delta':
       return <StreamingMessage text={event.payload.text} />;
     case 'agent.message':
+      // A reply Claude Code wrote itself (an API error, "Credit balance is too low"): a
+      // service line, not the agent's text.
+      if (event.payload.runtime) return <Line kind="system line-runtime">{event.payload.text}</Line>;
       return <AgentMessage event={event} />;
     case 'agent.thinking':
       return <Thinking event={event} />;
@@ -263,6 +278,11 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
 function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => number }) {
   const p = event.payload;
   if (p.code === 'worker_log') return <WorkerLogLine event={event} />;
+  if (p.code === 'task_notification') return <TaskNotification text={p.text} />;
+  // The runtime's own line about a compaction is text as is.
+  if (p.code === 'context_compacted') {
+    return <Line kind={`system line-system-${p.code}`}>{p.text || 'Context compacted'}</Line>;
+  }
   const caption = SYSTEM_CODE_LABELS[p.code];
   const warning = SYSTEM_WARNING_CODES.has(p.code);
   const kind = `system line-system-${p.code}${warning ? ' line-warning' : ''}`;
@@ -284,6 +304,22 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
       {caption && <b>{caption}</b>}
       <Markdown text={p.text} />
     </Line>
+  );
+}
+
+/** A background task's notification, folded as the tab folds it: "Background task" and the
+ *  first line of its summary; open, the whole text. */
+function TaskNotification({ text }: { text: string }) {
+  const peek = text.split('\n').find((l) => l.trim()) ?? '';
+  return (
+    <details class="line-fold line-system-task_notification">
+      <summary>
+        <IconChevron size={12} />
+        <span class="fold-label">Background task</span>
+        <span class="fold-peek">{peek.trim()}</span>
+      </summary>
+      <div class="fold-text">{text}</div>
+    </details>
   );
 }
 
@@ -316,7 +352,7 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
   return (
     <div class="msg-user">
       <div class="msg-bubble">
-        {event.payload.text && <Markdown class="text" text={event.payload.text} />}
+        {event.payload.text && <UserText text={event.payload.text} />}
         {ids.length > 0 && (
           <div class="attachments">
             {ids.map((id) => (
@@ -336,13 +372,19 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
   );
 }
 
+/** What the user typed, as the tab shows it: the text as is with its line breaks, no
+ *  Markdown. */
+function UserText({ text }: { text: string }) {
+  return <div class="text msg-text">{text}</div>;
+}
+
 /** "Reply with text instead": the user's text went to the agent with the denial. */
 function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
   const text = event.payload.message!;
   return (
     <div class="msg-user msg-answer">
       <div class="msg-bubble">
-        <Markdown class="text" text={text} />
+        <UserText text={text} />
       </div>
       <div class="meta">
         <CopyButton text={text} />
@@ -356,7 +398,7 @@ function PendingBubble({ pending, actions }: { pending: PendingMessage; actions:
   return (
     <div class={`msg-user msg-pending ${pending.status === 'failed' ? 'msg-failed' : ''}`}>
       <div class="msg-bubble">
-        {pending.text && <Markdown class="text" text={pending.text} />}
+        {pending.text && <UserText text={pending.text} />}
         {pending.attachments && <PendingAttachments files={pending.attachments} />}
       </div>
       <div class="meta">
@@ -435,7 +477,8 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
   );
 }
 
-/** A run of tool calls, collapsed: "N commands · time"; open, a row per call (T26). */
+/** A run of tool calls, collapsed: "N commands · time" and the last call's line, as the tab
+ *  shows it; open, a row per call (T26). */
 function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const calls = callRows(block.rows);
@@ -443,6 +486,8 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
   const ms = groupDuration(block.rows);
   const n = count(calls.length, 'command');
   const stats = ms !== undefined ? `${n} · ${formatDuration(ms)}` : n;
+  const last = calls.filter((r) => r.call).at(-1)?.call;
+  const peek = last && callPeek(last.payload.tool, last.payload.args_preview, actions.workspaceRoot);
   return (
     <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
       <button type="button" class="tool-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -451,6 +496,7 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
         </span>
         <StateMark state={state} />
         <span class="tool-stats">{stats}</span>
+        {peek && <span class="tool-peek mono">{peek}</span>}
       </button>
       {open && (
         <div class="tool-group-body">
@@ -472,8 +518,8 @@ function StateMark({ state }: { state: 'running' | 'error' | 'ok' }) {
   );
 }
 
-/** One call: `$ command` for Bash, else the tool and its main argument; open, the arguments
- *  and the result. */
+/** One call: `$ command` for Bash, else the tool and its main argument, paths under the
+ *  session's folder relative to it; open, the arguments and the result. */
 function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   if (row.kind === 'thinking') return <Thinking event={row.event} />;
   const { call } = row;
@@ -487,9 +533,11 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
         {line?.shell ? (
           <span class="tool-prompt">$</span>
         ) : (
-          <span class="tool-name">{call?.payload.tool ?? 'Tool result'}</span>
+          <span class="tool-name">{call ? toolLabel(call.payload.tool) : 'Tool result'}</span>
         )}
-        <span class="tool-line mono">{line ? line.text : oneLine(r?.result_preview ?? '', 80)}</span>
+        <span class="tool-line mono">
+          {line ? relativePaths(line.text, actions.workspaceRoot) : oneLine(r?.result_preview ?? '', 80)}
+        </span>
         {line?.more && <span class="tool-more">+{line.more} {line.more === 1 ? 'line' : 'lines'}</span>}
         {r?.duration_ms !== undefined && <span class="tool-time">{formatDuration(r.duration_ms)}</span>}
         <StateMark state={state} />
@@ -518,11 +566,21 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   );
 }
 
+/** "Other" of a question with options: whether it is chosen, and its text. */
+interface OtherAnswer {
+  on: boolean;
+  text: string;
+}
+
+/** The agent's questions (AskUserQuestion), as the tab asks them: a question's header, each
+ *  option's description under its label, checkboxes for a multi question, and "Other" whose
+ *  text is the answer (with multi, beside the checked labels). */
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
   const open = !fate.response && !fate.cancel;
   const [answers, setAnswers] = useState<Record<string, ClarifyAnswer>>({});
+  const [others, setOthers] = useState<Record<string, OtherAnswer>>({});
   const { busy, error, run } = useAction();
   const given = fate.response && 'answers' in fate.response ? fate.response.answers : undefined;
 
@@ -532,6 +590,44 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       const cur = Array.isArray(a[q.id]) ? (a[q.id] as string[]) : [];
       return { ...a, [q.id]: checked ? [...cur, v] : cur.filter((x) => x !== v) };
     });
+    // A single answer: an option takes the place of Other.
+    if (!q.multi && q.options?.length) setOthers((o) => (o[q.id]?.on ? { ...o, [q.id]: { ...o[q.id], on: false } } : o));
+  };
+  const setOther = (q: ClarifyQuestion, change: Partial<OtherAnswer>) => {
+    setOthers((o) => ({ ...o, [q.id]: { ...(o[q.id] ?? { on: false, text: '' }), ...change } }));
+    // A single answer: Other takes the place of the chosen option.
+    if (!q.multi && change.on) {
+      setAnswers((a) => {
+        const rest = { ...a };
+        delete rest[q.id];
+        return rest;
+      });
+    }
+  };
+  // What goes to the agent: an Other chosen with nothing typed is "Other", as the tab sends it.
+  const collect = (): Record<string, ClarifyAnswer> => {
+    const out = { ...answers };
+    for (const q of p.questions) {
+      const o = others[q.id];
+      if (!q.options?.length || !o?.on) continue;
+      const typed = o.text.trim() || 'Other';
+      const cur = out[q.id];
+      out[q.id] = q.multi ? [...(Array.isArray(cur) ? cur : []), typed] : typed;
+    }
+    return out;
+  };
+  // What a question shows: the options picked and Other; once answered, what was sent, an
+  // answer that is not an option being the text of Other.
+  const shown = (q: ClarifyQuestion): { picked: string[]; other: OtherAnswer } => {
+    const opts = q.options ?? [];
+    if (!given) {
+      const cur = answers[q.id];
+      return { picked: Array.isArray(cur) ? cur : cur === undefined ? [] : [cur], other: others[q.id] ?? { on: false, text: '' } };
+    }
+    const v = given[q.id];
+    const vals = Array.isArray(v) ? v : v === undefined ? [] : [v];
+    const typed = vals.filter((x) => !opts.includes(x));
+    return { picked: vals.filter((x) => opts.includes(x)), other: { on: typed.length > 0, text: typed.join(', ') } };
   };
 
   return (
@@ -539,37 +635,71 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       class={`card card-clarify ${open ? 'is-open' : 'is-closed'}`}
       onSubmit={(e) => {
         e.preventDefault();
-        if (open) run(() => actions.answer(p.request_id, answers));
+        if (open) run(() => actions.answer(p.request_id, collect()));
       }}
     >
       <div class="card-title">Agent asks</div>
-      {p.questions.map((q) => (
-        <fieldset key={q.id} class="question" disabled={!open || busy}>
-          <legend>{q.text}</legend>
-          {q.options?.map((o) => {
-            const cur = (given ?? answers)[q.id];
-            const input = {
-              name: `${p.request_id}-${q.id}`,
-              value: o,
-              checked: Array.isArray(cur) ? cur.includes(o) : cur === o,
-              onChange: (e: Event) => set(q, o, (e.currentTarget as HTMLInputElement).checked),
-            };
-            return (
-              <label key={o} class="choice">
-                {q.multi ? <input type="checkbox" {...input} /> : <input type="radio" {...input} />} {o}
-              </label>
-            );
-          })}
-          {!q.options?.length && (
-            <input
-              class="input"
-              type="text"
-              value={String((given ?? answers)[q.id] ?? '')}
-              onInput={(e) => set(q, (e.currentTarget as HTMLInputElement).value, true)}
-            />
-          )}
-        </fieldset>
-      ))}
+      {p.questions.map((q) => {
+        const s = shown(q);
+        const name = `${p.request_id}-${q.id}`;
+        const other = {
+          name,
+          'aria-label': 'Other',
+          checked: s.other.on,
+          onChange: (e: Event) => setOther(q, { on: (e.currentTarget as HTMLInputElement).checked }),
+        };
+        return (
+          <fieldset key={q.id} class="question" disabled={!open || busy}>
+            <legend>
+              {q.header && <span class="question-header">{q.header}</span>}
+              <span class="question-text">{q.text}</span>
+            </legend>
+            {q.options?.map((o, i) => {
+              const desc = q.option_descriptions?.[i];
+              const input = {
+                name,
+                value: o,
+                checked: s.picked.includes(o),
+                onChange: (e: Event) => set(q, o, (e.currentTarget as HTMLInputElement).checked),
+              };
+              return (
+                <label key={o} class="choice">
+                  {q.multi ? <input type="checkbox" {...input} /> : <input type="radio" {...input} />}
+                  <span class="choice-body">
+                    <span class="choice-label">{o}</span>
+                    {desc && <span class="choice-desc">{desc}</span>}
+                  </span>
+                </label>
+              );
+            })}
+            {!!q.options?.length && (
+              <div class="choice choice-other">
+                {q.multi ? <input type="checkbox" {...other} /> : <input type="radio" {...other} />}
+                {/* Typing into the field chooses Other, as in the tab. */}
+                <input
+                  class="input"
+                  type="text"
+                  placeholder="Other"
+                  aria-label="Other answer"
+                  value={s.other.text}
+                  onInput={(e) => {
+                    const text = (e.currentTarget as HTMLInputElement).value;
+                    setOther(q, text.trim() ? { text, on: true } : { text });
+                  }}
+                />
+              </div>
+            )}
+            {!q.options?.length && (
+              <input
+                class="input"
+                type="text"
+                value={String((given ?? answers)[q.id] ?? '')}
+                onInput={(e) => set(q, (e.currentTarget as HTMLInputElement).value, true)}
+              />
+            )}
+          </fieldset>
+        );
+      })}
       {open && (
         <div class="actions">
           <button type="submit" class="btn btn-primary" disabled={busy}>

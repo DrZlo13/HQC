@@ -174,8 +174,10 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         break;
       }
       case 'agent.message': {
-        close();
         const reply = rel.replies.get(e.seq!);
+        // A reply the runtime wrote itself is a service line, not the agent's message.
+        if (e.payload.runtime && !reply) break;
+        close();
         out.push(reply ?? { kind: 'agent', key: it.key, event: e });
         continue;
       }
@@ -244,6 +246,161 @@ export function callLine(tool: string, argsPreview: string): { shell: boolean; t
   }
   const key = BRIEF_KEYS.find((k) => typeof args[k] === 'string' && args[k]);
   return { shell: false, text: key ? oneLine(String(args[key]), 400) : '' };
+}
+
+/** A tool as the Claude Code tab names it: an MCP tool `mcp__<server>__<tool>` as
+ *  `<tool> (<server>)`, a plugin's server without its `plugin_<plugin>_` prefix
+ *  (`mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot` →
+ *  `take_screenshot (chrome-devtools)`); any other tool as it is. */
+export function toolLabel(tool: string): string {
+  const m = /^mcp__(?:plugin_[^_]+_)?([^:\s]*)__([^:\s]+)$/.exec(tool);
+  return m ? `${m[2]} (${m[1]})` : tool;
+}
+
+/** `text` with the paths under `root` (the session's folder, absolute) relative to it. */
+export function relativePaths(text: string, root: string | undefined): string {
+  const r = root?.replace(/\/+$/, '');
+  return r ? text.split(`${r}/`).join('') : text;
+}
+
+/** A call as one line of text, as a tool group's header shows its last call: `$ command`
+ *  for Bash, else the tool and its main argument; paths under `root` relative to it. */
+export function callPeek(tool: string, argsPreview: string, root: string | undefined): string {
+  const line = callLine(tool, argsPreview);
+  const text = relativePaths(line.text, root);
+  return line.shell ? `$ ${text}` : [toolLabel(tool), text].filter(Boolean).join(' ');
+}
+
+/** A JSON text cut at some point, as `args_preview` is at 4 KB (SPEC §4), read as far as it
+ *  goes: a string open at the cut ends there (a half escape dropped), a key without its value,
+ *  a half number or literal and a trailing comma go, open arrays and objects close. `cut`: the
+ *  text did not parse as it was; undefined if even the closed text does not parse. */
+export function cutJson(s: string): { value: unknown; cut: boolean } | undefined {
+  try {
+    return { value: JSON.parse(s), cut: false };
+  } catch {
+    // Cut, or not JSON at all: closed below.
+  }
+  const closers: string[] = [];
+  // Where the text can end: after the last whole value or opening bracket, with the brackets
+  // open there; `tail` ends a string open at the cut.
+  let safe = 0;
+  let safeClosers: string[] = [];
+  let tail = '';
+  const mark = (end: number, quote = '') => {
+    safe = end;
+    safeClosers = [...closers];
+    tail = quote;
+  };
+  // The last character outside strings that is not a space: says whether a string is a key.
+  let prev = '';
+  let i = 0;
+  scan: while (i < s.length) {
+    const c = s[i];
+    if (c === '"') {
+      const key = closers.at(-1) === '}' && (prev === '{' || prev === ',');
+      let j = i + 1;
+      while (s[j] !== '"') {
+        // A string open at the cut: a value ends there, a key goes.
+        if (j >= s.length) {
+          if (!key) mark(j, '"');
+          break scan;
+        }
+        if (s[j] !== '\\') {
+          j++;
+          continue;
+        }
+        const len = s[j + 1] === 'u' ? 6 : 2;
+        if (j + len > s.length) {
+          if (!key) mark(j, '"');
+          break scan;
+        }
+        j += len;
+      }
+      i = j + 1;
+      prev = '"';
+      if (!key) mark(i);
+    } else if (c === '{' || c === '[') {
+      closers.push(c === '{' ? '}' : ']');
+      prev = c;
+      mark(++i);
+    } else if (c === '}' || c === ']') {
+      closers.pop();
+      prev = c;
+      mark(++i);
+    } else if (c === ',' || c === ':') {
+      prev = c;
+      i++;
+    } else if (/\s/.test(c)) {
+      i++;
+    } else {
+      // A number or a literal is whole only if something follows it.
+      const end = i + /^[^\s,:\]}]*/.exec(s.slice(i))![0].length;
+      if (end >= s.length) break;
+      prev = c;
+      i = end;
+      mark(i);
+    }
+  }
+  try {
+    return { value: JSON.parse(s.slice(0, safe) + tail + safeClosers.reverse().join('')), cut: true };
+  } catch {
+    return undefined;
+  }
+}
+
+/** One edit as a diff: the lines both sides share at the start and at the end as context,
+ *  the rest removed, then added. `cut`: a side may end mid-line, so nothing is matched. */
+export function editDiff(before: string, after: string, cut = false): string {
+  const a = before ? before.split('\n') : [];
+  const b = after ? after.split('\n') : [];
+  let head = 0;
+  let foot = 0;
+  if (!cut) {
+    while (head < a.length && head < b.length && a[head] === b[head]) head++;
+    while (foot < a.length - head && foot < b.length - head && a[a.length - 1 - foot] === b[b.length - 1 - foot]) foot++;
+  }
+  return [
+    ...a.slice(0, head).map((l) => ` ${l}`),
+    ...a.slice(head, a.length - foot).map((l) => `-${l}`),
+    ...b.slice(head, b.length - foot).map((l) => `+${l}`),
+    ...a.slice(a.length - foot).map((l) => ` ${l}`),
+  ].join('\n');
+}
+
+/** A part of the change a permission request is about: a diff of an edit, or a file's
+ *  content; `title`, when set, names it in the code block's bar. */
+export interface ChangePart {
+  title?: string;
+  code: string;
+  diff: boolean;
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+/** What an Edit, a MultiEdit or a Write would change, from its call's `args_preview`: a diff
+ *  per edit (`old_string` → `new_string`), the content of a Write. `cut`: the preview is cut,
+ *  so the last part may end early and later ones are missing. Undefined for other tools and
+ *  for arguments without a change. */
+export function fileChange(tool: string, argsPreview: string): { parts: ChangePart[]; cut: boolean } | undefined {
+  if (tool !== 'Edit' && tool !== 'MultiEdit' && tool !== 'Write') return undefined;
+  const read = cutJson(argsPreview);
+  if (!read || !isRecord(read.value)) return undefined;
+  const args = read.value;
+  const parts: ChangePart[] = [];
+  if (tool === 'Write') {
+    if (typeof args.content === 'string') parts.push({ title: 'Content', code: args.content, diff: false });
+  } else {
+    const edits = (tool === 'Edit' ? [args] : Array.isArray(args.edits) ? args.edits : [])
+      .filter(isRecord)
+      .filter((e) => typeof e.old_string === 'string' || typeof e.new_string === 'string');
+    edits.forEach((e, i) => {
+      // A cut preview may have lost later edits: their number is not known.
+      const title = tool === 'Edit' ? undefined : read.cut ? `Edit ${i + 1}` : `Edit ${i + 1} of ${edits.length}`;
+      parts.push({ title, code: editDiff(str(e.old_string) ?? '', str(e.new_string) ?? '', read.cut), diff: true });
+    });
+  }
+  return parts.length ? { parts, cut: read.cut } : undefined;
 }
 
 /** `send` / `ask` for the hqc tools `hqc_send` / `hqc_ask` (`mcp__hqc__hqc_ask` in Claude

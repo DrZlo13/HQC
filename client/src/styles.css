@@ -1963,6 +1963,11 @@ select.input {
   box-shadow: inset 0 0 0 1px var(--permission-border);
 }
 
+/* The user's text as typed, line breaks kept (no Markdown, as in the Claude Code tab). */
+.msg-text {
+  white-space: pre-wrap;
+}
+
 .delivery-failed {
   color: var(--danger);
 }
@@ -2024,7 +2029,8 @@ select.input {
 
 .line-status.state-error,
 .line-cancel,
-.line-system-policy_denied {
+.line-system-policy_denied,
+.line-runtime {
   color: var(--danger);
 }
 .line-system-policy_denied b {
@@ -2050,6 +2056,44 @@ select.input {
 
 .line-usage {
   font-variant-numeric: tabular-nums;
+}
+
+/* A background task's notification, folded: its label and the first line of its summary. */
+.line-fold summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.line-fold summary::-webkit-details-marker {
+  display: none;
+}
+.line-fold[open] summary .icon {
+  transform: rotate(90deg);
+}
+.fold-label {
+  flex: none;
+}
+.fold-peek {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.fold-text {
+  margin: 6px 0 0 6px;
+  padding-left: 12px;
+  box-shadow: inset 1px 0 0 var(--border);
+  color: var(--text2);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .line-worker-log {
@@ -2112,6 +2156,15 @@ select.input {
 
 .tool-stats {
   flex: none;
+  color: var(--muted);
+}
+
+.tool-peek {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
   color: var(--muted);
 }
 
@@ -2434,6 +2487,37 @@ a.relay-peer {
   margin-bottom: 4px;
 }
 
+.question-header {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.choice-body {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+
+.choice-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* The text field of Other: the rest of the row, not the 18px box of `.choice input`. */
+.choice-other .input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  min-height: 32px;
+  padding: 4px 10px;
+}
+
 .choice {
   display: flex;
   align-items: center;
@@ -2542,6 +2626,25 @@ a.relay-peer {
 
 .perm-prompt {
   color: var(--muted);
+}
+
+/* What an Edit, a MultiEdit or a Write changes: a code block per edit. */
+.perm-change {
+  margin: 10px 16px 0;
+}
+.perm-change .md-code {
+  margin: 0;
+}
+.perm-change .md-code + .md-code {
+  margin-top: 8px;
+}
+.perm-change .md-code pre {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.perm-cut {
+  margin-top: 6px;
+  font-size: 12.5px;
 }
 
 .perm-note {

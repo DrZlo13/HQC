@@ -764,7 +764,7 @@ describe('favorites', () => {
     expect(root.querySelector('.btn-sheet-favorite')!.textContent).toBe('Remove from favorites');
   });
 
-  it('the rail: favorite projects first, the newest on top; the context menu of a tile marks one', async () => {
+  it('the rail: favorite projects first, in the hub\'s order; the context menu of a tile marks one', async () => {
     const api = hubApi();
     const app = makeApp(LIST, api);
     app.projects.set('p2', { id: 'p2', name: 'boards', slug: 'boards', description: '', is_personal: false, color: 'moss', created_at: at(80), favorite_at: at(5) });
@@ -783,7 +783,7 @@ describe('favorites', () => {
     await click(root.querySelector('.rail-menu .btn-favorite'));
     expect(api.setProjectFavorite).toHaveBeenCalledWith('p3', true);
     expect(root.querySelector('.rail-menu')).toBeNull();
-    expect(order()).toEqual(['kiln', 'boards', 'Personal', 'physics-mp']);
+    expect(order()).toEqual(['boards', 'kiln', 'Personal', 'physics-mp']);
 
     await act(async () => {
       tile('boards').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));

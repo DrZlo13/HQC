@@ -84,3 +84,10 @@ SPEC 0.68: `worker.session.state.json` carries `subagents`, the subagents the ag
 `api.session.json` and `client.session.summary.json` show it (absent is 0).
 `hub.session.input.scheduled.json` — a run of a schedule (`schedule_id`, §16): the worker never
 writes it into a running turn (§17.2).
+
+A session's model and auto-compaction: `hub.session.model.json` switches the model,
+`hub.session.model.default.json` (`model: null`) goes back to the runtime's default;
+`hub.session.autocompact.json` sets the context window the runtime compacts in,
+`hub.session.autocompact.off.json` (`0`) turns auto-compaction off. `hub.session.start.json`
+carries `autocompact`, `api.session.json` shows `model` and `autocompact` in `agent`, and
+`api.session.request.json` creates a session with both.

@@ -21,7 +21,8 @@ use hqc_proto::{
     },
     event::CancelReason,
     frame::{
-        FsListDirs, FsStat, HubFrame, ListCandidates, PermissionMode, ResultBody, SessionCleanup,
+        valid_autocompact, FsListDirs, FsStat, HubFrame, ListCandidates, PermissionMode,
+        ResultBody, SessionCleanup,
     },
 };
 use serde::Deserialize;
@@ -830,6 +831,24 @@ pub fn valid_model(m: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-'))
 }
 
+fn check_model(m: &str) -> ApiResult<()> {
+    if !valid_model(m) {
+        return Err(ApiError::BadRequest(
+            "model must be 1..64 characters of A-Z a-z 0-9 . _ : -".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn check_autocompact(n: u32) -> ApiResult<()> {
+    if !valid_autocompact(n) {
+        return Err(ApiError::BadRequest(
+            "autocompact must be 0 (off) or a window of 100000..=1000000 tokens".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn check_title(t: &str) -> ApiResult<()> {
     if t.chars().count() > MAX_TITLE {
         return Err(ApiError::BadRequest(format!(
@@ -925,11 +944,10 @@ pub async fn new_session(
     spawn: Option<db::Spawn>,
 ) -> ApiResult<SessionRow> {
     if let Some(m) = &b.model {
-        if !valid_model(m) {
-            return Err(ApiError::BadRequest(
-                "model must be 1..64 characters of A-Z a-z 0-9 . _ : -".into(),
-            ));
-        }
+        check_model(m)?;
+    }
+    if let Some(n) = b.autocompact {
+        check_autocompact(n)?;
     }
     let ws = session_workspace(app, project, b).await?;
     let worker = match db::worker(&app.db, ws.worker_id).await? {
@@ -963,6 +981,7 @@ pub async fn new_session(
             cwd,
             title: title.as_deref(),
             model: b.model.as_deref(),
+            autocompact: b.autocompact,
             // Only the worker owner may enable it (SPEC §10.1); here that is the creator.
             auto_approve: b.auto_approve && worker.owner_id == owner,
             // The creator owns the worker (above), so `auto` is theirs to choose (T38).
@@ -992,6 +1011,19 @@ pub struct PatchSession {
     pub auto_approve: Option<bool>,
     /// T38: `auto` only by the worker owner; a running agent switches at once.
     pub permission_mode: Option<PermissionMode>,
+    /// Absent: unchanged; `null`: the runtime's default. A running agent switches at once.
+    #[serde(
+        default,
+        deserialize_with = "hqc_proto::frame::maybe_null::deserialize"
+    )]
+    pub model: Option<Option<String>>,
+    /// Absent: unchanged; `null`: the runtime's default, 0: off. A running agent is started
+    /// again with it once no turn runs.
+    #[serde(
+        default,
+        deserialize_with = "hqc_proto::frame::maybe_null::deserialize"
+    )]
+    pub autocompact: Option<Option<u32>>,
 }
 
 pub async fn patch_session(
@@ -1001,6 +1033,18 @@ pub async fn patch_session(
     Json(b): Json<PatchSession>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
+    if s.system && (b.model.is_some() || b.autocompact.is_some()) {
+        return Err(ApiError::Conflict(
+            "system_session",
+            "the worker's service session has no agent".into(),
+        ));
+    }
+    if let Some(Some(m)) = &b.model {
+        check_model(m)?;
+    }
+    if let Some(Some(n)) = b.autocompact {
+        check_autocompact(n)?;
+    }
     if let Some(t) = b.title.as_deref().map(str::trim) {
         if t.is_empty() {
             return Err(ApiError::BadRequest("title must not be empty".into()));
@@ -1050,6 +1094,29 @@ pub async fn patch_session(
             HubFrame::SessionPermissionMode {
                 session_id: id,
                 permission_mode: m,
+            },
+        );
+    }
+    if let Some(m) = b.model {
+        db::set_model(&app.db, id, m.as_deref()).await?;
+        // A stopped agent starts with it; an offline worker gets it with `session.start`.
+        send_to_worker(
+            &app,
+            &s,
+            HubFrame::SessionModel {
+                session_id: id,
+                model: m,
+            },
+        );
+    }
+    if let Some(n) = b.autocompact {
+        db::set_autocompact(&app.db, id, n).await?;
+        send_to_worker(
+            &app,
+            &s,
+            HubFrame::SessionAutocompact {
+                session_id: id,
+                autocompact: n,
             },
         );
     }

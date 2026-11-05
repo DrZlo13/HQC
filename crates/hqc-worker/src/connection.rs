@@ -603,6 +603,8 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::SessionStop { .. } => "session.stop",
         HubFrame::SessionKill { .. } => "session.kill",
         HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
+        HubFrame::SessionModel { .. } => "session.model",
+        HubFrame::SessionAutocompact { .. } => "session.autocompact",
         HubFrame::ApprovalResponse { .. } => "approval.response",
         HubFrame::ClarifyResponse { .. } => "clarify.response",
         HubFrame::FsStat(_) => "fs.stat",

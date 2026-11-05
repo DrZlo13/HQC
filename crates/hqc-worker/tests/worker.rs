@@ -2896,3 +2896,266 @@ async fn subagents_go_in_session_state() {
     ack_of(&mut c, &fk).await;
     w.stop().await;
 }
+
+/// The reply (`ack` or `error`) to frame `id`, skipped or next; other replies read meanwhile
+/// are dropped.
+async fn reply_to(c: &mut HubConn, id: &str) -> Value {
+    let is = |f: &Value| (f["type"] == "ack" || f["type"] == "error") && f["id"] == id;
+    if let Some(i) = c.skipped.iter().position(is) {
+        return c.skipped.remove(i);
+    }
+    loop {
+        let f = c.recv().await;
+        if is(&f) {
+            return f;
+        }
+    }
+}
+
+fn count(calls: &[FakeCall], call: &FakeCall) -> usize {
+    calls.iter().filter(|c| *c == call).count()
+}
+
+fn models(adapters: &FakeAdapters) -> Vec<Option<String>> {
+    adapters
+        .start_specs()
+        .into_iter()
+        .map(|s| s.model)
+        .collect()
+}
+
+fn windows(adapters: &FakeAdapters) -> Vec<Option<u32>> {
+    adapters
+        .start_specs()
+        .into_iter()
+        .map(|s| s.autocompact)
+        .collect()
+}
+
+// The session's model: `session.start` gives it to the start; `session.model` switches a
+// running agent at once, mid-turn too; `null` (the runtime's default) waits for the next
+// start, as any model does for a stopped agent; a `session.start` for a running agent with
+// another model switches it; a name that is no model name is refused.
+#[tokio::test]
+async fn model_is_started_and_switched() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let mut start = env.start_payload(sid);
+    start["model"] = json!("opus");
+    let f = c.frame("session.start", start.clone()).await;
+    ack_of(&mut c, &f).await;
+    assert_eq!(models(&adapters), [Some("opus".to_string())]);
+    let switched = |a: &FakeAdapters| {
+        a.calls()
+            .into_iter()
+            .filter(|c| matches!(c, FakeCall::Model(..)))
+            .collect::<Vec<_>>()
+    };
+
+    // In a turn: at once, before it ends.
+    let a = Uuid::now_v7();
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    let f = c
+        .frame(
+            "session.model",
+            json!({"session_id": sid, "model": "sonnet"}),
+        )
+        .await;
+    assert_eq!(reply_to(&mut c, &f).await["payload"], json!({}));
+    adapters
+        .wait_for(
+            "the switch",
+            has_call(FakeCall::Model(sid, "sonnet".into())),
+        )
+        .await;
+    adapters.accept_input(sid, a).await;
+    adapters.end_turn(sid).await;
+
+    // The same model again: nothing to switch. The default has no name: the next start.
+    for model in [json!("sonnet"), Value::Null] {
+        let f = c
+            .frame("session.model", json!({"session_id": sid, "model": model}))
+            .await;
+        assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    }
+    let f = c.frame("session.kill", json!({"session_id": sid})).await;
+    reply_to(&mut c, &f).await;
+    let b = Uuid::now_v7();
+    c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("input B", has_call(input_call(sid, b)))
+        .await;
+    assert_eq!(models(&adapters), [Some("opus".to_string()), None]);
+    assert_eq!(switched(&adapters), [FakeCall::Model(sid, "sonnet".into())]);
+
+    // A switch the worker missed comes with the next `session.start`.
+    start["model"] = json!("haiku");
+    let f = c.frame("session.start", start).await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    adapters
+        .wait_for(
+            "the missed switch",
+            has_call(FakeCall::Model(sid, "haiku".into())),
+        )
+        .await;
+
+    // Not a model name: refused, as in `session.start`. An unknown session: the next
+    // `session.start` carries the model.
+    let f = c
+        .frame(
+            "session.model",
+            json!({"session_id": sid, "model": "--resume"}),
+        )
+        .await;
+    let err = reply_to(&mut c, &f).await;
+    assert_eq!(
+        (err["type"].as_str(), err["payload"]["code"].as_str()),
+        (Some("error"), Some("invalid_frame"))
+    );
+    let f = c
+        .frame(
+            "session.model",
+            json!({"session_id": Uuid::now_v7(), "model": "opus"}),
+        )
+        .await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    assert_eq!(switched(&adapters).len(), 2);
+    w.stop().await;
+}
+
+// Auto-compaction, which Claude Code takes only at its start: `session.autocompact` starts a
+// running agent again with it, resuming its transcript: at once between turns, after the turn
+// while one runs. The same value, and a stopped agent, need no restart; a `session.start` for
+// a running agent with another value restarts it as well; a value out of range is refused.
+#[tokio::test]
+async fn autocompact_restarts_the_agent_between_turns() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let start = env.start_payload(sid);
+    let f = c.frame("session.start", start.clone()).await;
+    ack_of(&mut c, &f).await;
+    let kills = |a: &FakeAdapters| count(&a.calls(), &FakeCall::Kill(sid));
+    let resumes = |a: &FakeAdapters| count(&a.calls(), &FakeCall::Resume(sid));
+    let set = |n: Value| json!({"session_id": sid, "autocompact": n});
+
+    // No turn runs: at once.
+    let f = c.frame("session.autocompact", set(json!(300_000))).await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    let calls = adapters
+        .wait_for("the restart", has_call(FakeCall::Resume(sid)))
+        .await;
+    assert!(index(&calls, &FakeCall::Kill(sid)) < index(&calls, &FakeCall::Resume(sid)));
+    assert_eq!(windows(&adapters), [None, Some(300_000)]);
+
+    // A turn runs: when it ends.
+    let a = Uuid::now_v7();
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", has_call(input_call(sid, a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+    let f = c.frame("session.autocompact", set(json!(0))).await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(kills(&adapters), 1, "not during the turn");
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the restart after the turn", |_| resumes(&adapters) == 2)
+        .await;
+    assert_eq!(windows(&adapters), [None, Some(300_000), Some(0)]);
+
+    // The same value: nothing to do.
+    let f = c.frame("session.autocompact", set(json!(0))).await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(kills(&adapters), 2);
+
+    // A change the worker missed comes with the next `session.start`.
+    let mut again = start.clone();
+    again["autocompact"] = json!(500_000);
+    let f = c.frame("session.start", again).await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    adapters
+        .wait_for("the restart for session.start", |_| resumes(&adapters) == 3)
+        .await;
+    assert_eq!(windows(&adapters)[3], Some(500_000));
+
+    // A stopped agent takes the default at its next start, without a restart.
+    let f = c.frame("session.kill", json!({"session_id": sid})).await;
+    reply_to(&mut c, &f).await;
+    let f = c.frame("session.autocompact", set(Value::Null)).await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    let b = Uuid::now_v7();
+    c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("input B", has_call(input_call(sid, b)))
+        .await;
+    assert_eq!(
+        windows(&adapters),
+        [None, Some(300_000), Some(0), Some(500_000), None]
+    );
+    assert_eq!(kills(&adapters), 4, "three restarts and session.kill");
+
+    let f = c.frame("session.autocompact", set(json!(5_000))).await;
+    let err = reply_to(&mut c, &f).await;
+    assert_eq!(
+        (err["type"].as_str(), err["payload"]["code"].as_str()),
+        (Some("error"), Some("invalid_frame"))
+    );
+    w.stop().await;
+}
+
+// An input written into the turn and not taken yet holds the restart back too: the turn ends
+// without naming it (it is on its way into the turn the runtime runs next by itself), and the
+// agent is started again with the new auto-compaction only when that turn ends.
+#[tokio::test]
+async fn autocompact_waits_for_an_input_written_into_the_turn() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+    c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("B into the turn", has_call(inject_call(sid, b)))
+        .await;
+    let f = c
+        .frame(
+            "session.autocompact",
+            json!({"session_id": sid, "autocompact": 300_000}),
+        )
+        .await;
+    assert_eq!(reply_to(&mut c, &f).await["type"], "ack");
+    adapters.end_turn(sid).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        "B is on its way: {:?}",
+        adapters.calls()
+    );
+    adapters.accept_input(sid, b).await;
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the restart", has_call(FakeCall::Resume(sid)))
+        .await;
+    assert_eq!(windows(&adapters), [None, Some(300_000)]);
+    w.stop().await;
+}

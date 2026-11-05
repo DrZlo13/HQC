@@ -10,6 +10,8 @@
   "slug": "hqc-run-the-tests",
   "agent": {
     "runtime": "claude_code",
+    "model": "sonnet",
+    "autocompact": 300000,
     "runtime_session_id": "36c72c19-b4ad-4d95-a482-ce4e281952cb",
     "process_state": "running",
     "disallowed_tools": [],

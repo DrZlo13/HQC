@@ -1438,6 +1438,9 @@ pub struct SessionRow {
     pub runtime: String,
     pub acp_agent: Option<String>,
     pub model: Option<String>,
+    /// Auto-compaction (`session.start.autocompact`): null — the runtime's default, 0 — off,
+    /// otherwise the context window in tokens.
+    pub autocompact: Option<i32>,
     pub runtime_session_id: Option<String>,
     pub process_state: String,
     pub system_prompt: Option<String>,
@@ -1478,7 +1481,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
     s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode, \
-    s.permission_capped_by, s.subagents";
+    s.permission_capped_by, s.subagents, s.autocompact";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1499,6 +1502,8 @@ pub struct NewSession<'a> {
     /// service sessions of workers do not count, SPEC §10.2).
     pub title: Option<&'a str>,
     pub model: Option<&'a str>,
+    /// `None`: the runtime's default auto-compaction.
+    pub autocompact: Option<u32>,
     pub auto_approve: bool,
     /// `None`: the worker's `[permissions] mode` (T38).
     pub permission_mode: Option<PermissionMode>,
@@ -1553,9 +1558,9 @@ pub async fn create_spawned_session(
         let r = sqlx::query(
             "INSERT INTO sessions (id, project_id, owner_id, workspace_id, worker_id, cwd, title, slug,
                 model, auto_approve, runtime, runtime_session_id, title_source, spawned_by,
-                spawn_chain_id, permission_mode)
+                spawn_chain_id, permission_mode, autocompact)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11, $12, $13, $14,
-                $15)
+                $15, $16)
              ON CONFLICT (project_id, slug) DO NOTHING",
         )
         .bind(id)
@@ -1573,6 +1578,7 @@ pub async fn create_spawned_session(
         .bind(spawn.map(|s| s.by))
         .bind(spawn.map(|s| s.chain_id))
         .bind(n.permission_mode.map(PermissionMode::as_str))
+        .bind(n.autocompact.map(autocompact_column))
         .execute(db)
         .await?;
         if r.rows_affected() == 1 {
@@ -1748,6 +1754,31 @@ pub async fn set_permission_mode(db: &PgPool, id: Uuid, mode: PermissionMode) ->
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// The session's model (`PATCH /api/sessions/{id}`); `None` — the runtime's default.
+pub async fn set_model(db: &PgPool, id: Uuid, model: Option<&str>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET model = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(model)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// The session's auto-compaction (`PATCH /api/sessions/{id}`); `None` — the runtime's default.
+pub async fn set_autocompact(db: &PgPool, id: Uuid, autocompact: Option<u32>) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET autocompact = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(autocompact.map(autocompact_column))
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// `autocompact` as its `integer` column; the values allowed fit (`valid_autocompact`).
+fn autocompact_column(n: u32) -> i32 {
+    i32::try_from(n).unwrap_or(i32::MAX)
 }
 
 /// A title from the runtime (`session.state.title`), applied unless the user set one.

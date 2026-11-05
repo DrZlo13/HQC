@@ -163,6 +163,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         session_id,
         runtime: Runtime::ClaudeCode,
         model: Some("claude-haiku-5-5".into()),
+        autocompact: None,
         workspace: workdir.to_path_buf(),
         workdir: workdir.to_path_buf(),
         environment: with_permissions(crate::permissions::Permissions::default()),
@@ -1075,6 +1076,88 @@ async fn adapter_switches_a_running_process() {
         .set_permission_mode(PermissionMode::Ask)
         .await
         .unwrap();
+}
+
+/// `set_model` on the adapter writes the control request to a running process (2.1.312
+/// answers `success` with the model it resolved the name to) and does nothing without one.
+/// The answer is no permission mode.
+#[tokio::test]
+async fn adapter_switches_the_model_of_a_running_process() {
+    let mut h = Harness::start("", Uuid::new_v4()).await;
+    h.adapter.set_model("sonnet").await.unwrap();
+    let req = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(v) = h
+                .claude
+                .stdin()
+                .into_iter()
+                .find(|v| v["request"]["subtype"] == "set_model")
+            {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no set_model on stdin");
+    assert_eq!(req["type"], "control_request");
+    assert_eq!(
+        req["request"],
+        json!({"subtype": "set_model", "model": "sonnet"})
+    );
+    assert!(req["request_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("hqc-model-"));
+    h.adapter.kill().await.unwrap();
+    h.adapter.set_model("haiku").await.unwrap();
+
+    let mut core = Core::new(Uuid::now_v7(), false);
+    for answer in [
+        r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-model-1","response":{"model":"claude-sonnet-5-5"}}}"#,
+        r#"{"type":"control_response","response":{"subtype":"error","request_id":"hqc-model-2","error":"Unknown model"}}"#,
+    ] {
+        assert!(core.on_line(answer).is_empty(), "{answer}");
+    }
+}
+
+/// Auto-compaction reaches the CLI at its start: a window as `--autocompact <tokens>`, off as
+/// `DISABLE_AUTO_COMPACT=1` in its environment, the runtime's default as neither.
+#[test]
+fn command_line_carries_the_autocompaction() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let factory =
+        ClaudeCodeAdapters::new(options(config.path()), Arc::new(ScriptedClaude::new("")));
+    let a = ClaudeCodeAdapter {
+        session_id: Uuid::nil(),
+        opts: factory.opts.clone(),
+        spawner: factory.spawner.clone(),
+        events: mpsc::channel(1).0,
+        proc: None,
+    };
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let command = |s: &StartSpec| {
+        let c = a.command(s, &Uuid::nil(), false, None);
+        let window = c
+            .args
+            .iter()
+            .position(|a| a == "--autocompact")
+            .map(|i| c.args[i + 1].clone());
+        let off: Vec<String> = c
+            .env
+            .iter()
+            .filter(|(k, _)| k == super::DISABLE_AUTO_COMPACT)
+            .map(|(_, v)| v.clone())
+            .collect();
+        (window, off)
+    };
+    s.autocompact = Some(300_000);
+    assert_eq!(command(&s), (Some("300000".into()), vec![]));
+    s.autocompact = Some(0);
+    assert_eq!(command(&s), (None, vec!["1".to_string()]));
+    s.autocompact = None;
+    assert_eq!(command(&s), (None, vec![]));
 }
 
 /// The agent gets a cleared environment with only the allowed variables (SPEC §14).

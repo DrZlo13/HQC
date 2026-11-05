@@ -43,6 +43,13 @@
 //!   mode, and a switch the user asks for meanwhile waits for the end of the capped turn.
 //!   `session.state.capped_input` names the input while a cap holds an `auto` session in
 //!   `ask`.
+//! - Model and auto-compaction: `session.model` switches a running agent at once, mid-turn
+//!   too ([`Adapter::set_model`]); `null` (the runtime's default) reaches it at its next
+//!   start, as any model reaches a stopped one. `session.autocompact` starts a running agent
+//!   again with the new value, resuming its transcript, once no turn runs, nothing is
+//!   written into one and no capped input waits; until then it waits for the end of the
+//!   turn. A `session.start` for a running agent with another model or auto-compaction does
+//!   the same.
 //! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
 //!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`], kept here and not
 //!   sent to the hub) is killed, the next input resumes it. A reconnect and a holder report
@@ -67,9 +74,9 @@ use std::path::{Path, PathBuf};
 
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
-    error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
-    ProcessState, RequestResult, ResultBody, SessionInput, SessionStart, StartMode, TitleRequest,
-    TitleResult, WireError, WorkerApprovalRequest, WorkerFrame,
+    error_code, valid_autocompact, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy,
+    PermissionMode, ProcessState, RequestResult, ResultBody, SessionInput, SessionStart, StartMode,
+    TitleRequest, TitleResult, WireError, WorkerApprovalRequest, WorkerFrame,
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -226,6 +233,16 @@ enum Cmd {
     PermissionMode {
         id: String,
         mode: PermissionMode,
+    },
+    /// The session's model from now on; `None` — the runtime's default.
+    Model {
+        id: String,
+        model: Option<String>,
+    },
+    /// The session's auto-compaction from now on (`session.start.autocompact`).
+    Autocompact {
+        id: String,
+        autocompact: Option<u32>,
     },
     Approval {
         id: String,
@@ -455,6 +472,41 @@ impl Supervisor {
                 }
                 let mode = self.cfg.permission_mode(session_id, Some(permission_mode));
                 (session_id, Cmd::PermissionMode { id, mode })
+            }
+            // Checked as in `session.start`: the value ends up on the agent's command line.
+            HubFrame::SessionModel { session_id, model } => {
+                if let Some(m) = model.as_deref().filter(|m| !crate::config::valid_model(m)) {
+                    let msg = format!("model {m:?} is not a model name");
+                    tracing::warn!(%session_id, "session.model rejected: {msg}");
+                    self.link
+                        .reply(&id, wire_error(error_code::INVALID_FRAME, msg, false));
+                    return;
+                }
+                if !self.sessions.contains_key(&session_id) {
+                    // Nothing runs: the next `session.start` carries the model.
+                    self.link.reply(&id, ack(None));
+                    return;
+                }
+                (session_id, Cmd::Model { id, model })
+            }
+            HubFrame::SessionAutocompact {
+                session_id,
+                autocompact,
+            } => {
+                if let Some(n) = autocompact.filter(|n| !valid_autocompact(*n)) {
+                    let msg = format!(
+                        "autocompact {n} is neither 0 nor a window of 100000..=1000000 tokens"
+                    );
+                    tracing::warn!(%session_id, "session.autocompact rejected: {msg}");
+                    self.link
+                        .reply(&id, wire_error(error_code::INVALID_FRAME, msg, false));
+                    return;
+                }
+                if !self.sessions.contains_key(&session_id) {
+                    self.link.reply(&id, ack(None));
+                    return;
+                }
+                (session_id, Cmd::Autocompact { id, autocompact })
             }
             HubFrame::ApprovalResponse {
                 session_id,
@@ -831,6 +883,7 @@ impl Supervisor {
             commands: None,
             permission_mode: None,
             asked_mode: spec.permission_mode,
+            process_autocompact: None,
             lowering: None,
             released: false,
             started_once: false,
@@ -859,6 +912,8 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Stop { id }
         | Cmd::Kill { id }
         | Cmd::PermissionMode { id, .. }
+        | Cmd::Model { id, .. }
+        | Cmd::Autocompact { id, .. }
         | Cmd::Approval { id, .. }
         | Cmd::Clarify { id, .. } => id.clone(),
         Cmd::Resync | Cmd::Release | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
@@ -924,6 +979,9 @@ struct Session {
     /// The mode last asked of the running process: its start flag or our last switch. The
     /// session's own mode is `spec.permission_mode`; they differ under a cap (T39).
     asked_mode: PermissionMode,
+    /// The auto-compaction the running process was started with; the session's own is
+    /// `spec.autocompact`, and the process is started again when they differ.
+    process_autocompact: Option<u32>,
     /// A capped input waiting for the runtime's `ask` (T39).
     lowering: Option<Lowering>,
     /// Stopped for that writer: `locked_by: vscode` until the next `session.start`.
@@ -1012,12 +1070,15 @@ impl Session {
                     // agent's MCP calls carry it from now on, and so does its next process.
                     self.link.mcp().set_hub_token(self.id, &spec.session_token);
                     self.spec.session_token = spec.session_token.clone();
-                    // A switch the worker missed while it was offline (T38).
+                    // Switches the worker missed while it was offline (T38).
                     self.switch_mode(spec.permission_mode).await;
+                    self.switch_model(spec.model.clone()).await;
+                    self.spec.autocompact = spec.autocompact;
                     if *spec != self.spec {
                         tracing::warn!(session_id = %self.id, "session.start for a running agent; keeping the running one");
                     }
                     self.link.reply(&id, ack(None));
+                    self.restart_for_autocompact().await;
                     return;
                 }
                 self.spec = *spec;
@@ -1061,6 +1122,18 @@ impl Session {
             Cmd::PermissionMode { id, mode } => {
                 self.switch_mode(mode).await;
                 self.link.reply(&id, ack(None));
+            }
+            Cmd::Model { id, model } => {
+                self.switch_model(model).await;
+                self.link.reply(&id, ack(None));
+            }
+            Cmd::Autocompact { id, autocompact } => {
+                if self.spec.autocompact != autocompact {
+                    tracing::info!(session_id = %self.id, ?autocompact, "auto-compaction changed");
+                    self.spec.autocompact = autocompact;
+                }
+                self.link.reply(&id, ack(None));
+                self.restart_for_autocompact().await;
             }
             Cmd::Approval {
                 id,
@@ -1126,6 +1199,48 @@ impl Session {
             return;
         }
         self.ask_runtime(mode).await;
+    }
+
+    /// Run `model` from now on: the next start takes it from the spec, a running agent
+    /// switches at once, mid-turn too. `None`, the runtime's default, has no name to switch
+    /// to: a running agent takes it at its next start. A runtime that refuses keeps its model
+    /// until then too.
+    async fn switch_model(&mut self, model: Option<String>) {
+        if self.spec.model == model {
+            return;
+        }
+        tracing::info!(session_id = %self.id, ?model, "model switched");
+        self.spec.model = model;
+        let Some(m) = self.spec.model.clone() else {
+            return;
+        };
+        if self.state == ProcessState::Stopped {
+            return;
+        }
+        if let Err(e) = self.adapter.set_model(&m).await {
+            tracing::warn!(session_id = %self.id, model = %m, "model not switched until the next start: {e:#}");
+        }
+    }
+
+    /// The running process was started with another auto-compaction than the session has
+    /// now, which the runtime takes only at its start: it is started again, resuming its
+    /// transcript, unless a turn runs, an input is written into one or a capped input waits
+    /// for `ask` (T39); the end of the turn calls this again. Like any new process, it starts
+    /// its MCP servers again and has no `session` rules.
+    async fn restart_for_autocompact(&mut self) {
+        if self.state != ProcessState::Running
+            || self.process_autocompact == self.spec.autocompact
+            || self.turn.is_some()
+            || !self.injected.is_empty()
+            || self.lowering.is_some()
+        {
+            return;
+        }
+        tracing::info!(session_id = %self.id, autocompact = ?self.spec.autocompact, "restarting the agent for its new auto-compaction");
+        self.kill_process("auto-compaction changed").await;
+        if let Err(e) = self.ensure_running().await {
+            self.fail_queue(&e);
+        }
     }
 
     /// A capped turn runs or waits for the runtime's `ask` (T39).
@@ -1452,6 +1567,7 @@ impl Session {
                     self.after_capped_turn().await;
                     self.send_state();
                 }
+                self.restart_for_autocompact().await;
                 self.pump().await;
             }
             // A count read from a process already stopped would outlive it.
@@ -1652,6 +1768,7 @@ impl Session {
                 // What the process was started with, until it reports otherwise.
                 self.permission_mode = Some(mode);
                 self.asked_mode = mode;
+                self.process_autocompact = self.spec.autocompact;
                 // Its MCP server is accepted only from inside this process (SPEC §7.2).
                 self.link.mcp().set_pid(self.id, self.adapter.pid());
                 self.set_state(ProcessState::Running);

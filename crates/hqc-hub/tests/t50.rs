@@ -159,6 +159,7 @@ async fn the_order_keeps_only_the_projects_live_sessions_and_a_new_one_goes_on_t
             cwd: ".",
             title: Some("Secret"),
             model: None,
+            autocompact: None,
             auto_approve: false,
             permission_mode: None,
         },

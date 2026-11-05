@@ -138,6 +138,7 @@ pub async fn views(
                     runtime: stored_enum(&s.runtime, Runtime::ClaudeCode),
                     acp_agent: s.acp_agent,
                     model: s.model,
+                    autocompact: s.autocompact.and_then(|n| u32::try_from(n).ok()),
                     runtime_session_id: s.runtime_session_id,
                     process_state: stored_enum(&s.process_state, ProcessState::Stopped),
                     system_prompt: s.system_prompt,

@@ -1158,6 +1158,10 @@ pub struct SessionInput {
     /// running in `auto` runs this turn in `ask`. The worker only ever lowers the mode for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_cap: Option<PermissionMode>,
+    /// `schedule_id` of a `user.message` the hub cron sent (since SPEC 0.68, §16): the run
+    /// waits for the end of a running turn instead of joining it (§17.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<Uuid>,
 }
 
 /// `session.input.peer` (SPEC §5.3, §7.1).
@@ -1249,6 +1253,10 @@ mod tests {
         (
             "session.input",
             include_str!("../examples/wire/hub.session.input.peer.json"),
+        ),
+        (
+            "session.input",
+            include_str!("../examples/wire/hub.session.input.scheduled.json"),
         ),
         (
             "session.stop",

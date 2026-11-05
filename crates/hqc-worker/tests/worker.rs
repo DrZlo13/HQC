@@ -2292,6 +2292,153 @@ async fn input_that_may_not_go_into_the_turn_waits_for_its_end() {
     w.stop().await;
 }
 
+/// `hqc_ask` P of another session, as a `session.input` frame.
+fn ask_input(sid: Uuid, eid: Uuid) -> Value {
+    let mut v = input(sid, eid, "Is the build green?");
+    v["peer"] = json!({"from": "hqc/y", "mode": "ask", "request_id": "r-1"});
+    v
+}
+
+/// The inputs written into a running turn so far.
+fn injected_calls(adapters: &FakeAdapters) -> Vec<FakeCall> {
+    adapters
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c, FakeCall::Inject { .. }))
+        .collect()
+}
+
+// SPEC §17.2: a person's input does not go into the turn of an `hqc_ask`: the ask's final
+// answer would be shaped by it. It waits for the end of that turn.
+#[tokio::test]
+async fn a_persons_input_does_not_join_an_ask_turn() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let (p, u) = (Uuid::now_v7(), Uuid::now_v7());
+    c.frame("session.input", ask_input(sid, p)).await;
+    adapters
+        .wait_for("the ask as a turn", has_call(input_call(sid, p)))
+        .await;
+    adapters.accept_input(sid, p).await;
+    c.frame("session.input", input(sid, u, "stop, do Z instead"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("U as a turn", has_call(input_call(sid, u)))
+        .await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    w.stop().await;
+}
+
+// SPEC §17.2: an `hqc_ask` handed while the runtime runs a turn it began by itself is carried
+// into the runtime's next turn; a person's input does not go into it there either, or the
+// turn's answer would name the person's input and the ask would get none.
+#[tokio::test]
+async fn a_persons_input_does_not_join_an_ask_carried_into_the_next_turn() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let (p, u) = (Uuid::now_v7(), Uuid::now_v7());
+    // The runtime is in a turn of its own: P is not taken yet.
+    c.frame("session.input", ask_input(sid, p)).await;
+    adapters
+        .wait_for("the ask handed", has_call(input_call(sid, p)))
+        .await;
+    c.frame("session.input", input(sid, u, "stop, do Z instead"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    adapters.end_turn_carrying(sid, vec![p], vec![]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    adapters.accept_input(sid, p).await;
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("U as a turn", has_call(input_call(sid, u)))
+        .await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    w.stop().await;
+}
+
+// SPEC §17.2: a run of a schedule (`schedule_id`) and a slash command do not go into a running
+// turn: each waits for its end and runs as a turn of its own.
+#[tokio::test]
+async fn scheduled_runs_and_slash_commands_wait_for_the_end_of_the_turn() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, s, k) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+
+    let mut scheduled = input(sid, s, "Check the build");
+    scheduled["schedule_id"] = json!(Uuid::now_v7());
+    c.frame("session.input", scheduled).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the scheduled run as a turn", has_call(input_call(sid, s)))
+        .await;
+    adapters.accept_input(sid, s).await;
+
+    c.frame("session.input", input(sid, k, "/compact")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        injected_calls(&adapters).is_empty(),
+        "{:?}",
+        adapters.calls()
+    );
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the slash command as a turn", has_call(input_call(sid, k)))
+        .await;
+    w.stop().await;
+}
+
 // SPEC §17.2: while the runtime asks (an open permission request), the input waits; the
 // answer lets it into the turn.
 #[tokio::test]

@@ -223,6 +223,7 @@ impl Harness {
                 peer_prefix: vec![],
                 peer: None,
                 permission_cap: None,
+                schedule_id: None,
             })
             .await
             .unwrap();
@@ -1294,6 +1295,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         })
         .await
         .unwrap();
@@ -1328,6 +1330,7 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         })
         .await
         .is_err());
@@ -1792,6 +1795,7 @@ fn deny_is_the_tabs_no() {
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
+        schedule_id: None,
     });
     core.on_line(&can_use_tool_line(&fx, "r1", None));
     let w = writes(&core.answer_approval("r1", "deny", None).unwrap());
@@ -2089,6 +2093,7 @@ async fn image_attachments_are_image_blocks() {
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
+        schedule_id: None,
     };
     let a = core.input_with_images(&input, images);
     assert!(
@@ -2116,6 +2121,7 @@ fn held_text_is_not_final_before_a_tool_call() {
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
+        schedule_id: None,
     });
     core.on_line(&echo(&Uuid::new_v4().to_string(), "x"));
     let u1 = Uuid::new_v4();
@@ -2166,6 +2172,7 @@ fn nul_never_reaches_an_event() {
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
+        schedule_id: None,
     });
     let lines = [
         json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta",
@@ -2265,6 +2272,7 @@ async fn takeover_records_are_registered_as_own() {
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
+        schedule_id: None,
     })
     .await
     .unwrap();
@@ -2586,6 +2594,7 @@ fn written(core: &mut Core, sid: Uuid, text: &str) -> Uuid {
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
+        schedule_id: None,
     });
     input
 }
@@ -2802,6 +2811,7 @@ fn user_input(sid: Uuid, text: &str) -> SessionInput {
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
+        schedule_id: None,
     }
 }
 

@@ -121,6 +121,7 @@ mod tests {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         }
     }
 

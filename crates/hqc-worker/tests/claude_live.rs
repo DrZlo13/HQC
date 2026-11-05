@@ -139,6 +139,7 @@ async fn live_repo_settings_ignored() {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         })
         .await
         .unwrap();
@@ -273,6 +274,7 @@ async fn live_environment_ssh() {
                     peer_prefix: vec![],
                     peer: None,
                     permission_cap: None,
+                    schedule_id: None,
                 })
                 .await
                 .unwrap();
@@ -494,6 +496,7 @@ async fn live_environment_ssh_keys() {
                     peer_prefix: vec![],
                     peer: None,
                     permission_cap: None,
+                    schedule_id: None,
                 })
                 .await
                 .unwrap();
@@ -631,6 +634,7 @@ async fn live_folder_rules() {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         })
         .await
         .unwrap();
@@ -737,6 +741,7 @@ async fn live_permission_mode_switch() {
                 peer_prefix: vec![],
                 peer: None,
                 permission_cap: None,
+                schedule_id: None,
             })
             .await
             .unwrap();
@@ -878,6 +883,7 @@ async fn live_bash_turn_with_approval() {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         })
         .await
         .unwrap();
@@ -1111,6 +1117,7 @@ async fn live_permission_policy() {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         })
         .await
         .unwrap();
@@ -1237,6 +1244,7 @@ async fn live_ai_title() {
             peer_prefix: vec![],
             peer: None,
             permission_cap: None,
+            schedule_id: None,
         })
         .await
         .unwrap();

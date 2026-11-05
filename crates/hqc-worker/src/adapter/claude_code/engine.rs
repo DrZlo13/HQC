@@ -15,8 +15,8 @@
 //!   `system` `compact_boundary` → `system context_compacted`;
 //! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
-//!   than `running` of the same `task_id` → [`AdapterEvent::Subagents`] when the count
-//!   changes;
+//!   than `running` of the same `task_id`, a foreground one at the latest until the `result`
+//!   → [`AdapterEvent::Subagents`] when the count changes;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
@@ -28,7 +28,8 @@
 //!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
 //!   `task_notification`, which cancels it; an input written during the turn and not echoed
 //!   is taken, carried into the next turn or not taken by its last `command_lifecycle` (SPEC
-//!   §17.2);
+//!   §17.2); a carried input `cancelled` after the `result` ends the turn it was carried
+//!   into; a carried local command is taken by its own `result`;
 //! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
 //!   differ from what this process reported (the CLI sends `init` before every turn);
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
@@ -501,10 +502,7 @@ impl Core {
             "assistant" if !sub => self.on_assistant(&v),
             "user" if v["isReplay"] == true => self.on_echo(&v),
             "user" if !sub => self.on_user(&v),
-            "command_lifecycle" => {
-                self.on_lifecycle(&v);
-                vec![]
-            }
+            "command_lifecycle" => self.on_lifecycle(&v),
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
             "control_response" => self.on_control_response(&v),
@@ -735,23 +733,50 @@ impl Core {
     /// `command_lifecycle {command_uuid, state}` (2.1.312) of an input not echoed yet:
     /// `queued` when the CLI read the line, `started` when it took it (right after the echo
     /// when it went into a running turn), `completed` or `cancelled`. `started` of an input
-    /// that begins a turn of its own makes it the turn's input.
-    fn on_lifecycle(&mut self, v: &Value) {
+    /// that begins a turn of its own makes it the turn's input. A carried input `cancelled`
+    /// after the `result` that carried it (a second Stop before it started) ends the turn it
+    /// was carried into, for which no `result` comes: [`AdapterEvent::TurnEnded`] with it in
+    /// `dropped`, the other carried inputs in `carried`. One `completed` without an echo (a
+    /// local command) is taken by the `result` the CLI sends for it: a local command has a
+    /// `result` of its own (`/name` without an echo, fixture of
+    /// `local_command_without_echo_is_taken`; `/cost` on 2.1.312).
+    fn on_lifecycle(&mut self, v: &Value) -> Vec<Action> {
         self.lifecycle = true;
         let Some(uuid) = v["command_uuid"]
             .as_str()
             .and_then(|u| u.parse::<Uuid>().ok())
         else {
-            return;
+            return vec![];
         };
-        let Some(w) = self.awaiting_echo.iter_mut().find(|w| w.uuid == uuid) else {
-            return;
+        let Some(i) = self.awaiting_echo.iter().position(|w| w.uuid == uuid) else {
+            return vec![];
         };
+        let w = &mut self.awaiting_echo[i];
         let state = v["state"].as_str().unwrap_or_default();
         if state == "started" && (!w.mid_turn || w.carried) {
             self.last_input = Some(w.event_id);
         }
         w.state = Some(state.to_owned());
+        if !(w.carried && state == "cancelled") {
+            return vec![];
+        }
+        let Some(w) = self.awaiting_echo.remove(i) else {
+            return vec![];
+        };
+        tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "carried input cancelled by the CLI, not taken");
+        let dropped = vec![w.event_id];
+        let carried: Vec<Uuid> = self
+            .awaiting_echo
+            .iter()
+            .filter(|w| w.carried)
+            .map(|w| w.event_id)
+            .collect();
+        // As at `result`: the CLI goes on with the other carried inputs.
+        self.in_turn = !carried.is_empty();
+        if self.in_turn {
+            self.turn += 1;
+        }
+        vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
     }
 
     /// Subagent `task_id` started (`add`) or ended: the new count when it changed.
@@ -817,6 +842,16 @@ impl Core {
             tracing::info!(session_id = %self.session_id, open = cancels.len(), "turn ended with open requests; cancelled");
         }
         out.extend(cancels);
+        // A foreground subagent cannot outlive the main turn either: it stops counting here
+        // also when the CLI sent no end of it (an interrupt, a denied call,
+        // `error_max_turns`). A background one goes on.
+        let before = self.subagents.len();
+        self.subagents.retain(|id| quiet.get(id) != Some(&false));
+        if self.subagents.len() != before {
+            let n = u32::try_from(self.subagents.len()).unwrap_or(u32::MAX);
+            tracing::info!(session_id = %self.session_id, subagents = n, "foreground subagents ended with the turn");
+            out.push(Action::Emit(AdapterEvent::Subagents(n)));
+        }
         let usage = &v["usage"];
         let num = |k: &str| usage[k].as_u64();
         let (input_tokens, output_tokens) = (

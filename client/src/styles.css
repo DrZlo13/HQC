@@ -529,6 +529,13 @@ select.input {
   color: var(--accent);
 }
 
+/* A tile's context menu: fixed at the pointer, the bar would clip it. */
+.menu.rail-menu {
+  position: fixed;
+  right: auto;
+  z-index: 30;
+}
+
 .rail-badge {
   position: absolute;
   top: -6px;
@@ -2956,6 +2963,14 @@ a.relay-peer {
 }
 
 /* ---- composer and the handover banner ---- */
+
+/* "Quote" under the end of text selected in the feed. */
+.btn-quote {
+  position: fixed;
+  z-index: 20;
+  transform: translateX(-50%);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
 
 .composer-wrap {
   flex: none;

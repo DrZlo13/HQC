@@ -6,7 +6,7 @@ import { useSubscription } from './hooks';
 import { colorHex } from '../theme';
 import { ProjectGlyph, projectName } from './Appearance';
 import { ArchiveList } from './Archive';
-import { IconArchive, IconGear, IconGrip, IconMore, IconPlus, IconRename, IconReorder, IconSearch, IconShield, IconTrash } from './icons';
+import { IconArchive, IconGear, IconGrip, IconMore, IconPlus, IconRename, IconReorder, IconSearch, IconShield, IconStar, IconTrash } from './icons';
 import { AUTO_CONFIRM, agentsLabel, formatWhen, shortPath } from './labels';
 import { workspaceTitle } from './ProjectSettings';
 import { RequestsLink } from './requests';
@@ -39,6 +39,12 @@ function rename(app: AppState, s: SessionInfo): void {
   const title = prompt('Rename the session', s.title)?.trim();
   if (!title || title === s.title) return;
   app.renameSession(s.id, title).catch((e: Error) => app.setListNotice(`Not renamed: ${e.message}`));
+}
+
+/** Adds the session to the user's favorites or takes it out; a refusal goes to the list's
+ *  notice. */
+function toggleFavorite(app: AppState, s: SessionInfo): void {
+  app.setSessionFavorite(s.id, !s.favorite_at).catch((e: Error) => app.setListNotice(`Favorites not saved: ${e.message}`));
 }
 
 /** Deletes a session; the one open goes back to its project. */
@@ -96,6 +102,12 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const pathOf = (s: SessionInfo) => shortPath(app.sessionPath(s) ?? '');
   const whereOf = (s: SessionInfo) => [app.workerName(s.worker_id), pathOf(s)].filter(Boolean).join(' · ');
   const now = Date.now();
+  // Favorites of every project above the groups, with the project in the row.
+  const favorites = reorder ? [] : app.favoriteSessions().filter((s) => matchesQuery(s, pathOf(s), query));
+  const projectOf = (s: SessionInfo) => {
+    const p = app.projects.get(s.project_id);
+    return p && projectName(p);
+  };
   let groups: SessionGroup[];
   if (reorder) {
     const items = reorder.map((id) => app.sessions.get(id)).filter((s): s is SessionInfo => !!s && !s.archived);
@@ -307,6 +319,32 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       )}
       {creating && project && <NewSession key={project.id} app={app} projectId={project.id} onDone={() => setCreating(false)} />}
       <div class="session-scroll" ref={scroll}>
+        {favorites.length > 0 && (
+          <div class="session-group group-favorites">
+            <div class="group-head">
+              <span class="group-label">Favorites</span>
+              <span class="group-count">{favorites.length}</span>
+            </div>
+            <ul class="session-list">
+              {favorites.map((s) => (
+                <SessionRow
+                  key={s.id}
+                  s={s}
+                  current={s.id === current}
+                  phone={phone}
+                  when={mode === 'recent' ? formatWhen(s.updated_at, now) : undefined}
+                  where={[projectOf(s), whereOf(s)].filter(Boolean).join(' · ')}
+                  dragging={false}
+                  onArchive={() => app.archiveLater(s)}
+                  onFavorite={() => toggleFavorite(app, s)}
+                  onRename={() => rename(app, s)}
+                  onDelete={() => remove(app, s, current)}
+                  onSheet={() => setSheet({ id: s.id, confirm: false })}
+                />
+              ))}
+            </ul>
+          </div>
+        )}
         {groups.map((g) => (
           <div key={g.id} class={`session-group group-${g.id}`}>
             <div class="group-head">
@@ -325,6 +363,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   grip={reorder ? grip(s.id) : undefined}
                   dragging={dragId === s.id}
                   onArchive={() => app.archiveLater(s)}
+                  onFavorite={() => toggleFavorite(app, s)}
                   onRename={() => rename(app, s)}
                   onDelete={() => remove(app, s, current)}
                   onSheet={() => setSheet({ id: s.id, confirm: false })}
@@ -379,6 +418,10 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             setSheet(null);
             app.archiveLater(sheetFor);
           }}
+          onFavorite={() => {
+            setSheet(null);
+            toggleFavorite(app, sheetFor);
+          }}
           onRename={() => {
             setSheet(null);
             rename(app, sheetFor);
@@ -415,6 +458,7 @@ function SessionRow({
   grip,
   dragging,
   onArchive,
+  onFavorite,
   onRename,
   onDelete,
   onSheet,
@@ -427,6 +471,7 @@ function SessionRow({
   grip?: GripHandlers;
   dragging: boolean;
   onArchive: () => void;
+  onFavorite: () => void;
   onRename: () => void;
   onDelete: () => void;
   onSheet: () => void;
@@ -530,7 +575,13 @@ function SessionRow({
           <button type="button" class="icon-btn btn-row-archive" aria-label={`Archive «${title}»`} title="Archive" onClick={onArchive}>
             <IconArchive />
           </button>
-          <RowMenu rules={rulesHref(s)} onRename={onRename} onDelete={() => setConfirm(true)} />
+          <RowMenu
+            rules={rulesHref(s)}
+            favorite={!!s.favorite_at}
+            onFavorite={onFavorite}
+            onRename={onRename}
+            onDelete={() => setConfirm(true)}
+          />
         </div>
       )}
       {confirm && (
@@ -555,8 +606,21 @@ function SessionRow({
   );
 }
 
-/** "⋯" of a desktop row: Rename, Folder rules, Delete… (confirmed in the row). */
-function RowMenu({ rules, onRename, onDelete }: { rules?: string; onRename: () => void; onDelete: () => void }) {
+/** "⋯" of a desktop row: Add to / Remove from favorites, Rename, Folder rules, Delete…
+ *  (confirmed in the row). */
+function RowMenu({
+  rules,
+  favorite,
+  onFavorite,
+  onRename,
+  onDelete,
+}: {
+  rules?: string;
+  favorite: boolean;
+  onFavorite: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -592,7 +656,7 @@ function RowMenu({ rules, onRename, onDelete }: { rules?: string; onRename: () =
       <button
         type="button"
         class="icon-btn btn-row-more"
-        aria-label="More: rename, folder rules, delete"
+        aria-label="More: favorites, rename, folder rules, delete"
         title="More"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -602,6 +666,7 @@ function RowMenu({ rules, onRename, onDelete }: { rules?: string; onRename: () =
       </button>
       {open && (
         <div class="menu" role="menu">
+          {item('btn-favorite', favorite ? 'Remove from favorites' : 'Add to favorites', onFavorite)}
           {item('btn-rename', 'Rename', onRename)}
           {rules && item('btn-rules', 'Folder rules', () => (location.hash = rules))}
           {item('btn-delete menu-danger', 'Delete…', onDelete)}
@@ -611,13 +676,15 @@ function RowMenu({ rules, onRename, onDelete }: { rules?: string; onRename: () =
   );
 }
 
-/** The phone's actions of a row (MList2): Archive, Rename, Delete… with a second step. */
+/** The phone's actions of a row (MList2): Archive, Add to / Remove from favorites, Rename,
+ *  Delete… with a second step. */
 function ActionSheet({
   s,
   where,
   confirm,
   onClose,
   onArchive,
+  onFavorite,
   onRename,
   onAskDelete,
   onDelete,
@@ -627,6 +694,7 @@ function ActionSheet({
   confirm: boolean;
   onClose: () => void;
   onArchive: () => void;
+  onFavorite: () => void;
   onRename: () => void;
   onAskDelete: () => void;
   onDelete: () => void;
@@ -655,6 +723,10 @@ function ActionSheet({
             <button type="button" class="sheet-btn btn-sheet-archive" onClick={onArchive}>
               <IconArchive />
               Archive
+            </button>
+            <button type="button" class="sheet-btn btn-sheet-favorite" onClick={onFavorite}>
+              <IconStar />
+              {s.favorite_at ? 'Remove from favorites' : 'Add to favorites'}
             </button>
             <button type="button" class="sheet-btn btn-sheet-rename" onClick={onRename}>
               <IconRename />

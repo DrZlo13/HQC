@@ -16,7 +16,7 @@ import {
   type ChatActions,
 } from "../src/ui/cards";
 import { CANONICAL_LABELS } from "../src/ui/labels";
-import { cutJson } from "../src/ui/feed";
+import { cutJson, relativePaths } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
 const raw = (name: string): any =>
@@ -1230,6 +1230,14 @@ describe("the feed like the Claude Code tab", () => {
     expect(root.querySelector(".perm-cut")!.textContent).toBe(
       "The preview is cut at 4 KB: the rest of the change is not shown.",
     );
+  });
+
+  it("makes a path relative to the session's folder only where the path starts", () => {
+    expect(relativePaths("/backup/home/u/p/f.rs", "/home/u/p")).toBe("/backup/home/u/p/f.rs");
+    expect(
+      relativePaths("cat /home/u/p/a.rs '/home/u/p/b c' --out=/home/u/p/o", "/home/u/p/"),
+    ).toBe("cat a.rs 'b c' --out=o");
+    expect(relativePaths("/home/u/p/f.rs", "/home/u/p")).toBe("f.rs");
   });
 
   it("reads a JSON preview cut anywhere: an open string ends, a dangling key goes", () => {

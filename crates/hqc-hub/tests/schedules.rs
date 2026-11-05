@@ -104,6 +104,8 @@ async fn an_at_is_sent_once_as_the_owners_input() {
     let input = w.expect("session.input").await;
     assert_eq!(input["payload"]["session_id"], a.as_str());
     assert_eq!(input["payload"]["text"], "Check the build");
+    // The worker lets it wait for the end of a running turn (SPEC §17.2).
+    assert_eq!(input["payload"]["schedule_id"], id.as_str());
 
     let ev = scheduled_inputs(&hub, &a).await;
     assert_eq!(ev.len(), 1);

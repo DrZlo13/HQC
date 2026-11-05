@@ -1,0 +1,12 @@
+{
+  "id": "f-13",
+  "type": "session.input",
+  "payload": {
+    "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+    "event_id": "0199f3a2-7c10-7000-8000-000000000102",
+    "text": "Check the nightly build",
+    "artifact_ids": [],
+    "peer_prefix": [],
+    "schedule_id": "019a1c2e-5b00-7000-8000-00000000c001"
+  }
+}

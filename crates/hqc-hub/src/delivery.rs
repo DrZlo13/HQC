@@ -91,7 +91,7 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
 }
 
 /// The input without `peer_prefix`; `peer` for a `peer.message` (SPEC §7.1); the cap of
-/// its chain, if it has one (T39).
+/// its chain, if it has one (T39); `schedule_id` of a run of a schedule (§16, §17.2).
 fn input_frame(
     session_id: Uuid,
     event_id: Uuid,
@@ -129,6 +129,9 @@ fn input_frame(
         permission_cap: chain
             .and_then(|c| serde_json::from_value::<Chain>(c.clone()).ok())
             .and_then(|c| c.permission_cap),
+        schedule_id: payload
+            .get("schedule_id")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
     }
 }
 

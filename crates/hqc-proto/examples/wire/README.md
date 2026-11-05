@@ -82,3 +82,5 @@ the worker runs that input's turn in `ask` under the cap; `api.session.json` and
 
 SPEC 0.68: `worker.session.state.json` carries `subagents`, the subagents the agent runs now;
 `api.session.json` and `client.session.summary.json` show it (absent is 0).
+`hub.session.input.scheduled.json` — a run of a schedule (`schedule_id`, §16): the worker never
+writes it into a running turn (§17.2).

@@ -19,8 +19,9 @@
 //!   the hub's `pending` inputs are the source of truth and come again after `hello`, so an
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
 //! - While a turn runs, the head of the queue goes into it when the runtime can take it
-//!   ([`Adapter::can_inject`]) and neither it nor the turn is capped to `ask`, and only a
-//!   person's input (no `peer`): as the VS Code tab does with what the user types meanwhile.
+//!   ([`Adapter::can_inject`]), neither it nor the turn is capped to `ask`, the turn's own
+//!   input has no `peer`, and only a person's input (no `peer`, no `schedule_id`) that is no
+//!   slash command: as the VS Code tab does with what the user types meanwhile.
 //!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; the first
 //!   input the turn carries to the next one becomes that turn, one the runtime will not take
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
@@ -1265,13 +1266,23 @@ impl Session {
     }
 
     /// Writes the head of the queue into the running turn (SPEC §17.2), as the VS Code tab
-    /// does with what the user types meanwhile: a person's input (no `peer`), neither it nor
-    /// the turn capped to `ask` (T39), and the runtime asks nothing now. Only the head goes,
-    /// so `seq` order holds. False: the head waits for the end of the turn.
+    /// does with what the user types meanwhile: a person's input (no `peer`, no
+    /// `schedule_id`) that is no slash command, into a turn whose own input has no `peer`
+    /// (an `hqc_ask` is answered by its own turn alone), neither of them capped to `ask`
+    /// (T39), and the runtime asks nothing now. Only the head goes, so `seq` order holds.
+    /// False: the head waits for the end of the turn.
     async fn inject_head(&mut self) -> bool {
-        let fits = |q: &Queued| q.input.peer.is_none() && !capped(&q.input);
+        let fits = |q: &Queued| {
+            q.input.peer.is_none()
+                && q.input.schedule_id.is_none()
+                && !q.input.text.starts_with('/')
+                && !capped(&q.input)
+        };
         if !self.queue.front().is_some_and(fits)
-            || self.turn.as_ref().is_some_and(|t| t.capped)
+            || self
+                .turn
+                .as_ref()
+                .is_some_and(|t| t.capped || t.input.peer.is_some())
             || !self.adapter.can_inject()
         {
             return false;

@@ -8,7 +8,13 @@
 //! - `assistant` text → `agent.message`, `final` when the record's `stop_reason` is
 //!   `end_turn` (2.1.308 writes it on every block of the turn's last message), `in_reply_to`
 //!   the last prompt of the file;
-//! - `assistant` `tool_use` → `tool.call`, non-empty `thinking` → `agent.thinking`.
+//! - `assistant` `tool_use` → `tool.call`, non-empty `thinking` → `agent.thinking`;
+//! - `assistant` text with `model` `<synthetic>` (the CLI's own reply) → `agent.message`
+//!   with `runtime: true`;
+//! - `user` with `origin.kind` `task-notification` (a background task ended; the CLI writes
+//!   `<task-notification>…<summary>…</summary>` as its text) → `system task_notification`
+//!   with the summary. While the worker's own process runs the session the mirror does not
+//!   emit it: the adapter reported the stream-json line, whose uuid differs.
 //!
 //! Empty thinking (2.1.308 writes only a signature), images and unknown blocks give no event.
 //! `session_id` and the author ids are nil: the worker does not know the hqc session, the
@@ -20,8 +26,16 @@ use hqc_proto::event::{Author, Delivery, Event, EventKind};
 use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
-    preview, result_text, text, ERROR_TEXT_LIMIT, PREVIEW_LIMIT,
+    preview, result_text, text, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, SYNTHETIC_MODEL, TASK_NOTIFICATION,
 };
+
+/// `origin.kind` of the `user` record of a background task's notification (2.1.312).
+const TASK_NOTIFICATION_ORIGIN: &str = "task-notification";
+
+/// A main-chain record of a background task's notification.
+pub fn is_task_notification(record: &Record) -> bool {
+    matches!(record, Record::User(m) if m.is_main() && m.origin_kind() == Some(TASK_NOTIFICATION_ORIGIN))
+}
 
 /// The events of one record; `in_reply_to`: event id of the file's last prompt.
 pub fn record_events(record: &Record, in_reply_to: Option<Uuid>) -> Vec<Event> {
@@ -71,7 +85,38 @@ fn agent() -> Author {
     Author::Agent { id: Uuid::nil() }
 }
 
+fn system(m: &Message, index: usize, code: &str, text: String) -> Event {
+    event(
+        m,
+        index,
+        Author::System,
+        EventKind::System {
+            text,
+            code: code.into(),
+            fork: None,
+        },
+    )
+}
+
+/// The text of `<tag>…</tag>` in a notification, trimmed; `None` when absent or empty.
+fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let (open, close) = (format!("<{name}>"), format!("</{name}>"));
+    let rest = &s[s.find(&open)? + open.len()..];
+    Some(rest[..rest.find(&close)?].trim()).filter(|t| !t.is_empty())
+}
+
 fn user(m: &Message) -> Vec<Event> {
+    if m.origin_kind() == Some(TASK_NOTIFICATION_ORIGIN) {
+        let blocks = m.blocks();
+        let (i, body) = blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b["type"] == "text")
+            .find_map(|(i, b)| Some((i, b["text"].as_str()?)))
+            .unwrap_or((0, ""));
+        let t = tag(body, "summary").unwrap_or("Background task");
+        return vec![system(m, i, TASK_NOTIFICATION, text(t))];
+    }
     let mut out = Vec::new();
     for (i, b) in m.blocks().iter().enumerate() {
         match b["type"].as_str() {
@@ -116,6 +161,7 @@ fn user(m: &Message) -> Vec<Event> {
 
 fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
     let end_turn = m.stop_reason() == Some("end_turn");
+    let synthetic = m.model() == Some(SYNTHETIC_MODEL);
     let mut out = Vec::new();
     for (i, b) in m.blocks().iter().enumerate() {
         let kind = match b["type"].as_str() {
@@ -128,6 +174,7 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
                     text: text(t),
                     r#final: end_turn,
                     in_reply_to,
+                    runtime: synthetic,
                 }
             }
             Some("tool_use") => EventKind::ToolCall {
@@ -284,6 +331,66 @@ mod tests {
         let line = r#"{"type":"user","uuid":"5fb160d6-592d-4780-a2b6-ebdcb33e8070","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>haiku</command-args>"}}"#;
         let rec = hqc_claude_jsonl::parse_line(line).unwrap();
         assert_eq!(typed_text(&rec).as_deref(), Some("/model haiku"));
+    }
+
+    /// A background task's notification is `system task_notification` with its summary (else
+    /// "Background task"), not a prompt; the CLI's own reply (`<synthetic>`, the record of a live run
+    /// on 2.1.312 with a model the API does not know) is `agent.message` with `runtime: true`
+    /// and the adapter's id for the block.
+    #[test]
+    fn notifications_and_runtime_replies() {
+        let rec = hqc_claude_jsonl::parse_line(crate::mirror::tests::NOTIFICATION).unwrap();
+        assert!(is_task_notification(&rec));
+        let evs = record_events(&rec, None);
+        assert_eq!(
+            evs.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+            [EventKind::System {
+                text: "Background command \"Run background sleep and echo marker\" completed \
+                       (exit code 0)"
+                    .into(),
+                code: "task_notification".into(),
+                fork: None,
+            }]
+        );
+        assert_eq!((&evs[0].author, evs[0].delivery), (&Author::System, None));
+        assert_eq!(prompt_id(&evs), None, "not a prompt");
+        let bare = crate::mirror::tests::NOTIFICATION.replace(
+            r#"<summary>Background command \"Run background sleep and echo marker\" completed (exit code 0)</summary>\n"#,
+            "",
+        );
+        let evs = record_events(&hqc_claude_jsonl::parse_line(&bare).unwrap(), None);
+        assert!(
+            matches!(&evs[..], [Event { kind: EventKind::System { text, .. }, .. }] if text == "Background task"),
+            "{evs:?}"
+        );
+        let typed = crate::mirror::tests::NOTIFICATION.replace(r#""origin":{"kind":"task-notification","producer":"session-task","runId":"0mw2x8jvm-af387e8f"},"#, "");
+        let rec = hqc_claude_jsonl::parse_line(&typed).unwrap();
+        assert!(!is_task_notification(&rec));
+        assert!(prompt_id(&record_events(&rec, None)).is_some());
+
+        let line = r#"{"parentUuid":"ce9e21ed-6734-479d-b65e-8794ac737a0b","isSidechain":false,"type":"assistant","uuid":"c294c442-b0d3-4724-94a4-17d06e405b0a","timestamp":"2026-11-05T02:26:14.254Z","message":{"id":"75495e5d-148c-41a6-8b21-25d0efd759a8","container":null,"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","stop_sequence":"","type":"message","content":[{"type":"text","text":"There's an issue with the selected model (claude-bogus-model-9-9). It may not exist or you may not have access to it."}]},"error":"model_not_found","isApiErrorMessage":true,"apiErrorStatus":404,"cwd":"/tmp/hqc-fixture/bg","sessionId":"382723fd-060a-4dad-a3a6-e43899c86dac"}"#;
+        let rec = hqc_claude_jsonl::parse_line(line).unwrap();
+        let prompt = Uuid::now_v7();
+        let evs = record_events(&rec, Some(prompt));
+        assert_eq!(
+            evs.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+            [EventKind::AgentMessage {
+                text: "There's an issue with the selected model (claude-bogus-model-9-9). It \
+                       may not exist or you may not have access to it."
+                    .into(),
+                r#final: false,
+                in_reply_to: Some(prompt),
+                runtime: true,
+            }]
+        );
+        assert_eq!(evs[0].author, agent());
+        assert_eq!(
+            evs[0].event_id,
+            crate::adapter::claude_code::engine::record_event_id(
+                &"c294c442-b0d3-4724-94a4-17d06e405b0a".parse().unwrap(),
+                0
+            )
+        );
     }
 
     #[test]

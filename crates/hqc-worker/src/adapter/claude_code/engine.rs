@@ -7,10 +7,15 @@
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`;
 //! - `assistant` `tool_use` → `tool.call`; non-empty `thinking` → `agent.thinking`;
+//! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
+//!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
+//! - `system` `task_notification` (a background task ended) → `system task_notification`;
+//!   `system` `compact_boundary` → `system context_compacted`;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //! - `result` → `usage`, `status idle`, end of turn; `usage.cost_usd` is the growth of the
 //!   CLI's cumulative `total_cost_usd` since the previous `result` of the session (or since
 //!   the transcript's last `cost-state` after `--resume`), `session_cost_usd` the total itself;
+//!   a request still open then gets `approval.cancel` / `clarify.cancel` `stopped`;
 //! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
 //!   differ from what this process reported (the CLI sends `init` before every turn);
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
@@ -35,8 +40,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use hqc_proto::event::{
-    ApprovalCanonical, ApprovalOption, Author, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
-    SessionState,
+    ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event,
+    EventKind, SessionState,
 };
 use hqc_proto::frame::{PermissionMode, SessionInput};
 use serde_json::{json, Value};
@@ -50,16 +55,30 @@ use crate::permissions::{FolderRules, Policy};
 pub const PREVIEW_LIMIT: usize = 4096;
 pub const ERROR_TEXT_LIMIT: usize = 300;
 
-pub const DENY_MESSAGE: &str = "The user denied this tool call.";
-/// Before the user's text of a denial with text (T26, SPEC §10.1): Claude Code's own wording
-/// of a rejection with feedback. Checked live on 2.1.308 with haiku: with it the model does
-/// what the text says; with a plain «denied and wrote instead:» it saw the text but took it
-/// for an instruction from the tool result and did not follow it.
-pub const DENY_WITH_TEXT: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:";
+/// A denial without text, sent with `interrupt: true`: what the "No" of the VS Code tab sends
+/// (extension 2.1.309, cc_remote docs/SPEC.md §2.12). The CLI ends the turn at once with
+/// `result` `error_during_execution` (checked live on 2.1.312).
+pub const DENY_MESSAGE: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+/// Before the user's text of a denial with text (T26, SPEC §10.1), sent with `interrupt:
+/// false`: the tab's wording for "Tell Claude what to do instead", two spaces before the
+/// text included. Checked live on 2.1.312 with haiku: the model did what the text said and
+/// did not run the call. With a plain «denied and wrote instead:» (2.1.308) it saw the text
+/// but took it for an instruction from the tool result and did not follow it.
+pub const DENY_WITH_TEXT: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). The user provided the following reason for the rejection:  ";
 pub const CLARIFY_CANCEL_MESSAGE: &str = "The user did not answer the questions.";
 pub const POLICY_DENY_MESSAGE: &str = "Denied by the worker's permission policy";
 /// `system.code` of a tool call refused by a deny rule of `[permissions]` (SPEC §4).
 pub const POLICY_DENIED: &str = "policy_denied";
+/// `system.code` of a background task (a shell command, a subagent) that finished or
+/// stopped: stream-json `system` `task_notification` (SPEC §4, §8.1).
+pub const TASK_NOTIFICATION: &str = "task_notification";
+/// `system.code` of stream-json `system` `compact_boundary` (SPEC §4, §8.1).
+pub const CONTEXT_COMPACTED: &str = "context_compacted";
+pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
+/// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
+/// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
+/// `runtime: true`.
+pub const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// `request_id` prefix of our `set_permission_mode` control requests.
 const MODE_REQUEST: &str = "hqc-mode-";
 
@@ -93,7 +112,8 @@ enum Pending {
 pub struct Core {
     session_id: Uuid,
     restricted: bool,
-    held: Option<(Uuid, String)>,
+    /// The last assistant text: event id, text, and whether the CLI wrote it itself.
+    held: Option<(Uuid, String, bool)>,
     /// `event_id` of the input sent last: `in_reply_to` of agent messages.
     last_input: Option<Uuid>,
     /// Inputs written to stdin whose `--replay-user-messages` echo has not come yet.
@@ -265,9 +285,10 @@ impl Core {
         };
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
+            // As the VS Code tab: "No" stops the turn, a text answer lets it go on.
             "deny" => match message {
-                Some(m) => deny(request_id, &format!("{DENY_WITH_TEXT}\n{m}")),
-                None => deny(request_id, DENY_MESSAGE),
+                Some(m) => deny_with(request_id, &format!("{DENY_WITH_TEXT}{m}"), false),
+                None => deny_with(request_id, DENY_MESSAGE, true),
             },
             "always" if !self.restricted && !local_rules.is_empty() => {
                 allow(request_id, &input, Some(local_rules))
@@ -392,6 +413,18 @@ impl Core {
                     out.extend(self.on_permission_denied(&v));
                     out
                 }
+                Some("task_notification") => self.on_task_notification(&v),
+                // Its uuid is that of the transcript's `system compact_boundary` record
+                // (fixture `resume-compact`): the event id is derived from it as from a
+                // record's.
+                Some("compact_boundary") => {
+                    tracing::info!(session_id = %self.session_id, trigger = ?v["compact_metadata"]["trigger"].as_str(), "context compacted");
+                    vec![self.emit_system_as(
+                        record_uuid(&v).map(|u| record_event_id(&u, 0)),
+                        CONTEXT_COMPACTED,
+                        CONTEXT_COMPACTED_TEXT.into(),
+                    )]
+                }
                 _ => vec![],
             },
             _ => vec![],
@@ -493,6 +526,9 @@ impl Core {
             tracing::warn!(session_id = %self.session_id, "assistant message without uuid skipped");
             return vec![];
         };
+        // The CLI's own reply, not the model's: marked, but held and flushed like any text,
+        // so it is the turn's final message when it ends the turn.
+        let synthetic = v["message"]["model"] == SYNTHETIC_MODEL;
         let mut out = Vec::new();
         for (i, block) in blocks(v).iter().enumerate() {
             let id = record_event_id(&uuid, i);
@@ -503,7 +539,10 @@ impl Core {
                         continue;
                     }
                     out.extend(self.flush(false));
-                    self.held = Some((id, text(t)));
+                    if synthetic {
+                        tracing::info!(session_id = %self.session_id, "runtime message");
+                    }
+                    self.held = Some((id, text(t), synthetic));
                 }
                 Some("tool_use") => {
                     out.extend(self.flush(false));
@@ -569,6 +608,26 @@ impl Core {
 
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
         let mut out: Vec<Action> = self.flush(true).into_iter().collect();
+        // A request the CLI no longer waits for: after "No" to one of two parallel calls it
+        // ends the turn and drops the other. Without the cancel the hub keeps its card open
+        // (Claude requests do not expire), and an answer to it finds no open request here.
+        let mut open: Vec<(String, Pending)> = self.pending.drain().collect();
+        if !open.is_empty() {
+            tracing::info!(session_id = %self.session_id, open = open.len(), "turn ended with open requests; cancelled");
+        }
+        open.sort_by(|a, b| a.0.cmp(&b.0));
+        for (request_id, p) in open {
+            let reason = CancelReason::Stopped;
+            let kind = match p {
+                Pending::Approval { .. } => EventKind::ApprovalCancel { request_id, reason },
+                Pending::Clarify { .. } => EventKind::ClarifyCancel { request_id, reason },
+            };
+            out.push(Action::Emit(AdapterEvent::Event(new_event(
+                self.session_id,
+                Author::System,
+                kind,
+            ))));
+        }
         let usage = &v["usage"];
         let num = |k: &str| usage[k].as_u64();
         let total = v["total_cost_usd"]
@@ -593,6 +652,9 @@ impl Core {
             state: SessionState::Idle,
             // `error_max_turns`, `error_during_execution`, ...: why the turn ended early.
             detail: (subtype != "success" || v["is_error"] == true).then(|| subtype.to_owned()),
+            // The turn's input: the hub fails an `hqc_ask` it carried that no final message
+            // answered (SPEC §7.1).
+            in_reply_to: self.last_input,
         }));
         // The CLI answered the input without echoing it: a local slash command (`/name`,
         // `/cost`, ...) runs without a model turn and without `--replay-user-messages`. The
@@ -602,10 +664,6 @@ impl Core {
             out.push(Action::Emit(AdapterEvent::InputAccepted { event_id }));
         }
         out.push(Action::Emit(AdapterEvent::TurnEnded));
-        if !self.pending.is_empty() {
-            tracing::warn!(session_id = %self.session_id, open = self.pending.len(), "turn ended with open requests; dropped");
-            self.pending.clear();
-        }
         tracing::info!(
             session_id = %self.session_id,
             subtype,
@@ -764,16 +822,31 @@ impl Core {
         vec![self.emit_system(code, preview(&text, ERROR_TEXT_LIMIT))]
     }
 
+    /// `system/task_notification`: a background task ended (checked live on 2.1.312: it comes
+    /// as soon as the task ends, before the turn the CLI then starts by itself). The text is
+    /// its `summary`, or "Background task" without one. Not a flush: a held text keeps
+    /// waiting for what decides whether it is final.
+    fn on_task_notification(&self, v: &Value) -> Vec<Action> {
+        let t = v["summary"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| "Background task".into(), text);
+        tracing::info!(session_id = %self.session_id, task_id = ?v["task_id"].as_str(), status = ?v["status"].as_str(), "background task notification");
+        vec![self.emit_system(TASK_NOTIFICATION, t)]
+    }
+
     // ---- helpers -----------------------------------------------------------------------
 
     fn flush(&mut self, r#final: bool) -> Option<Action> {
-        let (id, text) = self.held.take()?;
+        let (id, text, runtime) = self.held.take()?;
         Some(self.emit(
             id,
             EventKind::AgentMessage {
                 text,
                 r#final,
                 in_reply_to: self.last_input,
+                runtime,
             },
         ))
     }
@@ -791,7 +864,12 @@ impl Core {
 
     /// `system {code, text}` authored by the worker (SPEC §4), fresh v7 id.
     fn emit_system(&self, code: &str, text: String) -> Action {
-        Action::Emit(AdapterEvent::Event(new_event(
+        self.emit_system_as(None, code, text)
+    }
+
+    /// [`Self::emit_system`] with `event_id`, when given.
+    fn emit_system_as(&self, event_id: Option<Uuid>, code: &str, text: String) -> Action {
+        let mut e = new_event(
             self.session_id,
             Author::System,
             EventKind::System {
@@ -799,7 +877,11 @@ impl Core {
                 code: code.into(),
                 fork: None,
             },
-        )))
+        );
+        if let Some(id) = event_id {
+            e.event_id = id;
+        }
+        Action::Emit(AdapterEvent::Event(e))
     }
 
     fn emit_event(&self, kind: EventKind) -> Event {
@@ -843,6 +925,14 @@ fn deny(request_id: &str, message: &str) -> Value {
     control_response(request_id, json!({"behavior": "deny", "message": message}))
 }
 
+/// A denial by the user, with the CLI's `interrupt`: `true` ends the turn at once.
+fn deny_with(request_id: &str, message: &str, interrupt: bool) -> Value {
+    control_response(
+        request_id,
+        json!({"behavior": "deny", "message": message, "interrupt": interrupt}),
+    )
+}
+
 fn control_response(request_id: &str, response: Value) -> Value {
     json!({
         "type": "control_response",
@@ -883,18 +973,27 @@ fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Vec<String>)>
     for (i, q) in qs.iter().enumerate() {
         // The raw question goes back to the CLI as the key of its answer.
         let raw = q["question"].as_str()?;
-        let options: Vec<String> = q["options"]
+        // Labels and descriptions pair up: an option without a label is dropped with its
+        // description.
+        let (options, descriptions): (Vec<String>, Vec<String>) = q["options"]
             .as_array()
-            .map(|o| {
-                o.iter()
-                    .filter_map(|o| o["label"].as_str().map(text))
-                    .collect()
+            .into_iter()
+            .flatten()
+            .filter_map(|o| {
+                let label = o["label"].as_str()?;
+                Some((text(label), text(o["description"].as_str().unwrap_or(""))))
             })
-            .unwrap_or_default();
+            .unzip();
+        let described = descriptions.iter().any(|d| !d.is_empty());
         questions.push(ClarifyQuestion {
             id: (i + 1).to_string(),
             text: text(raw),
+            header: q["header"]
+                .as_str()
+                .filter(|h| !h.trim().is_empty())
+                .map(text),
             options: (!options.is_empty()).then_some(options),
+            option_descriptions: described.then_some(descriptions),
             multi: q["multiSelect"].as_bool(),
         });
         texts.push(raw.to_owned());

@@ -639,6 +639,79 @@ async fn clarify_answer_and_cancel_on_stop() {
     hub.finish().await;
 }
 
+/// A worker's cancel (the Claude Code adapter's for a request still open when the turn ends)
+/// closes its request; sent again, it gets its `seq`. One for a request the hub closed already
+/// (stop cancels first) is not stored a second time.
+#[tokio::test]
+async fn a_workers_cancel_closes_its_request_once() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("cancel").await;
+    ack_start(&mut w, &sid).await;
+    let far = "2099-01-01T00:00:00Z";
+
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-1", far),
+    ))
+    .await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let cancel = agent_event(
+        &sid,
+        "approval.cancel",
+        json!({"request_id": "req-1", "reason": "stopped"}),
+    );
+    let seq = w.event(cancel.clone()).await["seq"].clone();
+    assert!(seq.is_u64(), "{seq}");
+    hub.wait_session(&sid, "idle", |v| v["state"] == "idle")
+        .await;
+    assert_eq!(w.event(cancel).await["seq"], seq);
+
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-2", far),
+    ))
+    .await;
+    let (s, _) = hub
+        .post(&format!("/api/sessions/{sid}/stop"), json!({}))
+        .await;
+    assert_eq!(s, 200);
+    w.expect("approval.response").await;
+    w.expect("session.stop").await;
+    let ack = w
+        .event(agent_event(
+            &sid,
+            "approval.cancel",
+            json!({"request_id": "req-2", "reason": "stopped"}),
+        ))
+        .await;
+    assert!(ack["seq"].is_null(), "{ack}");
+    let cancels: Vec<(Value, Value)> = hub
+        .events(&sid)
+        .await
+        .iter()
+        .filter(|e| e["type"] == "approval.cancel")
+        .map(|e| {
+            (
+                e["payload"]["request_id"].clone(),
+                e["author"]["kind"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cancels,
+        [
+            (json!("req-1"), json!("agent")),
+            (json!("req-2"), json!("system"))
+        ]
+    );
+    hub.finish().await;
+}
+
 /// An answer given while the worker is offline reaches it after hello.
 #[tokio::test]
 async fn answer_while_offline_is_delivered_after_hello() {

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hqc_proto::event::{
-    ApprovalCanonical, Author, ClarifyAnswer, ClarifyQuestion, Event, EventKind, SessionState,
+    ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
+    SessionState,
 };
 use hqc_proto::frame::{Runtime, SessionInput};
 use serde_json::{json, Value};
@@ -434,7 +435,8 @@ async fn permission_allow_once() {
         &e.kind,
         EventKind::Status {
             state: SessionState::Idle,
-            detail: None
+            detail: None,
+            ..
         }
     )));
 }
@@ -457,18 +459,21 @@ async fn permission_deny() {
             "turn_ended"
         ]
     );
-    // The same answer as the spike's, except for the message text.
+    // The same answer as the spike's, except for the message text and `interrupt`: the
+    // VS Code tab's "No" (cc_remote docs/SPEC.md §2.12).
     let mut want = lines(fx.stdin);
     let mut got = h.claude.stdin();
     assert_eq!(
         got[1]["response"]["response"]["message"],
-        super::engine::DENY_MESSAGE
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. \
+         if it was a file edit, the new_string was NOT written to the file). STOP what you are \
+         doing and wait for the user to tell you how to proceed."
     );
+    assert_eq!(got[1]["response"]["response"]["interrupt"], true);
     for v in [&mut want[1], &mut got[1]] {
-        v["response"]["response"]
-            .as_object_mut()
-            .unwrap()
-            .remove("message");
+        let r = v["response"]["response"].as_object_mut().unwrap();
+        r.remove("message");
+        r.remove("interrupt");
     }
     assert_eq!(got, want);
     assert!(events(&evs).iter().any(|e| matches!(
@@ -525,16 +530,25 @@ async fn ask_user_question_becomes_clarify() {
             _ => None,
         })
         .unwrap();
+    // The question in full, as the VS Code tab shows it: the header and what each option
+    // means.
     assert_eq!(
         questions,
         [ClarifyQuestion {
             id: "1".into(),
             text: "Which area should I focus on first?".into(),
+            header: Some("Focus".into()),
             options: Some(vec![
                 "Hub (Recommended)".into(),
                 "Worker".into(),
                 "Protocol".into(),
                 "Client".into()
+            ]),
+            option_descriptions: Some(vec![
+                "crates/hqc-hub: axum + Postgres hub work".into(),
+                "crates/hqc-worker: daemon, adapters, MCP server".into(),
+                "crates/hqc-proto: event and frame schema".into(),
+                "client/: TypeScript PWA".into()
             ]),
             multi: Some(false),
         }]
@@ -550,7 +564,7 @@ async fn mcp_timeout_turn_ends_with_detail() {
     let evs = events(&evs);
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
-        EventKind::Status { state: SessionState::Idle, detail: Some(d) } if d == "error_max_turns"
+        EventKind::Status { state: SessionState::Idle, detail: Some(d), .. } if d == "error_max_turns"
     )));
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
@@ -593,6 +607,8 @@ async fn command_line_new_then_resume() {
             "host",
             "--permission-prompt-tool",
             "stdio",
+            "--thinking-display",
+            "summarized",
             "--strict-mcp-config",
             "--allowedTools",
             "mcp__hqc",
@@ -1684,6 +1700,185 @@ fn clarify_cancel_and_multi() {
     );
 }
 
+/// `AskUserQuestion` in full (SPEC §4 `clarify.request`): the header, and descriptions paired
+/// with the labels (an option without a label goes with its description), `""` where an
+/// option has none; neither field when empty. The answer is the label, the typed text of
+/// "Other", or the labels joined with ", " (cc_remote docs/SPEC.md §2.11).
+#[test]
+fn clarify_question_in_full_and_free_text() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let req = json!({"type": "control_request", "request_id": "q1", "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Pick a color", "header": "Color", "multiSelect": false, "options": [
+                {"label": "Red", "description": "Warm color"},
+                {"description": "no label"},
+                {"label": "Blue"}]},
+            {"question": "Which checks?", "header": " ", "multiSelect": true, "options": [
+                {"label": "fmt"}, {"label": "clippy"}]}]}}});
+    let a = core.on_line(&req.to_string());
+    let qs = match &a[..] {
+        [Action::Emit(AdapterEvent::Event(e))] => match &e.kind {
+            EventKind::ClarifyRequest { questions, .. } => questions.clone(),
+            k => panic!("{k:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(qs[0].header.as_deref(), Some("Color"));
+    assert_eq!(qs[0].options, Some(vec!["Red".into(), "Blue".into()]));
+    assert_eq!(
+        qs[0].option_descriptions,
+        Some(vec!["Warm color".into(), "".into()])
+    );
+    assert_eq!((&qs[1].header, &qs[1].option_descriptions), (&None, &None));
+    let wire = serde_json::to_value(&qs[1]).unwrap();
+    assert!(wire.get("header").is_none() && wire.get("option_descriptions").is_none());
+
+    let answers = BTreeMap::from([
+        (
+            "1".to_string(),
+            ClarifyAnswer::One("Teal, as in the logo".into()),
+        ),
+        (
+            "2".to_string(),
+            ClarifyAnswer::Many(vec!["fmt".into(), "clippy".into()]),
+        ),
+    ]);
+    let w = writes(&core.answer_clarify("q1", &answers).unwrap());
+    let r = &w[0]["response"]["response"];
+    assert_eq!(r["behavior"], "allow");
+    assert_eq!(
+        r["updatedInput"]["answers"],
+        json!({"Pick a color": "Teal, as in the logo", "Which checks?": "fmt, clippy"})
+    );
+    assert_eq!(
+        r["updatedInput"]["questions"],
+        req["request"]["input"]["questions"]
+    );
+}
+
+/// A denial is the VS Code tab's (cc_remote docs/SPEC.md §2.12): "No" stops the turn
+/// (`interrupt: true`), a text answer gives the reason after two spaces and lets the turn go
+/// on. After "No" the CLI ends the turn by itself (lines of a live run on 2.1.312): the turn
+/// ends as after a stop, no `agent.message`, the interrupt marker maps to nothing.
+#[test]
+fn deny_is_the_tabs_no() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    core.input(&SessionInput {
+        session_id: sid,
+        event_id: Uuid::now_v7(),
+        text: "x".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+    });
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    let w = writes(&core.answer_approval("r1", "deny", None).unwrap());
+    assert_eq!(
+        w[0]["response"]["response"],
+        json!({"behavior": "deny", "interrupt": true, "message": "The user doesn't want to \
+            proceed with this tool use. The tool use was rejected (eg. if it was a file edit, \
+            the new_string was NOT written to the file). STOP what you are doing and wait for \
+            the user to tell you how to proceed."})
+    );
+    core.on_line(&can_use_tool_line(&fx, "r2", None));
+    let w = writes(
+        &core
+            .answer_approval("r2", "deny", Some("Explain instead"))
+            .unwrap(),
+    );
+    assert_eq!(
+        w[0]["response"]["response"],
+        json!({"behavior": "deny", "interrupt": false, "message": "The user doesn't want to \
+            proceed with this tool use. The tool use was rejected (eg. if it was a file edit, \
+            the new_string was NOT written to the file). The user provided the following \
+            reason for the rejection:  Explain instead"})
+    );
+
+    let mut all = Vec::new();
+    for l in [
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use.","is_error":true,"tool_use_id":"toolu_01"}]},"parent_tool_use_id":null,"uuid":"e9fde0d1-1e44-4e17-ae45-df0c71e1522e","tool_use_result":"User rejected tool use"}"#,
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"parent_tool_use_id":null,"uuid":"a8ce3d78-0607-46d6-b845-90c476bf4429"}"#,
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":3,"terminal_reason":"aborted_tools","total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}"#,
+    ] {
+        all.extend(core.on_line(l));
+    }
+    let kinds: Vec<String> = all
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => Some(match &e.kind {
+                EventKind::Status { detail, .. } => format!("status:{detail:?}"),
+                k => serde_json::to_value(k).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            }),
+            Action::Emit(AdapterEvent::TurnEnded) => Some("turn_ended".into()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "tool.result",
+            "usage",
+            "status:Some(\"error_during_execution\")",
+            "turn_ended"
+        ]
+    );
+}
+
+/// "No" to one of two parallel calls ends the turn, and the CLI drops the other request: it
+/// is cancelled with `stopped` at the turn's end, so the hub closes its card.
+#[test]
+fn no_cancels_the_other_open_request() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    core.on_line(&can_use_tool_line(&fx, "r2", Some("touch other")));
+    core.answer_approval("r1", "deny", None).unwrap();
+    let a = core.on_line(
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2,"terminal_reason":"aborted_tools","total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}"#,
+    );
+    let cancels: Vec<(String, CancelReason)> = events(&emitted(a))
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::ApprovalCancel { request_id, reason } => Some((request_id.clone(), *reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, [("r2".to_string(), CancelReason::Stopped)]);
+    assert!(core.answer_approval("r2", "once", None).is_err());
+}
+
+/// The `status idle` that ends a turn names the turn's input (`in_reply_to`): the hub fails an
+/// `hqc_ask` only for the input whose turn ended without a final message, even when the next
+/// input's ack reaches it first (SPEC §7.1).
+#[test]
+fn end_of_turn_status_names_its_input() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    for _ in 0..2 {
+        let input = started(&mut core, sid);
+        let evs = emitted(core.on_line(
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"terminal_reason":"aborted_tools","total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}"#,
+        ));
+        let status = events(&evs)
+            .into_iter()
+            .find(|e| matches!(e.kind, EventKind::Status { .. }))
+            .map(|e| serde_json::to_value(&e.kind).unwrap())
+            .unwrap();
+        assert_eq!(
+            status["payload"],
+            json!({"state": "idle", "detail": "error_during_execution", "in_reply_to": input})
+        );
+    }
+}
+
 #[test]
 fn control_response_echo_and_unknown_requests() {
     let mut core = Core::new(Uuid::now_v7(), false);
@@ -1792,7 +1987,8 @@ fn held_text_is_not_final_before_a_tool_call() {
             EventKind::AgentMessage {
                 text: "Let me look.".into(),
                 r#final: false,
-                in_reply_to: Some(input)
+                in_reply_to: Some(input),
+                runtime: false,
             }
         )
     );
@@ -2137,4 +2333,184 @@ fn command_list_is_reported_when_it_changes() {
     assert_eq!(commands[0].last().map(String::as_str), Some("new-skill"));
     v.as_object_mut().unwrap().remove("slash_commands");
     assert!(core.on_line(&v.to_string()).is_empty(), "no list: nothing");
+}
+
+fn emitted(actions: Vec<Action>) -> Vec<AdapterEvent> {
+    actions
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Emit(e) => Some(e),
+            Action::Write(_) => None,
+        })
+        .collect()
+}
+
+fn started(core: &mut Core, sid: Uuid) -> Uuid {
+    let input = Uuid::now_v7();
+    core.input(&SessionInput {
+        session_id: sid,
+        event_id: input,
+        text: "x".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+    });
+    input
+}
+
+/// A background task's end (lines of a live run on 2.1.312: `run_in_background` Bash, then
+/// the turn the CLI starts by itself) is `system task_notification` the moment its line comes,
+/// before that turn's answer, with its summary.
+#[test]
+fn background_task_notification_is_a_system_event() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let stream = r#"{"type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","content":[{"type":"text","text":"WAITING"}]},"parent_tool_use_id":null,"uuid":"6f1d0c3e-3c2f-4a55-9d0e-1a2b3c4d5e6f"}
+{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0073724,"usage":{"input_tokens":4,"output_tokens":283}}
+{"type":"system","subtype":"task_updated","task_id":"b1b20u6dl","patch":{"status":"completed"},"uuid":"c5680b81-f430-4931-af98-c609a02f6fbf"}
+{"type":"system","subtype":"task_notification","task_id":"b1b20u6dl","tool_use_id":"toolu_01DNPTCZTgycgC11D8VMjfaD","status":"completed","output_file":"/tmp/tasks/b1b20u6dl.output","summary":"Background command \"Run background sleep and echo marker\" completed (exit code 0)","uuid":"e6a01eed-f829-40d1-a1f6-95882055c9f1"}
+{"type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","content":[{"type":"text","text":"PONG"}]},"parent_tool_use_id":null,"uuid":"7a2e1d4f-4d3a-4b66-8e1f-2b3c4d5e6f70"}
+{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.00780105,"usage":{"input_tokens":4,"output_tokens":5}}"#;
+    let evs = emitted(play(&mut core, stream));
+    assert_eq!(
+        shape(&evs),
+        [
+            "agent.message:true",
+            "usage",
+            "status",
+            "accepted",
+            "turn_ended",
+            "system",
+            "agent.message:true",
+            "usage",
+            "status",
+            "turn_ended"
+        ]
+    );
+    let sys = system_events(&evs.into_iter().map(Action::Emit).collect::<Vec<_>>());
+    assert_eq!(
+        sys,
+        [(
+            "task_notification".into(),
+            "Background command \"Run background sleep and echo marker\" completed (exit code 0)"
+                .into()
+        )]
+    );
+}
+
+/// `/compact` (lines of fixture `stream-resume-compact`, 2.1.308; the same `compact_boundary`
+/// came on 2.1.312): `system context_compacted`, its id derived from the line's uuid, which is
+/// the transcript record's.
+#[test]
+fn compact_boundary_is_a_system_event() {
+    let fx = fixture!("resume-compact", "2.1.308");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(&mut core, fx.stream);
+    assert_eq!(
+        system_events(&a),
+        [("context_compacted".into(), "Context compacted".into())]
+    );
+    let id = a
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) if matches!(e.kind, EventKind::System { .. }) => {
+                Some(e.event_id)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let boundary: Uuid = "31c3d952-eaeb-4d10-9930-8b35ca152b4b".parse().unwrap();
+    assert_eq!(id, Event::id_from_claude_record(&boundary));
+    assert!(fx
+        .transcript
+        .contains("31c3d952-eaeb-4d10-9930-8b35ca152b4b"));
+}
+
+/// The CLI's own reply (`model` `<synthetic>`; the lines of a live run on 2.1.312 with a model
+/// the API does not know, a model text put before them) is `agent.message` with `runtime: true`
+/// and the record's id, held like any text: the text before it is not final and not runtime.
+#[test]
+fn synthetic_reply_is_a_runtime_agent_message() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = started(&mut core, sid);
+    let u: Uuid = "c294c442-b0d3-4724-94a4-17d06e405b0a".parse().unwrap();
+    let text = "There's an issue with the selected model (claude-bogus-model-9-9). It may not \
+                exist or you may not have access to it.";
+    let stream = format!(
+        r#"{{"type":"assistant","message":{{"model":"claude-haiku-5-5","content":[{{"type":"text","text":"Partial answer"}}]}},"parent_tool_use_id":null,"uuid":"{}"}}
+{{"type":"assistant","message":{{"id":"75495e5d-148c-41a6-8b21-25d0efd759a8","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{{"type":"text","text":"{text}"}}]}},"parent_tool_use_id":null,"uuid":"{u}","error":"model_not_found","is_api_error_message":true,"api_error_status":404}}
+{{"type":"result","subtype":"success","is_error":true,"result":"{text}","total_cost_usd":0,"terminal_reason":"api_error","usage":{{"input_tokens":0,"output_tokens":0}}}}"#,
+        Uuid::new_v4()
+    );
+    let a = play(&mut core, &stream);
+    let evs = emitted(a.clone());
+    assert_eq!(
+        shape(&evs),
+        [
+            "agent.message:false",
+            "agent.message:true",
+            "usage",
+            "status",
+            "accepted",
+            "turn_ended"
+        ]
+    );
+    assert!(system_events(&a).is_empty());
+    let messages: Vec<(Uuid, &EventKind)> = events(&evs)
+        .into_iter()
+        .filter(|e| matches!(e.kind, EventKind::AgentMessage { .. }))
+        .map(|e| (e.event_id, &e.kind))
+        .collect();
+    assert!(matches!(
+        messages[0].1,
+        EventKind::AgentMessage { text, r#final: false, runtime: false, .. } if text == "Partial answer"
+    ));
+    assert_eq!(
+        messages[1],
+        (
+            Event::id_from_claude_record(&u),
+            &EventKind::AgentMessage {
+                text: text.into(),
+                r#final: true,
+                in_reply_to: Some(input),
+                runtime: true,
+            }
+        )
+    );
+}
+
+/// A turn the CLI's own reply ends ("Credit balance is too low", an API error) ends with a
+/// final `agent.message`, `runtime: true` on the wire: the hub's push, the answer to an
+/// `hqc_ask` and the title wait for that message (SPEC §4, §7.1). The lines of a live run on
+/// 2.1.312 with a model the API does not know.
+#[test]
+fn turn_ended_by_a_synthetic_reply_has_a_final_runtime_message() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = started(&mut core, sid);
+    let text = "There's an issue with the selected model (claude-bogus-model-9-9). It may not \
+                exist or you may not have access to it.";
+    let stream = format!(
+        r#"{{"type":"assistant","message":{{"id":"75495e5d-148c-41a6-8b21-25d0efd759a8","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{{"type":"text","text":"{text}"}}]}},"parent_tool_use_id":null,"uuid":"c294c442-b0d3-4724-94a4-17d06e405b0a","error":"model_not_found","is_api_error_message":true,"api_error_status":404}}
+{{"type":"result","subtype":"success","is_error":true,"result":"{text}","total_cost_usd":0,"terminal_reason":"api_error","usage":{{"input_tokens":0,"output_tokens":0}}}}"#
+    );
+    let evs = emitted(play(&mut core, &stream));
+    let wire: Vec<Value> = events(&evs)
+        .into_iter()
+        .map(|e| serde_json::to_value(&e.kind).unwrap())
+        .collect();
+    let last_message = wire
+        .iter()
+        .rev()
+        .find(|k| k["type"] == "agent.message")
+        .unwrap_or_else(|| panic!("no agent.message in {wire:?}"));
+    assert_eq!(
+        last_message["payload"],
+        json!({"text": text, "final": true, "in_reply_to": input, "runtime": true})
+    );
 }

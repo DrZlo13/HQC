@@ -1116,16 +1116,46 @@ pub async fn reply_files(
 /// §17.3): an ask that input carried gets no reply any more, so it fails now instead of at
 /// its timeout. The input is not delivered again.
 pub async fn turn_lost(app: &AppState, s: &SessionRow) -> anyhow::Result<()> {
+    fail_turn(app, s, None, "lost", |to| {
+        format!("{to} lost its turn on the question (its agent stopped); ask again")
+    })
+    .await
+}
+
+/// The turn of session `s` on input `input` ended with `status idle` (SPEC §7.1). A final
+/// message of that turn answered its ask already ([`on_final`]); one still open got none (the
+/// user's "No" to a permission request, `POST /stop`, a turn that ended without text) and
+/// fails now instead of at its timeout. The input comes from the status (`in_reply_to`), not
+/// from the session's last delivered input: the worker acks the next input outside its outbox,
+/// so that ack may come before this status (SPEC §5.2).
+pub async fn turn_stopped(app: &AppState, s: &SessionRow, input: Uuid) -> anyhow::Result<()> {
+    fail_turn(app, s, Some(input), "stopped", |to| {
+        format!("the turn of {to} on the question ended without an answer")
+    })
+    .await
+}
+
+/// Fails the open asks that input `input` of session `s` carried (`None`: its last delivered
+/// input), with `unavailable` and `message(to)`.
+async fn fail_turn(
+    app: &AppState,
+    s: &SessionRow,
+    input: Option<Uuid>,
+    why: &str,
+    message: impl Fn(&str) -> String,
+) -> anyhow::Result<()> {
     let open: Vec<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
          WHERE kind = 'ask' AND closed_at IS NULL
            AND payload ->> 'target_session_id' = $1
-           AND payload ->> 'event_id' = (SELECT event_id::text FROM events
-                                         WHERE session_id = $2 AND delivery = 'delivered'
-                                         ORDER BY seq DESC LIMIT 1)"
+           AND payload ->> 'event_id' = COALESCE($3::text,
+                                                 (SELECT event_id::text FROM events
+                                                  WHERE session_id = $2 AND delivery = 'delivered'
+                                                  ORDER BY seq DESC LIMIT 1))"
     ))
     .bind(s.id.to_string())
     .bind(s.id)
+    .bind(input.map(|i| i.to_string()))
     .fetch_all(&app.db)
     .await?;
     for p in open {
@@ -1133,16 +1163,8 @@ pub async fn turn_lost(app: &AppState, s: &SessionRow) -> anyhow::Result<()> {
             .as_str()
             .unwrap_or("the session")
             .to_string();
-        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, target = %s.id, "peer ask failed: the target's turn was lost");
-        fail(
-            app,
-            p,
-            err(
-                error_code::UNAVAILABLE,
-                format!("{to} lost its turn on the question (its agent stopped); ask again"),
-            ),
-        )
-        .await?;
+        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, target = %s.id, why, "peer ask failed: the target's turn ended without a reply");
+        fail(app, p, err(error_code::UNAVAILABLE, message(&to))).await?;
     }
     Ok(())
 }

@@ -154,8 +154,15 @@ pub enum ArtifactKind {
 pub struct ClarifyQuestion {
     pub id: String,
     pub text: String,
+    /// A short label of the question (`AskUserQuestion`'s `header`, since SPEC 0.67).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<String>>,
+    /// What each option means, in the order and number of `options`, `""` for an option
+    /// without one (since SPEC 0.67); absent when no option has a description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_descriptions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi: Option<bool>,
 }
@@ -192,6 +199,10 @@ pub enum EventKind {
         /// `event_id` of the input that started the turn.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         in_reply_to: Option<Uuid>,
+        /// A reply the runtime wrote itself instead of the model (an API error, "Credit
+        /// balance is too low"; since SPEC 0.67); absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        runtime: bool,
     },
     #[serde(rename = "agent.thinking")]
     AgentThinking { text: String },
@@ -310,6 +321,10 @@ pub enum EventKind {
         state: SessionState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// On the `idle` that ends a turn: `event_id` of the input that started it (since SPEC
+        /// 0.67); absent on other statuses and from older workers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_reply_to: Option<Uuid>,
     },
     #[serde(rename = "system")]
     System {

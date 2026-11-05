@@ -47,6 +47,10 @@ pub struct Message {
     /// The summary that replaces the history after `/compact`.
     #[serde(default)]
     pub is_compact_summary: bool,
+    /// Who wrote a `user` record that no person typed: `{"kind": "task-notification",
+    /// "producer": "session-task", ...}` for a finished background task (2.1.312).
+    #[serde(default)]
+    pub origin: Option<serde_json::Value>,
     pub message: serde_json::Value,
 }
 
@@ -64,6 +68,18 @@ impl Message {
     /// stream-json leaves it `null`.
     pub fn stop_reason(&self) -> Option<&str> {
         self.message.get("stop_reason")?.as_str()
+    }
+
+    /// `origin.kind`: `task-notification` for a finished background task; a prompt a person
+    /// typed has no `origin`.
+    pub fn origin_kind(&self) -> Option<&str> {
+        self.origin.as_ref()?.get("kind")?.as_str()
+    }
+
+    /// `message.model` of an assistant record; `<synthetic>` for a reply the CLI wrote
+    /// itself (an API error, "Credit balance is too low").
+    pub fn model(&self) -> Option<&str> {
+        self.message.get("model")?.as_str()
     }
 
     /// The content blocks; a plain string (a typed prompt) is one `text` block.

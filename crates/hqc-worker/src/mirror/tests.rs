@@ -717,3 +717,91 @@ fn no_registry_keeps_the_uuid_check() {
         }
     }
 }
+
+/// The `user` record of a background task's notification, as 2.1.312 wrote it in a live
+/// run (`run_in_background` Bash; the output path and `cwd` shortened).
+pub(crate) const NOTIFICATION: &str = r#"{"parentUuid":"d65d6dce-cab4-4296-a1cb-bf92667e507b","isSidechain":false,"promptId":"cf6b1bdd-53ad-4674-80e3-793e00dfadca","type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>b1b20u6dl</task-id>\n<tool-use-id>toolu_01DNPTCZTgycgC11D8VMjfaD</tool-use-id>\n<output-file>/tmp/tasks/b1b20u6dl.output</output-file>\n<status>completed</status>\n<summary>Background command \"Run background sleep and echo marker\" completed (exit code 0)</summary>\n</task-notification>"},"uuid":"640983ce-6012-48c6-b945-0b45eead2f1b","timestamp":"2026-11-05T02:23:28.612Z","permissionMode":"default","origin":{"kind":"task-notification","producer":"session-task","runId":"0mw2x8jvm-af387e8f"},"promptSource":"system","turnOrigin":"task_notification","turnPosition":{"promptIndex":0,"turnIndex":2},"queueSkipAttachments":true,"cwd":"/tmp/hqc-fixture/bg","sessionId":"dad7ce16-3a69-4fbc-a701-96eb301797af","version":"2.1.312"}"#;
+
+/// A transcript of a turn with a background task (2.1.312 shapes): the prompt, the answer
+/// `WAITING`, the task's notification and the turn the CLI then started (`PONG`).
+fn background_task_transcript() -> (String, [Uuid; 3]) {
+    let prompt = Uuid::new_v4();
+    let waiting = Uuid::new_v4();
+    let pong = Uuid::new_v4();
+    let at = |u: Uuid, rest: &str| {
+        format!(
+            r#"{{"parentUuid":null,"isSidechain":false,"uuid":"{u}","timestamp":"2026-11-05T02:23:17.674Z","cwd":"/tmp/hqc-fixture/bg","sessionId":"dad7ce16-3a69-4fbc-a701-96eb301797af",{rest}}}"#
+        )
+    };
+    let lines = [
+        at(
+            prompt,
+            r#""type":"user","message":{"role":"user","content":"Start it, then reply WAITING"}"#,
+        ),
+        at(
+            waiting,
+            r#""type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"WAITING"}]}"#,
+        ),
+        NOTIFICATION.to_string(),
+        at(
+            pong,
+            r#""type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"PONG"}]}"#,
+        ),
+    ];
+    (lines.join("\n") + "\n", [prompt, waiting, pong])
+}
+
+/// A background task's notification: while the worker's own process runs the session the
+/// adapter reports it (stream-json `system task_notification`, under another uuid), so the
+/// mirror neither emits it nor waits on it nor takes it for another writer, also without the
+/// registry; in a session the worker does not run it is `system task_notification`, never a
+/// prompt.
+#[test]
+fn task_notification_is_the_adapters_while_it_runs() {
+    let (transcript, own) = background_task_transcript();
+    let mut s = setup("bg", &transcript);
+    s.own.begin(s.runtime, None);
+    for u in own {
+        s.own.add(s.runtime, u);
+    }
+    append(&s.file, &transcript);
+    let t0 = Instant::now();
+    for later in [0, 10] {
+        let out = s
+            .mirror
+            .poll(t0 + Duration::from_secs(later), SystemTime::now());
+        assert!(out.is_empty(), "{later} s: {:?}", labels(&out));
+    }
+    let row = s.mirror.store.get(&s.file).unwrap().unwrap();
+    assert_eq!(row.offset, transcript.len() as u64, "read past it at once");
+
+    let mut s = setup("bg", &transcript);
+    append(&s.file, &transcript);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    let kinds: Vec<EventKind> = out
+        .iter()
+        .map(|o| match o {
+            Output::Event(e) => e.event.kind.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert!(matches!(&kinds[0], EventKind::UserMessage { .. }));
+    assert_eq!(
+        kinds[2],
+        EventKind::System {
+            text: "Background command \"Run background sleep and echo marker\" completed (exit \
+                   code 0)"
+                .into(),
+            code: "task_notification".into(),
+            fork: None,
+        }
+    );
+    // `PONG` answers the person's prompt, not the notification.
+    let EventKind::AgentMessage { in_reply_to, .. } = &kinds[3] else {
+        panic!("{:?}", kinds[3])
+    };
+    let Output::Event(p) = &out[0] else {
+        unreachable!()
+    };
+    assert_eq!(*in_reply_to, Some(p.event.event_id));
+}

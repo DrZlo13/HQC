@@ -591,6 +591,127 @@ async fn an_ask_times_out_and_a_cancelled_one_is_closed() {
     w.expect_silence(Duration::from_millis(300)).await;
 }
 
+/// A turn on the question that ends with `status idle` naming its input and no final message
+/// (the user's "No" to a permission request ends it so, as `POST /stop` does) fails the ask at
+/// once instead of at its timeout; the `status idle` after a final message leaves its reply
+/// alone.
+#[tokio::test]
+async fn an_ask_fails_when_the_targets_turn_ends_without_a_reply() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+
+    let (_, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "green?", "session": "personal/helper"}),
+    )
+    .await;
+    ack_input(&mut w, &input).await;
+    w.send("event", json!({"event": final_answer(&b, &input, "Yes.")}))
+        .await;
+    let f = frames(&mut w, 2).await;
+    let r = pick(&f, "mcp.result");
+    assert_eq!(r["payload"]["result"]["reply"], "Yes.", "{r}");
+    w.reply(&r["id"], "ack", json!({})).await;
+    w.event(agent_event(
+        &b,
+        "status",
+        json!({"state": "idle", "in_reply_to": input["payload"]["event_id"]}),
+    ))
+    .await;
+    w.expect_silence(Duration::from_millis(200)).await;
+
+    let (rid, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "deploy?", "session": "personal/helper"}),
+    )
+    .await;
+    ack_input(&mut w, &input).await;
+    let started_at = std::time::Instant::now();
+    w.send(
+        "event",
+        json!({"event": agent_event(&b, "status",
+                                    json!({"state": "idle", "detail": "error_during_execution",
+                                           "in_reply_to": input["payload"]["event_id"]}))}),
+    )
+    .await;
+    let f = frames(&mut w, 2).await;
+    let r = pick(&f, "mcp.result");
+    assert_eq!(r["payload"]["request_id"], rid.as_str());
+    assert_eq!(r["payload"]["error"]["code"], "unavailable", "{r}");
+    assert_eq!(
+        r["payload"]["error"]["message"],
+        "the turn of personal/helper on the question ended without an answer"
+    );
+    assert!(started_at.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        count(
+            &hub,
+            "SELECT count(*) FROM pending_requests WHERE session_id = $1 AND closed_at IS NULL",
+            &a
+        )
+        .await,
+        0
+    );
+}
+
+/// The worker acks an input outside its outbox and sends turn events through it (SPEC §5.2),
+/// so the ack of an ask queued behind input X can reach the hub before the `status idle` of
+/// turn X. That status names X (`in_reply_to`) and leaves the ask open; B's turn on the ask
+/// then answers it.
+#[tokio::test]
+async fn the_end_of_an_earlier_turn_leaves_a_queued_ask_open() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{b}/input"),
+            json!({"text": "build it"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let x = w.expect("session.input").await;
+    ack_input(&mut w, &x).await;
+    hub.wait_session(&b, "turn X", |v| v["state"] == "running")
+        .await;
+
+    let (rid, input) = ask_same_worker(
+        &mut w,
+        &ta,
+        json!({"text": "green?", "session": "personal/helper"}),
+    )
+    .await;
+    ack_input(&mut w, &input).await;
+    hub.wait_session(&b, "the ask delivered", |v| v["queue_len"] == 0)
+        .await;
+    // A status without `in_reply_to` (an older worker) fails nothing.
+    w.event(agent_event(&b, "status", json!({"state": "idle"})))
+        .await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    w.event(agent_event(
+        &b,
+        "status",
+        json!({"state": "idle", "in_reply_to": x["payload"]["event_id"]}),
+    ))
+    .await;
+    w.expect_silence(Duration::from_millis(300)).await;
+
+    w.send("event", json!({"event": final_answer(&b, &input, "Yes.")}))
+        .await;
+    let f = frames(&mut w, 2).await;
+    let r = pick(&f, "mcp.result");
+    assert_eq!(r["payload"]["request_id"], rid.as_str());
+    assert_eq!(r["payload"]["result"]["reply"], "Yes.", "{r}");
+}
+
 #[tokio::test]
 async fn the_answer_waits_for_an_offline_worker_and_a_restart_closes_the_ask() {
     let hub = TestHub::start().await;

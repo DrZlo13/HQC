@@ -365,6 +365,8 @@ impl ClaudeCodeAdapter {
     }
 
     /// The CLI command line (SPEC §8.1). Besides the protocol flags:
+    /// - `--thinking-display summarized`, as the VS Code extension passes it: without it the
+    ///   thinking blocks of newer models (opus 5.5 on 2.1.312) come with empty text;
     /// - `--setting-sources user,local` and `--permission-mode` (the ask mode or `auto`,
     ///   T38): a repository's own
     ///   `.claude/settings.json` (hooks, `defaultMode`) is not applied; `local` stays for the
@@ -398,6 +400,8 @@ impl ClaudeCodeAdapter {
             "host",
             "--permission-prompt-tool",
             "stdio",
+            "--thinking-display",
+            "summarized",
         ]
         .map(String::from)
         .into();

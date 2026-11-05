@@ -14,14 +14,20 @@
       {
         "id": "q1",
         "text": "Which area should I focus on first?",
+        "header": "Focus",
         "options": [
           "Hub",
           "Worker"
+        ],
+        "option_descriptions": [
+          "axum + Postgres hub work",
+          ""
         ]
       },
       {
         "id": "q2",
         "text": "Which checks should run?",
+        "header": "Checks",
         "options": [
           "fmt",
           "clippy",

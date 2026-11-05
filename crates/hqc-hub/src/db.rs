@@ -2637,14 +2637,15 @@ pub async fn close_request(db: &PgPool, id: Uuid, result: Option<&Value>) -> sql
     Ok(r.rows_affected() > 0)
 }
 
-/// The worker closed the request itself (its own response or cancel event).
+/// The worker closed the request itself (its cancel event): whether it was open, and is
+/// closed now.
 pub async fn close_request_by_worker(
     db: &PgPool,
     session_id: Uuid,
     kind: &str,
     request_id: &str,
-) -> sqlx::Result<()> {
-    sqlx::query(
+) -> sqlx::Result<bool> {
+    let r = sqlx::query(
         "UPDATE pending_requests SET closed_at = now(), updated_at = now()
          WHERE session_id = $1 AND kind = $2 AND request_id = $3 AND closed_at IS NULL",
     )
@@ -2653,7 +2654,7 @@ pub async fn close_request_by_worker(
     .bind(request_id)
     .execute(db)
     .await?;
-    Ok(())
+    Ok(r.rows_affected() > 0)
 }
 
 pub async fn open_requests_of_session(

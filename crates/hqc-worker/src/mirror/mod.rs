@@ -16,7 +16,9 @@
 //!
 //! Who writes (SPEC §9.2, §9.3). Records the worker's own Claude Code process produced are
 //! known by uuid or, for prompts, by the input's text ([`OwnRecords`], fed by the adapter) and
-//! skipped: the adapter sent them. Any other main-chain record is someone else's:
+//! skipped: the adapter sent them. So is a background task's notification while that process
+//! runs ([`map::is_task_notification`]): the adapter reported it from stream-json under
+//! another uuid. Any other main-chain record is someone else's:
 //! - while a process of this worker runs the session (`locked_by: hqc`) the mirror does not
 //!   emit it and does not move past it for [`GRACE`] (stream-json may lag behind the file).
 //!   Then, with Claude Code's registry of live sessions (below), it goes out like any other
@@ -468,7 +470,11 @@ impl Mirror {
                 continue;
             };
             let typed = map::typed_text(&rec);
-            if self.own.claim(runtime, uuid, typed.as_deref()) {
+            // A background task's notification while the worker's process runs the session:
+            // the adapter reported its stream-json line (`system task_notification`), which
+            // has another uuid; the record is the CLI's own, not another writer's.
+            let reported = live && map::is_task_notification(&rec);
+            if reported || self.own.claim(runtime, uuid, typed.as_deref()) {
                 if let Some(f) = self.track(path, runtime, link, &rec) {
                     out.push(wrap(f, row.title.clone()));
                 }

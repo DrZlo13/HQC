@@ -250,9 +250,11 @@ async fn deny_with_message_reaches_control_response() {
     let resp = &sent[1]["response"]["response"];
     assert_eq!(resp["behavior"], "deny", "{}", sent[1]);
     let want = format!(
-        "{}\n{text}",
+        "{}{text}",
         hqc_worker::adapter::claude_code::engine::DENY_WITH_TEXT
     );
     assert_eq!(resp["message"], want.as_str());
+    // The turn goes on with the user's text, as after the VS Code tab's text answer.
+    assert_eq!(resp["interrupt"], false);
     w.stop().await;
 }

@@ -966,7 +966,7 @@ async fn live_bash_turn_with_approval() {
     )));
     assert!(events.iter().any(|e| matches!(
         &e.kind,
-        EventKind::AgentMessage { text, r#final: true, in_reply_to: Some(r) } if text.contains("DONE") && *r == input_id
+        EventKind::AgentMessage { text, r#final: true, in_reply_to: Some(r), .. } if text.contains("DONE") && *r == input_id
     )));
 
     // Event ids against the transcript.

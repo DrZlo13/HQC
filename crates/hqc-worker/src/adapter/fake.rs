@@ -145,6 +145,7 @@ pub fn agent_message(session_id: Uuid, text: &str) -> Event {
             text: text.into(),
             r#final: false,
             in_reply_to: None,
+            runtime: false,
         },
     )
 }

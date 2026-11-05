@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.69, 2026-11-05. Status: the architecture agreed after six reviews and a survey of
+Version 0.69, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -412,8 +412,8 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result`; for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
-| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the input the adapter sent last (§8.1), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1) |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
+| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the input the adapter sent last once the runtime echoed it (§8.1), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; once an input is written during that turn, the turn names no input until the runtime echoes it: echoed after that turn's `result`, the turn's final message and `status idle` name none; taken into the turn after a tool result, the rest of the turn names it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
 
 `system` codes (the list is open; the client shows an unknown code as text):
@@ -1777,9 +1777,9 @@ The reply to an ask:
   turn is the one the status names with `in_reply_to` (§4), not the target's last delivered
   input: the worker acks the next input outside its outbox (§5.2), so that ack may reach the
   hub before the `status idle` of the turn before it, and an ask queued behind that turn would
-  fail as its own turn starts. A `status idle` without `in_reply_to` (an older worker) fails
-  nothing, and the ask waits for its timeout. The asking session's turn stays `running` while it waits; the
-  turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
+  fail as its own turn starts. A `status idle` without `in_reply_to` (an older worker, or a
+  turn that names no input, §8.1) fails nothing, and the ask waits for its timeout. The asking
+  session's turn stays `running` while it waits; the turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
   waiting call as "Waiting for a reply from <session>" with its timer (the runtime's
   `tool.call` of `hqc_ask`, no event of its own).
 - Since 0.47 (T42; the 2026-10-31 run, where B sent a changed file back with `hqc_send`
@@ -1947,7 +1947,9 @@ VS Code extension passes: without it the `thinking` blocks of opus 5.5 come with
 2.1.312, so there was no `agent.thinking`; with it they carry the summarized thinking, in
 stream-json and in the transcript under the same `uuid` (checked live on 2.1.312 with haiku).
 The flag is not in `--help` (`choices: summarized, omitted, highlights`); the binaries of
-2.1.233, 2.1.277 and 2.1.312 have it. Checked on 2.1.300: `--resume` continues the same uuid and appends to the same
+2.1.233, 2.1.277 and 2.1.312 have it. The worker passes it without a version check, and the CLI
+refuses an option it does not know (`error: unknown option`, 2.1.312), so a CLI that drops the
+flag fails every session start. Checked on 2.1.300: `--resume` continues the same uuid and appends to the same
 jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
 `allow_local_mcp`: since 0.56 such a session runs without the flag, the hqc server still comes
@@ -2080,7 +2082,10 @@ Mapping of stream-json to §4: `stream_event` text delta → `agent.delta`; `ass
 with text → `agent.message`, where the adapter holds the last text until the
 next stream item: `tool_use` → `final: false`, `result` → `final: true`;
 `tool_use` → `tool.call`; `tool_result` → `tool.result`; `result` → `usage` and
-`status idle`. Since 0.69: an `assistant` text whose `message.model` is `<synthetic>` — a reply the
+`status idle`. Since 0.69 a `result` with `num_turns: 0`, no tokens and no cost (a local slash
+command, the empty second `result` the CLI sends after a turn it started by itself) gives no
+`usage`, which the feed would show as an empty `0 → 0 tokens` line; `/compact` has no tokens
+either but costs, and keeps its `usage`. Since 0.69: an `assistant` text whose `message.model` is `<synthetic>` — a reply the
 CLI wrote itself (an API error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message`
 and the same `uuid` as the transcript record) — → `agent.message` with `runtime: true`, held
 and ended like any other text: the turn it ends has it as the final `agent.message`; `system`
@@ -2101,7 +2106,11 @@ that of the transcript's `system compact_boundary` record) →
 → `ack` of `session.input` (this field tells the echo from a `user` with `tool_result`).
 The CLI repeats on stdout every `control_response` the adapter sent to stdin;
 the adapter skips those lines. `in_reply_to` = the `event_id` of the input the adapter
-sent last.
+sent last, once its echo has come; before that, none (since 0.69). Once an input is written
+during a turn the CLI started by itself after a background task, the turn names no input
+until the CLI echoes it: echoed after that turn's `result` (checked live on 2.1.312), the
+turn's final message and `status idle` name none; taken into the turn after a tool result,
+the rest of the turn names it.
 
 Cost (since 0.28, T27; checked live on 2.1.308, fixtures `cost-turns`, `cost-resume`):
 `result.total_cost_usd` is the cumulative cost of the whole Claude Code session, not of the turn:
@@ -2675,12 +2684,22 @@ All these cancellations are written by the hub: on expiry, `stop` and archiving 
 `canonical: deny` option, so the adapter closes the request in the runtime (§5.3; since 0.69
 that deny also ends the runtime's turn, §8.1); on a worker restart, only the event (§5.2). On `POST /stop` the hub first cancels open requests with
 `stopped`, then sends `session.stop`; the adapter and the worker's supervisor do not emit a
-cancel on `session.stop`. Since 0.69 the Claude Code adapter cancels a request still open when
-the runtime's turn ends with `approval.cancel`/`clarify.cancel {stopped}`: after "No" to one of
-two parallel calls the CLI ends the turn and no longer waits for the other (before, the adapter
-forgot it and the card stayed open, since Claude's requests do not expire). The hub stores a
-worker's cancel only if it closes an open request: one it closed already (`stop`, an answer
-that crossed the cancel) keeps its own event. The hub cancels an open `clarify` the same way: a
+cancel on `session.stop`. Since 0.69 the Claude Code adapter cancels a request of the main agent
+or of a foreground subagent still open when the runtime's turn ends with
+`approval.cancel`/`clarify.cancel {stopped}`: after "No" to one of two parallel calls the CLI
+ends the turn and no longer waits for the other (before, the adapter forgot it and the card
+stayed open, since Claude's requests do not expire). A subagent's request carries `agent_id`,
+the `task_id` of the subagent's `task_started` (the main agent's has none; checked live on
+2.1.312). A foreground subagent (`task_started` with `is_backgrounded: false`, not moved to the
+background since) cannot outlive the main turn, so its request goes as the main agent's; every
+other subagent's request (a background one's, a nested one's) stays open: a background
+subagent's outlives the main turn's `result`, and the CLI still waits for its answer (checked
+live on 2.1.312). A subagent's request still open when its `task_notification` comes (the
+subagent ended) is cancelled there the same way, whichever comes first, that or the main
+turn's `result`. The hub stores
+a worker's cancel only if it closes an open request, in the transaction that closes it, so a
+cancel that fails to be stored leaves the request open for the worker's resend: one it closed
+already (`stop`, an answer that crossed the cancel) keeps its own event. The hub cancels an open `clarify` the same way: a
 `clarify.cancel` event and a `clarify.response` frame with `answers: {}`; the adapter answers
 the runtime `deny`, and the turn continues without answers.
 **Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
@@ -3642,20 +3661,28 @@ without a hub each of these would have to be done peer-to-peer.
 
 ### 0.68 → 0.69 (the feed of a Claude Code session as the VS Code tab shows it)
 §8.1: the adapter passes `--thinking-display summarized`, as the VS Code extension does (opus 5.5
-gave thinking without text, so no `agent.thinking`). A deny without text is the tab's "No": its
+gave thinking without text, so no `agent.thinking`), without a version check: a CLI that drops
+the flag fails every start. A deny without text is the tab's "No": its
 wording with `interrupt: true`, the CLI ends the turn at once (`result error_during_execution`,
 `status idle`); before, the model went on after "The user denied this tool call.". The hub's
-cancellation of a request (expiry, stop, archiving, §10.1) is answered with that deny too, so it
-ends the turn as well. §10.1: a request still open when the turn ends (the other of two
-parallel calls after "No") gets `approval.cancel`/`clarify.cancel {stopped}` from the adapter,
-before dropped silently; the hub stores a worker's cancel only if it closes an open request.
+cancellation of an approval request (stop, archiving, §10.1) is answered with that deny
+too, so it ends the turn as well; a cancelled `clarify` is still denied without `interrupt`, and
+the turn goes on without answers (§10.1). §10.1: a request of the main agent or of a foreground
+subagent still open when the turn ends (the other of two parallel calls after "No") gets
+`approval.cancel`/`clarify.cancel {stopped}` from the adapter, before dropped silently; a
+background subagent's stays open, since the CLI still waits for it, until the subagent's own
+`task_notification`, which cancels its requests still open; the hub stores a worker's cancel only if it closes an open request, in the same
+transaction.
 §4, §7.1: an `hqc_ask` whose turn on the question ends with `status idle` and no final message
 (after "No", `POST /stop`, a turn without text) fails at once with `unavailable`, "the turn of
 <session> on the question ended without an answer", before it waited for its timeout. The turn
 is the one named by the new `status.in_reply_to?`, which the Claude Code adapter sets on the
 `idle` that ends a turn (the next input's `ack` may come before that status); a status without
-it fails nothing. §8.1, §10.1: a
-deny with text uses the tab's wording ("The user provided the following reason for the
+it fails nothing. §8.1: `in_reply_to` names the input sent last only once its echo has come, so a
+turn the CLI starts by itself names no input once an input is written during it, until that
+input is echoed. §4, §8.1: no `usage` for a `result` with `num_turns: 0`, no tokens and no
+cost (a local slash command, the empty second `result` after a turn the CLI starts by itself),
+before shown as `0 → 0 tokens`; `/compact` keeps its `usage`. §8.1, §10.1: a deny with text uses the tab's wording ("The user provided the following reason for the
 rejection:", two spaces, the text) with `interrupt: false`. §4, §8.1: `clarify.request`
 questions carry `header?` and `option_descriptions?` from `AskUserQuestion`. §4, §8.1, §9.1,
 §9.2: new `system` codes from the worker: `task_notification` (stream-json `system

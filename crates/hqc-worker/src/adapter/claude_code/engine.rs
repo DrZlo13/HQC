@@ -9,7 +9,9 @@
 //! - `assistant` `tool_use` → `tool.call`; non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
-//! - `system` `task_notification` (a background task ended) → `system task_notification`;
+//! - `system` `task_notification` (a background task ended) → `system task_notification`,
+//!   except for a task that a subagent started or whose `task_started` said it runs in the
+//!   foreground, until a `task_updated` moves it to the background;
 //!   `system` `compact_boundary` → `system context_compacted`;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //! - `result` → `usage`, `status idle`, end of turn; `usage.cost_usd` is the growth of the
@@ -137,6 +139,13 @@ pub struct Core {
     permission_mode: Option<PermissionMode>,
     /// Message uuids read since the last [`Core::take_seen`].
     seen: Vec<Uuid>,
+    /// Tasks whose `task_started` had `is_backgrounded: false` (a foreground subagent, a Bash
+    /// call that runs for more than about 2 s) or that a subagent started
+    /// (`owned_by_subagent: true`), the latter marked `true`: the CLI
+    /// sends `task_notification` for them too (2.1.312), but they are no background task of
+    /// the session's agent. A task of the agent itself that the CLI moves to the background
+    /// later (`task_updated` `patch.is_backgrounded: true`) leaves the set.
+    quiet_tasks: HashMap<String, bool>,
 }
 
 impl Core {
@@ -164,6 +173,7 @@ impl Core {
             commands: None,
             permission_mode: None,
             seen: Vec::new(),
+            quiet_tasks: HashMap::new(),
         }
     }
 
@@ -412,6 +422,27 @@ impl Core {
                     let mut out: Vec<Action> = self.flush(false).into_iter().collect();
                     out.extend(self.on_permission_denied(&v));
                     out
+                }
+                Some("task_started") => {
+                    let subagent = v["owned_by_subagent"] == true;
+                    if let Some(id) = v["task_id"]
+                        .as_str()
+                        .filter(|_| subagent || v["is_backgrounded"] == false)
+                    {
+                        self.quiet_tasks.insert(id.to_owned(), subagent);
+                    }
+                    vec![]
+                }
+                Some("task_updated") => {
+                    if let Some(id) = v["task_id"]
+                        .as_str()
+                        .filter(|_| v["patch"]["is_backgrounded"] == true)
+                    {
+                        if self.quiet_tasks.get(id) == Some(&false) {
+                            self.quiet_tasks.remove(id);
+                        }
+                    }
+                    vec![]
                 }
                 Some("task_notification") => self.on_task_notification(&v),
                 // Its uuid is that of the transcript's `system compact_boundary` record
@@ -825,8 +856,16 @@ impl Core {
     /// `system/task_notification`: a background task ended (checked live on 2.1.312: it comes
     /// as soon as the task ends, before the turn the CLI then starts by itself). The text is
     /// its `summary`, or "Background task" without one. Not a flush: a held text keeps
-    /// waiting for what decides whether it is final.
-    fn on_task_notification(&self, v: &Value) -> Vec<Action> {
+    /// waiting for what decides whether it is final. Nothing for a task in [`Core::quiet_tasks`];
+    /// a task this process did not see start (it began before a `--resume`) counts as a
+    /// background one.
+    fn on_task_notification(&mut self, v: &Value) -> Vec<Action> {
+        if v["task_id"]
+            .as_str()
+            .is_some_and(|id| self.quiet_tasks.remove(id).is_some())
+        {
+            return vec![];
+        }
         let t = v["summary"]
             .as_str()
             .map(str::trim)

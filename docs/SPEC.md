@@ -2088,7 +2088,13 @@ and ended like any other text: the turn it ends has it as the final `agent.messa
 `status`, `summary`, `output_file`; checked live on 2.1.312 with a `run_in_background` Bash: it
 comes when the task ends, after the `result` of the turn that started it and before the turn
 the CLI then starts by itself, which brings `system/init`, the answer and its own `result`) →
-`system task_notification` with its `summary`, "Background task" without one; `system` `compact_boundary` (`compact_metadata.trigger: manual`
+`system task_notification` with its `summary`, "Background task" without one, unless a subagent
+started the task (its `system` `task_started` has `owned_by_subagent: true`, also after a move to
+the background) or its `task_started` had `is_backgrounded: false` and no `system`
+`task_updated` with `patch.is_backgrounded: true` moved it to the background later (2.1.312
+sends both lines for a foreground subagent, a foreground Bash call that runs for more than about
+2 s and a subagent's Bash calls too, background ones included; a task the process did not see
+start counts as a background one); `system` `compact_boundary` (`compact_metadata.trigger: manual`
 after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
 `system context_compacted` "Context compacted" with the `event_id` derived from that `uuid`; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
@@ -3653,7 +3659,8 @@ deny with text uses the tab's wording ("The user provided the following reason f
 rejection:", two spaces, the text) with `interrupt: false`. §4, §8.1: `clarify.request`
 questions carry `header?` and `option_descriptions?` from `AskUserQuestion`. §4, §8.1, §9.1,
 §9.2: new `system` codes from the worker: `task_notification` (stream-json `system
-task_notification` with its `summary`, "Background task" without one; in the mirror the transcript's `user` record with `origin.kind:
+task_notification` with its `summary`, "Background task" without one, only for a background task
+of the agent itself; in the mirror the transcript's `user` record with `origin.kind:
 task-notification`, which before became a `user.message` with the raw `<task-notification>`
 text, 5 s late, in sessions hqc runs too) and `context_compacted` (`system compact_boundary`).
 §4, §8.1, §9.1: `agent.message` carries `runtime?`, `true` for an `assistant` text with `model:

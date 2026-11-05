@@ -349,7 +349,7 @@ pub(crate) async fn admit(
     Ok(())
 }
 
-/// The chain of a new message, spawn or schedule of session `caller` (SPEC §7.1): its
+/// The chain of a new message, spawn, schedule or move wake of session `caller` (SPEC §7.1): its
 /// call's chain moved on ([`next_chain`]) with the caller's mode for the cap (T39).
 pub(crate) async fn outgoing_chain(
     app: &AppState,

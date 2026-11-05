@@ -15,7 +15,7 @@
 //!   ([`once_id`]) and a repeat answers from what the first call wrote.
 //! - A deferred tool (`hqc_ask`) answers [`Answer::Later`]: the hub acks the call frame and
 //!   sends `mcp.result` on its own later.
-//! - A tool that waits for the worker (`hqc_spawn` with a worktree, T47) answers
+//! - A tool that waits for the worker (`hqc_spawn` with a worktree, T47; `hqc_move`) answers
 //!   [`Answer::Wait`]: the connection goes on reading frames, and the result goes under the
 //!   call's frame id once the wait is over; if the connection closes first, nothing is sent
 //!   and the worker sends the call again after its next `hello`.
@@ -106,6 +106,10 @@ pub const REGISTRY: &[HubTool] = &[
     HubTool {
         name: hqc_proto::mcp::SCHEDULE,
         run: |app, caller, c| Box::pin(crate::schedules::tool(app, caller, c)),
+    },
+    HubTool {
+        name: hqc_proto::mcp::MOVE,
+        run: |app, caller, c| Box::pin(crate::moves::tool(app, caller, c)),
     },
 ];
 

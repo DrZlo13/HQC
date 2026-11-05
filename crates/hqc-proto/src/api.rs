@@ -80,6 +80,10 @@ pub struct Session {
     /// (`session.state.subagents`, since SPEC 0.68). Absent — 0.
     #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
     pub subagents: u32,
+    /// When the requesting user made the session a favorite (`PUT .../favorite`); favorites
+    /// are per user. Absent — not a favorite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_at: Option<DateTime<Utc>>,
 }
 
 /// `spawned_by` of a session: the spawning session and its address
@@ -107,6 +111,7 @@ impl Session {
             effective_permission_mode: self.effective_permission_mode,
             permission_capped_by: self.permission_capped_by.clone(),
             subagents: self.subagents,
+            favorite_at: self.favorite_at,
         }
     }
 }
@@ -237,6 +242,9 @@ pub struct Project {
     pub icon: Option<ProjectIcon>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// As in the session object: when the requesting user made the project a favorite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub favorite_at: Option<DateTime<Utc>>,
 }
 
 /// A project's color (SPEC §3 Project, T49): the names of the client's `theme.ts`. No
@@ -996,6 +1004,8 @@ mod tests {
             held.commands, None,
             "absent until a process reported a list"
         );
+        assert_eq!(summary.favorite_at, s.favorite_at);
+        assert!(s.favorite_at.is_some() && held.favorite_at.is_none());
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));
         let sp: SearchPage = roundtrip(include_str!("../examples/wire/api.search.json"));
         assert!(sp.results[0].seq.is_some() && sp.results[1].seq.is_none());
@@ -1041,6 +1051,7 @@ mod tests {
         assert!(matches!(patch.icon, Some(ProjectIcon::Emoji { .. })));
         assert!(matches!(p.icon, Some(ProjectIcon::Image { .. })));
         assert!(l.projects[0].icon.is_none(), "absent: the first letters");
+        assert!(p.favorite_at.is_some() && l.projects[0].favorite_at.is_none());
         let letters: PatchProject =
             serde_json::from_str(r#"{"icon":{"kind":"letters","value":"PM"}}"#).unwrap();
         assert_eq!(

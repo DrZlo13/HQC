@@ -60,6 +60,10 @@ pub fn router(app: AppState) -> Router {
                 .delete(api::delete_project),
         )
         .route(
+            "/api/projects/{id}/favorite",
+            put(api::favorite_project).delete(api::unfavorite_project),
+        )
+        .route(
             "/api/projects/{id}/icon",
             get(icons::get)
                 .put(icons::put)
@@ -110,6 +114,10 @@ pub fn router(app: AppState) -> Router {
         )
         .route("/api/requests", get(api::open_requests))
         .route("/api/sessions/{id}/read_cursor", put(api::read_cursor))
+        .route(
+            "/api/sessions/{id}/favorite",
+            put(api::favorite_session).delete(api::unfavorite_session),
+        )
         .route("/api/workers", get(api::workers))
         .route("/api/workers/enroll/confirm", post(api::enroll_confirm))
         .route("/api/workers/enroll/{code}", get(api::enroll_info))

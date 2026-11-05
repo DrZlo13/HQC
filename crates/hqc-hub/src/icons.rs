@@ -183,7 +183,7 @@ pub async fn put(
         .collect();
     let p = db::set_project_icon_image(&app.db, id, mime, &data, &sha).await?;
     tracing::info!(project_id = %id, mime, size = data.len(), "project icon image set");
-    Ok(Json(p.to_api()))
+    Ok(Json(crate::api::project_view(&app, &user, &p).await?))
 }
 
 /// `GET /api/projects/{id}/icon`.

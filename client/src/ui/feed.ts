@@ -257,10 +257,14 @@ export function toolLabel(tool: string): string {
   return m ? `${m[2]} (${m[1]})` : tool;
 }
 
-/** `text` with the paths under `root` (the session's folder, absolute) relative to it. */
+/** `text` with the paths under `root` (the session's folder, absolute) relative to it: only
+ *  where a path starts (at the start, after a space, a quote, `=` or `(`), not inside a
+ *  longer one such as `/backup<root>/f`. */
 export function relativePaths(text: string, root: string | undefined): string {
   const r = root?.replace(/\/+$/, '');
-  return r ? text.split(`${r}/`).join('') : text;
+  if (!r) return text;
+  const escaped = r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(`(^|[\\s"'\`=(])${escaped}/`, 'g'), '$1');
 }
 
 /** A call as one line of text, as a tool group's header shows its last call: `$ command`

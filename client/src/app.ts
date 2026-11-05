@@ -480,10 +480,9 @@ export class AppState {
     this.changed();
   }
 
-  /** Changes the session's model or auto-compaction (`null`: the runtime's default). A
-   *  running agent switches to a named model at once (`null` takes effect at its next start)
-   *  and is started again for a new auto-compaction once it is between turns. */
-  async setAgentSettings(sessionId: string, patch: Pick<SessionPatch, 'model' | 'autocompact'>): Promise<void> {
+  /** Changes the session's model (`null`: the runtime's default). A running agent switches
+   *  to a named model at once; `null` takes effect at its next start. */
+  async setAgentSettings(sessionId: string, patch: Pick<SessionPatch, 'model'>): Promise<void> {
     const s = await this.api.patchSession(sessionId, patch);
     this.sessions.set(s.id, s);
     this.changed();

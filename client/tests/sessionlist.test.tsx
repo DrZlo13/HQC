@@ -232,7 +232,7 @@ describe('SessionList (desktop column)', () => {
     expect(sub('Stone textures').querySelector('.session-agents')!.textContent).toBe(' · 2 agents');
   });
 
-  it('creates a session with a model and an auto-compaction from the form', async () => {
+  it('creates a session with a model from the form', async () => {
     const base = hubApi();
     let app!: AppState;
     const api = { ...base, workspaces: async () => app.workspaces.get('p1') ?? [], workers: async () => [] };
@@ -248,10 +248,6 @@ describe('SessionList (desktop column)', () => {
         el.dispatchEvent(new Event('change', { bubbles: true }));
       });
     await set('model', 'haiku');
-    await set('autocompact', 'window');
-    await set('autocompact_thousands', '400');
-    // No agent runs yet: nothing to restart.
-    expect(root.querySelector('.new-session .field-hint')).toBeNull();
     await act(async () => {
       root.querySelector('form.new-session')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       for (let i = 0; i < 5; i++) await Promise.resolve();
@@ -261,7 +257,6 @@ describe('SessionList (desktop column)', () => {
       cwd: '',
       permission_mode: undefined,
       model: 'haiku',
-      autocompact: 400_000,
     });
   });
 

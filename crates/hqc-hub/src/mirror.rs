@@ -171,7 +171,6 @@ pub async fn ingest(
                     cwd: &cwd,
                     title: None,
                     model: None,
-                    autocompact: None,
                     auto_approve: false,
                     permission_mode: None,
                 },

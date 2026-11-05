@@ -163,7 +163,6 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         session_id,
         runtime: Runtime::ClaudeCode,
         model: Some("claude-haiku-5-5".into()),
-        autocompact: None,
         workspace: workdir.to_path_buf(),
         workdir: workdir.to_path_buf(),
         environment: with_permissions(crate::permissions::Permissions::default()),
@@ -1119,45 +1118,6 @@ async fn adapter_switches_the_model_of_a_running_process() {
     ] {
         assert!(core.on_line(answer).is_empty(), "{answer}");
     }
-}
-
-/// Auto-compaction reaches the CLI at its start: a window as `--autocompact <tokens>`, off as
-/// `DISABLE_AUTO_COMPACT=1` in its environment, the runtime's default as neither.
-#[test]
-fn command_line_carries_the_autocompaction() {
-    let work = tempfile::tempdir().unwrap();
-    let config = tempfile::tempdir().unwrap();
-    let factory =
-        ClaudeCodeAdapters::new(options(config.path()), Arc::new(ScriptedClaude::new("")));
-    let a = ClaudeCodeAdapter {
-        session_id: Uuid::nil(),
-        opts: factory.opts.clone(),
-        spawner: factory.spawner.clone(),
-        events: mpsc::channel(1).0,
-        proc: None,
-    };
-    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
-    let command = |s: &StartSpec| {
-        let c = a.command(s, &Uuid::nil(), false, None);
-        let window = c
-            .args
-            .iter()
-            .position(|a| a == "--autocompact")
-            .map(|i| c.args[i + 1].clone());
-        let off: Vec<String> = c
-            .env
-            .iter()
-            .filter(|(k, _)| k == super::DISABLE_AUTO_COMPACT)
-            .map(|(_, v)| v.clone())
-            .collect();
-        (window, off)
-    };
-    s.autocompact = Some(300_000);
-    assert_eq!(command(&s), (Some("300000".into()), vec![]));
-    s.autocompact = Some(0);
-    assert_eq!(command(&s), (None, vec!["1".to_string()]));
-    s.autocompact = None;
-    assert_eq!(command(&s), (None, vec![]));
 }
 
 /// The agent gets a cleared environment with only the allowed variables (SPEC §14).

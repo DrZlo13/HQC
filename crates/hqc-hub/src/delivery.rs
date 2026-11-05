@@ -167,7 +167,6 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
             .unwrap_or(Runtime::ClaudeCode),
         acp_agent: s.acp_agent.clone(),
         model: s.model.clone(),
-        autocompact: s.autocompact.and_then(|n| u32::try_from(n).ok()),
         workspace_path: ws.as_ref().map(|w| w.path.clone()),
         cwd: s.cwd.clone(),
         runtime_session_id: s.runtime_session_id.clone(),

@@ -302,7 +302,6 @@ async fn refusals_come_at_once() {
             cwd: ".",
             title: Some("Secret"),
             model: None,
-            autocompact: None,
             auto_approve: false,
             permission_mode: None,
         },

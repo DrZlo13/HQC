@@ -241,21 +241,13 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     return 'idle';
   }
 
-  /** `model` and `autocompact` of a create or `PATCH` body: absent stays, `null` is the
-   *  runtime's default. */
+  /** `model` of a create or `PATCH` body: absent stays, `null` is the runtime's default. */
   function agentSettings(s, body) {
     if (body?.model !== undefined) {
       if (body.model !== null && !/^(?!-)[A-Za-z0-9._:-]{1,64}$/.test(String(body.model))) {
         throw fail(400, 'bad_request', 'model must be 1..64 characters of A-Z a-z 0-9 . _ : -');
       }
       s.model = body.model ?? undefined;
-    }
-    if (body?.autocompact !== undefined) {
-      const n = body.autocompact;
-      if (n !== null && n !== 0 && !(Number.isInteger(n) && n >= 100000 && n <= 1000000)) {
-        throw fail(400, 'bad_request', 'autocompact must be 0 (off) or a window of 100000..=1000000 tokens');
-      }
-      s.autocompact = n ?? undefined;
     }
     return s;
   }
@@ -279,7 +271,6 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       agent: {
         runtime: 'claude_code',
         ...(s.model ? { model: s.model } : {}),
-        ...(s.autocompact !== undefined ? { autocompact: s.autocompact } : {}),
         runtime_session_id: s.id,
         process_state: s.turn ? 'running' : 'stopped',
         disallowed_tools: [],

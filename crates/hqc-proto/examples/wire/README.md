@@ -87,9 +87,7 @@ writes it into a running turn (§17.2).
 
 SPEC 0.69: `api.session.json`, `client.session.summary.json`, `api.project.json` and the second
 project of `api.projects.json` carry `favorite_at`, the time the requesting user starred them
-(absent: not a favorite). A session's model and auto-compaction: `hub.session.model.json`
-switches the model, `hub.session.model.default.json` (`model: null`) goes back to the
-runtime's default; `hub.session.autocompact.json` sets the context window the runtime compacts in,
-`hub.session.autocompact.off.json` (`0`) turns auto-compaction off. `hub.session.start.json`
-carries `autocompact`, `api.session.json` shows `model` and `autocompact` in `agent`, and
-`api.session.request.json` creates a session with both.
+(absent: not a favorite). A session's model: `hub.session.model.json` switches the model,
+`hub.session.model.default.json` (`model: null`) goes back to the runtime's default;
+`api.session.json` shows `model` in `agent`, and `api.session.request.json` creates a session
+with one.

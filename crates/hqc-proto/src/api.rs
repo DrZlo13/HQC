@@ -124,10 +124,6 @@ pub struct Agent {
     pub acp_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Auto-compaction as `session.start.autocompact`: absent — the runtime's default, 0 —
-    /// off, otherwise the context window in tokens.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autocompact: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_session_id: Option<String>,
     pub process_state: ProcessState,
@@ -217,10 +213,6 @@ pub struct CreateSessionRequest {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Absent: the runtime's default; 0 — off, otherwise the context window in tokens,
-    /// 100000..=1000000 ([`crate::frame::valid_autocompact`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autocompact: Option<u32>,
     #[serde(default)]
     pub auto_approve: bool,
     /// Absent: the worker's `[permissions] mode` (T38). `auto` only from the worker owner.
@@ -1170,13 +1162,9 @@ mod tests {
         let s: CreateSessionRequest =
             roundtrip(include_str!("../examples/wire/api.session.request.json"));
         assert_eq!(s.workspace_id, Some(w.id));
-        // The model and the auto-compaction, as the session object shows them in `agent`.
+        // The model, as the session object shows it in `agent`.
         let created: Session = roundtrip(include_str!("../examples/wire/api.session.json"));
-        assert_eq!(
-            (s.model.as_deref(), s.autocompact),
-            (created.agent.model.as_deref(), created.agent.autocompact)
-        );
-        assert_eq!(created.agent.autocompact, Some(300_000));
+        assert_eq!(s.model.as_deref(), created.agent.model.as_deref());
         assert_eq!(
             serde_json::from_str::<CreateSessionRequest>("{}").unwrap(),
             CreateSessionRequest::default()

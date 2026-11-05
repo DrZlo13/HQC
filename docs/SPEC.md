@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.73, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.74, 2026-11-05. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -321,7 +321,10 @@ looked up by the pair (`worker_id`, `runtime_session_id`).
 ### Agent (embedded in Session)
 `runtime` (claude_code / acp / bare / none; `none` — only for the worker's service session:
 there is no agent and no process starts, §10.2), `acp_agent` (the agent's name from the
-worker's local config, for `acp`), `model`, `runtime_session_id` (a string: the jsonl uuid for
+worker's local config, for `acp`), `model` (since 0.74 also switched with `PATCH`, §6),
+`autocompact` (nullable, since 0.74: null — the runtime's default; 0 — auto-compaction off;
+100000..1000000 — the context window in tokens the runtime compacts by, §8.1; hub migration
+`0034`), `runtime_session_id` (a string: the jsonl uuid for
 Claude Code, an arbitrary id for ACP agents), `process_state`
 (stopped/starting/running/stopping), `system_prompt`, `disallowed_tools[]`,
 `restricted` (§8.4), `start_failures` (a counter, §5.2). Changing the runtime between turns
@@ -344,6 +347,13 @@ permission_cap?, capped_by?}` for agent→agent chains, otherwise null; the cap 
 
 ### ReadCursor
 `user_id`, `session_id`, `last_read_seq`. The source of "unread" (the rule is in §6).
+
+### Favorite
+Since 0.74: `user_id`, `session_id` | `project_id`, `created_at` — a session or a project the
+user starred; two tables, a row goes with its user, session or project (hub migration
+`0033`). Favorites are the user's own: another user's star on the same object is never shown,
+and starring does not touch the session's `updated_at`. The session object, `session.summary`
+and the project object carry `favorite_at?` (the row's `created_at`) for the requesting user.
 
 ### Artifact
 `owner_id`, `session_id` (the first session whose input carried the artifact; null until then),
@@ -729,8 +739,10 @@ MCP calls (worker → hub → worker):
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
   cwd, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?,
-  permission_mode?, allow_rules?[]}
-  — `mode`: `new` | `resume` (§5.2); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
+  permission_mode?, allow_rules?[], autocompact?}
+  — `mode`: `new` | `resume` (§5.2); `autocompact` (since 0.74) — the session's
+  `agent.autocompact` (§3 Agent), absent — the runtime's default; the worker refuses a value
+  outside 0 and 100000..1000000 with `error {invalid_frame}`; `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto`, the
@@ -788,6 +800,20 @@ MCP calls (worker → hub → worker):
   `session.start` carries the mode). The hub sends it when the worker is connected and
   otherwise relies on `session.start`; a `session.start` for a running agent whose mode differs
   switches it too.
+- `session.model` {session_id, model | null} → `ack` (since 0.74) — the user changed the
+  session's model (§6); `null` — the runtime's default. A running Claude Code agent switches at
+  once, also mid-turn (`set_model`, §8.1); `null` and a stopped agent take effect at the next
+  start. A session the worker has not started is only acked; an invalid name is
+  `error {invalid_frame}`. A `session.start` for a running agent with another model switches it
+  too.
+- `session.autocompact` {session_id, autocompact | null} → `ack` (since 0.74) — the user changed
+  the session's auto-compaction (§3 Agent). The runtime takes it only at start, so the worker
+  restarts a running agent with `--resume` (§8.1): at once when no turn runs, no input is
+  written into the running turn (§17.2) and no switch to `ask` is pending (§5.3
+  `permission_cap`), otherwise when the turn ends. A stopped agent takes it at the next start; a
+  value outside 0 and 100000..1000000 is `error {invalid_frame}`. The restart costs what any
+  restart costs: MCP servers and the ssh agent start again, and "for the session" approvals of
+  the process are gone.
 - `session.cleanup` {session_id, workspace_path | null, cwd, event_ids[]} → `ack` (since 0.23) —
   after `session.kill` when a session or its project is archived or deleted: remove the inbox
   folders of the inputs `event_ids` (for a session without a workspace — its scratch folder;
@@ -1220,10 +1246,17 @@ the rest is marked "later"):
   the worker (§5.3); without `path`: `allowed_roots`; outside them: `400 invalid_path`;
   offline: `409 worker_offline`
 - `GET/POST /api/projects/{id}/sessions` (list: `{sessions: [<session>]}`; create:
-  {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?} → `201` and
-  the session object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4).
+  {title?, workspace_id?, worker_id?, cwd?, model?, autocompact?, auto_approve?, permission_mode?}
+  → `201` and the session object, `api.session.request.json`), `GET/PATCH/DELETE
+  /api/sessions/{id}` (§17.4).
   `permission_mode` (since 0.42, T38): `ask` | `auto` (anything else: `422`, the body cannot be read); absent — the
-  worker's default. `PATCH /api/sessions/{id}` {title?, auto_approve?, permission_mode?}:
+  worker's default. `autocompact` (since 0.74): 0 or 100000..1000000 (§3 Agent), otherwise
+  `400`. `PATCH /api/sessions/{id}` {title?, auto_approve?, permission_mode?, model?,
+  autocompact?}: `model` and `autocompact` (since 0.74) — absent: unchanged, `null`: the
+  runtime's default; they are checked as on creation before anything is written, the service
+  session answers `409 system_session`, and the hub sends the worker `session.model` or
+  `session.autocompact` (§5.3). Neither is in `session.summary`: another device sees the change
+  when it fetches the session object. `permission_mode` in `PATCH`:
   `permission_mode` switches the session's mode and sends the worker `session.permission_mode`
   (§5.3); `auto` only by the worker owner (`403`, as for `auto_approve`), `ask` by whoever may
   manage the session; the service session: `409 system_session`. The reply carries the stored
@@ -1284,6 +1317,13 @@ the rest is marked "later"):
   user's own sessions and asks count: another user's request, or another user's ask aimed at
   the user's session, is never listed. The same list comes over `/api/ws` as `requests` (below)
 - `PUT /api/sessions/{id}/read_cursor` {last_read_seq}
+- `PUT/DELETE /api/sessions/{id}/favorite`, `PUT/DELETE /api/projects/{id}/favorite` (since
+  0.74, §3 Favorite): for whoever may read the session or the project, as `read_cursor`;
+  `PUT` → `200 {favorite_at}` (again: the same time), `DELETE` → `204` (also when there was
+  none). A session's change reaches the user's clients as `session.summary`; a project's has no
+  frame, another device sees it at the next `GET /api/projects`. The client shows a Favorites
+  block of the starred sessions of every project above the session groups, newest first, and the
+  starred projects first on the rail.
 - `GET /api/workers` → `{workers[]}`: workers that are not revoked; `?include_revoked=1` adds
   the revoked ones (the "Settings" screen). The worker object is `{id, name, os, status: online
   | offline | revoked, revoked_at?, last_seen?, system_session_id, ...}` (§3 Worker).
@@ -2291,6 +2331,18 @@ adapter's own request is reported, also of the mode the session already had: a c
 (§5.3) waits for that confirmation before it is written to stdin. Verified live on 2.1.308
 (`live_cap`): a process started in `auto` confirmed `default` within milliseconds of the
 request, and the next turn's `touch` was asked about.
+
+Model and auto-compaction (since 0.74). `agent.model` goes to `--model`; `session.model` for a
+running process is `{"type": "control_request", "request_id": "hqc-model-<uuid>", "request":
+{"subtype": "set_model", "model": "<name>"}}`, whose answer is only logged. Checked live on
+2.1.312 with haiku: the CLI answers `success` with the full model name at once, also during a
+Bash call, and the next model call of the same turn already uses the new model (the turn's
+`modelUsage` has both). `agent.autocompact` N becomes `--autocompact N`, 0 becomes
+`DISABLE_AUTO_COMPACT=1` in the process environment (`get_context_usage` then reports
+`isAutoCompactEnabled: false`); absent — neither. The threshold the CLI compacts at is the window
+minus min(maxOutput, 20000) minus 13000: `--autocompact 300000` gave 267000 on 2.1.312. A
+running process does not take a new window (`apply_flag_settings {autoCompactWindow}` did not
+change it), hence the restart of §5.3 `session.autocompact`.
 
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
 "interrupt"}` to stdin; the CLI ends the turn with a `result` record with `subtype:
@@ -3768,6 +3820,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.73 → 0.74 (session settings: favorites, model, auto-compaction, quoting)
+§3 Favorite, §6: a user stars sessions and projects; favorites are personal, in two tables
+(migration `0033_favorites`), `PUT/DELETE /api/sessions/{id}/favorite` and
+`/api/projects/{id}/favorite`, `favorite_at?` in the session object, `session.summary` and the
+project object; the client shows a Favorites block above the session groups and starred
+projects first on the rail. §3 Agent, §5.3, §6, §8.1: the model and the auto-compaction of a
+session are set on creation and changed with `PATCH`; the frames `session.model` (a running
+Claude Code agent switches with `set_model`, also mid-turn) and `session.autocompact` (`--autocompact
+N`, 0 — `DISABLE_AUTO_COMPACT=1`; a running agent restarts with `--resume` between turns);
+`session.start.autocompact`; migration `0034_session_autocompact`. Client only: a Quote button
+under a selection in the feed puts the selected text into the message field as `> ` lines.
 
 ### 0.72 → 0.73 (a dot on the tab's icon)
 §6 client layout: the tab's icon (the mark) gets a small amber dot in its lower right corner, with a clear gap cut around it, while a session of any project

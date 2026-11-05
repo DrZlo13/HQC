@@ -1369,3 +1369,112 @@ async fn live_session_title() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A message written while a Bash call runs joins the turn (PR #5): its echo is accepted,
+/// the turn's final answer uses it, and it is neither carried nor dropped. Haiku, two turns.
+///
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_input_joins_turn -- --nocapture
+#[tokio::test]
+async fn live_input_joins_turn() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp");
+    let work = root.join(format!("live-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&work).unwrap();
+    let work = work.canonicalize().unwrap();
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(Recording::default()));
+    let session_id = Uuid::now_v7();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: work.clone(),
+        workdir: work.clone(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
+        runtime_session_id: Some(Uuid::new_v4().to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: true,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
+        folder_rules: None,
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+    let input = |id, text: &str| SessionInput {
+        session_id,
+        event_id: id,
+        text: text.into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+    };
+    let first = Uuid::now_v7();
+    adapter
+        .input(&input(
+            first,
+            "Run the shell command `sleep 10` with the Bash tool. When it returns, reply with \
+             exactly the code word I send you meanwhile, or NONE if I send none.",
+        ))
+        .await
+        .unwrap();
+    let joined = Uuid::now_v7();
+    let mut injected = false;
+    let mut accepted = Vec::new();
+    let ended;
+    let mut finals = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("turn did not end in 180 s")
+            .expect("channel closed");
+        println!("{}", label(&ev));
+        match ev {
+            AdapterEvent::Event(e) => match &e.kind {
+                EventKind::ToolCall { .. } if !injected => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    assert!(adapter.can_inject(), "a Bash call runs, nothing is open");
+                    let wrote = adapter
+                        .inject_with(&input(joined, "The code word is PINEAPPLE."), &[])
+                        .await
+                        .unwrap();
+                    assert!(wrote);
+                    injected = true;
+                }
+                EventKind::AgentMessage {
+                    text,
+                    r#final: true,
+                    ..
+                } => finals.push(text.clone()),
+                _ => {}
+            },
+            AdapterEvent::InputAccepted { event_id } => accepted.push(event_id),
+            AdapterEvent::TurnEnded { carried, dropped } => {
+                ended = Some((carried, dropped));
+                break;
+            }
+            AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+            _ => {}
+        }
+    }
+    adapter.kill().await.unwrap();
+    println!("accepted {accepted:?}, finals {finals:?}, ended {ended:?}");
+    assert!(injected, "the Bash call came");
+    assert_eq!(accepted, [first, joined]);
+    let (carried, dropped) = ended.unwrap();
+    assert!(carried.is_empty() && dropped.is_empty());
+    assert!(finals.last().is_some_and(|t| t.contains("PINEAPPLE")));
+}

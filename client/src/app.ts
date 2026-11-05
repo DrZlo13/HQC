@@ -3,7 +3,7 @@
 // the list order (T50) of the projects that have been looked at, and a session archived from
 // the list that has not gone to the hub yet.
 
-import { Api, ApiError, type NewSessionOptions } from './api';
+import { Api, ApiError, type NewSessionOptions, type SessionPatch } from './api';
 import type {
   ClarifyAnswer,
   ListMode,
@@ -477,6 +477,15 @@ export class AppState {
   /** Switches the session's permission mode (T38); the hub tells a running agent at once. */
   async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
     const s = await this.api.patchSession(sessionId, { permission_mode: mode });
+    this.sessions.set(s.id, s);
+    this.changed();
+  }
+
+  /** Changes the session's model or auto-compaction (`null`: the runtime's default). A
+   *  running agent switches its model at once and is started again for a new
+   *  auto-compaction after its current turn. */
+  async setAgentSettings(sessionId: string, patch: Pick<SessionPatch, 'model' | 'autocompact'>): Promise<void> {
+    const s = await this.api.patchSession(sessionId, patch);
     this.sessions.set(s.id, s);
     this.changed();
   }

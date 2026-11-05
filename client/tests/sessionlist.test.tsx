@@ -232,6 +232,39 @@ describe('SessionList (desktop column)', () => {
     expect(sub('Stone textures').querySelector('.session-agents')!.textContent).toBe(' · 2 agents');
   });
 
+  it('creates a session with a model and an auto-compaction from the form', async () => {
+    const base = hubApi();
+    let app!: AppState;
+    const api = { ...base, workspaces: async () => app.workspaces.get('p1') ?? [], workers: async () => [] };
+    app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+    await mount(<SessionList app={app} />);
+    await click(root.querySelector('.btn-new-session'));
+    await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    const set = (name: string, value: string) =>
+      act(async () => {
+        const el = root.querySelector<HTMLInputElement>(`.new-session [name=${name}]`)!;
+        el.value = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    await set('model', 'haiku');
+    await set('autocompact', 'window');
+    await set('autocompact_thousands', '400');
+    // No agent runs yet: nothing to restart.
+    expect(root.querySelector('.new-session .field-hint')).toBeNull();
+    await act(async () => {
+      root.querySelector('form.new-session')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    });
+    expect(base.createSession).toHaveBeenCalledWith('p1', undefined, {
+      workspace_id: 'w1',
+      cwd: '',
+      permission_mode: undefined,
+      model: 'haiku',
+      autocompact: 400_000,
+    });
+  });
+
   it('switches to "Recent" with times, and keeps the choice on the hub (T50)', async () => {
     const api = hubApi();
     await mount(<SessionList app={makeApp(LIST, api)} />);

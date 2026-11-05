@@ -656,6 +656,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'runtime');
     optStr(p, 'acp_agent');
     optStr(p, 'model');
+    optNum(p, 'autocompact');
     optStr(p, 'workspace_path');
     str(p, 'cwd');
     optStr(p, 'runtime_session_id');
@@ -693,6 +694,15 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'session.permission_mode': (p) => {
     str(p, 'session_id');
     strictEnum(p, 'permission_mode', PERMISSION_MODES);
+  },
+  // `null`: the runtime's default; the field is there either way.
+  'session.model': (p) => {
+    str(p, 'session_id');
+    if (p.model !== null) str(p, 'model');
+  },
+  'session.autocompact': (p) => {
+    str(p, 'session_id');
+    if (p.autocompact !== null) num(p, 'autocompact');
   },
   'session.steer': (p) => {
     str(p, 'session_id');
@@ -996,6 +1006,11 @@ export interface SessionInfo {
   subagents?: number;
   /** When the user made it a favorite (favorites are per user); absent: not one. */
   favorite_at?: string;
+  /** The model hqc starts the agent with (`agent.model`); absent: the runtime's default. */
+  model?: string;
+  /** Auto-compaction (`agent.autocompact`): absent — the runtime's default, 0 — off,
+   *  otherwise the context window in tokens. */
+  autocompact?: number;
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -1059,6 +1074,7 @@ export function parseScheduleList(v: unknown): Schedule[] {
 
 export function parseSessionInfo(v: unknown): SessionInfo {
   const o = obj(v, 'session');
+  const agent: Obj = present(o, 'agent') ? obj(o.agent, 'agent') : {};
   return {
     id: str(o, 'id'),
     project_id: str(o, 'project_id'),
@@ -1084,6 +1100,8 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     permission_capped_by: optStr(o, 'permission_capped_by'),
     subagents: optNum(o, 'subagents'),
     favorite_at: optStr(o, 'favorite_at'),
+    model: optStr(agent, 'model'),
+    autocompact: optNum(agent, 'autocompact'),
   };
 }
 

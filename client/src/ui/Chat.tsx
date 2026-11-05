@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { ApiError } from '../api';
+import { ApiError, type SessionPatch } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize } from '../artifacts';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
 import type { Timeline } from '../timeline';
+import { AutocompactField, ModelField } from './agentSettings';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
@@ -251,6 +252,7 @@ export function Chat({
     if (mode === 'auto' && !confirm(AUTO_CONFIRM)) return;
     void act(() => app.setPermissionMode(sessionId, mode), 'Not switched');
   };
+  const setAgent = (patch: AgentPatch) => void act(() => app.setAgentSettings(sessionId, patch), 'Not changed');
   const { model, cost } = t.usageTotals();
   const pill = <StatePill state={state} timeline={t} />;
   const agents = agentsLabel(info?.subagents);
@@ -389,6 +391,7 @@ export function Chat({
             onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
             onSchedules={() => setSchedules(true)}
             onPermissionMode={setMode}
+            onAgent={setAgent}
           />
         )}
       </header>
@@ -597,8 +600,11 @@ export function currentMode(info: SessionInfo): PermissionMode {
   return info.permission_mode ?? info.effective_permission_mode ?? 'ask';
 }
 
-/** "More": schedules and the permission mode; on a phone also the path, model and cost.
- *  Archiving is on the list's rows, restore and delete on the archive's (T50). */
+type AgentPatch = Pick<SessionPatch, 'model' | 'autocompact'>;
+
+/** "More": schedules, the permission mode, the model and the auto-compaction; on a phone
+ *  also the path, the model of the last turn and the cost. Archiving is on the list's rows,
+ *  restore and delete on the archive's (T50). */
 function MoreMenu({
   info,
   phone,
@@ -608,6 +614,7 @@ function MoreMenu({
   onRetry,
   onSchedules,
   onPermissionMode,
+  onAgent,
 }: {
   info: SessionInfo;
   phone: boolean;
@@ -618,6 +625,8 @@ function MoreMenu({
   onRetry?: () => void;
   onSchedules: () => void;
   onPermissionMode: (mode: PermissionMode) => void;
+  /** A change PATCHes at once; `null` is the runtime's default. */
+  onAgent: (patch: AgentPatch) => void;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -687,6 +696,12 @@ function MoreMenu({
                   () => onPermissionMode('auto'),
                   "Claude Code decides tool calls itself; the worker's deny list is the only limit",
                 ))}
+          {!info.archived && (
+            <div class="menu-settings">
+              <ModelField value={info.model} onChange={(m) => onAgent({ model: m ?? null })} />
+              <AutocompactField value={info.autocompact} onChange={(n) => onAgent({ autocompact: n ?? null })} restarts />
+            </div>
+          )}
         </div>
       )}
     </div>

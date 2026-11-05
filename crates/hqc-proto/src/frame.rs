@@ -453,14 +453,6 @@ pub enum HubFrame {
         session_id: Uuid,
         model: Option<String>,
     },
-    /// The user changed the session's auto-compaction (`session.start.autocompact`; `null` is
-    /// the runtime's default): a running agent is started again with it, resuming its
-    /// transcript, once no turn runs. Answered with `ack`.
-    #[serde(rename = "session.autocompact")]
-    SessionAutocompact {
-        session_id: Uuid,
-        autocompact: Option<u32>,
-    },
     #[serde(rename = "approval.response")]
     ApprovalResponse {
         session_id: Uuid,
@@ -1028,10 +1020,6 @@ pub struct SessionStart {
     /// Absent: the runtime's default model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Auto-compaction: absent — the runtime's default, 0 — off, otherwise the context window
-    /// in tokens the runtime compacts in ([`valid_autocompact`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autocompact: Option<u32>,
     pub workspace_path: Option<String>,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1059,16 +1047,6 @@ pub struct SessionStart {
     /// empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_rules: Vec<String>,
-}
-
-/// The smallest and the largest context window of a session's auto-compaction, in tokens.
-pub const AUTOCOMPACT_MIN: u32 = 100_000;
-pub const AUTOCOMPACT_MAX: u32 = 1_000_000;
-
-/// A session's `autocompact`: 0 (off) or a window of [`AUTOCOMPACT_MIN`]..=[`AUTOCOMPACT_MAX`]
-/// tokens.
-pub fn valid_autocompact(n: u32) -> bool {
-    n == 0 || (AUTOCOMPACT_MIN..=AUTOCOMPACT_MAX).contains(&n)
 }
 
 /// `workspace.rules {workspace_path, allow_rules[]}` -> `ack` (since SPEC 0.52, T48): the
@@ -1236,7 +1214,6 @@ mod tests {
         "session.kill",
         "session.permission_mode",
         "session.model",
-        "session.autocompact",
         "approval.response",
         "clarify.response",
         "fs.stat",
@@ -1310,14 +1287,6 @@ mod tests {
         (
             "session.model",
             include_str!("../examples/wire/hub.session.model.default.json"),
-        ),
-        (
-            "session.autocompact",
-            include_str!("../examples/wire/hub.session.autocompact.json"),
-        ),
-        (
-            "session.autocompact",
-            include_str!("../examples/wire/hub.session.autocompact.off.json"),
         ),
         (
             "approval.response",
@@ -1508,7 +1477,6 @@ mod tests {
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::SessionModel { .. } => "session.model",
-            HubFrame::SessionAutocompact { .. } => "session.autocompact",
             HubFrame::ApprovalResponse { .. } => "approval.response",
             HubFrame::ClarifyResponse { .. } => "clarify.response",
             HubFrame::FsStat(_) => "fs.stat",
@@ -1930,29 +1898,14 @@ mod tests {
         assert_eq!(serde_json::to_value(Runtime::None).unwrap(), "none");
     }
 
-    /// `session.model` and `session.autocompact` say `null` for the runtime's default, and
-    /// `autocompact` is 0 or a window of 100k..=1M tokens.
+    /// `session.model` says `null` for the runtime's default.
     #[test]
-    fn session_settings_say_null_for_the_default() {
+    fn session_model_says_null_for_the_default() {
         let f: Envelope<HubFrame> = serde_json::from_str(include_str!(
             "../examples/wire/hub.session.model.default.json"
         ))
         .unwrap();
         assert!(matches!(f.body, HubFrame::SessionModel { model: None, .. }));
-        let off = HubFrame::SessionAutocompact {
-            session_id: Uuid::nil(),
-            autocompact: None,
-        };
-        assert_eq!(
-            serde_json::to_value(off).unwrap()["payload"],
-            json!({"session_id": Uuid::nil(), "autocompact": null})
-        );
-        for ok in [0, 100_000, 300_000, 1_000_000] {
-            assert!(valid_autocompact(ok), "{ok}");
-        }
-        for bad in [1, 99_999, 1_000_001, u32::MAX] {
-            assert!(!valid_autocompact(bad), "{bad}");
-        }
     }
 
     /// T30: a call and its answer share the frame `id` and `request_id`; an error has the one

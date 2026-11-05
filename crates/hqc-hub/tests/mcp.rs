@@ -186,7 +186,6 @@ async fn list_sessions_of_the_owner() {
             cwd: ".",
             title: Some("Secret"),
             model: None,
-            autocompact: None,
             auto_approve: false,
             permission_mode: None,
         },

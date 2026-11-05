@@ -656,7 +656,6 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'runtime');
     optStr(p, 'acp_agent');
     optStr(p, 'model');
-    optNum(p, 'autocompact');
     optStr(p, 'workspace_path');
     str(p, 'cwd');
     optStr(p, 'runtime_session_id');
@@ -699,10 +698,6 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'session.model': (p) => {
     str(p, 'session_id');
     if (p.model !== null) str(p, 'model');
-  },
-  'session.autocompact': (p) => {
-    str(p, 'session_id');
-    if (p.autocompact !== null) num(p, 'autocompact');
   },
   'session.steer': (p) => {
     str(p, 'session_id');
@@ -1008,9 +1003,6 @@ export interface SessionInfo {
   favorite_at?: string;
   /** The model hqc starts the agent with (`agent.model`); absent: the runtime's default. */
   model?: string;
-  /** Auto-compaction (`agent.autocompact`): absent — the runtime's default, 0 — off,
-   *  otherwise the context window in tokens. */
-  autocompact?: number;
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -1101,7 +1093,6 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     subagents: optNum(o, 'subagents'),
     favorite_at: optStr(o, 'favorite_at'),
     model: optStr(agent, 'model'),
-    autocompact: optNum(agent, 'autocompact'),
   };
 }
 

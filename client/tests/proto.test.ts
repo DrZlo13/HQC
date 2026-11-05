@@ -60,13 +60,9 @@ describe('examples/wire', () => {
     });
   }
 
-  it('reads session.model and session.autocompact, null for the default and never left out', () => {
+  it('reads session.model, null for the default and never left out', () => {
     expect(parseFrame(load('hub.session.model.default.json')).payload.model).toBeNull();
-    expect(parseFrame(load('hub.session.autocompact.off.json')).payload.autocompact).toBe(0);
     expect(() => parseFrame({ id: 'x', type: 'session.model', payload: { session_id: 's' } })).toThrow();
-    expect(() =>
-      parseFrame({ id: 'x', type: 'session.autocompact', payload: { session_id: 's', autocompact: '0' } }),
-    ).toThrow();
   });
 
   it('reads the text answer of approval.response (T26)', () => {
@@ -159,9 +155,9 @@ describe('examples/wire', () => {
     expect(s.favorite_at).toBe('2026-10-22T09:30:00Z');
     expect(sys.favorite_at).toBeUndefined();
     expect(one.type === 'session.summary' && one.session.favorite_at).toBe('2026-10-22T09:30:00Z');
-    // The model and the auto-compaction of `agent`; absent: the runtime's defaults.
-    expect([s.model, s.autocompact]).toEqual(['sonnet', 300000]);
-    expect([sys.model, sys.autocompact]).toEqual([undefined, undefined]);
+    // The model of `agent`; absent: the runtime's default.
+    expect(s.model).toBe('sonnet');
+    expect(sys.model).toBeUndefined();
     const sum =(load('client.session.summary.json') as { session: Record<string, unknown> }).session;
     for (const k of ['project_id', 'title', 'state', 'queue_len', 'unread', 'last_seq', 'last_read_seq']) {
       expect((s as unknown as Record<string, unknown>)[k], k).toEqual(sum[k]);

@@ -5,7 +5,7 @@ import { ArtifactStore, formatSize } from '../artifacts';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
 import type { Timeline } from '../timeline';
-import { AutocompactField, ModelField } from './agentSettings';
+import { ModelField } from './agentSettings';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
@@ -600,11 +600,11 @@ export function currentMode(info: SessionInfo): PermissionMode {
   return info.permission_mode ?? info.effective_permission_mode ?? 'ask';
 }
 
-type AgentPatch = Pick<SessionPatch, 'model' | 'autocompact'>;
+type AgentPatch = Pick<SessionPatch, 'model'>;
 
-/** "More": schedules, the permission mode, the model and the auto-compaction; on a phone
- *  also the path, the model of the last turn and the cost. Archiving is on the list's rows,
- *  restore and delete on the archive's (T50). */
+/** "More": schedules, the permission mode and the model; on a phone also the path, the
+ *  model of the last turn and the cost. Archiving is on the list's rows, restore and delete
+ *  on the archive's (T50). */
 function MoreMenu({
   info,
   phone,
@@ -699,7 +699,6 @@ function MoreMenu({
           {!info.archived && (
             <div class="menu-settings">
               <ModelField value={info.model} onChange={(m) => onAgent({ model: m ?? null })} />
-              <AutocompactField value={info.autocompact} onChange={(n) => onAgent({ autocompact: n ?? null })} restarts />
             </div>
           )}
         </div>

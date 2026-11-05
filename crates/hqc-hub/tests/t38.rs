@@ -263,7 +263,6 @@ async fn only_the_worker_owner_switches_to_auto() {
             cwd: ".",
             title: Some("Theirs"),
             model: None,
-            autocompact: None,
             auto_approve: false,
             permission_mode: None,
         },

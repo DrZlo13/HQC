@@ -65,7 +65,6 @@ function setup(
     permission_capped_by?: string;
     subagents?: number;
     model?: string;
-    autocompact?: number;
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -85,13 +84,12 @@ function setup(
     approve: vi.fn(async () => {}),
     takeover: vi.fn(async () => ({})),
     // PATCH /api/sessions/{id}: the hub stores the mode, the worker confirms it at once; the
-    // model and the auto-compaction are stored as sent (`null`: the runtime's default).
+    // model is stored as sent (`null`: the runtime's default).
     patchSession: vi.fn(async (_id: string, patch: SessionPatch) => ({
       ...info,
       permission_mode: patch.permission_mode,
       effective_permission_mode: patch.permission_mode,
       model: patch.model === undefined ? info.model : (patch.model ?? undefined),
-      autocompact: patch.autocompact === undefined ? info.autocompact : (patch.autocompact ?? undefined),
     })),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
@@ -135,7 +133,6 @@ function setup(
     permission_capped_by: opts.permission_capped_by,
     subagents: opts.subagents,
     model: opts.model,
-    autocompact: opts.autocompact,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -282,9 +279,9 @@ describe('permission mode', () => {
   });
 });
 
-// The session's model and auto-compaction in "More": a choice PATCHes at once, a typed name or
-// window when it is done; `null` goes back to the runtime's default.
-describe('model and auto-compaction', () => {
+// The session's model in "More": a choice PATCHes at once, a typed name when it is done; `null`
+// goes back to the runtime's default.
+describe('model', () => {
   const field = <E extends HTMLElement = HTMLSelectElement>(name: string) =>
     root.querySelector<E>(`.menu-settings [name=${name}]`);
   const set = (name: string, value: string) =>
@@ -325,44 +322,22 @@ describe('model and auto-compaction', () => {
   });
 
   it('a name that is no alias shows as typed', async () => {
-    const { app } = setup('idle', { model: 'claude-sonnet-5-5', autocompact: 300_000 });
+    const { app } = setup('idle', { model: 'claude-sonnet-5-5' });
     await mount(app);
     await open();
     expect(field('model')!.value).toBe('custom');
     expect(field<HTMLInputElement>('model_name')!.value).toBe('claude-sonnet-5-5');
-    expect(field('autocompact')!.value).toBe('window');
-    expect(field<HTMLInputElement>('autocompact_thousands')!.value).toBe('300');
-  });
-
-  it('sets the auto-compaction: off, a window in thousands, the default; says it restarts the agent', async () => {
-    const { app, api } = setup('running');
-    await mount(app);
-    await open();
-    expect($('.menu-settings .field-hint')!.textContent).toBe('A change restarts the agent after the current turn.');
-    expect(field('autocompact')!.value).toBe('');
-    await set('autocompact', 'off');
-    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: 0 });
-    expect(field('autocompact')!.value).toBe('off');
-
-    await set('autocompact', 'window');
-    expect(api.patchSession).toHaveBeenCalledTimes(1);
-    await set('autocompact_thousands', '250');
-    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: 250_000 });
-
-    await set('autocompact', '');
-    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: null });
-    expect(field('autocompact_thousands')).toBeNull();
   });
 
   it('shows what the hub refused', async () => {
     const { app, api } = setup('idle');
-    api.patchSession.mockRejectedValueOnce(new Error('autocompact must be 0 (off) or a window of 100000..=1000000 tokens'));
+    api.patchSession.mockRejectedValueOnce(new Error('model must be 1..64 characters of A-Z a-z 0-9 . _ : -'));
     await mount(app);
     await open();
-    await set('autocompact', 'window');
-    await set('autocompact_thousands', '50');
-    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: 50_000 });
-    expect($('.notice')!.textContent).toContain('Not changed: autocompact must be 0 (off)');
+    await set('model', 'custom');
+    await set('model_name', 'a b');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'a b' });
+    expect($('.notice')!.textContent).toContain('Not changed: model must be');
   });
 });
 

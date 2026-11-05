@@ -68,10 +68,6 @@ const KILL_GRACE: Duration = Duration::from_secs(5);
 const EXIT_DRAIN: Duration = Duration::from_secs(2);
 const STDERR_TAIL: usize = 2048;
 
-/// The CLI's switch that turns auto-compaction off (2.1.312: `get_context_usage` then says
-/// `isAutoCompactEnabled: false`).
-pub const DISABLE_AUTO_COMPACT: &str = "DISABLE_AUTO_COMPACT";
-
 /// Settings files the CLI reads: the user's own and `.claude/settings.local.json` (where
 /// `always` writes, SPEC §8.1), not the repository's `.claude/settings.json`.
 pub const SETTING_SOURCES: &str = "user,local";
@@ -384,11 +380,7 @@ impl ClaudeCodeAdapter {
     ///   is in `--mcp-config` either way); [`crate::config::Environment::process_env`];
     ///   `SSH_AUTH_SOCK` only as `ssh_agent`, the socket of the process's own ssh-agent (T44);
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
-    ///   `--append-system-prompt`;
-    /// - `autocompact`: a window → `--autocompact <tokens>` (2.1.312: `--autocompact 300000`
-    ///   compacts at 267000 tokens), 0 → [`DISABLE_AUTO_COMPACT`]`=1`.
-    ///
-    /// Nothing of `session.start` is silently dropped.
+    ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(
         &self,
         spec: &StartSpec,
@@ -457,9 +449,6 @@ impl ClaudeCodeAdapter {
         if let Some(m) = &spec.model {
             args.extend(["--model".into(), m.clone()]);
         }
-        if let Some(n) = spec.autocompact.filter(|n| *n > 0) {
-            args.extend(["--autocompact".into(), n.to_string()]);
-        }
         args.extend(self.opts.extra_args.iter().cloned());
         CommandSpec {
             program: self
@@ -483,10 +472,6 @@ impl ClaudeCodeAdapter {
                     "MCP_TOOL_TIMEOUT".into(),
                     mcp_tool_timeout_ms(spec.ask_timeout_s).to_string(),
                 ));
-                if spec.autocompact == Some(0) {
-                    env.retain(|(k, _)| k != DISABLE_AUTO_COMPACT);
-                    env.push((DISABLE_AUTO_COMPACT.into(), "1".into()));
-                }
                 env.sort();
                 env
             },

@@ -1889,7 +1889,7 @@ select.input {
   min-height: 28px;
   overflow-wrap: anywhere;
 }
-/* The model and the auto-compaction of the session, below the menu's items. */
+/* The model of the session, below the menu's items. */
 .menu-settings {
   display: flex;
   flex-direction: column;

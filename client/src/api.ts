@@ -75,8 +75,6 @@ export interface NewSessionOptions {
   permission_mode?: PermissionMode;
   /** Absent: the runtime's default model. */
   model?: string;
-  /** Absent: the runtime's default; 0 — off, otherwise the context window in tokens. */
-  autocompact?: number;
 }
 
 /** `PATCH /api/sessions/{id}`: absent fields stay; `null` is the runtime's default. */
@@ -84,7 +82,6 @@ export interface SessionPatch {
   title?: string;
   permission_mode?: PermissionMode;
   model?: string | null;
-  autocompact?: number | null;
 }
 
 /** A page of events; `invalid` are raw events that failed validation (shown, not dropped). */
@@ -181,13 +178,12 @@ export class Api {
   /** No `title`: the hub's default "Session N", which the runtime's title may replace. No
    *  `workspace_id`: the project's default workspace; `cwd` is relative to it (SPEC §13.4). */
   async createSession(projectId: string, title?: string, opts: NewSessionOptions = {}): Promise<SessionInfo> {
-    const body: Record<string, string | number> = {};
+    const body: Record<string, string> = {};
     if (title) body.title = title;
     if (opts.workspace_id) body.workspace_id = opts.workspace_id;
     if (opts.cwd && opts.cwd !== '.') body.cwd = opts.cwd;
     if (opts.permission_mode) body.permission_mode = opts.permission_mode;
     if (opts.model) body.model = opts.model;
-    if (opts.autocompact !== undefined) body.autocompact = opts.autocompact;
     const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, body);
     return parseSessionInfo(data);
   }

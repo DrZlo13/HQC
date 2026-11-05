@@ -46,8 +46,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use hqc_proto::frame::{
-    valid_autocompact, EnvBinding, EnvPermissions, EnvironmentInfo, Runtime, SessionStart,
-    DEFAULT_ENVIRONMENT,
+    EnvBinding, EnvPermissions, EnvironmentInfo, Runtime, SessionStart, DEFAULT_ENVIRONMENT,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -360,9 +359,6 @@ pub struct StartSpec {
     pub runtime: Runtime,
     /// `session.start.model`; a later `session.model` changes it.
     pub model: Option<String>,
-    /// `session.start.autocompact`: `None` — the runtime's default, 0 — off, otherwise the
-    /// context window in tokens; a later `session.autocompact` changes it.
-    pub autocompact: Option<u32>,
     /// The workspace (canonical, inside `allowed_roots`), not the hub's string; for a
     /// session without workspace its scratch folder.
     pub workspace: PathBuf,
@@ -517,11 +513,6 @@ impl Config {
                 return Err(format!("model {m:?} is not a model name"));
             }
         }
-        if let Some(n) = s.autocompact.filter(|n| !valid_autocompact(*n)) {
-            return Err(format!(
-                "autocompact {n} is neither 0 nor a window of 100000..=1000000 tokens"
-            ));
-        }
         if let Some(t) = s.disallowed_tools.iter().find(|t| !valid_tool_rule(t)) {
             return Err(format!("disallowed_tools entry {t:?} is not a tool rule"));
         }
@@ -550,7 +541,6 @@ impl Config {
             session_id: s.session_id,
             runtime: s.runtime,
             model: s.model.clone(),
-            autocompact: s.autocompact,
             workspace: ws,
             workdir,
             environment,
@@ -811,16 +801,6 @@ mod tests {
             let mut s = ok.clone();
             s.model = Some(model.into());
             assert!(c.check_start(&s).is_err(), "model {model:?}");
-        }
-        for n in [1, 99_999, 1_000_001] {
-            let mut s = ok.clone();
-            s.autocompact = Some(n);
-            assert!(c.check_start(&s).is_err(), "autocompact {n}");
-        }
-        for n in [None, Some(0), Some(100_000), Some(1_000_000)] {
-            let mut s = ok.clone();
-            s.autocompact = n;
-            assert_eq!(c.check_start(&s).unwrap().autocompact, n);
         }
         for tool in ["--permission-mode", "", "Bash\nx"] {
             let mut s = ok.clone();

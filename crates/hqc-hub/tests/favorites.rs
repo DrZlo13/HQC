@@ -27,7 +27,6 @@ async fn session_of(hub: &TestHub, owner: uuid::Uuid, project: uuid::Uuid) -> St
             cwd: ".",
             title: Some("Often"),
             model: None,
-            autocompact: None,
             auto_approve: false,
             permission_mode: None,
         },

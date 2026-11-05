@@ -290,6 +290,22 @@ describe('tolerance (SPEC §4)', () => {
     expect(ev.type === 'approval.request' && ev.payload.expires_at).toBeUndefined();
   });
 
+  it('reads the header and option descriptions of a question, absent ones too', () => {
+    const e = structuredClone(load('event.clarify.request.json')) as any;
+    e.payload.questions[0].header = 'Focus';
+    e.payload.questions[0].option_descriptions = ['axum + Postgres hub work', ''];
+    delete e.payload.questions[1].header;
+    delete e.payload.questions[1].option_descriptions;
+    const ev = parseEvent(e);
+    if (ev.type !== 'clarify.request') throw new Error('not a clarify.request');
+    expect(ev.payload.questions[0]).toMatchObject({
+      header: 'Focus',
+      option_descriptions: ['axum + Postgres hub work', ''],
+    });
+    expect(ev.payload.questions[1].header).toBeUndefined();
+    expect(ev.payload.questions[1].option_descriptions).toBeUndefined();
+  });
+
   it('rejects a known type with a wrong payload', () => {
     const e = structuredClone(approval);
     delete e.payload.options;

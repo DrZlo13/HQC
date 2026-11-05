@@ -502,4 +502,11 @@ describe('paths of the working copy', () => {
     expect(el.querySelector('.md-code-diff .diff-del')!.textContent).toBe('-a\n');
     expect(el.querySelector('.md-code-diff .diff-add')!.textContent).toBe('+b');
   });
+
+  it('only a pair of --- and +++ lines is a file header; one alone is a removed or added line', () => {
+    const el = mount(<Markdown text={'```diff\n--- a/x.md\n+++ b/x.md\n@@ -1,2 +1,1 @@\n----\n-title\n+++ fast\n```'} />);
+    expect([...el.querySelectorAll('.diff-file')].map((l) => l.textContent)).toEqual(['--- a/x.md\n', '+++ b/x.md\n']);
+    expect([...el.querySelectorAll('.diff-del')].map((l) => l.textContent)).toEqual(['----\n', '-title\n']);
+    expect([...el.querySelectorAll('.diff-add')].map((l) => l.textContent)).toEqual(['+++ fast']);
+  });
 });

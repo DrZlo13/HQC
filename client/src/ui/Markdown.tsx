@@ -337,7 +337,10 @@ function diffLines(code: string): ComponentChildren[] {
   const lines = code.split('\n');
   return lines.map((l, i) => {
     const text = i < lines.length - 1 ? `${l}\n` : l;
-    const cls = diffClass(l);
+    let cls = diffClass(l);
+    // File headers come as a pair; a `---` or `+++` line alone removes `--…` or adds `++…`.
+    const pair = l.startsWith('---') ? lines[i + 1]?.startsWith('+++') : lines[i - 1]?.startsWith('---');
+    if (cls === 'diff-file' && !pair) cls = l.startsWith('-') ? 'diff-del' : 'diff-add';
     return cls ? (
       <span key={i} class={cls}>
         {text}

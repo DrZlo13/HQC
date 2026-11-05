@@ -8,7 +8,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ApprovalOption, EventOf, RuleSuggestion } from '../proto';
 import { ruleError } from '../rules';
 import type { ChatActions, FolderActions } from './cards';
-import { callArgs, callLine, callPaths, outsidePath } from './feed';
+import { callArgs, callLine, callPaths, fileChange, outsidePath } from './feed';
+import { CodeBlock } from './Markdown';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconCross, IconInfo, IconShield } from './icons';
 import {
@@ -280,6 +281,8 @@ function PermissionCard({
     if (replying) field.current?.focus();
   }, [replying]);
   const v = requestView(event, call);
+  // What an edit or a write changes, from the call's arguments (cut at 4 KB, SPEC §4).
+  const change = call && !v.worker ? fileChange(p.tool, call.payload.args_preview) : undefined;
   const outside = outsidePath(v.paths, actions.workspaceRoot);
   const note = v.worker ? null : noteText(event, outside, actions.workspaceRoot);
   const once = p.options.find((o) => o.canonical === 'once');
@@ -381,6 +384,14 @@ function PermissionCard({
             {v.shell && <span class="perm-prompt">$ </span>}
             {v.what}
           </pre>
+        </div>
+      )}
+      {change && (
+        <div class="perm-change">
+          {change.parts.map((c, i) => (
+            <CodeBlock key={i} code={c.code} lang={c.diff ? 'diff' : ''} title={c.title} />
+          ))}
+          {change.cut && <div class="perm-cut muted">The preview is cut at 4 KB: the rest of the change is not shown.</div>}
         </div>
       )}
       {note && (

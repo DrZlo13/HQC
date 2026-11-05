@@ -54,4 +54,8 @@ describe('layout widths', () => {
     expect(rule('.pre')['overflow']).toBe('auto');
     expect(rule('.timeline')['overflow-y']).toBe('auto');
   });
+
+  it("the user's message keeps its line breaks", () => {
+    expect(rule('.msg-text')['white-space']).toBe('pre-wrap');
+  });
 });

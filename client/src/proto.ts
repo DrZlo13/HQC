@@ -115,6 +115,10 @@ export interface AgentMessage {
   text: string;
   final: boolean;
   in_reply_to?: Uuid;
+  /** A reply the runtime wrote itself instead of the model (an API error, "Credit balance is
+   *  too low"; since SPEC 0.67): a service line of the feed, not the agent's text. Absent =
+   *  false. */
+  runtime?: boolean;
 }
 export interface AgentThinking {
   text: string;
@@ -167,7 +171,11 @@ export interface RequestCancel {
 export interface ClarifyQuestion {
   id: string;
   text: string;
+  /** A short caption of the question (Claude Code's `header`). */
+  header?: string;
   options?: string[];
+  /** A description per option, in the order of `options`; "" where an option has none. */
+  option_descriptions?: string[];
   multi?: boolean;
 }
 export interface ClarifyRequest {
@@ -347,6 +355,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     text: str(p, 'text'),
     final: bool(p, 'final'),
     in_reply_to: optStr(p, 'in_reply_to'),
+    runtime: optBool(p, 'runtime'),
   }),
   'agent.thinking': (p) => ({ text: str(p, 'text') }),
   'tool.call': (p) => ({
@@ -392,7 +401,9 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
       return {
         id: str(q, 'id'),
         text: str(q, 'text'),
+        header: optStr(q, 'header'),
         options: present(q, 'options') ? strArr(q, 'options') : undefined,
+        option_descriptions: optStrArr(q, 'option_descriptions'),
         multi: optBool(q, 'multi'),
       };
     }),

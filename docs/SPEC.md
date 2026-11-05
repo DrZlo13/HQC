@@ -1323,7 +1323,7 @@ the rest is marked "later"):
   none). A session's change reaches the user's clients as `session.summary`; a project's has no
   frame, another device sees it at the next `GET /api/projects`. The client shows a Favorites
   block of the starred sessions of every project above the session groups, newest first, and the
-  starred projects first on the rail.
+  starred projects first on the rail, each part in the hub's project order.
 - `GET /api/workers` → `{workers[]}`: workers that are not revoked; `?include_revoked=1` adds
   the revoked ones (the "Settings" screen). The worker object is `{id, name, os, status: online
   | offline | revoked, revoked_at?, last_seen?, system_session_id, ...}` (§3 Worker).

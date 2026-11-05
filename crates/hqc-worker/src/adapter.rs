@@ -3,8 +3,9 @@
 //!
 //! One adapter instance per session, created by an [`AdapterFactory`] and driven by the
 //! session task of the supervisor. The input queue is the supervisor's job, not the
-//! adapter's (SPEC §17.2): `input` is only called when no turn is running. `steer?` is not
-//! here yet: iteration 1 has no `session.steer` frame.
+//! adapter's (SPEC §17.2): `input` is only called when no turn is running, `inject_with`
+//! only while one runs and [`Adapter::can_inject`] holds. `steer?` is not here yet:
+//! iteration 1 has no `session.steer` frame.
 
 use std::collections::BTreeMap;
 
@@ -34,8 +35,18 @@ pub enum AdapterEvent {
     /// (SPEC §5.2).
     InputAccepted { event_id: Uuid },
     /// The turn started by the last `input` is over (final answer, error or `stop`); the
-    /// next queued input may go.
-    TurnEnded,
+    /// next queued input may go. `carried`: inputs written during the turn that it did not
+    /// take and that the runtime runs next by itself (Claude Code), in the order written.
+    /// `dropped`: inputs written that the runtime will not take (Claude Code: `cancelled`).
+    /// An input written into the turn and named in neither is still on its way.
+    TurnEnded {
+        carried: Vec<Uuid>,
+        dropped: Vec<Uuid>,
+    },
+    /// How many subagents the runtime runs now (Claude Code: `system/task_started` with
+    /// `task_type: local_agent` until the task ends); sent as `session.state.subagents`.
+    /// Reported when it changes.
+    Subagents(u32),
     /// The runtime reported its own session id (ACP); sent in `session.state`.
     RuntimeSessionId(String),
     /// The runtime named the session (Claude Code: `ai-title` in the transcript, read when
@@ -93,6 +104,24 @@ pub trait Adapter: Send {
     ) -> anyhow::Result<()> {
         let _ = files;
         self.input(input).await
+    }
+    /// Whether a person's input can go into the running turn now (SPEC §17.2; Claude Code: a
+    /// turn runs and no permission request or question is open). By default never: input
+    /// waits for the end of the turn.
+    fn can_inject(&self) -> bool {
+        false
+    }
+    /// Writes input into the running turn, as [`Adapter::input_with`] does at its start; the
+    /// runtime takes it at its next step, or runs it next by itself (see
+    /// [`AdapterEvent::TurnEnded`]). `Ok(false)`: nothing written, [`Adapter::can_inject`] no
+    /// longer holds (the turn ended meanwhile).
+    async fn inject_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let _ = (input, files);
+        anyhow::bail!("this runtime cannot take input during a turn")
     }
     /// Abort the current turn; the process stays.
     async fn stop(&mut self) -> anyhow::Result<()>;

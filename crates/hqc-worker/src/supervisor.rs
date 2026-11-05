@@ -18,6 +18,14 @@
 //!   adapter reports [`AdapterEvent::InputAccepted`] (SPEC §5.2). The queue lives in memory:
 //!   the hub's `pending` inputs are the source of truth and come again after `hello`, so an
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
+//! - While a turn runs, the head of the queue goes into it when the runtime can take it
+//!   ([`Adapter::can_inject`]) and neither it nor the turn is capped to `ask`, and only a
+//!   person's input (no `peer`): as the VS Code tab does with what the user types meanwhile.
+//!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; the first
+//!   input the turn carries to the next one becomes that turn, one the runtime will not take
+//!   goes back to the head of the queue, as does every one not taken when the process exits.
+//! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) is repeated in every
+//!   `session.state` like `title`, 0 when the agent is stopped.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -129,6 +137,16 @@ fn ack(event_id: Option<Uuid>) -> WorkerFrame {
     WorkerFrame::Ack(Ack {
         event_id,
         seq: None,
+        joined: false,
+    })
+}
+
+/// `ack {event_id, joined: true}`: the input went into the turn already running.
+fn joined_ack(event_id: Uuid) -> WorkerFrame {
+    WorkerFrame::Ack(Ack {
+        event_id: Some(event_id),
+        seq: None,
+        joined: true,
     })
 }
 
@@ -815,6 +833,8 @@ impl Supervisor {
             resume_requested: false,
             queue: VecDeque::new(),
             turn: None,
+            injected: Vec::new(),
+            subagents: 0,
             delivered: VecDeque::new(),
             last_activity: Instant::now(),
         };
@@ -907,7 +927,12 @@ struct Session {
     resume_requested: bool,
     queue: VecDeque<Queued>,
     turn: Option<Turn>,
-    delivered: VecDeque<Uuid>,
+    /// Inputs written into the running turn and not accepted yet, in `seq` order.
+    injected: Vec<Queued>,
+    /// The runtime's count of running subagents, repeated in every `session.state`.
+    subagents: u32,
+    /// Inputs the runtime took, with whether it took them into a running turn (`joined`).
+    delivered: VecDeque<(Uuid, bool)>,
     last_activity: Instant,
 }
 
@@ -953,6 +978,7 @@ impl Session {
         let t = self.idle_timeout?;
         (self.state == ProcessState::Running
             && self.turn.is_none()
+            && self.injected.is_empty()
             && self.lowering.is_none()
             && self.queue.is_empty())
         .then(|| self.last_activity + t)
@@ -1024,6 +1050,8 @@ impl Session {
                     .answer_approval(&request_id, &option_id, message.as_deref())
                     .await;
                 self.reply_result(&id, r);
+                // The runtime asks nothing more: what waits may go into the turn.
+                self.pump().await;
             }
             Cmd::Clarify {
                 id,
@@ -1032,6 +1060,7 @@ impl Session {
             } => {
                 let r = self.adapter.answer_clarify(&request_id, &answers).await;
                 self.reply_result(&id, r);
+                self.pump().await;
             }
             Cmd::Resync => self.send_state(),
             Cmd::Release => self.release().await,
@@ -1125,8 +1154,15 @@ impl Session {
             );
             return;
         }
-        if self.delivered.contains(&eid) {
-            self.link.reply(&id, ack(Some(eid)));
+        if let Some(&(_, joined)) = self.delivered.iter().find(|(e, _)| *e == eid) {
+            // The same ack again: a plain one for a joined input would open a turn in the hub
+            // that nothing closes.
+            let a = if joined {
+                joined_ack(eid)
+            } else {
+                ack(Some(eid))
+            };
+            self.link.reply(&id, a);
             return;
         }
         if let Some(t) = self.turn.as_mut().filter(|t| t.input.event_id == eid) {
@@ -1136,6 +1172,10 @@ impl Session {
         }
         if let Some(l) = self.lowering.as_mut().filter(|l| l.q.input.event_id == eid) {
             l.q.frame_id = id;
+            return;
+        }
+        if let Some(q) = self.injected.iter_mut().find(|q| q.input.event_id == eid) {
+            q.frame_id = id;
             return;
         }
         if let Some(q) = self.queue.iter_mut().find(|q| q.input.event_id == eid) {
@@ -1158,40 +1198,23 @@ impl Session {
         self.pump().await;
     }
 
-    /// Hands the next queued input to the adapter if no turn is running. A capped input
-    /// first waits for the runtime to confirm `ask` (T39); an uncapped one runs in the
-    /// session's own mode.
+    /// Hands the next queued input to the adapter if no turn is running, or writes it into
+    /// the running turn ([`Session::inject_head`]). A capped input first waits for the
+    /// runtime to confirm `ask` (T39); an uncapped one runs in the session's own mode.
     async fn pump(&mut self) {
-        while self.turn.is_none() && self.lowering.is_none() && self.state == ProcessState::Running
-        {
+        while self.lowering.is_none() && self.state == ProcessState::Running {
+            if self.turn.is_some() {
+                if !self.inject_head().await {
+                    return;
+                }
+                continue;
+            }
             let Some(q) = self.queue.pop_front() else {
                 return;
             };
-            // Attachments go to `.hqc/inbox` first and their paths into the text (SPEC §12).
-            let (input, files) = match inbox::prepare(
-                &self.artifacts,
-                &self.spec,
-                &q.input,
-                &self.roots,
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "attachments: {e:#}");
-                    self.link.reply(
-                        &q.frame_id,
-                        wire_error(
-                            error_code::INTERNAL,
-                            format!("attachments: {e:#}"),
-                            e.retryable(),
-                        ),
-                    );
-                    continue;
-                }
+            let Some((input, files)) = self.prepared(&q).await else {
+                continue;
             };
-            // Messages from other sessions: headers and escaping (SPEC §7.1).
-            let input = crate::peer::runtime_input(&input);
             if !capped(&q.input) {
                 // After a capped turn whose next input was capped too (T39).
                 let own = self.spec.permission_mode;
@@ -1216,6 +1239,68 @@ impl Session {
                 return;
             }
             self.hand(q, input, files).await;
+        }
+    }
+
+    /// Input `q` as the runtime gets it: attachments in `.hqc/inbox` and their paths in the
+    /// text (SPEC §12), messages from other sessions with headers and escaping (SPEC §7.1).
+    /// `None`: the attachments failed, the hub has the error. (`&mut`: a `&Session` held
+    /// across the await would need the adapter to be `Sync`.)
+    async fn prepared(&mut self, q: &Queued) -> Option<(SessionInput, Vec<InboxFile>)> {
+        match inbox::prepare(&self.artifacts, &self.spec, &q.input, &self.roots).await {
+            Ok((input, files)) => Some((crate::peer::runtime_input(&input), files)),
+            Err(e) => {
+                tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "attachments: {e:#}");
+                self.link.reply(
+                    &q.frame_id,
+                    wire_error(
+                        error_code::INTERNAL,
+                        format!("attachments: {e:#}"),
+                        e.retryable(),
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    /// Writes the head of the queue into the running turn (SPEC §17.2), as the VS Code tab
+    /// does with what the user types meanwhile: a person's input (no `peer`), neither it nor
+    /// the turn capped to `ask` (T39), and the runtime asks nothing now. Only the head goes,
+    /// so `seq` order holds. False: the head waits for the end of the turn.
+    async fn inject_head(&mut self) -> bool {
+        let fits = |q: &Queued| q.input.peer.is_none() && !capped(&q.input);
+        if !self.queue.front().is_some_and(fits)
+            || self.turn.as_ref().is_some_and(|t| t.capped)
+            || !self.adapter.can_inject()
+        {
+            return false;
+        }
+        let Some(q) = self.queue.pop_front() else {
+            return false;
+        };
+        let Some((input, files)) = self.prepared(&q).await else {
+            return true;
+        };
+        match self.adapter.inject_with(&input, &files).await {
+            Ok(true) => {
+                tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "input written into the running turn");
+                self.injected.push(q);
+                true
+            }
+            // The turn ended meanwhile: the input goes once its end is handled.
+            Ok(false) => {
+                self.queue.push_front(q);
+                false
+            }
+            Err(e) => {
+                tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "input failed: {e:#}");
+                self.link.reply(
+                    &q.frame_id,
+                    wire_error(error_code::INTERNAL, format!("{e:#}"), true),
+                );
+                true
+            }
         }
     }
 
@@ -1301,27 +1386,46 @@ impl Session {
                     tracing::error!(session_id = %self.id, "outbox write failed, event lost: {err:#}");
                 }
             }
-            AdapterEvent::InputAccepted { event_id } => match self.turn.as_mut() {
-                Some(t) if t.input.event_id == event_id => {
+            AdapterEvent::InputAccepted { event_id } => {
+                let joined = if let Some(t) =
+                    self.turn.as_mut().filter(|t| t.input.event_id == event_id)
+                {
                     t.accepted = true;
                     self.link.reply(&t.frame_id, ack(Some(event_id)));
-                    self.delivered.push_back(event_id);
-                    if self.delivered.len() > DELIVERED_MEMORY {
-                        self.delivered.pop_front();
-                    }
+                    false
+                } else if let Some(i) = self
+                    .injected
+                    .iter()
+                    .position(|q| q.input.event_id == event_id)
+                {
+                    // Taken into the running turn: delivered, no turn of its own.
+                    let q = self.injected.remove(i);
+                    self.link.reply(&q.frame_id, joined_ack(event_id));
+                    true
+                } else {
+                    tracing::warn!(session_id = %self.id, %event_id, "adapter accepted an input that is not in flight");
+                    return;
+                };
+                self.delivered.push_back((event_id, joined));
+                if self.delivered.len() > DELIVERED_MEMORY {
+                    self.delivered.pop_front();
                 }
-                _ => {
-                    tracing::warn!(session_id = %self.id, %event_id, "adapter accepted an input that is not in flight")
-                }
-            },
-            AdapterEvent::TurnEnded => {
+            }
+            AdapterEvent::TurnEnded { carried, dropped } => {
                 let capped = self.turn.as_ref().is_some_and(|t| t.capped);
-                self.end_turn();
-                if capped {
+                self.end_turn(&carried, &dropped);
+                // A capped input the runtime carries is still the turn: its cap holds.
+                if capped && !self.turn.as_ref().is_some_and(|t| t.capped) {
                     self.after_capped_turn().await;
                     self.send_state();
                 }
                 self.pump().await;
+            }
+            AdapterEvent::Subagents(n) => {
+                if self.subagents != n {
+                    self.subagents = n;
+                    self.send_state();
+                }
             }
             AdapterEvent::RuntimeSessionId(r) => {
                 self.runtime_session_id = Some(r);
@@ -1357,7 +1461,9 @@ impl Session {
                 }
                 let in_turn = self.turn.is_some();
                 tracing::warn!(session_id = %self.id, ?error, in_turn, "agent process exited");
-                self.end_turn();
+                // Nothing written to the gone process is on its way any more.
+                let lost: Vec<Uuid> = self.injected.iter().map(|q| q.input.event_id).collect();
+                self.end_turn(&[], &lost);
                 if let Some(l) = self.lowering.take() {
                     // It never reached the runtime; the next process starts in `ask` for it.
                     self.queue.push_front(l.q);
@@ -1380,34 +1486,76 @@ impl Session {
         }
     }
 
-    /// Closes the current turn. An input the runtime never accepted goes back to the head
-    /// of the queue: without the acceptance it did not reach the runtime.
-    fn end_turn(&mut self) {
+    /// Closes the current turn. `carried`: inputs written during it that the runtime runs
+    /// next by itself (SPEC §17.2). The turn's own input, carried (it was written during a
+    /// turn the runtime began by itself), stays the turn; else the first carried input written
+    /// into the turn becomes it, the other carried ones stay written. The turn's own input
+    /// neither accepted nor carried goes back to the head of the queue, as does a written one
+    /// in `dropped` (the runtime will not take it), in `seq` order. Any other written input
+    /// stays written: it went into the turn the runtime runs next before this end reached
+    /// the session.
+    fn end_turn(&mut self, carried: &[Uuid], dropped: &[Uuid]) {
+        let mut back = Vec::new();
+        let mut next = None;
         if let Some(t) = self.turn.take() {
-            if !t.accepted {
-                if t.requeued >= MAX_REQUEUES {
-                    // The runtime keeps ending turns without taking this input: give it up
-                    // instead of resending it forever (the hub marks it failed after the
-                    // retries of SPEC §5.2).
-                    tracing::error!(session_id = %self.id, event_id = %t.input.event_id, "input never taken by the runtime; giving up");
-                    self.link.reply(
-                        &t.frame_id,
-                        wire_error(
-                            error_code::INTERNAL,
-                            "the runtime ended its turns without taking this input".to_string(),
-                            false,
-                        ),
-                    );
-                    return;
-                }
-                tracing::warn!(session_id = %self.id, event_id = %t.input.event_id, "turn ended before the input was accepted; requeued");
-                self.queue.push_front(Queued {
+            if !t.accepted && carried.contains(&t.input.event_id) {
+                next = Some(t);
+            } else if !t.accepted {
+                back.push(Queued {
                     frame_id: t.frame_id,
                     input: t.input,
-                    requeued: t.requeued + 1,
+                    requeued: t.requeued,
                 });
             }
         }
+        let mut still = Vec::new();
+        for q in std::mem::take(&mut self.injected) {
+            if dropped.contains(&q.input.event_id) {
+                back.push(q);
+            } else if !carried.contains(&q.input.event_id) {
+                still.push(q);
+            } else if next.is_none() {
+                tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "an input written during the turn starts the next one");
+                self.link.mcp().set_turn(self.id, q.input.event_id);
+                next = Some(Turn {
+                    frame_id: q.frame_id,
+                    input: q.input,
+                    accepted: false,
+                    requeued: q.requeued,
+                    capped: false,
+                });
+            } else {
+                still.push(q);
+            }
+        }
+        self.injected = still;
+        self.turn = next;
+        for q in back.into_iter().rev() {
+            self.requeue(q);
+        }
+    }
+
+    /// Input `q` ended a turn without being taken: back to the head of the queue.
+    fn requeue(&mut self, q: Queued) {
+        if q.requeued >= MAX_REQUEUES {
+            // The runtime keeps ending turns without taking this input: give it up instead of
+            // resending it forever (the hub marks it failed after the retries of SPEC §5.2).
+            tracing::error!(session_id = %self.id, event_id = %q.input.event_id, "input never taken by the runtime; giving up");
+            self.link.reply(
+                &q.frame_id,
+                wire_error(
+                    error_code::INTERNAL,
+                    "the runtime ended its turns without taking this input".to_string(),
+                    false,
+                ),
+            );
+            return;
+        }
+        tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "turn ended before the input was accepted; requeued");
+        self.queue.push_front(Queued {
+            requeued: q.requeued + 1,
+            ..q
+        });
     }
 
     async fn ensure_running(&mut self) -> anyhow::Result<()> {
@@ -1488,8 +1636,10 @@ impl Session {
         if let Some(t) = self.turn.take() {
             tracing::info!(session_id = %self.id, event_id = %t.input.event_id, "turn lost: {why}");
         }
-        // Not given to the runtime: still `pending` in the hub, which sends it again.
+        // Not given to the runtime, or not taken: still `pending` in the hub, which sends
+        // them again.
         self.lowering = None;
+        self.injected.clear();
         self.set_state(ProcessState::Stopped);
     }
 
@@ -1505,6 +1655,8 @@ impl Session {
             self.slot = None;
             // Its MCP server is gone with it; a call still open fails.
             self.link.mcp().unbind(self.id);
+            // And its subagents; the next process counts its own.
+            self.subagents = 0;
         }
         if self.state != s {
             self.state = s;
@@ -1532,6 +1684,7 @@ impl Session {
             commands: self.commands.clone(),
             permission_mode: self.permission_mode,
             capped_input: self.capped_input(),
+            subagents: self.subagents,
         });
     }
 

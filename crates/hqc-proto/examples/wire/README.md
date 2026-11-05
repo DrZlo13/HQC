@@ -32,7 +32,9 @@ Optional fields are omitted when absent; readers must accept `null` for them as 
 
 Replies reuse the request `id`: `hub.hello.ack.json` and `hub.error.json` answer
 `worker.hello.json` (`w-1`), `hub.ack.json` answers `worker.event.json` (`w-2`),
-`worker.ack.json` answers `hub.session.input.json` (`f-3`). `hub.ack.unknown-session.json`
+`worker.ack.json` answers `hub.session.input.json` (`f-3`); `worker.ack.joined.json` is the same
+answer for an input the runtime took into the turn already running (`joined`, SPEC §17.2).
+`hub.ack.unknown-session.json`
 is the ack for an event dropped because the hub does not know its session (no `seq`).
 `hub.clarify.response.cancel.json` — empty `answers`: the hub cancelled the clarify request.
 `worker.result.fs.stat.json` answers `hub.fs.stat.json` (`h-7`),
@@ -77,3 +79,6 @@ T39: the chain of `event.peer.message.json` carries a cap (`permission_cap: ask`
 which `hub.session.input.peer.json` hands to the worker; `worker.session.state.capped.json` —
 the worker runs that input's turn in `ask` under the cap; `api.session.json` and
 `client.session.summary.json` show the session meanwhile (`permission_capped_by`).
+
+SPEC 0.68: `worker.session.state.json` carries `subagents`, the subagents the agent runs now;
+`api.session.json` and `client.session.summary.json` show it (absent is 0).

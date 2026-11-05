@@ -13,14 +13,22 @@
 //!   except for a task that a subagent started or whose `task_started` said it runs in the
 //!   foreground, until a `task_updated` moves it to the background;
 //!   `system` `compact_boundary` → `system context_compacted`;
+//! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
+//!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
+//!   than `running` of the same `task_id` → [`AdapterEvent::Subagents`] when the count
+//!   changes;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
+//!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
+//!   `command_lifecycle` lines name (2.1.312);
 //! - `result` → `usage` (none with `num_turns: 0`, no tokens and no cost), `status idle`, end
 //!   of turn; `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the
 //!   previous `result` of the session (or since the transcript's last `cost-state` after
 //!   `--resume`), `session_cost_usd` the total itself;
 //!   a request of the main agent or of a foreground subagent still open then gets
 //!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
-//!   `task_notification`, which cancels it;
+//!   `task_notification`, which cancels it; an input written during the turn and not echoed
+//!   is taken, carried into the next turn or not taken by its last `command_lifecycle` (SPEC
+//!   §17.2);
 //! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
 //!   differ from what this process reported (the CLI sends `init` before every turn);
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
@@ -40,7 +48,7 @@
 //! Messages of subagents (`parent_tool_use_id` set) are not mapped: their records live in
 //! separate sidechain files, not in the session transcript.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
@@ -117,6 +125,22 @@ enum Pending {
     },
 }
 
+/// A user message written to stdin whose `--replay-user-messages` echo has not come yet.
+#[derive(Debug)]
+struct Written {
+    /// The line's own `uuid`, fresh v4 (not the `event_id`: the CLI silently drops a line
+    /// whose `uuid` it has seen, 2.1.312).
+    uuid: Uuid,
+    event_id: Uuid,
+    /// Written into the turn running then (SPEC §17.2).
+    mid_turn: bool,
+    /// The last `state` of its `command_lifecycle`: `queued`, `started`, `completed`,
+    /// `cancelled`; none yet, or a CLI without those lines.
+    state: Option<String>,
+    /// A turn ended without taking it: the CLI runs it next by itself.
+    carried: bool,
+}
+
 impl Pending {
     fn agent_id(&self) -> Option<&str> {
         match self {
@@ -133,11 +157,17 @@ pub struct Core {
     restricted: bool,
     /// The last assistant text: event id, text, and whether the CLI wrote it itself.
     held: Option<(Uuid, String, bool)>,
-    /// `event_id` of the input sent last: `in_reply_to` of agent messages once its echo has
+    /// `event_id` of the input of the turn: `in_reply_to` of agent messages once its echo has
     /// come ([`Core::reply_to`]).
     last_input: Option<Uuid>,
-    /// Inputs written to stdin whose `--replay-user-messages` echo has not come yet.
-    awaiting_echo: VecDeque<Uuid>,
+    /// Inputs written to stdin whose echo has not come yet, in the order written.
+    awaiting_echo: VecDeque<Written>,
+    /// An input was written to this process.
+    wrote: bool,
+    /// The CLI sends `command_lifecycle` lines (2.1.312).
+    lifecycle: bool,
+    /// `task_id`s of the subagents running now.
+    subagents: HashSet<String>,
     in_turn: bool,
     turn: u64,
     pending: HashMap<String, Pending>,
@@ -180,6 +210,9 @@ impl Core {
             held: None,
             last_input: None,
             awaiting_echo: VecDeque::new(),
+            wrote: false,
+            lifecycle: false,
+            subagents: HashSet::new(),
             in_turn: false,
             turn: 0,
             pending: HashMap::new(),
@@ -234,12 +267,50 @@ impl Core {
     /// block followed by `images` (image blocks of the Messages API, SPEC §8.1). The
     /// artifacts' paths are already in `input.text` (`.hqc/inbox`, SPEC §12).
     pub fn input_with_images(&mut self, input: &SessionInput, images: Vec<Value>) -> Vec<Action> {
-        // `peer_prefix` and `peer` are in `text` already (crate::peer, SPEC §7.1).
-        self.last_input = Some(input.event_id);
-        self.awaiting_echo.push_back(input.event_id);
+        // With `command_lifecycle` the CLI's `started` names the turn's input: one written
+        // during a turn the CLI began by itself runs only after it (SPEC §17.2).
+        if !self.wrote || !self.lifecycle {
+            self.last_input = Some(input.event_id);
+        }
         self.in_turn = true;
         self.turn += 1;
         self.held = None;
+        vec![self.write(input, images, false)]
+    }
+
+    /// A person's input may go into the running turn (SPEC §17.2): a turn runs and no
+    /// permission request or question is open.
+    pub fn can_inject(&self) -> bool {
+        self.in_turn && self.pending.is_empty()
+    }
+
+    /// [`Core::input_with_images`] into the running turn; `None` unless
+    /// [`Core::can_inject`]. The CLI takes the line at its next step, or runs it next by
+    /// itself when the turn ends first; it stays out of `in_reply_to` until then.
+    pub fn inject_with_images(
+        &mut self,
+        input: &SessionInput,
+        images: Vec<Value>,
+    ) -> Option<Vec<Action>> {
+        if !self.can_inject() {
+            return None;
+        }
+        Some(vec![self.write(input, images, true)])
+    }
+
+    /// The user message of stream-json, with a fresh `uuid` its echo and `command_lifecycle`
+    /// will name.
+    fn write(&mut self, input: &SessionInput, images: Vec<Value>, mid_turn: bool) -> Action {
+        // `peer_prefix` and `peer` are in `text` already (crate::peer, SPEC §7.1).
+        let uuid = Uuid::new_v4();
+        self.wrote = true;
+        self.awaiting_echo.push_back(Written {
+            uuid,
+            event_id: input.event_id,
+            mid_turn,
+            state: None,
+            carried: false,
+        });
         let content = if images.is_empty() {
             json!(input.text)
         } else {
@@ -247,10 +318,11 @@ impl Core {
             blocks.extend(images);
             Value::Array(blocks)
         };
-        vec![Action::Write(json!({
+        Action::Write(json!({
             "type": "user",
+            "uuid": uuid,
             "message": {"role": "user", "content": content},
-        }))]
+        }))
     }
 
     /// `control_request` `interrupt` for the running turn; `None` if no turn runs.
@@ -427,8 +499,12 @@ impl Core {
         match ty {
             "stream_event" if !sub => self.on_stream_event(&v),
             "assistant" if !sub => self.on_assistant(&v),
-            "user" if v["isReplay"] == true => self.on_echo(),
+            "user" if v["isReplay"] == true => self.on_echo(&v),
             "user" if !sub => self.on_user(&v),
+            "command_lifecycle" => {
+                self.on_lifecycle(&v);
+                vec![]
+            }
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
             "control_response" => self.on_control_response(&v),
@@ -453,8 +529,10 @@ impl Core {
                     {
                         self.quiet_tasks.insert(id.to_owned(), subagent);
                     }
-                    vec![]
+                    let agent = v["task_type"] == "local_agent";
+                    self.count_subagent(v["task_id"].as_str().filter(|_| agent), true)
                 }
+                // Its end comes before the task's `task_notification` (2.1.312).
                 Some("task_updated") => {
                     if let Some(id) = v["task_id"]
                         .as_str()
@@ -464,9 +542,16 @@ impl Core {
                             self.quiet_tasks.remove(id);
                         }
                     }
-                    vec![]
+                    let ended = v["patch"]["status"]
+                        .as_str()
+                        .is_some_and(|s| s != "running");
+                    self.count_subagent(v["task_id"].as_str().filter(|_| ended), false)
                 }
-                Some("task_notification") => self.on_task_notification(&v),
+                Some("task_notification") => {
+                    let mut out = self.on_task_notification(&v);
+                    out.extend(self.count_subagent(v["task_id"].as_str(), false));
+                    out
+                }
                 // Its uuid is that of the transcript's `system compact_boundary` record
                 // (fixture `resume-compact`): the event id is derived from it as from a
                 // record's.
@@ -622,14 +707,69 @@ impl Core {
         out
     }
 
-    fn on_echo(&mut self) -> Vec<Action> {
-        match self.awaiting_echo.pop_front() {
-            Some(event_id) => vec![Action::Emit(AdapterEvent::InputAccepted { event_id })],
+    /// The echo of the input written with its `uuid`. A CLI without `command_lifecycle` may
+    /// not keep our `uuid` (the T0 fixtures, 2.1.307 and 2.1.308): there it is the oldest
+    /// input's echo. An input that is no write into the running turn becomes the turn's input
+    /// here as by its `started`: taken into a turn the CLI began by itself, the echo comes
+    /// first and `started` finds nothing left.
+    fn on_echo(&mut self, v: &Value) -> Vec<Action> {
+        let at = record_uuid(v)
+            .and_then(|u| self.awaiting_echo.iter().position(|w| w.uuid == u))
+            .or_else(|| (!self.lifecycle && !self.awaiting_echo.is_empty()).then_some(0));
+        match at.and_then(|i| self.awaiting_echo.remove(i)) {
+            Some(w) => {
+                if self.lifecycle && (!w.mid_turn || w.carried) {
+                    self.last_input = Some(w.event_id);
+                }
+                vec![Action::Emit(AdapterEvent::InputAccepted {
+                    event_id: w.event_id,
+                })]
+            }
             None => {
                 tracing::warn!(session_id = %self.session_id, "replay echo without a sent input");
                 vec![]
             }
         }
+    }
+
+    /// `command_lifecycle {command_uuid, state}` (2.1.312) of an input not echoed yet:
+    /// `queued` when the CLI read the line, `started` when it took it (right after the echo
+    /// when it went into a running turn), `completed` or `cancelled`. `started` of an input
+    /// that begins a turn of its own makes it the turn's input.
+    fn on_lifecycle(&mut self, v: &Value) {
+        self.lifecycle = true;
+        let Some(uuid) = v["command_uuid"]
+            .as_str()
+            .and_then(|u| u.parse::<Uuid>().ok())
+        else {
+            return;
+        };
+        let Some(w) = self.awaiting_echo.iter_mut().find(|w| w.uuid == uuid) else {
+            return;
+        };
+        let state = v["state"].as_str().unwrap_or_default();
+        if state == "started" && (!w.mid_turn || w.carried) {
+            self.last_input = Some(w.event_id);
+        }
+        w.state = Some(state.to_owned());
+    }
+
+    /// Subagent `task_id` started (`add`) or ended: the new count when it changed.
+    fn count_subagent(&mut self, task_id: Option<&str>, add: bool) -> Vec<Action> {
+        let Some(id) = task_id else {
+            return vec![];
+        };
+        let changed = if add {
+            self.subagents.insert(id.to_owned())
+        } else {
+            self.subagents.remove(id)
+        };
+        if !changed {
+            return vec![];
+        }
+        let n = u32::try_from(self.subagents.len()).unwrap_or(u32::MAX);
+        tracing::info!(session_id = %self.session_id, task_id = id, subagents = n, "subagents");
+        vec![Action::Emit(AdapterEvent::Subagents(n))]
     }
 
     fn on_user(&mut self, v: &Value) -> Vec<Action> {
@@ -716,22 +856,52 @@ impl Core {
             // answered (SPEC §7.1).
             in_reply_to: self.reply_to(),
         }));
-        // The CLI answered the input without echoing it: a local slash command (`/name`,
-        // `/cost`, ...) runs without a model turn and without `--replay-user-messages`. The
-        // result still means the input was taken; without this the supervisor resends it.
-        while let Some(event_id) = self.awaiting_echo.pop_front() {
-            tracing::info!(session_id = %self.session_id, %event_id, "input taken without an echo (local command)");
-            out.push(Action::Emit(AdapterEvent::InputAccepted { event_id }));
+        // Inputs not echoed (SPEC §17.2), by their last `command_lifecycle`:
+        // - `started` without an echo: taken. A local slash command (`/name`, ...) runs
+        //   without a model turn and may come without one; without this the supervisor
+        //   resends it;
+        // - only `queued`: carried, the CLI runs it next by itself (an input written during
+        //   the final answer, or before an interrupt; 2.1.312);
+        // - `cancelled`: not taken, `dropped`;
+        // - no line (an older CLI): carried if written during the turn, else taken.
+        let (mut carried, mut dropped) = (Vec::new(), Vec::new());
+        for mut w in std::mem::take(&mut self.awaiting_echo) {
+            let carry = match w.state.as_deref() {
+                Some("cancelled") => {
+                    tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input cancelled by the CLI, not taken");
+                    dropped.push(w.event_id);
+                    continue;
+                }
+                Some("started" | "completed") => false,
+                Some(_) => true,
+                None => w.mid_turn,
+            };
+            if carry {
+                tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input carried into the next turn");
+                w.carried = true;
+                carried.push(w.event_id);
+                self.awaiting_echo.push_back(w);
+            } else {
+                tracing::info!(session_id = %self.session_id, event_id = %w.event_id, "input taken without an echo (local command)");
+                out.push(Action::Emit(AdapterEvent::InputAccepted {
+                    event_id: w.event_id,
+                }));
+            }
         }
-        out.push(Action::Emit(AdapterEvent::TurnEnded));
         tracing::info!(
             session_id = %self.session_id,
             subtype,
             num_turns = v["num_turns"].as_u64(),
             duration_ms = v["duration_ms"].as_u64(),
+            carried = carried.len(),
             "turn ended"
         );
-        self.in_turn = false;
+        // The CLI goes on with a carried input at once: that is a turn running.
+        self.in_turn = !carried.is_empty();
+        if self.in_turn {
+            self.turn += 1;
+        }
+        out.push(Action::Emit(AdapterEvent::TurnEnded { carried, dropped }));
         out
     }
 
@@ -950,14 +1120,13 @@ impl Core {
         ))
     }
 
-    /// The input the running turn answers: the one sent last, once its echo has come. Until
-    /// then the CLI has only queued it and what comes is no reply to it. Written during a turn
-    /// the CLI started by itself after a background task, it is echoed after that turn's
-    /// `result` (checked live on 2.1.312), so the turn's final message and `status idle` name
-    /// none; taken into the turn after a tool result, the rest of the turn names it.
+    /// The input the running turn answers ([`Core::last_input`]), once its echo has come. Until
+    /// then the CLI has only queued it and what comes is no reply to it: without
+    /// `command_lifecycle` the input is the one sent last, and one written during a turn the
+    /// CLI started by itself is echoed after that turn's `result` (checked live on 2.1.312).
     fn reply_to(&self) -> Option<Uuid> {
         self.last_input
-            .filter(|id| !self.awaiting_echo.contains(id))
+            .filter(|id| !self.awaiting_echo.iter().any(|w| w.event_id == *id))
     }
 
     fn emit(&self, event_id: Uuid, kind: EventKind) -> Action {

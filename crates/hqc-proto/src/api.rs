@@ -76,6 +76,10 @@ pub struct Session {
     /// otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_capped_by: Option<String>,
+    /// How many subagents the session's agent runs now, as its worker last reported it
+    /// (`session.state.subagents`, since SPEC 0.68). Absent — 0.
+    #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
+    pub subagents: u32,
 }
 
 /// `spawned_by` of a session: the spawning session and its address
@@ -102,6 +106,7 @@ impl Session {
             permission_mode: self.permission_mode,
             effective_permission_mode: self.effective_permission_mode,
             permission_capped_by: self.permission_capped_by.clone(),
+            subagents: self.subagents,
         }
     }
 }

@@ -66,6 +66,24 @@ fn lines(s: &str) -> Vec<Value> {
         .collect()
 }
 
+/// What the adapter wrote to stdin without the `uuid` of each user message, checked to be a
+/// fresh v4 (SPEC §8.1): the T0 spike wrote none.
+fn without_uuids(lines: Vec<Value>) -> Vec<Value> {
+    let mut seen = HashSet::new();
+    lines
+        .into_iter()
+        .map(|mut v| {
+            if v["type"] == "user" {
+                let u: Uuid = v["uuid"].as_str().expect("no uuid").parse().unwrap();
+                assert_eq!(u.get_version_num(), 4, "{v}");
+                assert!(seen.insert(u), "uuid written twice: {v}");
+                v.as_object_mut().unwrap().remove("uuid");
+            }
+            v
+        })
+        .collect()
+}
+
 impl Fixture {
     fn prompt(&self) -> String {
         lines(self.stdin)[0]["message"]["content"]
@@ -213,7 +231,7 @@ impl Harness {
             let ev = self.next().await;
             out.push(ev.clone());
             match ev {
-                AdapterEvent::TurnEnded => return out,
+                AdapterEvent::TurnEnded { .. } => return out,
                 AdapterEvent::Event(e) => match &e.kind {
                     EventKind::ApprovalRequest { request_id, .. } => self
                         .adapter
@@ -239,7 +257,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
     for ev in events {
         let s = match ev {
             AdapterEvent::InputAccepted { .. } => "accepted".into(),
-            AdapterEvent::TurnEnded => "turn_ended".into(),
+            AdapterEvent::TurnEnded { .. } => "turn_ended".into(),
+            AdapterEvent::Subagents(n) => format!("subagents:{n}"),
             AdapterEvent::Exited { .. } => "exited".into(),
             AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
             AdapterEvent::Title(_) => "title".into(),
@@ -374,7 +393,7 @@ async fn permission_allow_once() {
             "turn_ended"
         ]
     );
-    assert_eq!(h.claude.stdin(), lines(fx.stdin));
+    assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
     assert_eq!(
         approval_options(&evs),
         [
@@ -462,7 +481,7 @@ async fn permission_deny() {
     // The same answer as the spike's, except for the message text and `interrupt`: the
     // VS Code tab's "No" (cc_remote docs/SPEC.md §2.12).
     let mut want = lines(fx.stdin);
-    let mut got = h.claude.stdin();
+    let mut got = without_uuids(h.claude.stdin());
     assert_eq!(
         got[1]["response"]["response"]["message"],
         "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. \
@@ -498,7 +517,7 @@ async fn permission_always_sends_only_local_add_rules() {
         .collect::<Vec<_>>();
     assert_eq!(perms.len(), 1);
     want[1]["response"]["response"]["updatedPermissions"] = Value::Array(perms);
-    assert_eq!(h.claude.stdin(), want);
+    assert_eq!(without_uuids(h.claude.stdin()), want);
 }
 
 #[tokio::test]
@@ -553,14 +572,14 @@ async fn ask_user_question_becomes_clarify() {
             multi: Some(false),
         }]
     );
-    assert_eq!(h.claude.stdin(), lines(fx.stdin));
+    assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
 }
 
 #[tokio::test]
 async fn mcp_timeout_turn_ends_with_detail() {
     let fx = fixture!("mcp-timeout");
     let (h, evs, _) = run(&fx, "once", BTreeMap::new()).await;
-    assert_eq!(h.claude.stdin(), lines(fx.stdin));
+    assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
     let evs = events(&evs);
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
@@ -1815,7 +1834,7 @@ fn deny_is_the_tabs_no() {
                     .unwrap()
                     .to_owned(),
             }),
-            Action::Emit(AdapterEvent::TurnEnded) => Some("turn_ended".into()),
+            Action::Emit(AdapterEvent::TurnEnded { .. }) => Some("turn_ended".into()),
             _ => None,
         })
         .collect();
@@ -1994,7 +2013,10 @@ fn a_turn_the_cli_starts_by_itself_names_no_input() {
 {}
 {{"type":"assistant","message":{{"model":"claude-haiku-5-5","role":"assistant","content":[{{"type":"text","text":"PONG"}}]}},"parent_tool_use_id":null,"uuid":"cd9aae03-1988-42bd-a973-f068747cca40"}}
 {{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.00631608,"usage":{{"input_tokens":4,"output_tokens":5}}}}"#,
-            echo("Reply with the single word PONG.")
+            echo(
+                &Uuid::new_v4().to_string(),
+                "Reply with the single word PONG."
+            )
         ),
     );
     assert_eq!(
@@ -2069,7 +2091,10 @@ async fn image_attachments_are_image_blocks() {
         permission_cap: None,
     };
     let a = core.input_with_images(&input, images);
-    assert!(matches!(&a[..], [Action::Write(v)] if *v == want), "{a:?}");
+    assert!(
+        matches!(&a[..], [Action::Write(v)] if without_uuids(vec![v.clone()]) == [want.clone()]),
+        "{a:?}"
+    );
     // Without images the content stays a string.
     let a = core.input(&input);
     assert!(
@@ -2092,7 +2117,7 @@ fn held_text_is_not_final_before_a_tool_call() {
         peer: None,
         permission_cap: None,
     });
-    core.on_line(&echo("x"));
+    core.on_line(&echo(&Uuid::new_v4().to_string(), "x"));
     let u1 = Uuid::new_v4();
     let u2 = Uuid::new_v4();
     let text = json!({"type":"assistant","uuid":u1,"parent_tool_use_id":null,
@@ -2248,7 +2273,7 @@ async fn takeover_records_are_registered_as_own() {
             .await
             .unwrap()
             .unwrap();
-        if ev == AdapterEvent::TurnEnded {
+        if matches!(ev, AdapterEvent::TurnEnded { .. }) {
             break;
         }
     }
@@ -2546,7 +2571,7 @@ fn emitted(actions: Vec<Action>) -> Vec<AdapterEvent> {
 /// An input written and echoed: the CLI runs its turn.
 fn started(core: &mut Core, sid: Uuid) -> Uuid {
     let input = written(core, sid, "x");
-    core.on_line(&echo("x"));
+    core.on_line(&echo(&Uuid::new_v4().to_string(), "x"));
     input
 }
 
@@ -2563,13 +2588,6 @@ fn written(core: &mut Core, sid: Uuid, text: &str) -> Uuid {
         permission_cap: None,
     });
     input
-}
-
-/// The `--replay-user-messages` echo of an input.
-fn echo(text: &str) -> String {
-    json!({"type": "user", "isReplay": true, "uuid": Uuid::new_v4(), "parent_tool_use_id": null,
-        "message": {"role": "user", "content": text}})
-    .to_string()
 }
 
 /// A background task's end (lines of a live run on 2.1.312: `run_in_background` Bash, then
@@ -2766,5 +2784,607 @@ fn turn_ended_by_a_synthetic_reply_has_a_final_runtime_message() {
     assert_eq!(
         last_message["payload"],
         json!({"text": text, "final": true, "in_reply_to": input, "runtime": true})
+    );
+}
+
+// ---- SPEC §17.2: a message during a turn, and the subagents running ------------------------
+// The lines are those of live runs on 2.1.312 (haiku, `--replay-user-messages`, 2026-11-05),
+// with the message uuids the engine gave.
+
+const CLI_SESSION: &str = "42e1f456-d428-4380-ad8a-473e21ef9ff7";
+
+fn user_input(sid: Uuid, text: &str) -> SessionInput {
+    SessionInput {
+        session_id: sid,
+        event_id: Uuid::now_v7(),
+        text: text.into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+    }
+}
+
+/// The `uuid` of the one user message written.
+fn line_uuid(actions: &[Action]) -> String {
+    let w = writes(actions);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0]["type"], "user");
+    w[0]["uuid"].as_str().expect("no uuid").to_owned()
+}
+
+fn lifecycle(uuid: &str, state: &str) -> String {
+    json!({"type": "command_lifecycle", "command_uuid": uuid, "state": state,
+        "uuid": Uuid::new_v4(), "session_id": CLI_SESSION})
+    .to_string()
+}
+
+fn echo(uuid: &str, text: &str) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": text},
+        "session_id": CLI_SESSION, "parent_tool_use_id": null, "uuid": uuid,
+        "timestamp": "2026-11-05T14:25:00.000Z", "isReplay": true})
+    .to_string()
+}
+
+fn reply(text: &str) -> String {
+    json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+        "content": [{"type": "text", "text": text}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string()
+}
+
+fn bash(id: &str, command: &str) -> String {
+    json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+        "content": [{"type": "tool_use", "id": id, "name": "Bash",
+            "input": {"command": command, "description": "Sleep"}}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string()
+}
+
+fn tool_result(id: &str) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result",
+        "tool_use_id": id, "content": "", "is_error": false}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string()
+}
+
+fn result(subtype: &str) -> String {
+    json!({"type": "result", "subtype": subtype, "is_error": subtype != "success",
+        "num_turns": 2, "total_cost_usd": 0.001, "session_id": CLI_SESSION,
+        "usage": {"input_tokens": 4, "output_tokens": 2}})
+    .to_string()
+}
+
+fn lines_of(lines: &[String]) -> String {
+    lines.join("\n")
+}
+
+/// `accepted X`, `message "text" to X`, `status to X`, `turn_ended [X, ...]` (carried; with
+/// ` dropped [X, ...]` when any is), the inputs named as in `names`.
+fn trace(actions: &[Action], names: &[(Uuid, &str)]) -> Vec<String> {
+    let name = |u: &Uuid| {
+        names
+            .iter()
+            .find(|(id, _)| id == u)
+            .map_or("?", |(_, n)| *n)
+            .to_owned()
+    };
+    let to = |u: &Option<Uuid>| u.as_ref().map_or("-".to_owned(), name);
+    let list = |l: &[Uuid]| l.iter().map(name).collect::<Vec<_>>().join(", ");
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::InputAccepted { event_id }) => {
+                Some(format!("accepted {}", name(event_id)))
+            }
+            Action::Emit(AdapterEvent::TurnEnded { carried, dropped }) if dropped.is_empty() => {
+                Some(format!("turn_ended [{}]", list(carried)))
+            }
+            Action::Emit(AdapterEvent::TurnEnded { carried, dropped }) => Some(format!(
+                "turn_ended [{}] dropped [{}]",
+                list(carried),
+                list(dropped)
+            )),
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::AgentMessage {
+                    text, in_reply_to, ..
+                } => Some(format!("message {text:?} to {}", to(in_reply_to))),
+                EventKind::Status { in_reply_to, .. } => {
+                    Some(format!("status to {}", to(in_reply_to)))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each message written gets a fresh v4 `uuid`, not its `event_id`: a line with a uuid the
+/// CLI has seen is dropped without a turn. The echo is matched by it, not by order.
+#[test]
+fn every_message_has_a_fresh_uuid_and_its_echo_is_matched_by_it() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[lifecycle(&ua, "queued"), lifecycle(&ua, "started")]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    for (u, input) in [(&ua, &a), (&ub, &b)] {
+        let u: Uuid = u.parse().unwrap();
+        assert_eq!(u.get_version_num(), 4);
+        assert_ne!(u, input.event_id);
+    }
+    assert_ne!(ua, ub);
+    let out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            echo(&ub, "second"),
+            echo(&ua, "first"),
+        ]),
+    );
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(trace(&out, &names), ["accepted B", "accepted A"]);
+}
+
+/// A message written while the turn runs a command (`sleep 8`, the message 5 s in): the CLI
+/// takes it after the command's result, its echo then `started`, and answers both in the
+/// same turn, one `result`. The answer replies to the turn's input.
+#[test]
+fn a_message_during_a_command_joins_the_turn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(
+        sid,
+        "Run the bash command `sleep 8` in the foreground and then reply with the single word DONE.",
+    );
+    let b = user_input(sid, "Also add the word BANANA to your reply.");
+    let ua = line_uuid(&core.input(&a));
+    let call = "toolu_01NpAht5sbviUoPqP96JbyXm";
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, &a.text),
+            bash(call, "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    out.extend(play(&mut core, &lines_of(&[
+        lifecycle(&ub, "queued"),
+        r#"{"type":"system","subtype":"task_started","task_id":"b5w66jgbe","run_id":"0mw3n0e3u-695e122c","tool_use_id":"toolu_01NpAht5sbviUoPqP96JbyXm","description":"Sleep for 8 seconds","is_backgrounded":false,"task_type":"local_bash","uuid":"0f6c1d2e-2222-4a55-9d0e-1a2b3c4d5e01","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        r#"{"type":"system","subtype":"task_notification","task_id":"b5w66jgbe","run_id":"0mw3n0e3u-695e122c","tool_use_id":"toolu_01NpAht5sbviUoPqP96JbyXm","status":"completed","output_file":"","summary":"Sleep for 8 seconds","uuid":"0f6c1d2e-2222-4a55-9d0e-1a2b3c4d5e02","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        tool_result(call),
+        echo(&ub, &b.text),
+        lifecycle(&ub, "started"),
+        reply("DONE BANANA"),
+        lifecycle(&ub, "completed"),
+        result("success"),
+        lifecycle(&ua, "completed"),
+    ])));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "accepted A",
+            "accepted B",
+            "message \"DONE BANANA\" to A",
+            "status to A",
+            "turn_ended []"
+        ]
+    );
+    assert!(!core.can_inject(), "no turn runs");
+}
+
+/// A message written during the final answer (a turn without tools) is not taken into it:
+/// after the `result` the CLI runs it by itself, `started` first, then its echo, its answer
+/// and its own `result`.
+#[test]
+fn a_message_during_the_final_answer_is_carried() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(
+        sid,
+        "Without using any tools, write a 700-word story about a lighthouse keeper.",
+    );
+    let b = user_input(sid, "Also: end your reply with the word BANANA.");
+    let ua = line_uuid(&core.input(&a));
+    let mut out = play(
+        &mut core,
+        &lines_of(&[lifecycle(&ua, "queued"), lifecycle(&ua, "started")]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            echo(&ua, &a.text),
+            reply("A Tuesday of Salt and Iron"),
+            result("success"),
+            lifecycle(&ua, "completed"),
+            lifecycle(&ub, "started"),
+            echo(&ub, &b.text),
+            reply("Understood. BANANA"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "accepted A",
+            "message \"A Tuesday of Salt and Iron\" to A",
+            "status to A",
+            "turn_ended [B]",
+            "accepted B",
+            "message \"Understood. BANANA\" to B",
+            "status to B",
+            "turn_ended []"
+        ]
+    );
+}
+
+/// A message written before `interrupt`: the interrupted turn ends with
+/// `error_during_execution` (its input `cancelled` after the `result`), the CLI runs the
+/// message next. That turn runs for the engine at once: it can be stopped and joined.
+#[test]
+fn a_message_before_an_interrupt_is_carried() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(
+        sid,
+        "Run the bash command `sleep 15` in the foreground and then reply with the single word DONE.",
+    );
+    let b = user_input(sid, "Also add the word BANANA to your reply.");
+    let ua = line_uuid(&core.input(&a));
+    let call = "toolu_01FoCFY4DmUbVxXAembc44PX";
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, &a.text),
+            bash(call, "sleep 15"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let (_, interrupted) = core.interrupt().expect("a turn runs");
+    out.extend(play(&mut core, &lines_of(&[
+        lifecycle(&ub, "queued"),
+        r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-interrupt-1"}}"#.into(),
+        r#"{"type":"system","subtype":"task_notification","task_id":"bfis28nrx","run_id":"0mw3mw8rx-13c7c4ef","tool_use_id":"toolu_01FoCFY4DmUbVxXAembc44PX","status":"stopped","output_file":"","summary":"Sleep for 15 seconds","uuid":"0f6c1d2e-3333-4a55-9d0e-1a2b3c4d5e01","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        tool_result(call),
+        result("error_during_execution"),
+    ])));
+    assert!(!core.turn_running(interrupted));
+    assert!(core.interrupt().is_some(), "the carried input's turn runs");
+    assert!(core.can_inject());
+    out.extend(play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "cancelled"),
+            lifecycle(&ub, "started"),
+            echo(&ub, &b.text),
+            reply("BANANA. The `sleep 15` command was declined"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "accepted A",
+            "status to A",
+            "turn_ended [B]",
+            "accepted B",
+            "message \"BANANA. The `sleep 15` command was declined\" to B",
+            "status to B",
+            "turn_ended []"
+        ]
+    );
+}
+
+/// A message the CLI cancelled before the turn's `result` is not taken: neither accepted nor
+/// carried, but dropped (the supervisor queues it again).
+#[test]
+fn a_cancelled_message_is_not_taken() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            lifecycle(&ub, "cancelled"),
+            tool_result("toolu_1"),
+            reply("DONE"),
+            result("success"),
+        ]),
+    );
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "message \"DONE\" to A",
+            "status to A",
+            "turn_ended [] dropped [B]"
+        ]
+    );
+}
+
+/// A message the CLI took without an echo (`started`, no `isReplay` line: a local command)
+/// is taken at the `result`, also one written during the turn.
+#[test]
+fn a_message_started_without_an_echo_is_taken() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "/name x"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            lifecycle(&ub, "started"),
+            tool_result("toolu_1"),
+            reply("DONE"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    );
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "message \"DONE\" to A",
+            "status to A",
+            "accepted B",
+            "turn_ended []"
+        ]
+    );
+}
+
+/// Without `command_lifecycle` (an older CLI; the T0 fixtures, 2.1.307): the moment of
+/// writing decides. A message written during the turn and not echoed by its `result` is
+/// carried; an echo that names no uuid of ours is the oldest input's.
+#[test]
+fn without_lifecycle_lines_a_message_written_during_the_turn_is_carried() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    core.input(&a);
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            echo("adbf4a08-b683-4a10-af11-6bd389a5a73e", "first"),
+            bash("toolu_1", "sleep 8"),
+        ]),
+    );
+    core.inject_with_images(&b, vec![]).expect("a turn runs");
+    out.extend(play(
+        &mut core,
+        &lines_of(&[tool_result("toolu_1"), reply("DONE"), result("success")]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "accepted A",
+            "message \"DONE\" to A",
+            "status to A",
+            "turn_ended [B]"
+        ]
+    );
+    let next = play(
+        &mut core,
+        &lines_of(&[
+            echo("bdbf4a08-b683-4a10-af11-6bd389a5a73e", "second"),
+            result("success"),
+        ]),
+    );
+    let next = trace(&next, &names);
+    assert_eq!(next.first().map(String::as_str), Some("accepted B"));
+    assert_eq!(next.last().map(String::as_str), Some("turn_ended []"));
+}
+
+/// After a background subagent the CLI starts a turn by itself, without `command_lifecycle`.
+/// A message written meanwhile (no turn runs for the supervisor) waits for that turn: the
+/// turn's answer still replies to the earlier input, the message is carried, and its
+/// `started` makes it the input of the next turn.
+#[test]
+fn a_message_during_a_turn_the_cli_began_waits_for_it() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "Use the Agent tool once with subagent_type general-purpose and run_in_background set to true");
+    let b = user_input(sid, "Reply with the single word PONG.");
+    let ua = line_uuid(&core.input(&a));
+    let mut out = play(&mut core, &lines_of(&[
+        lifecycle(&ua, "queued"),
+        lifecycle(&ua, "started"),
+        echo(&ua, &a.text),
+        r#"{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Run the bash command sleep 6, then reply with the number 4.","uuid":"0f6c1d2e-4444-4a55-9d0e-1a2b3c4d5e01","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        tool_result("toolu_01B2anRdzK42h65tA2gdwhb2"),
+        reply("WAITING"),
+        result("success"),
+        lifecycle(&ua, "completed"),
+        r#"{"type":"system","subtype":"task_updated","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","patch":{"status":"completed","end_time":1793888580322},"uuid":"0f6c1d2e-4444-4a55-9d0e-1a2b3c4d5e02","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        r#"{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"completed","output_file":"/tmp/tasks/a52af2b436ded4cea.output","summary":"4","uuid":"0f6c1d2e-4444-4a55-9d0e-1a2b3c4d5e03","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+    ]));
+    let ub = line_uuid(&core.input(&b));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            reply("The background agent finished and replied: **4**"),
+            result("success"),
+            lifecycle(&ub, "started"),
+            echo(&ub, &b.text),
+            reply("PONG"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "accepted A",
+            "message \"WAITING\" to A",
+            "status to A",
+            "turn_ended []",
+            "message \"The background agent finished and replied: **4**\" to A",
+            "status to A",
+            "turn_ended [B]",
+            "accepted B",
+            "message \"PONG\" to B",
+            "status to B",
+            "turn_ended []"
+        ]
+    );
+}
+
+/// A message handed while the CLI runs a turn it began by itself after a background command,
+/// and taken into it during a command of that turn: its echo comes first, `started` after it.
+/// The rest of the turn replies to it.
+#[test]
+fn a_message_taken_into_a_turn_the_cli_began_is_its_input() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(
+        sid,
+        "Run the bash command `sleep 6` in the background and reply with the single word WAITING.",
+    );
+    let b = user_input(sid, "Reply with the single word PONG.");
+    let ua = line_uuid(&core.input(&a));
+    let mut out = play(&mut core, &lines_of(&[
+        lifecycle(&ua, "queued"),
+        lifecycle(&ua, "started"),
+        echo(&ua, &a.text),
+        bash("toolu_01Bg", "sleep 6"),
+        r#"{"type":"system","subtype":"task_started","task_id":"b2k5bg0e1","tool_use_id":"toolu_01Bg","description":"Sleep for 6 seconds","is_backgrounded":true,"task_type":"local_bash","uuid":"0f6c1d2e-6666-4a55-9d0e-1a2b3c4d5e01","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        tool_result("toolu_01Bg"),
+        reply("WAITING"),
+        result("success"),
+        lifecycle(&ua, "completed"),
+        r#"{"type":"system","subtype":"task_notification","task_id":"b2k5bg0e1","tool_use_id":"toolu_01Bg","status":"completed","output_file":"/tmp/tasks/b2k5bg0e1.output","summary":"Background command \"Sleep for 6 seconds\" completed (exit code 0)","uuid":"0f6c1d2e-6666-4a55-9d0e-1a2b3c4d5e02","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        bash("toolu_02Fg", "sleep 8"),
+    ]));
+    let ub = line_uuid(&core.input(&b));
+    out.extend(play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            tool_result("toolu_02Fg"),
+            echo(&ub, &b.text),
+            lifecycle(&ub, "started"),
+            reply("PONG"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    ));
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "accepted A",
+            "message \"WAITING\" to A",
+            "status to A",
+            "turn_ended []",
+            "accepted B",
+            "message \"PONG\" to B",
+            "status to B",
+            "turn_ended []"
+        ]
+    );
+}
+
+/// While a permission request is open nothing goes into the turn; the answer opens it again.
+#[test]
+fn no_message_goes_into_a_turn_that_asks() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    assert!(!core.can_inject(), "no turn");
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "second"));
+    core.input(&a);
+    assert!(core.can_inject());
+    assert_eq!(
+        approvals(&core.on_line(&can_use_tool_line(&fx, "r1", None))),
+        1
+    );
+    assert!(!core.can_inject());
+    assert!(core.inject_with_images(&b, vec![]).is_none());
+    core.answer_approval("r1", "once", None).unwrap();
+    assert!(core.can_inject());
+}
+
+/// The subagents running (lines of live runs on 2.1.312): a foreground and a background one
+/// at once; a command of the subagent is no subagent; the foreground one ends by
+/// `task_updated`, the background one by `task_notification`; a `task_updated` without a
+/// status changes nothing.
+#[test]
+fn running_subagents_are_counted() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let stream = r#"{"type":"system","subtype":"task_started","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","description":"Reply with number","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","prompt":"Reply with the number 4.","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e01"}
+{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e02"}
+{"type":"system","subtype":"task_started","task_id":"b6yusn86f","run_id":"0mw3mxvyu-6c7dc659","owned_by_subagent":true,"tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","description":"Sleep for 6 seconds","is_backgrounded":false,"parent_task_id":"a52af2b436ded4cea","task_type":"local_bash","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e03"}
+{"type":"system","subtype":"task_progress","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Running Sleep for 6 seconds","subagent_type":"general-purpose","usage":{"total_tokens":23176,"tool_uses":1,"duration_ms":1310},"last_tool_name":"Bash","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e04"}
+{"type":"system","subtype":"task_notification","task_id":"b6yusn86f","run_id":"0mw3mxvyu-6c7dc659","tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","status":"completed","output_file":"","summary":"Sleep for 6 seconds","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e05"}
+{"type":"system","subtype":"task_updated","task_id":"a52af2b436ded4cea","patch":{"is_backgrounded":true},"uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e06"}
+{"type":"system","subtype":"task_updated","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","patch":{"status":"completed","end_time":1793888262670},"uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e07"}
+{"type":"system","subtype":"task_notification","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","status":"completed","output_file":"/tmp/tasks/a55949578b136436b.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e08"}
+{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"completed","output_file":"/tmp/tasks/a52af2b436ded4cea.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e09"}"#;
+    // The count reported by each line, in order.
+    let counts: Vec<Vec<u32>> = stream
+        .lines()
+        .map(|l| {
+            core.on_line(l)
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::Emit(AdapterEvent::Subagents(n)) => Some(n),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            vec![1],
+            vec![2],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![1],
+            vec![],
+            vec![0]
+        ]
     );
 }

@@ -230,11 +230,13 @@ pub async fn on_start_failed(
     Ok(())
 }
 
+/// `joined`: the runtime took the input into the turn already running (SPEC §17.2).
 pub async fn on_input_ack(
     app: &AppState,
     conn: &Arc<WorkerConn>,
     session_id: Uuid,
     event_id: Uuid,
+    joined: bool,
 ) -> anyhow::Result<()> {
     {
         let mut st = conn.st.lock().await;
@@ -246,11 +248,11 @@ pub async fn on_input_ack(
         notify_delivery(app, &row);
         // The send buffer it carried reached the agent (SPEC §7.1).
         crate::peers::delivered(app, event_id).await?;
-        // The worker hands input to the runtime one turn at a time (SPEC §17.2), so a
-        // delivered input means its turn has started. The ack bypasses the worker's outbox
-        // and may come after the turn's own events (SPEC §5.2): a turn that already has
-        // its final answer stays closed.
-        if !db::turn_answered(&app.db, session_id, event_id).await? {
+        // A delivered input starts its turn (SPEC §17.2), unless it went into the turn
+        // already running (`joined`). The ack bypasses the worker's outbox and may come
+        // after the turn's own events (SPEC §5.2): a turn that already has its final answer
+        // stays closed, and a joined input's ack after that answer must not open it again.
+        if !joined && !db::turn_answered(&app.db, session_id, event_id).await? {
             db::set_turn(&app.db, session_id, true, false).await?;
         }
     }

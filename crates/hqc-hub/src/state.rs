@@ -1,6 +1,7 @@
 //! Computed session state and queue length (SPEC §17.1). Neither is stored: both are derived
 //! on every read from the session row, its events, open requests and worker presence.
 
+use chrono::{DateTime, Utc};
 use hqc_proto::{
     api::{Agent, Session, SpawnedBy},
     event::SessionState,
@@ -65,6 +66,8 @@ struct Aggregates {
     unread: i64,
     /// The address of `spawned_by` (SPEC §7).
     spawned_by_address: Option<String>,
+    /// The user's (`session_favorites`).
+    favorite_at: Option<DateTime<Utc>>,
 }
 
 /// A stored enum name (`runtime`, `process_state`, `locked_by`) as its proto type.
@@ -83,9 +86,11 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
             (SELECT count(*) FROM events e WHERE e.session_id = s.id
                 AND e.seq > COALESCE(r.last_read_seq, 0) AND {UNREAD_FILTER}) AS unread,
             (SELECT p.slug || '/' || sp.slug FROM sessions sp JOIN projects p ON p.id = sp.project_id
-                WHERE sp.id = s.spawned_by) AS spawned_by_address
+                WHERE sp.id = s.spawned_by) AS spawned_by_address,
+            f.created_at AS favorite_at
          FROM sessions s
          LEFT JOIN read_cursors r ON r.session_id = s.id AND r.user_id = $1
+         LEFT JOIN session_favorites f ON f.session_id = s.id AND f.user_id = $1
          WHERE s.id = ANY($2)"
     ))
     .bind(user)
@@ -94,8 +99,8 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
     .await
 }
 
-/// The session objects (SPEC §6) of the given rows for `user` (unread is per user), in the
-/// order given.
+/// The session objects (SPEC §6) of the given rows for `user` (unread and favorite_at are per
+/// user), in the order given.
 pub async fn views(
     app: &AppState,
     user: Uuid,
@@ -169,6 +174,7 @@ pub async fn views(
                         address,
                     },
                 ),
+                favorite_at: a.favorite_at,
             })
         })
         .collect())

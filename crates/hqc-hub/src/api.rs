@@ -130,13 +130,26 @@ pub(crate) async fn project_for(
     }
 }
 
+/// The project as `user` gets it: `favorite_at` is the user's own.
+pub(crate) async fn project_view(
+    app: &AppState,
+    user: &CurrentUser,
+    p: &db::ProjectRow,
+) -> ApiResult<api::Project> {
+    let fav = db::project_favorites(&app.db, user.id, &[p.id]).await?;
+    Ok(p.to_api(fav.first().map(|(_, at)| *at)))
+}
+
 pub async fn projects(
     State(app): State<AppState>,
     user: CurrentUser,
 ) -> ApiResult<Json<ProjectList>> {
     let rows = db::projects_of(&app.db, user.id).await?;
+    let ids: Vec<Uuid> = rows.iter().map(|p| p.id).collect();
+    let fav = db::project_favorites(&app.db, user.id, &ids).await?;
+    let at = |id: Uuid| fav.iter().find(|(p, _)| *p == id).map(|(_, at)| *at);
     Ok(Json(ProjectList {
-        projects: rows.iter().map(db::ProjectRow::to_api).collect(),
+        projects: rows.iter().map(|p| p.to_api(at(p.id))).collect(),
     }))
 }
 
@@ -156,7 +169,8 @@ pub async fn project(
     user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<api::Project>> {
-    Ok(Json(project_for(&app, &user, id).await?.to_api()))
+    let p = project_for(&app, &user, id).await?;
+    Ok(Json(project_view(&app, &user, &p).await?))
 }
 
 const MAX_PROJECT_NAME: usize = 100;
@@ -195,7 +209,7 @@ pub async fn create_project(
     let desc = description(b.description.as_deref().unwrap_or(""))?;
     let p = db::create_project(&app.db, user.id, &name, &desc).await?;
     tracing::info!(project_id = %p.id, user = %user.id, "project created");
-    Ok((StatusCode::CREATED, Json(p.to_api())))
+    Ok((StatusCode::CREATED, Json(p.to_api(None))))
 }
 
 /// `PATCH /api/projects/{id}`: name, description, default workspace, color and icon (T49).
@@ -238,7 +252,7 @@ pub async fn patch_project(
         },
     )
     .await?;
-    Ok(Json(p.to_api()))
+    Ok(Json(project_view(&app, &user, &p).await?))
 }
 
 /// `DELETE /api/projects/{id}`: the project, its workspace records and its sessions; agents
@@ -1372,6 +1386,55 @@ pub async fn read_cursor(
         db::set_read_cursor(&app.db, user.id, id, b.last_read_seq.clamp(0, s.last_seq)).await?;
     app.session_changed(id);
     Ok(Json(json!({ "last_read_seq": seq })))
+}
+
+/// `PUT /api/sessions/{id}/favorite`: the session is one of the user's favorites (SPEC §6).
+/// Reading the session is enough, as for the read cursor; a repeated `PUT` keeps the first
+/// time. The user's clients get a `session.summary` with it.
+pub async fn favorite_session(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    session_for(&app, &user, id, Action::Read).await?;
+    let at = db::add_favorite(&app.db, db::Favorite::Session, user.id, id).await?;
+    app.session_changed(id);
+    Ok(Json(json!({ "favorite_at": at })))
+}
+
+/// `DELETE /api/sessions/{id}/favorite`: no longer a favorite, also when it was not one.
+pub async fn unfavorite_session(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    session_for(&app, &user, id, Action::Read).await?;
+    db::remove_favorite(&app.db, db::Favorite::Session, user.id, id).await?;
+    app.session_changed(id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/projects/{id}/favorite`, as for a session. No frame: another device of the user
+/// sees it with the next `GET /api/projects`.
+pub async fn favorite_project(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    project_for(&app, &user, id).await?;
+    let at = db::add_favorite(&app.db, db::Favorite::Project, user.id, id).await?;
+    Ok(Json(json!({ "favorite_at": at })))
+}
+
+/// `DELETE /api/projects/{id}/favorite`.
+pub async fn unfavorite_project(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    project_for(&app, &user, id).await?;
+    db::remove_favorite(&app.db, db::Favorite::Project, user.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------- workers

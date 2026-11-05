@@ -167,7 +167,8 @@ pub async fn project(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ProjectRow>> 
 }
 
 impl ProjectRow {
-    pub fn to_api(&self) -> hqc_proto::api::Project {
+    /// `favorite_at`: the requesting user's (`project_favorites`).
+    pub fn to_api(&self, favorite_at: Option<DateTime<Utc>>) -> hqc_proto::api::Project {
         hqc_proto::api::Project {
             id: self.id,
             owner_id: self.owner_id,
@@ -184,6 +185,7 @@ impl ProjectRow {
             icon: self.icon.as_ref().and_then(|v| self.icon_api(v)),
             created_at: self.created_at,
             updated_at: self.updated_at,
+            favorite_at,
         }
     }
 
@@ -2767,6 +2769,79 @@ pub async fn pending_by_id(db: &PgPool, id: Uuid) -> sqlx::Result<Option<Pending
     ))
     .bind(id)
     .fetch_optional(db)
+    .await
+}
+
+// ---------------------------------------------------------------- favorites
+
+/// What a user marks as a favorite: a table `<kind>_favorites (user_id, <kind>_id,
+/// created_at)`.
+#[derive(Debug, Clone, Copy)]
+pub enum Favorite {
+    Session,
+    Project,
+}
+
+impl Favorite {
+    fn table_and_column(self) -> (&'static str, &'static str) {
+        match self {
+            Favorite::Session => ("session_favorites", "session_id"),
+            Favorite::Project => ("project_favorites", "project_id"),
+        }
+    }
+}
+
+/// Makes `id` one of the user's favorites and returns since when; a repeated call keeps the
+/// first time.
+pub async fn add_favorite(
+    db: &PgPool,
+    kind: Favorite,
+    user: Uuid,
+    id: Uuid,
+) -> sqlx::Result<DateTime<Utc>> {
+    let (table, column) = kind.table_and_column();
+    sqlx::query_scalar(&format!(
+        "INSERT INTO {table} (user_id, {column}) VALUES ($1, $2)
+         ON CONFLICT (user_id, {column}) DO UPDATE SET created_at = {table}.created_at
+         RETURNING created_at"
+    ))
+    .bind(user)
+    .bind(id)
+    .fetch_one(db)
+    .await
+}
+
+/// `id` is no longer the user's favorite; nothing happens if it was not one.
+pub async fn remove_favorite(
+    db: &PgPool,
+    kind: Favorite,
+    user: Uuid,
+    id: Uuid,
+) -> sqlx::Result<()> {
+    let (table, column) = kind.table_and_column();
+    sqlx::query(&format!(
+        "DELETE FROM {table} WHERE user_id = $1 AND {column} = $2"
+    ))
+    .bind(user)
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Those of `projects` the user made favorites, with since when.
+pub async fn project_favorites(
+    db: &PgPool,
+    user: Uuid,
+    projects: &[Uuid],
+) -> sqlx::Result<Vec<(Uuid, DateTime<Utc>)>> {
+    sqlx::query_as(
+        "SELECT project_id, created_at FROM project_favorites
+         WHERE user_id = $1 AND project_id = ANY($2)",
+    )
+    .bind(user)
+    .bind(projects)
+    .fetch_all(db)
     .await
 }
 

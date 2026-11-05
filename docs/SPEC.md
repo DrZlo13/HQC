@@ -772,6 +772,8 @@ MCP calls (worker → hub → worker):
   one of the buffered messages in `peer_prefix` has an `ask` cap, whatever the input (§7.1).
   Absent: no cap (a person's input that carries no such message, a run of a person's
   schedule, a message from before 0.43).
+  `schedule_id?` (since 0.70) — the `schedule_id` of a `user.message` the hub cron sent (§4,
+  §16): such a run waits for the end of a running turn instead of joining it (§17.2).
 - `session.stop` {session_id} — interrupt the current turn.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
@@ -2126,10 +2128,17 @@ that sends no such lines: the one written). At `result`
 an input written and not echoed is taken when its last line is `started` or `completed` (a
 local slash command), carried into the next turn, which the CLI then runs by itself, when it is
 only `queued`, and not taken when `cancelled`; without lifecycle lines it is carried when it was
-written during the turn, taken otherwise. `system` `task_started` with `task_type: local_agent`
-(a subagent in the background or not, a subagent's own too) counts as a running subagent until
-`task_notification`, or a `task_updated` whose `patch.status` is not `running`, of the same
-`task_id`; the count goes into `session.state.subagents` (§5.4).
+written during the turn, taken otherwise. A carried input whose line after that `result` is
+`cancelled` (a second Stop before it started) ends the turn it was carried into, for which no
+`result` comes: it is not taken, the other inputs carried with it stay carried, and with none
+left no turn runs. A carried local slash command has a `result` of its own, which takes it
+(`/name` without an echo, fixture of `local_command_without_echo_is_taken`; `/cost` on 2.1.312). `system` `task_started` with
+`task_type: local_agent` (a subagent in the background or not, a subagent's own too) counts as
+a running subagent until `task_notification`, or a `task_updated` whose `patch.status` is not
+`running`, of the same `task_id`; a foreground one (`is_backgrounded: false`, not moved to
+the background since) cannot outlive the main turn and stops counting at its `result` at the
+latest, as an interrupt, a denied call or `error_max_turns` during it may bring neither line;
+the count goes into `session.state.subagents` (§5.4).
 The CLI repeats on stdout every `control_response` the adapter sent to stdin;
 the adapter skips those lines. `in_reply_to` = the `event_id` of the turn's input, as above,
 once its echo has come (since 0.69; before that, none); an input written into a running turn
@@ -3407,23 +3416,27 @@ clears the flag. `worker_offline`: the session has a worker and it is not connec
 Input from the input queue (§7.1) that arrives during a turn waits for the final answer
 and starts the next turn; one turn per item, in `seq` order. Since 0.70 a Claude Code turn
 takes a person's input as the VS Code tab does: while a turn runs, the worker writes the head
-of the queue into it when the input has no `peer` (an `hqc_ask` waits for the answer of its own
-turn), neither the input nor the turn is capped to `ask` (§5.3) and the agent has no open
-`approval` or `clarify`; otherwise it waits as before, and so does everything behind it, so
-`seq` order holds. The CLI takes the input at its next step, after the result of the tool call
-running then, and the worker answers `ack {event_id, joined: true}` on its echo; the turn's
-final `agent.message` stays `in_reply_to` the turn's own input. When the turn ends before that
-(the input came during the final answer, or before an interrupt), the CLI runs it as the next
-turn by itself (§8.1): the first such input becomes that turn, its echo gives a plain `ack`; the
-others stay written into it and are acked with `joined: true` when the CLI takes them (that
-turn's `in_reply_to` is then the last of them the CLI took; such inputs are a person's, which
-nothing answers by `in_reply_to`). The same
-holds for an input sent during a turn the CLI began by itself after a background task. The
-"interrupt and send" button does `session.stop` and then the input. For runtimes with `steer`
-(Hermes) a "steer" button is available: `session.steer` without interrupting. Two users
-with `write` share the same queue. Each turn runs in its own input's mode (since 0.43, T39):
-a person's input queued behind a turn capped to `ask` runs in the session's mode (§5.3),
-unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7.1).
+of the queue into it when all of these hold: the input has no `peer` (an `hqc_ask` waits for
+the answer of its own turn) and no `schedule_id` (a run of a schedule, §16), its `text` does not
+start with `/` (a slash command), the turn's own input has no `peer` either (the answer of an
+`hqc_ask` goes to its sender: a person's input would shape it or, carried with the ask into a
+turn the CLI runs by itself, take it), neither the input nor the turn is capped to `ask`
+(§5.3), and the agent has no open `approval` or `clarify`. Otherwise it waits for the end of
+the turn as before (scheduled runs and slash commands always do), and so does everything behind
+it, so `seq` order holds. The CLI takes the input at its next step, after the result of the
+tool call running then, and the worker answers `ack {event_id, joined: true}` on its echo; the
+turn's final `agent.message` stays `in_reply_to` the turn's own input. When the turn ends
+before that (the input came during the final answer, or before an interrupt), the CLI runs it
+as the next turn by itself (§8.1): the first such input becomes that turn, its echo gives a
+plain `ack`; the others stay written into it and are acked with `joined: true` when the CLI
+takes them (that turn's `in_reply_to` is then the last of them the CLI took; such inputs are a
+person's, which nothing answers by `in_reply_to`). The same holds for an input sent during a
+turn the CLI began by itself after a background task. The "interrupt and send" button does
+`session.stop` and then the input. For runtimes with `steer` (Hermes) a "steer" button is
+available: `session.steer` without interrupting. Two users with `write` share the same queue.
+Each turn runs in its own input's mode (since 0.43, T39): a person's input queued behind a turn
+capped to `ask` runs in the session's mode (§5.3), unless (since 0.44, T40) it carries a
+buffered send from a session in `ask` (§7.1).
 
 ### 17.3 Processes
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
@@ -3699,17 +3712,22 @@ without a hub each of these would have to be done peer-to-peer.
 ### 0.69 → 0.70 (the agent at work: subagents and a message during a turn)
 §17.2, §5.2, §8.1: a person's message sent during a Claude Code turn goes into that turn, as in
 the VS Code tab, instead of waiting for its final answer. This changes the **[decision]** of
-§17.2 for Claude Code: input with a `peer`, input or a turn capped to `ask`, and input while an
+§17.2 for Claude Code: input with a `peer`, a run of a schedule, a slash command, input or a
+turn capped to `ask`, any input during the turn of an input with a `peer`, and input while an
 `approval` or `clarify` is open still wait. The worker answers `ack {event_id, joined: true}`
-for such an input, which marks it `delivered` and opens no turn in the hub (§17.1). The
-adapter writes every user message with a fresh `uuid` and reads `command_lifecycle`, so it
-knows at `result` whether an input not echoed was taken, carried into the turn the CLI then
-runs by itself (an input sent during the final answer, before an interrupt, or during a turn
-the CLI began after a background task) or not taken; before, every such input counted as taken
-(a local slash command), and the turn the CLI then ran went untracked. §5.4, §6, §8.1:
+for an input that goes into the turn, which marks it `delivered` and opens no turn in the hub
+(§17.1). §5.3: `session.input.schedule_id?`, which the hub copies from the `user.message`, so
+the worker tells a run of a schedule from a person's input. The adapter writes every user
+message with a fresh `uuid` and reads `command_lifecycle`, so it knows at `result` whether an
+input not echoed was taken, carried into the turn the CLI then runs by itself (an input sent
+during the final answer, before an interrupt, or during a turn the CLI began after a background
+task) or not taken; before, every such input counted as taken (a local slash command), and the
+turn the CLI then ran went untracked. A carried input `cancelled` after that `result` ends the
+turn it was carried into (§8.1). §5.4, §6, §8.1:
 `session.state.subagents`, `subagents` in the session object and `session.summary`: the
-subagents the agent runs now, from `task_started` (`local_agent`) to its end; the client shows
-"N agents". Migration `0032_session_subagents`.
+subagents the agent runs now, from `task_started` (`local_agent`) to its end, a foreground one
+at the latest to the `result` of the main turn; the client shows "N agents". Migration
+`0032_session_subagents`.
 
 ### 0.68 → 0.69 (the feed of a Claude Code session as the VS Code tab shows it)
 §8.1: the adapter passes `--thinking-display summarized`, as the VS Code extension does (opus 5.5

@@ -1855,6 +1855,76 @@ fn no_cancels_the_other_open_request() {
     assert!(core.answer_approval("r2", "once", None).is_err());
 }
 
+/// A background subagent's request (`agent_id`; a live run on 2.1.312) outlives the main turn's
+/// `result`, and the CLI still waits for its answer: it stays open and can be answered, while
+/// the main agent's request is cancelled.
+#[test]
+fn turn_end_cancels_only_the_main_agents_requests() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&can_use_tool_line(&fx, "main", None));
+    let mut sub: Value = serde_json::from_str(&can_use_tool_line(
+        &fx,
+        "sub",
+        Some("touch hqc-live-check.txt"),
+    ))
+    .unwrap();
+    sub["request"]["agent_id"] = json!("a8b8fdc3b4a031d4f");
+    assert_eq!(approvals(&core.on_line(&sub.to_string())), 1);
+    let a = core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"LAUNCHED","total_cost_usd":0.004,"usage":{"input_tokens":4,"output_tokens":165}}"#,
+    );
+    let cancels: Vec<(String, CancelReason)> = events(&emitted(a))
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::ApprovalCancel { request_id, reason } => Some((request_id.clone(), *reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, [("main".to_string(), CancelReason::Stopped)]);
+    let w = writes(&core.answer_approval("sub", "once", None).unwrap());
+    assert_eq!(w[0]["response"]["request_id"], "sub");
+    assert_eq!(w[0]["response"]["response"]["behavior"], "allow");
+}
+
+/// A foreground subagent (its `task_started` said `is_backgrounded: false`) cannot outlive the
+/// main turn: after "No" the CLI drops its request, which is cancelled at `result` like the main
+/// agent's; a background subagent's stays open.
+#[test]
+fn turn_end_cancels_a_foreground_subagents_request() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_started","task_id":"ac5672f5fc80df8ec","tool_use_id":"toolu_01TYRCeySHmvXd7Md3Y1rgb8","description":"Run ping and reply with 4","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0d"}
+{"type":"system","subtype":"task_started","task_id":"a8b8fdc3b4a031d4f","tool_use_id":"toolu_01BR8iav6ZtPUAhpuCWdQPCt","description":"Touch hqc-live-check file","is_backgrounded":true,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e13"}"#,
+    );
+    for (request_id, agent) in [("fg", "ac5672f5fc80df8ec"), ("bg", "a8b8fdc3b4a031d4f")] {
+        let mut v: Value =
+            serde_json::from_str(&can_use_tool_line(&fx, request_id, Some("touch x"))).unwrap();
+        v["request"]["agent_id"] = json!(agent);
+        assert_eq!(approvals(&core.on_line(&v.to_string())), 1);
+    }
+    let a = core.on_line(
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2,"terminal_reason":"aborted_tools","total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}"#,
+    );
+    let cancels: Vec<(String, CancelReason)> = events(&emitted(a))
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::ApprovalCancel { request_id, reason } => Some((request_id.clone(), *reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancels, [("fg".to_string(), CancelReason::Stopped)]);
+    assert!(core.answer_approval("fg", "once", None).is_err());
+    let w = writes(&core.answer_approval("bg", "once", None).unwrap());
+    assert_eq!(w[0]["response"]["request_id"], "bg");
+}
+
 /// The `status idle` that ends a turn names the turn's input (`in_reply_to`): the hub fails an
 /// `hqc_ask` only for the input whose turn ended without a final message, even when the next
 /// input's ack reaches it first (SPEC §7.1).
@@ -1877,6 +1947,63 @@ fn end_of_turn_status_names_its_input() {
             json!({"state": "idle", "detail": "error_during_execution", "in_reply_to": input})
         );
     }
+}
+
+/// An input written while the CLI runs a turn it started by itself after a background task is
+/// only queued: its echo comes after that turn's `result` (lines of a live run on 2.1.312). That
+/// turn's final message and `status idle` name no input; the input's own turn, after the echo,
+/// is named by it.
+#[test]
+fn a_turn_the_cli_starts_by_itself_names_no_input() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    play(
+        &mut core,
+        r#"{"type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","content":[{"type":"text","text":"LAUNCHED"}]},"parent_tool_use_id":null,"uuid":"facbaf1b-a768-4ef9-bb9a-e4d10fbbad9f"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"LAUNCHED","total_cost_usd":0.00426204,"usage":{"input_tokens":4,"output_tokens":165}}
+{"type":"system","subtype":"task_notification","task_id":"abd6ecd27912266e5","tool_use_id":"toolu_018foiN3RMuTb1fmFn53JffP","status":"completed","summary":"The command ran and printed `hqc-live-check`.","uuid":"614bde30-70d7-46cc-9ff9-9e22f9bdc118"}"#,
+    );
+    let queued = written(&mut core, sid, "Reply with the single word PONG.");
+    let replies = |a: Vec<Action>| -> Vec<(String, Option<Uuid>)> {
+        events(&emitted(a))
+            .into_iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::AgentMessage { in_reply_to, .. } => {
+                    Some(("agent.message".into(), *in_reply_to))
+                }
+                EventKind::Status { in_reply_to, .. } => Some(("status".into(), *in_reply_to)),
+                _ => None,
+            })
+            .collect()
+    };
+    let by_itself = play(
+        &mut core,
+        r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5","permissionMode":"default","uuid":"fb2b6af8-8921-4277-a09e-61e710bfcdb2"}
+{"type":"assistant","message":{"model":"claude-haiku-5-5","role":"assistant","content":[{"type":"text","text":"The background agent finished. It ran `echo hqc-live-check` and reported the output `hqc-live-check`."}]},"parent_tool_use_id":null,"uuid":"6943d433-0cb8-475e-aeae-4c90b14e4380"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.00609755,"usage":{"input_tokens":4,"output_tokens":38}}"#,
+    );
+    assert_eq!(
+        replies(by_itself),
+        [("agent.message".into(), None), ("status".into(), None)]
+    );
+    let next = play(
+        &mut core,
+        &format!(
+            r#"{{"type":"system","subtype":"init","model":"claude-haiku-5-5","permissionMode":"default","uuid":"4c2af2ed-8f49-404b-be85-fbf9f4ebdd58"}}
+{}
+{{"type":"assistant","message":{{"model":"claude-haiku-5-5","role":"assistant","content":[{{"type":"text","text":"PONG"}}]}},"parent_tool_use_id":null,"uuid":"cd9aae03-1988-42bd-a973-f068747cca40"}}
+{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.00631608,"usage":{{"input_tokens":4,"output_tokens":5}}}}"#,
+            echo("Reply with the single word PONG.")
+        ),
+    );
+    assert_eq!(
+        replies(next),
+        [
+            ("agent.message".into(), Some(queued)),
+            ("status".into(), Some(queued))
+        ]
+    );
 }
 
 #[test]
@@ -1965,6 +2092,7 @@ fn held_text_is_not_final_before_a_tool_call() {
         peer: None,
         permission_cap: None,
     });
+    core.on_line(&echo("x"));
     let u1 = Uuid::new_v4();
     let u2 = Uuid::new_v4();
     let text = json!({"type":"assistant","uuid":u1,"parent_tool_use_id":null,
@@ -2192,6 +2320,76 @@ async fn local_command_without_echo_is_taken() {
         .any(|e| matches!(e, AdapterEvent::InputAccepted { event_id } if *event_id == id)));
 }
 
+/// A `result` with no model turn and no tokens (a local slash command, the empty second
+/// `result` after a turn the CLI starts by itself, #6) ends the turn without a `usage`: the
+/// feed would show an empty `0 → 0 tokens` line. One that spent tokens keeps its `usage`.
+#[test]
+fn a_result_with_no_model_turn_and_no_tokens_has_no_usage() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    for (tokens, want) in [(0, 0), (12, 1)] {
+        started(&mut core, sid);
+        let evs = emitted(core.on_line(&format!(
+            r#"{{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":15,"result":"Session renamed to: x","total_cost_usd":0,"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}"#
+        )));
+        let s = shape(&evs);
+        assert!(s.iter().any(|e| e == "turn_ended"), "{s:?}");
+        assert_eq!(s.iter().filter(|e| *e == "usage").count(), want, "{s:?}");
+    }
+}
+
+/// `/compact` (fixture `stream-resume-compact`, 2.1.308): `num_turns: 0` and no tokens, but the
+/// session's total grew from the transcript's last `cost-state` (0.0032966), so it keeps its
+/// `usage` with what the compaction cost, and the next turn's cost does not include it.
+#[test]
+fn compact_keeps_its_usage() {
+    let fx = fixture!("resume-compact", "2.1.308");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false).with_cost_baseline(Some(0.0032966));
+    started(&mut core, sid);
+    let (costs, _) = costs_and_commands(&play(&mut core, fx.stream));
+    assert_eq!(costs.len(), 1, "{costs:?}");
+    assert!((costs[0].0 - 0.00138282).abs() < 1e-9, "{costs:?}");
+    assert_eq!(costs[0].1, 0.00467942);
+}
+
+/// A subagent that ends asks nothing any more: its request still open when its
+/// `task_notification` comes is cancelled there, even before the main turn's `result`.
+#[test]
+fn a_subagents_request_is_cancelled_when_it_ends() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_started","task_id":"ac5672f5fc80df8ec","tool_use_id":"toolu_01TYRCeySHmvXd7Md3Y1rgb8","description":"Run ping and reply with 4","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0d"}
+{"type":"system","subtype":"task_started","task_id":"a8b8fdc3b4a031d4f","tool_use_id":"toolu_01BR8iav6ZtPUAhpuCWdQPCt","description":"Touch hqc-live-check file","is_backgrounded":true,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e13"}"#,
+    );
+    for (request_id, agent) in [("fg", "ac5672f5fc80df8ec"), ("bg", "a8b8fdc3b4a031d4f")] {
+        let mut v: Value =
+            serde_json::from_str(&can_use_tool_line(&fx, request_id, Some("touch x"))).unwrap();
+        v["request"]["agent_id"] = json!(agent);
+        assert_eq!(approvals(&core.on_line(&v.to_string())), 1);
+    }
+    for (request_id, agent) in [("fg", "ac5672f5fc80df8ec"), ("bg", "a8b8fdc3b4a031d4f")] {
+        let a = core.on_line(&format!(
+            r#"{{"type":"system","subtype":"task_notification","task_id":"{agent}","status":"stopped","summary":"Stopped","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e14"}}"#
+        ));
+        let cancels: Vec<(String, CancelReason)> = events(&emitted(a))
+            .into_iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::ApprovalCancel { request_id, reason } => {
+                    Some((request_id.clone(), *reason))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cancels, [(request_id.to_string(), CancelReason::Stopped)]);
+        assert!(core.answer_approval(request_id, "once", None).is_err());
+    }
+}
+
 /// `(cost_usd, session_cost_usd)` of every `usage` and every command list, in order.
 fn costs_and_commands(actions: &[Action]) -> (Vec<(f64, f64)>, Vec<Vec<String>>) {
     let (mut costs, mut commands) = (vec![], vec![]);
@@ -2345,18 +2543,33 @@ fn emitted(actions: Vec<Action>) -> Vec<AdapterEvent> {
         .collect()
 }
 
+/// An input written and echoed: the CLI runs its turn.
 fn started(core: &mut Core, sid: Uuid) -> Uuid {
+    let input = written(core, sid, "x");
+    core.on_line(&echo("x"));
+    input
+}
+
+/// An input written to the CLI, not echoed yet.
+fn written(core: &mut Core, sid: Uuid, text: &str) -> Uuid {
     let input = Uuid::now_v7();
     core.input(&SessionInput {
         session_id: sid,
         event_id: input,
-        text: "x".into(),
+        text: text.into(),
         artifact_ids: vec![],
         peer_prefix: vec![],
         peer: None,
         permission_cap: None,
     });
     input
+}
+
+/// The `--replay-user-messages` echo of an input.
+fn echo(text: &str) -> String {
+    json!({"type": "user", "isReplay": true, "uuid": Uuid::new_v4(), "parent_tool_use_id": null,
+        "message": {"role": "user", "content": text}})
+    .to_string()
 }
 
 /// A background task's end (lines of a live run on 2.1.312: `run_in_background` Bash, then
@@ -2380,7 +2593,6 @@ fn background_task_notification_is_a_system_event() {
             "agent.message:true",
             "usage",
             "status",
-            "accepted",
             "turn_ended",
             "system",
             "agent.message:true",
@@ -2499,7 +2711,6 @@ fn synthetic_reply_is_a_runtime_agent_message() {
             "agent.message:true",
             "usage",
             "status",
-            "accepted",
             "turn_ended"
         ]
     );

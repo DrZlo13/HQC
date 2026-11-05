@@ -14,10 +14,13 @@
 //!   foreground, until a `task_updated` moves it to the background;
 //!   `system` `compact_boundary` → `system context_compacted`;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
-//! - `result` → `usage`, `status idle`, end of turn; `usage.cost_usd` is the growth of the
-//!   CLI's cumulative `total_cost_usd` since the previous `result` of the session (or since
-//!   the transcript's last `cost-state` after `--resume`), `session_cost_usd` the total itself;
-//!   a request still open then gets `approval.cancel` / `clarify.cancel` `stopped`;
+//! - `result` → `usage` (none with `num_turns: 0`, no tokens and no cost), `status idle`, end
+//!   of turn; `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the
+//!   previous `result` of the session (or since the transcript's last `cost-state` after
+//!   `--resume`), `session_cost_usd` the total itself;
+//!   a request of the main agent or of a foreground subagent still open then gets
+//!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
+//!   `task_notification`, which cancels it;
 //! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
 //!   differ from what this process reported (the CLI sends `init` before every turn);
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
@@ -102,12 +105,26 @@ enum Pending {
         local_rules: Vec<Value>,
         /// Every `rules[]` entry of every `addRules` suggestion, for `session`.
         suggested: Vec<Value>,
+        /// The subagent that asked ([`agent_of`]); `None`: the main agent.
+        agent_id: Option<String>,
     },
     Clarify {
         input: Value,
         /// Question texts by position; `clarify.request` ids are `1`, `2`, ...
         questions: Vec<String>,
+        /// The subagent that asked ([`agent_of`]); `None`: the main agent.
+        agent_id: Option<String>,
     },
+}
+
+impl Pending {
+    fn agent_id(&self) -> Option<&str> {
+        match self {
+            Pending::Approval { agent_id, .. } | Pending::Clarify { agent_id, .. } => {
+                agent_id.as_deref()
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -116,7 +133,8 @@ pub struct Core {
     restricted: bool,
     /// The last assistant text: event id, text, and whether the CLI wrote it itself.
     held: Option<(Uuid, String, bool)>,
-    /// `event_id` of the input sent last: `in_reply_to` of agent messages.
+    /// `event_id` of the input sent last: `in_reply_to` of agent messages once its echo has
+    /// come ([`Core::reply_to`]).
     last_input: Option<Uuid>,
     /// Inputs written to stdin whose `--replay-user-messages` echo has not come yet.
     awaiting_echo: VecDeque<Uuid>,
@@ -275,13 +293,14 @@ impl Core {
             .pending
             .remove(request_id)
             .ok_or_else(|| anyhow!("no open approval request {request_id}"))?;
-        let (tool, input, local_rules, suggested) = match p {
+        let (tool, input, local_rules, suggested, agent_id) = match p {
             Pending::Approval {
                 tool,
                 input,
                 local_rules,
                 suggested,
-            } => (tool, input, local_rules, suggested),
+                agent_id,
+            } => (tool, input, local_rules, suggested, agent_id),
             Pending::Clarify { .. } if option_id == "deny" => {
                 return Ok(vec![Action::Write(deny(
                     request_id,
@@ -317,6 +336,7 @@ impl Core {
                         input,
                         local_rules,
                         suggested,
+                        agent_id,
                     },
                 );
                 bail!("unknown approval option {other:?}");
@@ -333,7 +353,9 @@ impl Core {
         answers: &BTreeMap<String, ClarifyAnswer>,
     ) -> anyhow::Result<Vec<Action>> {
         let (input, questions) = match self.pending.remove(request_id) {
-            Some(Pending::Clarify { input, questions }) => (input, questions),
+            Some(Pending::Clarify {
+                input, questions, ..
+            }) => (input, questions),
             Some(p) => {
                 self.pending.insert(request_id.into(), p);
                 bail!("request {request_id} is an approval request");
@@ -642,42 +664,49 @@ impl Core {
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open
         // (Claude requests do not expire), and an answer to it finds no open request here.
-        let mut open: Vec<(String, Pending)> = self.pending.drain().collect();
-        if !open.is_empty() {
-            tracing::info!(session_id = %self.session_id, open = open.len(), "turn ended with open requests; cancelled");
+        // That is a request of the main agent or of a foreground subagent (in `quiet_tasks`
+        // with `false`), which cannot outlive the main turn. Any other subagent's request stays
+        // open: a background subagent's outlives the main turn's `result`, and the CLI still
+        // waits for its answer (checked live on 2.1.312).
+        let quiet = self.quiet_tasks.clone();
+        let cancels = self.cancel_pending(|p| match p.agent_id() {
+            None => true,
+            Some(agent) => quiet.get(agent) == Some(&false),
+        });
+        if !cancels.is_empty() {
+            tracing::info!(session_id = %self.session_id, open = cancels.len(), "turn ended with open requests; cancelled");
         }
-        open.sort_by(|a, b| a.0.cmp(&b.0));
-        for (request_id, p) in open {
-            let reason = CancelReason::Stopped;
-            let kind = match p {
-                Pending::Approval { .. } => EventKind::ApprovalCancel { request_id, reason },
-                Pending::Clarify { .. } => EventKind::ClarifyCancel { request_id, reason },
-            };
-            out.push(Action::Emit(AdapterEvent::Event(new_event(
-                self.session_id,
-                Author::System,
-                kind,
-            ))));
-        }
+        out.extend(cancels);
         let usage = &v["usage"];
         let num = |k: &str| usage[k].as_u64();
+        let (input_tokens, output_tokens) = (
+            num("input_tokens").unwrap_or(0),
+            num("output_tokens").unwrap_or(0),
+        );
         let total = v["total_cost_usd"]
             .as_f64()
             .filter(|c| c.is_finite() && *c >= 0.0);
-        let cost_usd = total.map(|t| self.turn_cost(t));
-        out.push(self.emit_new(EventKind::Usage {
-            input_tokens: num("input_tokens").unwrap_or(0),
-            output_tokens: num("output_tokens").unwrap_or(0),
-            cache_read: num("cache_read_input_tokens"),
-            cache_write: num("cache_creation_input_tokens"),
-            cost_usd,
-            session_cost_usd: total,
-            model: self.model.clone().or_else(|| {
-                v["modelUsage"]
-                    .as_object()
-                    .and_then(|m| m.keys().next().cloned())
-            }),
-        }));
+        let spent = total.is_some_and(|t| t > self.cost_total.unwrap_or(0.0));
+        // No `usage` for a result with no model turn, no tokens and no cost (a local slash
+        // command, the empty second `result` after a turn the CLI started by itself): the feed
+        // would show an empty `0 → 0 tokens` line. `/compact` has `num_turns: 0` and no tokens
+        // but costs, so it keeps its `usage`.
+        if v["num_turns"].as_u64() != Some(0) || input_tokens + output_tokens > 0 || spent {
+            let cost_usd = total.map(|t| self.turn_cost(t));
+            out.push(self.emit_new(EventKind::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read: num("cache_read_input_tokens"),
+                cache_write: num("cache_creation_input_tokens"),
+                cost_usd,
+                session_cost_usd: total,
+                model: self.model.clone().or_else(|| {
+                    v["modelUsage"]
+                        .as_object()
+                        .and_then(|m| m.keys().next().cloned())
+                }),
+            }));
+        }
         let subtype = v["subtype"].as_str().unwrap_or("");
         out.push(self.emit_new(EventKind::Status {
             state: SessionState::Idle,
@@ -685,7 +714,7 @@ impl Core {
             detail: (subtype != "success" || v["is_error"] == true).then(|| subtype.to_owned()),
             // The turn's input: the hub fails an `hqc_ask` it carried that no final message
             // answered (SPEC §7.1).
-            in_reply_to: self.last_input,
+            in_reply_to: self.reply_to(),
         }));
         // The CLI answered the input without echoing it: a local slash command (`/name`,
         // `/cost`, ...) runs without a model turn and without `--replay-user-messages`. The
@@ -737,6 +766,7 @@ impl Core {
                     Pending::Clarify {
                         input,
                         questions: texts,
+                        agent_id: agent_of(req),
                     },
                 );
                 return vec![self.emit_new(EventKind::ClarifyRequest {
@@ -824,6 +854,7 @@ impl Core {
                 input,
                 local_rules,
                 suggested,
+                agent_id: agent_of(req),
             },
         );
         vec![self.emit_new(EventKind::ApprovalRequest {
@@ -856,15 +887,20 @@ impl Core {
     /// `system/task_notification`: a background task ended (checked live on 2.1.312: it comes
     /// as soon as the task ends, before the turn the CLI then starts by itself). The text is
     /// its `summary`, or "Background task" without one. Not a flush: a held text keeps
-    /// waiting for what decides whether it is final. Nothing for a task in [`Core::quiet_tasks`];
+    /// waiting for what decides whether it is final. First the task's open requests (a
+    /// subagent's, by `agent_id`) are cancelled; a task in [`Core::quiet_tasks`] gets no line;
     /// a task this process did not see start (it began before a `--resume`) counts as a
     /// background one.
     fn on_task_notification(&mut self, v: &Value) -> Vec<Action> {
-        if v["task_id"]
-            .as_str()
-            .is_some_and(|id| self.quiet_tasks.remove(id).is_some())
-        {
-            return vec![];
+        let id = v["task_id"].as_str();
+        // A subagent that ended asks nothing any more: its requests still open are cancelled
+        // here, whichever comes first, this or the main turn's `result`.
+        let mut out = match id {
+            Some(id) => self.cancel_pending(|p| p.agent_id() == Some(id)),
+            None => vec![],
+        };
+        if id.is_some_and(|id| self.quiet_tasks.remove(id).is_some()) {
+            return out;
         }
         let t = v["summary"]
             .as_str()
@@ -872,7 +908,31 @@ impl Core {
             .filter(|s| !s.is_empty())
             .map_or_else(|| "Background task".into(), text);
         tracing::info!(session_id = %self.session_id, task_id = ?v["task_id"].as_str(), status = ?v["status"].as_str(), "background task notification");
-        vec![self.emit_system(TASK_NOTIFICATION, t)]
+        out.push(self.emit_system(TASK_NOTIFICATION, t));
+        out
+    }
+
+    /// Cancels the open requests `which` picks, in request id order: `approval.cancel` or
+    /// `clarify.cancel` with `stopped`, so the hub closes their cards.
+    fn cancel_pending(&mut self, which: impl Fn(&Pending) -> bool) -> Vec<Action> {
+        let (mut open, kept): (Vec<(String, Pending)>, Vec<_>) =
+            self.pending.drain().partition(|(_, p)| which(p));
+        self.pending.extend(kept);
+        open.sort_by(|a, b| a.0.cmp(&b.0));
+        open.into_iter()
+            .map(|(request_id, p)| {
+                let reason = CancelReason::Stopped;
+                let kind = match p {
+                    Pending::Approval { .. } => EventKind::ApprovalCancel { request_id, reason },
+                    Pending::Clarify { .. } => EventKind::ClarifyCancel { request_id, reason },
+                };
+                Action::Emit(AdapterEvent::Event(new_event(
+                    self.session_id,
+                    Author::System,
+                    kind,
+                )))
+            })
+            .collect()
     }
 
     // ---- helpers -----------------------------------------------------------------------
@@ -884,10 +944,20 @@ impl Core {
             EventKind::AgentMessage {
                 text,
                 r#final,
-                in_reply_to: self.last_input,
+                in_reply_to: self.reply_to(),
                 runtime,
             },
         ))
+    }
+
+    /// The input the running turn answers: the one sent last, once its echo has come. Until
+    /// then the CLI has only queued it and what comes is no reply to it. Written during a turn
+    /// the CLI started by itself after a background task, it is echoed after that turn's
+    /// `result` (checked live on 2.1.312), so the turn's final message and `status idle` name
+    /// none; taken into the turn after a tool result, the rest of the turn names it.
+    fn reply_to(&self) -> Option<Uuid> {
+        self.last_input
+            .filter(|id| !self.awaiting_echo.contains(id))
     }
 
     fn emit(&self, event_id: Uuid, kind: EventKind) -> Action {
@@ -950,6 +1020,13 @@ fn blocks(v: &Value) -> Vec<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+
+/// The subagent a `can_use_tool` request comes from: its `agent_id`, the `task_id` of the
+/// subagent's `task_started`; the main agent's request has none (checked live on 2.1.312 with
+/// a `run_in_background` subagent's Bash call).
+fn agent_of(req: &Value) -> Option<String> {
+    req["agent_id"].as_str().map(str::to_owned)
 }
 
 fn allow(request_id: &str, input: &Value, permissions: Option<Vec<Value>>) -> Value {

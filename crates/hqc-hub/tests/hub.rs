@@ -712,6 +712,63 @@ async fn a_workers_cancel_closes_its_request_once() {
     hub.finish().await;
 }
 
+/// A worker's cancel closes its request in the transaction that stores it: when storing it
+/// fails (here a trigger refuses it, as a database lost between the two would), the request
+/// stays open and the worker's resend of the same event stores it and closes the request.
+#[tokio::test]
+async fn a_workers_cancel_not_stored_leaves_its_request_open() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("cancel").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-1", "2099-01-01T00:00:00Z"),
+    ))
+    .await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION refuse_cancel() RETURNS trigger LANGUAGE plpgsql AS
+           $$ BEGIN RAISE EXCEPTION 'refused by the test'; END $$;
+         CREATE TRIGGER refuse_cancel BEFORE INSERT ON events FOR EACH ROW
+           WHEN (NEW.type = 'approval.cancel') EXECUTE FUNCTION refuse_cancel();",
+    )
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+    let open = || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT closed_at IS NULL FROM pending_requests WHERE request_id = 'req-1'",
+        )
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap()
+    };
+    let cancel = agent_event(
+        &sid,
+        "approval.cancel",
+        json!({"request_id": "req-1", "reason": "stopped"}),
+    );
+    w.send("event", json!({ "event": cancel.clone() })).await;
+    let e = w.expect("error").await;
+    assert_eq!(e["payload"]["retryable"], true, "{e}");
+    assert!(open().await);
+
+    sqlx::raw_sql("DROP TRIGGER refuse_cancel ON events")
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let ack = w.event(cancel).await;
+    assert!(ack["seq"].is_u64(), "{ack}");
+    assert!(!open().await);
+    hub.wait_session(&sid, "idle", |v| v["state"] == "idle")
+        .await;
+    hub.finish().await;
+}
+
 /// An answer given while the worker is offline reaches it after hello.
 #[tokio::test]
 async fn answer_while_offline_is_delivered_after_hello() {

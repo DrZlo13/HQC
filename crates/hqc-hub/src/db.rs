@@ -2321,10 +2321,48 @@ pub fn is_data_error(e: &anyhow::Error) -> bool {
 /// Append an event, assigning the next `seq` of its session (SPEC §5.2). The session row
 /// lock serializes appends per session; the unique `event_id` drops duplicates.
 pub async fn insert_event(db: &PgPool, e: &NewEvent) -> sqlx::Result<Inserted> {
+    Ok(insert(db, e, None)
+        .await?
+        .expect("an event that closes no request is never refused"))
+}
+
+/// [`insert_event`] of a worker's cancel of its open request `request_id` of `kind`, closed
+/// in the same transaction: the cancel is stored if and only if it closed the request (SPEC
+/// §10.1). `None` when the request was not open and this cancel is not stored.
+pub async fn insert_worker_cancel(
+    db: &PgPool,
+    e: &NewEvent,
+    kind: &str,
+    request_id: &str,
+) -> sqlx::Result<Option<Inserted>> {
+    insert(db, e, Some((kind, request_id))).await
+}
+
+async fn insert(
+    db: &PgPool,
+    e: &NewEvent,
+    closes: Option<(&str, &str)>,
+) -> sqlx::Result<Option<Inserted>> {
     if let Some(seq) = existing_seq(db, e.event_id).await? {
-        return Ok(Inserted::Duplicate(seq));
+        return Ok(Some(Inserted::Duplicate(seq)));
     }
     let mut tx = db.begin().await?;
+    if let Some((kind, request_id)) = closes {
+        let r = sqlx::query(
+            "UPDATE pending_requests SET closed_at = now(), updated_at = now()
+             WHERE session_id = $1 AND kind = $2 AND request_id = $3 AND closed_at IS NULL",
+        )
+        .bind(e.session_id)
+        .bind(kind)
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+        if r.rows_affected() == 0 {
+            tx.rollback().await?;
+            // The same cancel, sent again, may have closed it meanwhile.
+            return Ok(existing_seq(db, e.event_id).await?.map(Inserted::Duplicate));
+        }
+    }
     let Some(seq): Option<i64> = sqlx::query_scalar(
         "UPDATE sessions SET last_seq = last_seq + 1, updated_at = now() WHERE id = $1 RETURNING last_seq",
     )
@@ -2332,7 +2370,7 @@ pub async fn insert_event(db: &PgPool, e: &NewEvent) -> sqlx::Result<Inserted> {
     .fetch_optional(&mut *tx)
     .await?
     else {
-        return Ok(Inserted::UnknownSession);
+        return Ok(Some(Inserted::UnknownSession));
     };
     let row = sqlx::query_as::<_, EventRow>(&format!(
         "INSERT INTO events ({EVENT_COLS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -2354,13 +2392,15 @@ pub async fn insert_event(db: &PgPool, e: &NewEvent) -> sqlx::Result<Inserted> {
     match row {
         Some(row) => {
             tx.commit().await?;
-            Ok(Inserted::New(Box::new(row)))
+            Ok(Some(Inserted::New(Box::new(row))))
         }
         None => {
             tx.rollback().await?;
-            Ok(existing_seq(db, e.event_id)
-                .await?
-                .map_or(Inserted::UnknownSession, Inserted::Duplicate))
+            Ok(Some(
+                existing_seq(db, e.event_id)
+                    .await?
+                    .map_or(Inserted::UnknownSession, Inserted::Duplicate),
+            ))
         }
     }
 }
@@ -2632,26 +2672,6 @@ pub async fn close_request(db: &PgPool, id: Uuid, result: Option<&Value>) -> sql
     )
     .bind(id)
     .bind(result)
-    .execute(db)
-    .await?;
-    Ok(r.rows_affected() > 0)
-}
-
-/// The worker closed the request itself (its cancel event): whether it was open, and is
-/// closed now.
-pub async fn close_request_by_worker(
-    db: &PgPool,
-    session_id: Uuid,
-    kind: &str,
-    request_id: &str,
-) -> sqlx::Result<bool> {
-    let r = sqlx::query(
-        "UPDATE pending_requests SET closed_at = now(), updated_at = now()
-         WHERE session_id = $1 AND kind = $2 AND request_id = $3 AND closed_at IS NULL",
-    )
-    .bind(session_id)
-    .bind(kind)
-    .bind(request_id)
     .execute(db)
     .await?;
     Ok(r.rows_affected() > 0)

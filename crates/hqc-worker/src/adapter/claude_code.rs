@@ -290,9 +290,9 @@ impl Io {
     async fn run(&self, actions: Vec<Action>) -> anyhow::Result<()> {
         for a in actions {
             match a {
-                Action::Emit(AdapterEvent::TurnEnded) => {
+                Action::Emit(ev @ AdapterEvent::TurnEnded { .. }) => {
                     self.report_title().await;
-                    let _ = self.events.send(AdapterEvent::TurnEnded).await;
+                    let _ = self.events.send(ev).await;
                 }
                 Action::Emit(ev) => {
                     // The session task is gone only when the session is being torn down.
@@ -687,6 +687,26 @@ impl Adapter for ClaudeCodeAdapter {
         p.io.own.sent(p.io.runtime, &input.text);
         tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
         p.io.run(actions).await
+    }
+
+    fn can_inject(&self) -> bool {
+        self.running().is_ok_and(|p| lock(&p.core).can_inject())
+    }
+
+    async fn inject_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        let images = image_blocks(files).await;
+        let p = self.running()?;
+        let Some(actions) = lock(&p.core).inject_with_images(input, images) else {
+            return Ok(false);
+        };
+        p.io.own.sent(p.io.runtime, &input.text);
+        tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn");
+        p.io.run(actions).await?;
+        Ok(true)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

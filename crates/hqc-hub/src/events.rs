@@ -95,6 +95,7 @@ pub async fn ingest_worker_event(
     let dropped = Ingested::Ack(Ack {
         event_id: Some(ev.event_id),
         seq: None,
+        ..Ack::default()
     });
     let Some(s) = db::session(&app.db, ev.session_id).await? else {
         tracing::debug!(session_id = %ev.session_id, "event for unknown session dropped");
@@ -177,11 +178,13 @@ pub async fn ingest_worker_event(
             Ok(Ingested::Ack(Ack {
                 event_id: Some(ev.event_id),
                 seq: Some(seq as u64),
+                ..Ack::default()
             }))
         }
         Inserted::Duplicate(seq) => Ok(Ingested::Ack(Ack {
             event_id: Some(ev.event_id),
             seq: Some(seq as u64),
+            ..Ack::default()
         })),
         Inserted::UnknownSession => Ok(dropped),
     }

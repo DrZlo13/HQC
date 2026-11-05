@@ -48,7 +48,8 @@ impl<T> Envelope<T> {
 /// `ack {event_id?, seq?}` (SPEC §5, §5.2).
 /// - to `event`: `{event_id, seq}`; `seq` of the stored event for a duplicate, absent when
 ///   the event was dropped for an unknown session;
-/// - to `session.input`: `{event_id}` of the delivered input;
+/// - to `session.input`: `{event_id}` of the delivered input, with `joined: true` when the
+///   runtime took it into the turn already running (SPEC §17.2);
 /// - otherwise `{}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ack {
@@ -56,6 +57,16 @@ pub struct Ack {
     pub event_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    /// To `session.input` (since SPEC 0.68): the input went into the turn already running
+    /// (Claude Code takes what the user writes meanwhile at its next step, as the VS Code tab
+    /// does). It is delivered but opens no turn. Sent only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub joined: bool,
+}
+
+/// `skip_serializing_if` of a count whose absence means 0.
+pub(crate) fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// `error {code, message, retryable, details?}` (SPEC §5).
@@ -125,6 +136,12 @@ pub enum WorkerFrame {
         /// this turn. Absent — no cap applies now.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capped_input: Option<Uuid>,
+        /// How many subagents the session's agent runs now (since SPEC 0.68; Claude Code:
+        /// from `system/task_started` with `task_type: local_agent` to the task's end, in
+        /// the background or not, SPEC §8.1). Repeated in every following `session.state`,
+        /// 0 when the agent is stopped. Absent — 0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        subagents: u32,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -1417,6 +1434,10 @@ mod tests {
             include_str!("../examples/wire/worker.workspace.created.error.json"),
         ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
+        (
+            "ack",
+            include_str!("../examples/wire/worker.ack.joined.json"),
+        ),
         ("error", include_str!("../examples/wire/worker.error.json")),
     ];
 
@@ -1696,7 +1717,20 @@ mod tests {
             ack.body,
             WorkerFrame::Ack(Ack {
                 event_id: Some(si.event_id),
-                seq: None
+                seq: None,
+                joined: false,
+            })
+        );
+        // The same input taken into the turn already running (SPEC §17.2).
+        let joined: Envelope<WorkerFrame> =
+            serde_json::from_str(include_str!("../examples/wire/worker.ack.joined.json")).unwrap();
+        assert_eq!(joined.id, input.id);
+        assert_eq!(
+            joined.body,
+            WorkerFrame::Ack(Ack {
+                event_id: Some(si.event_id),
+                seq: None,
+                joined: true,
             })
         );
 
@@ -1913,6 +1947,13 @@ mod tests {
         };
         assert_eq!(commands(&old).unwrap()[0], "compact");
         assert_eq!(commands(&held), None);
+        // `subagents` (SPEC 0.68): absent is 0.
+        let subagents = |f: &Envelope<WorkerFrame>| match &f.body {
+            WorkerFrame::SessionState { subagents, .. } => *subagents,
+            other => panic!("not session.state: {other:?}"),
+        };
+        assert_eq!(subagents(&old), 2);
+        assert_eq!(subagents(&held), 0);
         assert_eq!(
             of(&held),
             Some(Some(HeldBy {

@@ -444,6 +444,7 @@ async fn handle_text(
             commands,
             permission_mode,
             capped_input,
+            subagents,
         } => {
             let st = StateFrame {
                 session_id,
@@ -455,6 +456,7 @@ async fn handle_text(
                 commands,
                 permission_mode,
                 capped_input,
+                subagents,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -673,6 +675,7 @@ struct StateFrame {
     commands: Option<Vec<String>>,
     permission_mode: Option<hqc_proto::frame::PermissionMode>,
     capped_input: Option<Uuid>,
+    subagents: u32,
 }
 
 async fn on_session_state(
@@ -691,6 +694,7 @@ async fn on_session_state(
         commands,
         permission_mode,
         capped_input,
+        subagents,
     } = st;
     if session_id.is_nil() {
         // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
@@ -741,6 +745,8 @@ async fn on_session_state(
     }
     // A turn under a peer message's cap, or none (T39): every report says which.
     db::set_permission_capped_by(&app.db, session_id, capped_input).await?;
+    // Every report carries the count; absent is 0.
+    db::set_subagents(&app.db, session_id, subagents).await?;
     conn.reply(id, HubFrame::Ack(Ack::default()));
 
     if process_state == ProcessState::Stopped {
@@ -819,7 +825,7 @@ async fn on_ack(app: &AppState, conn: &Arc<WorkerConn>, id: &str, a: Ack) -> any
             if a.event_id.is_some_and(|e| e != event_id) {
                 tracing::warn!(%session_id, "input ack carries a different event_id");
             }
-            delivery::on_input_ack(app, conn, session_id, event_id).await
+            delivery::on_input_ack(app, conn, session_id, event_id, a.joined).await
         }
         Some(Reply::Result { pending_id }) => crate::peers::result_acked(app, pending_id).await,
         // The outcome comes as `workspace.created`.

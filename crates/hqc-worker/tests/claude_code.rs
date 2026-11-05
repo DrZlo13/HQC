@@ -143,7 +143,13 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
             "status"
         ]
     );
-    let sent: Vec<Value> = claude.stdin();
+    // Each user message has a fresh `uuid` (SPEC §8.1); the spike wrote none.
+    let mut sent: Vec<Value> = claude.stdin();
+    for v in sent.iter_mut().filter(|v| v["type"] == "user") {
+        let u: Uuid = v["uuid"].as_str().unwrap().parse().unwrap();
+        assert_eq!(u.get_version_num(), 4, "{v}");
+        v.as_object_mut().unwrap().remove("uuid");
+    }
     let want: Vec<Value> = stdin
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())

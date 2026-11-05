@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.69, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.70, 2026-11-05. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -283,7 +283,8 @@ run the agent in, chosen on creation and switched with `PATCH`; null — the wor
 reported the agent runs in, `session.state.permission_mode`, §5.4; what the client shows),
 `permission_capped_by` (nullable; since 0.43, T39: while the worker runs the current turn in
 `ask` under its input's cap, §7.1, the address of the session up the chain whose `ask` set it,
-from `session.state.capped_input`, §5.4). In
+from `session.state.capped_input`, §5.4), `subagents` (since 0.70: the subagents the agent
+runs now, from `session.state.subagents`, §5.4; 0 after a worker restart). In
 `ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
 classifier decides and never asks (§8.1); the worker's `deny` stops a call in both. `state` and
 `queue_len` (§17.1) are **not stored**; the hub computes them when serving. In the first version
@@ -413,7 +414,7 @@ the client renders only them. The "source" column is the component that produces
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
-| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the input the adapter sent last once the runtime echoed it (§8.1), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; once an input is written during that turn, the turn names no input until the runtime echoes it: echoed after that turn's `result`, the turn's final message and `status idle` name none; taken into the turn after a tool result, the rest of the turn names it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1) |
+| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
 
 `system` codes (the list is open; the client shows an unknown code as text):
@@ -613,6 +614,9 @@ Hub → worker:
 - The hub stores `user.message` and `peer.message` with `delivery: pending` and sends them as
   `session.input`. The worker answers `ack {event_id}` after handing the input to the runtime
   (Claude Code — after the `--replay-user-messages` echo; ACP — after sending `session/prompt`).
+  Since 0.70 `ack {event_id, joined: true}` says the input went into the turn already running
+  (§17.2): the hub marks it `delivered` and does not open a turn for it (the `ack` goes past the
+  worker's outbox and may come after that turn's final answer).
   After `hello` the hub sends `session.start` with `mode: resume` to every session of this worker
   that has a `pending` input, an open `approval`/`clarify` or an answer to a request not yet
   acknowledged by the worker; after the `ack` to it — the unacknowledged answers, then the
@@ -980,6 +984,9 @@ MCP calls (worker → hub → worker):
   says it. The hub stores the `capped_by` of that input's chain as the session's
   `permission_capped_by` (§3) and clears it on a report without the field and on a worker
   restart.
+  `subagents` (since 0.70) — how many subagents the agent runs now (Claude Code: §8.1), 0 when
+  it is stopped; absent — 0, and like `capped_input` every report says it. The hub stores it as
+  the session's `subagents` and sets 0 on a worker restart.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — events
   from the mirror (§9.1, §9.2), through the outbox; the answer is `ack {event_id, seq}` as for
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
@@ -1391,7 +1398,11 @@ acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, archived_at?, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
 updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?,
-permission_capped_by?}`.
+permission_capped_by?, subagents?}`.
+`subagents` (since 0.70): the subagents the agent runs now, from `session.state` (§5.4);
+absent — 0. The client shows "N agents" ("1 agent") next to the state in the chat header and in
+the session's row of the list while it is above 0; a background subagent keeps it up after the
+turn that started it has ended.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header: `effective_permission_mode`, else
 `permission_mode`; "Auto" as a marked badge, "Ask" as plain text, "Ask (Auto asked)" while
@@ -1444,9 +1455,9 @@ newer copy).
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
-  permission_mode?, effective_permission_mode?, permission_capped_by?}` (the same as in the
-  session object; the modes since 0.42, so the header follows a switch the worker confirms, the
-  cap since 0.43); `{type: requests, requests[]}` (since 0.41, T37,
+  permission_mode?, effective_permission_mode?, permission_capped_by?, subagents?}` (the same as
+  in the session object; the modes since 0.42, so the header follows a switch the worker
+  confirms, the cap since 0.43, `subagents` since 0.70); `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -2104,13 +2115,25 @@ after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; 
 that of the transcript's `system compact_boundary` record) →
 `system context_compacted` "Context compacted" with the `event_id` derived from that `uuid`; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
 → `ack` of `session.input` (this field tells the echo from a `user` with `tool_result`).
+Since 0.70 every user message the adapter writes carries a fresh v4 `uuid` (not the input's
+`event_id`: 2.1.312 drops a line whose `uuid` it has seen, echo and all, without a turn); its
+echo and its `command_lifecycle {command_uuid, state}` lines carry it (2.1.312: `queued` when
+the line is read, `started` when the CLI takes it, right after the echo for one that went into a
+running turn, then `completed` or `cancelled`; a turn the CLI begins by itself has none). The
+input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a turn or comes
+during a turn the CLI began by itself (the first input of a process, and every input with a CLI
+that sends no such lines: the one written). At `result`
+an input written and not echoed is taken when its last line is `started` or `completed` (a
+local slash command), carried into the next turn, which the CLI then runs by itself, when it is
+only `queued`, and not taken when `cancelled`; without lifecycle lines it is carried when it was
+written during the turn, taken otherwise. `system` `task_started` with `task_type: local_agent`
+(a subagent in the background or not, a subagent's own too) counts as a running subagent until
+`task_notification`, or a `task_updated` whose `patch.status` is not `running`, of the same
+`task_id`; the count goes into `session.state.subagents` (§5.4).
 The CLI repeats on stdout every `control_response` the adapter sent to stdin;
-the adapter skips those lines. `in_reply_to` = the `event_id` of the input the adapter
-sent last, once its echo has come; before that, none (since 0.69). Once an input is written
-during a turn the CLI started by itself after a background task, the turn names no input
-until the CLI echoes it: echoed after that turn's `result` (checked live on 2.1.312), the
-turn's final message and `status idle` name none; taken into the turn after a tool result,
-the rest of the turn names it.
+the adapter skips those lines. `in_reply_to` = the `event_id` of the turn's input, as above,
+once its echo has come (since 0.69; before that, none); an input written into a running turn
+does not change it.
 
 Cost (since 0.28, T27; checked live on 2.1.308, fixtures `cost-turns`, `cost-resume`):
 `result.total_cost_usd` is the cumulative cost of the whole Claude Code session, not of the turn:
@@ -3372,7 +3395,8 @@ that line).
 A `status` event is not drawn as a feed line, except `error` with `detail`.
 
 The hub tracks "a turn is in progress" itself: a turn is opened by the worker's `ack` of
-`session.input` (the worker passes input to the runtime one per turn, §17.2) and closed by
+`session.input` (the worker passes input to the runtime one per turn, except an input that joins
+a running turn, §17.2: its `ack` has `joined: true` and opens none, since 0.70) and closed by
 `agent.message` with `final: true`, `status` with `idle` or `error` (the latter means "the turn
 ended with an error"), the process stopping or the watchdog (§17.3, also "the turn ended with
 an error").
@@ -3381,7 +3405,20 @@ clears the flag. `worker_offline`: the session has a worker and it is not connec
 
 ### 17.2 Input during a turn **[decision]**
 Input from the input queue (§7.1) that arrives during a turn waits for the final answer
-and starts the next turn; one turn per item, in `seq` order. The
+and starts the next turn; one turn per item, in `seq` order. Since 0.70 a Claude Code turn
+takes a person's input as the VS Code tab does: while a turn runs, the worker writes the head
+of the queue into it when the input has no `peer` (an `hqc_ask` waits for the answer of its own
+turn), neither the input nor the turn is capped to `ask` (§5.3) and the agent has no open
+`approval` or `clarify`; otherwise it waits as before, and so does everything behind it, so
+`seq` order holds. The CLI takes the input at its next step, after the result of the tool call
+running then, and the worker answers `ack {event_id, joined: true}` on its echo; the turn's
+final `agent.message` stays `in_reply_to` the turn's own input. When the turn ends before that
+(the input came during the final answer, or before an interrupt), the CLI runs it as the next
+turn by itself (§8.1): the first such input becomes that turn, its echo gives a plain `ack`; the
+others stay written into it and are acked with `joined: true` when the CLI takes them (that
+turn's `in_reply_to` is then the last of them the CLI took; such inputs are a person's, which
+nothing answers by `in_reply_to`). The same
+holds for an input sent during a turn the CLI began by itself after a background task. The
 "interrupt and send" button does `session.stop` and then the input. For runtimes with `steer`
 (Hermes) a "steer" button is available: `session.steer` without interrupting. Two users
 with `write` share the same queue. Each turn runs in its own input's mode (since 0.43, T39):
@@ -3658,6 +3695,21 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.69 → 0.70 (the agent at work: subagents and a message during a turn)
+§17.2, §5.2, §8.1: a person's message sent during a Claude Code turn goes into that turn, as in
+the VS Code tab, instead of waiting for its final answer. This changes the **[decision]** of
+§17.2 for Claude Code: input with a `peer`, input or a turn capped to `ask`, and input while an
+`approval` or `clarify` is open still wait. The worker answers `ack {event_id, joined: true}`
+for such an input, which marks it `delivered` and opens no turn in the hub (§17.1). The
+adapter writes every user message with a fresh `uuid` and reads `command_lifecycle`, so it
+knows at `result` whether an input not echoed was taken, carried into the turn the CLI then
+runs by itself (an input sent during the final answer, before an interrupt, or during a turn
+the CLI began after a background task) or not taken; before, every such input counted as taken
+(a local slash command), and the turn the CLI then ran went untracked. §5.4, §6, §8.1:
+`session.state.subagents`, `subagents` in the session object and `session.summary`: the
+subagents the agent runs now, from `task_started` (`local_agent`) to its end; the client shows
+"N agents". Migration `0032_session_subagents`.
 
 ### 0.68 → 0.69 (the feed of a Claude Code session as the VS Code tab shows it)
 §8.1: the adapter passes `--thinking-display summarized`, as the VS Code extension does (opus 5.5

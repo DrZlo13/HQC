@@ -22,6 +22,11 @@ pub enum FakeCall {
         session_id: Uuid,
         event_id: Uuid,
     },
+    /// An input written into the running turn (SPEC §17.2).
+    Inject {
+        session_id: Uuid,
+        event_id: Uuid,
+    },
     Stop(Uuid),
     Kill(Uuid),
     Approval {
@@ -50,6 +55,9 @@ struct State {
     start_modes: Vec<(Uuid, PermissionMode)>,
     /// `set_permission_mode` fails, as for a runtime that cannot switch (T39).
     refuse_modes: bool,
+    /// What [`Adapter::can_inject`] answers; false by default, as for a runtime that takes
+    /// no input during a turn.
+    injectable: bool,
 }
 
 #[derive(Clone, Default)]
@@ -71,6 +79,12 @@ impl FakeAdapters {
     /// Make every following `set_permission_mode` fail (T39).
     pub fn set_refuse_modes(&self, refuse: bool) {
         self.lock().refuse_modes = refuse;
+    }
+
+    /// Whether the agents take input into a running turn from now on (SPEC §17.2), as
+    /// Claude Code does while it asks nothing.
+    pub fn set_injectable(&self, injectable: bool) {
+        self.lock().injectable = injectable;
     }
 
     /// Make every following `start`/`resume` fail.
@@ -129,7 +143,18 @@ impl FakeAdapters {
     }
 
     pub async fn end_turn(&self, session_id: Uuid) {
-        self.emit(session_id, AdapterEvent::TurnEnded).await;
+        self.end_turn_carrying(session_id, vec![], vec![]).await;
+    }
+
+    /// Ends the turn; the runtime runs `carried` next by itself and will not take `dropped`.
+    pub async fn end_turn_carrying(
+        &self,
+        session_id: Uuid,
+        carried: Vec<Uuid>,
+        dropped: Vec<Uuid>,
+    ) {
+        self.emit(session_id, AdapterEvent::TurnEnded { carried, dropped })
+            .await;
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -234,6 +259,29 @@ impl Adapter for FakeAdapter {
             event_id: input.event_id,
         });
         Ok(())
+    }
+
+    fn can_inject(&self) -> bool {
+        self.shared.lock().injectable
+    }
+
+    async fn inject_with(
+        &mut self,
+        input: &SessionInput,
+        files: &[InboxFile],
+    ) -> anyhow::Result<bool> {
+        if !self.can_inject() {
+            return Ok(false);
+        }
+        self.shared
+            .lock()
+            .inputs
+            .push((input.clone(), files.to_vec()));
+        self.record(FakeCall::Inject {
+            session_id: self.session_id,
+            event_id: input.event_id,
+        });
+        Ok(true)
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {

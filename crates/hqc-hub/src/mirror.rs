@@ -114,6 +114,7 @@ pub async fn ingest(
     let dropped = Ack {
         event_id: Some(event_id),
         seq: None,
+        ..Ack::default()
     };
     let ws = match db::workspace_by_path(&app.db, conn.worker_id, &m.workspace_path).await? {
         Some(w) if w.mirror_enabled => w,
@@ -246,11 +247,13 @@ pub async fn ingest(
             Ack {
                 event_id: Some(event_id),
                 seq: Some(row.seq as u64),
+                ..Ack::default()
             }
         }
         Inserted::Duplicate(seq) => Ack {
             event_id: Some(event_id),
             seq: Some(seq as u64),
+            ..Ack::default()
         },
         Inserted::UnknownSession => dropped,
     };

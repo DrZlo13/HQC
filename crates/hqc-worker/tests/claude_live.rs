@@ -42,12 +42,13 @@ fn label(ev: &AdapterEvent) -> String {
             }
         }
         AdapterEvent::InputAccepted { .. } => "accepted".into(),
-        AdapterEvent::TurnEnded => "turn_ended".into(),
+        AdapterEvent::TurnEnded { .. } => "turn_ended".into(),
         AdapterEvent::Exited { error } => format!("exited:{error:?}"),
         AdapterEvent::RuntimeSessionId(s) => format!("runtime_session_id:{s}"),
         AdapterEvent::Title(t) => format!("title:{t}"),
         AdapterEvent::Commands(c) => format!("commands:{}", c.len()),
         AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
+        AdapterEvent::Subagents(n) => format!("subagents:{n}"),
     }
 }
 
@@ -167,7 +168,7 @@ async fn live_repo_settings_ignored() {
                         .unwrap();
                 }
             }
-            AdapterEvent::TurnEnded => break,
+            AdapterEvent::TurnEnded { .. } => break,
             AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
             _ => {}
         }
@@ -308,7 +309,7 @@ async fn live_environment_ssh() {
                         }
                         _ => {}
                     },
-                    AdapterEvent::TurnEnded => break,
+                    AdapterEvent::TurnEnded { .. } => break,
                     AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
                     _ => {}
                 }
@@ -526,7 +527,7 @@ async fn live_environment_ssh_keys() {
                         }
                         _ => {}
                     },
-                    AdapterEvent::TurnEnded => break,
+                    AdapterEvent::TurnEnded { .. } => break,
                     AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
                     _ => {}
                 }
@@ -656,7 +657,7 @@ async fn live_folder_rules() {
                         .unwrap();
                 }
             }
-            AdapterEvent::TurnEnded => break,
+            AdapterEvent::TurnEnded { .. } => break,
             AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
             _ => {}
         }
@@ -761,7 +762,7 @@ async fn live_permission_mode_switch() {
                             .unwrap();
                     }
                 }
-                AdapterEvent::TurnEnded => return (modes, asked),
+                AdapterEvent::TurnEnded { .. } => return (modes, asked),
                 AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
                 _ => {}
             }
@@ -902,7 +903,7 @@ async fn live_bash_turn_with_approval() {
                         .unwrap();
                 }
             }
-            AdapterEvent::TurnEnded => break,
+            AdapterEvent::TurnEnded { .. } => break,
             AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
             _ => {}
         }
@@ -1147,7 +1148,7 @@ async fn live_permission_policy() {
                 }
                 _ => {}
             },
-            AdapterEvent::TurnEnded => break,
+            AdapterEvent::TurnEnded { .. } => break,
             AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
             _ => {}
         }
@@ -1253,7 +1254,7 @@ async fn live_ai_title() {
         }
         match ev {
             AdapterEvent::Title(t) => title = Some(t),
-            AdapterEvent::TurnEnded => break,
+            AdapterEvent::TurnEnded { .. } => break,
             AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
             _ => {}
         }

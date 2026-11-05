@@ -103,6 +103,9 @@ pub struct SessionSummary {
     /// As in the session object (T39).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_capped_by: Option<String>,
+    /// As in the session object (SPEC 0.68): the subagents the agent runs now; absent — 0.
+    #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
+    pub subagents: u32,
 }
 
 #[cfg(test)]

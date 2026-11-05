@@ -1439,3 +1439,108 @@ async fn runtime_commands_are_kept_on_the_session() {
     assert_eq!(v["commands"].as_array().unwrap().len(), 500);
     hub.finish().await;
 }
+
+/// SPEC §17.2: an input the worker reports `joined` went into the turn already running. It is
+/// delivered but opens no turn: its ack, which can come after that turn's final answer (it
+/// bypasses the worker's outbox), must not open the turn again.
+#[tokio::test]
+async fn joined_input_ack_opens_no_turn() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("joined").await;
+    ack_start(&mut w, &sid).await;
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "A"}))
+        .await;
+    let a = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": a})).await;
+    hub.wait_session(&sid, "running", |v| v["state"] == "running")
+        .await;
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "B"}))
+        .await;
+    let b = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    assert_eq!(si["payload"]["event_id"], b);
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "done", "final": true, "in_reply_to": a}),
+    ))
+    .await;
+    // The turn is over; B is not delivered yet.
+    hub.wait_session(&sid, "turn closed", |v| v["state"] == "queued")
+        .await;
+    w.reply(&si["id"], "ack", json!({"event_id": b, "joined": true}))
+        .await;
+    // The hub reads a worker's frames in order: once this one is acked, so is the ack.
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    let v = hub.session(&sid).await;
+    assert_eq!(
+        (v["queue_len"].as_u64(), v["state"].as_str()),
+        (Some(0), Some("idle")),
+        "{v}"
+    );
+    let events = hub.events(&sid).await;
+    let stored = events.iter().find(|e| e["event_id"] == b).unwrap();
+    assert_eq!(stored["delivery"], "delivered");
+    hub.finish().await;
+}
+
+/// SPEC §5.4, §6: `session.state.subagents` is kept on the session, in the session object and
+/// its summary; a report without it is 0 (absent), and so is every session of a restarted
+/// worker.
+#[tokio::test]
+async fn subagents_are_kept_on_the_session() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Subagents").await;
+    ack_start(&mut w, &sid).await;
+    assert!(hub.session(&sid).await.get("subagents").is_none());
+    let mut c = FakeClient::connect(&hub).await;
+    c.send(json!({"type": "subscribe_summary"})).await;
+    c.until("summary").await;
+
+    let state = |n: Option<u32>| {
+        let mut v = json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"});
+        if let Some(n) = n {
+            v["subagents"] = json!(n);
+        }
+        v
+    };
+    w.send("session.state", state(Some(2))).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["subagents"], 2);
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"]["subagents"] == 2 {
+            break;
+        }
+    }
+    w.send("session.state", state(None)).await;
+    w.expect("ack").await;
+    assert!(hub.session(&sid).await.get("subagents").is_none());
+
+    w.send("session.state", state(Some(3))).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["subagents"], 3);
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (_w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    let v = hub
+        .wait_session(&sid, "stopped", |v| {
+            v["agent"]["process_state"] == "stopped"
+        })
+        .await;
+    assert!(v.get("subagents").is_none(), "{v}");
+    hub.finish().await;
+}

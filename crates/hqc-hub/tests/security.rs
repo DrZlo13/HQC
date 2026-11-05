@@ -232,6 +232,111 @@ async fn worker_routes_are_limited_per_address() {
     hub.finish().await;
 }
 
+/// `POST /worker/enroll` with `headers`; the status.
+async fn enroll_from(hub: &TestHub, headers: &[(&str, &str)]) -> u16 {
+    send(
+        hub,
+        reqwest::Method::POST,
+        "/worker/enroll",
+        headers,
+        Some(json!({"name": "w", "os": "linux"})),
+    )
+    .await
+    .0
+}
+
+/// Behind Traefik (RUNBOOK §1.9): with `HQC_CLIENT_IP_HEADER` the address is that header,
+/// else the TCP peer, and a `CF-Connecting-IP` the client made up is never read.
+#[tokio::test]
+async fn client_ip_header_replaces_cf_connecting_ip() {
+    let hub = TestHub::start_config(|c| {
+        c.limits.enroll_per_min = 1;
+        c.client_ip_header = Some(axum::http::HeaderName::from_static("x-real-ip"));
+    })
+    .await;
+    assert_eq!(
+        enroll_from(&hub, &[("X-Real-Ip", "198.51.100.1")]).await,
+        200
+    );
+    let rotated = [
+        ("X-Real-Ip", "198.51.100.1"),
+        ("CF-Connecting-IP", "203.0.113.9"),
+    ];
+    assert_eq!(enroll_from(&hub, &rotated).await, 429, "the same address");
+    let other = [
+        ("X-Real-Ip", "198.51.100.2"),
+        ("CF-Connecting-IP", "198.51.100.1"),
+    ];
+    assert_eq!(enroll_from(&hub, &other).await, 200, "another address");
+    // The header is set up but absent: the TCP peer, a made-up CF-Connecting-IP is not read.
+    assert_eq!(
+        enroll_from(&hub, &[("CF-Connecting-IP", "203.0.113.10")]).await,
+        200
+    );
+    assert_eq!(
+        enroll_from(&hub, &[("CF-Connecting-IP", "203.0.113.11")]).await,
+        429,
+        "the same TCP peer"
+    );
+    hub.finish().await;
+}
+
+/// Behind Traefik a `CF-IPCountry` the client sends is not shown on the confirmation screen
+/// (SPEC §5.1): it is Cloudflare's header, read only without `HQC_CLIENT_IP_HEADER`.
+#[tokio::test]
+async fn client_ip_header_drops_cf_ipcountry() {
+    let hub = TestHub::start_config(|c| {
+        c.client_ip_header = Some(axum::http::HeaderName::from_static("x-real-ip"));
+    })
+    .await;
+    let (s, e, _) = send(
+        &hub,
+        reqwest::Method::POST,
+        "/worker/enroll",
+        &[("CF-IPCountry", "de"), ("X-Real-Ip", "198.51.100.1")],
+        Some(json!({"name": "w", "os": "linux"})),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, info) = hub
+        .get(&format!(
+            "/api/workers/enroll/{}",
+            e["code"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(s, 200, "{info}");
+    assert!(info.get("country").is_none(), "{info}");
+    hub.finish().await;
+}
+
+/// Without `HQC_CLIENT_IP_HEADER` the address is `CF-Connecting-IP`, else the TCP peer, as
+/// before; `X-Real-Ip` is not read.
+#[tokio::test]
+async fn client_ip_without_the_setting_is_cf_connecting_ip() {
+    let hub = TestHub::start_limited(Limits {
+        enroll_per_min: 1,
+        ..Limits::default()
+    })
+    .await;
+    assert_eq!(
+        enroll_from(&hub, &[("X-Real-Ip", "198.51.100.1")]).await,
+        200
+    );
+    assert_eq!(
+        enroll_from(&hub, &[("X-Real-Ip", "198.51.100.2")]).await,
+        429,
+        "the same TCP peer"
+    );
+    let cf = [("CF-Connecting-IP", "203.0.113.1")];
+    assert_eq!(enroll_from(&hub, &cf).await, 200);
+    let cf_and_real = [
+        ("CF-Connecting-IP", "203.0.113.1"),
+        ("X-Real-Ip", "198.51.100.3"),
+    ];
+    assert_eq!(enroll_from(&hub, &cf_and_real).await, 429);
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn hello_of_a_revoked_worker_is_refused() {
     let hub = TestHub::start().await;

@@ -253,6 +253,7 @@ impl TestHub {
             limits,
             artifacts: art,
             public_origins: vec![],
+            client_ip_header: None,
         };
         configure(&mut config);
         std::fs::create_dir_all(&config.artifacts.dir).unwrap();

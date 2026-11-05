@@ -20,6 +20,11 @@ pub struct Config {
     /// the request's `Host`, which a reverse proxy may rewrite (SPEC §20). Empty: the `Host`
     /// or `X-Forwarded-Host` of the request.
     pub public_origins: Vec<String>,
+    /// `HQC_CLIENT_IP_HEADER`: the header a reverse proxy puts the client's address in
+    /// (`X-Real-Ip` for Traefik). When set, per-address limits take the address from it (the
+    /// TCP peer when it is absent), and neither `CF-Connecting-IP` nor `CF-IPCountry` is read
+    /// (SPEC §20). `None`: `CF-Connecting-IP`, else the TCP peer.
+    pub client_ip_header: Option<axum::http::HeaderName>,
 }
 
 /// The artifact store and its signed links (SPEC §12).
@@ -285,7 +290,8 @@ impl Config {
     /// `HQC_ACCESS_AUD`, `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, `HQC_DEV`,
     /// `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`,
     /// `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`,
-    /// `HQC_ARTIFACT_KEY`, `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`.
+    /// `HQC_ARTIFACT_KEY`, `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`,
+    /// `HQC_CLIENT_IP_HEADER`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -347,6 +353,12 @@ impl Config {
             limits: Limits::default(),
             artifacts,
             public_origins: public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?,
+            client_ip_header: var("HQC_CLIENT_IP_HEADER")
+                .map(|v| {
+                    axum::http::HeaderName::from_bytes(v.trim().as_bytes())
+                        .with_context(|| format!("HQC_CLIENT_IP_HEADER={v}: not a header name"))
+                })
+                .transpose()?,
         })
     }
 }

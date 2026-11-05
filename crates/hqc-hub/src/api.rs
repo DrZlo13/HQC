@@ -1666,8 +1666,11 @@ pub async fn worker_enroll(
     if total >= limits.enroll_active_total || from_ip >= limits.enroll_active_per_ip {
         return Err(ApiError::TooManyRequests);
     }
+    // Cloudflare's country, as `CF-Connecting-IP`: behind another reverse proxy
+    // (`HQC_CLIENT_IP_HEADER` set) the client could send any (SPEC §5.1, §20).
     let country = headers
         .get("cf-ipcountry")
+        .filter(|_| app.config.client_ip_header.is_none())
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_alphanumeric()))

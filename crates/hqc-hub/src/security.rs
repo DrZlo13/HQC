@@ -222,18 +222,28 @@ pub fn is_loopback_host(hostport: &str) -> bool {
         || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-/// The client's address: `CF-Connecting-IP` from Cloudflare (the hub is reachable only
-/// through the tunnel, SPEC §20), else the TCP peer.
+/// The client's address (SPEC §20): the header named by `HQC_CLIENT_IP_HEADER`, which a
+/// reverse proxy such as Traefik sets from the TCP peer, and then `CF-Connecting-IP` is not
+/// read; without that setting `CF-Connecting-IP` from Cloudflare (the hub is reachable only
+/// through the tunnel). Else the TCP peer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClientIp(pub String);
 
-impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
+impl FromRequestParts<AppState> for ClientIp {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        app: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let header = app
+            .config
+            .client_ip_header
+            .as_ref()
+            .map_or("cf-connecting-ip", |h| h.as_str());
         if let Some(ip) = parts
             .headers
-            .get("cf-connecting-ip")
+            .get(header)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<IpAddr>().ok())
         {

@@ -43,7 +43,8 @@
 //!   mode, and a switch the user asks for meanwhile waits for the end of the capped turn.
 //!   `session.state.capped_input` names the input while a cap holds an `auto` session in
 //!   `ask`.
-//! - `idle_timeout` (SPEC §17.3): an idle process is killed, the next input resumes it.
+//! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running) is killed,
+//!   the next input resumes it.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
 //! - Workspaces hqc makes and deletes (T45): `workspace.create` is acked at once and runs in
@@ -977,12 +978,14 @@ impl Session {
 
     fn idle_deadline(&self) -> Option<Instant> {
         let t = self.idle_timeout?;
+        // A background subagent outlives the turn and may be silent for long (a build).
         (self.state == ProcessState::Running
             && self.turn.is_none()
             && self.injected.is_empty()
             && self.lowering.is_none()
-            && self.queue.is_empty())
-        .then(|| self.last_activity + t)
+            && self.queue.is_empty()
+            && self.subagents == 0)
+            .then(|| self.last_activity + t)
     }
 
     async fn on_cmd(&mut self, c: Cmd) {

@@ -3440,7 +3440,8 @@ buffered send from a session in `ask` (§7.1).
 
 ### 17.3 Processes
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
-  process exits, and the next input brings it back via resume.
+  process exits, and the next input brings it back via resume. Since 0.70 an agent whose
+  subagents still run (`session.state.subagents` > 0, §5.4) is not idle.
 - Worker offline: input accumulates in the hub (`pending`), the session is `worker_offline`,
   delivery on connect in `seq` order. Open `approval`s on an offline worker
   stay open until it returns or until `expires_at`.
@@ -3727,7 +3728,8 @@ turn it was carried into (§8.1). §5.4, §6, §8.1:
 `session.state.subagents`, `subagents` in the session object and `session.summary`: the
 subagents the agent runs now, from `task_started` (`local_agent`) to its end, a foreground one
 at the latest to the `result` of the main turn; the client shows "N agents". Migration
-`0032_session_subagents`.
+`0032_session_subagents`. §17.3: the worker's `idle_timeout` no longer stops an agent whose
+subagents still run.
 
 ### 0.68 → 0.69 (the feed of a Claude Code session as the VS Code tab shows it)
 §8.1: the adapter passes `--thinking-display summarized`, as the VS Code extension does (opus 5.5

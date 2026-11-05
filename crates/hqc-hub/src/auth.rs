@@ -4,8 +4,9 @@
 //! against the team's JWKS, issuer and audience from config; an email header without a JWT
 //! is never accepted. With `HQC_OIDC_*` it is instead an OIDC ID token from
 //! `Authorization: Bearer` (put there by a reverse proxy such as oauth2-proxy), checked the
-//! same way against the configured issuer, audience and JWKS URL; `Cf-Access-Jwt-Assertion`
-//! is then not read. `HQC_DEV=1` replaces this with a fixed user for local development.
+//! same way against the configured issuer, audience and JWKS URL, and in addition with
+//! `email_verified: true` and, when it has a `typ`, `typ: ID`; `Cf-Access-Jwt-Assertion` is
+//! then not read. `HQC_DEV=1` replaces this with a fixed user for local development.
 //!
 //! Workers: a random 256-bit bearer token; the database keeps only its sha256.
 
@@ -51,7 +52,7 @@ impl Auth {
                 issuer,
                 aud,
                 jwks_url,
-            } => Auth::Oidc(Box::new(AccessVerifier::with_issuer(issuer, aud, jwks_url))),
+            } => Auth::Oidc(Box::new(AccessVerifier::oidc(issuer, aud, jwks_url))),
             AuthConfig::Dev { email } => Auth::Dev {
                 email: email.clone(),
             },
@@ -63,6 +64,9 @@ pub struct AccessVerifier {
     issuer: String,
     aud: String,
     certs_url: String,
+    /// OIDC mode: only ID tokens (`typ`, when present, is `ID`) whose `email_verified` is
+    /// `true`. Without it any account of the realm could set its email to someone else's.
+    id_token: bool,
     http: reqwest::Client,
     /// The last fetched key set and when it was fetched. Readers never wait for a fetch.
     keys: RwLock<Option<(JwkSet, Instant)>>,
@@ -82,13 +86,18 @@ struct Refresh {
 const JWKS_BACKOFF_MIN: Duration = Duration::from_secs(5);
 const JWKS_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
-/// What a client learns about a rejected Access token; the reason goes to the log.
-const BAD_TOKEN: &str = "invalid access token";
+/// What a client learns about a rejected token; the reason goes to the log.
+const BAD_TOKEN: &str = "invalid token";
 
 #[derive(Debug, serde::Deserialize)]
 struct AccessClaims {
     #[serde(default)]
     email: Option<String>,
+    /// Read in OIDC mode only; any JSON so that Access tokens decode as before.
+    #[serde(default)]
+    email_verified: Option<serde_json::Value>,
+    #[serde(default)]
+    typ: Option<serde_json::Value>,
 }
 
 impl AccessVerifier {
@@ -104,6 +113,7 @@ impl AccessVerifier {
             issuer: issuer.to_string(),
             aud: aud.to_string(),
             certs_url: certs_url.to_string(),
+            id_token: false,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -115,11 +125,20 @@ impl AccessVerifier {
         }
     }
 
+    /// As [`Self::with_issuer`], for OIDC ID tokens: also `email_verified: true` and, when
+    /// the token has a `typ`, `typ: ID` (Keycloak's access tokens are `Bearer`).
+    pub fn oidc(issuer: &str, aud: &str, certs_url: &str) -> Self {
+        Self {
+            id_token: true,
+            ..Self::with_issuer(issuer, aud, certs_url)
+        }
+    }
+
     /// Verify the token and return the email it was issued for. The client gets a generic
     /// message; why the token was refused is logged.
     pub async fn verify(&self, token: &str) -> Result<String, ApiError> {
         let bad = |why: &dyn std::fmt::Display| {
-            tracing::info!("access token refused: {why}");
+            tracing::info!("token refused: {why}");
             ApiError::Unauthorized(BAD_TOKEN.into())
         };
         let header = jsonwebtoken::decode_header(token).map_err(|e| bad(&e))?;
@@ -135,11 +154,22 @@ impl AccessVerifier {
         v.set_issuer(&[&self.issuer]);
         v.set_audience(&[&self.aud]);
         v.set_required_spec_claims(&["exp", "iss", "aud"]);
-        let data = jsonwebtoken::decode::<AccessClaims>(token, &key, &v).map_err(|e| bad(&e))?;
-        data.claims
+        let claims = jsonwebtoken::decode::<AccessClaims>(token, &key, &v)
+            .map_err(|e| bad(&e))?
+            .claims;
+        if self.id_token {
+            if let Some(typ) = claims.typ.as_ref().filter(|t| t.as_str() != Some("ID")) {
+                return Err(bad(&format_args!("typ {typ} is not an ID token")));
+            }
+            if claims.email_verified != Some(serde_json::Value::Bool(true)) {
+                tracing::info!("token refused: email_verified is not true");
+                return Err(ApiError::Forbidden("the email is not verified".into()));
+            }
+        }
+        claims
             .email
             .filter(|e| e.contains('@'))
-            .ok_or_else(|| ApiError::Forbidden("access token has no email".into()))
+            .ok_or_else(|| ApiError::Forbidden("the token has no email".into()))
     }
 
     /// The key `kid` from the cached set, refreshing it when it is old or does not know
@@ -168,7 +198,7 @@ impl AccessVerifier {
             return match cached {
                 Some((set, _)) => Ok(find(&set)),
                 None => Err(ApiError::Internal(anyhow::anyhow!(
-                    "access keys unavailable (fetch backing off)"
+                    "signing keys unavailable (fetch backing off)"
                 ))),
             };
         }
@@ -187,17 +217,17 @@ impl AccessVerifier {
                 refresh.failed = Some((Instant::now(), wait));
                 match cached {
                     Some((set, _)) => {
-                        tracing::warn!(error = %e, retry_in = ?wait, "access JWKS refresh failed; using the previous keys");
+                        tracing::warn!(error = %e, retry_in = ?wait, "JWKS refresh failed; using the previous keys");
                         Ok(find(&set))
                     }
-                    None => Err(ApiError::Internal(e.context("fetching access JWKS"))),
+                    None => Err(ApiError::Internal(e.context("fetching JWKS"))),
                 }
             }
         }
     }
 
     async fn fetch(&self) -> anyhow::Result<JwkSet> {
-        tracing::debug!(url = %self.certs_url, "fetching access JWKS");
+        tracing::debug!(url = %self.certs_url, "fetching JWKS");
         let set = self
             .http
             .get(&self.certs_url)

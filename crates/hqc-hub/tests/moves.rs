@@ -525,3 +525,262 @@ async fn a_stopped_session_starts_there_with_its_next_input() {
     assert_eq!(start["payload"]["workspace_path"], "/w/foo");
     hub.finish().await;
 }
+
+// ---------------------------------------------------------------- hqc_move (SPEC §7)
+
+/// A session in [`HQC`] on a worker that moves, its agent running in `mode`, in the turn of
+/// a person's input: the worker, the session, its token and that input's `event_id`.
+async fn agent(hub: &TestHub, mode: &str) -> (FakeWorker, String, String, Value) {
+    let (_, token) = hub.enroll("home-mac").await;
+    let mut w = FakeWorker::connect(hub, &token).await.unwrap();
+    w.hello_with(ROOT, hub.boot_id, moves()).await;
+    let pid = hub.personal_project().await;
+    let (s, v) = hub.add_workspace(&mut w, &pid, HQC).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = hub
+        .post(
+            &format!("/api/projects/{pid}/sessions"),
+            json!({"title": "moving", "permission_mode": mode}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let sid = v["id"].as_str().unwrap().to_string();
+    let start = ack_start(&mut w, &sid).await;
+    let id = w
+        .send(
+            "session.state",
+            json!({"session_id": sid, "process_state": "running", "locked_by": "hqc",
+                   "permission_mode": mode}),
+        )
+        .await;
+    assert_eq!(w.expect("ack").await["id"], id.as_str());
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "move this into foo"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let input = w.expect("session.input").await;
+    w.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": input["payload"]["event_id"]}),
+    )
+    .await;
+    let token = start["payload"]["session_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (w, sid, token, input["payload"]["event_id"].clone())
+}
+
+/// What the worker saw while one `hqc_move` ran.
+struct Call {
+    /// The `mcp.result` payload.
+    result: Value,
+    /// The `session.start`s it acked.
+    starts: Vec<Value>,
+    /// The `session.input`s it got.
+    inputs: Vec<Value>,
+    /// How many of them came before any `session.start`.
+    early: usize,
+}
+
+/// `hqc_move` with `args` and `request_id` `rid` from the session of `token`, in the turn of
+/// input `turn`, while the worker answers `fs.stat` (a folder with `denied` in its path it
+/// cannot make) and acks `session.start`.
+async fn call_move(w: &mut FakeWorker, token: &str, rid: &str, turn: &Value, args: Value) -> Call {
+    let id = w
+        .send(
+            "mcp.call",
+            json!({"request_id": rid, "session_token": token, "tool": "hqc_move",
+                   "args": args, "turn_input": turn}),
+        )
+        .await;
+    let (mut starts, mut inputs, mut early) = (Vec::new(), Vec::new(), 0);
+    loop {
+        let f = w.recv().await;
+        match f["type"].as_str().unwrap() {
+            "mcp.result" => {
+                assert_eq!(f["id"], id.as_str(), "{f}");
+                assert_eq!(f["payload"]["request_id"], rid);
+                return Call {
+                    result: f["payload"].clone(),
+                    starts,
+                    inputs,
+                    early,
+                };
+            }
+            "fs.stat" if f["payload"]["path"].as_str().unwrap().contains("denied") => {
+                let e = json!({"code": "invalid_frame", "retryable": false,
+                               "message": "mkdir /w/denied: permission denied"});
+                w.reply(&f["id"], "error", e).await;
+            }
+            "fs.stat" => {
+                let (ty, payload) = w.fs_reply(&f);
+                w.reply(&f["id"], ty, payload).await;
+            }
+            "session.start" => {
+                w.reply(&f["id"], "ack", json!({})).await;
+                starts.push(f);
+            }
+            "session.input" => {
+                early += usize::from(starts.is_empty());
+                inputs.push(f);
+            }
+            "ack" => {}
+            _ => panic!("unexpected frame {f}"),
+        }
+    }
+}
+
+/// The feed's `user.message`s with `text`.
+fn inputs_with<'a>(events: &'a [Value], text: &str) -> Vec<&'a Value> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "user.message" && e["payload"]["text"] == text)
+        .collect()
+}
+
+/// The agent moves its own session into a folder that is not there yet (made by the worker)
+/// and learns its new address. Then its owner's input "you moved…" waits in its queue, after
+/// `session_moved`: a `user.message` without `peer`, in the call's chain moved on and in the
+/// session's own mode (`auto` here: no `ask` cap), delivered after the new `session.start`.
+/// The same call again answers the same and stores nothing.
+#[tokio::test]
+async fn the_agent_moves_itself() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto").await;
+    let before = projects(&hub).await.len();
+    let rid = Uuid::now_v7().to_string();
+    let args = json!({"path": "/w/missing-foo"});
+
+    let c = call_move(&mut w, &token, &rid, &turn, args.clone()).await;
+    assert_eq!(
+        c.result["result"],
+        json!({"address": "missing-foo/moving", "project": "missing-foo", "path": "/w/missing-foo"}),
+        "{}",
+        c.result
+    );
+    assert_eq!(projects(&hub).await.len(), before + 1);
+    assert_eq!(c.starts.len(), 1);
+    assert_eq!(c.starts[0]["payload"]["workspace_path"], "/w/missing-foo");
+    assert_eq!(c.early, 0);
+    let input = match c.inputs.into_iter().next() {
+        Some(f) => f,
+        None => w.expect("session.input").await,
+    };
+    let p = &input["payload"];
+    assert_eq!(p["session_id"], sid.as_str());
+    assert!(p["peer"].is_null(), "{p}");
+    assert_ne!(p["permission_cap"], "ask", "{p}");
+    let text = p["text"].as_str().unwrap().to_string();
+    assert!(text.contains("/w/missing-foo"), "{text}");
+
+    let events = hub.events(&sid).await;
+    let wake = inputs_with(&events, &text);
+    assert_eq!(wake.len(), 1, "{events:?}");
+    assert_eq!(wake[0]["event_id"], p["event_id"]);
+    assert_eq!(wake[0]["author"]["kind"], "user");
+    assert_eq!(wake[0]["chain"]["hops"], 1, "{}", wake[0]);
+    assert!(wake[0]["seq"].as_i64() > moved_events(&events)[0]["seq"].as_i64());
+
+    // A repeat (the answer lost, SPEC §5.2).
+    let again = call_move(&mut w, &token, &rid, &turn, args).await;
+    assert_eq!(again.result["result"], c.result["result"]);
+    assert_eq!(projects(&hub).await.len(), before + 1);
+    let events = hub.events(&sid).await;
+    assert_eq!(inputs_with(&events, &text).len(), 1);
+    assert_eq!(moved_events(&events).len(), 1);
+    hub.finish().await;
+}
+
+/// The error code and message of an `hqc_move` that is refused before anything starts.
+async fn refusal(w: &mut FakeWorker, token: &str, turn: &Value, args: Value) -> (String, String) {
+    let c = call_move(w, token, &Uuid::now_v7().to_string(), turn, args).await;
+    assert!(c.result.get("result").is_none(), "{}", c.result);
+    assert!(c.starts.is_empty() && c.inputs.is_empty());
+    let e = &c.result["error"];
+    (
+        e["code"].as_str().unwrap().to_string(),
+        e["message"].as_str().unwrap().to_string(),
+    )
+}
+
+/// What `hqc_move` refuses, with the codes of SPEC §7: nothing moves, nothing is queued.
+#[tokio::test]
+async fn the_tool_refuses() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto").await;
+    let before = projects(&hub).await.len();
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+
+    // Outside allowed_roots, or a folder the worker cannot make: its reason.
+    let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/etc"})).await;
+    assert_eq!(code, "invalid_args");
+    assert!(m.contains("allowed_roots"), "{m}");
+    let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/denied"})).await;
+    assert_eq!(code, "invalid_args");
+    assert!(m.contains("permission denied"), "{m}");
+    // Inside a workspace.
+    let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/hqc/sub"})).await;
+    assert_eq!(code, "invalid_args");
+    assert!(m.contains("workspace_conflict"), "{m}");
+    // An unknown project.
+    let (code, _) = refusal(
+        &mut w,
+        &token,
+        &turn,
+        json!({"path": "/w/foo", "project": "nope"}),
+    )
+    .await;
+    assert_eq!(code, "not_found");
+
+    // A chain at its hops limit moves nothing (SPEC §7.1).
+    let set_chain = |chain: Option<Value>| {
+        let (db, ev) = (
+            hub.app.db.clone(),
+            turn.as_str().unwrap().parse::<Uuid>().unwrap(),
+        );
+        async move {
+            sqlx::query("UPDATE events SET chain = $2 WHERE event_id = $1")
+                .bind(ev)
+                .bind(chain)
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+    };
+    set_chain(Some(
+        json!({"chain_id": Uuid::now_v7(), "depth": 0, "hops": 20}),
+    ))
+    .await;
+    let (code, _) = refusal(&mut w, &token, &turn, json!({"path": "/w/foo"})).await;
+    assert_eq!(code, "limit_exceeded");
+    set_chain(None).await;
+
+    // Not run by hqc now, or driven from VS Code.
+    let id: Uuid = sid.parse().unwrap();
+    for locked in ["none", "vscode"] {
+        sqlx::query("UPDATE sessions SET locked_by = $2 WHERE id = $1")
+            .bind(id)
+            .bind(locked)
+            .execute(&hub.app.db)
+            .await
+            .unwrap();
+        let (code, _) = refusal(&mut w, &token, &turn, json!({"path": "/w/foo"})).await;
+        assert_eq!(code, "unavailable", "{locked}");
+    }
+
+    assert_eq!(projects(&hub).await.len(), before);
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    let events = hub.events(&sid).await;
+    assert!(moved_events(&events).is_empty());
+    let inputs = events
+        .iter()
+        .filter(|e| e["type"] == "user.message")
+        .count();
+    assert_eq!(inputs, 1, "only the person's: {events:?}");
+    hub.finish().await;
+}

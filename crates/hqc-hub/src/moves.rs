@@ -1,5 +1,6 @@
 //! A session moves to another folder of its worker, in another project (SPEC §3 Session,
-//! §6): `POST /api/sessions/{id}/move` goes through [`move_session`].
+//! §6, §7): `POST /api/sessions/{id}/move` and the agent's `hqc_move` ([`tool`]) go through
+//! [`move_session`].
 //!
 //! - Only a Claude Code session with a workspace, not archived, neither driven from VS Code
 //!   (`locked_by: vscode`) nor held open by a live process outside hqc (`held_by`, SPEC
@@ -30,11 +31,18 @@
 //!   counts the session.
 //! - The connection's start state goes back to "not started" and a running agent gets a new
 //!   `session.start` with the new folder at once, which the worker applies once no turn runs
-//!   (SPEC §5.3); a stopped agent starts there with its next input. Nothing is queued.
+//!   (SPEC §5.3); a stopped agent starts there with its next input. Nothing is queued; only
+//!   the tool queues the input that wakes the agent there.
 
 use std::path::Path;
 
-use hqc_proto::api::WorkspaceState;
+use hqc_proto::{
+    api::WorkspaceState,
+    frame::{McpCall, McpError},
+    mcp::error_code,
+};
+use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
@@ -44,6 +52,7 @@ use crate::{
     delivery,
     error::{ApiError, ApiResult},
     events,
+    mcp::{args, internal, once_id, Answer},
     worker_ws::StartState,
 };
 
@@ -51,6 +60,85 @@ use crate::{
 pub const MOVED: &str = "session_moved";
 /// What [`crate::mcp::once_id`] derives the id of a move's new project from.
 const PROJECT: &str = "hqc_move project";
+/// What [`crate::mcp::once_id`] derives the `event_id` of the input after a tool move from.
+const WAKE: &str = "hqc_move wake";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveArgs {
+    path: String,
+    project: Option<String>,
+}
+
+/// `hqc_move(path, project?)` (SPEC §7): `{address, project, path}`. The calling session,
+/// run by hqc (`locked_by: hqc`), moves by [`move_session`], a missing folder made; the call
+/// waits for the worker's `fs.stat` on the connection it came by ([`Answer::Wait`]). Then an
+/// input of the owner, "you moved to …", goes into its queue as a run of `hqc_schedule` does
+/// (SPEC §16): a `user.message` with the call's chain moved on, so the turn it starts runs in
+/// the session's own mode (or the `ask` cap of the chain) and, after the move, in the new
+/// folder. Once per `request_id`: a repeat finds the session moved and the input stored, and
+/// answers the same.
+pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
+    let a: MoveArgs = args(c.args.clone())?;
+    if caller.locked_by != "hqc" {
+        return Err(McpError::new(
+            error_code::UNAVAILABLE,
+            "the session's agent is not run by hqc now",
+        ));
+    }
+    // The chain moves on as for a schedule; one at its limit moves nothing (SPEC §7.1).
+    let chain = crate::peers::outgoing_chain(app, caller, c, false).await?;
+    let chain = serde_json::to_value(chain).map_err(internal)?;
+    let wake = once_id(WAKE, caller.id, &c.request_id);
+    // Off the connection's loop: the worker answers `fs.stat` on the connection the call came by.
+    let (app, caller) = (app.clone(), caller.clone());
+    Ok(Answer::Wait(Box::pin(async move {
+        let m = move_session(&app, &caller, &a.path, a.project.as_deref(), true)
+            .await
+            .map_err(tool_error)?;
+        let text = format!(
+            "You moved to {}, project {}; continue the task.",
+            m.workspace.path, m.project.name
+        );
+        events::store_hub_event_with_id(
+            &app,
+            &m.session,
+            wake,
+            events::user_author(m.session.owner_id),
+            "user.message",
+            json!({"text": text, "artifact_ids": []}),
+            Some("pending"),
+            Some(chain),
+        )
+        .await
+        .map_err(internal)?;
+        delivery::kick(&app, m.session.id, false).await;
+        let address = crate::peers::address(&app, &m.session)
+            .await
+            .map_err(internal)?;
+        Ok(json!({"address": address, "project": m.project.slug, "path": m.workspace.path}))
+    })))
+}
+
+/// An error of [`move_session`] as the tool's (SPEC §7), after `spawn`'s: a folder the worker
+/// refuses or cannot make and a project that does not fit the folder are `invalid_args` with
+/// the reason, an overlap `invalid_args` naming `workspace_conflict`, an unknown project
+/// `not_found`, a session or worker that cannot move now `unavailable`.
+fn tool_error(e: ApiError) -> McpError {
+    match e {
+        ApiError::NotFound => McpError::new(error_code::NOT_FOUND, "no such project"),
+        ApiError::ConflictWith(code @ "workspace_conflict", m, _) => {
+            McpError::new(error_code::INVALID_ARGS, format!("{code}: {m}"))
+        }
+        ApiError::BadRequest(m) | ApiError::Invalid(_, m) => {
+            McpError::new(error_code::INVALID_ARGS, m)
+        }
+        ApiError::Conflict(_, m) | ApiError::ConflictWith(_, m, _) => {
+            McpError::new(error_code::UNAVAILABLE, m)
+        }
+        other => internal(other),
+    }
+}
 
 /// Where the session is now.
 pub struct Moved {

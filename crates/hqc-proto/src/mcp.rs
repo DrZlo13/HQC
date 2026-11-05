@@ -33,12 +33,14 @@ pub const ASK: &str = "hqc_ask";
 pub const SEARCH_HISTORY: &str = "hqc_search_history";
 pub const SPAWN: &str = "hqc_spawn";
 pub const SCHEDULE: &str = "hqc_schedule";
+pub const MOVE: &str = "hqc_move";
 /// `instructions` of `initialize` (SPEC §7.2): the runtime keeps them in the system prompt while
 /// the tools themselves wait behind its tool search, so each tool is named here by its use.
 pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's owner; the user \
     reads this session in the hqc chat. Show the user files you make (images, charts, reports, \
     diffs) with hqc_attach, not just a path. Other sessions: hqc_list_sessions, hqc_send, \
-    hqc_ask, hqc_spawn; history: hqc_search_history; later or recurring messages: hqc_schedule.";
+    hqc_ask, hqc_spawn; history: hqc_search_history; later or recurring messages: hqc_schedule; \
+    moving this session to another folder or project, only when the user asks: hqc_move.";
 
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -274,6 +276,35 @@ pub const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: MOVE,
+        description: "Move this session to another folder on the same machine. Call it only \
+            when the user asks you to (\"move this into project foo\"). `path` becomes this \
+            session's working folder, in `project` when given, otherwise in a new project named \
+            after the folder; a folder that is a workspace already comes with its project. A \
+            missing folder is created; it must lie inside the machine's allowed roots and \
+            neither inside nor around another workspace. Returns `{address, project, path}`: \
+            your new address, the project's slug and the folder's canonical path. After the \
+            call, end your turn: from the next turn you work in `path`, the conversation goes \
+            on, and your address is now `address`.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The folder's absolute path on this machine; created when missing."
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "A project slug or id; a new project named after the folder when absent."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            })
+        },
+    },
 ];
 
 /// The `files` argument of [`SEND`] and [`ASK`] (since 0.46, T41).
@@ -386,6 +417,7 @@ mod tests {
         assert!(tool(ATTACH).is_some());
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
         assert!(tool(SEARCH_HISTORY).is_some());
+        assert!(tool(MOVE).is_some());
     }
 
     #[test]

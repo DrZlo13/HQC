@@ -1889,6 +1889,16 @@ select.input {
   min-height: 28px;
   overflow-wrap: anywhere;
 }
+/* The model and the auto-compaction of the session, below the menu's items. */
+.menu-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 240px;
+  padding: 8px 10px 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
 
 .timeline {
   flex: 1;

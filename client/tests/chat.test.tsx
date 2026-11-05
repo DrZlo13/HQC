@@ -8,7 +8,7 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Api } from '../src/api';
+import type { Api, SessionPatch } from '../src/api';
 import { AppState } from '../src/app';
 import {
   parseEvent,
@@ -64,6 +64,8 @@ function setup(
     effective_permission_mode?: PermissionMode;
     permission_capped_by?: string;
     subagents?: number;
+    model?: string;
+    autocompact?: number;
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -82,11 +84,14 @@ function setup(
     readCursor: vi.fn(async () => {}),
     approve: vi.fn(async () => {}),
     takeover: vi.fn(async () => ({})),
-    // PATCH /api/sessions/{id}: the hub stores the mode, the worker confirms it at once.
-    patchSession: vi.fn(async (_id: string, patch: { permission_mode?: PermissionMode }) => ({
+    // PATCH /api/sessions/{id}: the hub stores the mode, the worker confirms it at once; the
+    // model and the auto-compaction are stored as sent (`null`: the runtime's default).
+    patchSession: vi.fn(async (_id: string, patch: SessionPatch) => ({
       ...info,
       permission_mode: patch.permission_mode,
       effective_permission_mode: patch.permission_mode,
+      model: patch.model === undefined ? info.model : (patch.model ?? undefined),
+      autocompact: patch.autocompact === undefined ? info.autocompact : (patch.autocompact ?? undefined),
     })),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
@@ -129,6 +134,8 @@ function setup(
     effective_permission_mode: opts.effective_permission_mode,
     permission_capped_by: opts.permission_capped_by,
     subagents: opts.subagents,
+    model: opts.model,
+    autocompact: opts.autocompact,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -272,6 +279,90 @@ describe('permission mode', () => {
       ]),
     );
     expect(mark().auto).toBe('Auto');
+  });
+});
+
+// The session's model and auto-compaction in "More": a choice PATCHes at once, a typed name or
+// window when it is done; `null` goes back to the runtime's default.
+describe('model and auto-compaction', () => {
+  const field = <E extends HTMLElement = HTMLSelectElement>(name: string) =>
+    root.querySelector<E>(`.menu-settings [name=${name}]`);
+  const set = (name: string, value: string) =>
+    act(async () => {
+      const el = field<HTMLInputElement>(name)!;
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+  const open = () => act(async () => $('.btn-more')!.click());
+
+  it('switches the model: an alias at once, another name once typed, the default as null', async () => {
+    const { app, api } = setup('running');
+    await mount(app);
+    await open();
+    expect(field('model')!.value).toBe('');
+    expect([...field('model')!.options].map((o) => o.textContent)).toEqual([
+      "Claude Code's default",
+      'Opus',
+      'Sonnet',
+      'Haiku',
+      'Another model…',
+    ]);
+    await set('model', 'sonnet');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'sonnet' });
+    expect(app.sessions.get('s1')!.model).toBe('sonnet');
+    expect(field('model')!.value).toBe('sonnet');
+
+    await set('model', 'custom');
+    expect(api.patchSession).toHaveBeenCalledTimes(1);
+    await set('model_name', ' claude-opus-5-5 ');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: 'claude-opus-5-5' });
+
+    await set('model', '');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: null });
+    expect(field('model_name')).toBeNull();
+  });
+
+  it('a name that is no alias shows as typed', async () => {
+    const { app } = setup('idle', { model: 'claude-sonnet-5-5', autocompact: 300_000 });
+    await mount(app);
+    await open();
+    expect(field('model')!.value).toBe('custom');
+    expect(field<HTMLInputElement>('model_name')!.value).toBe('claude-sonnet-5-5');
+    expect(field('autocompact')!.value).toBe('window');
+    expect(field<HTMLInputElement>('autocompact_thousands')!.value).toBe('300');
+  });
+
+  it('sets the auto-compaction: off, a window in thousands, the default; says it restarts the agent', async () => {
+    const { app, api } = setup('running');
+    await mount(app);
+    await open();
+    expect($('.menu-settings .field-hint')!.textContent).toBe('A change restarts the agent after the current turn.');
+    expect(field('autocompact')!.value).toBe('');
+    await set('autocompact', 'off');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: 0 });
+    expect(field('autocompact')!.value).toBe('off');
+
+    await set('autocompact', 'window');
+    expect(api.patchSession).toHaveBeenCalledTimes(1);
+    await set('autocompact_thousands', '250');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: 250_000 });
+
+    await set('autocompact', '');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: null });
+    expect(field('autocompact_thousands')).toBeNull();
+  });
+
+  it('shows what the hub refused', async () => {
+    const { app, api } = setup('idle');
+    api.patchSession.mockRejectedValueOnce(new Error('autocompact must be 0 (off) or a window of 100000..=1000000 tokens'));
+    await mount(app);
+    await open();
+    await set('autocompact', 'window');
+    await set('autocompact_thousands', '50');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { autocompact: 50_000 });
+    expect($('.notice')!.textContent).toContain('Not changed: autocompact must be 0 (off)');
   });
 });
 

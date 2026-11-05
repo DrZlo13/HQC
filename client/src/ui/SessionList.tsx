@@ -5,6 +5,7 @@ import type { PermissionMode, SessionInfo, Workspace } from '../proto';
 import { useSubscription } from './hooks';
 import { colorHex } from '../theme';
 import { ProjectGlyph, projectName } from './Appearance';
+import { AutocompactField, ModelField } from './agentSettings';
 import { ArchiveList } from './Archive';
 import { IconArchive, IconGear, IconGrip, IconMore, IconPlus, IconRename, IconReorder, IconSearch, IconShield, IconStar, IconTrash } from './icons';
 import { AUTO_CONFIRM, agentsLabel, formatWhen, shortPath } from './labels';
@@ -832,6 +833,9 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
   const [cwd, setCwd] = useState('');
   // T38: '' is the worker's own default.
   const [mode, setMode] = useState<PermissionMode | ''>('');
+  // Absent: the runtime's defaults.
+  const [model, setModel] = useState<string | undefined>();
+  const [autocompact, setAutocompact] = useState<number | undefined>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const project = app.projects.get(projectId);
@@ -849,7 +853,7 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
     try {
       const s = await app.createSession(
         title.trim() || undefined,
-        { workspace_id: chosen, cwd: cwd.trim(), permission_mode: mode || undefined },
+        { workspace_id: chosen, cwd: cwd.trim(), permission_mode: mode || undefined, model, autocompact },
         projectId,
       );
       onDone();
@@ -929,6 +933,8 @@ function NewSession({ app, projectId, onDone }: { app: AppState; projectId: stri
           <option value="auto">Auto</option>
         </select>
       </label>
+      <ModelField value={model} onChange={setModel} />
+      <AutocompactField value={autocompact} onChange={setAutocompact} />
       {error && <div class="error-text">{error}</div>}
       <div class="row">
         <button type="submit" class="btn btn-small btn-primary" disabled={busy || !chosen}>

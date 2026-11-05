@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { useSubscription } from './hooks';
@@ -14,7 +14,7 @@ const TILE_STEP = 54;
  *  the project color at the left edge; an amber "needs you" badge, else a dot when a
  *  session has unread events; "+ project", Reorder
  *  (drag the tiles or move a focused one with ↑/↓, then Done or Cancel), settings and who is
- *  signed in. */
+ *  signed in. A tile's context menu adds the project to the favorites, which go first. */
 export function ProjectRail({ app }: { app: AppState }) {
   useSubscription((fn) => app.onChange(fn), [app]);
   const [error, setError] = useState<string | null>(null);
@@ -26,6 +26,26 @@ export function ProjectRail({ app }: { app: AppState }) {
   const [dragId, setDragId] = useState<string | null>(null);
   const focusTile = useRef<string | null>(null);
   const nav = useRef<HTMLElement>(null);
+  // A tile's context menu, where it was opened; fixed, the bar clips what overflows it.
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const menuBox = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const doc = menuBox.current?.ownerDocument;
+    if (!doc) return;
+    menuBox.current?.querySelector<HTMLElement>('.menu-item')?.focus();
+    const away = (e: Event) => {
+      if (!menuBox.current?.contains(e.target as Node)) setMenu(null);
+    };
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setMenu(null);
+    doc.addEventListener('pointerdown', away);
+    doc.addEventListener('keydown', esc);
+    return () => {
+      doc.removeEventListener('pointerdown', away);
+      doc.removeEventListener('keydown', esc);
+    };
+  }, [menu]);
+  const menuProject = menu && app.projects.get(menu.id);
   useLayoutEffect(() => {
     const id = focusTile.current;
     focusTile.current = null;
@@ -100,6 +120,12 @@ export function ProjectRail({ app }: { app: AppState }) {
               aria-current={on ? 'true' : undefined}
               title={name}
               style={on ? undefined : { background: tileBackground(p) }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                // From the keyboard (the menu key) there is no pointer: next to the tile.
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setMenu({ id: p.id, x: e.clientX || r.right, y: e.clientY || r.top });
+              }}
             >
               <ProjectGlyph p={p} />
             </a>
@@ -147,6 +173,23 @@ export function ProjectRail({ app }: { app: AppState }) {
             </button>
           )}
         </>
+      )}
+      {menu && menuProject && (
+        <div class="menu rail-menu" role="menu" ref={menuBox} style={{ left: `${menu.x}px`, top: `${menu.y}px` }}>
+          <button
+            type="button"
+            role="menuitem"
+            class="menu-item btn-favorite"
+            onClick={() => {
+              setMenu(null);
+              app
+                .setProjectFavorite(menuProject.id, !menuProject.favorite_at)
+                .catch((e: Error) => app.setListNotice(`Favorites not saved: ${e.message}`));
+            }}
+          >
+            {menuProject.favorite_at ? 'Remove from favorites' : 'Add to favorites'}
+          </button>
+        </div>
       )}
       <div class="spacer" />
       <a class="rail-btn" href="#/settings" aria-label="Settings" title="Settings">

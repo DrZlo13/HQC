@@ -12,6 +12,7 @@ import {
   parseEnrollInfo,
   parseEvent,
   parseEventPage,
+  parseFavorite,
   parseFrame,
   parseInputResponse,
   parseMe,
@@ -145,6 +146,10 @@ describe('examples/wire', () => {
     expect(s.subagents).toBe(2);
     expect(sys.subagents).toBeUndefined();
     expect(one.type === 'session.summary' && one.session.subagents).toBe(2);
+    // Favorites: the user's, in the session and its summary; absent is not a favorite.
+    expect(s.favorite_at).toBe('2026-10-22T09:30:00Z');
+    expect(sys.favorite_at).toBeUndefined();
+    expect(one.type === 'session.summary' && one.session.favorite_at).toBe('2026-10-22T09:30:00Z');
     const sum =(load('client.session.summary.json') as { session: Record<string, unknown> }).session;
     for (const k of ['project_id', 'title', 'state', 'queue_len', 'unread', 'last_seq', 'last_read_seq']) {
       expect((s as unknown as Record<string, unknown>)[k], k).toEqual(sum[k]);
@@ -180,6 +185,10 @@ describe('examples/wire', () => {
     expect(list[0].default_workspace_id).toBeUndefined();
     // T49: no icon, the letters; an unknown color or icon kind does not break the list.
     expect(list[0]).toMatchObject({ color: 'slate', icon: undefined });
+    // Favorites: the user's; the reply of PUT .../favorite.
+    expect([p.favorite_at, list[0].favorite_at]).toEqual(['2026-10-24T08:00:00Z', undefined]);
+    expect(parseFavorite({ favorite_at: '2026-10-24T08:00:00Z' })).toBe('2026-10-24T08:00:00Z');
+    expect(() => parseFavorite({})).toThrow();
     const odd = parseProject({ ...(load('api.project.json') as object), color: 'mauve', icon: { kind: 'svg', value: 'x' } });
     expect(odd).toMatchObject({ color: 'teal', icon: undefined });
     expect(parseMe(load('api.me.json')).theme).toBe('contrast');

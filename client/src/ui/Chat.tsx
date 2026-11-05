@@ -196,6 +196,26 @@ export function Chat({
     o.observe(feed.current);
     return () => o.disconnect();
   }, []);
+  // "Quote": text selected in the feed, a button under its end that puts it into the
+  // composer. A press on the button may clear the selection (a phone's tap): the text is kept
+  // and the button stays until the click.
+  const [quote, setQuote] = useState<FeedSelection | null>(null);
+  const quoting = useRef(false);
+  const insertQuote = useRef<((text: string) => void) | null>(null);
+  useEffect(() => {
+    const update = () => {
+      if (!quoting.current) setQuote(feedSelection(feed.current));
+    };
+    const away = (e: Event) => {
+      if (!(e.target as Element | null)?.closest?.('.btn-quote')) quoting.current = false;
+    };
+    document.addEventListener('selectionchange', update);
+    document.addEventListener('pointerdown', away, true);
+    return () => {
+      document.removeEventListener('selectionchange', update);
+      document.removeEventListener('pointerdown', away, true);
+    };
+  }, []);
   // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
   // history (`olderFrom`) is loaded down to it. The block that holds it is the last one that
   // starts at or before it (a hidden event's neighbour); the feed renders from there if it
@@ -388,6 +408,7 @@ export function Chat({
           const el = e.currentTarget as HTMLDivElement;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
           if (el.scrollTop < 400 && start > 0) showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
+          if (quote) setQuote(feedSelection(feed.current));
         }}
       >
         <div class="feed" ref={feed}>
@@ -436,8 +457,33 @@ export function Chat({
           <PermissionBlock event={sheet} call={approvalCall(items, t, sheet.payload.request_id)} actions={actions} sheet />
         </div>
       )}
+      {quote && !system && !disabled && !sheet && (
+        <button
+          type="button"
+          class="btn btn-small btn-quote"
+          // Below the end, clear of a phone's selection handle; on screen when the end is not.
+          style={{
+            left: `${Math.min(Math.max(quote.x, 48), innerWidth - 48)}px`,
+            top: `${Math.min(quote.y + (phone ? 28 : 8), innerHeight - 56)}px`,
+          }}
+          onPointerDown={(e) => {
+            quoting.current = true;
+            // A mouse press keeps the selection and the focus where they are.
+            e.preventDefault();
+          }}
+          onClick={() => {
+            quoting.current = false;
+            insertQuote.current?.(quote.text);
+            document.getSelection()?.removeAllRanges();
+            setQuote(null);
+          }}
+        >
+          Quote
+        </button>
+      )}
       {!system && !disabled && !sheet && (
         <Composer
+          insertQuote={insertQuote}
           phone={phone}
           commands={info?.commands}
           files={files}
@@ -452,6 +498,37 @@ export function Chat({
       )}
     </section>
   );
+}
+
+/** Text selected inside the feed, and the point under its end where "Quote" goes. */
+export interface FeedSelection {
+  text: string;
+  x: number;
+  y: number;
+}
+
+/** The selection, if it is text inside `feed`; the edges of the text are trimmed. */
+export function feedSelection(feed: HTMLElement | null): FeedSelection | null {
+  const sel = feed?.ownerDocument.getSelection();
+  if (!feed || !sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!feed.contains(range.commonAncestorContainer)) return null;
+  const text = sel.toString().trim();
+  if (!text) return null;
+  const rects = range.getClientRects();
+  const end = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+  return { text, x: end.right, y: end.bottom };
+}
+
+/** The draft with `quote` after it as `> ` lines (a blank line between them when the draft
+ *  has text) and a blank line after, where the reply goes. */
+export function withQuote(draft: string, quote: string): string {
+  const lines = quote
+    .split(/\r?\n/)
+    .map((l) => (l.trim() ? `> ${l}` : '>'))
+    .join('\n');
+  const head = draft.trimEnd();
+  return `${head ? `${head}\n\n` : ''}${lines}\n\n`;
 }
 
 /** The `tool.call` an approval card shows (feed.ts), for the sheet. */
@@ -658,6 +735,7 @@ export function Composer({
   files = [],
   onFiles = () => {},
   onRemove = () => {},
+  insertQuote,
 }: {
   onSend: (text: string) => void;
   placeholder?: string;
@@ -667,9 +745,24 @@ export function Composer({
   files?: OutgoingFile[];
   onFiles?: (files: FileList | File[]) => void;
   onRemove?: (index: number) => void;
+  /** Set here to a function that puts a quote of the feed into the message (`withQuote`),
+   *  focused, the caret at its end. */
+  insertQuote?: { current: ((text: string) => void) | null };
 }) {
   const [text, setText] = useState('');
   const area = useRef<HTMLTextAreaElement>(null);
+  const caretToEnd = useRef(false);
+  useEffect(() => {
+    if (!insertQuote) return;
+    insertQuote.current = (q) => {
+      caretToEnd.current = true;
+      setText((cur) => withQuote(cur, q));
+      area.current?.focus();
+    };
+    return () => {
+      insertQuote.current = null;
+    };
+  }, [insertQuote]);
   const picker = useRef<HTMLInputElement>(null);
   const canSend = text.trim() !== '' || files.length > 0;
   // The slash command popup (T27): the matches, the highlighted one, and the text Esc closed
@@ -704,6 +797,11 @@ export function Composer({
     if (!el) return;
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    if (caretToEnd.current) {
+      caretToEnd.current = false;
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.scrollTop = el.scrollHeight;
+    }
   }, [text]);
   const attach = (
     <button

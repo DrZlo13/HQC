@@ -155,6 +155,13 @@ export const IconRename = ({ size = 15 }: { size?: number }) => (
   </Svg>
 );
 
+/** Favorites: a five-pointed star. */
+export const IconStar = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M10 2.8l1.8 5.1 5.4.2-4.2 3.3 1.5 5.2-4.5-3.1-4.5 3.1 1.5-5.2-4.2-3.3 5.4-.2z" />
+  </Svg>
+);
+
 /** Reorder: two arrows, up and down. */
 export const IconReorder = ({ size = 16 }: { size?: number }) => (
   <Svg size={size}>

@@ -10,6 +10,7 @@ import {
   parseEnrollInfo,
   parseEvent,
   parseEventPage,
+  parseFavorite,
   parseInputResponse,
   parseMe,
   parseProject,
@@ -428,6 +429,24 @@ export class Api {
 
   async readCursor(id: string, lastReadSeq: number): Promise<void> {
     await this.req('PUT', `/api/sessions/${enc(id)}/read_cursor`, { last_read_seq: lastReadSeq });
+  }
+
+  /** The session is one of the user's favorites, or no longer: the time it became one. */
+  async setSessionFavorite(id: string, on: boolean): Promise<string | undefined> {
+    return this.favorite(`/api/sessions/${enc(id)}/favorite`, on);
+  }
+
+  /** The same for a project. */
+  async setProjectFavorite(id: string, on: boolean): Promise<string | undefined> {
+    return this.favorite(`/api/projects/${enc(id)}/favorite`, on);
+  }
+
+  private async favorite(path: string, on: boolean): Promise<string | undefined> {
+    if (!on) {
+      await this.req('DELETE', path);
+      return undefined;
+    }
+    return parseFavorite(await this.req('PUT', path));
   }
 
   async artifactUrl(id: string): Promise<string> {

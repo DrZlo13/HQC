@@ -784,6 +784,8 @@ export interface SessionSummary {
   permission_capped_by?: string;
   /** Subagents the agent runs now; absent is 0. */
   subagents?: number;
+  /** When the user made it a favorite; absent: not one. */
+  favorite_at?: string;
 }
 
 /** A session waiting on another through an open `hqc_ask`, directly or along a chain. */
@@ -878,6 +880,7 @@ export function parseSummary(v: unknown): SessionSummary {
     effective_permission_mode: optPermissionMode(s, 'effective_permission_mode'),
     permission_capped_by: optStr(s, 'permission_capped_by'),
     subagents: optNum(s, 'subagents'),
+    favorite_at: optStr(s, 'favorite_at'),
   };
 }
 
@@ -991,6 +994,8 @@ export interface SessionInfo {
   permission_capped_by?: string;
   /** Subagents the agent runs now, as its worker last reported; absent is 0. */
   subagents?: number;
+  /** When the user made it a favorite (favorites are per user); absent: not one. */
+  favorite_at?: string;
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -1078,6 +1083,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     effective_permission_mode: optPermissionMode(o, 'effective_permission_mode'),
     permission_capped_by: optStr(o, 'permission_capped_by'),
     subagents: optNum(o, 'subagents'),
+    favorite_at: optStr(o, 'favorite_at'),
   };
 }
 
@@ -1128,6 +1134,8 @@ export interface Project {
   /** Absent: the first letters of the name. */
   icon?: ProjectIcon;
   created_at: string;
+  /** When the user made it a favorite; absent: not one. */
+  favorite_at?: string;
 }
 
 /** A project's icon (T49); `url` of an image changes with the image. */
@@ -1155,7 +1163,13 @@ export function parseProject(v: unknown): Project {
     color: oneOf(o, 'color', PROJECT_COLOR_NAMES) ?? 'teal',
     icon: optProjectIcon(o),
     created_at: str(o, 'created_at'),
+    favorite_at: optStr(o, 'favorite_at'),
   };
+}
+
+/** `{favorite_at}` of `PUT /api/sessions/{id}/favorite` and `PUT /api/projects/{id}/favorite`. */
+export function parseFavorite(v: unknown): string {
+  return str(obj(v, 'favorite'), 'favorite_at');
 }
 
 /** `{projects: [...]}` of `GET /api/projects`. */

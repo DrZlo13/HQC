@@ -159,6 +159,7 @@ export class AppState {
         effective_permission_mode: s.effective_permission_mode,
         permission_capped_by: s.permission_capped_by,
         subagents: s.subagents,
+        favorite_at: s.favorite_at,
       });
     }
     // A session created elsewhere: fetch the list again for its title.
@@ -204,9 +205,20 @@ export class AppState {
     if (left.length !== this.requests.length) this.setRequests(left);
   }
 
-  /** Projects in the hub's order (the personal one first, it is the oldest). */
+  /** The user's favorite projects first, the newest favorite on top; then the others in the
+   *  hub's order (the personal one first, it is the oldest). */
   sortedProjects(): Project[] {
-    return [...this.projects.values()];
+    const all = [...this.projects.values()];
+    const favorites = all.filter((p) => p.favorite_at).sort((a, b) => Date.parse(b.favorite_at!) - Date.parse(a.favorite_at!));
+    return [...favorites, ...all.filter((p) => !p.favorite_at)];
+  }
+
+  /** Marks the project a favorite or not; another device of the user sees it after a reload. */
+  async setProjectFavorite(id: string, on: boolean): Promise<void> {
+    const favorite_at = await this.api.setProjectFavorite(id, on);
+    const p = this.projects.get(id);
+    if (p) this.projects.set(id, { ...p, favorite_at });
+    this.changed();
   }
 
   /** The project bar in the order of `ids` at once, then as the hub keeps it. */
@@ -245,6 +257,23 @@ export class AppState {
     return [...this.sessions.values()]
       .filter((s) => !s.archived && !s.system && s.project_id === projectId && s.id !== this.pendingArchive?.id)
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
+  }
+
+  /** The user's favorite sessions of every project, the newest favorite first, without
+   *  archived ones and the one waiting to be archived. */
+  favoriteSessions(): SessionInfo[] {
+    return [...this.sessions.values()]
+      .filter((s) => s.favorite_at && !s.archived && s.id !== this.pendingArchive?.id)
+      .sort((a, b) => Date.parse(b.favorite_at!) - Date.parse(a.favorite_at!));
+  }
+
+  /** Marks the session a favorite or not; the hub's `session.summary` says the same to the
+   *  user's other clients. */
+  async setSessionFavorite(id: string, on: boolean): Promise<void> {
+    const favorite_at = await this.api.setSessionFavorite(id, on);
+    const s = this.sessions.get(id);
+    if (s) this.sessions.set(id, { ...s, favorite_at });
+    this.changed();
   }
 
   /** Archived sessions of the project, the last archived first: archive mode (T50). */

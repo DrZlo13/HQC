@@ -21,7 +21,7 @@ import {
 } from '../src/proto';
 import { AUTO_CONFIRM } from '../src/ui/labels';
 import type { HubSocket } from '../src/ws';
-import { Chat } from '../src/ui/Chat';
+import { Chat, withQuote } from '../src/ui/Chat';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const ev = (name: string, seq: number, patch: (e: any) => void = () => {}): HqcEvent => {
@@ -598,5 +598,85 @@ describe('history', () => {
     });
     expect(blocks().length).toBe(120);
     expect(blocks()[0].textContent).toContain('answer 331');
+  });
+});
+
+describe('Quote', () => {
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  /** The text node of the feed (or of `scope`) that reads `text`. */
+  const textNode = (text: string, scope = '.feed') => {
+    const w = document.createTreeWalker($(scope)!, NodeFilter.SHOW_TEXT);
+    for (let n = w.nextNode(); n; n = w.nextNode()) if (n.textContent === text) return n;
+    throw new Error(`no text «${text}»`);
+  };
+  const select = (node: Node | null) =>
+    act(async () => {
+      const sel = document.getSelection()!;
+      sel.removeAllRanges();
+      if (node) {
+        const r = document.createRange();
+        r.selectNodeContents(node);
+        sel.addRange(r);
+      }
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+
+  it('puts the text selected in the feed after the draft as «> » lines and focuses the field', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    expect($('.btn-quote')).toBeNull();
+    await act(() => {
+      area().value = 'Look at this';
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await select(textNode('All tests pass.'));
+    expect($('.btn-quote')!.textContent).toBe('Quote');
+    await act(() => $('.btn-quote')!.click());
+    expect(area().value).toBe('Look at this\n\n> All tests pass.\n\n');
+    expect(document.activeElement).toBe(area());
+    expect(area().selectionStart).toBe(area().value.length);
+    expect(document.getSelection()!.rangeCount).toBe(0);
+    expect($('.btn-quote')).toBeNull();
+    // The next quote goes after the first.
+    await select(textNode('All tests pass.'));
+    await act(() => $('.btn-quote')!.click());
+    expect(area().value).toBe('Look at this\n\n> All tests pass.\n\n> All tests pass.\n\n');
+  });
+
+  it('offers nothing for text outside the feed, or without a composer', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    await select(textNode('test 12', '.chat-head'));
+    expect($('.btn-quote')).toBeNull();
+    await select(textNode('All tests pass.'));
+    expect($('.btn-quote')).not.toBeNull();
+    await select(null);
+    expect($('.btn-quote'), 'gone with the selection').toBeNull();
+    render(null, root);
+
+    const locked = setup('locked_vscode');
+    await mount(locked.app);
+    await select(textNode('All tests pass.'));
+    expect($('.btn-quote')).toBeNull();
+  });
+
+  it('on a phone a tap that clears the selection still quotes it', async () => {
+    // Without the open request of HISTORY: on a phone it would take the composer's place.
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app, true);
+    await select(textNode('All tests pass.'));
+    const btn = $('.btn-quote')!;
+    await act(() => void btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true })));
+    await select(null);
+    expect($('.btn-quote')).toBe(btn);
+    await act(() => btn.click());
+    expect(area().value).toBe('> All tests pass.\n\n');
+    expect($('.btn-quote')).toBeNull();
+  });
+
+  it('quotes every line, a blank one as a bare «>», after a blank line', () => {
+    expect(withQuote('', 'one')).toBe('> one\n\n');
+    expect(withQuote('  \n', 'one')).toBe('> one\n\n');
+    expect(withQuote('draft\n\n', 'one\n\n  two\r\nthree')).toBe('draft\n\n> one\n>\n>   two\n> three\n\n');
   });
 });

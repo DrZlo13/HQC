@@ -144,6 +144,9 @@ function hubApi(order: { mode: ListMode; session_ids: string[] } = { mode: 'stat
     deleteSession: vi.fn(async () => {}),
     patchSession: vi.fn(async (id: string, p: { title?: string }) => sess(id, p.title ?? id, 'idle', at(0))),
     createSession: vi.fn(async (_p: string, title: string) => sess('new', title, 'running', at(0))),
+    // PUT answers the time it became a favorite, DELETE nothing.
+    setSessionFavorite: vi.fn(async (_id: string, on: boolean) => (on ? at(0) : undefined)),
+    setProjectFavorite: vi.fn(async (_id: string, on: boolean) => (on ? at(0) : undefined)),
   };
 }
 
@@ -371,7 +374,12 @@ describe('archive from the row (T50)', () => {
     vi.stubGlobal('prompt', () => 'Net sync');
     await mount(<SessionList app={app} />);
     await click(rowOf('Network sync').querySelector('.btn-row-more'));
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Rename', 'Folder rules', 'Delete…']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual([
+      'Add to favorites',
+      'Rename',
+      'Folder rules',
+      'Delete…',
+    ]);
     await click(root.querySelector('.menu .btn-rename'));
     expect(api.patchSession).toHaveBeenCalledWith('net', { title: 'Net sync' });
     vi.unstubAllGlobals();
@@ -590,7 +598,13 @@ describe('SessionList (phone)', () => {
     });
     const sheet = root.querySelector('.action-sheet')!;
     expect(sheet.querySelector('.action-sheet-title')!.textContent).toBe('Network sync');
-    expect([...sheet.querySelectorAll('button')].map((b) => b.textContent)).toEqual(['Archive', 'Rename', 'Delete…', 'Cancel']);
+    expect([...sheet.querySelectorAll('button')].map((b) => b.textContent)).toEqual([
+      'Archive',
+      'Add to favorites',
+      'Rename',
+      'Delete…',
+      'Cancel',
+    ]);
     expect(sheet.querySelector('.btn-sheet-rules')!.getAttribute('href')).toBe('#/p/p1/rules/w1?session=net');
     await click(sheet.querySelector('.btn-sheet-archive'));
     expect(root.querySelector('.action-sheet')).toBeNull();
@@ -618,5 +632,140 @@ describe('SessionList (phone)', () => {
     expect(item.lastElementChild!.classList.contains('grip')).toBe(true);
     expect(root.querySelector('.fab')).toBeNull();
     expect(root.querySelector('.list-hint')!.textContent).toBe('Drag the handle on the right. Done saves the order and switches to Custom.');
+  });
+});
+
+describe('favorites', () => {
+  const favoriteTitles = () => [...root.querySelectorAll('.group-favorites .session-title')].map((t) => t.textContent);
+  const listed = (title: string) =>
+    [...root.querySelectorAll<HTMLElement>('.session-group:not(.group-favorites) .session-item')].find(
+      (r) => r.querySelector('.session-title')!.textContent === title,
+    )!;
+  const menuItems = () => [...root.querySelectorAll('.menu .menu-item')].map((b) => b.textContent);
+
+  it('lists the favorites of every project above the groups, the newest first; a click opens one', async () => {
+    const app = makeApp([
+      ...LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)),
+      sess('plan', 'Migration plan', 'idle', at(50), { project_id: 'p0', favorite_at: at(1) }),
+      sess('old', 'Old SPI experiment', 'archived', at(70), { favorite_at: at(0.5) }),
+    ]);
+    await mount(<SessionList app={app} current="plan" />);
+    // Archived favorites stay in the archive.
+    expect(groups()[0]).toEqual(['Favorites', '2', ['Migration plan', 'Cave scene port']]);
+    const rows = [...root.querySelectorAll<HTMLElement>('.group-favorites .session-item')];
+    expect(rows[0].querySelector('.session-where')!.textContent).toBe('Personal · home-mac');
+    expect(rows[0].querySelector('.session-row')!.getAttribute('href')).toBe('#/s/plan');
+    expect(rows[0].querySelector('.session-row')!.classList.contains('is-current')).toBe(true);
+    expect(rows[1].querySelector('.session-where')!.textContent).toBe('physics-mp · home-mac · games/phys-mp');
+    // The project's own groups still hold it.
+    expect(listed('Cave scene port')).toBeTruthy();
+    // The search narrows them too; Reorder hides them.
+    await type('cave');
+    expect(favoriteTitles()).toEqual(['Cave scene port']);
+    await type('');
+    await click(root.querySelector('.btn-reorder'));
+    expect(root.querySelector('.group-favorites')).toBeNull();
+  });
+
+  it('"⋯" adds a session to the favorites and takes it out; the summary of another device too', async () => {
+    const api = hubApi();
+    const app = makeApp(LIST, api);
+    await mount(<SessionList app={app} />);
+    expect(root.querySelector('.group-favorites')).toBeNull();
+    await click(listed('Cave scene port').querySelector('.btn-row-more'));
+    expect(menuItems()[0]).toBe('Add to favorites');
+    await click(root.querySelector('.menu .btn-favorite'));
+    expect(api.setSessionFavorite).toHaveBeenCalledWith('cave', true);
+    expect(favoriteTitles()).toEqual(['Cave scene port']);
+
+    await click(listed('Cave scene port').querySelector('.btn-row-more'));
+    expect(menuItems()[0]).toBe('Remove from favorites');
+    await click(root.querySelector('.menu .btn-favorite'));
+    expect(api.setSessionFavorite).toHaveBeenLastCalledWith('cave', false);
+    expect(root.querySelector('.group-favorites')).toBeNull();
+
+    // Made a favorite on another device: the hub's summary brings it.
+    const net = app.sessions.get('net')!;
+    await act(() =>
+      app.mergeSummary([
+        {
+          session_id: 'net',
+          project_id: 'p1',
+          title: net.title,
+          state: net.state,
+          queue_len: 0,
+          unread: 0,
+          last_seq: 1,
+          last_read_seq: 1,
+          favorite_at: at(0),
+        },
+      ]),
+    );
+    expect(favoriteTitles()).toEqual(['Network sync']);
+  });
+
+  it('a refusal goes to the notice and changes nothing', async () => {
+    const api = hubApi();
+    api.setSessionFavorite.mockRejectedValueOnce(new Error('hub unavailable'));
+    const app = makeApp(LIST, api);
+    await mount(<SessionList app={app} />);
+    await click(listed('Cave scene port').querySelector('.btn-row-more'));
+    await click(root.querySelector('.menu .btn-favorite'));
+    expect(root.querySelector('.notice')!.textContent).toBe('Favorites not saved: hub unavailable');
+    expect(root.querySelector('.group-favorites')).toBeNull();
+  });
+
+  it('the phone sheet has it too', async () => {
+    const api = hubApi();
+    await mount(<SessionList app={makeApp(LIST, api)} phone />);
+    await act(async () => {
+      listed('Network sync').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    await click(root.querySelector('.btn-sheet-favorite'));
+    expect(api.setSessionFavorite).toHaveBeenCalledWith('net', true);
+    expect(root.querySelector('.action-sheet')).toBeNull();
+    expect(favoriteTitles()).toEqual(['Network sync']);
+    await act(async () => {
+      listed('Network sync').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    expect(root.querySelector('.btn-sheet-favorite')!.textContent).toBe('Remove from favorites');
+  });
+
+  it('the rail: favorite projects first, the newest on top; the context menu of a tile marks one', async () => {
+    const api = hubApi();
+    const app = makeApp(LIST, api);
+    app.projects.set('p2', { id: 'p2', name: 'boards', slug: 'boards', description: '', is_personal: false, color: 'moss', created_at: at(80), favorite_at: at(5) });
+    app.projects.set('p3', { id: 'p3', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'coral', created_at: at(70) });
+    await mount(<ProjectRail app={app} />);
+    const order = () => [...root.querySelectorAll('.rail-project')].map((r) => r.getAttribute('aria-label'));
+    expect(order()).toEqual(['boards', 'Personal', 'physics-mp', 'kiln']);
+
+    const tile = (name: string) => root.querySelector<HTMLElement>(`.rail-project[aria-label="${name}"]`)!;
+    await act(async () => {
+      tile('kiln').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 200 }));
+    });
+    const menu = root.querySelector<HTMLElement>('.rail-menu')!;
+    expect([menu.style.left, menu.style.top]).toEqual(['30px', '200px']);
+    expect(menuItems()).toEqual(['Add to favorites']);
+    await click(root.querySelector('.rail-menu .btn-favorite'));
+    expect(api.setProjectFavorite).toHaveBeenCalledWith('p3', true);
+    expect(root.querySelector('.rail-menu')).toBeNull();
+    expect(order()).toEqual(['kiln', 'boards', 'Personal', 'physics-mp']);
+
+    await act(async () => {
+      tile('boards').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    expect(menuItems()).toEqual(['Remove from favorites']);
+    // Esc closes it without a change.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(root.querySelector('.rail-menu')).toBeNull();
+    await act(async () => {
+      tile('boards').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    await click(root.querySelector('.rail-menu .btn-favorite'));
+    expect(api.setProjectFavorite).toHaveBeenLastCalledWith('p2', false);
+    expect(order()).toEqual(['kiln', 'Personal', 'physics-mp', 'boards']);
   });
 });

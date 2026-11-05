@@ -1011,7 +1011,8 @@ pub struct PatchSession {
     pub auto_approve: Option<bool>,
     /// T38: `auto` only by the worker owner; a running agent switches at once.
     pub permission_mode: Option<PermissionMode>,
-    /// Absent: unchanged; `null`: the runtime's default. A running agent switches at once.
+    /// Absent: unchanged; `null`: the runtime's default. A running agent switches to a named
+    /// model at once; `null` takes effect at its next start.
     #[serde(
         default,
         deserialize_with = "hqc_proto::frame::maybe_null::deserialize"

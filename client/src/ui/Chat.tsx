@@ -10,7 +10,7 @@ import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { IconArchive, IconAttach, IconBack, IconCode, IconMore, IconSend, IconShield, IconStop } from './icons';
-import { AUTO_CONFIRM, STATE_LABELS, formatCost, homePath, modelName } from './labels';
+import { AUTO_CONFIRM, STATE_LABELS, agentsLabel, formatCost, homePath, modelName } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
 import { WaitedRequests } from './requests';
@@ -199,6 +199,7 @@ export function Chat({
   };
   const { model, cost } = t.usageTotals();
   const pill = <StatePill state={state} timeline={t} />;
+  const agents = agentsLabel(info?.subagents);
   const conn = app.conn !== 'open' && <span class="conn-lost">offline</span>;
 
   // T50: archived — read-only, no input; restore and delete are on the archive's rows.
@@ -233,6 +234,11 @@ export function Chat({
           <h1 class="chat-title">{info?.title || 'Session'}</h1>
           <div class="chat-meta">
             {pill}
+            {agents && (
+              <span class="chat-agents" title="Subagents the agent runs now">
+                {agents}
+              </span>
+            )}
             {!system && info && <PermissionMark info={info} />}
             {system && <span class="chat-system-note">the worker's service session</span>}
             {info?.spawned_by && (

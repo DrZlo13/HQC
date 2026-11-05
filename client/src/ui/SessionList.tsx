@@ -7,7 +7,7 @@ import { colorHex } from '../theme';
 import { ProjectGlyph, projectName } from './Appearance';
 import { ArchiveList } from './Archive';
 import { IconArchive, IconGear, IconGrip, IconMore, IconPlus, IconRename, IconReorder, IconSearch, IconShield, IconTrash } from './icons';
-import { AUTO_CONFIRM, formatWhen, shortPath } from './labels';
+import { AUTO_CONFIRM, agentsLabel, formatWhen, shortPath } from './labels';
 import { workspaceTitle } from './ProjectSettings';
 import { RequestsLink } from './requests';
 import { SearchHits } from './Search';
@@ -436,6 +436,7 @@ function SessionRow({
   const fired = useRef(false);
   const bucket = bucketOf(s);
   const title = s.title || s.slug || s.id.slice(-8);
+  const agents = agentsLabel(s.subagents);
   const handle = grip && (
     <button type="button" class="grip" data-grip={s.id} aria-label={`Drag to reorder «${title}», or use arrow keys`} {...grip}>
       <IconGrip />
@@ -454,7 +455,10 @@ function SessionRow({
             </span>
           )}
         </span>
-        <span class={`session-sub state-${s.state}`}>{subLabel(s)}</span>
+        <span class={`session-sub state-${s.state}`}>
+          {subLabel(s)}
+          {agents && <span class="session-agents"> · {agents}</span>}
+        </span>
         {where && (
           <span class="session-where mono" title={where}>
             {where}

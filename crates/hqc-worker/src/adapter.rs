@@ -143,6 +143,12 @@ pub trait Adapter: Send {
         let _ = mode;
         anyhow::bail!("this runtime cannot switch its permission mode while it runs")
     }
+    /// Switch the running process to `model`, mid-turn too; with no process, nothing to do:
+    /// the next start takes the model from its [`StartSpec`].
+    async fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
+        let _ = model;
+        anyhow::bail!("this runtime cannot switch its model while it runs")
+    }
     /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
     async fn answer_approval(
         &mut self,

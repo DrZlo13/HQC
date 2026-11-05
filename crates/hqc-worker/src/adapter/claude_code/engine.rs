@@ -52,6 +52,7 @@
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
+//! - the CLI's answer to our `set_model` is only logged;
 //! - other `control_response` lines are the CLI's echo of ours and are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
@@ -106,6 +107,8 @@ pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// `request_id` prefix of our `set_permission_mode` control requests.
 const MODE_REQUEST: &str = "hqc-mode-";
+/// `request_id` prefix of our `set_model` control requests.
+const MODEL_REQUEST: &str = "hqc-model-";
 
 // Mostly `Emit`, like `AdapterEvent` itself; boxing would only add an allocation.
 #[allow(clippy::large_enum_variant)]
@@ -397,6 +400,17 @@ impl Core {
         }))
     }
 
+    /// Switch the running process to `model`: `control_request {subtype: set_model}`. The CLI
+    /// answers `success` with the model it resolved the name to, and its next model call uses
+    /// it, the next one of a running turn too (checked on 2.1.312).
+    pub fn set_model(&self, model: &str) -> Action {
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("{MODEL_REQUEST}{}", Uuid::now_v7()),
+            "request": {"subtype": "set_model", "model": model},
+        }))
+    }
+
     /// `message`: the user's text with `deny` (T26); it goes to Claude Code as the reason of
     /// the denial, which the model gets as the tool result.
     pub fn answer_approval(
@@ -655,14 +669,20 @@ impl Core {
         vec![Action::Emit(AdapterEvent::PermissionMode(mode))]
     }
 
-    /// The CLI's answer to our `set_permission_mode`; every other `control_response` is
-    /// the echo of one of ours.
+    /// The CLI's answer to our `set_permission_mode` or `set_model` (logged); every other
+    /// `control_response` is the echo of one of ours.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
-        if !r["request_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with(MODE_REQUEST))
-        {
+        let id = r["request_id"].as_str().unwrap_or("");
+        if id.starts_with(MODEL_REQUEST) {
+            if r["subtype"] == "success" {
+                tracing::info!(session_id = %self.session_id, model = ?r["response"]["model"].as_str(), "model switched");
+            } else {
+                tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the model switch");
+            }
+            return vec![];
+        }
+        if !id.starts_with(MODE_REQUEST) {
             return vec![];
         }
         if r["subtype"] == "success" {

@@ -40,6 +40,8 @@ pub enum FakeCall {
     },
     /// A switch of the running process (T38).
     PermissionMode(Uuid, PermissionMode),
+    /// A model switch of the running process.
+    Model(Uuid, String),
 }
 
 #[derive(Default)]
@@ -53,6 +55,8 @@ struct State {
     pid: Option<Option<u32>>,
     /// The permission mode of every `start`/`resume`, in order (T38).
     start_modes: Vec<(Uuid, PermissionMode)>,
+    /// The spec of every `start`/`resume`, in order.
+    start_specs: Vec<StartSpec>,
     /// `set_permission_mode` fails, as for a runtime that cannot switch (T39).
     refuse_modes: bool,
     /// What [`Adapter::can_inject`] answers; false by default, as for a runtime that takes
@@ -104,6 +108,11 @@ impl FakeAdapters {
     /// The permission mode each `start`/`resume` got from its spec, in order (T38).
     pub fn start_modes(&self) -> Vec<(Uuid, PermissionMode)> {
         self.lock().start_modes.clone()
+    }
+
+    /// The spec each `start`/`resume` got, in order.
+    pub fn start_specs(&self) -> Vec<StartSpec> {
+        self.lock().start_specs.clone()
     }
 
     /// Number of adapters created, i.e. sessions the supervisor tried to run.
@@ -205,6 +214,12 @@ impl FakeAdapter {
         self.shared.lock().calls.push(c);
     }
 
+    fn started(&self, spec: &StartSpec) {
+        let mut st = self.shared.lock();
+        st.start_modes.push((self.session_id, spec.permission_mode));
+        st.start_specs.push(spec.clone());
+    }
+
     fn spawn(&self, c: FakeCall) -> anyhow::Result<()> {
         let fail = self.shared.lock().fail_start;
         self.record(c);
@@ -218,19 +233,18 @@ impl FakeAdapter {
 #[async_trait]
 impl Adapter for FakeAdapter {
     async fn start(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
-        self.shared
-            .lock()
-            .start_modes
-            .push((self.session_id, spec.permission_mode));
+        self.started(spec);
         self.spawn(FakeCall::Start(self.session_id))
     }
 
     async fn resume(&mut self, spec: &StartSpec) -> anyhow::Result<()> {
-        self.shared
-            .lock()
-            .start_modes
-            .push((self.session_id, spec.permission_mode));
+        self.started(spec);
         self.spawn(FakeCall::Resume(self.session_id))
+    }
+
+    async fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
+        self.record(FakeCall::Model(self.session_id, model.into()));
+        Ok(())
     }
 
     async fn set_permission_mode(&mut self, mode: PermissionMode) -> anyhow::Result<()> {

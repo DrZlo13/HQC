@@ -95,6 +95,7 @@ The hub is configured by environment variables only; it takes a single command-l
 | `HQC_ARTIFACT_PUBLIC_BASE` | no | origin of a separate artifact domain, `https://artifacts.<hub domain>` without a path (`http://` only for loopback). Signed links point there, and HTML is rendered in an iframe only from there; the hub adds this origin to `img-src`/`frame-src`/`connect-src` of its CSP, and on this host serves only `/artifacts/*` (everything else is `404`). The domain is the same tunnel to the same hub, **outside** Access (§1.6). If unset, links are relative, on the hub's domain (behind Access), and HTML can only be downloaded |
 | `HQC_ARTIFACT_KEY` | no | HMAC key for signed links, at least 32 characters (`openssl rand -hex 32`). If unset, a random one per run: links from the previous run stop working, and the client just requests new ones. Needed only if links must survive a restart |
 | `HQC_PUBLIC_ORIGINS` | no | comma-separated origins browsers open the hub at: `https://hqc.example.com`. When set, `Origin` on `/api/*` (WebSocket and writes) is checked against this list instead of the request's `Host`. Needed if a proxy in front of the hub rewrites `Host` to the container name (Caddy with `header_up Host`, cloudflared with `httpHostHeader`) and does not set `X-Forwarded-Host`; the symptom is `WebSocket connection to wss://…/api/ws failed` in the browser and `Origin does not match the hub's host` in the hub log |
+| `HQC_CLIENT_IP_HEADER` | no | the header a reverse proxy in front of the hub puts the client's address in, from the TCP peer, e.g. `X-Real-Ip` for Traefik (§1.9). When set, the per-address limits on `/worker/*` (SPEC §20) take the address from this header (the TCP peer when it is absent), and the hub reads neither `CF-Connecting-IP` nor `CF-IPCountry` (the country on the enrollment screen). If unset: `CF-Connecting-IP` (Cloudflare Tunnel, §1.6), otherwise the TCP peer |
 | `HQC_TURN_WATCHDOG_S` | no, `900` | turn watchdog (SPEC §17.3), whole seconds: if a session is `running` and the worker has sent no event for it (including `agent.delta`) for longer than this, the hub closes the turn with `system turn_lost` "no events for N s", and the session stays in `error` until the next input. Waiting for an answer to approval/clarify and the worker being offline do not count. `0` turns it off |
 | `RUST_LOG` | no, `info` | log level (`tracing`), e.g. `hqc_hub=debug` |
 
@@ -487,9 +488,16 @@ The Keycloak client, in the realm the hub trusts:
 - `offline_access` among the client's optional scopes (it is there by default): with it the
   refresh token outlives the SSO session, and the phone stays signed in for the cookie's
   lifetime.
+- The hub lets in only users whose email is verified (`email_verified` in the ID token, SPEC §6):
+  tick Email verified on each user, or turn on Verify email in the realm. With
+  `email_verified: false` oauth2-proxy itself refuses the sign-in at `/oauth2/callback` (`500`,
+  `email in id_token … isn't verified` in its log); a token without the claim gets `403` from
+  the hub.
 
-The compose file of §1.8, with `HQC_OIDC_*` in place of `HQC_ACCESS_*` and oauth2-proxy added;
-`proxy` is the network Traefik sees the containers on:
+The compose file of §1.8 with these changes: drop the `HQC_ACCESS_*` lines from `hub.env` (next
+to `HQC_OIDC_*` the hub refuses to start), give the hub the environment and labels below, add
+oauth2-proxy, and replace the `edge` network with `proxy`, the network Traefik sees the
+containers on, in the services and at the top level:
 
 ```yaml
   hqc-hub:
@@ -498,6 +506,8 @@ The compose file of §1.8, with `HQC_OIDC_*` in place of `HQC_ACCESS_*` and oaut
       HQC_OIDC_ISSUER: https://auth.example.com/realms/<realm>
       HQC_OIDC_AUD: hqc
       HQC_OIDC_JWKS_URL: https://auth.example.com/realms/<realm>/protocol/openid-connect/certs
+      HQC_CLIENT_IP_HEADER: X-Real-Ip
+      HQC_ARTIFACT_PUBLIC_BASE: https://artifacts.hqc.example.com
     networks: [default, proxy]
     labels:
       traefik.enable: "true"
@@ -513,10 +523,16 @@ The compose file of §1.8, with `HQC_OIDC_*` in place of `HQC_ACCESS_*` and oaut
       traefik.http.routers.hqc-worker.entrypoints: websecure
       traefik.http.routers.hqc-worker.tls.certresolver: letsencrypt
       traefik.http.routers.hqc-worker.service: hqc-hub
+      # Artifact domain: public, signed links only (SPEC §12), no sign-in.
+      traefik.http.routers.hqc-artifacts.rule: Host(`artifacts.hqc.example.com`)
+      traefik.http.routers.hqc-artifacts.entrypoints: websecure
+      traefik.http.routers.hqc-artifacts.tls.certresolver: letsencrypt
+      traefik.http.routers.hqc-artifacts.service: hqc-hub
       traefik.http.services.hqc-hub.loadbalancer.server.port: "8080"
       traefik.http.middlewares.hqc-auth.forwardauth.address: http://hqc-oauth2-proxy:4180/
       traefik.http.middlewares.hqc-auth.forwardauth.trustForwardHeader: "true"
       traefik.http.middlewares.hqc-auth.forwardauth.authResponseHeaders: Authorization
+      traefik.http.middlewares.hqc-auth.forwardauth.addAuthCookiesToResponse: _oauth2_proxy,_oauth2_proxy_0,_oauth2_proxy_1,_oauth2_proxy_2
 
   hqc-oauth2-proxy:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
@@ -550,6 +566,27 @@ The compose file of §1.8, with `HQC_OIDC_*` in place of `HQC_ACCESS_*` and oaut
       traefik.http.services.hqc-oauth2.loadbalancer.server.port: "4180"
 ```
 
+```yaml
+networks:
+  # Traefik's network, from its own compose project; instead of edge.
+  proxy:
+    external: true
+```
+
+- `HQC_CLIENT_IP_HEADER: X-Real-Ip`: Traefik sets `X-Real-Ip` to the address of the TCP peer and
+  drops one the client sent (unless the entrypoint's `forwardedHeaders` trusts that peer), so the
+  hub's per-address limits on `/worker/*` count real clients; without it every client is
+  Traefik's address, and 20 bad worker tokens a minute from anyone would turn away every worker's
+  reconnect with `429`, while a `CF-Connecting-IP` the client makes up would pass through.
+- `addAuthCookiesToResponse` (Traefik 3.0 or later): oauth2-proxy renews the session every
+  `OAUTH2_PROXY_COOKIE_REFRESH` and sends the new cookie in its forwardAuth answer, which Traefik
+  passes to the browser only for the cookies named here: `_oauth2_proxy` and the parts
+  `_oauth2_proxy_0` to `_2` of a session over 4 KB (up to about 12 KB; a bigger one needs more
+  names); without it every request after the first renewal renews again.
+- Artifact domain: a DNS name for `artifacts.hqc.example.com` pointing at Traefik, and the router
+  above without the sign-in; the hub serves only `/artifacts/*` there (§1.2
+  `HQC_ARTIFACT_PUBLIC_BASE`). Without the router and the variable, signed links go to the hub's
+  domain behind the sign-in and HTML attachments can only be downloaded.
 - `OAUTH2_PROXY_COOKIE_REFRESH` shorter than the ID token lifetime, see `HQC_OIDC_ISSUER` in §1.2.
 - Without `OAUTH2_PROXY_WHITELIST_DOMAINS` oauth2-proxy refuses to return to the requested page
   after sign-in (`Rejecting invalid redirect … domain not in whitelist` in its log).

@@ -66,8 +66,9 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   worker as its owner, within `allowed_roots` and whatever the agent's tools allow
   (Bash can leave the workspace) — the hub starts a session, sends input and answers `once`
   to the permission request itself; plus reading all conversations, the transcripts
-  in events and the push subscriptions. The protection is the hub itself: Access, tunnel only,
-  no open ports (§20). Signing input and answers with device keys registered on the worker
+  in events and the push subscriptions. The protection is the hub itself: Access, tunnel only
+  (in OIDC mode since 0.68: the provider's sign-in, only the reverse proxy reaches the hub), no
+  open ports (§20). Signing input and answers with device keys registered on the worker
   locally is iteration 3+.
 - The hub **cannot**: go outside the worker's `allowed_roots` (also not through an agent's
   `hqc_attach` or the `files` of `hqc_send`/`hqc_ask`: the worker resolves and reads the path
@@ -501,7 +502,9 @@ Enrollment over HTTP (route `/worker/*`, without Access, rate-limited; the bodie
   expires_at, poll_interval_s}`; `protocol_version` is informational (`hello` decides), `machine_id` is
   the machine fingerprint (below, since 0.23), the hub ignores unknown body fields; `code` is 8 characters `XXXX-XXXX` without look-alike letters and lives 10 minutes;
   `poll_token` is the worker's secret, sent only in the body (not in the URL), only its hash in the database.
-  With the code the hub stores `CF-IPCountry` and the request address (limits, §20).
+  With the code the hub stores `CF-IPCountry` and the request address (limits, §20); with
+  `HQC_CLIENT_IP_HEADER` (since 0.68, §20) it does not read `CF-IPCountry`, which a client
+  behind another reverse proxy could set, and there is no country.
 - The user enters the code in the web UI. First `GET /api/workers/enroll/{code}` →
   `{name, os, created_at, country?, replaceable?}` (404 — no such live code): the client
   shows the name, OS, time and country, and the confirm button becomes active only after they
@@ -1018,16 +1021,21 @@ Authentication: the hub verifies the signature of the `Cf-Access-Jwt-Assertion` 
 Cloudflare's JWKS (issuer and audience from the config) and takes the email from the token. An
 email header without a JWT is not accepted. The worker route `/worker/*` is excluded from Access
 and accepts only worker tokens; the human route `/api/*` accepts only Access JWTs (in OIDC mode,
-below, the provider's ID tokens). The hub listens only on the tunnel interface.
+below, the provider's ID tokens). The hub listens only on the tunnel interface (in OIDC mode,
+only the reverse proxy reaches it).
 
 OIDC mode (since 0.68), for a hub behind a reverse proxy that signs people in with an OIDC
 provider instead of Cloudflare Access (Traefik forwardAuth with oauth2-proxy and Keycloak, for
 example): `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD` and `HQC_OIDC_JWKS_URL`, all three. `/api/*`, the
 `/api/ws` WebSocket included, then takes the provider's ID token from `Authorization: Bearer`
 and checks it the same way: an RS256 signature by a key of that JWKS, exactly that `iss`, the
-`aud`, `exp`, and the email from the `email` claim; `Cf-Access-Jwt-Assertion` is not read. The
-proxy puts the token there (oauth2-proxy `--set-authorization-header`) and lets `/worker/*`
-through without its sign-in. It must also renew the token before it expires: the hub refuses an
+`aud`, `exp`, and the email from the `email` claim; `Cf-Access-Jwt-Assertion` is not read. On
+top of that the email counts only with `email_verified: true` (Keycloak puts it in the ID token
+with the `email` scope), otherwise `403`: the provider may let every account set its own email,
+and an account that set the owner's would become the owner's hub user, with their workers. A
+token with a `typ` other than `ID` gets `401` (Keycloak's access tokens are `Bearer`; other
+providers may leave `typ` out, which passes). The proxy puts the token there (oauth2-proxy
+`--set-authorization-header`) and lets `/worker/*` through without its sign-in. It must also renew the token before it expires: the hub refuses an
 expired one with `401`, and oauth2-proxy keeps handing over the token it got at sign-in unless
 `--cookie-refresh` is shorter than the token's lifetime (in Keycloak the Access Token Lifespan,
 5 minutes by default). Only some of the three variables, or them together with
@@ -1249,7 +1257,8 @@ the rest is marked "later"):
   the revoked ones (the "Settings" screen). The worker object is `{id, name, os, status: online
   | offline | revoked, revoked_at?, last_seen?, system_session_id, ...}` (§3 Worker).
   `GET /api/workers/enroll/{code}` → `{name, os, created_at, country?, replaceable?}`
-  (`EnrollInfo`; `country` is `CF-IPCountry` of the `enroll` request; `replaceable`: §5.1, workers
+  (`EnrollInfo`; `country` is `CF-IPCountry` of the `enroll` request, absent with
+  `HQC_CLIENT_IP_HEADER`, §5.1; `replaceable`: §5.1, workers
   of the same machine first and with `same_machine: true`), `POST
   /api/workers/enroll/confirm` {code, name?, replace_worker_id?} → `{worker_id, name,
   replaced?}` (the client also opens the screen from the link `#/enroll?code=XXXX-XXXX`;
@@ -3393,9 +3402,10 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
 
 ## 20. Hosting and security
 
-- The hub listens only on the tunnel interface; `/api/*` is behind Cloudflare Access with JWT
-  verification (in OIDC mode, behind the proxy's sign-in, the hub verifying the provider's ID
-  token, §6); `/worker/*` is outside Access, worker tokens only, rate limit on enroll;
+- The hub listens only on the tunnel interface (in OIDC mode, only the reverse proxy reaches
+  it); `/api/*` is behind Cloudflare Access with JWT verification (in OIDC mode, behind the
+  proxy's sign-in, the hub verifying the provider's ID token, §6); `/worker/*` is outside
+  Access, worker tokens only, rate limit on enroll;
   `artifacts.<hub-domain>` is public, signed links with a TTL only.
 - The hub's dev mode (`HQC_DEV=1`, no Access) is allowed only on a loopback
   `HQC_HUB_LISTEN` address and without `HQC_ACCESS_*` or `HQC_OIDC_*`; otherwise the hub does
@@ -3413,7 +3423,10 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. The client build has
   no inline scripts (a client test checks this). HSTS is set by Cloudflare.
 - Limits (in the hub process's memory; the address is `CF-Connecting-IP`, otherwise the
-  connection's address): `POST /worker/enroll` — 10 per minute and 10 live unconfirmed codes per
+  connection's address; with `HQC_CLIENT_IP_HEADER` (since 0.68), for a reverse proxy that puts
+  the TCP peer's address in a header of its own, such as Traefik's `X-Real-Ip`, it is that header,
+  otherwise the connection's address, and neither `CF-Connecting-IP` nor `CF-IPCountry` (§5.1)
+  is read, since there the client could set them): `POST /worker/enroll` — 10 per minute and 10 live unconfirmed codes per
   address, 1000 in total; `POST /worker/enroll/poll` — 60 per minute per address; `/worker/ws` —
   20 invalid tokens per minute per address (beyond that `429` without a database query), a token
   of the wrong shape does not reach the database, at most 16 token checks at once (`503`); client
@@ -3552,8 +3565,10 @@ without a hub each of these would have to be done peer-to-peer.
 ### 0.67 → 0.68 (OIDC sign-in behind a reverse proxy)
 §6, §20: a third way to authenticate people besides Cloudflare Access and dev mode:
 `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, the provider's ID token from
-`Authorization: Bearer`, put there by a proxy such as oauth2-proxy with Keycloak. Access and dev
-mode are unchanged. RUNBOOK §1.2.
+`Authorization: Bearer`, put there by a proxy such as oauth2-proxy with Keycloak, with
+`email_verified: true` and, when it has a `typ`, `typ: ID`. Access and dev mode are unchanged.
+§20: `HQC_CLIENT_IP_HEADER` names the header per-address limits take the address from instead
+of `CF-Connecting-IP`; with it `CF-IPCountry` is not read either (§5.1). RUNBOOK §1.2, §1.9.
 
 ### 0.66 → 0.67 (unread projects)
 §6 client layout: a project tile with no session waiting shows a dot when one of its sessions

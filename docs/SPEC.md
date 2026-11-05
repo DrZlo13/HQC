@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.75, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.76, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -322,12 +322,12 @@ title from `ai-title` (`title_source: runtime`) or "Session N", `locked_by` per 
 looked up by the pair (`worker_id`, `runtime_session_id`).
 
 Move (since 0.75): a Claude Code session continues in another folder of its worker, usually in
-another project, as the same conversation (`POST /api/sessions/{id}/move`, §6). Its `project_id`,
-`workspace_id`, `cwd` (`.`) and possibly `slug` change, so its address
-`<project-slug>/<session-slug>` (§7) changes too; the old project's saved list order forgets
-it (a move to another folder of the same project keeps its place there). Its
-`runtime_session_id` stays: the worker moves the transcript to the new folder (§8.1).
-Not to another worker.
+another project, as the same conversation (`POST /api/sessions/{id}/move`, §6; the agent itself
+with `hqc_move`, §7, since 0.76). Its `project_id`, `workspace_id`, `cwd` (`.`) and possibly
+`slug` change, so its address `<project-slug>/<session-slug>` (§7) changes too; the old
+project's saved list order forgets it (a move to another folder of the same project keeps its
+place there). Its `runtime_session_id` stays: the worker moves the transcript to the new folder
+(§8.1). Not to another worker.
 
 ### Agent (embedded in Session)
 `runtime` (claude_code / acp / bare / none; `none` — only for the worker's service session:
@@ -418,7 +418,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -451,7 +451,7 @@ the client renders only them. The "source" column is the component that produces
 | `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
 | `peer_evicted` | hub | in the target session: the send buffer was over its limit and its oldest messages were dropped unread (§7.1), since 0.35 |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
-| `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6); `text` names the old project, the new one and the folder |
+| `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6, or `hqc_move`, §7); `text` names the old project, the new one and the folder |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
@@ -1330,7 +1330,7 @@ the rest is marked "later"):
   project and workspace, `cwd: .` and its slug (§3 Session), the old project's saved order drops
   it (the same project's keeps it), the feed gets `system session_moved` (§4), the workspace's
   `mirror.set` goes out, and a running agent gets `session.start` with the new folder, which the
-  worker applies between turns (§5.3). No input is queued: a stopped agent starts there with its
+  worker applies between turns (§5.3). No input is queued (`hqc_move` queues one, §7): a stopped agent starts there with its
   next input. A session already in that workspace is answered as it is, nothing written and no
   second `session_moved`; the workspace's `mirror.set` and the `session.start` of a running agent
   go out again, as the first call may have ended between the move and them (the client went
@@ -1774,13 +1774,39 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   timezone}` (`session` — the target's address). Once per `request_id` (§5.2): the schedule's id
   is `once_id("hqc_schedule", …)`, and a repeat answers from that row. The agent can neither
   list nor delete schedules; the owner does that in the client (§6).
+- `hqc_move(path, project?)` (since 0.76) — the calling session moves to folder `path` of its
+  worker, by the core of `POST /api/sessions/{id}/move` (§6) with `create: true`: a missing
+  folder is made, inside `allowed_roots` only. `project` and the folder rules are the
+  endpoint's; the result is `{address, project, path}` — the session's new address, its
+  project's slug and the canonical path. The call waits for the worker's `fs.stat` on the
+  connection it came by, as a spawn with a worktree does. The caller must be run by hqc
+  (`locked_by: hqc`). Errors: `invalid_args` with the worker's reason for a folder outside the
+  roots or one it cannot make, and for a path that is another project's workspace while
+  `project` names another; `invalid_args` with the text `workspace_conflict` for a folder inside
+  or around another workspace; `not_found` for an unknown project; `unavailable` for a session
+  that may not move (the endpoint's `409`s: not Claude Code, no workspace, VS Code or a live
+  holder, a subagent still running, a worker without `claude_code.moves`, archived) or is not
+  run by hqc; `limit_exceeded`
+  when the call's chain is at its limit, before anything moves. Then the hub queues the
+  owner's `user.message` "You moved to <path>, project <name>; continue the task." in the
+  session, as a run of an agent's `hqc_schedule` does (§16): no `peer`, so it waits for no
+  answer as an ask would; the call's chain moved on (§7.1), so a turn it starts runs in the
+  session's own mode, or `ask` when the chain is capped, and moves after moves end at the hops
+  limit. The worker writes no input into the running turn while a move waits (§17.2), so that
+  input starts the agent's first turn in the new folder. Once per `request_id` (§5.2): the
+  input's `event_id` is `once_id("hqc_move wake", …)`, and a repeat finds the session moved and
+  answers the same. The description tells the agent to call it only when the user asks, to end
+  its turn after it, and that from the next turn it works in `path`, the conversation goes on
+  and its address is `address`. Only this tool queues an input; a move from the client does
+  not (§6).
 
 Session address: `<project-slug>/<session-slug>` or the id. A slug is unique within the project
 and does not change on rename.
 
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
 since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
-`hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34; `hqc_schedule` since 0.38, T35); the list is shared by the worker's MCP server and the hub
+`hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34; `hqc_schedule` since 0.38, T35;
+`hqc_move` since 0.76); the list is shared by the worker's MCP server and the hub
 (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
 (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
@@ -3902,6 +3928,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.75 → 0.76 (an agent moves its own session: `hqc_move`)
+§7, §7.2: the tool `hqc_move(path, project?)` moves the calling session, run by hqc, by the core
+of `POST /api/sessions/{id}/move` with `create: true` and answers `{address, project, path}`;
+its errors map the endpoint's codes (`invalid_args`, with `workspace_conflict` in the text for an
+overlap; `not_found`; `unavailable`; `limit_exceeded` for a chain at its limit, before anything
+moves). It then queues the owner's input "You moved to …; continue the task." as a run of an
+agent's `hqc_schedule` (§16): a `user.message` in the call's chain moved on, so the turn runs in
+the session's own mode; once per `request_id`. `INSTRUCTIONS` name it: only when the user asks.
+A move from the client still queues nothing (§6). §4: that input is a `user.message` the hub
+writes. §17.2, §5.3: while a move waits, the worker
+writes no input into the running turn, so the input after `hqc_move` starts the first turn in
+the new folder.
 
 ### 0.74 → 0.75 (a session moves to another folder and project)
 §3 Session, §6: `POST /api/sessions/{id}/move {path, project?, create?}` continues a Claude Code

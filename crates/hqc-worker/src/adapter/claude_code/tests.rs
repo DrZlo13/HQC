@@ -2400,6 +2400,49 @@ fn background_task_notification_is_a_system_event() {
     );
 }
 
+/// The CLI sends `task_started` and `task_notification` for a foreground Bash call that runs
+/// for more than about 2 s and for the tasks of a subagent too, its background Bash call
+/// included (lines of live runs on 2.1.312): only the ends of the background subagent, of
+/// the foreground Bash call the CLI moved to the background (`background_tasks` control
+/// request) and of the foreground subagent moved with it are a `system task_notification`;
+/// that subagent's Bash call, moved too, stays quiet.
+#[test]
+fn only_a_background_task_is_a_notification() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let stream = r#"{"type":"system","subtype":"task_started","task_id":"bfis28nrx","tool_use_id":"toolu_01FoCFY4DmUbVxXAembc44PX","description":"Sleep for 15 seconds","is_backgrounded":false,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e01"}
+{"type":"system","subtype":"task_notification","task_id":"bfis28nrx","tool_use_id":"toolu_01FoCFY4DmUbVxXAembc44PX","status":"completed","output_file":"","summary":"Sleep for 15 seconds","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e02"}
+{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e03"}
+{"type":"system","subtype":"task_started","task_id":"b6yusn86f","owned_by_subagent":true,"tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","description":"Sleep for 6 seconds","is_backgrounded":false,"parent_task_id":"a52af2b436ded4cea","task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e04"}
+{"type":"system","subtype":"task_notification","task_id":"b6yusn86f","tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","status":"completed","output_file":"","summary":"Sleep for 6 seconds","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e05"}
+{"type":"system","subtype":"task_started","task_id":"b77j6ge9s","owned_by_subagent":true,"tool_use_id":"toolu_01UAxvZqF9hbY2GJ1GSt7Pch","description":"Run sleep 4 in the background","is_backgrounded":true,"parent_task_id":"a52af2b436ded4cea","task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e07"}
+{"type":"system","subtype":"task_notification","task_id":"b77j6ge9s","tool_use_id":"toolu_01UAxvZqF9hbY2GJ1GSt7Pch","status":"completed","output_file":"/tmp/tasks/b77j6ge9s.output","summary":"Background command \"Run sleep 4 in the background\" completed (exit code 0)","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e08"}
+{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"completed","output_file":"/tmp/tasks/a52af2b436ded4cea.output","summary":"4","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e06"}
+{"type":"system","subtype":"task_started","task_id":"bnx80r4bg","tool_use_id":"toolu_01LkxBZReUQu4HTFtoWqC3Nb","description":"Sleep for 20 seconds","is_backgrounded":false,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e09"}
+{"type":"system","subtype":"task_updated","task_id":"bnx80r4bg","patch":{"is_backgrounded":true},"uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0a"}
+{"type":"system","subtype":"task_updated","task_id":"bnx80r4bg","patch":{"status":"completed","end_time":1793889489540},"uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0b"}
+{"type":"system","subtype":"task_notification","task_id":"bnx80r4bg","tool_use_id":"toolu_01LkxBZReUQu4HTFtoWqC3Nb","status":"completed","output_file":"/tmp/tasks/bnx80r4bg.output","summary":"Background command \"Sleep for 20 seconds\" completed (exit code 0)","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0c"}
+{"type":"system","subtype":"task_started","task_id":"ac5672f5fc80df8ec","tool_use_id":"toolu_01TYRCeySHmvXd7Md3Y1rgb8","description":"Run ping and reply with 4","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0d"}
+{"type":"system","subtype":"task_started","task_id":"bdcvcjogg","owned_by_subagent":true,"tool_use_id":"toolu_01S54MBuJffoXWdPz6MLU7aG","description":"Ping localhost 25 times in foreground","is_backgrounded":false,"parent_task_id":"ac5672f5fc80df8ec","task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0e"}
+{"type":"system","subtype":"task_updated","task_id":"bdcvcjogg","patch":{"is_backgrounded":true},"uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0f"}
+{"type":"system","subtype":"task_updated","task_id":"ac5672f5fc80df8ec","patch":{"is_backgrounded":true},"uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e10"}
+{"type":"system","subtype":"task_notification","task_id":"bdcvcjogg","tool_use_id":"toolu_01S54MBuJffoXWdPz6MLU7aG","status":"completed","output_file":"/tmp/tasks/bdcvcjogg.output","summary":"Background command \"Ping localhost 25 times in foreground\" completed (exit code 0)","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e11"}
+{"type":"system","subtype":"task_notification","task_id":"ac5672f5fc80df8ec","tool_use_id":"toolu_01TYRCeySHmvXd7Md3Y1rgb8","status":"completed","output_file":"/tmp/tasks/ac5672f5fc80df8ec.output","summary":"4","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e12"}"#;
+    let a = play(&mut core, stream);
+    assert_eq!(
+        system_events(&a),
+        [
+            ("task_notification".into(), "4".into()),
+            (
+                "task_notification".into(),
+                "Background command \"Sleep for 20 seconds\" completed (exit code 0)".into()
+            ),
+            ("task_notification".into(), "4".into())
+        ]
+    );
+}
+
 /// `/compact` (lines of fixture `stream-resume-compact`, 2.1.308; the same `compact_boundary`
 /// came on 2.1.312): `system context_compacted`, its id derived from the line's uuid, which is
 /// the transcript record's.

@@ -953,6 +953,33 @@ async fn idle_agent_is_stopped_and_resumed_by_input() {
     w.stop().await;
 }
 
+// idle_timeout (SPEC §17.3): an agent whose subagent still runs after the turn is not idle;
+// it is stopped once the last one ends.
+#[tokio::test]
+async fn idle_timeout_waits_for_subagents() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    adapters.emit(sid, AdapterEvent::Subagents(1)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        "never idle while a subagent runs"
+    );
+    adapters.emit(sid, AdapterEvent::Subagents(0)).await;
+    adapters
+        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    w.stop().await;
+}
+
 /// A `session.state` of `sid` whose `permission_mode` is `mode`, skipped or next.
 async fn state_with_mode(c: &mut HubConn, sid: Uuid, mode: &str) -> Value {
     let hit = |st: &Value| {

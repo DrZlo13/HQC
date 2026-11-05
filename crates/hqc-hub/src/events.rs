@@ -131,28 +131,6 @@ pub async fn ingest_worker_event(
         });
         return Ok(dropped);
     }
-    // A cancel from the worker closes its request before it is stored. One the hub closed
-    // already (`POST /stop` cancels before it stops the turn, an answer that crossed the
-    // cancel; SPEC §10.1) has its cancel or answer in the feed: a second one is not stored. A
-    // cancel sent again after its `ack` was lost gets its `seq`.
-    let cancelled = match &ev.kind {
-        EventKind::ApprovalCancel { request_id, .. } => Some(("approval", request_id)),
-        EventKind::ClarifyCancel { request_id, .. } => Some(("clarify", request_id)),
-        _ => None,
-    };
-    if let Some((kind, request_id)) = cancelled {
-        if !db::close_request_by_worker(&app.db, s.id, kind, request_id).await? {
-            if let Some(row) = db::event_by_id(&app.db, ev.event_id).await? {
-                return Ok(Ingested::Ack(Ack {
-                    event_id: Some(ev.event_id),
-                    seq: Some(row.seq as u64),
-                }));
-            }
-            tracing::info!(session_id = %s.id, %request_id, kind = kind_name, "cancel of a closed request dropped");
-            return Ok(dropped);
-        }
-    }
-
     let str_field = |k: &str| raw.get(k).and_then(Value::as_str).map(str::to_string);
     let new = NewEvent {
         event_id: ev.event_id,
@@ -166,7 +144,27 @@ pub async fn ingest_worker_event(
         delivery: None,
         delivered_at: None,
     };
-    match db::insert_event(&app.db, &new).await? {
+    // A cancel from the worker is stored in the transaction that closes its request, so one
+    // that fails to be stored leaves the request open for its resend. One the hub closed
+    // already (`POST /stop` cancels before it stops the turn, an answer that crossed the
+    // cancel; SPEC §10.1) has its cancel or answer in the feed: a second one is not stored. A
+    // cancel sent again after its `ack` was lost gets its `seq`.
+    let cancelled = match &ev.kind {
+        EventKind::ApprovalCancel { request_id, .. } => Some(("approval", request_id)),
+        EventKind::ClarifyCancel { request_id, .. } => Some(("clarify", request_id)),
+        _ => None,
+    };
+    let inserted = match cancelled {
+        Some((kind, request_id)) => {
+            let Some(i) = db::insert_worker_cancel(&app.db, &new, kind, request_id).await? else {
+                tracing::info!(session_id = %s.id, %request_id, kind = kind_name, "cancel of a closed request dropped");
+                return Ok(dropped);
+            };
+            i
+        }
+        None => db::insert_event(&app.db, &new).await?,
+    };
+    match inserted {
         Inserted::New(row) => {
             let seq = row.seq;
             after_store(app, &s, &row, &ev.kind, Source::Worker).await?;
@@ -438,7 +436,8 @@ async fn after_store(
                 db::set_turn(&app.db, s.id, false, false).await?;
                 // An ask the turn's input carried and still open got no final message from that
                 // turn (the user's "No" to a permission request, `POST /stop`): it fails now
-                // (SPEC §7.1). Without `in_reply_to` (an older worker) it waits for its timeout.
+                // (SPEC §7.1). Without `in_reply_to` (an older worker, or a turn that names no
+                // input, §8.1) it waits for its timeout.
                 // Boxed: failing it may store a hub event, which comes back here.
                 if let Some(input) = in_reply_to {
                     Box::pin(crate::peers::turn_stopped(app, s, *input)).await?;

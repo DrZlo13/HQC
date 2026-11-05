@@ -3100,6 +3100,111 @@ fn a_message_before_an_interrupt_is_carried() {
     );
 }
 
+/// The interrupt of `a_message_before_an_interrupt_is_carried` with two messages written: the
+/// `result` carries both, then the CLI cancels them before either is `started` (another Stop).
+/// No `result` comes for that turn: each `cancelled` ends it, the first with the other still
+/// carried, the last with nothing left to run.
+#[test]
+fn carried_messages_cancelled_after_the_result_end_their_turn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(
+        sid,
+        "Run the bash command `sleep 15` in the foreground and then reply with the single word DONE.",
+    );
+    let (b, d) = (
+        user_input(sid, "Also add the word BANANA to your reply."),
+        user_input(sid, "And the word CHERRY."),
+    );
+    let ua = line_uuid(&core.input(&a));
+    let call = "toolu_01FoCFY4DmUbVxXAembc44PX";
+    let mut out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, &a.text),
+            bash(call, "sleep 15"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    let ud = line_uuid(&core.inject_with_images(&d, vec![]).expect("a turn runs"));
+    core.interrupt().expect("a turn runs");
+    out.extend(play(&mut core, &lines_of(&[
+        lifecycle(&ub, "queued"),
+        lifecycle(&ud, "queued"),
+        r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-interrupt-1"}}"#.into(),
+        r#"{"type":"system","subtype":"task_notification","task_id":"bfis28nrx","run_id":"0mw3mw8rx-13c7c4ef","tool_use_id":"toolu_01FoCFY4DmUbVxXAembc44PX","status":"stopped","output_file":"","summary":"Sleep for 15 seconds","uuid":"0f6c1d2e-3333-4a55-9d0e-1a2b3c4d5e01","session_id":"42e1f456-d428-4380-ad8a-473e21ef9ff7"}"#.into(),
+        tool_result(call),
+        result("error_during_execution"),
+        lifecycle(&ua, "cancelled"),
+    ])));
+    let (_, carried_turn) = core.interrupt().expect("the carried inputs' turn runs");
+    out.extend(play(&mut core, &lifecycle(&ub, "cancelled")));
+    assert!(core.can_inject(), "D is still carried");
+    assert!(!core.turn_running(carried_turn));
+    out.extend(play(&mut core, &lifecycle(&ud, "cancelled")));
+    assert!(!core.can_inject(), "no turn runs");
+    assert!(core.interrupt().is_none(), "nothing to interrupt");
+    let names = [(a.event_id, "A"), (b.event_id, "B"), (d.event_id, "D")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "accepted A",
+            "status to A",
+            "turn_ended [B, D]",
+            "turn_ended [D] dropped [B]",
+            "turn_ended [] dropped [D]"
+        ]
+    );
+}
+
+/// A message carried past an interrupt that the CLI runs as a local command (`started` and
+/// `completed`, no echo): its own `result` (`/name`, `/cost` on 2.1.312) takes it and ends its
+/// turn, once; `completed` alone ends nothing.
+#[test]
+fn a_carried_local_command_is_taken_by_its_own_result() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let (a, b) = (user_input(sid, "first"), user_input(sid, "/name x"));
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, "first"),
+            bash("toolu_1", "sleep 15"),
+        ]),
+    );
+    let ub = line_uuid(&core.inject_with_images(&b, vec![]).expect("a turn runs"));
+    core.interrupt().expect("a turn runs");
+    let out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            tool_result("toolu_1"),
+            result("error_during_execution"),
+            lifecycle(&ua, "cancelled"),
+            lifecycle(&ub, "started"),
+            lifecycle(&ub, "completed"),
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":15,"result":"Session renamed to: x","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}"#.to_owned(),
+        ]),
+    );
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "status to A",
+            "turn_ended [B]",
+            "status to -",
+            "accepted B",
+            "turn_ended []"
+        ]
+    );
+    assert!(!core.can_inject(), "no turn runs");
+}
+
 /// A message the CLI cancelled before the turn's `result` is not taken: neither accepted nor
 /// carried, but dropped (the supervisor queues it again).
 #[test]
@@ -3397,4 +3502,32 @@ fn running_subagents_are_counted() {
             vec![0]
         ]
     );
+}
+
+/// A foreground subagent the CLI sent no end for (an interrupt, a denied call,
+/// `error_max_turns`) stops counting at the `result` of the main turn; a background one goes
+/// on until its `task_notification`.
+#[test]
+fn a_foreground_subagent_stops_counting_at_the_result() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let stream = r#"{"type":"system","subtype":"task_started","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","description":"Reply with number","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","prompt":"Reply with the number 4.","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e01"}
+{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e02"}
+{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2,"terminal_reason":"aborted_tools","total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":0.001,"usage":{"input_tokens":0,"output_tokens":0}}
+{"type":"system","subtype":"task_notification","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","status":"stopped","output_file":"","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e08"}
+{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"completed","output_file":"/tmp/tasks/a52af2b436ded4cea.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e09"}"#;
+    // The count reported by each line, in order.
+    let counts: Vec<Vec<u32>> = stream
+        .lines()
+        .map(|l| {
+            core.on_line(l)
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::Emit(AdapterEvent::Subagents(n)) => Some(n),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(counts, [vec![1], vec![2], vec![1], vec![], vec![], vec![0]]);
 }

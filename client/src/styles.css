@@ -846,6 +846,9 @@ select.input {
 .session-sub.state-error {
   color: var(--danger);
 }
+.session-agents {
+  color: var(--text2);
+}
 
 .session-where {
   margin-top: 1px;
@@ -1694,6 +1697,13 @@ select.input {
 
 .chat-system-note {
   color: var(--muted);
+}
+
+/* The subagents the agent runs now, next to the state pill. */
+.chat-agents {
+  color: var(--text2);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-spawned {

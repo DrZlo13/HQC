@@ -218,6 +218,17 @@ describe('SessionList (desktop column)', () => {
     expect(root.querySelector('.session-when')).toBeNull();
   });
 
+  it('shows the subagents running in the row, next to the state', async () => {
+    const list = LIST.map((s) => (s.id === 'stones' ? { ...s, subagents: 2 } : s.id === 'net' ? { ...s, subagents: 1 } : s));
+    await mount(<SessionList app={makeApp(list)} current="net" />);
+    const sub = (title: string) =>
+      [...root.querySelectorAll('.session-row')].find((r) => r.querySelector('.session-title')!.textContent === title)!.querySelector('.session-sub')!;
+    expect(sub('Stone textures').textContent).toBe('Running · 2 agents');
+    expect(sub('Network sync').textContent).toBe('Waiting for reply · 1 agent');
+    expect(sub('Step determinism').textContent).toBe('Running');
+    expect(sub('Stone textures').querySelector('.session-agents')!.textContent).toBe(' · 2 agents');
+  });
+
   it('switches to "Recent" with times, and keeps the choice on the hub (T50)', async () => {
     const api = hubApi();
     await mount(<SessionList app={makeApp(LIST, api)} />);

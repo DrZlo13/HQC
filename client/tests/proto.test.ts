@@ -141,6 +141,10 @@ describe('examples/wire', () => {
     expect(peer.chain).toMatchObject({ permission_cap: 'ask', capped_by: 'hqc/build-bot' });
     const usage = parseEvent(load('event.usage.json'));
     expect(usage.type === 'usage' && [usage.payload.cost_usd, usage.payload.session_cost_usd]).toEqual([0.0123, 0.4567]);
+    // SPEC 0.68: the subagents the agent runs now, in the session and its summary; absent is 0.
+    expect(s.subagents).toBe(2);
+    expect(sys.subagents).toBeUndefined();
+    expect(one.type === 'session.summary' && one.session.subagents).toBe(2);
     const sum =(load('client.session.summary.json') as { session: Record<string, unknown> }).session;
     for (const k of ['project_id', 'title', 'state', 'queue_len', 'unread', 'last_seq', 'last_read_seq']) {
       expect((s as unknown as Record<string, unknown>)[k], k).toEqual(sum[k]);

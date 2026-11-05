@@ -43,6 +43,12 @@ export const STATE_LABELS: Record<SessionState, string> = {
   unknown: 'Unknown',
 };
 
+/** The subagents a session's agent runs now, shown next to its state; nothing at 0. */
+export function agentsLabel(n: number | undefined): string | undefined {
+  if (!n || n < 1) return undefined;
+  return n === 1 ? '1 agent' : `${n} agents`;
+}
+
 /** `system.code` → caption before the text; other codes show the text alone (SPEC §4). */
 export const SYSTEM_CODE_LABELS: Record<string, string> = {
   policy_denied: 'Blocked by worker policy',

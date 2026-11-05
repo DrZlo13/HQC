@@ -63,6 +63,7 @@ function setup(
     permission_mode?: PermissionMode;
     effective_permission_mode?: PermissionMode;
     permission_capped_by?: string;
+    subagents?: number;
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -122,6 +123,7 @@ function setup(
     permission_mode: opts.permission_mode,
     effective_permission_mode: opts.effective_permission_mode,
     permission_capped_by: opts.permission_capped_by,
+    subagents: opts.subagents,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -269,6 +271,27 @@ describe('permission mode', () => {
 });
 
 describe('header', () => {
+  it('shows the subagents running next to the state, only while there are any', async () => {
+    let { app } = setup('running', { subagents: 2 });
+    await mount(app);
+    expect($('.chat-agents')!.textContent).toBe('2 agents');
+    expect($('.pill + .chat-agents')).not.toBeNull();
+    const s = app.sessions.get('s1')!;
+    const summary = (subagents?: number) =>
+      app.mergeSummary([
+        { session_id: 's1', project_id: 'p1', title: s.title, state: 'running', queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7, subagents },
+      ]);
+    await act(async () => summary(1));
+    expect($('.chat-agents')!.textContent).toBe('1 agent');
+    await act(async () => summary(undefined));
+    expect($('.chat-agents')).toBeNull();
+    render(null, root);
+
+    ({ app } = setup('running', { subagents: 0 }));
+    await mount(app);
+    expect($('.chat-agents')).toBeNull();
+  });
+
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
     const { app } = setup('waiting');
     await mount(app);

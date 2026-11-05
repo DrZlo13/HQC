@@ -782,6 +782,8 @@ export interface SessionSummary {
   permission_mode?: PermissionMode;
   effective_permission_mode?: PermissionMode;
   permission_capped_by?: string;
+  /** Subagents the agent runs now; absent is 0. */
+  subagents?: number;
 }
 
 /** A session waiting on another through an open `hqc_ask`, directly or along a chain. */
@@ -875,6 +877,7 @@ export function parseSummary(v: unknown): SessionSummary {
     permission_mode: optPermissionMode(s, 'permission_mode'),
     effective_permission_mode: optPermissionMode(s, 'effective_permission_mode'),
     permission_capped_by: optStr(s, 'permission_capped_by'),
+    subagents: optNum(s, 'subagents'),
   };
 }
 
@@ -986,6 +989,8 @@ export interface SessionInfo {
   /** While the current turn runs in Ask under a peer message's cap (T39): the address of
    *  the session up the chain whose Ask set it. */
   permission_capped_by?: string;
+  /** Subagents the agent runs now, as its worker last reported; absent is 0. */
+  subagents?: number;
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -1072,6 +1077,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     permission_mode: optPermissionMode(o, 'permission_mode'),
     effective_permission_mode: optPermissionMode(o, 'effective_permission_mode'),
     permission_capped_by: optStr(o, 'permission_capped_by'),
+    subagents: optNum(o, 'subagents'),
   };
 }
 

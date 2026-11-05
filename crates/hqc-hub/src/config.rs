@@ -399,6 +399,12 @@ fn auth_from(var: impl Fn(&str) -> Option<String>, listen: &str) -> anyhow::Resu
                 );
             }
             let [issuer, aud, jwks_url] = oidc.map(|(_, v)| v.unwrap_or_default());
+            if let Some((scheme, rest)) = jwks_url.split_once("://") {
+                let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+                if scheme.eq_ignore_ascii_case("http") && !crate::security::is_loopback_host(host) {
+                    tracing::warn!("HQC_OIDC_JWKS_URL={jwks_url}: plain http to a non-loopback host, the signing keys can be replaced on the way");
+                }
+            }
             AuthConfig::Oidc {
                 issuer,
                 aud,

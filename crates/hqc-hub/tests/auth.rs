@@ -82,6 +82,12 @@ async fn access_jwt_is_verified() {
     assert_eq!(v2["personal_project_id"], v["personal_project_id"]);
 
     assert_eq!(me(&hub, None, None).await.0, 401);
+    // Nor the same token as a bearer token: in Access mode only the Access header counts.
+    let bearer = format!("Bearer {good}");
+    assert_eq!(
+        me(&hub, None, Some(("Authorization", &bearer))).await.0,
+        401
+    );
     // An email header without a JWT is not accepted (SPEC §6).
     assert_eq!(
         me(
@@ -123,24 +129,31 @@ async fn access_jwt_is_verified() {
     hub.finish().await;
 }
 
-/// `HQC_OIDC_*` behind oauth2-proxy: the ID token comes in `Authorization: Bearer`, the
-/// Access header is not read.
-#[tokio::test]
-async fn oidc_bearer_token_is_verified() {
-    const ISSUER: &str = "https://auth.example.com/realms/home";
+const ISSUER: &str = "https://auth.example.com/realms/home";
+
+/// Keycloak's shape of an ID token: `aud` is the client id as a string.
+fn oidc_claims(iss: &str, aud: &str) -> Value {
+    let mut c = claims("bob@example.com", aud, 600);
+    c["iss"] = json!(iss);
+    c["aud"] = json!(aud);
+    c["email_verified"] = json!(true);
+    c
+}
+
+async fn oidc_hub() -> TestHub {
     let auth = AuthConfig::Oidc {
         issuer: ISSUER.into(),
         aud: AUD.into(),
         jwks_url: jwks_server().await,
     };
-    let hub = TestHub::start_with(auth, String::new()).await;
-    // Keycloak's shape: `aud` is the client id as a string.
-    let oidc_claims = |iss: &str, aud: &str| {
-        let mut c = claims("bob@example.com", aud, 600);
-        c["iss"] = json!(iss);
-        c["aud"] = json!(aud);
-        c
-    };
+    TestHub::start_with(auth, String::new()).await
+}
+
+/// `HQC_OIDC_*` behind oauth2-proxy: the ID token comes in `Authorization: Bearer`, the
+/// Access header is not read.
+#[tokio::test]
+async fn oidc_bearer_token_is_verified() {
+    let hub = oidc_hub().await;
     let good = token(oidc_claims(ISSUER, AUD));
     let bearer = format!("Bearer {good}");
     let (s, v) = me(&hub, None, Some(("Authorization", &bearer))).await;
@@ -150,13 +163,54 @@ async fn oidc_bearer_token_is_verified() {
     assert_eq!(me(&hub, None, None).await.0, 401);
     assert_eq!(me(&hub, Some(&good), None).await.0, 401);
     assert_eq!(me(&hub, None, Some(("Authorization", &good))).await.0, 401);
-    for bad in [
-        oidc_claims("https://auth.example.com/realms/other", AUD),
-        oidc_claims(ISSUER, "other-client"),
+    let mut expired = oidc_claims(ISSUER, AUD);
+    expired["exp"] = json!(chrono::Utc::now().timestamp() - 600);
+    let mut hs256 = Header::new(Algorithm::HS256);
+    hs256.kid = Some(KID.into());
+    let b64 = |v: Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+    let rsa = EncodingKey::from_rsa_pem(KEY_PEM).unwrap();
+    let mut accepted = Vec::new();
+    for (why, bad) in [
+        (
+            "another issuer",
+            token(oidc_claims("https://auth.example.com/realms/other", AUD)),
+        ),
+        ("another client", token(oidc_claims(ISSUER, "other-client"))),
+        ("expired", token(expired)),
+        (
+            "HS256",
+            jsonwebtoken::encode(
+                &hs256,
+                &oidc_claims(ISSUER, AUD),
+                &EncodingKey::from_secret(b"secret"),
+            )
+            .unwrap(),
+        ),
+        (
+            "alg none",
+            format!(
+                "{}.{}.",
+                b64(json!({"alg": "none", "typ": "JWT", "kid": KID})),
+                b64(oidc_claims(ISSUER, AUD))
+            ),
+        ),
+        (
+            "no kid",
+            jsonwebtoken::encode(
+                &Header::new(Algorithm::RS256),
+                &oidc_claims(ISSUER, AUD),
+                &rsa,
+            )
+            .unwrap(),
+        ),
     ] {
-        let h = format!("Bearer {}", token(bad));
-        assert_eq!(me(&hub, None, Some(("Authorization", &h))).await.0, 401);
+        let h = format!("Bearer {bad}");
+        let (s, v) = me(&hub, None, Some(("Authorization", &h))).await;
+        if s != 401 {
+            accepted.push(format!("{why}: {s}: {v}"));
+        }
     }
+    assert!(accepted.is_empty(), "{accepted:#?}");
 
     let ws = |authorization: Option<String>| {
         let mut req = format!("{}/api/ws", hub.ws_base)
@@ -185,6 +239,37 @@ async fn oidc_bearer_token_is_verified() {
 
     // /worker/* reads the same header but does not accept OIDC tokens.
     assert!(FakeWorker::connect(&hub, &good).await.is_err());
+    hub.finish().await;
+}
+
+/// The email is the hub user, and through it their workers: in OIDC mode only an email the
+/// provider verified (Keycloak lets every account edit its own), and only from an ID token.
+#[tokio::test]
+async fn oidc_token_needs_a_verified_email_and_the_id_type() {
+    let hub = oidc_hub().await;
+    let mut unverified = oidc_claims(ISSUER, AUD);
+    unverified["email_verified"] = json!(false);
+    let mut no_claim = oidc_claims(ISSUER, AUD);
+    no_claim.as_object_mut().unwrap().remove("email_verified");
+    let mut id = oidc_claims(ISSUER, AUD);
+    id["typ"] = json!("ID");
+    // Keycloak's access token for the same client.
+    let mut access = oidc_claims(ISSUER, AUD);
+    access["typ"] = json!("Bearer");
+    let mut wrong = Vec::new();
+    for (why, claims, want) in [
+        ("email_verified false", unverified, 403),
+        ("email_verified missing", no_claim, 403),
+        ("typ ID", id, 200),
+        ("typ Bearer", access, 401),
+    ] {
+        let h = format!("Bearer {}", token(claims));
+        let (s, v) = me(&hub, None, Some(("Authorization", &h))).await;
+        if s != want {
+            wrong.push(format!("{why}: {s}, not {want}: {v}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
     hub.finish().await;
 }
 

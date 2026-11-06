@@ -774,9 +774,10 @@ MCP calls (worker → hub → worker):
   checked, now a worker ignores one an older hub still sends. A `session.start` for a running
   agent with another `workspace_path` or `cwd` is a move (since 0.75, §6): the worker checks the
   new folder as above, asks for the owner's consent to it as for a new session (§10.2), acks,
-  and restarts the agent there: at once when no turn and no subagent runs (`subagents`, §5.4),
-  no input is written into the running turn and no switch to `ask` is pending, otherwise at the
-  end of the first turn after which all of these hold (after a background subagent the
+  and restarts the agent there: at once when no turn runs, a turn the runtime started by itself
+  included (Claude Code after a background task's end, §8.1), no subagent runs (`subagents`,
+  §5.4), no input is written into the running turn and no switch to `ask` is pending, otherwise
+  at the end of the first turn after which all of these hold (after a background subagent the
   runtime runs a turn of its own on its result, §8.1); the same folder again before that
   cancels the waiting move. Background commands and monitors of the agent itself do not hold
   the move and stop with the process; when it stopped any, every input but a slash command
@@ -3905,8 +3906,9 @@ codes of `POST /api/workspaces`, with `create` the overlap check on the requeste
 worker makes the folder, so a `409` leaves none. Nothing is queued. The client: "Move to project…" in
 the chat's "More" menu; a summary with another `project_id` moves the session in the lists.
 §5.3, §10.2: a `session.start` for a running agent with another folder is a move, applied
-between turns once no subagent runs, with the owner's consent to a new folder of a foreign
-session; the agent's own background commands stop with it, and its first input in the new
+between turns, a turn the runtime started by itself waited for too, once no subagent runs, with
+the owner's consent to a new folder of a foreign session; the agent's own background commands
+stop with it, and its first input in the new
 folder that the runtime takes and is no slash command says how many. §8.1, §9.2, §2.1: before every start of a Claude Code agent the worker moves its
 transcript by uuid to the place of the working directory, within `allowed_roots`, never over
 a file and not while a live process outside the worker holds it (Claude Code's registry read at

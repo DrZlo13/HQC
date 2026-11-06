@@ -173,11 +173,11 @@ pub async fn project(
     Ok(Json(project_view(&app, &user, &p).await?))
 }
 
-const MAX_PROJECT_NAME: usize = 100;
+pub(crate) const MAX_PROJECT_NAME: usize = 100;
 const MAX_DESCRIPTION: usize = 2000;
 const MAX_LABEL: usize = 100;
 
-fn project_name(name: &str) -> ApiResult<String> {
+pub(crate) fn project_name(name: &str) -> ApiResult<String> {
     let name = name.trim();
     if name.is_empty() {
         return Err(ApiError::BadRequest("name must not be empty".into()));
@@ -439,13 +439,47 @@ pub async fn create_workspace(
             )))
         }
     }
-    let path = check_path(&b.path)?;
+    let canonical = stat_folder(&app, worker.id, &b.path, b.create).await?;
+    let ws = workspace_insert(
+        &app,
+        db::NewWorkspace {
+            project_id: project.id,
+            owner_id: user.id,
+            worker_id: worker.id,
+            path: &canonical,
+            label: &label,
+            mirror_enabled: body.mirror_enabled,
+            source: db::Source::Dir,
+            ephemeral: None,
+        },
+    )
+    .await?;
+    // Mirrored by default (T21; the import of SPEC §9.1): the worker follows the folder's
+    // transcripts and sends their history.
+    if ws.mirror_enabled {
+        if let Some(conn) = app.workers.get(ws.worker_id) {
+            crate::mirror::enable(&app, &conn, &ws).await?;
+        }
+    }
+    tracing::info!(workspace_id = %ws.id, project_id = %ws.project_id, worker_id = %ws.worker_id, path = %ws.path, mirror = ws.mirror_enabled, "workspace added");
+    Ok((StatusCode::CREATED, Json(ws.to_api())))
+}
+
+/// The canonical path of folder `path` on the online worker, which checks it with `fs.stat`
+/// (`create`: makes it when missing): the codes of `POST /api/workspaces` (SPEC §6).
+pub(crate) async fn stat_folder(
+    app: &AppState,
+    worker_id: Uuid,
+    path: &str,
+    create: bool,
+) -> ApiResult<String> {
+    let path = check_path(path)?;
     let request = path.to_string();
-    let st = match ask_worker(&app, worker.id, |request_id| {
+    let st = match ask_worker(app, worker_id, |request_id| {
         HubFrame::FsStat(FsStat {
             request_id,
             path: request,
-            create: b.create,
+            create,
         })
     })
     .await?
@@ -489,29 +523,7 @@ pub async fn create_workspace(
             format!("the worker reported {canonical}, which is not a canonical path"),
         ));
     }
-    let ws = workspace_insert(
-        &app,
-        db::NewWorkspace {
-            project_id: project.id,
-            owner_id: user.id,
-            worker_id: worker.id,
-            path: canonical,
-            label: &label,
-            mirror_enabled: body.mirror_enabled,
-            source: db::Source::Dir,
-            ephemeral: None,
-        },
-    )
-    .await?;
-    // Mirrored by default (T21; the import of SPEC §9.1): the worker follows the folder's
-    // transcripts and sends their history.
-    if ws.mirror_enabled {
-        if let Some(conn) = app.workers.get(ws.worker_id) {
-            crate::mirror::enable(&app, &conn, &ws).await?;
-        }
-    }
-    tracing::info!(workspace_id = %ws.id, project_id = %ws.project_id, worker_id = %ws.worker_id, path = %ws.path, mirror = ws.mirror_enabled, "workspace added");
-    Ok((StatusCode::CREATED, Json(ws.to_api())))
+    Ok(canonical.to_string())
 }
 
 /// Stores a new workspace; one that overlaps a workspace of the same worker is `409
@@ -521,17 +533,25 @@ pub(crate) async fn workspace_insert(
     n: db::NewWorkspace<'_>,
 ) -> ApiResult<db::WorkspaceRow> {
     let path = n.path.to_string();
-    let x = match db::create_workspace(&app.db, n).await? {
-        db::WorkspaceInsert::Created(ws) => return Ok(ws),
-        db::WorkspaceInsert::Conflict(x) => x,
-    };
+    match db::create_workspace(&app.db, n).await? {
+        db::WorkspaceInsert::Created(ws) => Ok(ws),
+        db::WorkspaceInsert::Conflict(x) => Err(workspace_conflict(app, &path, &x).await?),
+    }
+}
+
+/// `409 workspace_conflict` for `path` that equals, lies inside or contains workspace `x`.
+pub(crate) async fn workspace_conflict(
+    app: &AppState,
+    path: &str,
+    x: &db::WorkspaceRow,
+) -> ApiResult<ApiError> {
     let name = db::project(&app.db, x.project_id)
         .await?
         .map(|p| p.name)
         .unwrap_or_default();
     let how = if x.path == path {
         "is already"
-    } else if std::path::Path::new(&path).starts_with(&x.path) {
+    } else if std::path::Path::new(path).starts_with(&x.path) {
         "is inside"
     } else {
         "contains"
@@ -540,7 +560,7 @@ pub(crate) async fn workspace_insert(
     extra.insert("existing_workspace_id".into(), json!(x.id));
     extra.insert("existing_project_id".into(), json!(x.project_id));
     extra.insert("existing_path".into(), json!(x.path));
-    Err(ApiError::ConflictWith(
+    Ok(ApiError::ConflictWith(
         "workspace_conflict",
         format!("{path} {how} workspace {} of project {name}", x.path),
         extra,
@@ -728,6 +748,30 @@ pub async fn takeover(
     crate::mirror::takeover(&app, &s).await?;
     let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     Ok(Json(json!(state::view(&app, user.id, s).await?)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MoveSession {
+    pub path: String,
+    /// A slug or id of the user's project; absent: a new project named after the folder.
+    pub project: Option<String>,
+    /// The worker makes a missing folder, as for `POST /api/workspaces`.
+    #[serde(default)]
+    pub create: bool,
+}
+
+/// `POST /api/sessions/{id}/move` {path, project?, create?} (SPEC §6): the session continues
+/// in another folder of its worker, in another project ([`crate::moves`]); the response is
+/// the session object. No input is queued: the session goes on with the next one.
+pub async fn move_session(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<MoveSession>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Manage).await?;
+    let m = crate::moves::move_session(&app, &s, &b.path, b.project.as_deref(), b.create).await?;
+    Ok(Json(json!(state::view(&app, user.id, m.session).await?)))
 }
 
 // ---------------------------------------------------------------- sessions

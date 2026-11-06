@@ -437,9 +437,10 @@ impl TestHub {
                     if f["type"] == "mirror.set"
                         || f["type"] == "workspace.rules"
                         || f["type"] == "workspace.create"
+                        || f["type"] == "session.start"
                     {
                         // Every workspace is mirrored by default (T21); a clone is asked for
-                        // before the answer (T45).
+                        // before the answer (T45); a moved session starts again before it.
                         w.queue.push_back(f);
                         continue;
                     }

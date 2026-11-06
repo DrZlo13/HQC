@@ -210,6 +210,17 @@ pub async fn create_project(
     name: &str,
     description: &str,
 ) -> sqlx::Result<ProjectRow> {
+    create_project_as(db, new_id(), owner, name, description).await
+}
+
+/// [`create_project`] with the id `id` (a session's move derives it, so a repeat finds it).
+pub async fn create_project_as(
+    db: &PgPool,
+    id: Uuid,
+    owner: Uuid,
+    name: &str,
+    description: &str,
+) -> sqlx::Result<ProjectRow> {
     let base = slugify_or(name, "project");
     for i in 1.. {
         let slug = if i == 1 {
@@ -221,7 +232,7 @@ pub async fn create_project(
             "INSERT INTO projects (id, owner_id, name, slug, description) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (owner_id, slug) DO NOTHING RETURNING *",
         )
-        .bind(new_id())
+        .bind(id)
         .bind(owner)
         .bind(name)
         .bind(&slug)
@@ -1204,6 +1215,26 @@ pub fn paths_overlap(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// The worker's workspace (any state) at `path`, else the first one that `path` lies inside
+/// or contains.
+pub async fn overlapping_workspace(
+    db: &PgPool,
+    worker_id: Uuid,
+    path: &str,
+) -> sqlx::Result<Option<WorkspaceRow>> {
+    let all: Vec<WorkspaceRow> = sqlx::query_as(&format!(
+        "SELECT {WORKSPACE_COLS} FROM workspaces WHERE worker_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(worker_id)
+    .fetch_all(db)
+    .await?;
+    let exact = all.iter().position(|w| w.path == path);
+    Ok(match exact {
+        Some(i) => all.into_iter().nth(i),
+        None => all.into_iter().find(|w| paths_overlap(&w.path, path)),
+    })
+}
+
 pub struct NewWorkspace<'a> {
     pub project_id: Uuid,
     pub owner_id: Uuid,
@@ -1659,6 +1690,55 @@ pub async fn put_session_order(
     .execute(db)
     .await?;
     Ok(())
+}
+
+/// Moves the session into `workspace` of `project` with `cwd = '.'` (SPEC §3 Session): its
+/// slug stays if no other session of that project has it, else gets `-2`, `-3`, … A project
+/// it left drops it from its saved session orders; one it stays in keeps its place.
+pub async fn move_session(
+    db: &PgPool,
+    s: &SessionRow,
+    project: Uuid,
+    workspace: Uuid,
+) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    let mut slug = s.slug.clone();
+    for i in 2.. {
+        let taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE project_id = $1 AND slug = $2 AND id <> $3)",
+        )
+        .bind(project)
+        .bind(&slug)
+        .bind(s.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !taken {
+            break;
+        }
+        slug = format!("{}-{i}", s.slug);
+    }
+    sqlx::query(
+        "UPDATE sessions SET project_id = $2, workspace_id = $3, cwd = '.', slug = $4,
+            updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(s.id)
+    .bind(project)
+    .bind(workspace)
+    .bind(&slug)
+    .execute(&mut *tx)
+    .await?;
+    if project != s.project_id {
+        sqlx::query(
+            "UPDATE session_orders SET session_ids = array_remove(session_ids, $1)
+             WHERE project_id = $2",
+        )
+        .bind(s.id)
+        .bind(s.project_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
 }
 
 /// A title from the user (`PATCH`): the runtime's never replaces it.

@@ -177,15 +177,17 @@ pub fn service(
     router(app).into_make_service_with_connect_info::<std::net::SocketAddr>()
 }
 
-/// Build the hub state over a migrated pool and start its background tasks.
-pub fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> AppState {
+/// Build the hub state over a migrated pool and start its background tasks. Before it returns,
+/// so before the hub serves anything, it finds the moves the previous process left
+/// ([`moves::left_on_start`]).
+pub async fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> AppState {
     let app = AppState::new(db, config, push);
+    moves::left_on_start(&app).await;
     tokio::spawn(requests::expiry_loop(app.clone()));
     if let Some(limit) = app.config.timing.turn_watchdog {
         tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));
     }
     tokio::spawn(schedules::cron_loop(app.clone()));
-    tokio::spawn(moves::recover(app.clone()));
     if let Some(keep) = app.config.artifacts.retention {
         tokio::spawn(artifacts::cleanup_loop(app.clone(), keep));
     }

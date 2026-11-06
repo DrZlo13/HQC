@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
     let push = push::from_config(config.vapid.as_ref())?;
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     tracing::info!(addr = %config.listen, protocol = hqc_proto::PROTOCOL_VERSION, "hqc-hub listening");
-    let app = hqc_hub::start(pool, config, push);
+    let app = hqc_hub::start(pool, config, push).await;
     axum::serve(listener, hqc_hub::service(app)).await?;
     Ok(())
 }

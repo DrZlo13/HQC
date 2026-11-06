@@ -19,12 +19,21 @@ export function tabMark(app: AppState): TabMark {
   return unread ? 'unread' : undefined;
 }
 
-/** The mark with a dot in its lower right corner, as a `data:` URL (the CSP allows no `blob:`). */
+/** The mark with a small dot in its lower right corner and a clear gap around it, as GitHub
+ *  marks its tab, as a `data:` URL (the CSP allows no `blob:`). */
 export function markedIcon(svg: string, mark: Exclude<TabMark, undefined>): string {
   const fill = mark === 'waiting' ? STATUS.waiting : '#F4F1EC';
-  const dot = `<circle cx="152" cy="152" r="44" fill="${fill}" stroke="#0E0C0A" stroke-width="12"/>`;
-  return `data:image/svg+xml,${encodeURIComponent(svg.replace(/<\/svg>\s*$/, `${dot}</svg>`))}`;
+  const open = svg.indexOf('>', svg.indexOf('<svg')) + 1;
+  const cut =
+    '<defs><mask id="hqc-tab-cut"><rect width="200" height="200" fill="#fff"/>' +
+    `<circle cx="${DOT.x}" cy="${DOT.y}" r="${DOT.r + DOT.gap}" fill="#000"/></mask></defs><g mask="url(#hqc-tab-cut)">`;
+  const dot = `</g><circle cx="${DOT.x}" cy="${DOT.y}" r="${DOT.r}" fill="${fill}"/>`;
+  const marked = svg.slice(0, open) + cut + svg.slice(open).replace(/<\/svg>\s*$/, `${dot}</svg>`);
+  return `data:image/svg+xml,${encodeURIComponent(marked)}`;
 }
+
+/** The dot in the mark's 200 × 200 view box. */
+const DOT = { x: 162, y: 162, r: 30, gap: 14 };
 
 /** Keeps the tab's icons in step with `tabMark`; the plain ones while nothing is marked. */
 export function watchTabIcon(app: AppState, doc: Document = document): () => void {

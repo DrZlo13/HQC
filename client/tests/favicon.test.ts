@@ -64,6 +64,8 @@ describe('tab icon', () => {
     for (const h of hrefs()) {
       const svg = decodeURIComponent(h.replace('data:image/svg+xml,', ''));
       expect(svg).toContain(`fill="${STATUS.waiting}"`);
+      // The mark under a mask that cuts the gap around the dot.
+      expect(svg).toMatch(/^<svg[^>]*><defs><mask id="hqc-tab-cut">.*<g mask="url\(#hqc-tab-cut\)"><circle r="1"\/><\/g><circle /);
       expect(svg.endsWith('</svg>')).toBe(true);
     }
     expect(document.querySelector('link[rel="icon"]')!.hasAttribute('sizes')).toBe(false);

@@ -383,6 +383,31 @@ async fn refusals() {
         .execute(&hub.app.db)
         .await
         .unwrap();
+    // On a worker of another user: refused before the worker is asked.
+    let me = hqc_hub::db::ensure_user(&hub.app.db, &hub.email)
+        .await
+        .unwrap();
+    let stranger = hqc_hub::db::ensure_user(&hub.app.db, "stranger-move@example.com")
+        .await
+        .unwrap();
+    let worker_id = w.worker_id.clone();
+    let owner = |u: Uuid| {
+        sqlx::query("UPDATE workers SET owner_id = $2 WHERE id = $1::uuid")
+            .bind(worker_id.clone())
+            .bind(u)
+            .execute(&hub.app.db)
+    };
+    owner(stranger.id).await.unwrap();
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/move"),
+            json!({"path": "/w/foo"}),
+        )
+        .await;
+    assert_eq!((s, v["error"].as_str()), (409, Some("unavailable")), "{v}");
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert!(moved_events(&hub.events(&sid).await).is_empty());
+    owner(me.id).await.unwrap();
     // Archived, as for a takeover.
     let (s, _) = hub
         .post(&format!("/api/sessions/{sid}/archive"), json!({}))

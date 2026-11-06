@@ -233,6 +233,54 @@ async fn input_during_a_waiting_move_goes_to_the_new_folder() {
     w.stop().await;
 }
 
+/// A move cancelled while it waits (the first folder again) lets go the input it held: into
+/// the running turn, as with no move, and the process is not stopped.
+#[tokio::test]
+async fn a_cancelled_move_lets_the_held_input_go() {
+    let env = Env::new();
+    let (ws, other) = (env.workspace(), other(&env));
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    started(&mut c, start_in(&env, sid, &ws)).await;
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: a,
+            })
+        })
+        .await;
+    adapters.accept_input(sid, a).await;
+
+    started(&mut c, start_in(&env, sid, &other)).await;
+    c.frame("session.input", input(sid, b, "B")).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let injected = FakeCall::Inject {
+        session_id: sid,
+        event_id: b,
+    };
+    assert!(
+        !adapters.calls().contains(&injected),
+        "{:?}",
+        adapters.calls()
+    );
+
+    started(&mut c, start_in(&env, sid, &ws)).await;
+    adapters
+        .wait_for("B into A's turn", |c| c.contains(&injected))
+        .await;
+    assert_eq!(count_kills(&adapters, sid), 0);
+    assert_eq!(workdirs(&adapters), [ws]);
+    w.stop().await;
+}
+
 /// A background subagent outlives the turn: the move waits for it, and no input starts a turn
 /// in the old folder meanwhile. Nor does the end of the last subagent move the agent: the
 /// runtime reports it before the turn it then runs by itself on the subagent's result, and the

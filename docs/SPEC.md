@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.70, 2026-11-05. Status: the architecture agreed after six reviews and a survey of
+Version 0.70, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2112,13 +2112,23 @@ the background) or its `task_started` had `is_backgrounded: false` and no `syste
 `task_updated` with `patch.is_backgrounded: true` moved it to the background later (2.1.312
 sends both lines for a foreground subagent, a foreground Bash call that runs for more than about
 2 s and a subagent's Bash calls too, background ones included; a task the process did not see
-start counts as a background one); since 0.70 a subagent's `task_notification` that comes while
-the latest `background_tasks_changed` list (below) holds the subagent or a task of it is no end:
-the adapter keeps the latest one and handles it (the line, the cancel of the subagent's open
-requests) when the subagent stops counting or the process exits, so a subagent gives one line, with the summary of its latest notification (its real end, or what it said last when the process exits)
-(2.1.312 sends two for a subagent whose command it moved to the background, "This agent has not
-reported yet…" while the list holds the subagent and its commands, and its real end while the
-list still holds the subagent alone); `system` `compact_boundary` (`compact_metadata.trigger: manual`
+start counts as a background one); since 0.70 a subagent's `task_notification` without its
+report (no `handback` field) that comes while the latest `background_tasks_changed` list
+(below) holds the subagent or a task of it is no end: the adapter keeps the latest one and
+handles it (the line, the cancel of the subagent's open requests) when the subagent stops
+counting or the process exits; a notification with the report replaces it and is handled at
+once. 2.1.312 sends two for a subagent whose command it moved to the background: "This agent
+has not reported yet…" without `handback` while the list holds the subagent and its commands,
+and its real end, `handback: "send"` and `handback_report {text}`, after the subagent's
+`SubagentHandback` call. A notification with `handback` is the end at once, also while a
+command the subagent left running is still listed (live on 2.1.312: a subagent's wait loop
+that never ended). A task gives one line: a later `task_notification` of the same `task_id`
+only cancels the subagent's open requests (the CLI's own description of the field: any
+notification "can be followed by a later one for the same task_id when the agent is resumed or
+finishes its wait; the later one replaces what the earlier one showed"; checked live on 2.1.312:
+a subagent that reported while its 200 s `ping`, moved to the background, ran on is listed and
+started again when the `ping` ends, and sends a second notification with `handback: "send"` and
+the same summary); `system` `compact_boundary` (`compact_metadata.trigger: manual`
 after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
 `system context_compacted` "Context compacted" with the `event_id` derived from that `uuid`; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
@@ -2149,7 +2159,9 @@ the count goes into `session.state.subagents` (§5.4). `system` `background_task
 started, as in its `task_started`): the CLI's whole list of the session's running background
 tasks, subagents and shell commands, sent on every change and `[]` at the end. A subagent also
 counts while the latest list holds it (`task_type: local_agent`) or a task of the list has it
-as `parent_task_id`: with `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a subagent's
+as `parent_task_id`, the latter until a `task_notification` with its report (`handback`) and
+again from its next `task_started`: a command a subagent that reported left running is a
+background task of the session, not a running subagent. With `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a subagent's
 Bash call that runs for more than about 180 s to the background (the agent's own 240 s Bash
 call stays in the foreground) and reports the subagent ended (`task_updated` `completed`,
 `task_notification` "This agent has not reported yet: it is waiting on its own background
@@ -2751,8 +2763,8 @@ other subagent's request (a background one's, a nested one's) stays open: a back
 subagent's outlives the main turn's `result`, and the CLI still waits for its answer (checked
 live on 2.1.312). A subagent's request still open when its `task_notification` comes (the
 subagent ended) is cancelled there the same way, whichever comes first, that or the main
-turn's `result`; a notification that comes while the latest `background_tasks_changed` list
-holds the subagent or a task of it is no end (§8.1), and the
+turn's `result`; a notification without the subagent's report that comes while the latest
+`background_tasks_changed` list holds the subagent or a task of it is no end (§8.1), and the
 cancel waits with it. The hub stores
 a worker's cancel only if it closes an open request, in the transaction that closes it, so a
 cancel that fails to be stored leaves the request open for the worker's resend: one it closed
@@ -3758,11 +3770,12 @@ turn it was carried into (§8.1). §5.4, §6, §8.1:
 subagents the agent runs now, from `task_started` (`local_agent`) to its end, a foreground one
 at the latest to the `result` of the main turn; the client shows "N agents". Migration
 `0032_session_subagents`. A subagent also counts while the CLI's `background_tasks_changed`
-list holds it or a task of it: 2.1.312 under `claude-vscode` moves a subagent's long Bash call
-to the background and meanwhile reports the subagent ended (§8.1). A `task_notification` of
-such a subagent while the list holds it or a task of it is no end: it gives no line and cancels
-nothing until the subagent stops counting or the process exits, and then one line with the
-summary of its latest notification, instead of one per notification.
+list holds it or a task of it (a task of it only until it hands its report over): 2.1.312
+under `claude-vscode` moves a subagent's long Bash call to the background and meanwhile
+reports the subagent ended (§8.1). A `task_notification` of such a subagent without its report
+(`handback`) is no end: it gives no line and cancels nothing until the report comes, the
+subagent stops counting or the process exits. A task gives one line, instead of one per
+notification.
 §17.3: the worker's
 `idle_timeout` no longer stops an agent whose subagents still run or for which the CLI lists
 background tasks; a reconnect and a holder change of any transcript no longer restart its idle

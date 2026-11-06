@@ -3559,7 +3559,7 @@ const MOVED_SUBAGENT: &str = r#"{"type":"system","subtype":"background_tasks_cha
 {"type":"system","subtype":"task_notification","task_id":"blm1ph76i","status":"completed","summary":"Monitor \"wait for background ping to finish\" stream ended"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"}]}
 {"type":"system","subtype":"task_updated","task_id":"a739e2460001cfdc1","patch":{"status":"completed"}}
-{"type":"system","subtype":"task_notification","task_id":"a739e2460001cfdc1","status":"completed","summary":"This agent's report was delivered to you as a message from \"a739e2460001cfdc1\" (its SubagentHandback call). Read it there; it is not repeated here.\n"}
+{"type":"system","subtype":"task_notification","task_id":"a739e2460001cfdc1","status":"completed","handback":"send","summary":"This agent's report was delivered to you as a message from \"a739e2460001cfdc1\" (its SubagentHandback call). Read it there; it is not repeated here.\n"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[]}
 {"type":"result","subtype":"success","num_turns":1}
 {"type":"result","subtype":"success","num_turns":0}"#;
@@ -3688,10 +3688,10 @@ fn system_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<(usize, String,
 }
 
 /// [`MOVED_SUBAGENT`], and its variant with one long command: the subagent's first
-/// `task_notification` ("has not reported yet") comes while the list still holds it and its
-/// commands, the second, its real end, while the list still holds it alone. One "Background
-/// task" line, with the real end's summary, when the list drops it: at the next line of another
-/// kind, here the `result` before the end of the turn. Its commands' ends give none.
+/// `task_notification` ("has not reported yet", no `handback`) comes while the list still
+/// holds it and its commands, the second, its real end with the report, while the list still
+/// holds it alone. One "Background task" line, with the real end's summary, at the real end.
+/// Its commands' ends give none.
 #[test]
 fn a_subagent_waiting_on_its_background_command_ends_in_one_line() {
     let end = |i: usize| {
@@ -3701,23 +3701,72 @@ fn a_subagent_waiting_on_its_background_command_ends_in_one_line() {
             "This agent's report was delivered to you as a message from \"a739e2460001cfdc1\" (its SubagentHandback call). Read it there; it is not repeated here.".to_string(),
         )]
     };
-    assert_eq!(system_lines(MOVED_SUBAGENT.lines()), end(23));
+    assert_eq!(system_lines(MOVED_SUBAGENT.lines()), end(21));
     let lines = one_background_command();
-    assert_eq!(system_lines(lines.iter().map(String::as_str)), end(20));
+    assert_eq!(system_lines(lines.iter().map(String::as_str)), end(18));
 }
 
-/// [`MOVED_SUBAGENT`] with the `system init` the CLI sends between `[]` and the `result`
-/// (lines 52 and 53 of the capture): the held end gives its line at that `init`, a line of
-/// another kind after the drop, and the `result` gives none.
+/// [`MOVED_SUBAGENT`] up to the list after the "has not reported yet" end, then the commands
+/// leave the list with no restart and no other end: the held end gives its line at the next
+/// line of another kind, the `init`, and the `result` gives none.
 #[test]
 fn a_held_subagent_end_comes_at_the_next_line_of_another_kind() {
-    let mut lines: Vec<&str> = MOVED_SUBAGENT.lines().collect();
-    lines.insert(23, r#"{"type":"system","subtype":"init"}"#);
+    let mut lines: Vec<&str> = MOVED_SUBAGENT.lines().take(11).collect();
+    lines.extend([
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        r#"{"type":"system","subtype":"init"}"#,
+        r#"{"type":"result","subtype":"success","num_turns":1}"#,
+    ]);
     let got: Vec<(usize, String)> = system_lines(lines.into_iter())
         .into_iter()
         .map(|(i, code, _)| (i, code))
         .collect();
-    assert_eq!(got, [(23, "task_notification".to_string())]);
+    assert_eq!(got, [(12, "task_notification".to_string())]);
+}
+
+/// A subagent hands its report over while a command it moved to the background still runs
+/// (live on 2.1.312, a wait loop that never ended): its end, with `handback`, is the line at
+/// once, and the command left in the list no longer counts it. When the command ends the CLI
+/// lists and starts the subagent again: it counts by a task of its own again, and its next
+/// end, held while that task is listed, gives no second line.
+#[test]
+fn a_subagent_that_reported_with_a_command_left_running_ends_at_once() {
+    let lines = [
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"A","is_backgrounded":true,"task_type":"local_agent"}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"c","owned_by_subagent":true,"is_backgrounded":false,"parent_task_id":"A","task_type":"local_bash"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"},{"task_id":"c","task_type":"local_bash","parent_task_id":"A"}]}"#,
+        r#"{"type":"system","subtype":"task_updated","task_id":"c","patch":{"is_backgrounded":true}}"#,
+        r#"{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","handback":"send","summary":"reported"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"c","task_type":"local_bash","parent_task_id":"A"}]}"#,
+        r#"{"type":"result","subtype":"success","num_turns":1}"#,
+        r#"{"type":"system","subtype":"task_updated","task_id":"c","patch":{"status":"completed"}}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"c","status":"completed","summary":"Background command ended"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"A","is_backgrounded":true,"task_type":"local_agent"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"d","task_type":"local_bash","parent_task_id":"A"}]}"#,
+        r#"{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"waiting again"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        r#"{"type":"result","subtype":"success","num_turns":1}"#,
+    ];
+    assert_eq!(
+        system_lines(lines.into_iter()),
+        [(6, "task_notification".to_string(), "reported".to_string())]
+    );
+    let subagents: Vec<(usize, String)> = task_counts(lines.into_iter())
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, e)| e.into_iter().map(move |e| (i, e)))
+        .filter(|(_, e)| e.starts_with("subagents"))
+        .collect();
+    let want: Vec<(usize, String)> = [(0, 1), (8, 0), (12, 1), (18, 0)]
+        .into_iter()
+        .map(|(i, n)| (i, format!("subagents:{n}")))
+        .collect();
+    assert_eq!(subagents, want);
 }
 
 /// Subagent `A` held while a task of it is listed; a list that drops `A` and adds `B` at once
@@ -3744,6 +3793,60 @@ fn a_held_subagent_listed_again_with_another_keeps_its_end() {
     );
 }
 
+/// A background subagent that hands its report over while its 200 s `ping`, moved to the
+/// background, still runs; when the `ping` ends the CLI lists and starts it again, and it
+/// reports again (2.1.312 with `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; the task lines, `init`
+/// and `result` of the capture, in order, with the fields the adapter reads).
+const REPORTED_SUBAGENT: &str = r#"{"type":"system","subtype":"init"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"}]}
+{"type":"system","subtype":"task_started","task_id":"a7b736ac9a06b8816","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"result","subtype":"success","num_turns":2}
+{"type":"system","subtype":"task_started","task_id":"baydyre83","owned_by_subagent":true,"is_backgrounded":false,"parent_task_id":"a7b736ac9a06b8816","task_type":"local_bash"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"},{"task_id":"baydyre83","task_type":"local_bash","parent_task_id":"a7b736ac9a06b8816"}]}
+{"type":"system","subtype":"task_updated","task_id":"baydyre83","patch":{"is_backgrounded":true}}
+{"type":"system","subtype":"task_updated","task_id":"a7b736ac9a06b8816","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"a7b736ac9a06b8816","status":"completed","handback":"send","summary":"This agent's report was delivered to you as a message from \"a7b736ac9a06b8816\" (its SubagentHandback call). Read it there; it is not repeated here.\n"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"baydyre83","task_type":"local_bash","parent_task_id":"a7b736ac9a06b8816"}]}
+{"type":"system","subtype":"init"}
+{"type":"result","subtype":"success","num_turns":1}
+{"type":"system","subtype":"init"}
+{"type":"result","subtype":"success","num_turns":1}
+{"type":"system","subtype":"task_updated","task_id":"baydyre83","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"baydyre83","status":"completed","summary":"Background command \"Ping localhost 200 times quietly\" completed (exit code 0)"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"}]}
+{"type":"system","subtype":"task_started","task_id":"a7b736ac9a06b8816","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"task_updated","task_id":"a7b736ac9a06b8816","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"a7b736ac9a06b8816","status":"completed","handback":"send","summary":"This agent's report was delivered to you as a message from \"a7b736ac9a06b8816\" (its SubagentHandback call). Read it there; it is not repeated here.\n"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[]}
+{"type":"system","subtype":"init"}
+{"type":"result","subtype":"success","num_turns":1}"#;
+
+/// [`REPORTED_SUBAGENT`]: one line, at the first report; the second report gives none. The
+/// `ping` left running does not count the subagent; the restart does, until `[]`.
+#[test]
+fn a_subagent_that_reports_twice_gives_one_line() {
+    assert_eq!(
+        system_lines(REPORTED_SUBAGENT.lines()),
+        [(
+            8,
+            "task_notification".to_string(),
+            "This agent's report was delivered to you as a message from \"a7b736ac9a06b8816\" (its SubagentHandback call). Read it there; it is not repeated here.".to_string(),
+        )]
+    );
+    let subagents: Vec<(usize, String)> = task_counts(REPORTED_SUBAGENT.lines())
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, e)| e.into_iter().map(move |e| (i, e)))
+        .filter(|(_, e)| e.starts_with("subagents"))
+        .collect();
+    let want: Vec<(usize, String)> = [(1, 1), (10, 0), (17, 1), (22, 0)]
+        .into_iter()
+        .map(|(i, n)| (i, format!("subagents:{n}")))
+        .collect();
+    assert_eq!(subagents, want);
+}
+
 /// [`MOVED_SUBAGENT`] up to the subagent's first `task_notification`, then the process exits:
 /// the held end is not lost, it gives its line at the exit.
 #[test]
@@ -3764,8 +3867,7 @@ fn a_held_subagent_end_comes_at_exit() {
 }
 
 /// [`MOVED_SUBAGENT`] with a request of the subagent open from its start: its first
-/// `task_notification` is no end and cancels nothing; the request is cancelled at its real end,
-/// when the list drops it.
+/// `task_notification` is no end and cancels nothing; the request is cancelled at its real end.
 #[test]
 fn a_subagent_waiting_on_its_background_command_keeps_its_request() {
     let fx = fixture!("permission-allow");
@@ -3786,5 +3888,5 @@ fn a_subagent_waiting_on_its_background_command_keeps_its_request() {
             assert_eq!(approvals(&core.on_line(&req.to_string())), 1);
         }
     }
-    assert_eq!(cancels, [(23, "sub".to_string())]);
+    assert_eq!(cancels, [(21, "sub".to_string())]);
 }

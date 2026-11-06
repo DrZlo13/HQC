@@ -2796,6 +2796,24 @@ pub async fn set_request_result(db: &PgPool, id: Uuid, result: &Value) -> sqlx::
     Ok(())
 }
 
+/// `move` requests closed without a result that the owner allowed: the session's feed has its
+/// `approval.response` with `once` (SPEC §7). A request a cancellation closed without a frame
+/// (`mcp.cancel`, a worker restart) has none.
+pub async fn allowed_moves_without_result(db: &PgPool) -> sqlx::Result<Vec<PendingRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {PENDING_COLS} FROM pending_requests p
+         WHERE p.kind = 'move' AND p.closed_at IS NOT NULL AND p.result IS NULL
+           AND EXISTS (SELECT 1 FROM events e
+                       WHERE e.session_id = p.session_id AND e.type = 'approval.response'
+                         AND e.payload ->> 'request_id' = p.request_id
+                         AND e.payload ->> 'option_id' = $1)
+         ORDER BY p.closed_at"
+    ))
+    .bind(hqc_proto::frame::worker_approval::ONCE)
+    .fetch_all(db)
+    .await
+}
+
 pub async fn open_requests_of_session(
     db: &PgPool,
     session_id: Uuid,

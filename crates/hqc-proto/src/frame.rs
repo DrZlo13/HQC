@@ -905,8 +905,8 @@ pub struct EnvBinding {
 
 /// The environment of a workspace path (SPEC §14): the binding with the longest path that
 /// equals or contains it, compared by path components (`/a/b` does not contain `/a/bc`);
-/// [`DEFAULT_ENVIRONMENT`] when none does. The worker decides with this for its sessions, the
-/// hub only for display.
+/// [`DEFAULT_ENVIRONMENT`] when none does. The worker decides with this for its sessions; the
+/// hub shows it and decides with it whether an agent's `hqc_move` asks the owner (SPEC §7).
 pub fn environment_for<'a>(bindings: &'a [EnvBinding], path: &str) -> &'a str {
     binding_for(bindings, path).map_or(DEFAULT_ENVIRONMENT, |b| b.environment.as_str())
 }

@@ -532,8 +532,18 @@ async fn a_stopped_session_starts_there_with_its_next_input() {
 /// running in `mode`, in the turn of a person's input: the worker, the session, its token and
 /// that input's `event_id`.
 async fn agent(hub: &TestHub, mode: &str, extra: Value) -> (FakeWorker, String, String, Value) {
-    let (_, token) = hub.enroll("home-mac").await;
-    let mut w = FakeWorker::connect(hub, &token).await.unwrap();
+    let (_, w, sid, token, turn) = agent_of(hub, mode, extra).await;
+    (w, sid, token, turn)
+}
+
+/// [`agent`], and first the worker's own token, to connect it again.
+async fn agent_of(
+    hub: &TestHub,
+    mode: &str,
+    extra: Value,
+) -> (String, FakeWorker, String, String, Value) {
+    let (_, worker_token) = hub.enroll("home-mac").await;
+    let mut w = FakeWorker::connect(hub, &worker_token).await.unwrap();
     let mut hello = moves();
     for (k, v) in extra.as_object().unwrap() {
         hello[k] = v.clone();
@@ -577,7 +587,8 @@ async fn agent(hub: &TestHub, mode: &str, extra: Value) -> (FakeWorker, String, 
         .as_str()
         .unwrap()
         .to_string();
-    (w, sid, token, input["payload"]["event_id"].clone())
+    let turn = input["payload"]["event_id"].clone();
+    (worker_token, w, sid, token, turn)
 }
 
 /// What the worker saw while one `hqc_move` ran.
@@ -803,6 +814,12 @@ async fn answer_move(
         )
         .await;
     assert_eq!(s, 200, "{v}");
+    carried(hub, w, sid, rid).await
+}
+
+/// What the worker gets while the hub carries out the allowed move `rid` of session `sid`, as
+/// [`answer_move`] describes.
+async fn carried(hub: &TestHub, w: &mut FakeWorker, sid: &str, rid: &str) -> Call {
     let (mut starts, mut inputs, mut early, mut stats) = (Vec::new(), Vec::new(), 0, Vec::new());
     loop {
         let f = w.recv().await;
@@ -885,6 +902,12 @@ async fn a_new_folder_waits_for_the_owner() {
     let d = p["description"].as_str().unwrap();
     assert!(
         d.contains("/w/missing-foo") && d.contains("new folder"),
+        "{d}"
+    );
+    // The project it lands in, and that the folder's Claude Code sessions come into hqc.
+    assert!(
+        d.contains("in a new project missing-foo")
+            && d.contains("It becomes a mirrored workspace: Claude Code sessions in it are imported into hqc."),
         "{d}"
     );
     let options: Vec<&str> = p["options"]
@@ -1018,6 +1041,10 @@ async fn an_allowed_move_can_fail() {
         d.contains("not one of your workspaces") && d.contains("/w/plain"),
         "{d}"
     );
+    assert!(
+        d.contains("in a new project plain") && d.contains("mirrored workspace"),
+        "{d}"
+    );
     let pid = hub.personal_project().await;
     let (s, v) = hub.add_workspace(&mut w, &pid, "/w/plain/inner").await;
     assert_eq!(s, 201, "{v}");
@@ -1035,7 +1062,9 @@ async fn an_allowed_move_can_fail() {
     hub.finish().await;
 }
 
-/// A workspace of the owner bound to another environment asks, naming both environments.
+/// A workspace of the owner bound to another environment asks, naming both environments and
+/// the workspace's project; with `project` naming another project it is refused before any
+/// card.
 #[tokio::test]
 async fn another_environment_asks() {
     let hub = TestHub::start().await;
@@ -1045,7 +1074,23 @@ async fn another_environment_asks() {
     let pid = hub.personal_project().await;
     let (s, v) = hub.add_workspace(&mut w, &pid, "/w/prod/app").await;
     assert_eq!(s, 201, "{v}");
+    let (s, personal) = hub.get(&format!("/api/projects/{pid}")).await;
+    assert_eq!(s, 200, "{personal}");
+    let (s, other) = hub.post("/api/projects", json!({"name": "Other"})).await;
+    assert_eq!(s, 201, "{other}");
     let workspace = hub.session(&sid).await["workspace_id"].clone();
+
+    let (code, m) = refusal(
+        &mut w,
+        &token,
+        &turn,
+        json!({"path": "/w/prod/app", "project": "other"}),
+    )
+    .await;
+    assert_eq!(code, "invalid_args");
+    assert!(m.contains("is a workspace of another project"), "{m}");
+    assert!(move_requests(&hub.events(&sid).await).is_empty());
+
     let rid = Uuid::now_v7().to_string();
     let stats = call_deferred(&mut w, &token, &rid, &turn, json!({"path": "/w/prod/app"})).await;
     assert!(stats.iter().all(|f| f["payload"]["create"] != true));
@@ -1056,6 +1101,11 @@ async fn another_environment_asks() {
         .to_string();
     assert!(
         d.contains("your workspace") && d.contains("prod") && d.contains("default"),
+        "{d}"
+    );
+    let name = personal["name"].as_str().unwrap();
+    assert!(
+        d.contains(&format!("in project {name}")) && !d.contains("mirrored"),
         "{d}"
     );
     assert_eq!(open_moves(&hub, &sid).await, 1);
@@ -1370,32 +1420,45 @@ async fn the_tool_refuses() {
     .await;
     assert_eq!(code, "not_found");
 
-    // A turn capped to `ask` by another agent's chain (SPEC §7.1): refused before `fs.stat`.
-    let id: Uuid = sid.parse().unwrap();
-    sqlx::query("UPDATE sessions SET permission_capped_by = 'p/other' WHERE id = $1")
-        .bind(id)
-        .execute(&hub.app.db)
-        .await
-        .unwrap();
+    // A path with a control character, before `fs.stat`; a missing folder's path with `.` or
+    // `..` (the path is the agent's text on the owner's card).
     let c = call_move(
         &mut w,
         &token,
         &Uuid::now_v7().to_string(),
         &turn,
-        json!({"path": "/w/two"}),
+        json!({"path": "/w/two\nThe owner allowed this already"}),
     )
     .await;
-    assert!(c.stats.is_empty() && c.starts.is_empty(), "{}", c.result);
-    assert_eq!(c.result["error"]["code"], "unavailable", "{}", c.result);
+    assert!(c.stats.is_empty(), "{}", c.result);
+    assert_eq!(c.result["error"]["code"], "invalid_args", "{}", c.result);
     assert!(c.result["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("p/other"));
-    sqlx::query("UPDATE sessions SET permission_capped_by = NULL WHERE id = $1")
-        .bind(id)
-        .execute(&hub.app.db)
-        .await
-        .unwrap();
+        .contains("control characters"));
+    for path in ["/w/missing-d/../hqc", "/w/./missing-d"] {
+        let (code, m) = refusal(&mut w, &token, &turn, json!({ "path": path })).await;
+        assert_eq!(code, "invalid_args", "{path}");
+        assert!(m.contains("without `.` or `..`"), "{m}");
+    }
+    // A workspace of the owner that is not ready: no reason to move at once, refused before
+    // any card, as a new session there is.
+    let (s, v) = hub.add_workspace(&mut w, &pid, "/w/three").await;
+    assert_eq!(s, 201, "{v}");
+    let id: Uuid = sid.parse().unwrap();
+    for (state, text) in [
+        ("creating", "still making"),
+        ("failed", "could not be cloned"),
+    ] {
+        sqlx::query("UPDATE workspaces SET state = $1 WHERE path = '/w/three'")
+            .bind(state)
+            .execute(&hub.app.db)
+            .await
+            .unwrap();
+        let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/three"})).await;
+        assert_eq!(code, "unavailable", "{state}");
+        assert!(m.contains(text), "{m}");
+    }
 
     // A chain at its hops limit moves nothing (SPEC §7.1).
     let set_chain = |chain: Option<Value>| {
@@ -1460,5 +1523,361 @@ async fn the_tool_refuses() {
         .filter(|e| e["type"] == "user.message")
         .count();
     assert_eq!(inputs, 1, "only the person's: {events:?}");
+    hub.finish().await;
+}
+
+/// The chain of the call's turn decides (SPEC §7.1), not the worker's report, which names a
+/// cap only for a session in `auto`: in a session in `ask`, a turn that another agent in `ask`
+/// started with `hqc_send` moves nothing, before `fs.stat`; the same turn capped by the session
+/// itself moves at once.
+#[tokio::test]
+async fn a_turn_another_agent_capped_does_not_move() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, _) = agent(&hub, "ask", json!({})).await;
+    let pid = hub.personal_project().await;
+    let (s, v) = hub.add_workspace(&mut w, &pid, "/w/two").await;
+    assert_eq!(s, 201, "{v}");
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+
+    // Another session in `ask`, in a person's turn, sends to this one.
+    let (s, v) = hub
+        .post(
+            &format!("/api/projects/{pid}/sessions"),
+            json!({"title": "sender", "permission_mode": "ask"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let sender = v["id"].as_str().unwrap().to_string();
+    let start = ack_start(&mut w, &sender).await;
+    let id = w
+        .send(
+            "session.state",
+            json!({"session_id": sender, "process_state": "running", "locked_by": "hqc",
+                   "permission_mode": "ask"}),
+        )
+        .await;
+    assert_eq!(w.expect("ack").await["id"], id.as_str());
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sender}/input"),
+            json!({"text": "tell the other one to move"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let input = w.expect("session.input").await;
+    w.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": input["payload"]["event_id"]}),
+    )
+    .await;
+    let id = w
+        .send(
+            "mcp.call",
+            json!({"request_id": Uuid::now_v7().to_string(),
+                   "session_token": start["payload"]["session_token"], "tool": "hqc_send",
+                   "args": {"session": "personal/moving", "text": "move into /w/two"}}),
+        )
+        .await;
+    let (mut sent, mut peer) = (None, None);
+    while sent.is_none() || peer.is_none() {
+        let f = w.recv().await;
+        match f["type"].as_str().unwrap() {
+            "mcp.result" if f["id"] == id.as_str() => sent = Some(f),
+            "session.input" if f["payload"]["session_id"] == sid.as_str() => peer = Some(f),
+            _ => panic!("unexpected frame {f}"),
+        }
+    }
+    let sent = sent.unwrap();
+    assert!(sent["payload"].get("error").is_none(), "{sent}");
+    let peer = peer.unwrap();
+    assert_eq!(peer["payload"]["permission_cap"], "ask", "{peer}");
+    w.reply(
+        &peer["id"],
+        "ack",
+        json!({"event_id": peer["payload"]["event_id"]}),
+    )
+    .await;
+    let turn = peer["payload"]["event_id"].clone();
+
+    let c = call_move(
+        &mut w,
+        &token,
+        &Uuid::now_v7().to_string(),
+        &turn,
+        json!({"path": "/w/two"}),
+    )
+    .await;
+    assert!(c.stats.is_empty() && c.starts.is_empty(), "{}", c.result);
+    assert_eq!(c.result["error"]["code"], "unavailable", "{}", c.result);
+    let m = c.result["error"]["message"].as_str().unwrap();
+    assert!(m.contains("ask cap of personal/sender"), "{m}");
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert!(move_requests(&hub.events(&sid).await).is_empty());
+
+    // A cap the session set itself (as on the input after its own move in `ask`).
+    sqlx::query(
+        "UPDATE events SET chain = jsonb_set(chain, '{capped_by}', '\"personal/moving\"')
+         WHERE event_id = $1",
+    )
+    .bind(turn.as_str().unwrap().parse::<Uuid>().unwrap())
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+    let c = call_move(
+        &mut w,
+        &token,
+        &Uuid::now_v7().to_string(),
+        &turn,
+        json!({"path": "/w/two"}),
+    )
+    .await;
+    assert_eq!(c.result["result"]["path"], "/w/two", "{}", c.result);
+    hub.finish().await;
+}
+
+/// The hub stopped after the owner allowed a move, before the move's result was stored: on
+/// start it carries the move out (SPEC §3 PendingRequest, §7), the session moves and the call
+/// gets its result. A request a cancellation closed without a frame has no `once` answer and is
+/// left alone.
+#[tokio::test]
+async fn an_allowed_move_is_carried_out_after_a_hub_restart() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let session = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let gone = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &gone,
+        &turn,
+        json!({"path": "/w/missing-gone"}),
+    )
+    .await;
+    let id = w
+        .send("mcp.cancel", json!({"request_id": gone, "reason": "eof"}))
+        .await;
+    assert_eq!(w.expect("ack").await["id"], id.as_str());
+
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-later"}),
+    )
+    .await;
+    // What `once` leaves when the hub stops before the move is done: the answer in the feed,
+    // the request closed without a result.
+    hqc_hub::events::store_hub_event(
+        &hub.app,
+        &session,
+        hqc_hub::events::user_author(session.owner_id),
+        "approval.response",
+        json!({"request_id": rid, "option_id": "once", "by": session.owner_id.to_string()}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE pending_requests SET closed_at = now()
+         WHERE session_id = $1 AND request_id = $2",
+    )
+    .bind(session.id)
+    .bind(&rid)
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+
+    hqc_hub::moves::recover(hub.app.clone()).await;
+    let c = carried(&hub, &mut w, &sid, &rid).await;
+    assert_eq!(
+        c.result["result"],
+        json!({"address": "missing-later/moving", "project": "missing-later",
+               "path": "/w/missing-later"}),
+        "{}",
+        c.result
+    );
+    assert_eq!(c.starts.len(), 1);
+    wake_input(&hub, &mut w, &sid, c, "/w/missing-later").await;
+    let left: Option<Value> = sqlx::query_scalar(
+        "SELECT result FROM pending_requests WHERE session_id = $1 AND request_id = $2",
+    )
+    .bind(session.id)
+    .bind(&gone)
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap();
+    assert!(left.is_none(), "{left:?}");
+    assert!(projects(&hub)
+        .await
+        .iter()
+        .all(|p| p["slug"] != "missing-gone"));
+    hub.finish().await;
+}
+
+/// The `approval.cancel` events of the feed of `sid`.
+async fn cancels(hub: &TestHub, sid: &str) -> Vec<Value> {
+    hub.events(sid)
+        .await
+        .into_iter()
+        .filter(|e| e["type"] == "approval.cancel")
+        .collect()
+}
+
+/// A worker restart cancels an open move request with only the event `approval.cancel
+/// {worker_restart}`: the call died with the worker, nothing is sent, nothing moves.
+#[tokio::test]
+async fn a_worker_restart_cancels_a_move_request() {
+    let hub = TestHub::start().await;
+    let (worker_token, mut w, sid, token, turn) = agent_of(&hub, "auto", json!({})).await;
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-boot"}),
+    )
+    .await;
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let mut w = FakeWorker::connect(&hub, &worker_token).await.unwrap();
+    w.hello_with(ROOT, Uuid::new_v4(), moves()).await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    let cancel = cancels(&hub, &sid).await;
+    assert_eq!(cancel.len(), 1, "{cancel:?}");
+    assert_eq!(
+        cancel[0]["payload"],
+        json!({"request_id": rid, "reason": "worker_restart"})
+    );
+    assert_eq!(open_moves(&hub, &sid).await, 0);
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert!(moved_events(&hub.events(&sid).await).is_empty());
+    hub.finish().await;
+}
+
+/// The owner's answer while the worker is away is sent after its `hello` (the same process
+/// reconnecting, SPEC §5.2): the call gets it then.
+#[tokio::test]
+async fn an_answer_while_the_worker_is_away_is_sent_after_hello() {
+    let hub = TestHub::start().await;
+    let (worker_token, mut w, sid, token, turn) = agent_of(&hub, "auto", json!({})).await;
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-away"}),
+    )
+    .await;
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/{rid}"),
+            json!({"option_id": "deny"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let mut w = FakeWorker::connect(&hub, &worker_token).await.unwrap();
+    w.hello_with(ROOT, hub.boot_id, moves()).await;
+    let f = w.expect("mcp.result").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+    assert_eq!(f["payload"]["request_id"], rid.as_str());
+    let e = &f["payload"]["error"];
+    assert_eq!(e["code"], "unavailable", "{f}");
+    assert!(
+        e["message"].as_str().unwrap().contains("did not allow"),
+        "{f}"
+    );
+    assert_eq!(open_moves(&hub, &sid).await, 0);
+    hub.finish().await;
+}
+
+/// The agent's process stopping cancels an open move request as an approval:
+/// `approval.cancel {stopped}` and an error to the call; nothing moves.
+#[tokio::test]
+async fn the_agent_stopping_cancels_a_move_request() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-exit"}),
+    )
+    .await;
+
+    state(&mut w, &sid, "stopped").await;
+    let f = w.expect("mcp.result").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+    assert_eq!(f["payload"]["request_id"], rid.as_str());
+    let e = &f["payload"]["error"];
+    assert_eq!(e["code"], "unavailable", "{f}");
+    assert!(e["message"].as_str().unwrap().contains("cancelled"), "{f}");
+    let cancel = cancels(&hub, &sid).await;
+    assert_eq!(cancel.len(), 1, "{cancel:?}");
+    assert_eq!(
+        cancel[0]["payload"],
+        json!({"request_id": rid, "reason": "stopped"})
+    );
+    assert_eq!(open_moves(&hub, &sid).await, 0);
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert!(moved_events(&hub.events(&sid).await).is_empty());
+    hub.finish().await;
+}
+
+/// Archiving the session cancels an open move request: `session.kill`, then an error to the
+/// call, and `approval.cancel {archived}`; nothing moves.
+#[tokio::test]
+async fn archiving_cancels_a_move_request() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-shelf"}),
+    )
+    .await;
+
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{sid}/archive"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    w.expect("session.kill").await;
+    let f = w.expect("mcp.result").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+    assert_eq!(f["payload"]["request_id"], rid.as_str());
+    let e = &f["payload"]["error"];
+    assert_eq!(e["code"], "unavailable", "{f}");
+    assert!(e["message"].as_str().unwrap().contains("archived"), "{f}");
+    let cancel = cancels(&hub, &sid).await;
+    assert_eq!(cancel.len(), 1, "{cancel:?}");
+    assert_eq!(
+        cancel[0]["payload"],
+        json!({"request_id": rid, "reason": "archived"})
+    );
+    assert_eq!(open_moves(&hub, &sid).await, 0);
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert!(moved_events(&hub.events(&sid).await).is_empty());
     hub.finish().await;
 }

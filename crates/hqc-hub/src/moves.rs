@@ -36,7 +36,7 @@
 //!   (SPEC §5.3); a stopped agent starts there with its next input. Nothing is queued; only
 //!   the tool queues the input that wakes the agent there.
 //!
-//! The tool moves at once only into a workspace of the owner in the environment of the
+//! The tool moves at once only into a ready workspace of the owner in the environment of the
 //! session's folder now; anything else waits for the owner's answer, a PendingRequest of kind
 //! [`KIND`] in the calling session (SPEC §3, §7, §10.1), unless the move would be refused
 //! anyway ([`refused`]).
@@ -46,7 +46,7 @@ use std::path::Path;
 use hqc_proto::{
     api::WorkspaceState,
     event::CancelReason,
-    frame::{environment_for, worker_approval, McpCall, McpError, McpResult},
+    frame::{environment_for, worker_approval, McpCall, McpError, McpResult, PermissionMode},
     mcp::error_code,
 };
 use serde::Deserialize;
@@ -82,10 +82,11 @@ struct MoveArgs {
 }
 
 /// `hqc_move(path, project?)` (SPEC §7): `{address, project, path}`. The calling session,
-/// run by hqc (`locked_by: hqc`), in a turn without an `ask` cap (SPEC §7.1), looks at the
-/// folder with `fs.stat` on the connection the call came by ([`Answer::Wait`]), creating
-/// nothing ([`target`]). Into a workspace of the owner in the environment of its folder now
-/// it moves at once by [`move_session`]; anything else that would not be refused anyway
+/// run by hqc (`locked_by: hqc`), in a turn whose chain no other session capped to `ask`
+/// (SPEC §7.1), whatever the session's own mode, looks at the folder with `fs.stat` on the
+/// connection the call came by ([`Answer::Wait`]), creating nothing ([`target`]). Into a ready
+/// workspace of the owner in the environment of its folder now it moves at once by
+/// [`move_session`]; anything else that would not be refused anyway
 /// ([`refused`]) waits for the owner's answer ([`ask_owner`]), and the call is answered later,
 /// as `hqc_ask` is. Either way the move lands only in the canonical path it was decided on.
 /// After the move an input of the owner, "you moved to …", goes into its queue as a run of
@@ -118,14 +119,29 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             "the session's agent is not run by hqc now",
         ));
     }
-    if let Some(by) = &caller.permission_capped_by {
-        return Err(McpError::new(
-            error_code::UNAVAILABLE,
-            format!("this turn runs under the ask cap of {by}; the session does not move from it"),
-        ));
+    // The chain the turn runs on, not the worker's report, which names a cap only while the
+    // session runs in `auto`. A cap the session set itself (the input after its own move in
+    // `ask`) leaves it free to move.
+    let turn = crate::peers::call_chain(app, caller, c)
+        .await
+        .map_err(internal)?;
+    let me = crate::peers::address(app, caller).await.map_err(internal)?;
+    if let Some(t) = turn
+        .as_ref()
+        .filter(|t| t.permission_cap == Some(PermissionMode::Ask))
+    {
+        if t.capped_by.as_deref() != Some(me.as_str()) {
+            let by = t.capped_by.as_deref().unwrap_or("another session");
+            return Err(McpError::new(
+                error_code::UNAVAILABLE,
+                format!(
+                    "this turn runs under the ask cap of {by}; the session does not move from it"
+                ),
+            ));
+        }
     }
     // The chain moves on as for a schedule; one at its limit moves nothing (SPEC §7.1).
-    let chain = crate::peers::outgoing_chain(app, caller, c, false).await?;
+    let chain = crate::peers::next_chain(turn, false, crate::peers::sender_mode(caller), &me)?;
     let chain = serde_json::to_value(chain).map_err(internal)?;
     let wake = once_id(WAKE, caller.id, &c.request_id);
     // Off the connection's loop: the worker answers `fs.stat` on the connection the call came by.
@@ -141,10 +157,27 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             }
             Target::Ask { path, why } => {
                 let project = a.project.as_deref();
-                refused(&app, &caller, &path, project)
+                let (lands, mirrored) = refused(&app, &caller, &path, project)
                     .await
                     .map_err(tool_error)?;
-                ask_owner(&app, &caller, &request_id, &path, project, &why, chain).await?;
+                let mut description =
+                    format!("The agent asks to move this session into {why}, {lands}:\n{path}");
+                if mirrored {
+                    description.push_str(
+                        "\nIt becomes a mirrored workspace: Claude Code sessions in it are \
+                         imported into hqc.",
+                    );
+                }
+                ask_owner(
+                    &app,
+                    &caller,
+                    &request_id,
+                    &path,
+                    project,
+                    &description,
+                    chain,
+                )
+                .await?;
                 Ok(None)
             }
         }
@@ -180,8 +213,8 @@ async fn woken(app: &AppState, m: &Moved, wake: Uuid, chain: Value) -> Result<Va
 /// Where `hqc_move` goes: the path is the one the move is decided on, and the one it must land
 /// in ([`move_session`]'s `decided`).
 enum Target {
-    /// Exactly a workspace of the owner on the session's worker, in the environment of the
-    /// session's folder now: the session moves at once.
+    /// Exactly a ready workspace of the owner on the session's worker, in the environment of
+    /// the session's folder now: the session moves at once.
     Workspace(String),
     /// Anything else waits for the owner: the canonical path (as given, when missing), shown
     /// to the owner, and what the owner is asked about.
@@ -191,8 +224,16 @@ enum Target {
 /// Where a move of `s` into `path` goes (SPEC §7): the worker's `fs.stat` without `create`,
 /// the owner's workspaces on that worker and the environments of the worker's bindings (as
 /// [`db::set_workspace_environments`] has them) for the target and for the session's folder.
-/// A folder the worker refuses is the tool's error at once; a missing one asks.
+/// A folder the worker refuses is the tool's error at once; a missing one asks. The path is
+/// the agent's text the owner may be shown: one with a control character is refused, and so is
+/// a missing folder's with a `.` or `..` component.
 async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, McpError> {
+    if path.chars().any(char::is_control) {
+        return Err(McpError::new(
+            error_code::INVALID_ARGS,
+            "path must not contain control characters",
+        ));
+    }
     let worker = match s.worker_id {
         Some(w) => db::worker(&app.db, w).await.map_err(internal)?,
         None => None,
@@ -210,17 +251,26 @@ async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, Mc
     })?;
     let (path, exists) = match api::stat_folder(app, worker.id, path, false).await {
         Ok(p) => (p, true),
-        Err(ApiError::Invalid("path_not_found", _)) => (
-            api::check_path(path).map_err(tool_error)?.to_string(),
-            false,
-        ),
+        Err(ApiError::Invalid("path_not_found", _)) => {
+            let p = api::check_path(path).map_err(tool_error)?;
+            // Split by hand: `Path::components` drops a `.` inside the path.
+            if p.split('/').any(|c| c == "." || c == "..") {
+                return Err(McpError::new(
+                    error_code::INVALID_ARGS,
+                    format!("{p} does not exist; a new folder takes a path without `.` or `..`"),
+                ));
+            }
+            (p.to_string(), false)
+        }
         Err(e) => return Err(tool_error(e)),
     };
     let workspace = exists
         && db::overlapping_workspace(&app.db, worker.id, &path)
             .await
             .map_err(internal)?
-            .is_some_and(|w| w.path == path && w.owner_id == s.owner_id);
+            .is_some_and(|w| {
+                w.path == path && w.owner_id == s.owner_id && w.state() == WorkspaceState::Ready
+            });
     let bindings = db::env_bindings(worker.env_bindings);
     let (to, from) = (
         environment_for(&bindings, &path),
@@ -248,23 +298,23 @@ async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, Mc
 }
 
 /// The owner is asked about the move of `s` into `path` (SPEC §7, §10.1): an `approval.request`
-/// of the hub in the session's feed with the options `once` / `deny`, and an open request of
-/// kind [`KIND`] keyed by the call's `request_id`, which keeps what the move needs (`move`:
-/// the path, the project, the call's chain moved on). No expiry; a repeat of the call opens
-/// none and stores no second event.
+/// of the hub in the session's feed with `description` and the options `once` / `deny`, and an
+/// open request of kind [`KIND`] keyed by the call's `request_id`, which keeps what the move
+/// needs (`move`: the path, the project, the call's chain moved on). No expiry; a repeat of the
+/// call opens none and stores no second event.
 async fn ask_owner(
     app: &AppState,
     s: &SessionRow,
     request_id: &str,
     path: &str,
     project: Option<&str>,
-    why: &str,
+    description: &str,
     chain: Value,
 ) -> Result<(), McpError> {
     let payload = json!({
         "request_id": request_id,
         "tool": hqc_proto::mcp::MOVE,
-        "description": format!("The agent asks to move this session into {why}:\n{path}"),
+        "description": description,
         "options": [
             {"id": worker_approval::ONCE, "label": "Allow", "canonical": "once"},
             {"id": worker_approval::DENY, "label": "Deny", "canonical": "deny"},
@@ -298,7 +348,9 @@ async fn ask_owner(
 /// moves as the call asked, into the path the owner was shown, a missing folder made, and then
 /// as [`tool`] goes on after a move; the call gets that result, or the move's error, as an
 /// `mcp.result` of its own, kept in the request until the worker acknowledges it. Off the
-/// answer's HTTP request, so that a client that goes away does not cut the move short.
+/// answer's HTTP request, so that a client that goes away does not cut the move short. A result
+/// that is not stored carries the move out again, as [`recover`] does after a hub restart: a
+/// move already done answers as a repeat, and the input after it is stored once.
 pub fn allowed(app: &AppState, p: PendingRow) {
     let app = app.clone();
     tokio::spawn(async move {
@@ -309,7 +361,8 @@ pub fn allowed(app: &AppState, p: PendingRow) {
         tracing::info!(session_id = %p.session_id, request_id = %p.request_id, ok = r.error.is_none(), "allowed hqc_move carried out");
         let frame = json!({"type": "mcp.result", "payload": r});
         if let Err(e) = db::set_request_result(&app.db, p.id, &frame).await {
-            tracing::error!(request_id = %p.request_id, error = %e, "the result of an allowed move not stored");
+            tracing::error!(request_id = %p.request_id, error = %e, "the result of an allowed move not stored; carrying it out again");
+            allowed(&app, p);
             return;
         }
         requests::deliver_result(
@@ -321,6 +374,21 @@ pub fn allowed(app: &AppState, p: PendingRow) {
         )
         .await;
     });
+}
+
+/// On hub start (SPEC §3 PendingRequest, §7): every move the owner allowed whose result is not
+/// stored — the hub stopped while it carried the move out — goes through [`allowed`] again, so
+/// the call gets its result.
+pub async fn recover(app: AppState) {
+    match db::allowed_moves_without_result(&app.db).await {
+        Ok(rows) => {
+            for p in rows {
+                tracing::info!(session_id = %p.session_id, request_id = %p.request_id, "an allowed hqc_move without a result carried out again");
+                allowed(&app, p);
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "allowed moves without a result"),
+    }
 }
 
 async fn carry_out(app: &AppState, p: &PendingRow) -> Result<Value, McpError> {
@@ -578,18 +646,58 @@ async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
 }
 
 /// What refuses a move of `s` into `path` in `project` anyway, checked before the owner is
-/// asked (SPEC §7): [`movable`], an unknown `project` (`404`) and an [`overlap`] of `path`.
+/// asked (SPEC §7): [`movable`], an unknown `project` (`404`), an [`overlap`] of `path`, and a
+/// workspace of the owner at `path` that is not ready (`409 workspace_not_ready`) or, when
+/// `project` names another, of another project. Otherwise what the card says the move lands
+/// in: `in project <name>` or `in a new project <folder name>`, and whether the folder becomes
+/// a new workspace, mirrored.
 async fn refused(
     app: &AppState,
     s: &SessionRow,
     path: &str,
     project: Option<&str>,
-) -> ApiResult<()> {
+) -> ApiResult<(String, bool)> {
     let worker = movable(app, s).await?;
-    if let Some(p) = project {
-        owner_project(app, s.owner_id, p).await?;
+    let wanted = match project {
+        Some(p) => Some(owner_project(app, s.owner_id, p).await?),
+        None => None,
+    };
+    overlap(app, worker.id, s, path).await?;
+    let Some(w) = db::overlapping_workspace(&app.db, worker.id, path)
+        .await?
+        .filter(|w| w.owner_id == s.owner_id && Path::new(&w.path) == Path::new(path))
+    else {
+        let lands = match wanted {
+            Some(p) => format!("in project {}", p.name),
+            None => format!("in a new project {}", folder_name(path)),
+        };
+        return Ok((lands, true));
+    };
+    match w.state() {
+        WorkspaceState::Ready => {}
+        WorkspaceState::Creating => {
+            return Err(ApiError::Conflict(
+                "workspace_not_ready",
+                format!("the worker is still making {}", w.path),
+            ))
+        }
+        WorkspaceState::Failed => {
+            return Err(ApiError::Conflict(
+                "workspace_not_ready",
+                format!("{} could not be cloned; remove it", w.path),
+            ))
+        }
     }
-    overlap(app, worker.id, s, path).await
+    if let Some(p) = wanted.filter(|p| p.id != w.project_id) {
+        return Err(ApiError::BadRequest(format!(
+            "{path} is a workspace of another project, not of {}",
+            p.slug
+        )));
+    }
+    let p = db::project(&app.db, w.project_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok((format!("in project {}", p.name), false))
 }
 
 /// `409 workspace_conflict` when `path` equals another owner's workspace on `worker`, lies
@@ -625,13 +733,19 @@ async fn new_project(app: &AppState, s: &SessionRow, path: &str) -> ApiResult<db
         }
         return Ok(p);
     }
-    let name: String = Path::new(path)
+    let name = folder_name(path);
+    let p = db::create_project_as(&app.db, id, s.owner_id, &api::project_name(&name)?, "").await?;
+    tracing::info!(project_id = %p.id, session_id = %s.id, "project created for a move");
+    Ok(p)
+}
+
+/// The name of the project a move to `path` makes: the folder's last component, cut to
+/// [`api::MAX_PROJECT_NAME`].
+fn folder_name(path: &str) -> String {
+    Path::new(path)
         .file_name()
         .map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
         .chars()
         .take(api::MAX_PROJECT_NAME)
-        .collect();
-    let p = db::create_project_as(&app.db, id, s.owner_id, &api::project_name(&name)?, "").await?;
-    tracing::info!(project_id = %p.id, session_id = %s.id, "project created for a move");
-    Ok(p)
+        .collect()
 }

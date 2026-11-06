@@ -4,22 +4,26 @@
 //! - Only a Claude Code session with a workspace, not archived, neither driven from VS Code
 //!   (`locked_by: vscode`) nor held open by a live process outside hqc (`held_by`, SPEC
 //!   §9.3), with no subagent running (`subagents`, a foreground one too), whose worker is
-//!   online and reports `claude_code.moves` (SPEC §5.4); otherwise `409`. Checked again on the
-//!   row read anew under the owner's lock: it may change during the worker's round-trip.
+//!   its owner's, online and reports `claude_code.moves` (SPEC §5.4); otherwise `409`.
+//!   Checked again on the row read anew under the owner's lock: it may change during the
+//!   worker's round-trip.
 //! - The worker checks the folder with `fs.stat` (`create`: it makes a missing one), with the
 //!   codes of `POST /api/workspaces`; the canonical path it reports is the target. With
-//!   `create` the overlap check below runs on the requested path first, so a refused move
-//!   makes no folder (unless the path reaches a workspace through a symlink, which only the
-//!   canonical path shows).
+//!   `create` the overlap and readiness checks below run on the requested path first, so a
+//!   refused move makes no folder (unless the path reaches a workspace through a symlink,
+//!   which only the canonical path shows).
 //! - A workspace of the owner on that worker at exactly that path is taken with its project
-//!   (`project`, when given, must be that one); a path that equals another owner's
+//!   (`project`, when given, must be that one), unless it is not `ready` (`409
+//!   workspace_not_ready`, as for a new session); a path that equals another owner's
 //!   workspace, lies inside one or contains one is `409 workspace_conflict`, and no record is
 //!   created.
 //! - Otherwise the folder becomes a new `dir` workspace, `ready` and mirrored, of `project`
 //!   (a slug or id of the owner's) or of a new project named after the folder's last
 //!   component, whose id is derived from the session and the path ([`crate::mcp::once_id`]),
 //!   so a repeat finds it. The project's first workspace becomes its default.
-//! - A session already in that workspace is a repeat: the same result, nothing written.
+//! - A session already in that workspace is a repeat: the same result, nothing written; the
+//!   `mirror.set` and the start below go out again, as the first call may have ended before
+//!   them.
 //! - One UPDATE moves the session ([`db::move_session`]: `project_id`, `workspace_id`, `cwd =
 //!   '.'`, the slug kept when free there); its old project's saved orders drop it; `system
 //!   session_moved` goes into its feed; then the workspace's `mirror.set`, so its `since`
@@ -30,6 +34,7 @@
 
 use std::path::Path;
 
+use hqc_proto::api::WorkspaceState;
 use uuid::Uuid;
 
 use crate::{
@@ -75,6 +80,7 @@ pub async fn move_session(
             if x.owner_id != s.owner_id || Path::new(&x.path) != Path::new(requested) {
                 return Err(api::workspace_conflict(app, requested, &x).await?);
             }
+            ready(&x)?;
         }
     }
     let path = api::stat_folder(app, worker.id, path, create).await?;
@@ -97,6 +103,7 @@ pub async fn move_session(
                     p.slug
                 )));
             }
+            ready(&w)?;
             w
         }
         Some(x) => return Err(api::workspace_conflict(app, &path, &x).await?),
@@ -126,32 +133,29 @@ pub async fn move_session(
     let project = db::project(&app.db, ws.project_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    if s.workspace_id == Some(ws.id) {
-        // A repeat: the session is there already.
-        return Ok(Moved {
-            session: s,
-            project,
-            workspace: ws,
-        });
+    // A session there already is a repeat: it is not moved again. What follows goes out
+    // again, as the first call may have ended before it (the client went away, a database
+    // error); none of it changes anything twice.
+    if s.workspace_id != Some(ws.id) {
+        let from = db::project(&app.db, s.project_id)
+            .await?
+            .map_or_else(|| "?".to_string(), |p| p.name);
+        db::move_session(&app.db, &s, project.id, ws.id).await?;
+        let moved = db::session(&app.db, s.id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        events::system(
+            app,
+            &moved,
+            MOVED,
+            &format!(
+                "The session moved from {from} to {} ({})",
+                project.name, ws.path
+            ),
+        )
+        .await?;
+        tracing::info!(session_id = %s.id, project_id = %project.id, workspace_id = %ws.id, path = %ws.path, slug = %moved.slug, "session moved");
     }
-    let from = db::project(&app.db, s.project_id)
-        .await?
-        .map_or_else(|| "?".to_string(), |p| p.name);
-    db::move_session(&app.db, &s, project.id, ws.id).await?;
-    let moved = db::session(&app.db, s.id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    events::system(
-        app,
-        &moved,
-        MOVED,
-        &format!(
-            "The session moved from {from} to {} ({})",
-            project.name, ws.path
-        ),
-    )
-    .await?;
-    tracing::info!(session_id = %s.id, project_id = %project.id, workspace_id = %ws.id, path = %ws.path, slug = %moved.slug, "session moved");
     if let Some(conn) = app.workers.get(worker.id) {
         // After the move: `since` of the workspace's sessions counts this one (SPEC §9.1).
         if ws.mirror_enabled {
@@ -159,7 +163,7 @@ pub async fn move_session(
         }
         conn.st.lock().await.sessions.entry(s.id).or_default().start = StartState::NotStarted;
     }
-    delivery::kick(app, s.id, moved.process_state != "stopped").await;
+    delivery::kick(app, s.id, s.process_state != "stopped").await;
     app.session_changed(s.id);
     let session = db::session(&app.db, s.id)
         .await?
@@ -169,6 +173,22 @@ pub async fn move_session(
         project,
         workspace: ws,
     })
+}
+
+/// Workspace `w` takes the session, as for a new session (T45): a clone that runs or failed
+/// has no folder to run in, `409 workspace_not_ready`.
+fn ready(w: &db::WorkspaceRow) -> ApiResult<()> {
+    match w.state() {
+        WorkspaceState::Ready => Ok(()),
+        WorkspaceState::Creating => Err(ApiError::Conflict(
+            "workspace_not_ready",
+            format!("the worker is still making {}", w.path),
+        )),
+        WorkspaceState::Failed => Err(ApiError::Conflict(
+            "workspace_not_ready",
+            format!("{} could not be cloned; remove it", w.path),
+        )),
+    }
 }
 
 /// The worker of session `s` when nothing refuses its move; otherwise `409` (`archived`,
@@ -191,9 +211,8 @@ async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
             "the session is driven or open outside hqc (VS Code): close it there first",
         ));
     }
-    // A background subagent outlives the turn: the agent would wait in its old folder for it,
-    // and the input meanwhile would run there. The hub sees only the count, so a foreground
-    // one refuses too.
+    // A background subagent outlives the turn: the agent, and its input with it, would wait in
+    // its old folder for it. The hub sees only the count, so a foreground one refuses too.
     if s.subagents > 0 {
         return Err(unavailable(
             "a subagent of the session is still running: move once it has ended",
@@ -203,8 +222,9 @@ async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
         Some(w) => db::worker(&app.db, w).await?,
         None => None,
     }
-    .filter(|w| w.revoked_at.is_none())
-    .ok_or_else(|| unavailable("the session has no worker"))?;
+    // As for `POST /api/workspaces`: the folder becomes a workspace of the owner there.
+    .filter(|w| w.owner_id == s.owner_id && w.revoked_at.is_none())
+    .ok_or_else(|| unavailable("the session has no worker of its owner"))?;
     if !app.workers.is_online(worker.id) {
         return Err(ApiError::Conflict(
             "worker_offline",

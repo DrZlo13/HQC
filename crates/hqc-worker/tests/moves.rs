@@ -178,46 +178,148 @@ async fn a_running_session_moves_after_its_turn() {
     w.stop().await;
 }
 
-/// A background subagent outlives the turn: the move waits for it, and for the turn the runtime
-/// then runs by itself on its result, not only for the end of the turn.
+/// An input that comes while a move waits is not written into the running turn (SPEC §17.2):
+/// it is for the agent in the new folder (the one after `hqc_move`, §7), which gets it as its
+/// first turn there.
 #[tokio::test]
-async fn a_move_waits_for_a_background_subagent() {
+async fn input_during_a_waiting_move_goes_to_the_new_folder() {
     let env = Env::with_mirror();
     let (ws, other) = (env.workspace(), other(&env));
     transcript(&env, &encode_project_dir(&ws.display().to_string()), &ws);
     let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
     let mut hub = FakeHub::start().await;
     let w = start_worker(&env, &hub.url(), &adapters);
     let mut c = hub.accept().await;
     c.handshake().await;
     let sid = Uuid::now_v7();
     started(&mut c, start_in(&env, sid, &ws)).await;
-    adapters.emit(sid, AdapterEvent::Subagents(1)).await;
-
-    started(&mut c, start_in(&env, sid, &other)).await;
-    adapters.end_turn(sid).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        count_kills(&adapters, sid),
-        0,
-        "not while the subagent runs"
-    );
-    adapters.emit(sid, AdapterEvent::Subagents(0)).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        count_kills(&adapters, sid),
-        0,
-        "not before the runtime's own turn"
-    );
-
-    adapters.end_turn(sid).await;
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    c.frame("session.input", input(sid, a, "A")).await;
     adapters
-        .wait_for("the start in the new folder", |_| {
-            adapters.start_specs().len() == 2
+        .wait_for("input A", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: a,
+            })
         })
         .await;
+    adapters.accept_input(sid, a).await;
+
+    started(&mut c, start_in(&env, sid, &other)).await;
+    c.frame("session.input", input(sid, b, "you moved")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let injected = FakeCall::Inject {
+        session_id: sid,
+        event_id: b,
+    };
+    assert!(
+        !adapters.calls().contains(&injected),
+        "{:?}",
+        adapters.calls()
+    );
+
+    adapters.end_turn(sid).await;
+    let b_input = FakeCall::Input {
+        session_id: sid,
+        event_id: b,
+    };
+    let calls = adapters
+        .wait_for("B as a turn", |c| c.contains(&b_input))
+        .await;
     assert_eq!(workdirs(&adapters), [ws, other]);
+    let at = |call: &FakeCall| calls.iter().position(|c| c == call).unwrap();
+    assert!(at(&FakeCall::Kill(sid)) < at(&b_input), "{calls:?}");
     w.stop().await;
+}
+
+/// A background subagent outlives the turn: the move waits for it, and no input starts a turn
+/// in the old folder meanwhile. Nor does the end of the last subagent move the agent: the
+/// runtime reports it before the turn it then runs by itself on the subagent's result, and the
+/// end of that turn moves it. When no such turn comes, the next input does, and goes to the new
+/// process.
+#[tokio::test]
+async fn a_move_waits_for_a_background_subagent() {
+    // `before`: input B before the subagent's end, then a turn of the runtime's own; `after`: B
+    // after the subagent's end, no turn of the runtime's own; `during`: B before the
+    // subagent's end, which comes while a turn of the runtime's own runs.
+    for case in ["before", "after", "during"] {
+        let env = Env::with_mirror();
+        let (ws, other) = (env.workspace(), other(&env));
+        transcript(&env, &encode_project_dir(&ws.display().to_string()), &ws);
+        let adapters = FakeAdapters::new();
+        let mut hub = FakeHub::start().await;
+        let w = start_worker(&env, &hub.url(), &adapters);
+        let mut c = hub.accept().await;
+        c.handshake().await;
+        let sid = Uuid::now_v7();
+        started(&mut c, start_in(&env, sid, &ws)).await;
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        let given = |e: Uuid| FakeCall::Input {
+            session_id: sid,
+            event_id: e,
+        };
+        c.frame("session.input", input(sid, a, "A")).await;
+        adapters
+            .wait_for("input A", |c| c.contains(&given(a)))
+            .await;
+        adapters.accept_input(sid, a).await;
+        adapters.emit(sid, AdapterEvent::Subagents(1)).await;
+
+        started(&mut c, start_in(&env, sid, &other)).await;
+        adapters.end_turn(sid).await;
+        let mut fb = None;
+        if case != "after" {
+            fb = Some(c.frame("session.input", input(sid, b, "B")).await);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            count_kills(&adapters, sid),
+            0,
+            "{case}: not while the subagent runs"
+        );
+        assert!(
+            !adapters.calls().contains(&given(b)),
+            "{case}: no turn in the old folder: {:?}",
+            adapters.calls()
+        );
+
+        adapters.set_own_turn(case == "during");
+        adapters.emit(sid, AdapterEvent::Subagents(0)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            count_kills(&adapters, sid),
+            0,
+            "{case}: not at the subagent's end"
+        );
+        assert!(
+            !adapters.calls().contains(&given(b)),
+            "{case}: {:?}",
+            adapters.calls()
+        );
+        if case == "after" {
+            fb = Some(c.frame("session.input", input(sid, b, "B")).await);
+        } else {
+            // The runtime's own turn on the subagent's result begins (`before`) and ends.
+            adapters.set_own_turn(true);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(count_kills(&adapters, sid), 0, "{case}: not during it");
+            adapters.set_own_turn(false);
+            adapters.end_turn(sid).await;
+        }
+        let calls = adapters
+            .wait_for(&format!("{case}: B in the new folder"), |c| {
+                c.contains(&given(b))
+            })
+            .await;
+        assert_eq!(workdirs(&adapters), [ws, other]);
+        let at = |x: &FakeCall| calls.iter().position(|c| c == x).unwrap();
+        assert!(at(&FakeCall::Kill(sid)) < at(&given(b)), "{calls:?}");
+        adapters.accept_input(sid, b).await;
+        let r = reply_to(&mut c, &fb.unwrap()).await;
+        assert_eq!(r["type"], "ack", "{r}");
+        w.stop().await;
+    }
 }
 
 /// A turn the runtime starts by itself after a background task's end holds the move as a turn

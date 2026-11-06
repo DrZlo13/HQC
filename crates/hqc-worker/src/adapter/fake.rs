@@ -62,6 +62,8 @@ struct State {
     /// What [`Adapter::can_inject`] answers; false by default, as for a runtime that takes
     /// no input during a turn.
     injectable: bool,
+    /// What [`Adapter::runs_own_turn`] answers; false by default.
+    own_turn: bool,
 }
 
 #[derive(Clone, Default)]
@@ -89,6 +91,12 @@ impl FakeAdapters {
     /// Claude Code does while it asks nothing.
     pub fn set_injectable(&self, injectable: bool) {
         self.lock().injectable = injectable;
+    }
+
+    /// Whether the agents run a turn they started by themselves from now on, as Claude Code
+    /// does after a background task's end, until the test ends it with [`Self::end_turn`].
+    pub fn set_own_turn(&self, own: bool) {
+        self.lock().own_turn = own;
     }
 
     /// Make every following `start`/`resume` fail.
@@ -277,6 +285,10 @@ impl Adapter for FakeAdapter {
 
     fn can_inject(&self) -> bool {
         self.shared.lock().injectable
+    }
+
+    fn runs_own_turn(&self) -> bool {
+        self.shared.lock().own_turn
     }
 
     async fn inject_with(

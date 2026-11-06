@@ -5,8 +5,9 @@
 //!   with `error {invalid_frame}` and nothing is created or spawned (SPEC §2.1, §14).
 //!   `mode: new` calls [`Adapter::start`], `mode: resume` [`Adapter::resume`] (SPEC §5.3).
 //!   `session.start` for a live process is acked without touching it, unless it names another
-//!   folder: a move, which waits until no turn and no subagent runs, nothing is written into
-//!   a turn and no capped input waits, then stops the process and starts the next one there;
+//!   folder: a move, which waits until no turn (also none the runtime started by itself) and
+//!   no subagent runs, nothing is written into a turn and no capped input waits, then stops
+//!   the process and starts the next one there;
 //!   before every start of a Claude Code agent its transcript is moved to where the working
 //!   directory puts it, if it is elsewhere and no live process outside hqc holds it
 //!   ([`crate::mirror::relocate`]).
@@ -1216,15 +1217,17 @@ impl Session {
     }
 
     /// A move waits (SPEC §5.3): the running process is stopped and started again in the new
-    /// folder, its transcript moved there ([`Session::ensure_running`]), once no turn and no
-    /// subagent runs, nothing is written into a turn and no capped input waits for `ask`
-    /// (T39); the end of a turn calls this again. Not the end of a background subagent: the
-    /// runtime then runs a turn of its own on its result, and the end of that turn moves.
+    /// folder, its transcript moved there ([`Session::ensure_running`]), once no turn runs (a
+    /// turn the runtime started by itself included: [`Adapter::runs_own_turn`]) and no
+    /// subagent, nothing is written into a turn and no capped input waits for `ask` (T39); the
+    /// end of a turn calls this again. Not the end of a background subagent: the runtime then
+    /// runs a turn of its own on its result, and the end of that turn moves.
     /// Background commands of the agent itself die with the process; its next input says so.
     async fn restart_for_move(&mut self) {
         if self.moving.is_none()
             || self.state != ProcessState::Running
             || self.turn.is_some()
+            || self.adapter.runs_own_turn()
             || self.subagents > 0
             || !self.injected.is_empty()
             || self.lowering.is_some()

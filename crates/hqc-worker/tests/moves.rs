@@ -220,6 +220,95 @@ async fn a_move_waits_for_a_background_subagent() {
     w.stop().await;
 }
 
+/// A turn the runtime starts by itself after a background task's end holds the move as a turn
+/// of ours does: the agent moves at its end, not in the middle of it.
+#[tokio::test]
+async fn a_move_waits_for_a_turn_the_runtime_starts_by_itself() {
+    let env = Env::new();
+    let (ws, other) = (env.workspace(), other(&env));
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    started(&mut c, start_in(&env, sid, &ws)).await;
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(0)).await;
+    adapters.set_own_turn(true);
+
+    started(&mut c, start_in(&env, sid, &other)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        count_kills(&adapters, sid),
+        0,
+        "not during the runtime's own turn"
+    );
+
+    adapters.set_own_turn(false);
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("the start in the new folder", |_| {
+            adapters.start_specs().len() == 2
+        })
+        .await;
+    assert_eq!(workdirs(&adapters), [ws, other]);
+    w.stop().await;
+}
+
+/// A Stop asked while no turn runs is the old process's: an input the new process drops after
+/// a move goes back to the queue, as with no Stop, instead of failing as cancelled by it.
+#[tokio::test]
+async fn a_stop_before_a_move_cancels_nothing_after_it() {
+    let env = Env::new();
+    let (ws, other) = (env.workspace(), other(&env));
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    started(&mut c, start_in(&env, sid, &ws)).await;
+    let stop = c.frame("session.stop", json!({"session_id": sid})).await;
+    assert_eq!(reply_to(&mut c, &stop).await["type"], "ack");
+    assert!(adapters.calls().contains(&FakeCall::Stop(sid)));
+    started(&mut c, start_in(&env, sid, &other)).await;
+    adapters
+        .wait_for("the start in the new folder", |_| {
+            adapters.start_specs().len() == 2
+        })
+        .await;
+
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    let given = |e: Uuid| FakeCall::Input {
+        session_id: sid,
+        event_id: e,
+    };
+    c.frame("session.input", input(sid, a, "A")).await;
+    adapters
+        .wait_for("input A", |c| c.contains(&given(a)))
+        .await;
+    adapters.accept_input(sid, a).await;
+    let fb = c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("B into A's turn", |c| {
+            c.contains(&FakeCall::Inject {
+                session_id: sid,
+                event_id: b,
+            })
+        })
+        .await;
+    adapters.end_turn_carrying(sid, vec![], vec![b]).await;
+    adapters
+        .wait_for("B again, as the next turn", |c| c.contains(&given(b)))
+        .await;
+    adapters.accept_input(sid, b).await;
+    let r = reply_to(&mut c, &fb).await;
+    assert_eq!(r["type"], "ack", "{r}");
+    w.stop().await;
+}
+
 /// A background command of the agent itself does not hold the move: it dies with the process,
 /// and the first input in the new folder that is no slash command tells the agent so; the
 /// next one does not. A command started during the turn a move waits for counts too.

@@ -778,8 +778,12 @@ MCP calls (worker → hub → worker):
   included (Claude Code after a background task's end, §8.1), no subagent runs (`subagents`,
   §5.4), no input is written into the running turn and no switch to `ask` is pending, otherwise
   at the end of the first turn after which all of these hold (after a background subagent the
-  runtime runs a turn of its own on its result, §8.1); the same folder again before that
-  cancels the waiting move. Background commands and monitors of the agent itself do not hold
+  runtime runs a turn of its own on its result, §8.1, so the subagent's end does not move the
+  agent: the CLI reports it before that turn begins), or, when no such turn comes, at the next
+  input that finds them all holding; the same folder again before that cancels the waiting
+  move. Meanwhile no input starts a turn in the old folder or is written into the running one
+  (§17.2): it waits and goes to the new process, or, the move cancelled, to the running one.
+  Background commands and monitors of the agent itself do not hold
   the move and stop with the process; when it stopped any, every input but a slash command
   the runtime is given in the new folder, until it takes one, begins with a line telling the
   agent how many (`[hqc] Moving this session to <folder> stopped N background task(s) …`, then
@@ -1312,12 +1316,13 @@ the rest is marked "later"):
   `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
   folder's project (§3 Session). The hub checks the folder with `fs.stat` as `POST
   /api/workspaces` does, with the same codes (`create`: the worker makes a missing folder; the
-  overlap check below runs on the requested path before that, so a `409` leaves no folder,
+  overlap and `ready` checks below run on the requested path before that, so a `409` leaves no folder,
   unless the path reaches a workspace through a symlink, which only the canonical path shows; `400
   path_not_found`, `outside_allowed_roots`, `not_a_directory`, `invalid_path`, `409
   worker_offline`, `504 worker_timeout`), and takes the canonical path. A workspace of the
   session's owner on that worker at exactly that path is taken with its project (`project`, when
-  given, must be that one: `400` otherwise); one that lies inside the path or contains it, or
+  given, must be that one: `400` otherwise), unless it is not `ready` (§3 Workspace): `409
+  workspace_not_ready`, as for a new session; one that lies inside the path or contains it, or
   another owner's, is `409 workspace_conflict` with the body of `POST /api/workspaces`.
   Otherwise the folder becomes a new `dir` workspace, mirrored (§9.2), of `project` (an id or
   slug of the owner's projects, `404` otherwise) or of a new project named after the folder's
@@ -1326,12 +1331,16 @@ the rest is marked "later"):
   it (the same project's keeps it), the feed gets `system session_moved` (§4), the workspace's
   `mirror.set` goes out, and a running agent gets `session.start` with the new folder, which the
   worker applies between turns (§5.3). No input is queued: a stopped agent starts there with its
-  next input. A session already in that workspace is answered as it is. `409 archived`: an
+  next input. A session already in that workspace is answered as it is, nothing written and no
+  second `session_moved`; the workspace's `mirror.set` and the `session.start` of a running agent
+  go out again, as the first call may have ended between the move and them (the client went
+  away, a database error). `409 archived`: an
   archived session, as for `/takeover`. `409 unavailable`: not a Claude Code session, the
   service session, no workspace, driven from VS Code (`locked_by: vscode`), held open by a live
   process outside hqc (`held_by`, §9.3), a session whose subagents still run (`subagents`, §5.4;
   a foreground one too, as the hub sees only the count: a background one would keep the agent in
-  its old folder, and input meanwhile would run there), or a worker that does not report
+  its old folder), a worker that is not the session owner's (as for `POST /api/workspaces`), or
+  a worker that does not report
   `capabilities.claude_code.moves` (§5.4). These refusals are checked before `fs.stat` and again
   after it, on the session read anew: it may change meanwhile. The client offers it as "Move to
   project…" in the chat's "More" menu: the project (one of the user's, or a new one named after the folder), one
@@ -3598,7 +3607,9 @@ whenever one of them comes from a session in `ask`, and a capped input never joi
 honours `joined` only for a `user.message` without `schedule_id`; a `joined` on any other input
 is the worker's mistake, logged, and the input's turn opens (since 0.71). Otherwise it waits for the end of
 the turn as before (scheduled runs and slash commands always do), and so does everything behind
-it, so `seq` order holds. The CLI takes the input at its next step, after the result of the
+it, so `seq` order holds. Since 0.75 nothing is written into the turn either while a move of
+the session waits (§5.3): the input is for the agent in the new folder. The CLI takes the input
+at its next step, after the result of the
 tool call running then, and the worker answers `ack {event_id, joined: true}` on its echo; the
 turn's final `agent.message` stays `in_reply_to` the turn's own input. When the turn ends
 before that (the input came during the final answer, or before an interrupt), the CLI runs it
@@ -3899,15 +3910,21 @@ owner with its project, or a new mirrored workspace of `project` or of a new pro
 the folder; the slug is kept when free, otherwise `-2`…; the old project's saved order drops the
 session (a move within the project keeps its place); `system session_moved` (§4); `409
 archived`; `409 unavailable` for a session driven from VS Code, held by a live process or with
-subagents still running (a foreground one too), and for a worker without
+subagents still running (a foreground one too), for a worker that is not the session owner's
+and for a worker without
 `capabilities.claude_code.moves` (§5.4, reported only when Claude Code's config folder exists),
 these refusals checked again on the session read anew after `fs.stat`; the folder checks and
-codes of `POST /api/workspaces`, with `create` the overlap check on the requested path before the
-worker makes the folder, so a `409` leaves none. Nothing is queued. The client: "Move to project…" in
+codes of `POST /api/workspaces`; `409 workspace_not_ready` for an exact workspace that is not
+`ready`; with `create` the overlap and `ready` checks on the requested path before the worker
+makes the folder, so a `409` leaves none. Nothing is queued. A repeat writes nothing, but sends the workspace's
+`mirror.set` and the start of a running agent again. The client: "Move to project…" in
 the chat's "More" menu; a summary with another `project_id` moves the session in the lists.
 §5.3, §10.2: a `session.start` for a running agent with another folder is a move, applied
-between turns, a turn the runtime started by itself waited for too, once no subagent runs, with
-the owner's consent to a new folder of a foreign session; the agent's own background commands
+between turns, a turn the runtime started by itself waited for too, once no subagent runs (not
+at the end of the last one: the end of the runtime's turn on its result moves the agent, or,
+with no such turn, the next input), with
+the owner's consent to a new folder of a foreign session; while it waits no input starts a turn
+in the old folder or is written into the running one (§17.2); the agent's own background commands
 stop with it, and its first input in the new
 folder that the runtime takes and is no slash command says how many. §8.1, §9.2, §2.1: before every start of a Claude Code agent the worker moves its
 transcript by uuid to the place of the working directory, within `allowed_roots`, never over

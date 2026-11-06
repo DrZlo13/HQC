@@ -5,8 +5,10 @@
 //! is never accepted. With `HQC_OIDC_*` it is instead an OIDC ID token from
 //! `Authorization: Bearer` (put there by a reverse proxy such as oauth2-proxy), checked the
 //! same way against the configured issuer, audience and JWKS URL, and in addition with
-//! `email_verified: true` and, when it has a `typ`, `typ: ID`; `Cf-Access-Jwt-Assertion` is
-//! then not read. `HQC_DEV=1` replaces this with a fixed user for local development.
+//! `email_verified: true`, when it has a `typ`, `typ: ID`, with an array `aud`, `azp` equal to
+//! the client id, and an email from `HQC_OIDC_ALLOWED_EMAILS`; the user is the one bound to
+//! its `sub`, and `Cf-Access-Jwt-Assertion` is not read. `HQC_DEV=1` replaces this with a
+//! fixed user for local development.
 //!
 //! Workers: a random 256-bit bearer token; the database keeps only its sha256.
 
@@ -52,7 +54,13 @@ impl Auth {
                 issuer,
                 aud,
                 jwks_url,
-            } => Auth::Oidc(Box::new(AccessVerifier::oidc(issuer, aud, jwks_url))),
+                allowed_emails,
+            } => Auth::Oidc(Box::new(AccessVerifier::oidc(
+                issuer,
+                aud,
+                jwks_url,
+                allowed_emails,
+            ))),
             AuthConfig::Dev { email } => Auth::Dev {
                 email: email.clone(),
             },
@@ -67,6 +75,10 @@ pub struct AccessVerifier {
     /// OIDC mode: only ID tokens (`typ`, when present, is `ID`) whose `email_verified` is
     /// `true`. Without it any account of the realm could set its email to someone else's.
     id_token: bool,
+    /// OIDC mode: the only emails let in (`HQC_OIDC_ALLOWED_EMAILS`, lowercase); without it any
+    /// account of the realm with an ID token for the client would become a hub user, however
+    /// the token came.
+    allowed_emails: Vec<String>,
     http: reqwest::Client,
     /// The last fetched key set and when it was fetched. Readers never wait for a fetch.
     keys: RwLock<Option<(JwkSet, Instant)>>,
@@ -89,6 +101,12 @@ const JWKS_BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// What a client learns about a rejected token; the reason goes to the log.
 const BAD_TOKEN: &str = "invalid token";
 
+/// A rejected token: [`BAD_TOKEN`] to the client, `why` to the log.
+fn refused(why: &dyn std::fmt::Display) -> ApiError {
+    tracing::info!("token refused: {why}");
+    ApiError::Unauthorized(BAD_TOKEN.into())
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct AccessClaims {
     #[serde(default)]
@@ -98,6 +116,20 @@ struct AccessClaims {
     email_verified: Option<serde_json::Value>,
     #[serde(default)]
     typ: Option<serde_json::Value>,
+    #[serde(default)]
+    sub: Option<serde_json::Value>,
+    #[serde(default)]
+    aud: Option<serde_json::Value>,
+    #[serde(default)]
+    azp: Option<serde_json::Value>,
+}
+
+/// Who a verified token was issued for.
+pub struct Identity {
+    pub email: String,
+    /// OIDC mode only: the token's `sub`, the key of the hub user (the issuer is fixed by
+    /// `HQC_OIDC_ISSUER`).
+    pub oidc_sub: Option<String>,
 }
 
 impl AccessVerifier {
@@ -114,6 +146,7 @@ impl AccessVerifier {
             aud: aud.to_string(),
             certs_url: certs_url.to_string(),
             id_token: false,
+            allowed_emails: Vec::new(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -125,22 +158,21 @@ impl AccessVerifier {
         }
     }
 
-    /// As [`Self::with_issuer`], for OIDC ID tokens: also `email_verified: true` and, when
-    /// the token has a `typ`, `typ: ID` (Keycloak's access tokens are `Bearer`).
-    pub fn oidc(issuer: &str, aud: &str, certs_url: &str) -> Self {
+    /// As [`Self::with_issuer`], for OIDC ID tokens: also `email_verified: true`, when the
+    /// token has a `typ`, `typ: ID` (Keycloak's access tokens are `Bearer`), with an array
+    /// `aud`, `azp: <aud>` (OIDC Core 3.1.3.7), an email of `allowed_emails` and a `sub`.
+    pub fn oidc(issuer: &str, aud: &str, certs_url: &str, allowed_emails: &[String]) -> Self {
         Self {
             id_token: true,
+            allowed_emails: allowed_emails.to_vec(),
             ..Self::with_issuer(issuer, aud, certs_url)
         }
     }
 
-    /// Verify the token and return the email it was issued for. The client gets a generic
+    /// Verify the token and return who it was issued for. The client gets a generic
     /// message; why the token was refused is logged.
-    pub async fn verify(&self, token: &str) -> Result<String, ApiError> {
-        let bad = |why: &dyn std::fmt::Display| {
-            tracing::info!("token refused: {why}");
-            ApiError::Unauthorized(BAD_TOKEN.into())
-        };
+    pub async fn verify(&self, token: &str) -> Result<Identity, ApiError> {
+        let bad = refused;
         let header = jsonwebtoken::decode_header(token).map_err(|e| bad(&e))?;
         if header.alg != Algorithm::RS256 {
             return Err(bad(&format_args!("algorithm {:?}", header.alg)));
@@ -154,6 +186,7 @@ impl AccessVerifier {
         v.set_issuer(&[&self.issuer]);
         v.set_audience(&[&self.aud]);
         v.set_required_spec_claims(&["exp", "iss", "aud"]);
+        v.validate_nbf = true;
         let claims = jsonwebtoken::decode::<AccessClaims>(token, &key, &v)
             .map_err(|e| bad(&e))?
             .claims;
@@ -161,15 +194,42 @@ impl AccessVerifier {
             if let Some(typ) = claims.typ.as_ref().filter(|t| t.as_str() != Some("ID")) {
                 return Err(bad(&format_args!("typ {typ} is not an ID token")));
             }
+            let azp = claims.azp.as_ref().and_then(|a| a.as_str());
+            if claims.aud.as_ref().is_some_and(|a| a.is_array()) && azp != Some(self.aud.as_str()) {
+                return Err(bad(&format_args!(
+                    "aud is an array and azp {azp:?} is not the client id"
+                )));
+            }
             if claims.email_verified != Some(serde_json::Value::Bool(true)) {
                 tracing::info!("token refused: email_verified is not true");
                 return Err(ApiError::Forbidden("the email is not verified".into()));
             }
         }
-        claims
+        let email = claims
             .email
             .filter(|e| e.contains('@'))
-            .ok_or_else(|| ApiError::Forbidden("the token has no email".into()))
+            .ok_or_else(|| ApiError::Forbidden("the token has no email".into()))?;
+        if !self.id_token {
+            return Ok(Identity {
+                email,
+                oidc_sub: None,
+            });
+        }
+        if !self.allowed_emails.contains(&email.trim().to_lowercase()) {
+            return Err(bad(&format_args!(
+                "{email} is not in HQC_OIDC_ALLOWED_EMAILS"
+            )));
+        }
+        let sub = claims
+            .sub
+            .as_ref()
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| bad(&"no sub"))?;
+        Ok(Identity {
+            email,
+            oidc_sub: Some(sub.to_string()),
+        })
     }
 
     /// The key `kid` from the cached set, refreshing it when it is old or does not know
@@ -255,8 +315,11 @@ impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, app: &AppState) -> Result<Self, ApiError> {
-        let email = match &app.auth {
-            Auth::Dev { email } => email.clone(),
+        let id = match &app.auth {
+            Auth::Dev { email } => Identity {
+                email: email.clone(),
+                oidc_sub: None,
+            },
             Auth::Access(v) => {
                 let token = parts
                     .headers
@@ -273,7 +336,17 @@ impl FromRequestParts<AppState> for CurrentUser {
                 v.verify(token).await?
             }
         };
-        let u = db::ensure_user(&app.db, &email).await?;
+        let u = match &id.oidc_sub {
+            None => db::ensure_user(&app.db, &id.email).await?,
+            Some(sub) => db::ensure_oidc_user(&app.db, &id.email, sub)
+                .await?
+                .ok_or_else(|| {
+                    refused(&format_args!(
+                        "{} belongs to a user bound to another subject",
+                        id.email
+                    ))
+                })?,
+        };
         Ok(CurrentUser {
             id: u.id,
             email: u.email,

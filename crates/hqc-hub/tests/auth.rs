@@ -145,8 +145,31 @@ async fn oidc_hub() -> TestHub {
         issuer: ISSUER.into(),
         aud: AUD.into(),
         jwks_url: jwks_server().await,
+        allowed_emails: vec!["bob@example.com".into(), "alice@example.com".into()],
     };
     TestHub::start_with(auth, String::new()).await
+}
+
+/// `GET /api/me` with the ID token of `claims` as the bearer token.
+async fn me_oidc(hub: &TestHub, claims: Value) -> (u16, Value) {
+    let h = format!("Bearer {}", token(claims));
+    me(hub, None, Some(("Authorization", &h))).await
+}
+
+/// `oidc_claims` for `email` and `sub`.
+fn oidc_claims_of(email: &str, sub: &str) -> Value {
+    let mut c = oidc_claims(ISSUER, AUD);
+    c["email"] = json!(email);
+    c["sub"] = json!(sub);
+    c
+}
+
+async fn oidc_sub_of(hub: &TestHub, email: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT oidc_sub FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap()
 }
 
 /// `HQC_OIDC_*` behind oauth2-proxy: the ID token comes in `Authorization: Bearer`, the
@@ -265,6 +288,152 @@ async fn oidc_token_needs_a_verified_email_and_the_id_type() {
     ] {
         let h = format!("Bearer {}", token(claims));
         let (s, v) = me(&hub, None, Some(("Authorization", &h))).await;
+        if s != want {
+            wrong.push(format!("{why}: {s}, not {want}: {v}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    hub.finish().await;
+}
+
+/// Any account of the realm may have an ID token for the client: only the emails of
+/// `HQC_OIDC_ALLOWED_EMAILS` (any case) get in, the others get the answer of a bad token and no
+/// hub user.
+#[tokio::test]
+async fn oidc_email_outside_the_allow_list_is_refused() {
+    let hub = oidc_hub().await;
+    let bad_token = me_oidc(
+        &hub,
+        oidc_claims("https://auth.example.com/realms/other", AUD),
+    )
+    .await;
+    assert_eq!(bad_token.0, 401, "{}", bad_token.1);
+    let eve = me_oidc(&hub, oidc_claims_of("eve@example.com", "u9")).await;
+    assert_eq!(eve, bad_token);
+    let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email = $1")
+        .bind("eve@example.com")
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+    assert_eq!(users, 0);
+    let (s, v) = me_oidc(&hub, oidc_claims_of("Alice@Example.COM", "u2")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["email"], "alice@example.com");
+    hub.finish().await;
+}
+
+/// An OIDC token without a `sub`, or with an empty one, gets the answer of a bad token and no
+/// hub user: there is no subject to bind the user to.
+#[tokio::test]
+async fn oidc_token_without_a_subject_is_refused() {
+    let hub = oidc_hub().await;
+    let bad_token = me_oidc(
+        &hub,
+        oidc_claims("https://auth.example.com/realms/other", AUD),
+    )
+    .await;
+    assert_eq!(bad_token.0, 401, "{}", bad_token.1);
+    let mut none = oidc_claims_of("alice@example.com", "u2");
+    none.as_object_mut().unwrap().remove("sub");
+    assert_eq!(me_oidc(&hub, none).await, bad_token);
+    let empty = oidc_claims_of("alice@example.com", "");
+    assert_eq!(me_oidc(&hub, empty).await, bad_token);
+    let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE email = $1")
+        .bind("alice@example.com")
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap();
+    assert_eq!(users, 0);
+    hub.finish().await;
+}
+
+/// The first OIDC sign-in binds the hub user to the token's `sub`, a user of an earlier
+/// sign-in without one (Access) included; the user of that `sub` stays the same when the email
+/// changes at the provider.
+#[tokio::test]
+async fn oidc_sign_in_binds_the_subject() {
+    let hub = oidc_hub().await;
+    let bob = hqc_hub::db::ensure_user(&hub.app.db, "bob@example.com")
+        .await
+        .unwrap();
+    assert_eq!(oidc_sub_of(&hub, "bob@example.com").await, None);
+    let (s, v) = me_oidc(&hub, oidc_claims_of("bob@example.com", "u1")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["id"], bob.id.to_string());
+    assert_eq!(
+        oidc_sub_of(&hub, "bob@example.com").await.as_deref(),
+        Some("u1")
+    );
+
+    let (s, v) = me_oidc(&hub, oidc_claims_of("alice@example.com", "u2")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        oidc_sub_of(&hub, "alice@example.com").await.as_deref(),
+        Some("u2")
+    );
+
+    // Bob's account at the provider now has another allowed email: still Bob's hub user.
+    let (s, v) = me_oidc(&hub, oidc_claims_of("alice@example.com", "u1")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["id"], bob.id.to_string());
+    hub.finish().await;
+}
+
+/// The hub user of a verified email is not taken over by another account of the provider
+/// with that email once the user is bound to a `sub`.
+#[tokio::test]
+async fn oidc_email_of_another_subject_is_refused() {
+    let hub = oidc_hub().await;
+    let (s, v) = me_oidc(&hub, oidc_claims_of("bob@example.com", "u1")).await;
+    assert_eq!(s, 200, "{v}");
+    let bad_token = me_oidc(
+        &hub,
+        oidc_claims("https://auth.example.com/realms/other", AUD),
+    )
+    .await;
+    let other = me_oidc(&hub, oidc_claims_of("bob@example.com", "u2")).await;
+    assert_eq!(other, bad_token);
+    assert_eq!(
+        oidc_sub_of(&hub, "bob@example.com").await.as_deref(),
+        Some("u1")
+    );
+    hub.finish().await;
+}
+
+/// `nbf` is checked (with the 60 s leeway of `exp`).
+#[tokio::test]
+async fn oidc_token_before_its_nbf_is_refused() {
+    let hub = oidc_hub().await;
+    let now = chrono::Utc::now().timestamp();
+    let mut early = oidc_claims(ISSUER, AUD);
+    early["nbf"] = json!(now + 600);
+    assert_eq!(me_oidc(&hub, early).await.0, 401);
+    let mut valid = oidc_claims(ISSUER, AUD);
+    valid["nbf"] = json!(now - 10);
+    let (s, v) = me_oidc(&hub, valid).await;
+    assert_eq!(s, 200, "{v}");
+    hub.finish().await;
+}
+
+/// An `aud` array counts only with `azp` equal to the client id (OIDC Core 3.1.3.7).
+#[tokio::test]
+async fn oidc_array_aud_needs_azp_of_the_client() {
+    let hub = oidc_hub().await;
+    let with_azp = |azp: Option<&str>| {
+        let mut c = oidc_claims(ISSUER, AUD);
+        c["aud"] = json!([AUD, "other-client"]);
+        if let Some(azp) = azp {
+            c["azp"] = json!(azp);
+        }
+        c
+    };
+    let mut wrong = Vec::new();
+    for (why, claims, want) in [
+        ("no azp", with_azp(None), 401),
+        ("azp of another client", with_azp(Some("other-client")), 401),
+        ("azp of the client", with_azp(Some(AUD)), 200),
+    ] {
+        let (s, v) = me_oidc(&hub, claims).await;
         if s != want {
             wrong.push(format!("{why}: {s}, not {want}: {v}"));
         }

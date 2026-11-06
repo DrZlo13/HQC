@@ -23,7 +23,7 @@ pub struct Config {
     /// `HQC_CLIENT_IP_HEADER`: the header a reverse proxy puts the client's address in
     /// (`X-Real-Ip` for Traefik). When set, per-address limits take the address from it (the
     /// TCP peer when it is absent), and neither `CF-Connecting-IP` nor `CF-IPCountry` is read
-    /// (SPEC §20). `None`: `CF-Connecting-IP`, else the TCP peer.
+    /// (SPEC §20). `None`: `CF-Connecting-IP`, else the TCP peer. Required in OIDC mode.
     pub client_ip_header: Option<axum::http::HeaderName>,
 }
 
@@ -88,16 +88,29 @@ impl ArtifactConfig {
     }
 }
 
+/// `https://host`, or `http://` to a loopback host, without a user before the host; a path may
+/// follow. The rule of `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_PUBLIC_ORIGINS` and the `HQC_OIDC_*`
+/// URLs.
+fn is_https_or_loopback(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() || host.contains('@') {
+        return false;
+    }
+    match scheme {
+        "https" => true,
+        "http" => crate::security::is_loopback_host(host),
+        _ => false,
+    }
+}
+
 /// `HQC_ARTIFACT_PUBLIC_BASE`: `https://host[:port]` (or `http://` on loopback), no path.
 pub fn artifact_public_base(v: &str) -> anyhow::Result<String> {
     let v = v.trim().trim_end_matches('/');
-    let ok = match v.split_once("://") {
-        Some(("https", h)) => !h.is_empty(),
-        Some(("http", h)) => crate::security::is_loopback_host(h),
-        _ => false,
-    };
     let host = v.split_once("://").map(|x| x.1).unwrap_or("");
-    if !ok || host.contains(['/', '?', '#', '@']) {
+    if !is_https_or_loopback(v) || host.contains(['/', '?', '#', '@']) {
         bail!("HQC_ARTIFACT_PUBLIC_BASE={v}: expected https://host[:port] (http only on loopback), without a path");
     }
     Ok(v.to_string())
@@ -208,6 +221,8 @@ pub enum AuthConfig {
         aud: String,
         /// The provider's JWKS (no discovery).
         jwks_url: String,
+        /// `HQC_OIDC_ALLOWED_EMAILS`: the only emails let in, trimmed and lowercase; not empty.
+        allowed_emails: Vec<String>,
     },
     /// Local development without Access: every request is this user. Only with `HQC_DEV=1`.
     Dev { email: String },
@@ -287,11 +302,11 @@ pub fn turn_watchdog_from(v: Option<&str>) -> anyhow::Result<Option<Duration>> {
 
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
-    /// `HQC_ACCESS_AUD`, `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, `HQC_DEV`,
-    /// `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`,
-    /// `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`, `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`,
-    /// `HQC_ARTIFACT_KEY`, `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`,
-    /// `HQC_CLIENT_IP_HEADER`.
+    /// `HQC_ACCESS_AUD`, `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`,
+    /// `HQC_OIDC_ALLOWED_EMAILS`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`,
+    /// `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`,
+    /// `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`,
+    /// `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`, `HQC_CLIENT_IP_HEADER`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -365,14 +380,20 @@ impl Config {
 
 /// How people are authenticated, from `var` (unset or blank: `None`): Cloudflare Access
 /// (`HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD`), an OIDC ID token (`HQC_OIDC_ISSUER`,
-/// `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, all three) or `HQC_DEV=1` with `HQC_DEV_USER` on a
-/// loopback `listen`. Variables of two modes at once refuse to start.
+/// `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, `HQC_OIDC_ALLOWED_EMAILS`, all four, the two URLs
+/// https or http to loopback, and `HQC_CLIENT_IP_HEADER`) or `HQC_DEV=1` with `HQC_DEV_USER` on
+/// a loopback `listen`. Variables of two modes at once refuse to start.
 fn auth_from(var: impl Fn(&str) -> Option<String>, listen: &str) -> anyhow::Result<AuthConfig> {
     let dev = var("HQC_DEV").as_deref() == Some("1");
     let team_domain = var("HQC_ACCESS_TEAM_DOMAIN");
     let aud = var("HQC_ACCESS_AUD");
-    let oidc = ["HQC_OIDC_ISSUER", "HQC_OIDC_AUD", "HQC_OIDC_JWKS_URL"]
-        .map(|k| (k, var(k).map(|v| v.trim().to_string())));
+    let oidc = [
+        "HQC_OIDC_ISSUER",
+        "HQC_OIDC_AUD",
+        "HQC_OIDC_JWKS_URL",
+        "HQC_OIDC_ALLOWED_EMAILS",
+    ]
+    .map(|k| (k, var(k).map(|v| v.trim().to_string())));
     let oidc_set = oidc.iter().any(|(_, v)| v.is_some());
     let auth = if dev {
         if team_domain.is_some() || aud.is_some() {
@@ -406,21 +427,36 @@ fn auth_from(var: impl Fn(&str) -> Option<String>, listen: &str) -> anyhow::Resu
                 .collect();
             if !missing.is_empty() {
                 bail!(
-                    "HQC_OIDC_* needs all three variables, not set: {}",
+                    "HQC_OIDC_* needs all four variables, not set: {}",
                     missing.join(", ")
                 );
             }
-            let [issuer, aud, jwks_url] = oidc.map(|(_, v)| v.unwrap_or_default());
-            if let Some((scheme, rest)) = jwks_url.split_once("://") {
-                let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-                if scheme.eq_ignore_ascii_case("http") && !crate::security::is_loopback_host(host) {
-                    tracing::warn!("HQC_OIDC_JWKS_URL={jwks_url}: plain http to a non-loopback host, the signing keys can be replaced on the way");
+            let [issuer, aud, jwks_url, allowed] = oidc.map(|(_, v)| v.unwrap_or_default());
+            for (k, url) in [
+                ("HQC_OIDC_ISSUER", &issuer),
+                ("HQC_OIDC_JWKS_URL", &jwks_url),
+            ] {
+                if !is_https_or_loopback(url) {
+                    bail!("{k}={url}: expected https://host/... (http:// only to a loopback host)");
                 }
+            }
+            let allowed_emails: Vec<String> = allowed
+                .split(',')
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect();
+            if allowed_emails.is_empty() {
+                bail!("HQC_OIDC_ALLOWED_EMAILS={allowed}: no email in the list");
+            }
+            // Behind a proxy other than Cloudflare the client sets `CF-Connecting-IP` itself.
+            if var("HQC_CLIENT_IP_HEADER").is_none() {
+                bail!("HQC_OIDC_* requires HQC_CLIENT_IP_HEADER (X-Real-Ip behind Traefik): without it a CF-Connecting-IP the client sends would be its address");
             }
             AuthConfig::Oidc {
                 issuer,
                 aud,
                 jwks_url,
+                allowed_emails,
             }
         } else {
             AuthConfig::Access {
@@ -534,14 +570,26 @@ mod tests {
         assert_eq!(c.public_host().unwrap(), "artifacts.example.com:8443");
     }
 
-    const OIDC: [(&str, &str); 3] = [
+    const OIDC: [(&str, &str); 5] = [
         ("HQC_OIDC_ISSUER", " https://auth.example.com/realms/home "),
         ("HQC_OIDC_AUD", "hqc"),
         (
             "HQC_OIDC_JWKS_URL",
             "https://auth.example.com/realms/home/protocol/openid-connect/certs",
         ),
+        (
+            "HQC_OIDC_ALLOWED_EMAILS",
+            " Bob@Example.com, ,alice@example.com ",
+        ),
+        ("HQC_CLIENT_IP_HEADER", "X-Real-Ip"),
     ];
+
+    /// [`OIDC`] with `k` set to `v`, or without `k`.
+    fn oidc_with(k: &'static str, v: Option<&'static str>) -> Vec<(&'static str, &'static str)> {
+        let mut vars: Vec<_> = OIDC.iter().copied().filter(|(n, _)| *n != k).collect();
+        vars.extend(v.map(|v| (k, v)));
+        vars
+    }
 
     fn auth(vars: &[(&str, &str)], listen: &str) -> anyhow::Result<AuthConfig> {
         auth_from(
@@ -555,18 +603,66 @@ mod tests {
     }
 
     #[test]
-    fn oidc_mode_with_all_three_variables() {
+    fn oidc_mode_with_all_its_variables() {
         match auth(&OIDC, "0.0.0.0:8080").unwrap() {
             AuthConfig::Oidc {
                 issuer,
                 aud,
                 jwks_url,
+                allowed_emails,
             } => {
                 assert_eq!(issuer, "https://auth.example.com/realms/home");
                 assert_eq!(aud, "hqc");
                 assert_eq!(jwks_url, OIDC[2].1);
+                assert_eq!(allowed_emails, ["bob@example.com", "alice@example.com"]);
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// The realm may have accounts that are not the hub's people (SPEC §6).
+    #[test]
+    fn oidc_mode_needs_an_allow_list() {
+        for vars in [
+            oidc_with("HQC_OIDC_ALLOWED_EMAILS", None),
+            oidc_with("HQC_OIDC_ALLOWED_EMAILS", Some(" , ")),
+        ] {
+            let e = auth(&vars, "0.0.0.0:8080").unwrap_err().to_string();
+            assert!(e.contains("HQC_OIDC_ALLOWED_EMAILS"), "{e}");
+        }
+    }
+
+    /// Behind a proxy other than Cloudflare the client sets `CF-Connecting-IP` (SPEC §20).
+    #[test]
+    fn oidc_mode_needs_the_client_ip_header() {
+        let vars = oidc_with("HQC_CLIENT_IP_HEADER", None);
+        let e = auth(&vars, "0.0.0.0:8080").unwrap_err().to_string();
+        assert!(e.contains("HQC_CLIENT_IP_HEADER"), "{e}");
+    }
+
+    /// Over plain http to another host anyone on the path can replace the signing keys.
+    #[test]
+    fn oidc_urls_are_https_or_loopback() {
+        for k in ["HQC_OIDC_ISSUER", "HQC_OIDC_JWKS_URL"] {
+            for bad in [
+                "http://auth.example.com/realms/home",
+                "http://127.0.0.1@auth.example.com/realms/home",
+                "auth.example.com/realms/home",
+            ] {
+                let e = auth(&oidc_with(k, Some(bad)), "0.0.0.0:8080")
+                    .unwrap_err()
+                    .to_string();
+                assert!(e.contains(k), "{k}={bad}: {e}");
+            }
+            for ok in [
+                "http://127.0.0.1:8080/realms/home",
+                "http://localhost/certs",
+            ] {
+                assert!(
+                    auth(&oidc_with(k, Some(ok)), "0.0.0.0:8080").is_ok(),
+                    "{k}={ok}"
+                );
+            }
         }
     }
 

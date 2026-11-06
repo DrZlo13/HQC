@@ -60,6 +60,9 @@ export class Timeline {
   private readonly listeners = new Set<() => void>();
   private sorted: HqcEvent[] | null = [];
   lastSeq = 0;
+  /** Events before this `seq` are not loaded yet (`ChatSession` loads the newest page first);
+   *  0 once the history is in. */
+  olderFrom = 0;
   /** Text of `agent.delta` since the last `agent.message`. */
   streaming = "";
   version = 0;
@@ -129,6 +132,8 @@ export class Timeline {
     }
     this.bySeq.set(ev.seq, ev);
     this.sorted = null;
+    // An older page loaded behind the live tail ends no stream.
+    const fresh = ev.seq > this.lastSeq;
     if (advance) this.lastSeq = Math.max(this.lastSeq, ev.seq);
 
     switch (ev.type) {
@@ -139,10 +144,10 @@ export class Timeline {
         }
         break;
       case "agent.message":
-        this.streaming = "";
+        if (fresh) this.streaming = "";
         break;
       case "status":
-        if (ev.payload.state !== "running") this.streaming = "";
+        if (fresh && ev.payload.state !== "running") this.streaming = "";
         break;
       case "tool.call":
         this.calls.set(ev.payload.call_id, ev);

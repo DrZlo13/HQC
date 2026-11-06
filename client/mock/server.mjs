@@ -885,8 +885,12 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   });
   route('GET', '/api/sessions/:id/events', (p, _, q) => {
     const s = sessionOr404(p.id);
-    const after = Number(q.get('after_seq') ?? 0);
     const limit = Math.min(1000, Number(q.get('limit') ?? 200));
+    if (q.has('before_seq')) {
+      const before = Number(q.get('before_seq'));
+      return { events: s.events.filter((e) => e.seq < before).slice(-limit), last_seq: s.last_seq };
+    }
+    const after = Number(q.get('after_seq') ?? 0);
     return { events: s.events.filter((e) => e.seq > after).slice(0, limit), last_seq: s.last_seq };
   });
   route('POST', '/api/sessions/:id/input', (p, body) => {

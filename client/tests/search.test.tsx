@@ -64,6 +64,11 @@ function makeApp(search: (q: string, opts: { fuzzy?: boolean; cursor?: string })
       const page = (events ?? []).filter((e) => e.seq! > after).slice(0, limit);
       return { events: page, invalid: [], maxSeq: Math.max(after, ...page.map((e) => e.seq!)), count: page.length };
     }),
+    eventsBefore: vi.fn(async (_id: string, before = Number.MAX_SAFE_INTEGER, limit = 200) => {
+      const found = (events ?? []).filter((e) => e.seq! < before).slice(-limit);
+      const seqs = found.map((e) => e.seq!);
+      return { events: found, invalid: [], maxSeq: Math.max(0, ...seqs), minSeq: seqs[0], count: found.length };
+    }),
     readCursor: async () => {},
     session: async () => info('s1', 'Long one'),
   };
@@ -184,7 +189,7 @@ describe('the phone search screen', () => {
 });
 
 describe('a hit opens the session at its event', () => {
-  // 450 events: three history pages; the hit is on the second.
+  // 450 events: the newest page holds 100 of them, the hit is in the older history.
   const history: HqcEvent[] = [];
   for (let seq = 1; seq <= 450; seq++) {
     const user = seq % 3 === 1;
@@ -220,7 +225,8 @@ describe('a hit opens the session at its event', () => {
 
   it('scrolls to the event once its page is loaded and marks it', async () => {
     const scrolled = await open(320);
-    expect(root.querySelectorAll('.feed-block').length).toBe(300);
+    // The feed renders from the hit's block on.
+    expect(root.querySelector<HTMLElement>('.feed-block')!.dataset.seq).toBe('320');
     const found = root.querySelector<HTMLElement>('.feed-block.is-found')!;
     expect(found.dataset.seq).toBe('320');
     expect(found.textContent).toContain('answer 320');

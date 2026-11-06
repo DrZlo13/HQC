@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.71, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.72, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -456,7 +456,10 @@ Rules:
   reply (§7.1).
 - `*_preview` fields are cut by the worker to 4 KB; the full tool result is not sent to the hub,
   except diffs and results saved as artifacts.
-- `agent.delta` goes to clients over WebSocket and is not saved; `agent.message` is saved.
+- `agent.delta` goes to clients over WebSocket and is not saved; `agent.message` is saved. The
+  hub keeps the text of a session's deltas in memory until its `agent.message` or a `status`
+  other than `running` (up to 512 KiB, and not past the worker's disconnect), so a client that
+  subscribes mid-answer gets all of it (§6, since 0.72).
 - History is never rewritten. Protection against forged peer-message headers is applied
   on delivery to the runtime (§7.1).
 
@@ -1432,7 +1435,12 @@ commands starting with that name (ignoring case): arrows move, Tab or Enter inse
 Esc closes, a click or tap inserts. No list — no popup; only commands from the list are offered.
 
 WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB): the client sends `subscribe {session_id, after_seq}` and receives
-events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. An event
+events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
+the answer being written comes right after those events, before `subscribed`, as one
+`agent.delta` with its text so far, and the stream carries only the deltas after it. On open
+the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
+older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
+each time the user scrolls to the top. An event
 stored from a client input carries its `client_op_id`, so the client shows the message at
 once and matches it with the echo (a technique from Agent Host Protocol, §22). A separate
 subscription, `subscribe_summary`, gives `state`, `queue_len` and unread counts per session,
@@ -3343,8 +3351,8 @@ Since 0.36 (T33; `crates/hqc-hub/src/search.rs`, migration `0016`, measurements 
   hits below them ("In messages", "Similar words" for fuzzy, "More" for the next page). Phone:
   the list's search button opens `#/search`, a screen with the field, the sessions of all
   projects matching by title or path, and the hub's hits. A hit opens `#/s/<session>?seq=<seq>`:
-  the chat loads its history as always (in full, page by page) and, once the event is there,
-  scrolls the block that holds it (the last block starting at or before `seq`) to the middle
+  the chat loads its history as always (the newest page, then the older ones, §6) and, once the
+  event is there, renders the feed from the block that holds it if it did not and scrolls the block that holds it (the last block starting at or before `seq`) to the middle
   and marks it.
 
 ## 16. Notifications and hub cron
@@ -3759,6 +3767,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.71 → 0.72 (a long chat opens at once, the answer being written in full)
+§6: the chat loads the newest 100 events first, shows them and subscribes, then loads the older
+history behind them; it renders the last 60 blocks of the feed and more as the user scrolls up.
+Before, it loaded the whole history from the start, page by page, before it showed anything.
+§4, §6: the hub keeps the text of the answer being written and sends it on `subscribe`, so a
+chat opened mid-answer shows all of it, not only what came after it opened. §15: a search hit
+in the older history renders the feed from its block.
 
 ### 0.70 → 0.71 (after the security pass of #4 and #5)
 §17.2: `session.stop` interrupts a turn the CLI began by itself; an input the CLI cancels after

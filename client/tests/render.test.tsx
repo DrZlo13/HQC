@@ -131,6 +131,14 @@ describe("every example event renders", () => {
     t.apply(ev("event.agent.message"));
     expect(t.streaming).toBe("");
   });
+
+  it("an older page loaded behind the live tail ends no stream", () => {
+    const t = new Timeline();
+    t.apply(ev("event.agent.message", withSeq(50)));
+    t.apply(ev("event.agent.delta"));
+    t.applyAll([ev("event.agent.message", withSeq(10)), ev("event.status", withSeq(11))]);
+    expect(t.streaming).toBe("Running");
+  });
 });
 
 describe("delivery after a dropped socket", () => {

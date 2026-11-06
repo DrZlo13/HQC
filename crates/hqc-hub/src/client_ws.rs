@@ -2,7 +2,8 @@
 //! [`hqc_proto::client_frame`].
 //!
 //! - `subscribe {session_id, after_seq?}` — stored events with `seq > after_seq` (default 0),
-//!   then `subscribed {session_id, last_seq}`, then the live stream: stored events,
+//!   the answer being written as one `agent.delta` ([`AppState::live_text`]), then
+//!   `subscribed {session_id, last_seq}`, then the live stream: stored events,
 //!   `agent.delta` (no `seq`), `delivery` changes of inputs;
 //! - `unsubscribe {session_id}`;
 //! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
@@ -54,6 +55,9 @@ struct Client {
     socket: WebSocket,
     /// session -> last `seq` sent.
     subs: HashMap<Uuid, i64>,
+    /// session -> the number of the first `agent.delta` not in the text sent on subscribe
+    /// ([`AppState::live_text`]).
+    live_from: HashMap<Uuid, u64>,
     summary: bool,
 }
 
@@ -66,6 +70,7 @@ async fn run(app: AppState, user: CurrentUser, socket: WebSocket) {
         user,
         socket,
         subs: HashMap::new(),
+        live_from: HashMap::new(),
         summary: false,
     };
     loop {
@@ -150,6 +155,14 @@ impl Client {
                 if !self.backfill(session_id).await {
                     return false;
                 }
+                // After the backfill: the text is ended before its `agent.message` is stored.
+                let (text, next) = self.app.live_text(session_id);
+                self.live_from.insert(session_id, next);
+                if let Some(event) = text {
+                    if !self.send(ServerFrame::Event { event }).await {
+                        return false;
+                    }
+                }
                 let last_seq = self.subs[&session_id].max(0) as u64;
                 self.send(ServerFrame::Subscribed {
                     session_id,
@@ -158,6 +171,7 @@ impl Client {
                 .await
             }
             ClientFrame::Unsubscribe { session_id } => {
+                self.live_from.remove(&session_id);
                 if self.subs.remove(&session_id).is_some() {
                     self.app.watch(self.user.id, session_id, false);
                 }
@@ -215,20 +229,33 @@ impl Client {
                 let Some(&last) = self.subs.get(session_id) else {
                     return true;
                 };
-                let frame = || ServerFrame::Event {
-                    event: event.clone(),
-                };
-                match seq {
-                    None => self.send(frame()).await,
-                    Some(seq) if *seq <= last => true,
-                    Some(seq) if *seq == last + 1 => {
-                        self.subs.insert(*session_id, *seq);
-                        self.send(frame()).await
+                match *seq {
+                    seq if seq <= last => true,
+                    seq if seq == last + 1 => {
+                        self.subs.insert(*session_id, seq);
+                        self.send(ServerFrame::Event {
+                            event: event.clone(),
+                        })
+                        .await
                     }
                     // A gap: notices of concurrent writers can arrive out of order.
-                    Some(_) => self.backfill(*session_id).await,
+                    _ => self.backfill(*session_id).await,
                 }
             }
+            Notice::Delta {
+                session_id,
+                at,
+                event,
+            } => match self.live_from.get(session_id) {
+                // Before it: in the text sent on subscribe.
+                Some(from) if at >= from => {
+                    self.send(ServerFrame::Event {
+                        event: event.clone(),
+                    })
+                    .await
+                }
+                _ => true,
+            },
             Notice::Resent {
                 session_id,
                 seq,

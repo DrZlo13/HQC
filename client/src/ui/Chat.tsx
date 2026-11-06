@@ -5,7 +5,7 @@ import { ArtifactStore, formatSize } from '../artifacts';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
 import type { Timeline } from '../timeline';
-import { ActivityLine, ChatItems, StreamingMessage, onlyRequests, type ChatActions } from './cards';
+import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
@@ -18,6 +18,8 @@ import { SchedulesPanel } from './Schedules';
 import { archivedLabel } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
+/** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
+const SHOWN = 60;
 
 /** `focusSeq`: scroll to that event once it is loaded and mark it (a search hit, SPEC §15). */
 export function Chat({
@@ -44,10 +46,16 @@ export function Chat({
     if (!picked.length) return;
     void Promise.all(picked.map(toOutgoing)).then((add) => setFiles((cur) => [...cur, ...add]));
   };
-  // The feed shows once the history is in: page by page it scrolled down for seconds.
+  // The feed shows once the newest page is in; the older history loads behind it.
   const [loaded, setLoaded] = useState(false);
+  // The feed renders from the block that starts at `from.current` (a `seq`): the last `SHOWN`
+  // blocks on open, more as the user scrolls up. Set once, so blocks that come in at either
+  // end do not shift what is on screen.
+  const from = useRef<number | undefined>(undefined);
+  const [, grow] = useState(0);
   useEffect(() => {
     setLoaded(false);
+    from.current = undefined;
     void chat.open().then(() => setLoaded(true));
     return () => chat.close();
   }, [chat]);
@@ -131,6 +139,9 @@ export function Chat({
 
   const showRetry = !system && (state === 'error' || t.hasFailedDelivery());
   const items = !loaded ? [] : requestsOnly ? onlyRequests(t.items()) : t.items();
+  const blocks = buildFeed(items, t);
+  if (from.current === undefined && blocks.length) from.current = blockSeq(blocks[Math.max(0, blocks.length - SHOWN)]) ?? 0;
+  const start = firstShown(blocks, from.current ?? 0);
   const locked = state === 'locked_vscode';
   // SPEC §9.3: read-only while VS Code has it. Open there right now (`held_by`): it has to be
   // closed there first, the hub refuses takeover (`409 vscode_open`). Written from there
@@ -157,8 +168,21 @@ export function Chat({
     );
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // Blocks added above keep what is on screen in place: the distance to the bottom stays.
+  const keep = useRef<number | undefined>(undefined);
+  const showMore = (seq: number | undefined) => {
+    const el = scroller.current;
+    if (!el || seq === undefined) return;
+    keep.current = el.scrollHeight - el.scrollTop;
+    from.current = seq;
+    grow((n) => n + 1);
+  };
   useLayoutEffect(() => {
     const el = scroller.current;
+    if (el && keep.current !== undefined) {
+      el.scrollTop = el.scrollHeight - keep.current;
+      keep.current = undefined;
+    }
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
   // Images and code blocks grow after the render: stay at the bottom while stuck to it.
@@ -172,13 +196,23 @@ export function Chat({
     o.observe(feed.current);
     return () => o.disconnect();
   }, []);
-  // The jump to a search hit: the history loads in full on open (ChatSession.open), so the
-  // event is there once `lastSeq` reaches it; the block that holds it is the last one that
-  // starts at or before it (a hidden event's neighbour).
+  // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
+  // history (`olderFrom`) is loaded down to it. The block that holds it is the last one that
+  // starts at or before it (a hidden event's neighbour); the feed renders from there if it
+  // did not.
   const focused = useRef<number | undefined>(undefined);
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (!el || focusSeq === undefined || focused.current === focusSeq || t.lastSeq < focusSeq) return;
+    if (!el || focusSeq === undefined || focused.current === focusSeq || t.lastSeq < focusSeq || t.olderFrom > focusSeq) return;
+    if (focusSeq < (from.current ?? 0)) {
+      let at = 0;
+      blocks.forEach((b, i) => {
+        if ((blockSeq(b) ?? Infinity) <= focusSeq) at = i;
+      });
+      from.current = blockSeq(blocks[at]) ?? 0;
+      grow((n) => n + 1);
+      return;
+    }
     let target: HTMLElement | undefined;
     for (const b of el.querySelectorAll<HTMLElement>('.feed-block[data-seq]')) {
       if (Number(b.dataset.seq) <= focusSeq) target = b;
@@ -353,11 +387,12 @@ export function Chat({
         onScroll={(e) => {
           const el = e.currentTarget as HTMLDivElement;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          if (el.scrollTop < 400 && start > 0) showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
         }}
       >
         <div class="feed" ref={feed}>
           {!loaded && <div class="empty">Loading…</div>}
-          <ChatItems items={items} actions={actions} />
+          <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           {!system && <ActivityLine state={state} timeline={t} />}
@@ -809,4 +844,11 @@ export function Composer({
       </form>
     </div>
   );
+}
+
+/** Index of the first block to render: the first that starts at or after `from`. Blocks
+ *  without a `seq` (messages not stored yet) come last and always render. */
+function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number {
+  const i = blocks.findIndex((b) => (blockSeq(b) ?? Infinity) >= from);
+  return i < 0 ? blocks.length : i;
 }

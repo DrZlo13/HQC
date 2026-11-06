@@ -77,6 +77,11 @@ function setup(requests: OpenRequest[] = REQUESTS) {
       const events = HISTORY.filter((e) => e.seq! > after);
       return { events, invalid: [], maxSeq: Math.max(after, ...events.map((e) => e.seq!)), count: events.length };
     }),
+    eventsBefore: vi.fn(async (_id: string, before = Number.MAX_SAFE_INTEGER, limit = 200) => {
+      const found = HISTORY.filter((e) => e.seq! < before).slice(-limit);
+      const seqs = found.map((e) => e.seq!);
+      return { events: found, invalid: [], maxSeq: Math.max(0, ...seqs), minSeq: seqs[0], count: found.length };
+    }),
     readCursor: vi.fn(async () => {}),
     approve: vi.fn(async () => {}),
     clarify: vi.fn(async () => {}),

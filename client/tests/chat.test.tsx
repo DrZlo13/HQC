@@ -74,6 +74,11 @@ function setup(
       const events = history.filter((e) => e.seq! > after);
       return { events, invalid: [], maxSeq: Math.max(after, ...events.map((e) => e.seq!)), count: events.length };
     }),
+    eventsBefore: vi.fn(async (_id: string, before = Number.MAX_SAFE_INTEGER, limit = 200) => {
+      const found = history.filter((e) => e.seq! < before).slice(-limit);
+      const seqs = found.map((e) => e.seq!);
+      return { events: found, invalid: [], maxSeq: Math.max(0, ...seqs), minSeq: seqs[0], count: found.length };
+    }),
     readCursor: vi.fn(async () => {}),
     approve: vi.fn(async () => {}),
     takeover: vi.fn(async () => ({})),
@@ -560,26 +565,38 @@ describe('slash command completion (T27)', () => {
 });
 
 describe('history', () => {
-  it('shows the feed once the whole history is in, not page by page', async () => {
-    const { api, app } = setup('idle');
-    // A full first page, then a second one that waits.
-    const page = Array.from({ length: 200 }, (_, i) => ev('event.agent.message', i + 1));
-    let last!: () => void;
-    api.events.mockImplementationOnce(async () => ({ events: page, invalid: [], maxSeq: 200, count: 200 }));
-    api.events.mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          last = () => r({ events: [ev('event.agent.message', 201)], invalid: [], maxSeq: 201, count: 1 });
-        }),
+  const long = Array.from({ length: 450 }, (_, i) =>
+    ev('event.agent.message', i + 1, (e) => (e.payload.text = `answer ${i + 1}`)),
+  );
+
+  it('shows the newest page at once and loads the older history behind it', async () => {
+    const { api, app } = setup('idle', { history: long });
+    let older!: () => void;
+    const tail = api.eventsBefore.getMockImplementation()!;
+    api.eventsBefore.mockImplementationOnce(tail);
+    api.eventsBefore.mockImplementationOnce(
+      (id, before, limit) => new Promise((r) => (older = () => r(tail(id, before, limit)))),
     );
     await mount(app);
-    expect(root.querySelector('.feed .empty')?.textContent).toBe('Loading…');
-    expect(root.querySelectorAll('.feed-block').length).toBe(0);
+    expect(api.events).not.toHaveBeenCalled();
+    expect(root.querySelector('.feed .empty')).toBeNull();
+    expect(api.eventsBefore.mock.calls[1]?.[1]).toBe(351);
+    // The last 60 blocks of the newest 100 events.
+    const blocks = () => [...root.querySelectorAll<HTMLElement>('.feed-block')];
+    expect(blocks().length).toBe(60);
+    expect(blocks().at(-1)!.textContent).toContain('answer 450');
     await act(async () => {
-      last();
+      older();
       await new Promise((r) => setTimeout(r, 20));
     });
-    expect(root.querySelector('.feed .empty')).toBeNull();
-    expect(root.querySelectorAll('.feed-block').length).toBeGreaterThan(0);
+    // What is on screen stays; scrolling to the top renders more.
+    expect(blocks().length).toBe(60);
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    await act(async () => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(blocks().length).toBe(120);
+    expect(blocks()[0].textContent).toContain('answer 331');
   });
 });

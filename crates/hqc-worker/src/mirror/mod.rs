@@ -55,6 +55,7 @@ pub mod fork;
 pub mod holders;
 pub mod map;
 pub mod registry;
+pub mod relocate;
 pub mod store;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -598,7 +599,7 @@ fn read_tree(path: &Path, upto: u64) -> anyhow::Result<fork::Tree> {
 }
 
 /// `cwd` of the first record that has one, reading at most [`CWD_LINES`] lines.
-fn read_cwd(path: &Path) -> Option<String> {
+pub(crate) fn read_cwd(path: &Path) -> Option<String> {
     let f = std::fs::File::open(path).ok()?;
     std::io::BufReader::new(f)
         .lines()

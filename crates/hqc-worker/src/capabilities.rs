@@ -1,4 +1,5 @@
-//! `hello.capabilities` (SPEC §3 Worker, §5.4): `{claude_code?: {version}, acp_agents: []}`.
+//! `hello.capabilities` (SPEC §3 Worker, §5.4): `{claude_code?: {version, moves}, acp_agents:
+//! []}`; `moves`: the worker moves a session's transcript into its new folder (SPEC §8.1).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,7 +22,7 @@ pub async fn detect(claude_bin: Option<&Path>) -> Value {
 pub fn build(claude_version: Option<&str>) -> Value {
     let mut caps = json!({ "acp_agents": [] });
     if let Some(v) = claude_version {
-        caps["claude_code"] = json!({ "version": v });
+        caps["claude_code"] = json!({ "version": v, "moves": true });
     }
     caps
 }
@@ -139,6 +140,7 @@ mod tests {
         assert_eq!(parse_version("nope"), None);
         assert_eq!(build(None), json!({"acp_agents": []}));
         assert_eq!(build(Some("1.2"))["claude_code"]["version"], "1.2");
+        assert_eq!(build(Some("1.2"))["claude_code"]["moves"], true);
         let dir = tempfile::tempdir().unwrap();
         let mut none = build(None);
         with_sessions_registry(&mut none, dir.path());

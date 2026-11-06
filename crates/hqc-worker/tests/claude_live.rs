@@ -1479,3 +1479,146 @@ async fn live_input_joins_turn() {
     assert!(carried.is_empty() && dropped.is_empty());
     assert!(finals.last().is_some_and(|t| t.contains("PINEAPPLE")));
 }
+
+/// The final text of the turn running on `rx`.
+async fn turn_text(rx: &mut mpsc::Receiver<AdapterEvent>) -> String {
+    let mut text = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let ev = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .expect("turn did not end in 180 s")
+            .expect("channel closed");
+        match ev {
+            AdapterEvent::Event(e) => {
+                if let EventKind::AgentMessage {
+                    text: t,
+                    r#final: true,
+                    ..
+                } = e.kind
+                {
+                    text = t;
+                }
+            }
+            AdapterEvent::TurnEnded { .. } => return text,
+            AdapterEvent::Exited { error } => panic!("claude exited: {error:?}"),
+            _ => {}
+        }
+    }
+}
+
+/// The session move (SPEC §5.3, §8.1): a turn in folder `a`, the process stopped, the
+/// transcript moved by uuid to where folder `b` puts it, the agent started in `b`: it resumes
+/// (`--resume`) and remembers the first turn. Haiku, `--max-turns 2`, two turns, no tools.
+///
+/// ```
+/// HQC_LIVE_CLAUDE=1 cargo test -p hqc-worker --test claude_live live_move_resumes_in_the_new_folder -- --nocapture
+/// ```
+#[tokio::test]
+async fn live_move_resumes_in_the_new_folder() {
+    if std::env::var("HQC_LIVE_CLAUDE").as_deref() != Ok("1") {
+        eprintln!("skipped: set HQC_LIVE_CLAUDE=1 to run against the real claude");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tmp")
+        .join(format!("live-move-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    let root = root.canonicalize().unwrap();
+    let (a, b) = (root.join("a"), root.join("b"));
+
+    let opts = ClaudeOptions {
+        extra_args: vec!["--max-turns".into(), "2".into()],
+        ask_mode: hqc_worker::capabilities::claude_permission_mode(None).await,
+        ..ClaudeOptions::default()
+    };
+    let config_dir = opts.config_dir.clone().expect("claude config dir");
+    let spawner = Arc::new(Recording::default());
+    let factory = ClaudeCodeAdapters::new(opts, spawner.clone());
+    let session_id = Uuid::now_v7();
+    let claude_session = Uuid::new_v4();
+    let spec = StartSpec {
+        session_id,
+        runtime: Runtime::ClaudeCode,
+        model: Some("claude-haiku-5-5".into()),
+        workspace: a.clone(),
+        workdir: a.clone(),
+        environment: Arc::new(Environment::default_of(&Permissions::default())),
+        runtime_session_id: Some(claude_session.to_string()),
+        system_prompt: None,
+        disallowed_tools: vec![],
+        restricted: false,
+        auto_approve: false,
+        session_token: hqc_worker::token::Secret::new("st"),
+        ask_timeout_s: 600,
+        permission_mode: PermissionMode::Ask,
+        folder_rules: None,
+    };
+    let input = |text: &str| SessionInput {
+        session_id,
+        event_id: Uuid::now_v7(),
+        text: text.into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&spec, tx);
+    adapter.start(&spec).await.expect("claude starts");
+    adapter
+        .input(&input(
+            "Remember the code word TANGERINE-41. Reply with exactly: OK",
+        ))
+        .await
+        .unwrap();
+    println!(
+        "first turn in {}: {}",
+        a.display(),
+        turn_text(&mut rx).await
+    );
+    adapter.kill().await.unwrap();
+
+    let from = paths::transcript_path(&config_dir, &a, &claude_session);
+    assert!(from.is_file(), "{}", from.display());
+    let store = hqc_worker::mirror::store::Store::open(&root.join("mirror")).unwrap();
+    let to = hqc_worker::mirror::relocate::relocate(
+        &config_dir.join("projects"),
+        &store,
+        std::slice::from_ref(&root),
+        claude_session,
+        &b,
+    )
+    .unwrap()
+    .expect("the transcript is moved");
+    assert_eq!(to, paths::transcript_path(&config_dir, &b, &claude_session));
+    assert!(!from.exists());
+
+    let moved = StartSpec {
+        workspace: b.clone(),
+        workdir: b.clone(),
+        ..spec.clone()
+    };
+    let (tx, mut rx) = mpsc::channel(4096);
+    let mut adapter = factory.create(&moved, tx);
+    adapter.start(&moved).await.expect("claude starts in b");
+    adapter
+        .input(&input(
+            "What was the code word? Reply with only the code word.",
+        ))
+        .await
+        .unwrap();
+    let answer = turn_text(&mut rx).await;
+    println!("second turn in {}: {answer}", b.display());
+    adapter.kill().await.unwrap();
+    let cmds = spawner.0.lock().unwrap().clone();
+    println!("second: claude {}", cmds[1].args.join(" "));
+    assert!(cmds[1]
+        .args
+        .windows(2)
+        .any(|w| w == ["--resume", &claude_session.to_string()]));
+    assert!(answer.contains("TANGERINE-41"), "{answer}");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -3638,6 +3638,22 @@ fn a_foreground_subagent_stops_counting_at_the_result() {
         })
         .collect();
     assert_eq!(counts, [vec![1], vec![2], vec![1], vec![], vec![], vec![0]]);
+
+    // The new count goes before the end of the turn: a waiting move checks it there.
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut lines = stream.lines();
+    core.on_line(lines.next().unwrap());
+    core.on_line(lines.next().unwrap());
+    let order: Vec<&str> = core
+        .on_line(lines.next().unwrap())
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Subagents(_)) => Some("subagents"),
+            Action::Emit(AdapterEvent::TurnEnded { .. }) => Some("turn ended"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["subagents", "turn ended"]);
 }
 
 /// A background subagent whose Bash call the CLI moves to the background (2.1.312 with

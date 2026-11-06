@@ -15,8 +15,15 @@
 //!   `system` `compact_boundary` → `system context_compacted`;
 //! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
-//!   than `running` of the same `task_id`, a foreground one at the latest until the `result`
-//!   → [`AdapterEvent::Subagents`] when the count changes;
+//!   than `running` of the same `task_id`, a foreground one at the latest until the `result`,
+//!   and any subagent the latest `background_tasks_changed` list holds or a task of it names
+//!   as its `parent_task_id` → [`AdapterEvent::Subagents`] when the count changes, a drop that
+//!   a `background_tasks_changed` brings at the next line of another kind: the CLI reports a
+//!   subagent ended while it waits for a command moved to the background, and lists and
+//!   starts its `task_id` again when the command ends (2.1.312);
+//! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
+//!   background tasks, subagents and commands, its subagents' too) →
+//!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
@@ -167,8 +174,15 @@ pub struct Core {
     wrote: bool,
     /// The CLI sends `command_lifecycle` lines (2.1.312).
     lifecycle: bool,
-    /// `task_id`s of the subagents running now.
+    /// `task_id`s of the subagents the CLI reports running now.
     subagents: HashSet<String>,
+    /// The subagent count last reported ([`Core::running_subagents`]).
+    subagents_reported: usize,
+    /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
+    /// reported: the next line of another kind reports it.
+    recount: bool,
+    /// `tasks` of the latest `system` `background_tasks_changed`.
+    background: Vec<Value>,
     in_turn: bool,
     turn: u64,
     pending: HashMap<String, Pending>,
@@ -214,6 +228,9 @@ impl Core {
             wrote: false,
             lifecycle: false,
             subagents: HashSet::new(),
+            subagents_reported: 0,
+            recount: false,
+            background: Vec::new(),
             in_turn: false,
             turn: 0,
             pending: HashMap::new(),
@@ -497,7 +514,7 @@ impl Core {
                 self.seen.push(u);
             }
         }
-        match ty {
+        let mut out = match ty {
             "stream_event" if !sub => self.on_stream_event(&v),
             "assistant" if !sub => self.on_assistant(&v),
             "user" if v["isReplay"] == true => self.on_echo(&v),
@@ -550,6 +567,7 @@ impl Core {
                     out.extend(self.count_subagent(v["task_id"].as_str(), false));
                     out
                 }
+                Some("background_tasks_changed") => self.on_background_tasks(&v),
                 // Its uuid is that of the transcript's `system compact_boundary` record
                 // (fixture `resume-compact`): the event id is derived from it as from a
                 // record's.
@@ -564,7 +582,12 @@ impl Core {
                 _ => vec![],
             },
             _ => vec![],
+        };
+        // A drop a `background_tasks_changed` left for a line of another kind (this one).
+        if self.recount && !(ty == "system" && v["subtype"] == "background_tasks_changed") {
+            out.extend(self.report_subagents(None));
         }
+        out
     }
 
     /// The CLI's permission mode: `auto` is `auto`, any other (`default`, which `manual`
@@ -779,7 +802,8 @@ impl Core {
         vec![Action::Emit(AdapterEvent::TurnEnded { carried, dropped })]
     }
 
-    /// Subagent `task_id` started (`add`) or ended: the new count when it changed.
+    /// Subagent `task_id` started (`add`) or ended by the CLI's word: the new count when it
+    /// changed.
     fn count_subagent(&mut self, task_id: Option<&str>, add: bool) -> Vec<Action> {
         let Some(id) = task_id else {
             return vec![];
@@ -792,8 +816,64 @@ impl Core {
         if !changed {
             return vec![];
         }
-        let n = u32::try_from(self.subagents.len()).unwrap_or(u32::MAX);
-        tracing::info!(session_id = %self.session_id, task_id = id, subagents = n, "subagents");
+        self.report_subagents(Some(id))
+    }
+
+    /// `system/background_tasks_changed` (2.1.312): `tasks`, the CLI's whole list of the
+    /// session's running background tasks, sent on every change and `[]` at the end. Their
+    /// number when it changed; a subagent count that went up. One that went down waits for the
+    /// next line of another kind ([`Core::recount`]): when the last command of a subagent the
+    /// CLI already called ended leaves the list, the CLI lists the subagent again only on the
+    /// next line, `[]` then `[subagent]`, and then starts it again (SPEC §8.1 **[verify]**:
+    /// inferred from a capture where a second task of the subagent kept the list non-empty).
+    fn on_background_tasks(&mut self, v: &Value) -> Vec<Action> {
+        let before = self.background.len();
+        self.background = v["tasks"].as_array().cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        if self.background.len() != before {
+            let n = u32::try_from(self.background.len()).unwrap_or(u32::MAX);
+            tracing::info!(session_id = %self.session_id, background_tasks = n, "background tasks");
+            out.push(Action::Emit(AdapterEvent::BackgroundTasks(n)));
+        }
+        if self.running_subagents() < self.subagents_reported {
+            self.recount = true;
+        } else {
+            out.extend(self.report_subagents(None));
+        }
+        out
+    }
+
+    /// The subagents at work: those the CLI reports running, and those the latest
+    /// `background_tasks_changed` list holds (`task_type: local_agent`) or a task of it belongs
+    /// to (its `parent_task_id`). With `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a
+    /// subagent's Bash call that runs for more than about 180 s to the background (the agent's
+    /// own stays in the foreground) and reports the subagent ended (`task_updated`
+    /// `completed`, `task_notification` "This agent has not reported yet: it is waiting on its
+    /// own background work…") while the command still runs; when it ends, the CLI starts the
+    /// same `task_id` again.
+    fn running_subagents(&self) -> usize {
+        let mut ids: HashSet<&str> = self.subagents.iter().map(String::as_str).collect();
+        for t in &self.background {
+            if t["task_type"] == "local_agent" {
+                ids.extend(t["task_id"].as_str());
+            }
+            ids.extend(t["parent_task_id"].as_str());
+        }
+        ids.len()
+    }
+
+    /// [`AdapterEvent::Subagents`] when [`Core::running_subagents`] differs from the count
+    /// last reported; `task_id`: the subagent whose start or end the CLI reported, for the
+    /// log.
+    fn report_subagents(&mut self, task_id: Option<&str>) -> Vec<Action> {
+        self.recount = false;
+        let n = self.running_subagents();
+        if n == self.subagents_reported {
+            return vec![];
+        }
+        self.subagents_reported = n;
+        let n = u32::try_from(n).unwrap_or(u32::MAX);
+        tracing::info!(session_id = %self.session_id, task_id, subagents = n, "subagents");
         vec![Action::Emit(AdapterEvent::Subagents(n))]
     }
 
@@ -848,10 +928,10 @@ impl Core {
         let before = self.subagents.len();
         self.subagents.retain(|id| quiet.get(id) != Some(&false));
         if self.subagents.len() != before {
-            let n = u32::try_from(self.subagents.len()).unwrap_or(u32::MAX);
-            tracing::info!(session_id = %self.session_id, subagents = n, "foreground subagents ended with the turn");
-            out.push(Action::Emit(AdapterEvent::Subagents(n)));
+            tracing::info!(session_id = %self.session_id, "foreground subagents ended with the turn");
         }
+        // Also a drop a `background_tasks_changed` left to this line: before `TurnEnded`.
+        out.extend(self.report_subagents(None));
         let usage = &v["usage"];
         let num = |k: &str| usage[k].as_u64();
         let (input_tokens, output_tokens) = (

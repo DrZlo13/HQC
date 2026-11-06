@@ -44,9 +44,13 @@ pub enum AdapterEvent {
         dropped: Vec<Uuid>,
     },
     /// How many subagents the runtime runs now (Claude Code: `system/task_started` with
-    /// `task_type: local_agent` until the task ends); sent as `session.state.subagents`.
-    /// Reported when it changes.
+    /// `task_type: local_agent` until the task ends, and while a background task the CLI
+    /// lists belongs to it); sent as `session.state.subagents`. Reported when it changes.
     Subagents(u32),
+    /// How many background tasks the runtime lists now, its subagents' included (Claude Code:
+    /// the `tasks` of `system/background_tasks_changed`, SPEC §8.1). Not sent to the hub: the
+    /// agent is not idle while it is above 0 (SPEC §17.3). Reported when it changes.
+    BackgroundTasks(u32),
     /// The runtime reported its own session id (ACP); sent in `session.state`.
     RuntimeSessionId(String),
     /// The runtime named the session (Claude Code: `ai-title` in the transcript, read when

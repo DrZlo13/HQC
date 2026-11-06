@@ -260,6 +260,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::InputAccepted { .. } => "accepted".into(),
             AdapterEvent::TurnEnded { .. } => "turn_ended".into(),
             AdapterEvent::Subagents(n) => format!("subagents:{n}"),
+            AdapterEvent::BackgroundTasks(n) => format!("background_tasks:{n}"),
             AdapterEvent::Exited { .. } => "exited".into(),
             AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
             AdapterEvent::Title(_) => "title".into(),
@@ -3530,4 +3531,140 @@ fn a_foreground_subagent_stops_counting_at_the_result() {
         })
         .collect();
     assert_eq!(counts, [vec![1], vec![2], vec![1], vec![], vec![], vec![0]]);
+}
+
+/// A background subagent whose Bash call the CLI moves to the background (2.1.312 with
+/// `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, a subagent's 240 s `ping` and its Monitor
+/// `blm1ph76i` waiting for it; the `system` task lines, `background_tasks_changed` and `result`
+/// of the capture, in order, with the fields the adapter reads; the lines between them change
+/// no count).
+const MOVED_SUBAGENT: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"}]}
+{"type":"system","subtype":"task_started","task_id":"a739e2460001cfdc1","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"result","subtype":"success","num_turns":2}
+{"type":"system","subtype":"task_started","task_id":"b0h1rmks3","owned_by_subagent":true,"is_backgrounded":false,"parent_task_id":"a739e2460001cfdc1","task_type":"local_bash"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"},{"task_id":"b0h1rmks3","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
+{"type":"system","subtype":"task_updated","task_id":"b0h1rmks3","patch":{"is_backgrounded":true}}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"},{"task_id":"b0h1rmks3","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"},{"task_id":"blm1ph76i","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
+{"type":"system","subtype":"task_started","task_id":"blm1ph76i","owned_by_subagent":true,"is_backgrounded":true,"parent_task_id":"a739e2460001cfdc1","task_type":"local_bash"}
+{"type":"system","subtype":"task_updated","task_id":"a739e2460001cfdc1","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"a739e2460001cfdc1","status":"completed","summary":"This agent has not reported yet: it is waiting on its own background work and will deliver its report through SubagentHandback when that finishes.\n"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b0h1rmks3","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"},{"task_id":"blm1ph76i","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
+{"type":"result","subtype":"success","num_turns":1}
+{"type":"system","subtype":"task_updated","task_id":"b0h1rmks3","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"b0h1rmks3","status":"completed","summary":"Background command \"Ping localhost 240 times quietly\" completed (exit code 0)"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"blm1ph76i","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"},{"task_id":"blm1ph76i","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
+{"type":"system","subtype":"task_started","task_id":"a739e2460001cfdc1","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"task_updated","task_id":"blm1ph76i","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"blm1ph76i","status":"completed","summary":"Monitor \"wait for background ping to finish\" stream ended"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"}]}
+{"type":"system","subtype":"task_updated","task_id":"a739e2460001cfdc1","patch":{"status":"completed"}}
+{"type":"system","subtype":"task_notification","task_id":"a739e2460001cfdc1","status":"completed","summary":"This agent's report was delivered to you as a message from \"a739e2460001cfdc1\" (its SubagentHandback call). Read it there; it is not repeated here.\n"}
+{"type":"system","subtype":"background_tasks_changed","tasks":[]}
+{"type":"result","subtype":"success","num_turns":1}
+{"type":"result","subtype":"success","num_turns":0}"#;
+
+/// The subagent and background task counts and the ends of turns each line reports, in order.
+fn task_counts<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<String>> {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    lines
+        .map(|l| {
+            core.on_line(l)
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::Emit(AdapterEvent::Subagents(n)) => Some(format!("subagents:{n}")),
+                    Action::Emit(AdapterEvent::BackgroundTasks(n)) => {
+                        Some(format!("background_tasks:{n}"))
+                    }
+                    Action::Emit(AdapterEvent::TurnEnded { .. }) => Some("turn_ended".into()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// [`MOVED_SUBAGENT`]: the CLI reports the subagent ended while it waits for its commands and
+/// starts it again when the `ping` ends; it counts all along, until it ends for real, and that
+/// end comes before the end of the turn. The number of listed background tasks is reported as
+/// it changes.
+#[test]
+fn a_subagent_waiting_on_its_background_command_still_counts() {
+    let want: [&[&str]; 25] = [
+        &["background_tasks:1", "subagents:1"],
+        &[],
+        &["turn_ended"],
+        &[],
+        &["background_tasks:2"],
+        &[],
+        &["background_tasks:3"],
+        &[],
+        // The CLI says the subagent completed; its commands still run.
+        &[],
+        &[],
+        &["background_tasks:2"],
+        &["turn_ended"],
+        &[],
+        &[],
+        &["background_tasks:1"],
+        &["background_tasks:2"],
+        // Started again by the CLI: it never stopped counting.
+        &[],
+        &[],
+        &[],
+        &["background_tasks:1"],
+        // The real end; still listed until `[]`, reported at the next line.
+        &[],
+        &[],
+        &["background_tasks:0"],
+        &["subagents:0", "turn_ended"],
+        &["turn_ended"],
+    ];
+    assert_eq!(task_counts(MOVED_SUBAGENT.lines()), want);
+}
+
+/// [`MOVED_SUBAGENT`] without the Monitor `blm1ph76i`, one long command only (a list that comes
+/// out the same as the one before changes nothing): when the command ends the CLI lists none,
+/// `[]`, and only on the next line the subagent again, `[a739…]`, then starts it. That drop on a
+/// `background_tasks_changed` alone is not reported.
+#[test]
+fn a_subagent_with_one_background_command_still_counts() {
+    let lines: Vec<String> = MOVED_SUBAGENT
+        .lines()
+        .filter_map(|l| {
+            let mut v: Value = serde_json::from_str(l).unwrap();
+            if v["subtype"] == "background_tasks_changed" {
+                let tasks = v["tasks"].as_array_mut().unwrap();
+                tasks.retain(|t| t["task_id"] != "blm1ph76i");
+                return Some(v.to_string());
+            }
+            (!l.contains("blm1ph76i")).then(|| l.to_owned())
+        })
+        .collect();
+    let want: [&[&str]; 22] = [
+        &["background_tasks:1", "subagents:1"],
+        &[],
+        &["turn_ended"],
+        &[],
+        &["background_tasks:2"],
+        &[],
+        &[],
+        &[],
+        &[],
+        &["background_tasks:1"],
+        &["turn_ended"],
+        &[],
+        &[],
+        // The `ping` ended: `[]`, then the subagent listed again and started.
+        &["background_tasks:0"],
+        &["background_tasks:1"],
+        &[],
+        &[],
+        &[],
+        &[],
+        &["background_tasks:0"],
+        &["subagents:0", "turn_ended"],
+        &["turn_ended"],
+    ];
+    assert_eq!(task_counts(lines.iter().map(String::as_str)), want);
 }

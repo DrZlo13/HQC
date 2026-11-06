@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.74, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.75, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -78,7 +78,9 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   and listed itself is ever deleted, never one because the hub named it, §5.3, §13; since 0.58,
   T45; a worktree only of a git workspace the worker knows, into a new folder checked the same
   way, and it is removed only by `git worktree remove` in the origin the worker recorded, since
-  0.60, T46), pick an environment or a
+  0.60, T46; a moved session's transcript goes only to the place of a folder the worker accepts
+  for `session.start`, only from where Claude Code wrote it inside `allowed_roots`, and never
+  over another file, §8.1, since 0.75), pick an environment or a
   Hermes profile for a path the worker owner has not bound locally, hand a session an ssh key
   (since 0.57 only an environment's `ssh_keys` give a process an ssh-agent, and without them it
   gets none, not even the user's), or enable
@@ -153,7 +155,7 @@ and the two differ.
 
 ### Worker
 `owner_id`, `name`, `os`, `token_hash`, `status` (online/offline), `last_seen`,
-`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?}`, `acp_agents[{name,
+`protocol_version`, `boot_id` (from the last `hello`, §5.2), `capabilities` (`claude_code: {version, sessions_registry?, moves?}`, `acp_agents[{name,
 version, load_session, resume, image, isolation}]` — the result of each agent's `initialize`
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
@@ -262,7 +264,8 @@ service session has no workspace, §10.2), `worker_id` (the workspace's worker;
 required for Claude Code without a workspace; null for a bare model; ACP agents without a
 workspace are not allowed, §8.4), `cwd` (a relative path inside the workspace, `.` by default),
 `title`, `title_source` (`default` | `runtime` | `user` — who set the title), `slug`
-(unique in the project, does not change on rename), `agent`,
+(unique in the project, does not change on rename; a move to another project keeps it when it
+is free there and appends `-2`, `-3`… otherwise), `agent`,
 `auto_approve`, `wake_on_send` (true by default since 0.55, T52, and on every session made before it, hub migration `0027`; false before), `locked_by` (none/hqc/vscode),
 `last_seq`, `archived`, `archived_at` (nullable; since 0.53, T50: when it was archived, cleared
 on unarchive; null for sessions archived before hub migration `0026`, the client then shows no
@@ -317,6 +320,14 @@ or the first input until it stops), `vscode` — a foreign holder or writer of t
 `runtime_session_id` = the file's uuid, `cwd` from the record relative to the workspace, the
 title from `ai-title` (`title_source: runtime`) or "Session N", `locked_by` per §9.1. It is
 looked up by the pair (`worker_id`, `runtime_session_id`).
+
+Move (since 0.75): a Claude Code session continues in another folder of its worker, usually in
+another project, as the same conversation (`POST /api/sessions/{id}/move`, §6). Its `project_id`,
+`workspace_id`, `cwd` (`.`) and possibly `slug` change, so its address
+`<project-slug>/<session-slug>` (§7) changes too; the old project's saved list order forgets
+it (a move to another folder of the same project keeps its place there). Its
+`runtime_session_id` stays: the worker moves the transcript to the new folder (§8.1).
+Not to another worker.
 
 ### Agent (embedded in Session)
 `runtime` (claude_code / acp / bare / none; `none` — only for the worker's service session:
@@ -440,6 +451,7 @@ the client renders only them. The "source" column is the component that produces
 | `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
 | `peer_evicted` | hub | in the target session: the send buffer was over its limit and its oldest messages were dropped unread (§7.1), since 0.35 |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
+| `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6); `text` names the old project, the new one and the folder |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
@@ -619,6 +631,11 @@ Worker → hub:
   `final: true` and that input's `in_reply_to` does not reopen the turn. A turn that ended
   without final text (only `status idle|error`) stays "in progress" until the next turn when
   its `ack` is late like this **[verify]**.
+- A session's `session.state` bypasses the outbox too, but since 0.75 the worker sends it only
+  after the outbox entries written before it, also in what it sends at once when it stops. The
+  hub ends an open turn as lost on `stopped` (§17.3), and a stop right after a turn (a move,
+  §5.3) used to reach it before that turn's final `agent.message` in a few restarts of a
+  hundred.
 - An event for a session of another worker is handled as for an unknown one: `ack` without `seq`.
 
 Hub → worker:
@@ -754,7 +771,20 @@ MCP calls (worker → hub → worker):
   checks `cwd` against it (§8.1), otherwise `error {invalid_frame}`. The session's environment
   is the binding of that canonical path in the worker's local config (§14), resolved by the
   worker on every `session.start`; until 0.56 the frame had an `environment` the worker
-  checked, now a worker ignores one an older hub still sends.
+  checked, now a worker ignores one an older hub still sends. A `session.start` for a running
+  agent with another `workspace_path` or `cwd` is a move (since 0.75, §6): the worker checks the
+  new folder as above, asks for the owner's consent to it as for a new session (§10.2), acks,
+  and restarts the agent there: at once when no turn and no subagent runs (`subagents`, §5.4),
+  no input is written into the running turn and no switch to `ask` is pending, otherwise at the
+  end of the first turn after which all of these hold (after a background subagent the
+  runtime runs a turn of its own on its result, §8.1); the same folder again before that
+  cancels the waiting move. Background commands and monitors of the agent itself do not hold
+  the move and stop with the process; when it stopped any, every input but a slash command
+  the runtime is given in the new folder, until it takes one, begins with a line telling the
+  agent how many (`[hqc] Moving this session to <folder> stopped N background task(s) …`, then
+  `---` and an empty line, before the block of §7.1), but not one written into a turn whose
+  input has it; the hub's history keeps the input as sent. Before every start
+  of a Claude Code agent its transcript is moved to the place of the working directory (§8.1).
 - `session.input` {session_id, event_id, text, artifact_ids[],
   peer_prefix[{from: "<project-slug>/<session-slug>", text, ts, event_id?, artifact_ids[]?}]} —
   the worker downloads the artifacts via `GET /worker/artifacts/{id}` with its token
@@ -962,8 +992,9 @@ MCP calls (worker → hub → worker):
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[], machine_id?}
   — `boot_id`: a uuid, new on every start of the worker process, the same in every `hello`
   of that process (§5.2, §17.3); `machine_id` — the machine fingerprint (since 0.23, §5.1). `capabilities` — `{claude_code?: {version,
-  sessions_registry?}, acp_agents[]}`; `sessions_registry: true` — the worker reads the Claude
-  Code live sessions registry and reports holders (§9.3).
+  sessions_registry?, moves?}, acp_agents[]}`; `sessions_registry: true` — the worker reads the Claude
+  Code live sessions registry and reports holders (§9.3); `moves: true` (since 0.75) — the worker
+  moves a moved session's transcript (§8.1); the hub moves only sessions of such a worker (§6).
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
   allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
   values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
@@ -1274,6 +1305,35 @@ the rest is marked "later"):
   holds the transcript: `409 vscode_open` with `held_by`; no registry data and VS Code wrote
   less than 30 s ago: `409 vscode_active`; worker offline: `409 worker_offline`; archived:
   `409 archived`; service session: `409 system_session`
+- `POST /api/sessions/{id}/move` {path, project?, create?} → the session object (since 0.75;
+  `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
+  folder's project (§3 Session). The hub checks the folder with `fs.stat` as `POST
+  /api/workspaces` does, with the same codes (`create`: the worker makes a missing folder,
+  before the overlap check below, so it stays after a `409`, as for `POST /api/workspaces`; `400
+  path_not_found`, `outside_allowed_roots`, `not_a_directory`, `invalid_path`, `409
+  worker_offline`, `504 worker_timeout`), and takes the canonical path. A workspace of the
+  session's owner on that worker at exactly that path is taken with its project (`project`, when
+  given, must be that one: `400` otherwise); one that lies inside the path or contains it, or
+  another owner's, is `409 workspace_conflict` with the body of `POST /api/workspaces`.
+  Otherwise the folder becomes a new `dir` workspace, mirrored (§9.2), of `project` (an id or
+  slug of the owner's projects, `404` otherwise) or of a new project named after the folder's
+  last component; a project's first workspace becomes its default. Then the session gets that
+  project and workspace, `cwd: .` and its slug (§3 Session), the old project's saved order drops
+  it (the same project's keeps it), the feed gets `system session_moved` (§4), the workspace's
+  `mirror.set` goes out, and a running agent gets `session.start` with the new folder, which the
+  worker applies between turns (§5.3). No input is queued: a stopped agent starts there with its
+  next input. A session already in that workspace is answered as it is. `409 archived`: an
+  archived session, as for `/takeover`. `409 unavailable`: not a Claude Code session, the
+  service session, no workspace, driven from VS Code (`locked_by: vscode`), held open by a live
+  process outside hqc (`held_by`, §9.3), a session whose subagents still run (`subagents`, §5.4;
+  a foreground one too, as the hub sees only the count: a background one would keep the agent in
+  its old folder, and input meanwhile would run there), or a worker that does not report
+  `capabilities.claude_code.moves` (§5.4). The client offers it as "Move to project…" in the
+  chat's "More" menu: the project (one of the user's, or a new one named after the folder), one
+  of that project's folders on the session's worker, the folder tree or a typed path, and
+  "Create the folder and move" after `path_not_found`, as when a workspace is added; after the
+  move the session leaves the old project's list and opens in the new one, which joins the rail.
+  A `session.summary` with another `project_id` (a move made elsewhere) does the same.
 - `POST /api/sessions/{id}/requests/{request_id}` {option_id, message? | answers} → `{event_id, seq}`
   of the stored answer; closed request: `409 request_closed` (§10.1). The same call answers a
   request wherever the client shows it (its own feed, the feed of a session waiting on it, the
@@ -1733,7 +1793,8 @@ Delivery:
   from an agent and the `peer_prefix` block; the real header is added after escaping. The
   history on the hub is not rewritten.
 - The runtime's text (since 0.35, T32; the worker builds it from `session.input`, §5.3): the
-  "Messages from other sessions" block if `peer_prefix` is not empty, then the header line if
+  "Messages from other sessions" block if `peer_prefix` is not empty (after a move that
+  stopped background tasks, the line of §5.3 comes first), then the header line if
   `peer` is set, then the escaped `text` (with the inbox paths of §12). The block is
   `Messages from other sessions (they await no reply):` (since 0.55 `Messages from other
   sessions (they await no reply; each is from <the same note as the send's header>):`), an empty line, then per message
@@ -1983,7 +2044,20 @@ The process `claude -p --output-format stream-json --input-format stream-json
 continue. The choice between them depends on whether the transcript
 `<config>/projects/<encoded cwd>/<uuid>.jsonl` exists (§9), not on `mode` from `session.start`:
 both `start` and `resume` of the adapter use `--resume` when the file exists, otherwise
-`--session-id`. `--permission-prompt-tool stdio` is required: without it the CLI asks the host
+`--session-id`. A session that moved (§5.3, §6) finds no file there: since 0.75, before every
+start, when the transcript is not at the place of the working directory, the worker looks for
+`<uuid>.jsonl` in every folder of `<config>/projects`, by uuid rather than by the old folder, so
+a move also survives a worker restart between the hub's `session.start` and the agent's start,
+and moves it there with its `<uuid>/` folder (subagents): only when exactly one file has that
+uuid, only one written in another folder (the `cwd` of its mirror row, which a move sets, else
+of its first record; symlinks resolved, through its deepest existing ancestor when the folder
+is gone, as a worktree deleted after the move) inside `allowed_roots`, and never over an existing file
+or folder (a hard link, then the old name is removed). Otherwise the start fails
+(`agent_start_failed`, §5.2) and the file stays where it was. A transcript written in the
+working directory itself, under another name of it (a path through a symlink), is not moved. The mirror's row for
+the new path is written first (§9.2). That `--resume` in the new folder keeps the conversation is
+what the live test `live_move_resumes_in_the_new_folder` checks **[verify]**.
+`--permission-prompt-tool stdio` is required: without it the CLI asks the host
 nothing and rejects outright everything that needs confirmation
 (`system/permission_denied`, `permission_decision.source: config`), and `AskUserQuestion`
 is not in the tool list (checked on 2.1.307). `--allowedTools mcp__hqc`
@@ -2209,7 +2283,7 @@ Monitor waiting for the `ping`, kept the list from going empty), so a drop of th
 `background_tasks_changed` alone brings is reported at the next line of another kind (at a
 `result` before the end of the turn). The
 number of tasks in the list stays in the worker: the agent is not idle while it is above 0
-(§17.3).
+(§17.3), and a move tells the agent how many it stopped (§5.3).
 The CLI repeats on stdout every `control_response` the adapter sent to stdin;
 the adapter skips those lines. `in_reply_to` = the `event_id` of the turn's input, as above,
 once its echo has come (since 0.69; before that, none); an input written into a running turn
@@ -2598,6 +2672,10 @@ before the watch was set), offsets and rescans are needed anyway, and 2 s is muc
 incomplete line waits for the next pass; a file that got shorter is read again (`event_id`
 absorbs duplicates). Offsets, the file's last prompt and `ai-title` are stored next to the `cwd`
 cache (`$HQC_HOME/mirror/mirror.sqlite3`); `mirror.event` goes through the outbox, like `event`.
+A transcript the worker moves for a moved session (§8.1, since 0.75) gets its row at the new path
+before it is moved: `cwd` the new folder, the offset at the file's end, the old row's last prompt
+and `ai-title`. The mirror reads the row before the records, so it neither imports the file
+again nor counts it to the old folder by the `cwd` of its old records.
 
 The worker recognises its own records by `uuid`: the Claude Code adapter puts into a shared
 in-memory registry (by `runtime_session_id`) the uuid of every `user`/`assistant` message of the
@@ -2954,7 +3032,7 @@ a cache of folders in which it has agreed to run sessions: `$HQC_HOME/known_work
 (an array of canonical paths, mode 0600, written through a temporary file). A `session.start`
 with a `workspace_path` whose canonical path is not in the cache, for a session with
 `owner_is_worker_owner: false` and without `requested_by_owner`, is not executed by the worker
-right away: it sends `worker.approval.request {kind: workspace.use}` with the description "the
+right away (since 0.75 also when a running session moves to such a folder, §5.3): it sends `worker.approval.request {kind: workspace.use}` with the description "the
 hub wants to run sessions in <path>" and `expires_at` 10 minutes ahead, and defers the `ack` to
 `session.start`. `once`: the folder is written to the cache, and the waiting `session.start`
 frames run as usual; `deny`, expiry at the hub, or the worker's own wait for `expires_at` +
@@ -3800,6 +3878,27 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.74 → 0.75 (a session moves to another folder and project)
+§3 Session, §6: `POST /api/sessions/{id}/move {path, project?, create?}` continues a Claude Code
+session in another folder of its worker, as the same conversation: an exact workspace of the
+owner with its project, or a new mirrored workspace of `project` or of a new project named after
+the folder; the slug is kept when free, otherwise `-2`…; the old project's saved order drops the
+session (a move within the project keeps its place); `system session_moved` (§4); `409
+archived`; `409 unavailable` for a session driven from VS Code, held by a live process or with
+subagents still running (a foreground one too), and for a worker without
+`capabilities.claude_code.moves` (§5.4); the folder checks and codes of `POST /api/workspaces`, `create` making the folder before the overlap
+check, so it stays after a `409`, as there. Nothing is queued. The client: "Move to project…" in
+the chat's "More" menu; a summary with another `project_id` moves the session in the lists.
+§5.3, §10.2: a `session.start` for a running agent with another folder is a move, applied
+between turns once no subagent runs, with the owner's consent to a new folder of a foreign
+session; the agent's own background commands stop with it, and its first input in the new
+folder that the runtime takes and is no slash command says how many. §8.1, §9.2, §2.1: before every start of a Claude Code agent the worker moves its
+transcript by uuid to the place of the working directory, within `allowed_roots` and never over
+a file, the mirror's row first; the folder of a transcript is judged through its deepest
+existing ancestor when it is gone. §5.2: a `session.state` goes after the outbox entries written
+before it, also when the worker stops (a stop right after a turn could overtake its final answer
+and lose the turn).
 
 ### 0.73 → 0.74 (favorites, a session's model, quoting)
 §3 Favorite, §6: a user stars sessions and projects; favorites are personal, in two tables

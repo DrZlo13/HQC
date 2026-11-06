@@ -399,7 +399,9 @@ row of its own (§5.2).
 A `move` (since 0.76) is a row of the session whose agent's `hqc_move` waits for the owner's
 answer (§7, §10.1): `request_id` — the `mcp.call`'s, `worker_id` — the session's worker,
 `payload` — the hub's `approval.request` in the session's feed plus `move: {path, project,
-turn}` (the folder, the call's `project`, the chain of the call's turn, §7.1), no `expires_at`,
+turn}` (the folder, the call's `project`, the chain of the call's turn, §7.1), no `expires_at`
+(the call itself ends at the runtime's tool timeout, `ask_timeout_s` plus a minute, §7.2, and its
+`mcp.cancel` closes the row),
 `result` — the `mcp.result` frame once the move was carried out or refused, the owner denied it
 or the hub cancelled the request. An allowed move closes the row first, without a `result`, and
 fills it in when the move is done. On start, before it serves anything, the hub finds every
@@ -1819,7 +1821,10 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   line "It becomes a mirrored workspace: Claude Code sessions in it are imported into hqc." (it
   becomes a `dir` workspace with the mirror on, §9.1); options `once` / `deny`. The call is
   deferred as `hqc_ask` is: `ack` now, the `mcp.result` a frame of its own later, kept in the
-  request until the worker acknowledges it and sent again after `hello`. `once`: the hub moves
+  request until the worker acknowledges it and sent again after `hello`. The call waits at most
+  the runtime's tool timeout (`ask_timeout_s` plus a minute, 11 minutes by default, §7.2): then
+  the runtime cancels it, its `mcp.cancel` closes the request (below), and an answer after that
+  gets `409 request_closed`. `once`: the hub moves
   the session into the path on the card with `create: true` (a missing folder is made, inside
   `allowed_roots` only) and goes on as after a move at once; a move that fails then gives the
   call its error; a hub that stops before it has stored the call's result carries the move out
@@ -1841,8 +1846,10 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   the chain of the input its turn runs on (the one the call's chain is taken from, §7.1) must
   not be capped to `ask` by another session (`capped_by` other than the session's own address),
   whatever the session's own mode: a turn another agent in `ask` started moves nothing
-  (`unavailable`), before `fs.stat`; a cap the session set itself (the input after its own move
-  in `ask`) does not refuse. Errors: `invalid_args` with the worker's reason for a folder
+  (`unavailable`), before `fs.stat`; a cap the session set itself does not refuse — any chain
+  whose first session in `ask` up the chain is the caller: the input after its own move in
+  `ask`, another agent's answer to a message the session sent in `ask`, a run of its own
+  `hqc_schedule` made in `ask`. Errors: `invalid_args` with the worker's reason for a folder
   outside the roots or one it cannot make, for a path or a canonical path with a control
   character or a missing folder's path with `.` or `..`, and for a path that is another
   project's workspace while
@@ -1859,7 +1866,8 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   it waits) moved on (§7.1), built after the move: an `ask` cap there is the session's own
   (another's refused the call), and is named by the session's address in the new project, so a
   move from the turn the input starts is not refused for it; that turn runs in the session's
-  own mode, and moves after moves end at the hops limit. The worker writes no input into the
+  own mode, or in `ask` when the call's turn carried the session's own cap, and moves after
+  moves end at the hops limit. The worker writes no input into the
   running turn while a move waits (§17.2), so that input starts the agent's first turn in the
   new folder. Once per `request_id` (§5.2): the input's `event_id` is `once_id("hqc_move wake",
   …)`; a repeat of a move made at once finds that input and answers from where the session is,
@@ -3088,9 +3096,10 @@ card, the call gets the error (§7). Only the session owner answers it (`403` fo
 it takes no `message` (`400`); `auto_approve` never answers it. It counts as any open request:
 the session is `waiting` (§17.1), it is in the Requests list and in the feeds of the sessions
 waiting on this one, it pushes (§16). The answer is the usual `approval.response` event; no
-`approval.response` frame goes to the worker, the call gets its `mcp.result` (§7). It does not
-expire, and the turn watchdog (§17.3) leaves a session waiting on it alone, as one waiting on
-an `hqc_ask`; `POST /stop`, archiving and the agent's process stopping cancel it as an
+`approval.response` frame goes to the worker, the call gets its `mcp.result` (§7). It has no
+`expires_at`, but the call waits at most the runtime's tool timeout (`ask_timeout_s` plus a
+minute, §7.2), whose `mcp.cancel` closes it (below); the turn watchdog (§17.3) leaves a session
+waiting on it alone, as one waiting on an `hqc_ask`; `POST /stop`, archiving and the agent's process stopping cancel it as an
 approval, with `approval.cancel` and the call's `mcp.result` error; a worker restart writes
 only the event, and so does `mcp.cancel` of the call (§5.2), with `approval.cancel {stopped}`.
 The client draws it with the card of a worker's request (§10.2): the description, "Allow" and
@@ -4042,7 +4051,8 @@ or of another project than `project`) is the call's error before any card. The m
 in the canonical path it was decided on (the one on the card): a different canonical path from
 the move's own `fs.stat`, a folder swapped for a symlink meanwhile, is `invalid_args` and
 records nothing. `mcp.cancel` of a waiting call closes its request with `approval.cancel
-{stopped}`. §3 PendingRequest, §6 `GET /api/requests`, §10.1, §11: the request kind `move`,
+{stopped}`; so does the runtime's tool timeout (`ask_timeout_s` plus a minute), the most the
+call waits for the owner. §3 PendingRequest, §6 `GET /api/requests`, §10.1, §11: the request kind `move`,
 answered by the session owner only, without `message`, never by `auto_approve`, counted as any
 open request; the client's card says "The agent asks to move this session"; an allowed move
 whose result the previous hub process did not store (it stopped meanwhile) is found on start
@@ -4050,7 +4060,8 @@ and carried out again once the session's worker sends `hello`. It then
 queues the owner's input "You moved to …; continue the task." as a run of an agent's
 `hqc_schedule` (§16): a `user.message` in the call's chain moved on, built after the move (a
 cap of the session's own is named by its new address), so the turn runs in the session's own
-mode; once per `request_id`, a repeat of a move made at once answered from that input before
+mode or under that cap; a cap of the session's own (the first session in `ask` up the chain is
+the caller) never refuses the call; once per `request_id`, a repeat of a move made at once answered from that input before
 anything the turn's chain decides. `INSTRUCTIONS` name it: only when the user asks, and
 a folder other than one of the user's workspaces in the same environment waits for the user. A
 move from the client still queues nothing (§6). §4: that input is a `user.message` the hub

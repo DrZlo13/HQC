@@ -136,7 +136,9 @@ Project, Workspace, Session, Artifact, Grant, ScheduledMessage. An Event has no 
 it has `author`.
 
 ### User
-`email` (from the verified Cloudflare Access JWT), `display_name`, `api_keys`
+`email` (from the verified Cloudflare Access JWT, in OIDC mode the provider's ID token, §6),
+`oidc_sub` (since 0.68, OIDC mode only: the provider's `sub` the user is bound to on the first
+OIDC sign-in, §6; hub migration `0031_oidc_subject`), `display_name`, `api_keys`
 (OpenRouter, Anthropic API; encrypted with the hub's master key, which lives in the hub's
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
 project, created on first sign-in; the personal assistant session lives in it), `theme`.
@@ -1026,20 +1028,35 @@ only the reverse proxy reaches it).
 
 OIDC mode (since 0.68), for a hub behind a reverse proxy that signs people in with an OIDC
 provider instead of Cloudflare Access (Traefik forwardAuth with oauth2-proxy and Keycloak, for
-example): `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD` and `HQC_OIDC_JWKS_URL`, all three. `/api/*`, the
-`/api/ws` WebSocket included, then takes the provider's ID token from `Authorization: Bearer`
-and checks it the same way: an RS256 signature by a key of that JWKS, exactly that `iss`, the
-`aud`, `exp`, and the email from the `email` claim; `Cf-Access-Jwt-Assertion` is not read. On
-top of that the email counts only with `email_verified: true` (Keycloak puts it in the ID token
-with the `email` scope), otherwise `403`: the provider may let every account set its own email,
-and an account that set the owner's would become the owner's hub user, with their workers. A
-token with a `typ` other than `ID` gets `401` (Keycloak's access tokens are `Bearer`; other
-providers may leave `typ` out, which passes). The proxy puts the token there (oauth2-proxy
+example): `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL` and `HQC_OIDC_ALLOWED_EMAILS`,
+all four, and `HQC_CLIENT_IP_HEADER` (§20). `/api/*`, the `/api/ws` WebSocket included, then
+takes the provider's ID token from `Authorization: Bearer` and checks it the same way: an RS256
+signature by a key of that JWKS, exactly that `iss`, the `aud`, `exp` and `nbf` (60 s of
+leeway; `nbf` in Access mode too), and the email from the `email` claim;
+`Cf-Access-Jwt-Assertion` is not read. On top of that the email counts only with
+`email_verified: true` (Keycloak puts it in the ID token with the `email` scope), otherwise
+`403`: the provider may let every account set its own email, and an account that set the
+owner's would become the owner's hub user, with their workers. A token with a `typ` other than
+`ID` gets `401` (Keycloak's access tokens are `Bearer`; other providers may leave `typ` out,
+which passes), and so does one whose `aud` is an array without `azp` equal to `HQC_OIDC_AUD`
+(OIDC Core 3.1.3.7). Only the emails of `HQC_OIDC_ALLOWED_EMAILS` (comma-separated, compared
+case-insensitively) get in; another one gets the same `401` as an invalid token, before the hub
+looks up or creates a user: any account of the realm with an ID token for the client, through
+the proxy's sign-in or past the proxy, would otherwise become a hub user that enrolls workers of
+its own. The hub user is keyed on the token's `sub` (§3 User `oidc_sub`); the issuer is fixed by
+`HQC_OIDC_ISSUER`, so `sub` alone is the key. The user bound to that `sub` signs in; else the
+user of the email is bound to it on this first OIDC sign-in (one from Access mode too), or is
+created with it; if the user of the email is bound to another `sub`, the token gets the same
+`401`. So an account whose email changes at the provider keeps its hub user (when the new email
+is on the allow-list too), and another account that gets the same email verified does not take it
+over. The proxy puts the token there (oauth2-proxy
 `--set-authorization-header`) and lets `/worker/*` through without its sign-in. It must also renew the token before it expires: the hub refuses an
 expired one with `401`, and oauth2-proxy keeps handing over the token it got at sign-in unless
 `--cookie-refresh` is shorter than the token's lifetime (in Keycloak the Access Token Lifespan,
-5 minutes by default). Only some of the three variables, or them together with
-`HQC_ACCESS_*` or `HQC_DEV=1`, and the hub does not start.
+5 minutes by default). Only some of the four variables, an empty allow-list, no
+`HQC_CLIENT_IP_HEADER`, an issuer or JWKS URL that is not `https://` (`http://` only to a
+loopback host, the rule of `HQC_PUBLIC_ORIGINS`), or the variables together with `HQC_ACCESS_*`
+or `HQC_DEV=1`, and the hub does not start.
 
 Dev mode (local development without Access): `HQC_DEV=1` together with `HQC_DEV_USER=<email>`;
 all `/api/*` requests come from that user. The hub refuses to start if `HQC_ACCESS_*` or
@@ -3421,9 +3438,10 @@ unless (since 0.44, T40) it carries a buffered send from a session in `ask` (§7
   connect-src 'self' wss: https:; img-src 'self' data:; style-src 'self' 'unsafe-inline';
   object-src 'none'; base-uri 'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`,
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. The client build has
-  no inline scripts (a client test checks this). HSTS is set by Cloudflare.
+  no inline scripts (a client test checks this). HSTS is set by Cloudflare (in OIDC mode, by
+  the reverse proxy, RUNBOOK §1.9).
 - Limits (in the hub process's memory; the address is `CF-Connecting-IP`, otherwise the
-  connection's address; with `HQC_CLIENT_IP_HEADER` (since 0.68), for a reverse proxy that puts
+  connection's address; with `HQC_CLIENT_IP_HEADER` (since 0.68, required in OIDC mode, §6), for a reverse proxy that puts
   the TCP peer's address in a header of its own, such as Traefik's `X-Real-Ip`, it is that header,
   otherwise the connection's address, and neither `CF-Connecting-IP` nor `CF-IPCountry` (§5.1)
   is read, since there the client could set them): `POST /worker/enroll` — 10 per minute and 10 live unconfirmed codes per
@@ -3564,11 +3582,17 @@ without a hub each of these would have to be done peer-to-peer.
 
 ### 0.67 → 0.68 (OIDC sign-in behind a reverse proxy)
 §6, §20: a third way to authenticate people besides Cloudflare Access and dev mode:
-`HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, the provider's ID token from
-`Authorization: Bearer`, put there by a proxy such as oauth2-proxy with Keycloak, with
-`email_verified: true` and, when it has a `typ`, `typ: ID`. Access and dev mode are unchanged.
-§20: `HQC_CLIENT_IP_HEADER` names the header per-address limits take the address from instead
-of `CF-Connecting-IP`; with it `CF-IPCountry` is not read either (§5.1). RUNBOOK §1.2, §1.9.
+`HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`, `HQC_OIDC_ALLOWED_EMAILS`, the
+provider's ID token from `Authorization: Bearer`, put there by a proxy such as oauth2-proxy with
+Keycloak, with `email_verified: true`, when it has a `typ`, `typ: ID`, with an array `aud`,
+`azp` equal to the client id, and an email of the allow-list; the issuer and the JWKS URL are
+`https://` (`http://` only to loopback), and `HQC_CLIENT_IP_HEADER` is required. §3 User, §6:
+the first OIDC sign-in binds the user to the token's `sub` (migration `0031_oidc_subject`,
+`users.oidc_sub`); the email of a user bound to another `sub` is refused. §6: `nbf` is checked,
+in Access mode too; otherwise Access and dev mode are unchanged. §20: `HQC_CLIENT_IP_HEADER`
+names the header per-address limits take the address from instead of `CF-Connecting-IP`; with
+it `CF-IPCountry` is not read either (§5.1); in OIDC mode HSTS is the reverse proxy's. RUNBOOK
+§1.2, §1.9.
 
 ### 0.66 → 0.67 (unread projects)
 §6 client layout: a project tile with no session waiting shows a dot when one of its sessions

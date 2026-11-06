@@ -81,9 +81,10 @@ The hub is configured by environment variables only; it takes a single command-l
 | `HQC_HUB_LISTEN` | no, `127.0.0.1:8080` | HTTP address and port. The hub listens only on the interface `cloudflared` connects to (§20); with the tunnel on the same host, loopback. In the Docker image it is `0.0.0.0:8080` inside the container, and the port is not published (§1.8) |
 | `HQC_ACCESS_TEAM_DOMAIN` | yes (without `HQC_DEV` or `HQC_OIDC_*`) | Cloudflare Zero Trust team domain, `<team>.cloudflareaccess.com` (`https://` and `/` are allowed; the hub strips them). From it the hub derives the issuer `https://<team>.cloudflareaccess.com` and the JWKS `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs` |
 | `HQC_ACCESS_AUD` | yes (without `HQC_DEV` or `HQC_OIDC_*`) | Application Audience (AUD) tag of the hub's Access application; the hub checks `aud` in the `Cf-Access-Jwt-Assertion` JWT |
-| `HQC_OIDC_ISSUER` | instead of `HQC_ACCESS_*` | OIDC mode (SPEC §6), for a hub behind a reverse proxy that signs people in with an OIDC provider: the exact `iss` of the provider's ID tokens, e.g. `https://auth.example.com/realms/<realm>` for Keycloak. Set together with the two below or none of them; with `HQC_ACCESS_*` or `HQC_DEV=1` the hub does not start. The hub reads the token from `Authorization: Bearer` on `/api/*` and `/api/ws`; the proxy must renew it before it expires (oauth2-proxy `--set-authorization-header` with `--cookie-refresh` shorter than the token lifetime, e.g. `4m` against Keycloak's default 5-minute Access Token Lifespan), otherwise `/api/*` answers `401` a few minutes after sign-in |
+| `HQC_OIDC_ISSUER` | instead of `HQC_ACCESS_*` | OIDC mode (SPEC §6), for a hub behind a reverse proxy that signs people in with an OIDC provider: the exact `iss` of the provider's ID tokens, e.g. `https://auth.example.com/realms/<realm>` for Keycloak; `https://`, `http://` only to a loopback host. Set together with the three below, or none of them; OIDC mode also requires `HQC_CLIENT_IP_HEADER`; with `HQC_ACCESS_*` or `HQC_DEV=1` the hub does not start. The hub reads the token from `Authorization: Bearer` on `/api/*` and `/api/ws`; the proxy must renew it before it expires (oauth2-proxy `--set-authorization-header` with `--cookie-refresh` shorter than the token lifetime, e.g. `4m` against Keycloak's default 5-minute Access Token Lifespan), otherwise `/api/*` answers `401` a few minutes after sign-in |
 | `HQC_OIDC_AUD` | with `HQC_OIDC_ISSUER` | the expected `aud` of the ID token: the client id the proxy signs in with |
-| `HQC_OIDC_JWKS_URL` | with `HQC_OIDC_ISSUER` | the provider's JWKS, e.g. `https://auth.example.com/realms/<realm>/protocol/openid-connect/certs` for Keycloak; no discovery |
+| `HQC_OIDC_JWKS_URL` | with `HQC_OIDC_ISSUER` | the provider's JWKS, e.g. `https://auth.example.com/realms/<realm>/protocol/openid-connect/certs` for Keycloak; no discovery. `https://`, `http://` only to a loopback host: over plain http anyone on the way can replace the signing keys |
+| `HQC_OIDC_ALLOWED_EMAILS` | with `HQC_OIDC_ISSUER` | comma-separated emails of the people the hub lets in, e.g. `you@example.com`, compared case-insensitively. Any other account of the realm with an ID token for the client gets `401` and no hub user, whichever way the token reaches the hub. Empty, and the hub does not start |
 | `HQC_VAPID_PRIVATE` | no | VAPID private key for Web Push: a 32-byte P-256 scalar, base64url without `=` (§1.5). Set together with `HQC_VAPID_PUBLIC` or not at all; otherwise the hub does not start |
 | `HQC_VAPID_PUBLIC` | no | VAPID public key: an uncompressed P-256 point (65 bytes), base64url without `=`. Served by `GET /api/push/vapid`. Without the key pair push is off, and the client says "VAPID keys are not configured on the hub" |
 | `HQC_VAPID_SUBJECT` | no, `mailto:hqc@localhost` | `sub` in the VAPID signature: `mailto:` or `https:`. Set a real address: push services (Apple especially) may reject signatures with a made-up one |
@@ -95,7 +96,7 @@ The hub is configured by environment variables only; it takes a single command-l
 | `HQC_ARTIFACT_PUBLIC_BASE` | no | origin of a separate artifact domain, `https://artifacts.<hub domain>` without a path (`http://` only for loopback). Signed links point there, and HTML is rendered in an iframe only from there; the hub adds this origin to `img-src`/`frame-src`/`connect-src` of its CSP, and on this host serves only `/artifacts/*` (everything else is `404`). The domain is the same tunnel to the same hub, **outside** Access (§1.6). If unset, links are relative, on the hub's domain (behind Access), and HTML can only be downloaded |
 | `HQC_ARTIFACT_KEY` | no | HMAC key for signed links, at least 32 characters (`openssl rand -hex 32`). If unset, a random one per run: links from the previous run stop working, and the client just requests new ones. Needed only if links must survive a restart |
 | `HQC_PUBLIC_ORIGINS` | no | comma-separated origins browsers open the hub at: `https://hqc.example.com`. When set, `Origin` on `/api/*` (WebSocket and writes) is checked against this list instead of the request's `Host`. Needed if a proxy in front of the hub rewrites `Host` to the container name (Caddy with `header_up Host`, cloudflared with `httpHostHeader`) and does not set `X-Forwarded-Host`; the symptom is `WebSocket connection to wss://…/api/ws failed` in the browser and `Origin does not match the hub's host` in the hub log |
-| `HQC_CLIENT_IP_HEADER` | no | the header a reverse proxy in front of the hub puts the client's address in, from the TCP peer, e.g. `X-Real-Ip` for Traefik (§1.9). When set, the per-address limits on `/worker/*` (SPEC §20) take the address from this header (the TCP peer when it is absent), and the hub reads neither `CF-Connecting-IP` nor `CF-IPCountry` (the country on the enrollment screen). If unset: `CF-Connecting-IP` (Cloudflare Tunnel, §1.6), otherwise the TCP peer |
+| `HQC_CLIENT_IP_HEADER` | in OIDC mode | the header a reverse proxy in front of the hub puts the client's address in, from the TCP peer, e.g. `X-Real-Ip` for Traefik (§1.9). When set, the per-address limits on `/worker/*` (SPEC §20) take the address from this header (the TCP peer when it is absent), and the hub reads neither `CF-Connecting-IP` nor `CF-IPCountry` (the country on the enrollment screen). If unset: `CF-Connecting-IP` (Cloudflare Tunnel, §1.6), otherwise the TCP peer; in OIDC mode the hub then does not start |
 | `HQC_TURN_WATCHDOG_S` | no, `900` | turn watchdog (SPEC §17.3), whole seconds: if a session is `running` and the worker has sent no event for it (including `agent.delta`) for longer than this, the hub closes the turn with `system turn_lost` "no events for N s", and the session stays in `error` until the next input. Waiting for an answer to approval/clarify and the worker being offline do not count. `0` turns it off |
 | `RUST_LOG` | no, `info` | log level (`tracing`), e.g. `hqc_hub=debug` |
 
@@ -348,8 +349,8 @@ client in `/opt/hqc/client`, user `hqc` (uid/gid 10001), port 8080, and from pac
 | `RUST_LOG` | `info` |
 | `NO_COLOR` | `1`: logs without ANSI colours |
 
-You must set: `HQC_DATABASE_URL`, `HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD` (or the three
-`HQC_OIDC_*` instead of the last two); for push,
+You must set: `HQC_DATABASE_URL`, `HQC_ACCESS_TEAM_DOMAIN`, `HQC_ACCESS_AUD` (or the four
+`HQC_OIDC_*` and `HQC_CLIENT_IP_HEADER` instead of the last two, §1.9); for push,
 `HQC_VAPID_PRIVATE`, `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT` (§1.5). `HQC_DEV` does not work
 in the container and is not needed: with `0.0.0.0` the hub refuses to start in dev mode.
 
@@ -477,9 +478,19 @@ Instead of Cloudflare Tunnel and Access (§1.6): Traefik sends every request for
 a forwardAuth middleware to oauth2-proxy, which signs people in with Keycloak and hands the hub
 the ID token as `Authorization: Bearer`; the hub runs in OIDC mode (§1.2) and verifies the token
 itself. Workers keep their own tokens: `/worker/*` has a router of its own without the
-middleware. Everyone who can sign in to the realm gets into the hub.
+middleware. Only the emails of `HQC_OIDC_ALLOWED_EMAILS` get into the hub; any other account of
+the realm gets `401`.
 
-The Keycloak client, in the realm the hub trusts:
+A hub user is bound to the `sub` of their first OIDC sign-in, and a token with the same email
+and another `sub` gets `401`. When the account is recreated in the realm, or `HQC_OIDC_ISSUER`
+changes, clear the binding in the hub's database — `UPDATE users SET oidc_sub = NULL WHERE
+email = '<email>'`, for every user when the issuer changes; the next sign-in binds it again.
+
+The realm the hub trusts has User registration off (Realm settings → Login): with it on, anyone
+on the internet gets an account of the realm, and the hub's allow-list is then the only thing
+between them and the hub.
+
+The Keycloak client, in that realm:
 
 - Client ID `hqc` (it is `HQC_OIDC_AUD`), Client authentication on, Standard flow only.
 - Valid redirect URIs `https://hqc.example.com/oauth2/callback`, Web origins
@@ -496,39 +507,50 @@ The Keycloak client, in the realm the hub trusts:
 
 The compose file of §1.8 with these changes: drop the `HQC_ACCESS_*` lines from `hub.env` (next
 to `HQC_OIDC_*` the hub refuses to start), give the hub the environment and labels below, add
-oauth2-proxy, and replace the `edge` network with `proxy`, the network Traefik sees the
-containers on, in the services and at the top level:
+oauth2-proxy, and replace the `edge` network with `hqc-traefik`, a network only Traefik and
+these containers are on, in the services and at the top level:
 
 ```yaml
   hqc-hub:
-    # image, restart, depends_on, env_file and volumes as in §1.8
+    # image, restart, depends_on, env_file and volumes as in §1.8; no ports
     environment:
       HQC_OIDC_ISSUER: https://auth.example.com/realms/<realm>
       HQC_OIDC_AUD: hqc
       HQC_OIDC_JWKS_URL: https://auth.example.com/realms/<realm>/protocol/openid-connect/certs
+      HQC_OIDC_ALLOWED_EMAILS: you@example.com
       HQC_CLIENT_IP_HEADER: X-Real-Ip
       HQC_ARTIFACT_PUBLIC_BASE: https://artifacts.hqc.example.com
-    networks: [default, proxy]
+    networks: [default, hqc-traefik]
     labels:
       traefik.enable: "true"
-      traefik.docker.network: proxy
+      traefik.docker.network: hqc-traefik
       # People: the whole site behind the sign-in.
       traefik.http.routers.hqc.rule: Host(`hqc.example.com`)
       traefik.http.routers.hqc.entrypoints: websecure
       traefik.http.routers.hqc.tls.certresolver: letsencrypt
-      traefik.http.routers.hqc.middlewares: hqc-auth
+      traefik.http.routers.hqc.middlewares: hqc-hsts,hqc-auth
       traefik.http.routers.hqc.service: hqc-hub
       # Workers: their own token, no sign-in (the longer rule wins over the one above).
       traefik.http.routers.hqc-worker.rule: Host(`hqc.example.com`) && PathPrefix(`/worker/`)
       traefik.http.routers.hqc-worker.entrypoints: websecure
       traefik.http.routers.hqc-worker.tls.certresolver: letsencrypt
+      traefik.http.routers.hqc-worker.middlewares: hqc-hsts
       traefik.http.routers.hqc-worker.service: hqc-hub
       # Artifact domain: public, signed links only (SPEC §12), no sign-in.
       traefik.http.routers.hqc-artifacts.rule: Host(`artifacts.hqc.example.com`)
       traefik.http.routers.hqc-artifacts.entrypoints: websecure
       traefik.http.routers.hqc-artifacts.tls.certresolver: letsencrypt
+      traefik.http.routers.hqc-artifacts.middlewares: hqc-hsts
       traefik.http.routers.hqc-artifacts.service: hqc-hub
+      # Plain http: a redirect to https for both names.
+      traefik.http.routers.hqc-http.rule: Host(`hqc.example.com`) || Host(`artifacts.hqc.example.com`)
+      traefik.http.routers.hqc-http.entrypoints: web
+      traefik.http.routers.hqc-http.middlewares: hqc-https
+      traefik.http.routers.hqc-http.service: hqc-hub
       traefik.http.services.hqc-hub.loadbalancer.server.port: "8080"
+      traefik.http.middlewares.hqc-https.redirectscheme.scheme: https
+      traefik.http.middlewares.hqc-https.redirectscheme.permanent: "true"
+      traefik.http.middlewares.hqc-hsts.headers.stsSeconds: "31536000"
       traefik.http.middlewares.hqc-auth.forwardauth.address: http://hqc-oauth2-proxy:4180/
       traefik.http.middlewares.hqc-auth.forwardauth.trustForwardHeader: "true"
       traefik.http.middlewares.hqc-auth.forwardauth.authResponseHeaders: Authorization
@@ -556,28 +578,45 @@ containers on, in the services and at the top level:
       OAUTH2_PROXY_COOKIE_REFRESH: 4m
       OAUTH2_PROXY_COOKIE_SAMESITE: lax
       OAUTH2_PROXY_COOKIE_SECURE: "true"
-    networks: [proxy]
+    networks: [hqc-traefik]
     labels:
       traefik.enable: "true"
-      traefik.docker.network: proxy
+      traefik.docker.network: hqc-traefik
       traefik.http.routers.hqc-oauth2.rule: Host(`hqc.example.com`) && PathPrefix(`/oauth2/`)
       traefik.http.routers.hqc-oauth2.entrypoints: websecure
       traefik.http.routers.hqc-oauth2.tls.certresolver: letsencrypt
+      traefik.http.routers.hqc-oauth2.middlewares: hqc-hsts
       traefik.http.services.hqc-oauth2.loadbalancer.server.port: "4180"
 ```
 
 ```yaml
 networks:
-  # Traefik's network, from its own compose project; instead of edge.
-  proxy:
+  # Only Traefik and this stack, instead of edge: docker network create hqc-traefik, and add
+  # it to the networks of Traefik's service in its own compose project.
+  hqc-traefik:
     external: true
 ```
 
-- `HQC_CLIENT_IP_HEADER: X-Real-Ip`: Traefik sets `X-Real-Ip` to the address of the TCP peer and
-  drops one the client sent (unless the entrypoint's `forwardedHeaders` trusts that peer), so the
-  hub's per-address limits on `/worker/*` count real clients; without it every client is
-  Traefik's address, and 20 bad worker tokens a minute from anyone would turn away every worker's
-  reconnect with `429`, while a `CF-Connecting-IP` the client makes up would pass through.
+- `hqc-traefik`, not a network Traefik shares with other stacks (a common `proxy`): any
+  container on the hub's network reaches `hqc-hub:8080` past Traefik and sets `X-Real-Ip`
+  itself. The hub's port is not published (no `ports:`, as in §1.8), and the entrypoints'
+  `forwardedHeaders.trustedIPs` stays empty (and `forwardedHeaders.insecure` off): otherwise
+  Traefik keeps the `X-Real-Ip` that a trusted peer sent.
+- `HQC_CLIENT_IP_HEADER: X-Real-Ip`, required in OIDC mode: Traefik sets `X-Real-Ip` to the
+  address of the TCP peer and drops one the client sent (unless the entrypoint's
+  `forwardedHeaders` trusts that peer), so the hub's per-address limits on `/worker/*` count
+  real clients. Without the variable the hub does not start: it would take the address from a
+  `CF-Connecting-IP` the client makes up, and without either header every client is Traefik's
+  address, so 20 bad worker tokens a minute from anyone would turn away every worker's reconnect
+  with `429`. Behind another proxy, name a header that the proxy sets to the TCP peer's address
+  in place of whatever the client sent, not one it appends to (`X-Forwarded-For`): the hub reads
+  only the first value of the header (the client's own when the proxy adds its value after it),
+  and a list of addresses in one value is not an address, so every client counts as the proxy.
+- `hqc-hsts` and `hqc-http`: SPEC §20 leaves HSTS to Cloudflare; here Traefik sets
+  `Strict-Transport-Security` for a year on every https answer and permanently redirects plain
+  http on the `web` entrypoint to https. If Traefik's static configuration already redirects
+  `web` to `websecure` (`entryPoints.web.http.redirections`), the `hqc-http` router is not
+  needed.
 - `addAuthCookiesToResponse` (Traefik 3.0 or later): oauth2-proxy renews the session every
   `OAUTH2_PROXY_COOKIE_REFRESH` and sends the new cookie in its forwardAuth answer, which Traefik
   passes to the browser only for the cookies named here: `_oauth2_proxy` and the parts

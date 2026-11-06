@@ -645,3 +645,53 @@ it('makes a missing folder for a workspace when asked', async () => {
   await until('workspace listed', () => $$('.workspace-row').find((r) => r.textContent?.includes('/notes/new2')));
   expect($('.add-workspace')).toBeNull();
 });
+
+it('moves a session from its chat into a new project, and into a folder of another project', async () => {
+  const personal = app.me!.personal_project_id;
+  const s = await app.api.createSession(personal, 'Move me');
+  await until('known', () => app.sessions.get(s.id));
+  location.hash = `#/s/${s.id}`;
+  await until('chat', () => $('.chat'));
+  (await menuItem('.btn-move'))!.click();
+  await until('move form', () => $('.move-session input[name=path]'));
+  type('.move-session input[name=path]', '/Users/home-mac/work/moved');
+  await settle();
+  submit('.move-session');
+  await until('missing', () => $('.move-session .error-text')?.textContent?.includes('does not exist on the worker'));
+  $<HTMLButtonElement>('.move-session .btn-create-folder')!.click();
+  // A new project named after the folder joins the rail; the session opens there.
+  await until('new project', () => projectRow('moved'));
+  await until('gone from the form', () => !$('.move-session'));
+  const moved = app.sessions.get(s.id)!;
+  expect(moved.project_id).not.toBe(personal);
+  expect(app.projects.get(moved.project_id)?.name).toBe('moved');
+  await until('current', () => app.currentProject()?.id === moved.project_id);
+  await until('its row', () => $$('.session-row').find((r) => r.textContent?.includes('Move me')));
+  await until('the feed says so', () => root.textContent?.includes('The session moved from'));
+
+  // Back into a folder of the personal project, picked from its list.
+  (await menuItem('.btn-move'))!.click();
+  await until('move form', () => $('.move-session select[name=project]'));
+  choose('.move-session select[name=project]', personal);
+  const hqc = await until('its folders', () =>
+    $$('.move-session .move-folders button').find((b) => b.textContent?.trim().endsWith('/work/hqc')),
+  );
+  hqc.click();
+  await settle();
+  expect($<HTMLInputElement>('.move-session input[name=path]')!.value).toBe('/Users/home-mac/work/hqc');
+  submit('.move-session');
+  await until('back', () => app.sessions.get(s.id)?.project_id === personal);
+  await until('personal current', () => app.currentProject()?.id === personal);
+});
+
+it('takes a session moved elsewhere out of its list and puts its new project on the rail', async () => {
+  const personal = app.me!.personal_project_id;
+  const s = await app.api.createSession(personal, 'Moved elsewhere');
+  location.hash = `#/p/${personal}`;
+  await until('its row', () => $$('.session-row').find((r) => r.textContent?.includes('Moved elsewhere')));
+  // As the agent's tool or another tab would: past this client's state.
+  await app.api.moveSession(s.id, { path: '/Users/home-mac/work/elsewhere', create: true });
+  await until('new project', () => projectRow('elsewhere'));
+  await until('row gone', () => !$$('.session-row').find((r) => r.textContent?.includes('Moved elsewhere')));
+  expect(app.projects.get(app.sessions.get(s.id)!.project_id)?.name).toBe('elsewhere');
+});

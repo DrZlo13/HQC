@@ -379,7 +379,11 @@ describe('header', () => {
     expect(button('Stop')).toBeDefined();
     await act(async () => $('.btn-more')!.click());
     // T50: archiving is on the list's rows, not in the header.
-    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Schedules', 'Switch to Auto']);
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual([
+      'Schedules',
+      'Move to project…',
+      'Switch to Auto',
+    ]);
   });
 
   it('shows an archived session read-only: the chip, the band with the time, a dimmed feed, no input (T50)', async () => {

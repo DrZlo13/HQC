@@ -579,18 +579,21 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     projectOrder = [...new Set(body?.project_ids ?? [])].filter((id) => projects.has(id));
     return { projects: orderedProjects() };
   });
-  route('POST', '/api/projects', (_, body) => {
-    const name = String(body?.name ?? '').trim();
-    if (!name) throw fail(400, 'bad_request', 'name must not be empty');
+  function newProject(name, description = '') {
     const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
     let slug = base;
     for (let i = 2; [...projects.values()].some((p) => p.slug === slug); i++) slug = `${base}-${i}`;
     const p = {
-      id: randomUUID(), owner_id: userId, name, slug, description: String(body?.description ?? ''),
+      id: randomUUID(), owner_id: userId, name, slug, description,
       is_personal: false, color: COLORS[projects.size % COLORS.length], created_at: now(), updated_at: now(),
     };
     projects.set(p.id, p);
-    return withStatus(201, p);
+    return p;
+  }
+  route('POST', '/api/projects', (_, body) => {
+    const name = String(body?.name ?? '').trim();
+    if (!name) throw fail(400, 'bad_request', 'name must not be empty');
+    return withStatus(201, newProject(name, String(body?.description ?? '')));
   });
   route('GET', '/api/projects/:pid', (p) => projectOr404(p.pid));
   route('PATCH', '/api/projects/:pid', (p, body) => {
@@ -837,6 +840,55 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       code: 'session_taken_over',
       text: 'hqc took over the session. If it is open in VS Code, its context there is stale: reopen the session in VS Code after you switch back.',
     }));
+    return info(s);
+  });
+  // SPEC §6: the session continues in another folder of its worker, in another project: a
+  // workspace of the user at exactly that path with its project, or a new workspace of
+  // `project` or of a new project named after the folder; checks as for a new workspace.
+  route('POST', '/api/sessions/:id/move', (p, body) => {
+    const s = sessionOr404(p.id);
+    if (s.locked === 'vscode' || s.held_by) {
+      throw fail(409, 'unavailable', 'the session is driven or open outside hqc (VS Code): close it there first');
+    }
+    const worker = workspaces.get(s.workspace_id)?.worker_id ?? workerId;
+    if (!workerOnline(worker)) throw fail(409, 'worker_offline', 'the worker is offline');
+    const path = String(body?.path ?? '').trim().replace(/\/+$/, '');
+    if (!inRoot(path)) throw fail(400, 'outside_allowed_roots', `${path} is outside the worker's allowed_roots`);
+    const cut = path.lastIndexOf('/');
+    const known = path in TREE || (TREE[path.slice(0, cut)] ?? []).includes(path.slice(cut + 1));
+    if (!known && body?.create) (TREE[path.slice(0, cut)] ??= []).push(path.slice(cut + 1));
+    else if (!known) throw fail(400, 'path_not_found', `${path} does not exist on the worker`);
+    const wanted = body?.project && [...projects.values()].find((x) => x.id === body.project || x.slug === body.project);
+    if (body?.project && !wanted) throw fail(404, 'not_found', 'unknown project');
+    let ws = [...workspaces.values()].find((w) => w.worker_id === worker && overlap(w.path, path));
+    if (ws && ws.path !== path) {
+      const name = projects.get(ws.project_id)?.name ?? '';
+      throw fail(409, 'workspace_conflict', `${path} overlaps workspace ${ws.path} of project ${name}`, {
+        existing_workspace_id: ws.id, existing_project_id: ws.project_id, existing_path: ws.path,
+      });
+    }
+    if (ws && wanted && ws.project_id !== wanted.id) {
+      throw fail(400, 'bad_request', `${path} is a workspace of another project, not of ${wanted.slug}`);
+    }
+    if (!ws) {
+      const pr = wanted || newProject(path.slice(cut + 1));
+      ws = {
+        ...ex['api.workspace'], id: randomUUID(), project_id: pr.id, worker_id: worker, path,
+        label: '', mirror_enabled: true, created_at: now(), updated_at: now(),
+      };
+      workspaces.set(ws.id, ws);
+      pr.default_workspace_id ??= ws.id;
+    }
+    if (s.workspace_id === ws.id) return info(s);
+    const from = projects.get(s.project_id)?.name ?? '?';
+    const to = projects.get(ws.project_id);
+    const order = orders.get(s.project_id);
+    if (order) order.session_ids = order.session_ids.filter((id) => id !== s.id);
+    const base = s.slug;
+    let slug = base;
+    for (let i = 2; [...sessions.values()].some((x) => x !== s && x.project_id === to.id && x.slug === slug); i++) slug = `${base}-${i}`;
+    Object.assign(s, { project_id: to.id, workspace_id: ws.id, cwd: '.', slug });
+    store(s, mk(s, 'event.system', { code: 'session_moved', text: `The session moved from ${from} to ${to.name} (${ws.path})` }));
     return info(s);
   });
   route('PATCH', '/api/workspaces/:id', (p, body) => {

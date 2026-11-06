@@ -43,8 +43,10 @@
 //!   mode, and a switch the user asks for meanwhile waits for the end of the capped turn.
 //!   `session.state.capped_input` names the input while a cap holds an `auto` session in
 //!   `ask`.
-//! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running) is killed,
-//!   the next input resumes it.
+//! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
+//!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`], kept here and not
+//!   sent to the hub) is killed, the next input resumes it. A reconnect and a holder report
+//!   (`Cmd::Resync`, `Cmd::Held`) are no activity of the agent.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
 //! - Workspaces hqc makes and deletes (T45): `workspace.create` is acked at once and runs in
@@ -837,6 +839,7 @@ impl Supervisor {
             turn: None,
             injected: Vec::new(),
             subagents: 0,
+            background_tasks: 0,
             delivered: VecDeque::new(),
             last_activity: Instant::now(),
         };
@@ -933,6 +936,8 @@ struct Session {
     injected: Vec<Queued>,
     /// The runtime's count of running subagents, repeated in every `session.state`.
     subagents: u32,
+    /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]); not sent.
+    background_tasks: u32,
     /// Inputs the runtime took, with whether it took them into a running turn (`joined`).
     delivered: VecDeque<(Uuid, bool)>,
     last_activity: Instant,
@@ -945,7 +950,12 @@ impl Session {
             let lowering_deadline = self.lowering.as_ref().map(|l| l.deadline);
             tokio::select! {
                 c = cmds.recv() => {
-                    self.last_activity = Instant::now();
+                    // A reconnect and a holder of some transcript (any Claude Code on the
+                    // machine) are the worker's news, not this agent's work: a `Held` of its
+                    // own transcript releases it anyway.
+                    if !matches!(c, Some(Cmd::Resync | Cmd::Held { .. })) {
+                        self.last_activity = Instant::now();
+                    }
                     match c {
                         Some(Cmd::Shutdown) | None => {
                             self.kill_process("worker shutdown").await;
@@ -978,13 +988,15 @@ impl Session {
 
     fn idle_deadline(&self) -> Option<Instant> {
         let t = self.idle_timeout?;
-        // A background subagent outlives the turn and may be silent for long (a build).
+        // A background subagent or command outlives the turn and may be silent for long (a
+        // build).
         (self.state == ProcessState::Running
             && self.turn.is_none()
             && self.injected.is_empty()
             && self.lowering.is_none()
             && self.queue.is_empty()
-            && self.subagents == 0)
+            && self.subagents == 0
+            && self.background_tasks == 0)
             .then(|| self.last_activity + t)
     }
 
@@ -1435,10 +1447,16 @@ impl Session {
                 }
                 self.pump().await;
             }
+            // A count read from a process already stopped would outlive it.
             AdapterEvent::Subagents(n) => {
-                if self.subagents != n {
+                if self.state != ProcessState::Stopped && self.subagents != n {
                     self.subagents = n;
                     self.send_state();
+                }
+            }
+            AdapterEvent::BackgroundTasks(n) => {
+                if self.state != ProcessState::Stopped {
+                    self.background_tasks = n;
                 }
             }
             AdapterEvent::RuntimeSessionId(r) => {
@@ -1669,8 +1687,9 @@ impl Session {
             self.slot = None;
             // Its MCP server is gone with it; a call still open fails.
             self.link.mcp().unbind(self.id);
-            // And its subagents; the next process counts its own.
+            // And its subagents and background tasks; the next process counts its own.
             self.subagents = 0;
+            self.background_tasks = 0;
         }
         if self.state != s {
             self.state = s;

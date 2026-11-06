@@ -980,6 +980,175 @@ async fn idle_timeout_waits_for_subagents() {
     w.stop().await;
 }
 
+// idle_timeout (SPEC §17.3): an agent while the runtime lists background tasks (a subagent's
+// command moved to the background) is not idle; it is stopped once there are none.
+#[tokio::test]
+async fn idle_timeout_waits_for_background_tasks() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        "never idle while the runtime lists a background task"
+    );
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(0)).await;
+    adapters
+        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    w.stop().await;
+}
+
+// idle_timeout (SPEC §17.3): holders of other transcripts (Claude Code in VS Code or a terminal
+// on the same machine) changing all the time do not keep an idle agent alive.
+#[tokio::test]
+async fn idle_timeout_ignores_holders_of_other_transcripts() {
+    let env = Env::with_mirror();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(500));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    // A new holder every 100 ms (the mirror's poll here), each of another transcript: an entry
+    // of Claude Code's registry `<config>/sessions` for a live process, this test's.
+    let (projects, _) = env.mirror.clone().unwrap();
+    let dir = projects.with_file_name("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let started = Instant::now();
+    let mut n = 0;
+    while !adapters.calls().contains(&FakeCall::Kill(sid)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "an idle agent must be stopped while holders of other transcripts change"
+        );
+        n += 1;
+        let entry = json!({"pid": std::process::id(), "sessionId": Uuid::new_v4(),
+            "cwd": env.workspace(), "entrypoint": "claude-vscode", "kind": "interactive",
+            "status": "busy", "updatedAt": 1792779848554u64});
+        std::fs::write(dir.join(format!("{n}.json")), entry.to_string()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    w.stop().await;
+}
+
+// idle_timeout (SPEC §17.3): the background tasks of a killed process go with it; the process
+// resumed after it is stopped once idle.
+#[tokio::test]
+async fn idle_timeout_forgets_the_background_tasks_of_a_killed_process() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    // Events are handled in order: once the title is in `session.state`, so is the count.
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+    adapters
+        .emit(sid, AdapterEvent::Title("Fix the build".into()))
+        .await;
+    state_where(&mut c, sid, |st| st["payload"]["title"] == "Fix the build").await;
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    adapters
+        .wait_for("kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    let e = Uuid::now_v7();
+    c.frame("session.input", input(sid, e, "go")).await;
+    adapters
+        .wait_for("input", |c| c.contains(&input_call(sid, e)))
+        .await;
+    adapters.accept_input(sid, e).await;
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("idle kill of the resumed process", |c| {
+            c.iter().filter(|x| **x == FakeCall::Kill(sid)).count() == 2
+        })
+        .await;
+    w.stop().await;
+}
+
+// idle_timeout (SPEC §17.3): counts that come after the process was stopped (lines of a killed
+// process read late) are dropped: no `subagents` in `session.state`, and the process resumed
+// later is stopped once idle.
+#[tokio::test]
+async fn counts_after_the_process_stopped_are_dropped() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    adapters
+        .wait_for("kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    adapters.emit(sid, AdapterEvent::BackgroundTasks(1)).await;
+    adapters.emit(sid, AdapterEvent::Subagents(2)).await;
+    adapters
+        .emit(sid, AdapterEvent::Title("after".into()))
+        .await;
+    let st = state_where(&mut c, sid, |st| st["payload"]["title"] == "after").await;
+    assert!(st["payload"].get("subagents").is_none(), "{st}");
+    let e = Uuid::now_v7();
+    c.frame("session.input", input(sid, e, "go")).await;
+    adapters
+        .wait_for("input", |c| c.contains(&input_call(sid, e)))
+        .await;
+    adapters.accept_input(sid, e).await;
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("idle kill of the resumed process", |c| {
+            c.iter().filter(|x| **x == FakeCall::Kill(sid)).count() == 2
+        })
+        .await;
+    w.stop().await;
+}
+
+// idle_timeout (SPEC §17.3): the worker's reconnects to the hub do not keep an idle agent alive.
+#[tokio::test]
+async fn idle_timeout_ignores_reconnects() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(500));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let started = Instant::now();
+    while !adapters.calls().contains(&FakeCall::Kill(sid)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "an idle agent must be stopped while the worker reconnects"
+        );
+        c.close().await;
+        c = hub.accept().await;
+        c.handshake().await;
+    }
+    w.stop().await;
+}
+
 /// A `session.state` of `sid` whose `permission_mode` is `mode`, skipped or next.
 async fn state_with_mode(c: &mut HubConn, sid: Uuid, mode: &str) -> Value {
     let hit = |st: &Value| {

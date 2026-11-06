@@ -760,8 +760,23 @@ async fn the_tool_refuses() {
     assert_eq!(code, "limit_exceeded");
     set_chain(None).await;
 
-    // Not run by hqc now, or driven from VS Code.
+    // A subagent still running: refused by the move itself, nothing queued.
     let id: Uuid = sid.parse().unwrap();
+    sqlx::query("UPDATE sessions SET subagents = 1 WHERE id = $1")
+        .bind(id)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/foo"})).await;
+    assert_eq!(code, "unavailable");
+    assert!(m.contains("subagent"), "{m}");
+    sqlx::query("UPDATE sessions SET subagents = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+
+    // Not run by hqc now, or driven from VS Code.
     for locked in ["none", "vscode"] {
         sqlx::query("UPDATE sessions SET locked_by = $2 WHERE id = $1")
             .bind(id)

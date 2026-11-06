@@ -2138,7 +2138,24 @@ a running subagent until `task_notification`, or a `task_updated` whose `patch.s
 `running`, of the same `task_id`; a foreground one (`is_backgrounded: false`, not moved to
 the background since) cannot outlive the main turn and stops counting at its `result` at the
 latest, as an interrupt, a denied call or `error_max_turns` during it may bring neither line;
-the count goes into `session.state.subagents` (§5.4).
+the count goes into `session.state.subagents` (§5.4). `system` `background_tasks_changed`
+(2.1.312) carries `tasks[]` (`task_id`, `task_type`, and `parent_task_id` for a task a subagent
+started, as in its `task_started`): the CLI's whole list of the session's running background
+tasks, subagents and shell commands, sent on every change and `[]` at the end. A subagent also
+counts while the latest list holds it (`task_type: local_agent`) or a task of the list has it
+as `parent_task_id`: with `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a subagent's
+Bash call that runs for more than about 180 s to the background (the agent's own 240 s Bash
+call stays in the foreground) and reports the subagent ended (`task_updated` `completed`,
+`task_notification` "This agent has not reported yet: it is waiting on its own background
+work…") while the command still runs; when the command ends it lists the subagent again and
+starts the same `task_id` again (checked live on 2.1.312 with a background subagent's 240 s
+`ping`). With one such command the list goes `[]` first and holds the subagent again only on
+the next line **[verify]** (inferred from that capture, where a second task of the subagent, a
+Monitor waiting for the `ping`, kept the list from going empty), so a drop of the count that a
+`background_tasks_changed` alone brings is reported at the next line of another kind (at a
+`result` before the end of the turn). The
+number of tasks in the list stays in the worker: the agent is not idle while it is above 0
+(§17.3).
 The CLI repeats on stdout every `control_response` the adapter sent to stdin;
 the adapter skips those lines. `in_reply_to` = the `event_id` of the turn's input, as above,
 once its echo has come (since 0.69; before that, none); an input written into a running turn
@@ -3440,8 +3457,12 @@ buffered send from a session in `ask` (§7.1).
 
 ### 17.3 Processes
 - An idle agent is left alone by default. With the worker's `idle_timeout` > 0 the
-  process exits, and the next input brings it back via resume. Since 0.70 an agent whose
-  subagents still run (`session.state.subagents` > 0, §5.4) is not idle.
+  process exits, and the next input brings it back via resume. Since 0.70 an agent is not idle
+  while its subagents run (`session.state.subagents` > 0, §5.4) or while Claude Code lists
+  background tasks of the session (`background_tasks_changed`, §8.1). Since 0.70 the worker's
+  reconnect to the hub and a change of the holder of any transcript (§9.3: Claude Code in VS
+  Code or a terminal on the same machine) do not count as the agent's activity; a holder of
+  the session's own transcript stops the agent anyway.
 - Worker offline: input accumulates in the hub (`pending`), the session is `worker_offline`,
   delivery on connect in `seq` order. Open `approval`s on an offline worker
   stay open until it returns or until `expires_at`.
@@ -3728,8 +3749,12 @@ turn it was carried into (§8.1). §5.4, §6, §8.1:
 `session.state.subagents`, `subagents` in the session object and `session.summary`: the
 subagents the agent runs now, from `task_started` (`local_agent`) to its end, a foreground one
 at the latest to the `result` of the main turn; the client shows "N agents". Migration
-`0032_session_subagents`. §17.3: the worker's `idle_timeout` no longer stops an agent whose
-subagents still run.
+`0032_session_subagents`. A subagent also counts while the CLI's `background_tasks_changed`
+list holds it or a task of it: 2.1.312 under `claude-vscode` moves a subagent's long Bash call
+to the background and meanwhile reports the subagent ended (§8.1). §17.3: the worker's
+`idle_timeout` no longer stops an agent whose subagents still run or for which the CLI lists
+background tasks; a reconnect and a holder change of any transcript no longer restart its idle
+time, so an agent on a machine where Claude Code runs outside hqc is stopped too.
 
 ### 0.68 → 0.69 (the feed of a Claude Code session as the VS Code tab shows it)
 §8.1: the adapter passes `--thinking-display summarized`, as the VS Code extension does (opus 5.5

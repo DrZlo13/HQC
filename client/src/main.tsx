@@ -1,5 +1,6 @@
 import { render } from 'preact';
 import { createApp } from './app';
+import { watchTabIcon } from './favicon';
 import { listenForNavigation, registerServiceWorker } from './push';
 import { applyTheme } from './theme';
 import { App } from './ui/App';
@@ -9,6 +10,7 @@ import './styles.css';
 applyTheme(document.documentElement, 'teal', 'warm');
 const app = createApp();
 render(<App app={app} />, document.getElementById('app')!);
+watchTabIcon(app);
 void app.init();
 void registerServiceWorker();
 listenForNavigation();

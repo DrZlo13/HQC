@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.72, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.73, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1345,7 +1345,8 @@ saturated with a pill of its color at the left edge, an amber "needs you" badge,
 rows with a status dot — amber waiting, the project color pulsing while running, an empty ring
 idle — title, time, status and `worker · path` without `~/work/`) and the main column, whose
 feed and input are at most 780 px wide; on a phone one screen at a time, the projects as chips
-with their icons, the same badge or dot. Since 0.64 the project bar has "Reorder projects" (⇅ under "+"): the tiles
+with their icons, the same badge or dot. Since 0.73 the tab's icon marks the same across all
+projects: an amber dot while a session waits, else a light one while one has unread events. Since 0.64 the project bar has "Reorder projects" (⇅ under "+"): the tiles
 are dragged (or moved with ↑/↓ when focused) instead of opened, ✓ stores the order with `PUT
 /api/me/project_order`, ✕ drops it; a phone's chips follow the same order. Since 0.64 a project opened on a desktop opens the session last open in it
 on this device (kept in the browser's storage; none, archived or deleted: the empty main
@@ -3767,6 +3768,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.72 → 0.73 (a dot on the tab's icon)
+§6 client layout: the tab's icon (the mark) gets an amber dot while a session of any project
+waits for the user and a light one while nothing waits but one has unread events, as the
+project tiles do.
 
 ### 0.71 → 0.72 (a long chat opens at once, the answer being written in full)
 §6: the chat loads the newest 100 events first, shows them and subscribes, then loads the older

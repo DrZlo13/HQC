@@ -111,6 +111,7 @@ export function Chat({
     discard: (op) => chat.discard(op),
     artifacts,
     workspaceRoot: path,
+    system,
     folder: rulesHref && workspace
       ? {
           path: homePath(workspace.path),

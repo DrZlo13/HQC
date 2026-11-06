@@ -68,6 +68,8 @@ export interface ChatActions {
   /** The session's folder on the worker (absolute): a request touching a path outside it
    *  says so. */
   workspaceRoot?: string;
+  /** The worker's service session (SPEC §10.2): its requests are the worker's own. */
+  system?: boolean;
   /** The session's workspace (T48): "Allow in this folder" saves hqc rules into it; absent
    *  without a workspace, and where the card is shown away from its session. */
   folder?: FolderActions;

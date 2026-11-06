@@ -770,7 +770,8 @@ pub async fn move_session(
     Json(b): Json<MoveSession>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
-    let m = crate::moves::move_session(&app, &s, &b.path, b.project.as_deref(), b.create).await?;
+    let project = b.project.as_deref();
+    let m = crate::moves::move_session(&app, &s, &b.path, project, b.create, None).await?;
     Ok(Json(json!(state::view(&app, user.id, m.session).await?)))
 }
 

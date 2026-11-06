@@ -953,6 +953,35 @@ describe("worker's service session (T17, SPEC §10.2)", () => {
     );
   });
 
+  it("names an agent's move of its session in the header, outside the service session", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.approval.request", (e) => {
+        e.seq = 1;
+        e.author = { kind: "system" };
+        e.payload = {
+          request_id: "move-1",
+          tool: "hqc_move",
+          description:
+            "The agent asks to move this session into a new folder (made if you allow it):\n/w/foo",
+          options: [
+            { id: "once", label: "Allow", canonical: "once" },
+            { id: "deny", label: "Deny", canonical: "deny" },
+          ],
+        };
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "The agent asks to move this session",
+    );
+    render(null, root);
+    show(t, { system: true });
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "The worker asks for permission",
+    );
+  });
+
   it('"requests only" keeps the request cards only', () => {
     const t = new Timeline();
     t.apply(log(1, "warn", "a"));

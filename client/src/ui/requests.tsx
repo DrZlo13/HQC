@@ -22,6 +22,7 @@ function requestActions(app: AppState, r: OpenRequest, timeline: Timeline): Chat
     resend: () => {},
     discard: () => {},
     openArtifact: () => {},
+    system: r.system,
   };
 }
 

@@ -287,7 +287,7 @@ pub const TOOLS: &[Tool] = &[
             one of the user's workspaces in the environment of your folder now the session moves \
             at once; any other folder (a new one, one that is no workspace yet, one in another \
             environment) waits until the user allows it in the chat, and the call fails if the \
-            user denies it. A missing folder is created once allowed; it must lie inside the \
+            user denies it or does not answer before the tool call times out. A missing folder is created once allowed; it must lie inside the \
             machine's allowed roots and neither inside nor around another workspace. Returns \
             `{address, project, path}`: \
             your new address, the project's slug and the folder's canonical path. After the \

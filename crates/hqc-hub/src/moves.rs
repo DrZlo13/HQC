@@ -91,7 +91,8 @@ struct MoveArgs {
 /// as `hqc_ask` is. Either way the move lands only in the canonical path it was decided on.
 /// After the move an input of the owner, "you moved to …", goes into its queue as a run of
 /// `hqc_schedule` does (SPEC §16): a `user.message` with the call's chain moved on ([`woken`]),
-/// so the turn it starts runs in the session's own mode and, after the move, in the new folder.
+/// so the turn it starts runs in the session's own mode (or in `ask` when the call's turn carried
+/// the session's own cap) and, after the move, in the new folder.
 /// Once per `request_id`: a repeat finds the request it opened, or the input stored after a
 /// move at once, and answers the same.
 pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
@@ -131,8 +132,9 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         ));
     }
     // The chain the turn runs on, not the worker's report, which names a cap only while the
-    // session runs in `auto`. A cap the session set itself (the input after its own move in
-    // `ask`) leaves it free to move.
+    // session runs in `auto`. A cap the session set itself (the first session in `ask` up the
+    // chain is this one: the input after its own move, an answer to its own message, a run of
+    // its own schedule) leaves it free to move.
     let turn = crate::peers::call_chain(app, caller, c)
         .await
         .map_err(internal)?;

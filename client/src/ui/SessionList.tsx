@@ -696,10 +696,12 @@ function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) =>
               {p.icon ? <ProjectGlyph p={p} /> : <span class="chip-dot" style={{ background: colorHex(p.color) }} />}
             </span>
             {projectName(p)}
-            {waiting > 0 && (
+            {waiting > 0 ? (
               <span class="chip-badge" aria-label={`needs you: ${waiting}`}>
                 {waiting}
               </span>
+            ) : (
+              app.projectUnread(p.id) && <span class="chip-unread" aria-label="unread" />
             )}
           </a>
         );

@@ -384,6 +384,15 @@ export class AppState {
     return n;
   }
 
+  /** Whether one of the project's sessions has unread events, among the ones
+   *  [`projectWaiting`] counts (no archived or service sessions). */
+  projectUnread(projectId: string): boolean {
+    for (const s of this.sessions.values()) {
+      if (s.project_id === projectId && !s.archived && !s.system && s.unread > 0) return true;
+    }
+    return false;
+  }
+
   /** A worker's name: the title of its service session (SPEC §10.2). */
   workerName(workerId: string | undefined): string | undefined {
     if (!workerId) return undefined;

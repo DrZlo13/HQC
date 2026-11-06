@@ -514,6 +514,27 @@ describe('ProjectRail', () => {
     expect(badges[0].getAttribute('aria-label')).toBe('needs you: 1');
     expect(root.querySelector('.avatar')!.getAttribute('title')).toBe('who@example.com');
   });
+
+  it('marks a project with unread events by a dot, unless someone waits there', async () => {
+    const app = makeApp([
+      ...LIST.map((s) => ({ ...s, unread: 2 })),
+      sess('notes', 'Notes', 'idle', at(0.5), { project_id: 'p0', unread: 1 }),
+      sess('gone', 'Gone', 'archived', at(0.5), { project_id: 'p0', unread: 3 }),
+    ]);
+    await mount(<ProjectRail app={app} />);
+    const dots = () => [...root.querySelectorAll('.rail-item')].map((i) => [!!i.querySelector('.rail-unread'), !!i.querySelector('.rail-badge')]);
+    // Personal: an unread session, no one waits; physics-mp: the badge wins.
+    expect(dots()).toEqual([
+      [true, false],
+      [false, true],
+    ]);
+    await mount(<SessionList app={app} phone />);
+    expect([...root.querySelectorAll('.chips .chip.project-row')].map((c) => !!c.querySelector('.chip-unread'))).toEqual([true, false]);
+    app.sessions.set('notes', { ...app.sessions.get('notes')!, unread: 0 });
+    await mount(<ProjectRail app={app} />);
+    // Archived and service sessions do not count.
+    expect(dots()[0]).toEqual([false, false]);
+  });
 });
 
 describe('SessionList (phone)', () => {

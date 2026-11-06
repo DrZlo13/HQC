@@ -546,6 +546,17 @@ select.input {
   justify-content: center;
   border: 2px solid var(--rail);
 }
+/* No one waits, but a session has unread events. */
+.rail-unread {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 2px solid var(--rail);
+}
 
 /* A project's icon: its emoji, 1-2 letters or image (T49). */
 .glyph {
@@ -1423,6 +1434,12 @@ select.input {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.chip-unread {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text);
 }
 
 .sessions-phone .seg {

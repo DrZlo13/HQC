@@ -11,7 +11,8 @@ const TILE_STEP = 54;
 
 /** The project bar of a desktop (T49, README "Project bar"): a tile per project with its
  *  icon on its color at ~24 %; the current one more saturated (`--mark-bg`) with a pill of
- *  the project color at the left edge; an amber "needs you" badge; "+ project", Reorder
+ *  the project color at the left edge; an amber "needs you" badge, else a dot when a
+ *  session has unread events; "+ project", Reorder
  *  (drag the tiles or move a focused one with ↑/↓, then Done or Cancel), settings and who is
  *  signed in. */
 export function ProjectRail({ app }: { app: AppState }) {
@@ -103,10 +104,12 @@ export function ProjectRail({ app }: { app: AppState }) {
               <ProjectGlyph p={p} />
             </a>
             )}
-            {waiting > 0 && (
+            {waiting > 0 ? (
               <span class="rail-badge" aria-label={`needs you: ${waiting}`}>
                 {waiting > 99 ? '99+' : waiting}
               </span>
+            ) : (
+              app.projectUnread(p.id) && <span class="rail-unread" aria-label="unread" />
             )}
           </div>
         );

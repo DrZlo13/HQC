@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.66, 2026-11-04. Status: the architecture agreed after six reviews and a survey of
+Version 0.67, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1286,12 +1286,13 @@ the rest is marked "later"):
 
 Client layout (since 0.51, T49, `docs/design/redesign-2026-11-01`): on a desktop the project
 bar (72 px: a tile per project with its icon on its color at ~24 %, the current one more
-saturated with a pill of its color at the left edge, an amber "needs you" badge), the sidebar
+saturated with a pill of its color at the left edge, an amber "needs you" badge, else, since
+0.67, a dot when a session of the project has unread events), the sidebar
 (280–310 px: the project's tile, name and counters, a gear to the project settings, "New";
 rows with a status dot — amber waiting, the project color pulsing while running, an empty ring
 idle — title, time, status and `worker · path` without `~/work/`) and the main column, whose
 feed and input are at most 780 px wide; on a phone one screen at a time, the projects as chips
-with their icons. Since 0.64 the project bar has "Reorder projects" (⇅ under "+"): the tiles
+with their icons, the same badge or dot. Since 0.64 the project bar has "Reorder projects" (⇅ under "+"): the tiles
 are dragged (or moved with ↑/↓ when focused) instead of opened, ✓ stores the order with `PUT
 /api/me/project_order`, ✕ drops it; a phone's chips follow the same order. Since 0.64 a project opened on a desktop opens the session last open in it
 on this device (kept in the browser's storage; none, archived or deleted: the empty main
@@ -3532,6 +3533,10 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.66 → 0.67 (unread projects)
+§6 client layout: a project tile with no session waiting shows a dot when one of its sessions
+(not archived, not a service session) has unread events; a phone's chip too.
 
 ### 0.65 → 0.66 (MCP server instructions)
 §7.2: the hqc MCP server's `initialize` gives `instructions` that name every tool by its use and

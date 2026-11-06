@@ -14,6 +14,7 @@ import { IconArchive, IconAttach, IconBack, IconCode, IconMore, IconSend, IconSh
 import { AUTO_CONFIRM, STATE_LABELS, agentsLabel, formatCost, homePath, modelName } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
+import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
 import { archivedLabel } from './sessions';
@@ -38,6 +39,7 @@ export function Chat({
   const [notice, setNotice] = useState<string | null>(null);
   const [requestsOnly, setRequestsOnly] = useState(false);
   const [schedules, setSchedules] = useState(false);
+  const [moving, setMoving] = useState(false);
   const artifacts = useMemo(() => new ArtifactStore(app.api), [app]);
   const peerMessage = useMemo(() => peerMessages(app.api), [app]);
   const [files, setFiles] = useState<OutgoingFile[]>([]);
@@ -390,6 +392,7 @@ export function Chat({
             cost={cost}
             onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
             onSchedules={() => setSchedules(true)}
+            onMove={() => setMoving(true)}
             onPermissionMode={setMode}
             onAgent={setAgent}
           />
@@ -404,6 +407,11 @@ export function Chat({
         </div>
       )}
       {schedules && <SchedulesPanel api={app.api} sessionId={sessionId} onClose={() => setSchedules(false)} />}
+      {moving && info && (
+        <div class="move-panel" role="region" aria-label="Move to project">
+          <MoveSession app={app} session={info} onDone={() => setMoving(false)} />
+        </div>
+      )}
       <div
         class="timeline"
         ref={scroller}
@@ -602,9 +610,9 @@ export function currentMode(info: SessionInfo): PermissionMode {
 
 type AgentPatch = Pick<SessionPatch, 'model'>;
 
-/** "More": schedules, the permission mode and the model; on a phone also the path, the
- *  model of the last turn and the cost. Archiving is on the list's rows, restore and delete
- *  on the archive's (T50). */
+/** "More": schedules, the move to another project, the permission mode and the model; on
+ *  a phone also the path, the model of the last turn and the cost. Archiving is on the
+ *  list's rows, restore and delete on the archive's (T50). */
 function MoreMenu({
   info,
   phone,
@@ -613,6 +621,7 @@ function MoreMenu({
   cost,
   onRetry,
   onSchedules,
+  onMove,
   onPermissionMode,
   onAgent,
 }: {
@@ -624,6 +633,8 @@ function MoreMenu({
   /** On a phone "Retry" lives here, not in the crowded header. */
   onRetry?: () => void;
   onSchedules: () => void;
+  /** "Move to project…": the session continues in another folder and project. */
+  onMove: () => void;
   onPermissionMode: (mode: PermissionMode) => void;
   /** A change PATCHes at once; `null` is the runtime's default. */
   onAgent: (patch: AgentPatch) => void;
@@ -687,6 +698,8 @@ function MoreMenu({
           )}
           {onRetry && item('btn-retry', 'Retry', onRetry)}
           {item('btn-schedules', 'Schedules', onSchedules, 'Messages scheduled into this session')}
+          {!info.archived &&
+            item('btn-move', 'Move to project…', onMove, 'Continue this session in another folder and project on its worker')}
           {!info.archived &&
             (currentMode(info) === 'auto'
               ? item('btn-mode-ask', 'Switch to Ask', () => onPermissionMode('ask'), 'Ask before tool calls outside the worker\'s rules')

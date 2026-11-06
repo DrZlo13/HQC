@@ -309,6 +309,13 @@ export class Api {
     return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/takeover`));
   }
 
+  /** The session continues in folder `path` of its worker, in `project` (an id) or a new
+   *  project named after the folder; the errors of `createWorkspace` (`path_not_found`:
+   *  `create` makes the folder). No input is queued. */
+  async moveSession(id: string, body: { path: string; project?: string; create?: boolean }): Promise<SessionInfo> {
+    return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/move`, body));
+  }
+
   /** Removes the record; the folder is not touched (SPEC §13.2) unless `removeFolder` is set
    *  for a folder hqc created, which the worker then deletes (T45). `force`: the user saw and
    *  confirmed the uncommitted files, which `git worktree remove` keeps otherwise (T46).

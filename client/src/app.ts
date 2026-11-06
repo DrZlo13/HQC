@@ -144,8 +144,16 @@ export class AppState {
       }
       // Archived or restored elsewhere: `archived_at` is not in the summary (T50).
       if (known.archived !== (s.state === 'archived')) void this.refreshSession(s.session_id);
+      // Moved elsewhere: its slug, workspace and folder are not in the summary, and a new
+      // project is not on the rail yet.
+      if (known.project_id !== s.project_id) {
+        this.workspaces.delete(s.project_id);
+        if (this.projects.has(s.project_id)) void this.refreshSession(s.session_id);
+        else unknown = true;
+      }
       this.sessions.set(s.session_id, {
         ...known,
+        project_id: s.project_id,
         title: s.title,
         state: s.state,
         queue_len: s.queue_len,
@@ -469,6 +477,19 @@ export class AppState {
     if (!this.me || !projectId) throw new Error('not signed in');
     const s = await this.api.createSession(projectId, title, opts);
     this.sessions.set(s.id, s);
+    this.changed();
+    return s;
+  }
+
+  /** Moves the session to folder `path` of its worker, in `project` or a new one (a new
+   *  project joins the rail); its list follows it there. */
+  async moveSession(sessionId: string, body: { path: string; project?: string; create?: boolean }): Promise<SessionInfo> {
+    const s = await this.api.moveSession(sessionId, body);
+    if (!this.projects.has(s.project_id)) {
+      for (const p of await this.api.projects()) this.projects.set(p.id, p);
+    }
+    this.sessions.set(s.id, s);
+    this.workspaces.delete(s.project_id);
     this.changed();
     return s;
   }

@@ -5,6 +5,7 @@ import {
   parseWorkspaceConflict,
   type Candidate,
   type DirEntry,
+  type SessionInfo,
   type Workspace,
   type WorkspaceInspection,
 } from '../proto';
@@ -689,6 +690,112 @@ function AddWorkspace({
         ) : (
           <button type="submit" class="btn btn-small btn-primary" disabled={busy || !worker || !path.trim()}>
             Add
+          </button>
+        )}
+        <button type="button" class="btn btn-small" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** "Move to project…" (SPEC §6): the project, one of the user's or a new one named after the
+ *  folder, and the folder on the session's worker, as when a workspace is added: one of that
+ *  project's folders there, one from the tree, or typed; a missing one the worker can make.
+ *  The session then continues there, with its next input. */
+export function MoveSession({ app, session, onDone }: { app: AppState; session: SessionInfo; onDone: () => void }) {
+  // `''`: a new project.
+  const [project, setProject] = useState('');
+  const [path, setPath] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<ReturnType<typeof addError> | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [folders, setFolders] = useState<Workspace[]>([]);
+  const worker = session.worker_id ?? '';
+
+  useEffect(() => {
+    setFolders([]);
+    if (project) app.loadWorkspaces(project).then(setFolders, () => {});
+  }, [app, project]);
+  const here = folders.filter((w) => w.worker_id === worker && (w.state ?? 'ready') === 'ready' && w.id !== session.workspace_id);
+  const pick = (p: string) => {
+    setPath(p);
+    setMissing(false);
+  };
+
+  const move = async (e: Event, create = false) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    setMissing(false);
+    try {
+      await app.moveSession(session.id, { path: path.trim(), project: project || undefined, create: create || undefined });
+      onDone();
+    } catch (err) {
+      setError(addError(err, app));
+      setMissing(err instanceof ApiError && err.code === 'path_not_found');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form class="add-workspace move-session" onSubmit={move}>
+      <label class="field">
+        <span class="muted small">Project</span>
+        <select
+          class="input"
+          name="project"
+          value={project}
+          onChange={(e) => {
+            setProject((e.target as HTMLSelectElement).value);
+            setMissing(false);
+          }}
+        >
+          <option value="">New project, named after the folder</option>
+          {app.sortedProjects().map((p) => (
+            <option key={p.id} value={p.id}>
+              {projectName(p)}
+            </option>
+          ))}
+        </select>
+      </label>
+      {here.length > 0 && (
+        <ul class="dir-list move-folders">
+          {here.map((w) => (
+            <li key={w.id}>
+              <button type="button" class="dir-entry" onClick={() => pick(w.path)}>
+                📁 {workspaceName(w)} <span class="muted small">{homePath(w.path)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <FolderTree app={app} worker={worker} onPick={pick} />
+      <label class="field">
+        <span class="muted small">Path on the worker</span>
+        <input
+          class="input"
+          name="path"
+          placeholder="/Users/me/work/project"
+          value={path}
+          onInput={(e) => pick((e.target as HTMLInputElement).value)}
+        />
+      </label>
+      {error && (
+        <div class="error-text">
+          {error.text} {error.link && <a href={error.link.href}>{error.link.label}</a>}
+        </div>
+      )}
+      <div class="row">
+        {missing ? (
+          <button type="button" class="btn btn-small btn-primary btn-create-folder" disabled={busy} onClick={(e) => move(e, true)}>
+            Create the folder and move
+          </button>
+        ) : (
+          <button type="submit" class="btn btn-small btn-primary btn-move" disabled={busy || !path.trim()}>
+            Move
           </button>
         )}
         <button type="button" class="btn btn-small" onClick={onDone}>

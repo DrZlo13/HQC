@@ -673,6 +673,11 @@ pub struct MirrorHandle {
     pub cmds: mpsc::UnboundedSender<MirrorCmd>,
     pub store: Arc<Store>,
     pub projects: PathBuf,
+    /// `<claude config>/sessions`, read before a transcript moves ([`relocate::Registry`]);
+    /// `None`: not looked at.
+    pub sessions: Option<PathBuf>,
+    /// The worker's own agent processes, shared with the adapter.
+    pub own: Arc<OwnRecords>,
 }
 
 /// The mirror task: a poll every `every` and right after `mirror.set`; events go to the

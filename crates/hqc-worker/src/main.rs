@@ -160,6 +160,7 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
     let mut capabilities = capabilities::detect(config.claude_bin.as_deref()).await;
     if let Some(d) = hqc_worker::adapter::claude_code::paths::default_config_dir() {
         capabilities::with_sessions_registry(&mut capabilities, &d.join("sessions"));
+        capabilities::with_moves(&mut capabilities, &d);
     }
     let permission_mode = capabilities::claude_permission_mode(config.claude_bin.as_deref()).await;
     let p = &config.permissions;

@@ -33,7 +33,7 @@ export function markedIcon(svg: string, mark: Exclude<TabMark, undefined>): stri
 }
 
 /** The dot in the mark's 200 × 200 view box. */
-const DOT = { x: 162, y: 162, r: 30, gap: 14 };
+const DOT = { x: 162, y: 162, r: 30, gap: 18 };
 
 /** Keeps the tab's icons in step with `tabMark`; the plain ones while nothing is marked. */
 export function watchTabIcon(app: AppState, doc: Document = document): () => void {

@@ -2112,7 +2112,13 @@ the background) or its `task_started` had `is_backgrounded: false` and no `syste
 `task_updated` with `patch.is_backgrounded: true` moved it to the background later (2.1.312
 sends both lines for a foreground subagent, a foreground Bash call that runs for more than about
 2 s and a subagent's Bash calls too, background ones included; a task the process did not see
-start counts as a background one); `system` `compact_boundary` (`compact_metadata.trigger: manual`
+start counts as a background one); since 0.70 a subagent's `task_notification` that comes while
+the latest `background_tasks_changed` list (below) holds the subagent or a task of it is no end:
+the adapter keeps the latest one and handles it (the line, the cancel of the subagent's open
+requests) when the subagent stops counting or the process exits, so a subagent gives one line, with the summary of its latest notification (its real end, or what it said last when the process exits)
+(2.1.312 sends two for a subagent whose command it moved to the background, "This agent has not
+reported yet…" while the list holds the subagent and its commands, and its real end while the
+list still holds the subagent alone); `system` `compact_boundary` (`compact_metadata.trigger: manual`
 after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
 `system context_compacted` "Context compacted" with the `event_id` derived from that `uuid`; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
@@ -2745,7 +2751,9 @@ other subagent's request (a background one's, a nested one's) stays open: a back
 subagent's outlives the main turn's `result`, and the CLI still waits for its answer (checked
 live on 2.1.312). A subagent's request still open when its `task_notification` comes (the
 subagent ended) is cancelled there the same way, whichever comes first, that or the main
-turn's `result`. The hub stores
+turn's `result`; a notification that comes while the latest `background_tasks_changed` list
+holds the subagent or a task of it is no end (§8.1), and the
+cancel waits with it. The hub stores
 a worker's cancel only if it closes an open request, in the transaction that closes it, so a
 cancel that fails to be stored leaves the request open for the worker's resend: one it closed
 already (`stop`, an answer that crossed the cancel) keeps its own event. The hub cancels an open `clarify` the same way: a
@@ -3751,7 +3759,11 @@ subagents the agent runs now, from `task_started` (`local_agent`) to its end, a 
 at the latest to the `result` of the main turn; the client shows "N agents". Migration
 `0032_session_subagents`. A subagent also counts while the CLI's `background_tasks_changed`
 list holds it or a task of it: 2.1.312 under `claude-vscode` moves a subagent's long Bash call
-to the background and meanwhile reports the subagent ended (§8.1). §17.3: the worker's
+to the background and meanwhile reports the subagent ended (§8.1). A `task_notification` of
+such a subagent while the list holds it or a task of it is no end: it gives no line and cancels
+nothing until the subagent stops counting or the process exits, and then one line with the
+summary of its latest notification, instead of one per notification.
+§17.3: the worker's
 `idle_timeout` no longer stops an agent whose subagents still run or for which the CLI lists
 background tasks; a reconnect and a holder change of any transcript no longer restart its idle
 time, so an agent on a machine where Claude Code runs outside hqc is stopped too.

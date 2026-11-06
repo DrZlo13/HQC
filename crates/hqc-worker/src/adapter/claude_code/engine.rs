@@ -11,7 +11,9 @@
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`,
 //!   except for a task that a subagent started or whose `task_started` said it runs in the
-//!   foreground, until a `task_updated` moves it to the background;
+//!   foreground, until a `task_updated` moves it to the background; that of a subagent the
+//!   latest `background_tasks_changed` still holds, or a task of it, is no end: the latest one
+//!   is handled when the subagent stops counting (below);
 //!   `system` `compact_boundary` → `system context_compacted`;
 //! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
@@ -209,6 +211,10 @@ pub struct Core {
     /// the session's agent. A task of the agent itself that the CLI moves to the background
     /// later (`task_updated` `patch.is_backgrounded: true`) leaves the set.
     quiet_tasks: HashMap<String, bool>,
+    /// The latest `task_notification` of each subagent the latest `background_tasks_changed`
+    /// still held ([`Core::listed`]) when it came: not its end yet. It is handled as the end
+    /// when the subagent stops counting ([`Core::report_subagents`]).
+    held_ends: BTreeMap<String, Value>,
 }
 
 impl Core {
@@ -243,6 +249,7 @@ impl Core {
             permission_mode: None,
             seen: Vec::new(),
             quiet_tasks: HashMap::new(),
+            held_ends: BTreeMap::new(),
         }
     }
 
@@ -487,7 +494,13 @@ impl Core {
         self.pending.clear();
         self.awaiting_echo.clear();
         self.in_turn = false;
-        self.flush(false).into_iter().collect()
+        let mut out: Vec<Action> = self.flush(false).into_iter().collect();
+        // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
+        // last word now: the process that ran it is gone.
+        for (_, v) in std::mem::take(&mut self.held_ends) {
+            out.extend(self.on_task_ended(&v));
+        }
+        out
     }
 
     // ---- from the CLI ----------------------------------------------------------------
@@ -821,7 +834,8 @@ impl Core {
 
     /// `system/background_tasks_changed` (2.1.312): `tasks`, the CLI's whole list of the
     /// session's running background tasks, sent on every change and `[]` at the end. Their
-    /// number when it changed; a subagent count that went up. One that went down waits for the
+    /// number when it changed; a subagent count that went up. One that went down, or a subagent
+    /// of [`Core::held_ends`] that stopped counting, waits for the
     /// next line of another kind ([`Core::recount`]): when the last command of a subagent the
     /// CLI already called ended leaves the list, the CLI lists the subagent again only on the
     /// next line, `[]` then `[subagent]`, and then starts it again (SPEC §8.1 **[verify]**:
@@ -835,7 +849,9 @@ impl Core {
             tracing::info!(session_id = %self.session_id, background_tasks = n, "background tasks");
             out.push(Action::Emit(AdapterEvent::BackgroundTasks(n)));
         }
-        if self.running_subagents() < self.subagents_reported {
+        if self.running_subagents() < self.subagents_reported
+            || self.held_ends.keys().any(|id| !self.counts(id))
+        {
             self.recount = true;
         } else {
             out.extend(self.report_subagents(None));
@@ -862,19 +878,39 @@ impl Core {
         ids.len()
     }
 
+    /// The latest `background_tasks_changed` list holds subagent `id` or a task of it.
+    fn listed(&self, id: &str) -> bool {
+        self.background.iter().any(|t| {
+            (t["task_type"] == "local_agent" && t["task_id"] == id) || t["parent_task_id"] == id
+        })
+    }
+
+    /// Subagent `id` is one of [`Core::running_subagents`].
+    fn counts(&self, id: &str) -> bool {
+        self.subagents.contains(id) || self.listed(id)
+    }
+
     /// [`AdapterEvent::Subagents`] when [`Core::running_subagents`] differs from the count
-    /// last reported; `task_id`: the subagent whose start or end the CLI reported, for the
-    /// log.
+    /// last reported, then the end of each subagent in [`Core::held_ends`] that no longer
+    /// counts; `task_id`: the subagent whose start or end the CLI reported, for the log.
     fn report_subagents(&mut self, task_id: Option<&str>) -> Vec<Action> {
         self.recount = false;
         let n = self.running_subagents();
-        if n == self.subagents_reported {
-            return vec![];
+        let mut out = Vec::new();
+        if n != self.subagents_reported {
+            self.subagents_reported = n;
+            let n = u32::try_from(n).unwrap_or(u32::MAX);
+            tracing::info!(session_id = %self.session_id, task_id, subagents = n, "subagents");
+            out.push(Action::Emit(AdapterEvent::Subagents(n)));
         }
-        self.subagents_reported = n;
-        let n = u32::try_from(n).unwrap_or(u32::MAX);
-        tracing::info!(session_id = %self.session_id, task_id, subagents = n, "subagents");
-        vec![Action::Emit(AdapterEvent::Subagents(n))]
+        let (ended, held): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut self.held_ends)
+            .into_iter()
+            .partition(|(id, _)| !self.counts(id));
+        self.held_ends = held;
+        for v in ended.into_values() {
+            out.extend(self.on_task_ended(&v));
+        }
+        out
     }
 
     fn on_user(&mut self, v: &Value) -> Vec<Action> {
@@ -1175,8 +1211,25 @@ impl Core {
     /// waiting for what decides whether it is final. First the task's open requests (a
     /// subagent's, by `agent_id`) are cancelled; a task in [`Core::quiet_tasks`] gets no line;
     /// a task this process did not see start (it began before a `--resume`) counts as a
-    /// background one.
+    /// background one. A subagent the latest `background_tasks_changed` still holds, or a task
+    /// of it, has not ended (the CLI reports it ended while it waits on its own command moved
+    /// to the background, 2.1.312): its latest notification waits in [`Core::held_ends`], with
+    /// the line and the cancels, until it stops counting.
     fn on_task_notification(&mut self, v: &Value) -> Vec<Action> {
+        let id = v["task_id"].as_str();
+        if let Some(id) = id.filter(|id| self.listed(id)) {
+            tracing::info!(session_id = %self.session_id, task_id = id, "subagent end held: it still counts");
+            self.held_ends.insert(id.to_owned(), v.clone());
+            return vec![];
+        }
+        if let Some(id) = id {
+            self.held_ends.remove(id);
+        }
+        self.on_task_ended(v)
+    }
+
+    /// The end of the task of `task_notification` `v` ([`Core::on_task_notification`]).
+    fn on_task_ended(&mut self, v: &Value) -> Vec<Action> {
         let id = v["task_id"].as_str();
         // A subagent that ended asks nothing any more: its requests still open are cancelled
         // here, whichever comes first, this or the main turn's `result`.

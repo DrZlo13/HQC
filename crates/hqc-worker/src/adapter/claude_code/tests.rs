@@ -3629,18 +3629,7 @@ fn a_subagent_waiting_on_its_background_command_still_counts() {
 /// `background_tasks_changed` alone is not reported.
 #[test]
 fn a_subagent_with_one_background_command_still_counts() {
-    let lines: Vec<String> = MOVED_SUBAGENT
-        .lines()
-        .filter_map(|l| {
-            let mut v: Value = serde_json::from_str(l).unwrap();
-            if v["subtype"] == "background_tasks_changed" {
-                let tasks = v["tasks"].as_array_mut().unwrap();
-                tasks.retain(|t| t["task_id"] != "blm1ph76i");
-                return Some(v.to_string());
-            }
-            (!l.contains("blm1ph76i")).then(|| l.to_owned())
-        })
-        .collect();
+    let lines = one_background_command();
     let want: [&[&str]; 22] = [
         &["background_tasks:1", "subagents:1"],
         &[],
@@ -3667,4 +3656,135 @@ fn a_subagent_with_one_background_command_still_counts() {
         &["turn_ended"],
     ];
     assert_eq!(task_counts(lines.iter().map(String::as_str)), want);
+}
+
+/// The lines of [`MOVED_SUBAGENT`] without the Monitor `blm1ph76i`.
+fn one_background_command() -> Vec<String> {
+    MOVED_SUBAGENT
+        .lines()
+        .filter_map(|l| {
+            let mut v: Value = serde_json::from_str(l).unwrap();
+            if v["subtype"] == "background_tasks_changed" {
+                let tasks = v["tasks"].as_array_mut().unwrap();
+                tasks.retain(|t| t["task_id"] != "blm1ph76i");
+                return Some(v.to_string());
+            }
+            (!l.contains("blm1ph76i")).then(|| l.to_owned())
+        })
+        .collect()
+}
+
+/// The `system` lines each line reports, by its index.
+fn system_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<(usize, String, String)> {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    lines
+        .enumerate()
+        .flat_map(|(i, l)| {
+            system_events(&core.on_line(l))
+                .into_iter()
+                .map(move |(code, text)| (i, code, text))
+        })
+        .collect()
+}
+
+/// [`MOVED_SUBAGENT`], and its variant with one long command: the subagent's first
+/// `task_notification` ("has not reported yet") comes while the list still holds it and its
+/// commands, the second, its real end, while the list still holds it alone. One "Background
+/// task" line, with the real end's summary, when the list drops it: at the next line of another
+/// kind, here the `result` before the end of the turn. Its commands' ends give none.
+#[test]
+fn a_subagent_waiting_on_its_background_command_ends_in_one_line() {
+    let end = |i: usize| {
+        vec![(
+            i,
+            "task_notification".to_string(),
+            "This agent's report was delivered to you as a message from \"a739e2460001cfdc1\" (its SubagentHandback call). Read it there; it is not repeated here.".to_string(),
+        )]
+    };
+    assert_eq!(system_lines(MOVED_SUBAGENT.lines()), end(23));
+    let lines = one_background_command();
+    assert_eq!(system_lines(lines.iter().map(String::as_str)), end(20));
+}
+
+/// [`MOVED_SUBAGENT`] with the `system init` the CLI sends between `[]` and the `result`
+/// (lines 52 and 53 of the capture): the held end gives its line at that `init`, a line of
+/// another kind after the drop, and the `result` gives none.
+#[test]
+fn a_held_subagent_end_comes_at_the_next_line_of_another_kind() {
+    let mut lines: Vec<&str> = MOVED_SUBAGENT.lines().collect();
+    lines.insert(23, r#"{"type":"system","subtype":"init"}"#);
+    let got: Vec<(usize, String)> = system_lines(lines.into_iter())
+        .into_iter()
+        .map(|(i, code, _)| (i, code))
+        .collect();
+    assert_eq!(got, [(23, "task_notification".to_string())]);
+}
+
+/// Subagent `A` held while a task of it is listed; a list that drops `A` and adds `B` at once
+/// does not count `A` out at once: the next list holds `A` again, and its end waits. Its real
+/// end comes when a list drops it, at the next line of another kind.
+#[test]
+fn a_held_subagent_listed_again_with_another_keeps_its_end() {
+    let lines = [
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"A","is_backgrounded":true,"task_type":"local_agent"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"},{"task_id":"c","task_type":"local_bash","parent_task_id":"A"}]}"#,
+        r#"{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"not yet"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"B","task_type":"local_agent"}]}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent"},{"task_id":"B","task_type":"local_agent"}]}"#,
+        r#"{"type":"result","subtype":"success","num_turns":1}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","summary":"done"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"B","task_type":"local_agent"}]}"#,
+        r#"{"type":"result","subtype":"success","num_turns":0}"#,
+    ];
+    assert_eq!(
+        system_lines(lines.into_iter()),
+        [(10, "task_notification".to_string(), "done".to_string())]
+    );
+}
+
+/// [`MOVED_SUBAGENT`] up to the subagent's first `task_notification`, then the process exits:
+/// the held end is not lost, it gives its line at the exit.
+#[test]
+fn a_held_subagent_end_comes_at_exit() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut got = vec![];
+    for l in MOVED_SUBAGENT.lines().take(10) {
+        got.extend(system_events(&core.on_line(l)));
+    }
+    assert_eq!(got, vec![]);
+    got.extend(system_events(&core.on_exit()));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "task_notification");
+    assert!(
+        got[0].1.starts_with("This agent has not reported yet"),
+        "{got:?}"
+    );
+}
+
+/// [`MOVED_SUBAGENT`] with a request of the subagent open from its start: its first
+/// `task_notification` is no end and cancels nothing; the request is cancelled at its real end,
+/// when the list drops it.
+#[test]
+fn a_subagent_waiting_on_its_background_command_keeps_its_request() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let mut req: Value =
+        serde_json::from_str(&can_use_tool_line(&fx, "sub", Some("touch x"))).unwrap();
+    req["request"]["agent_id"] = json!("a739e2460001cfdc1");
+    let mut cancels: Vec<(usize, String)> = vec![];
+    for (i, l) in MOVED_SUBAGENT.lines().enumerate() {
+        for e in events(&emitted(core.on_line(l))) {
+            if let EventKind::ApprovalCancel { request_id, .. } = &e.kind {
+                cancels.push((i, request_id.clone()));
+            }
+        }
+        if i == 1 {
+            assert_eq!(approvals(&core.on_line(&req.to_string())), 1);
+        }
+    }
+    assert_eq!(cancels, [(23, "sub".to_string())]);
 }

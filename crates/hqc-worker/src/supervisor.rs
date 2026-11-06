@@ -7,7 +7,9 @@
 //!   `session.start` for a live process is acked without touching it, unless it names another
 //!   folder: a move, which waits until no turn (also none the runtime started by itself) and
 //!   no subagent runs, nothing is written into a turn and no capped input waits, then stops
-//!   the process and starts the next one there;
+//!   the process and starts the next one there; meanwhile no input starts a turn in the old
+//!   folder or is written into the running one, and a queued input moves the agent once
+//!   nothing holds the move;
 //!   before every start of a Claude Code agent its transcript is moved to where the working
 //!   directory puts it, if it is elsewhere and no live process outside hqc holds it
 //!   ([`crate::mirror::relocate`]).
@@ -1080,6 +1082,9 @@ impl Session {
                     self.moving = moving.then_some(spec);
                     self.link.reply(&id, ack(None));
                     self.restart_for_move().await;
+                    // What waited for the move goes to the new process, or, the move
+                    // cancelled, to this one.
+                    self.pump().await;
                     return;
                 }
                 self.moving = None;
@@ -1221,7 +1226,8 @@ impl Session {
     /// turn the runtime started by itself included: [`Adapter::runs_own_turn`]) and no
     /// subagent, nothing is written into a turn and no capped input waits for `ask` (T39); the
     /// end of a turn calls this again. Not the end of a background subagent: the runtime then
-    /// runs a turn of its own on its result, and the end of that turn moves.
+    /// runs a turn of its own on its result, and the end of that turn moves; a queued input
+    /// moves the agent once nothing runs ([`Session::pump`]), in case no such turn comes.
     /// Background commands of the agent itself die with the process; its next input says so.
     async fn restart_for_move(&mut self) {
         if self.moving.is_none()
@@ -1389,12 +1395,24 @@ impl Session {
     }
 
     /// Hands the next queued input to the adapter if no turn is running, or writes it into
-    /// the running turn ([`Session::inject_head`]). A capped input first waits for the
-    /// runtime to confirm `ask` (T39); an uncapped one runs in the session's own mode.
+    /// the running turn ([`Session::inject_head`]). While a move waits the input is for the
+    /// agent in the new folder: it waits as long as something holds the move, then the move
+    /// goes first ([`Session::restart_for_move`]). A capped input first waits for the runtime
+    /// to confirm `ask` (T39); an uncapped one runs in the session's own mode.
     async fn pump(&mut self) {
         while self.lowering.is_none() && self.state == ProcessState::Running {
             if self.turn.is_some() {
                 if !self.inject_head().await {
+                    return;
+                }
+                continue;
+            }
+            if self.moving.is_some() {
+                if self.queue.is_empty() {
+                    return;
+                }
+                self.restart_for_move().await;
+                if self.moving.is_some() {
                     return;
                 }
                 continue;
@@ -1481,7 +1499,8 @@ impl Session {
     /// does with what the user types meanwhile: a person's input (no `peer`, no
     /// `schedule_id`) that is no slash command, into a turn whose own input has no `peer`
     /// (an `hqc_ask` is answered by its own turn alone), neither of them capped to `ask`
-    /// (T39), and the runtime asks nothing now. Only the head goes, so `seq` order holds.
+    /// (T39), the runtime asks nothing now and no move waits (the input is for the agent in
+    /// the new folder). Only the head goes, so `seq` order holds.
     /// False: the head waits for the end of the turn.
     async fn inject_head(&mut self) -> bool {
         let fits = |q: &Queued| {
@@ -1491,6 +1510,7 @@ impl Session {
                 && !capped(&q.input)
         };
         if !self.queue.front().is_some_and(fits)
+            || self.moving.is_some()
             || self
                 .turn
                 .as_ref()

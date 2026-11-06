@@ -140,13 +140,60 @@ async fn a_session_moves_to_a_new_project() {
             .unwrap();
     assert!(order.is_empty(), "{order:?}");
 
-    // A repeat: the same answer, nothing new.
+    // A repeat: the same answer, no new project and no second `session_moved`; the start
+    // goes out again, in case the first call ended before it.
     let (s, again) = move_to(&hub, &mut w, &sid, json!({"path": "/w/foo"})).await;
     assert_eq!(s, 200, "{again}");
     assert_eq!(again["project_id"], new_pid.as_str());
     assert_eq!(projects(&hub).await.len(), before + 1);
     assert_eq!(moved_events(&hub.events(&sid).await).len(), 1);
+    let start = w.expect("session.start").await;
+    assert_eq!(start["payload"]["workspace_path"], "/w/foo");
+    w.reply(&start["id"], "ack", json!({})).await;
     w.expect_silence(Duration::from_millis(300)).await;
+    hub.finish().await;
+}
+
+/// A move whose call ended once the session was moved in the database (the client went away,
+/// a database error), before the worker heard of it: a repeat sends what did not go out, the
+/// workspace's `mirror.set` and the start in the new folder, and no second `session_moved`.
+#[tokio::test]
+async fn a_repeat_sends_what_did_not_go_out() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, _) = session(&hub, moves(), "running").await;
+    let (s, p) = hub.post("/api/projects", json!({"name": "Foo"})).await;
+    assert_eq!(s, 201, "{p}");
+    let pid: Uuid = p["id"].as_str().unwrap().parse().unwrap();
+    let (s, ws) = hub.add_workspace(&mut w, &pid.to_string(), "/w/foo").await;
+    assert_eq!(s, 201, "{ws}");
+    let wsid: Uuid = ws["id"].as_str().unwrap().parse().unwrap();
+    // The first call as far as its `session_moved`.
+    let db = &hub.app.db;
+    let id: Uuid = sid.parse().unwrap();
+    let row = hqc_hub::db::session(db, id).await.unwrap().unwrap();
+    hqc_hub::db::move_session(db, &row, pid, wsid)
+        .await
+        .unwrap();
+    let moved = hqc_hub::db::session(db, id).await.unwrap().unwrap();
+    hqc_hub::events::system(&hub.app, &moved, hqc_hub::moves::MOVED, "moved")
+        .await
+        .unwrap();
+    w.expect_silence(Duration::from_millis(300)).await;
+    w.mirror_sets.clear();
+
+    let (s, v) = move_to(&hub, &mut w, &sid, json!({"path": "/w/foo"})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["workspace_id"], wsid.to_string());
+    let start = w.expect("session.start").await;
+    assert_eq!(start["payload"]["workspace_path"], "/w/foo");
+    assert!(
+        w.mirror_sets
+            .iter()
+            .any(|m| m["payload"]["workspace_path"] == "/w/foo" && m["payload"]["enabled"] == true),
+        "{:?}",
+        w.mirror_sets
+    );
+    assert_eq!(moved_events(&hub.events(&sid).await).len(), 1);
     hub.finish().await;
 }
 
@@ -272,6 +319,37 @@ async fn refusals() {
     )
     .await;
     assert_eq!(s, 404, "{v}");
+    // A workspace of the owner that is not ready: a clone still being made, or one that failed.
+    let pid = hub.personal_project().await;
+    let (s, v) = hub.add_workspace(&mut w, &pid, "/w/two").await;
+    assert_eq!(s, 201, "{v}");
+    for state in ["creating", "failed"] {
+        sqlx::query("UPDATE workspaces SET state = $2 WHERE path = $1")
+            .bind("/w/two")
+            .bind(state)
+            .execute(&hub.app.db)
+            .await
+            .unwrap();
+        let (s, v) = move_to(&hub, &mut w, &sid, json!({"path": "/w/two"})).await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (409, Some("workspace_not_ready")),
+            "{state}: {v}"
+        );
+        // With `create`: refused before the worker is asked, so it makes no folder.
+        let (s, v) = hub
+            .post(
+                &format!("/api/sessions/{sid}/move"),
+                json!({"path": "/w/two", "create": true}),
+            )
+            .await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (409, Some("workspace_not_ready")),
+            "{state}, create: {v}"
+        );
+        w.expect_silence(Duration::from_millis(300)).await;
+    }
 
     // Driven from VS Code, or held open by a live process outside hqc (SPEC §9.3).
     let id: Uuid = sid.parse().unwrap();
@@ -344,6 +422,45 @@ async fn refusals() {
         (409, Some("worker_offline")),
         "{v}"
     );
+    hub.finish().await;
+}
+
+/// The refusals run again on the session read anew after `fs.stat`: a holder outside hqc that
+/// shows up during the worker's round-trip refuses the move, and nothing is made.
+#[tokio::test]
+async fn refused_on_the_session_read_again() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, _) = session(&hub, moves(), "running").await;
+    let before = projects(&hub).await.len();
+    let id: Uuid = sid.parse().unwrap();
+    let url = format!("/api/sessions/{sid}/move");
+    let req = hub.post(&url, json!({"path": "/w/foo"}));
+    let worker = async {
+        let f = w.expect("fs.stat").await;
+        sqlx::query(
+            "UPDATE sessions SET
+                held_by = '{\"entrypoint\": \"claude-vscode\", \"status\": \"idle\"}' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+        let (ty, payload) = w.fs_reply(&f);
+        w.reply(&f["id"], ty, payload).await;
+    };
+    let ((s, v), ()) = tokio::join!(req, worker);
+    assert_eq!((s, v["error"].as_str()), (409, Some("unavailable")), "{v}");
+    assert_eq!(projects(&hub).await.len(), before);
+    let (_, l) = hub.get("/api/workspaces").await;
+    let paths: Vec<Option<&str>> = l["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["path"].as_str())
+        .collect();
+    assert_eq!(paths, [Some(HQC)], "{l}");
+    assert!(moved_events(&hub.events(&sid).await).is_empty());
+    w.expect_silence(Duration::from_millis(300)).await;
     hub.finish().await;
 }
 

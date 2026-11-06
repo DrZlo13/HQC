@@ -994,7 +994,9 @@ MCP calls (worker → hub → worker):
   of that process (§5.2, §17.3); `machine_id` — the machine fingerprint (since 0.23, §5.1). `capabilities` — `{claude_code?: {version,
   sessions_registry?, moves?}, acp_agents[]}`; `sessions_registry: true` — the worker reads the Claude
   Code live sessions registry and reports holders (§9.3); `moves: true` (since 0.75) — the worker
-  moves a moved session's transcript (§8.1); the hub moves only sessions of such a worker (§6).
+  moves a moved session's transcript (§8.1), reported only when Claude Code's config folder
+  (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) exists at the worker's start, where the transcripts
+  are; the hub moves only sessions of such a worker (§6).
   `environments` (since 0.56, T43) — the environments of the local config (§14) as `{name,
   allow_local_mcp?, permissions {unblock?, allow?, deny?}}`, without `default` and never with the
   values (or the names) of `env`; a plain string, as workers before 0.56 send, reads as an
@@ -1308,8 +1310,9 @@ the rest is marked "later"):
 - `POST /api/sessions/{id}/move` {path, project?, create?} → the session object (since 0.75;
   `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
   folder's project (§3 Session). The hub checks the folder with `fs.stat` as `POST
-  /api/workspaces` does, with the same codes (`create`: the worker makes a missing folder,
-  before the overlap check below, so it stays after a `409`, as for `POST /api/workspaces`; `400
+  /api/workspaces` does, with the same codes (`create`: the worker makes a missing folder; the
+  overlap check below runs on the requested path before that, so a `409` leaves no folder,
+  unless the path reaches a workspace through a symlink, which only the canonical path shows; `400
   path_not_found`, `outside_allowed_roots`, `not_a_directory`, `invalid_path`, `409
   worker_offline`, `504 worker_timeout`), and takes the canonical path. A workspace of the
   session's owner on that worker at exactly that path is taken with its project (`project`, when
@@ -1328,8 +1331,9 @@ the rest is marked "later"):
   process outside hqc (`held_by`, §9.3), a session whose subagents still run (`subagents`, §5.4;
   a foreground one too, as the hub sees only the count: a background one would keep the agent in
   its old folder, and input meanwhile would run there), or a worker that does not report
-  `capabilities.claude_code.moves` (§5.4). The client offers it as "Move to project…" in the
-  chat's "More" menu: the project (one of the user's, or a new one named after the folder), one
+  `capabilities.claude_code.moves` (§5.4). These refusals are checked before `fs.stat` and again
+  after it, on the session read anew: it may change meanwhile. The client offers it as "Move to
+  project…" in the chat's "More" menu: the project (one of the user's, or a new one named after the folder), one
   of that project's folders on the session's worker, the folder tree or a typed path, and
   "Create the folder and move" after `path_not_found`, as when a workspace is added; after the
   move the session leaves the old project's list and opens in the new one, which joins the rail.
@@ -2051,11 +2055,18 @@ a move also survives a worker restart between the hub's `session.start` and the 
 and moves it there with its `<uuid>/` folder (subagents): only when exactly one file has that
 uuid, only one written in another folder (the `cwd` of its mirror row, which a move sets, else
 of its first record; symlinks resolved, through its deepest existing ancestor when the folder
-is gone, as a worktree deleted after the move) inside `allowed_roots`, and never over an existing file
-or folder (a hard link, then the old name is removed). Otherwise the start fails
-(`agent_start_failed`, §5.2) and the file stays where it was. A transcript written in the
+is gone, as a worktree deleted after the move) inside `allowed_roots`, never over an existing file
+or folder (a hard link, then the old name is removed), and not while a live Claude Code process
+outside the worker holds it: such a process would go on appending to the moved file while the
+agent appends too. The worker reads Claude Code's registry of live sessions (§9.3) at that
+moment, its own agent processes left out as the mirror leaves them out, and does not rely on the
+hub's `held_by`, which may lag; without the registry folder there is no such check. Otherwise the
+start fails (`agent_start_failed`, §5.2; for a holder the message names its `entrypoint` and
+pid) and the file stays where it was. A transcript written in the
 working directory itself, under another name of it (a path through a symlink), is not moved. The mirror's row for
-the new path is written first (§9.2). That `--resume` in the new folder keeps the conversation is
+the new path is written first (§9.2) and removed again when the file does not get there. This is
+the one place where hqc moves a Claude Code transcript; elsewhere it never modifies or deletes
+one **[decision]**. That `--resume` in the new folder keeps the conversation is
 what the live test `live_move_resumes_in_the_new_folder` checks **[verify]**.
 `--permission-prompt-tool stdio` is required: without it the CLI asks the host
 nothing and rejects outright everything that needs confirmation
@@ -2675,7 +2686,8 @@ cache (`$HQC_HOME/mirror/mirror.sqlite3`); `mirror.event` goes through the outbo
 A transcript the worker moves for a moved session (§8.1, since 0.75) gets its row at the new path
 before it is moved: `cwd` the new folder, the offset at the file's end, the old row's last prompt
 and `ai-title`. The mirror reads the row before the records, so it neither imports the file
-again nor counts it to the old folder by the `cwd` of its old records.
+again nor counts it to the old folder by the `cwd` of its old records. When the file does not
+get there (its folder or the link fails), the row is removed again.
 
 The worker recognises its own records by `uuid`: the Claude Code adapter puts into a shared
 in-memory registry (by `runtime_session_id`) the uuid of every `user`/`assistant` message of the
@@ -3887,16 +3899,20 @@ the folder; the slug is kept when free, otherwise `-2`…; the old project's sav
 session (a move within the project keeps its place); `system session_moved` (§4); `409
 archived`; `409 unavailable` for a session driven from VS Code, held by a live process or with
 subagents still running (a foreground one too), and for a worker without
-`capabilities.claude_code.moves` (§5.4); the folder checks and codes of `POST /api/workspaces`, `create` making the folder before the overlap
-check, so it stays after a `409`, as there. Nothing is queued. The client: "Move to project…" in
+`capabilities.claude_code.moves` (§5.4, reported only when Claude Code's config folder exists),
+these refusals checked again on the session read anew after `fs.stat`; the folder checks and
+codes of `POST /api/workspaces`, with `create` the overlap check on the requested path before the
+worker makes the folder, so a `409` leaves none. Nothing is queued. The client: "Move to project…" in
 the chat's "More" menu; a summary with another `project_id` moves the session in the lists.
 §5.3, §10.2: a `session.start` for a running agent with another folder is a move, applied
 between turns once no subagent runs, with the owner's consent to a new folder of a foreign
 session; the agent's own background commands stop with it, and its first input in the new
 folder that the runtime takes and is no slash command says how many. §8.1, §9.2, §2.1: before every start of a Claude Code agent the worker moves its
-transcript by uuid to the place of the working directory, within `allowed_roots` and never over
-a file, the mirror's row first; the folder of a transcript is judged through its deepest
-existing ancestor when it is gone. §5.2: a `session.state` goes after the outbox entries written
+transcript by uuid to the place of the working directory, within `allowed_roots`, never over
+a file and not while a live process outside the worker holds it (Claude Code's registry read at
+that moment, §9.3), the mirror's row first and removed again when the file does not get there;
+the folder of a transcript is judged through its deepest existing ancestor when it is gone; this
+is the one place where hqc moves a Claude Code transcript **[decision]**. §5.2: a `session.state` goes after the outbox entries written
 before it, also when the worker stops (a stop right after a turn could overtake its final answer
 and lose the turn).
 

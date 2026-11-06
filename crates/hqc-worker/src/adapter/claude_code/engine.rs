@@ -11,15 +11,17 @@
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`,
 //!   except for a task that a subagent started or whose `task_started` said it runs in the
-//!   foreground, until a `task_updated` moves it to the background; that of a subagent the
-//!   latest `background_tasks_changed` still holds, or a task of it, is no end: the latest one
-//!   is handled when the subagent stops counting (below);
+//!   foreground, until a `task_updated` moves it to the background; one without the
+//!   subagent's report (`handback`) while the latest `background_tasks_changed` still holds the
+//!   subagent, or a task of it, is no end: the latest one is handled when the subagent stops
+//!   counting (below); a task gives one line, a later notification of it none;
 //!   `system` `compact_boundary` → `system context_compacted`;
 //! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
 //!   than `running` of the same `task_id`, a foreground one at the latest until the `result`,
 //!   and any subagent the latest `background_tasks_changed` list holds or a task of it names
-//!   as its `parent_task_id` → [`AdapterEvent::Subagents`] when the count changes, a drop that
+//!   as its `parent_task_id`, unless that subagent reported since its last `task_started`
+//!   ([`Core::reported`]) → [`AdapterEvent::Subagents`] when the count changes, a drop that
 //!   a `background_tasks_changed` brings at the next line of another kind: the CLI reports a
 //!   subagent ended while it waits for a command moved to the background, and lists and
 //!   starts its `task_id` again when the command ends (2.1.312);
@@ -211,10 +213,20 @@ pub struct Core {
     /// the session's agent. A task of the agent itself that the CLI moves to the background
     /// later (`task_updated` `patch.is_backgrounded: true`) leaves the set.
     quiet_tasks: HashMap<String, bool>,
-    /// The latest `task_notification` of each subagent the latest `background_tasks_changed`
-    /// still held ([`Core::listed`]) when it came: not its end yet. It is handled as the end
-    /// when the subagent stops counting ([`Core::report_subagents`]).
+    /// The latest `task_notification` without a report (`handback`) of each subagent the
+    /// latest `background_tasks_changed` still held ([`Core::listed`]) when it came: not its
+    /// end yet. It is handled as the end when the subagent stops counting
+    /// ([`Core::report_subagents`]) or the process exits.
     held_ends: BTreeMap<String, Value>,
+    /// Subagents whose latest `task_notification` carried their report (`handback`), until
+    /// the CLI starts them again: a task of theirs still listed is the session's background
+    /// work, it does not count them as running ([`Core::running_subagents`]).
+    reported: HashSet<String>,
+    /// Tasks whose end gave its line: a later `task_notification` of the same `task_id` gives
+    /// none (2.1.312 sends one each time a subagent stops, also after its report when a command
+    /// it left running ends and the CLI resumes it; "the later one replaces what the earlier one
+    /// showed", which an append-only feed cannot do).
+    announced: HashSet<String>,
 }
 
 impl Core {
@@ -250,6 +262,8 @@ impl Core {
             seen: Vec::new(),
             quiet_tasks: HashMap::new(),
             held_ends: BTreeMap::new(),
+            reported: HashSet::new(),
+            announced: HashSet::new(),
         }
     }
 
@@ -558,6 +572,9 @@ impl Core {
                         self.quiet_tasks.insert(id.to_owned(), subagent);
                     }
                     let agent = v["task_type"] == "local_agent";
+                    if let Some(id) = v["task_id"].as_str().filter(|_| agent) {
+                        self.reported.remove(id);
+                    }
                     self.count_subagent(v["task_id"].as_str().filter(|_| agent), true)
                 }
                 // Its end comes before the task's `task_notification` (2.1.312).
@@ -866,22 +883,30 @@ impl Core {
     /// own stays in the foreground) and reports the subagent ended (`task_updated`
     /// `completed`, `task_notification` "This agent has not reported yet: it is waiting on its
     /// own background work…") while the command still runs; when it ends, the CLI starts the
-    /// same `task_id` again.
+    /// same `task_id` again. A task of a subagent in [`Core::reported`] does not count it: the
+    /// subagent handed its report over and left the task running.
     fn running_subagents(&self) -> usize {
         let mut ids: HashSet<&str> = self.subagents.iter().map(String::as_str).collect();
         for t in &self.background {
             if t["task_type"] == "local_agent" {
                 ids.extend(t["task_id"].as_str());
             }
-            ids.extend(t["parent_task_id"].as_str());
+            ids.extend(self.parent(t));
         }
         ids.len()
+    }
+
+    /// The subagent listed task `t` belongs to, unless that subagent has reported.
+    fn parent<'a>(&self, t: &'a Value) -> Option<&'a str> {
+        t["parent_task_id"]
+            .as_str()
+            .filter(|p| !self.reported.contains(*p))
     }
 
     /// The latest `background_tasks_changed` list holds subagent `id` or a task of it.
     fn listed(&self, id: &str) -> bool {
         self.background.iter().any(|t| {
-            (t["task_type"] == "local_agent" && t["task_id"] == id) || t["parent_task_id"] == id
+            (t["task_type"] == "local_agent" && t["task_id"] == id) || self.parent(t) == Some(id)
         })
     }
 
@@ -1209,21 +1234,28 @@ impl Core {
     /// as soon as the task ends, before the turn the CLI then starts by itself). The text is
     /// its `summary`, or "Background task" without one. Not a flush: a held text keeps
     /// waiting for what decides whether it is final. First the task's open requests (a
-    /// subagent's, by `agent_id`) are cancelled; a task in [`Core::quiet_tasks`] gets no line;
+    /// subagent's, by `agent_id`) are cancelled; a task in [`Core::quiet_tasks`] gets no line,
+    /// nor one in [`Core::announced`];
     /// a task this process did not see start (it began before a `--resume`) counts as a
-    /// background one. A subagent the latest `background_tasks_changed` still holds, or a task
-    /// of it, has not ended (the CLI reports it ended while it waits on its own command moved
-    /// to the background, 2.1.312): its latest notification waits in [`Core::held_ends`], with
-    /// the line and the cancels, until it stops counting.
+    /// background one. A notification without the subagent's report (`handback`) while the
+    /// latest `background_tasks_changed` still holds the subagent or a task of it is no end
+    /// (2.1.312 sends it when the subagent waits on its own command moved to the background,
+    /// "This agent has not reported yet…"): it waits in [`Core::held_ends`], with the line and
+    /// the cancels, until the subagent stops counting. One with the report is the end, also
+    /// while a task the subagent left running is listed ([`Core::reported`]).
     fn on_task_notification(&mut self, v: &Value) -> Vec<Action> {
         let id = v["task_id"].as_str();
-        if let Some(id) = id.filter(|id| self.listed(id)) {
+        let report = !v["handback"].is_null();
+        if let Some(id) = id.filter(|id| !report && self.listed(id)) {
             tracing::info!(session_id = %self.session_id, task_id = id, "subagent end held: it still counts");
             self.held_ends.insert(id.to_owned(), v.clone());
             return vec![];
         }
         if let Some(id) = id {
             self.held_ends.remove(id);
+            if report {
+                self.reported.insert(id.to_owned());
+            }
         }
         self.on_task_ended(v)
     }
@@ -1238,6 +1270,9 @@ impl Core {
             None => vec![],
         };
         if id.is_some_and(|id| self.quiet_tasks.remove(id).is_some()) {
+            return out;
+        }
+        if id.is_some_and(|id| !self.announced.insert(id.to_owned())) {
             return out;
         }
         let t = v["summary"]

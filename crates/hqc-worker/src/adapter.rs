@@ -116,6 +116,12 @@ pub trait Adapter: Send {
     fn can_inject(&self) -> bool {
         false
     }
+    /// Whether the runtime runs a turn it started by itself, with no input of ours (Claude
+    /// Code: from `system/init` after a background task's end until its `result`, which ends
+    /// it with [`AdapterEvent::TurnEnded`]); a move waits for it (SPEC §5.3). By default never.
+    fn runs_own_turn(&self) -> bool {
+        false
+    }
     /// Writes input into the running turn, as [`Adapter::input_with`] does at its start; the
     /// runtime takes it at its next step, or runs it next by itself (see
     /// [`AdapterEvent::TurnEnded`]). `Ok(false)`: nothing written, [`Adapter::can_inject`] no

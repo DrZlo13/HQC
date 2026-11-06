@@ -299,6 +299,11 @@ impl Core {
         (self.in_turn || self.self_turn) && self.turn == turn
     }
 
+    /// Whether a turn the CLI started by itself runs, until its `result`.
+    pub fn runs_own_turn(&self) -> bool {
+        self.self_turn
+    }
+
     pub fn session_rules(&self) -> usize {
         self.rules.len()
     }

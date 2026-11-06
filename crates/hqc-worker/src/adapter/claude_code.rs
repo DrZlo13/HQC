@@ -693,6 +693,10 @@ impl Adapter for ClaudeCodeAdapter {
         self.running().is_ok_and(|p| lock(&p.core).can_inject())
     }
 
+    fn runs_own_turn(&self) -> bool {
+        self.running().is_ok_and(|p| lock(&p.core).runs_own_turn())
+    }
+
     async fn inject_with(
         &mut self,
         input: &SessionInput,

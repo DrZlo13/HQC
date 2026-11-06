@@ -17,8 +17,9 @@
 //!   sends `mcp.result` on its own later.
 //! - A tool that waits for the worker (`hqc_spawn` with a worktree, T47; `hqc_move`) answers
 //!   [`Answer::Wait`]: the connection goes on reading frames, and the result goes under the
-//!   call's frame id once the wait is over; if the connection closes first, nothing is sent
-//!   and the worker sends the call again after its next `hello`.
+//!   call's frame id once the wait is over, or the call is deferred then (an `hqc_move` that
+//!   asks the owner): `ack {}` and `mcp.result` later; if the connection closes first, nothing
+//!   is sent and the worker sends the call again after its next `hello`.
 //!
 //! [`REGISTRY`] is the hub's half of [`hqc_proto::mcp::TOOLS`]: a tool lands in both at once.
 
@@ -47,8 +48,9 @@ pub enum Answer {
     Now(Value),
     /// Deferred: `ack {}` now, `mcp.result` as a frame of its own later (SPEC §5.2).
     Later,
-    /// `mcp.result` under the call's frame id once this is done, off the connection's loop.
-    Wait(BoxFuture<'static, ToolResult>),
+    /// `mcp.result` under the call's frame id once this is done, off the connection's loop;
+    /// `Ok(None)`: deferred after all, as [`Answer::Later`].
+    Wait(BoxFuture<'static, Result<Option<Value>, McpError>>),
 }
 
 /// What the connection does with an `mcp.call` ([`call`]).
@@ -57,8 +59,9 @@ pub enum Called {
     Now(McpResult),
     /// Ack the frame; the result comes later.
     Later,
-    /// Send its `mcp.result` under the call's frame id when it is done.
-    Wait(BoxFuture<'static, McpResult>),
+    /// Send its `mcp.result` under the call's frame id when it is done; `None`: ack the frame
+    /// then, the result comes later.
+    Wait(BoxFuture<'static, Option<McpResult>>),
 }
 
 /// A tool's implementation: the calling session and the call (its `request_id`, `args`).
@@ -142,7 +145,16 @@ pub async fn call(app: &AppState, worker_id: Uuid, c: &McpCall) -> Called {
         }
         Ok(Answer::Wait(f)) => {
             let c = c.clone();
-            Called::Wait(Box::pin(async move { finished(worker_id, &c, f.await) }))
+            Called::Wait(Box::pin(async move {
+                match f.await {
+                    Ok(None) => {
+                        tracing::info!(%worker_id, request_id = %c.request_id, tool = %c.tool, "mcp call");
+                        None
+                    }
+                    Ok(Some(v)) => Some(finished(worker_id, &c, Ok(v))),
+                    Err(e) => Some(finished(worker_id, &c, Err(e))),
+                }
+            }))
         }
         Err(e) => Called::Now(finished(worker_id, c, Err(e))),
     }

@@ -81,7 +81,7 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
             (SELECT count(*) FROM events e WHERE e.session_id = s.id AND e.delivery = 'pending') AS queue_len,
             EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed') AS has_failed,
             EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id AND p.closed_at IS NULL
-                    AND p.kind IN ('approval', 'clarify', 'worker_approval')) AS has_open_request,
+                    AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move')) AS has_open_request,
             COALESCE(r.last_read_seq, 0) AS last_read_seq,
             (SELECT count(*) FROM events e WHERE e.session_id = s.id
                 AND e.seq > COALESCE(r.last_read_seq, 0) AND {UNREAD_FILTER}) AS unread,

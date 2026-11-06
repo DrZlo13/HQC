@@ -33,31 +33,39 @@
 //!   `session.start` with the new folder at once, which the worker applies once no turn runs
 //!   (SPEC §5.3); a stopped agent starts there with its next input. Nothing is queued; only
 //!   the tool queues the input that wakes the agent there.
+//!
+//! The tool moves at once only into a workspace of the owner in the environment of the
+//! session's folder now; anything else waits for the owner's answer, a PendingRequest of kind
+//! [`KIND`] in the calling session (SPEC §3, §7, §10.1).
 
 use std::path::Path;
 
 use hqc_proto::{
     api::WorkspaceState,
-    frame::{McpCall, McpError},
+    event::CancelReason,
+    frame::{environment_for, worker_approval, McpCall, McpError, McpResult},
     mcp::error_code,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
     api,
     app::AppState,
-    db::{self, SessionRow},
+    db::{self, PendingRow, SessionRow},
     delivery,
     error::{ApiError, ApiResult},
     events,
     mcp::{args, internal, once_id, Answer},
+    requests,
     worker_ws::StartState,
 };
 
 /// `system.code` written into the feed of a session that moved (SPEC §4).
 pub const MOVED: &str = "session_moved";
+/// `kind` of the PendingRequest of an `hqc_move` that waits for the owner (SPEC §3).
+pub const KIND: &str = "move";
 /// What [`crate::mcp::once_id`] derives the id of a move's new project from.
 const PROJECT: &str = "hqc_move project";
 /// What [`crate::mcp::once_id`] derives the `event_id` of the input after a tool move from.
@@ -71,19 +79,45 @@ struct MoveArgs {
 }
 
 /// `hqc_move(path, project?)` (SPEC §7): `{address, project, path}`. The calling session,
-/// run by hqc (`locked_by: hqc`), moves by [`move_session`], a missing folder made; the call
-/// waits for the worker's `fs.stat` on the connection it came by ([`Answer::Wait`]). Then an
-/// input of the owner, "you moved to …", goes into its queue as a run of `hqc_schedule` does
-/// (SPEC §16): a `user.message` with the call's chain moved on, so the turn it starts runs in
-/// the session's own mode (or the `ask` cap of the chain) and, after the move, in the new
-/// folder. Once per `request_id`: a repeat finds the session moved and the input stored, and
-/// answers the same.
+/// run by hqc (`locked_by: hqc`), in a turn without an `ask` cap (SPEC §7.1), looks at the
+/// folder with `fs.stat` on the connection the call came by ([`Answer::Wait`]), creating
+/// nothing ([`target`]). Into a workspace of the owner in the environment of its folder now
+/// it moves at once by [`move_session`]; anything else waits for the owner's answer
+/// ([`ask_owner`]), and the call is answered later, as `hqc_ask` is. After the move an input
+/// of the owner, "you moved to …", goes into its queue as a run of `hqc_schedule` does (SPEC
+/// §16): a `user.message` with the call's chain moved on, so the turn it starts runs in the
+/// session's own mode and, after the move, in the new folder.
+/// Once per `request_id`: a repeat finds the session moved and the input stored, or the
+/// request it opened, and answers the same.
 pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
     let a: MoveArgs = args(c.args.clone())?;
+    if let Some(p) = db::request_by_id(&app.db, caller.id, KIND, &c.request_id)
+        .await
+        .map_err(internal)?
+    {
+        // A repeat of a call that asked the owner (SPEC §5.2): waiting, or its outcome.
+        return match p.result {
+            None => Ok(Answer::Later),
+            Some(frame) => {
+                crate::peers::result_acked(app, p.id)
+                    .await
+                    .map_err(internal)?;
+                let r: McpResult =
+                    serde_json::from_value(frame["payload"].clone()).map_err(internal)?;
+                r.outcome().map(Answer::Now)
+            }
+        };
+    }
     if caller.locked_by != "hqc" {
         return Err(McpError::new(
             error_code::UNAVAILABLE,
             "the session's agent is not run by hqc now",
+        ));
+    }
+    if let Some(by) = &caller.permission_capped_by {
+        return Err(McpError::new(
+            error_code::UNAVAILABLE,
+            format!("this turn runs under the ask cap of {by}; the session does not move from it"),
         ));
     }
     // The chain moves on as for a schedule; one at its limit moves nothing (SPEC §7.1).
@@ -91,33 +125,231 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     let chain = serde_json::to_value(chain).map_err(internal)?;
     let wake = once_id(WAKE, caller.id, &c.request_id);
     // Off the connection's loop: the worker answers `fs.stat` on the connection the call came by.
-    let (app, caller) = (app.clone(), caller.clone());
+    let (app, caller, request_id) = (app.clone(), caller.clone(), c.request_id.clone());
     Ok(Answer::Wait(Box::pin(async move {
-        let m = move_session(&app, &caller, &a.path, a.project.as_deref(), true)
-            .await
-            .map_err(tool_error)?;
-        let text = format!(
-            "You moved to {}, project {}; continue the task.",
-            m.workspace.path, m.project.name
-        );
-        events::store_hub_event_with_id(
-            &app,
-            &m.session,
-            wake,
-            events::user_author(m.session.owner_id),
-            "user.message",
-            json!({"text": text, "artifact_ids": []}),
-            Some("pending"),
-            Some(chain),
-        )
+        match target(&app, &caller, &a.path).await? {
+            Target::Workspace(path) => {
+                let m = move_session(&app, &caller, &path, a.project.as_deref(), false)
+                    .await
+                    .map_err(tool_error)?;
+                woken(&app, &m, wake, chain).await.map(Some)
+            }
+            Target::Ask { path, why } => {
+                let project = a.project.as_deref();
+                ask_owner(&app, &caller, &request_id, &path, project, &why, chain).await?;
+                Ok(None)
+            }
+        }
+    })))
+}
+
+/// After a move of the calling session: the owner's input "you moved to …" in its queue, in
+/// `chain`, once per call (`wake`), and the call's result.
+async fn woken(app: &AppState, m: &Moved, wake: Uuid, chain: Value) -> Result<Value, McpError> {
+    let text = format!(
+        "You moved to {}, project {}; continue the task.",
+        m.workspace.path, m.project.name
+    );
+    events::store_hub_event_with_id(
+        app,
+        &m.session,
+        wake,
+        events::user_author(m.session.owner_id),
+        "user.message",
+        json!({"text": text, "artifact_ids": []}),
+        Some("pending"),
+        Some(chain),
+    )
+    .await
+    .map_err(internal)?;
+    delivery::kick(app, m.session.id, false).await;
+    let address = crate::peers::address(app, &m.session)
         .await
         .map_err(internal)?;
-        delivery::kick(&app, m.session.id, false).await;
-        let address = crate::peers::address(&app, &m.session)
+    Ok(json!({"address": address, "project": m.project.slug, "path": m.workspace.path}))
+}
+
+/// Where `hqc_move` goes.
+enum Target {
+    /// Exactly a workspace of the owner on the session's worker, in the environment of the
+    /// session's folder now: the session moves at once.
+    Workspace(String),
+    /// Anything else waits for the owner: the canonical path (as given, when missing) and what
+    /// the owner is asked about.
+    Ask { path: String, why: String },
+}
+
+/// Where a move of `s` into `path` goes (SPEC §7): the worker's `fs.stat` without `create`,
+/// the owner's workspaces on that worker and the environments of the worker's bindings (as
+/// [`db::set_workspace_environments`] has them) for the target and for the session's folder.
+/// A folder the worker refuses is the tool's error at once; a missing one asks.
+async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, McpError> {
+    let worker = match s.worker_id {
+        Some(w) => db::worker(&app.db, w).await.map_err(internal)?,
+        None => None,
+    }
+    .ok_or_else(|| McpError::new(error_code::UNAVAILABLE, "the session has no worker"))?;
+    let here = match s.workspace_id {
+        Some(w) => db::workspace(&app.db, w).await.map_err(internal)?,
+        None => None,
+    }
+    .ok_or_else(|| {
+        McpError::new(
+            error_code::UNAVAILABLE,
+            "the session has no folder to move from",
+        )
+    })?;
+    let (path, exists) = match api::stat_folder(app, worker.id, path, false).await {
+        Ok(p) => (p, true),
+        Err(ApiError::Invalid("path_not_found", _)) => (
+            api::check_path(path).map_err(tool_error)?.to_string(),
+            false,
+        ),
+        Err(e) => return Err(tool_error(e)),
+    };
+    let workspace = exists
+        && db::overlapping_workspace(&app.db, worker.id, &path)
             .await
-            .map_err(internal)?;
-        Ok(json!({"address": address, "project": m.project.slug, "path": m.workspace.path}))
-    })))
+            .map_err(internal)?
+            .is_some_and(|w| w.path == path && w.owner_id == s.owner_id);
+    let bindings = db::env_bindings(worker.env_bindings);
+    let (to, from) = (
+        environment_for(&bindings, &path),
+        environment_for(&bindings, &here.path),
+    );
+    if workspace && to == from {
+        return Ok(Target::Workspace(path));
+    }
+    let folder = if !exists {
+        "a new folder (made if you allow it)"
+    } else if !workspace {
+        "a folder that is not one of your workspaces yet"
+    } else {
+        "your workspace"
+    };
+    let env = if to == from {
+        String::new()
+    } else {
+        format!(" in environment {to} (its folder now is in {from})")
+    };
+    Ok(Target::Ask {
+        why: format!("{folder}{env}"),
+        path,
+    })
+}
+
+/// The owner is asked about the move of `s` into `path` (SPEC §7, §10.1): an `approval.request`
+/// of the hub in the session's feed with the options `once` / `deny`, and an open request of
+/// kind [`KIND`] keyed by the call's `request_id`, which keeps what the move needs (`move`:
+/// the path, the project, the call's chain moved on). No expiry; a repeat of the call opens
+/// none and stores no second event.
+async fn ask_owner(
+    app: &AppState,
+    s: &SessionRow,
+    request_id: &str,
+    path: &str,
+    project: Option<&str>,
+    why: &str,
+    chain: Value,
+) -> Result<(), McpError> {
+    let payload = json!({
+        "request_id": request_id,
+        "tool": hqc_proto::mcp::MOVE,
+        "description": format!("The agent asks to move this session into {why}:\n{path}"),
+        "options": [
+            {"id": worker_approval::ONCE, "label": "Allow", "canonical": "once"},
+            {"id": worker_approval::DENY, "label": "Deny", "canonical": "deny"},
+        ],
+    });
+    let mut stored = payload.clone();
+    stored["move"] = json!({"path": path, "project": project, "chain": chain});
+    hqc_proto::replace_nul_json(&mut stored);
+    if !db::open_request(&app.db, KIND, s.id, request_id, &stored, None, s.worker_id)
+        .await
+        .map_err(internal)?
+    {
+        return Ok(());
+    }
+    tracing::info!(session_id = %s.id, %request_id, %path, "hqc_move asks the owner");
+    events::store_hub_event(
+        app,
+        s,
+        json!({"kind": "system"}),
+        "approval.request",
+        payload,
+        None,
+        None,
+    )
+    .await
+    .map_err(internal)?;
+    Ok(())
+}
+
+/// The owner allowed the move of request `p` (closed already, without a result): the session
+/// moves as the call asked, a missing folder made, and then as [`tool`] goes on after a move;
+/// the call gets that result, or the move's error, as an `mcp.result` of its own, kept in the
+/// request until the worker acknowledges it. Off the answer's HTTP request, so that a client
+/// that goes away does not cut the move short.
+pub fn allowed(app: &AppState, p: PendingRow) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        let r = match carry_out(&app, &p).await {
+            Ok(v) => McpResult::ok(&p.request_id, v),
+            Err(e) => McpResult::err(&p.request_id, &e.code, e.message),
+        };
+        tracing::info!(session_id = %p.session_id, request_id = %p.request_id, ok = r.error.is_none(), "allowed hqc_move carried out");
+        let frame = json!({"type": "mcp.result", "payload": r});
+        if let Err(e) = db::set_request_result(&app.db, p.id, &frame).await {
+            tracing::error!(request_id = %p.request_id, error = %e, "the result of an allowed move not stored");
+            return;
+        }
+        requests::deliver_result(
+            &app,
+            &PendingRow {
+                result: Some(frame),
+                ..p
+            },
+        )
+        .await;
+    });
+}
+
+async fn carry_out(app: &AppState, p: &PendingRow) -> Result<Value, McpError> {
+    let m = &p.payload["move"];
+    let path = m["path"]
+        .as_str()
+        .ok_or_else(|| internal("a move request without its path"))?;
+    let s = db::session(&app.db, p.session_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| McpError::new(error_code::UNAVAILABLE, "the session is gone"))?;
+    let moved = move_session(app, &s, path, m["project"].as_str(), true)
+        .await
+        .map_err(tool_error)?;
+    let wake = once_id(WAKE, s.id, &p.request_id);
+    woken(app, &moved, wake, m["chain"].clone()).await
+}
+
+/// The `mcp.result` of a move the owner denied: nothing moved, nothing was made.
+pub fn denied(request_id: &str) -> Value {
+    json!({"type": "mcp.result", "payload": McpResult::err(
+        request_id,
+        error_code::UNAVAILABLE,
+        "the user did not allow the move; the session stays where it is",
+    )})
+}
+
+/// The `mcp.result` of a move whose request the hub cancelled (SPEC §10.1).
+pub fn cancelled(request_id: &str, reason: CancelReason) -> Value {
+    let why = serde_json::to_value(reason).unwrap_or_default();
+    json!({"type": "mcp.result", "payload": McpResult::err(
+        request_id,
+        error_code::UNAVAILABLE,
+        format!(
+            "the request to the user to allow the move was cancelled ({}); the session stays where it is",
+            why.as_str().unwrap_or("cancelled")
+        ),
+    )})
 }
 
 /// An error of [`move_session`] as the tool's (SPEC §7), after `spawn`'s: a folder the worker

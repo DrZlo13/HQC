@@ -523,8 +523,9 @@ async fn handle_text(
         // A fast tool is answered under the call's frame id, a deferred one (`hqc_ask`) is
         // acked and answered later by a frame of its own (SPEC §5.2). One that waits for a
         // worker (`hqc_spawn` with a worktree, T47) is answered under the frame id from a task,
-        // so this loop reads the worker's answer meanwhile; a closed connection drops it, and
-        // the worker sends the call again.
+        // so this loop reads the worker's answer meanwhile, or acked from it when it turns out
+        // deferred (`hqc_move` asking the owner); a closed connection drops it, and the worker
+        // sends the call again.
         WorkerFrame::McpCall(c) => {
             match crate::mcp::call(app, conn.worker_id, &c).await {
                 crate::mcp::Called::Now(r) => conn.reply(&id, HubFrame::McpResult(r)),
@@ -533,7 +534,10 @@ async fn handle_text(
                     let conn = conn.clone();
                     tokio::spawn(async move {
                         tokio::select! {
-                            r = f => conn.reply(&id, HubFrame::McpResult(r)),
+                            r = f => match r {
+                                Some(r) => conn.reply(&id, HubFrame::McpResult(r)),
+                                None => conn.reply(&id, HubFrame::Ack(Ack::default())),
+                            },
                             _ = conn.tx.closed() => {}
                         }
                     });

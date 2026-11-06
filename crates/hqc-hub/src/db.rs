@@ -1176,7 +1176,7 @@ pub async fn workspaces_of_owner(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<W
 }
 
 /// `workers.env_bindings` as stored from `hello`; anything unreadable is no binding.
-fn env_bindings(v: Value) -> Vec<hqc_proto::frame::EnvBinding> {
+pub fn env_bindings(v: Value) -> Vec<hqc_proto::frame::EnvBinding> {
     serde_json::from_value(v).unwrap_or_default()
 }
 
@@ -2056,14 +2056,14 @@ pub async fn clear_turn_error(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
 
 /// Sessions whose computed state is `running` apart from worker presence (SPEC §17.1): a
 /// turn is open and nothing ranks above it. The caller checks that the worker is online.
-/// A session waiting for the answer to its `hqc_ask` is not silent but waiting, and is left
-/// out too (SPEC §7.1, §17.3).
+/// A session waiting for the answer to its `hqc_ask` or for the owner's answer to its
+/// `hqc_move` is not silent but waiting, and is left out too (SPEC §7, §7.1, §17.3).
 pub async fn running_turns(db: &PgPool) -> sqlx::Result<Vec<(Uuid, Option<Uuid>)>> {
     sqlx::query_as(
         "SELECT s.id, s.worker_id FROM sessions s
          WHERE s.turn_open AND NOT s.archived AND NOT s.last_turn_error AND s.locked_by <> 'vscode'
            AND NOT EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
-                           AND p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'ask'))
+                           AND p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'ask', 'move'))
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed')",
     )
     .fetch_all(db)
@@ -2705,7 +2705,7 @@ pub async fn find_open_request(
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
          WHERE session_id = $1 AND request_id = $2 AND closed_at IS NULL
-           AND kind IN ('approval', 'clarify', 'worker_approval')"
+           AND kind IN ('approval', 'clarify', 'worker_approval', 'move')"
     ))
     .bind(session_id)
     .bind(request_id)
@@ -2782,13 +2782,27 @@ pub async fn close_request(db: &PgPool, id: Uuid, result: Option<&Value>) -> sql
     Ok(r.rows_affected() > 0)
 }
 
+/// The result of a request closed without one, once it is known (an allowed `hqc_move`,
+/// SPEC §7).
+pub async fn set_request_result(db: &PgPool, id: Uuid, result: &Value) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE pending_requests SET result = $2, updated_at = now()
+         WHERE id = $1 AND result IS NULL",
+    )
+    .bind(id)
+    .bind(result)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn open_requests_of_session(
     db: &PgPool,
     session_id: Uuid,
 ) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
-         WHERE session_id = $1 AND closed_at IS NULL AND kind IN ('approval', 'clarify')"
+         WHERE session_id = $1 AND closed_at IS NULL AND kind IN ('approval', 'clarify', 'move')"
     ))
     .bind(session_id)
     .fetch_all(db)
@@ -2801,7 +2815,7 @@ pub async fn open_requests_of_worker(
 ) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests p
-         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval')
+         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move')
            AND p.session_id IN (SELECT id FROM sessions WHERE worker_id = $1)"
     ))
     .bind(worker_id)

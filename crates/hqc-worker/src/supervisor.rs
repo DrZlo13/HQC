@@ -8,7 +8,8 @@
 //!   folder: a move, which waits until no turn and no subagent runs, nothing is written into
 //!   a turn and no capped input waits, then stops the process and starts the next one there;
 //!   before every start of a Claude Code agent its transcript is moved to where the working
-//!   directory puts it, if it is elsewhere ([`crate::mirror::relocate`]).
+//!   directory puts it, if it is elsewhere and no live process outside hqc holds it
+//!   ([`crate::mirror::relocate`]).
 //!   A failed spawn is `error {agent_start_failed, retryable: true}` (SPEC §5.2).
 //! - A folder the worker has not run sessions in ([`KnownPaths`]), for a session that is
 //!   neither the worker owner's (`owner_is_worker_owner`) nor in a workspace the owner
@@ -1231,6 +1232,8 @@ impl Session {
             return;
         }
         self.stopped_by_move += self.background_tasks;
+        // A Stop the old process got cancels nothing the new one drops (`end_turn`).
+        self.stop_asked = false;
         self.kill_process("moved to another folder").await;
         if let Err(e) = self.ensure_running().await {
             self.fail_queue(&e);
@@ -1266,14 +1269,24 @@ impl Session {
         else {
             return Ok(());
         };
-        let (projects, store, roots, workdir) = (
+        let (projects, store, roots, workdir, sessions, own) = (
             m.projects.clone(),
             m.store.clone(),
             self.roots.clone(),
             self.spec.workdir.clone(),
+            m.sessions.clone(),
+            m.own.clone(),
         );
         tokio::task::spawn_blocking(move || {
-            crate::mirror::relocate::relocate(&projects, &store, &roots, uuid, &workdir)
+            // A fresh read: a holder outside hqc keeps the transcript where it is (SPEC §9.3).
+            let registry = sessions
+                .as_deref()
+                .map(|dir| crate::mirror::relocate::Registry {
+                    dir,
+                    own: &own,
+                    procs: &crate::mirror::holders::System,
+                });
+            crate::mirror::relocate::relocate(&projects, &store, &roots, uuid, &workdir, registry)
         })
         .await??;
         Ok(())

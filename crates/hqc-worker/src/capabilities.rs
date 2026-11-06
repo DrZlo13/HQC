@@ -1,4 +1,4 @@
-//! `hello.capabilities` (SPEC §3 Worker, §5.4): `{claude_code?: {version, moves}, acp_agents:
+//! `hello.capabilities` (SPEC §3 Worker, §5.4): `{claude_code?: {version, moves?}, acp_agents:
 //! []}`; `moves`: the worker moves a session's transcript into its new folder (SPEC §8.1).
 
 use std::path::{Path, PathBuf};
@@ -22,9 +22,18 @@ pub async fn detect(claude_bin: Option<&Path>) -> Value {
 pub fn build(claude_version: Option<&str>) -> Value {
     let mut caps = json!({ "acp_agents": [] });
     if let Some(v) = claude_version {
-        caps["claude_code"] = json!({ "version": v, "moves": true });
+        caps["claude_code"] = json!({ "version": v });
     }
     caps
+}
+
+/// `claude_code.moves: true` when Claude Code's config folder (`config`) exists: the worker
+/// finds a moved session's transcript under `<config>/projects` (SPEC §8.1). Without it the hub
+/// does not move the worker's sessions, which would start a new conversation instead.
+pub fn with_moves(caps: &mut Value, config: &Path) {
+    if caps.get("claude_code").is_some() && config.is_dir() {
+        caps["claude_code"]["moves"] = json!(true);
+    }
 }
 
 /// `claude_code.sessions_registry: true` when Claude Code's registry of live sessions
@@ -140,8 +149,16 @@ mod tests {
         assert_eq!(parse_version("nope"), None);
         assert_eq!(build(None), json!({"acp_agents": []}));
         assert_eq!(build(Some("1.2"))["claude_code"]["version"], "1.2");
-        assert_eq!(build(Some("1.2"))["claude_code"]["moves"], true);
+        assert!(build(Some("1.2"))["claude_code"].get("moves").is_none());
         let dir = tempfile::tempdir().unwrap();
+        let mut none = build(None);
+        with_moves(&mut none, dir.path());
+        assert!(none.get("claude_code").is_none());
+        let mut caps = build(Some("2.1.308"));
+        with_moves(&mut caps, &dir.path().join("claude"));
+        assert!(caps["claude_code"].get("moves").is_none());
+        with_moves(&mut caps, dir.path());
+        assert_eq!(caps["claude_code"]["moves"], true);
         let mut none = build(None);
         with_sessions_registry(&mut none, dir.path());
         assert!(none.get("claude_code").is_none());

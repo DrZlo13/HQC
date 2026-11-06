@@ -206,8 +206,8 @@ impl Worker {
             let store = Arc::new(mirror::store::Store::open(&m.state_dir)?);
             let (cmds, cmd_rx) = mpsc::unbounded_channel();
             let mut core =
-                mirror::Mirror::new(m.projects_dir.clone(), store.clone(), m.own_records);
-            if let Some(d) = m.sessions_dir {
+                mirror::Mirror::new(m.projects_dir.clone(), store.clone(), m.own_records.clone());
+            if let Some(d) = m.sessions_dir.clone() {
                 core = core.with_registry(d, Box::new(mirror::holders::System));
             }
             core.grace = m.grace;
@@ -216,6 +216,8 @@ impl Worker {
                 cmds,
                 store,
                 projects: m.projects_dir,
+                sessions: m.sessions_dir,
+                own: m.own_records,
             });
             mirror_task = Some(tokio::spawn(mirror::run(
                 core,

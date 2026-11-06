@@ -237,6 +237,19 @@ async fn refusals() {
         "{v}"
     );
     assert_eq!(v["existing_path"], HQC);
+    // With `create`: refused before the worker is asked, so it makes no folder.
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/move"),
+            json!({"path": "/w/hqc/missing", "create": true}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some("workspace_conflict")),
+        "{v}"
+    );
+    w.expect_silence(Duration::from_millis(300)).await;
     // Outside allowed_roots, and a missing folder without `create`.
     let (s, v) = move_to(&hub, &mut w, &sid, json!({"path": "/etc"})).await;
     assert_eq!(

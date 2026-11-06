@@ -4,11 +4,13 @@
 //! - Only a Claude Code session with a workspace, not archived, neither driven from VS Code
 //!   (`locked_by: vscode`) nor held open by a live process outside hqc (`held_by`, SPEC
 //!   §9.3), with no subagent running (`subagents`, a foreground one too), whose worker is
-//!   online and reports `claude_code.moves` (SPEC §5.4); otherwise `409`.
-//! - The worker checks the folder with `fs.stat` (`create`: it makes a missing one, before
-//!   the overlap check below, so a refused move may leave it, as `POST /api/workspaces`
-//!   does), with the codes of `POST /api/workspaces`; the canonical path it reports is the
-//!   target.
+//!   online and reports `claude_code.moves` (SPEC §5.4); otherwise `409`. Checked again on the
+//!   row read anew under the owner's lock: it may change during the worker's round-trip.
+//! - The worker checks the folder with `fs.stat` (`create`: it makes a missing one), with the
+//!   codes of `POST /api/workspaces`; the canonical path it reports is the target. With
+//!   `create` the overlap check below runs on the requested path first, so a refused move
+//!   makes no folder (unless the path reaches a workspace through a symlink, which only the
+//!   canonical path shows).
 //! - A workspace of the owner on that worker at exactly that path is taken with its project
 //!   (`project`, when given, must be that one); a path that equals another owner's
 //!   workspace, lies inside one or contains one is `409 workspace_conflict`, and no record is
@@ -65,47 +67,15 @@ pub async fn move_session(
     project: Option<&str>,
     create: bool,
 ) -> ApiResult<Moved> {
-    if s.archived {
-        return Err(ApiError::Conflict(
-            "archived",
-            "the session is archived".into(),
-        ));
-    }
-    if s.system || s.runtime != "claude_code" {
-        return Err(unavailable("only a Claude Code session can move"));
-    }
-    if s.workspace_id.is_none() {
-        return Err(unavailable("the session has no folder to move from"));
-    }
-    if s.locked_by == "vscode" || s.held_by.is_some() {
-        return Err(unavailable(
-            "the session is driven or open outside hqc (VS Code): close it there first",
-        ));
-    }
-    // A background subagent outlives the turn: the agent would wait in its old folder for it,
-    // and the input meanwhile would run there. The hub sees only the count, so a foreground
-    // one refuses too.
-    if s.subagents > 0 {
-        return Err(unavailable(
-            "a subagent of the session is still running: move once it has ended",
-        ));
-    }
-    let worker = match s.worker_id {
-        Some(w) => db::worker(&app.db, w).await?,
-        None => None,
-    }
-    .filter(|w| w.revoked_at.is_none())
-    .ok_or_else(|| unavailable("the session has no worker"))?;
-    if !app.workers.is_online(worker.id) {
-        return Err(ApiError::Conflict(
-            "worker_offline",
-            "the worker is offline".into(),
-        ));
-    }
-    if worker.capabilities["claude_code"]["moves"] != true {
-        return Err(unavailable(
-            "the session's worker cannot move a session; update it",
-        ));
+    let worker = movable(app, s).await?;
+    if create {
+        // Before the worker makes the folder: a refused move leaves none.
+        let requested = api::check_path(path)?;
+        if let Some(x) = db::overlapping_workspace(&app.db, worker.id, requested).await? {
+            if x.owner_id != s.owner_id || Path::new(&x.path) != Path::new(requested) {
+                return Err(api::workspace_conflict(app, requested, &x).await?);
+            }
+        }
     }
     let path = api::stat_folder(app, worker.id, path, create).await?;
     // Held until the session is moved: a repeat that comes in parallel finds what this made.
@@ -113,6 +83,8 @@ pub async fn move_session(
     let s = db::session(&app.db, s.id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    // The row may have changed during the worker's round-trip.
+    movable(app, &s).await?;
     let wanted = match project {
         Some(p) => Some(owner_project(app, s.owner_id, p).await?),
         None => None,
@@ -197,6 +169,54 @@ pub async fn move_session(
         project,
         workspace: ws,
     })
+}
+
+/// The worker of session `s` when nothing refuses its move; otherwise `409` (`archived`,
+/// `unavailable`, `worker_offline`).
+async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
+    if s.archived {
+        return Err(ApiError::Conflict(
+            "archived",
+            "the session is archived".into(),
+        ));
+    }
+    if s.system || s.runtime != "claude_code" {
+        return Err(unavailable("only a Claude Code session can move"));
+    }
+    if s.workspace_id.is_none() {
+        return Err(unavailable("the session has no folder to move from"));
+    }
+    if s.locked_by == "vscode" || s.held_by.is_some() {
+        return Err(unavailable(
+            "the session is driven or open outside hqc (VS Code): close it there first",
+        ));
+    }
+    // A background subagent outlives the turn: the agent would wait in its old folder for it,
+    // and the input meanwhile would run there. The hub sees only the count, so a foreground
+    // one refuses too.
+    if s.subagents > 0 {
+        return Err(unavailable(
+            "a subagent of the session is still running: move once it has ended",
+        ));
+    }
+    let worker = match s.worker_id {
+        Some(w) => db::worker(&app.db, w).await?,
+        None => None,
+    }
+    .filter(|w| w.revoked_at.is_none())
+    .ok_or_else(|| unavailable("the session has no worker"))?;
+    if !app.workers.is_online(worker.id) {
+        return Err(ApiError::Conflict(
+            "worker_offline",
+            "the worker is offline".into(),
+        ));
+    }
+    if worker.capabilities["claude_code"]["moves"] != true {
+        return Err(unavailable(
+            "the session's worker cannot move a session; update it",
+        ));
+    }
+    Ok(worker)
 }
 
 /// The owner's project by slug or id; another owner's is `404`, as a missing one.

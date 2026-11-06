@@ -1590,6 +1590,7 @@ async fn live_move_resumes_in_the_new_folder() {
         std::slice::from_ref(&root),
         claude_session,
         &b,
+        None,
     )
     .unwrap()
     .expect("the transcript is moved");

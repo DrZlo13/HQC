@@ -103,6 +103,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn remove(&self, path: &Path) -> anyhow::Result<()> {
+        self.db()
+            .execute(
+                "DELETE FROM files WHERE path = ?1",
+                params![path.to_string_lossy()],
+            )
+            .context("writing the mirror state")?;
+        Ok(())
+    }
+
     fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
     }

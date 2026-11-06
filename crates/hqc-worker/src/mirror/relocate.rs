@@ -11,29 +11,46 @@
 //! of that uuid, only one whose folder (the mirror row's `cwd`, which a move sets, else the
 //! first recorded `cwd`; symlinks resolved, through its deepest existing ancestor when the
 //! folder is gone) lies inside `allowed_roots`, and never over a file or folder at the new
-//! place. Otherwise the start fails and the transcript stays where it was. A transcript of
-//! that folder itself is left alone: it was not moved.
+//! place. Nor does it move one that a live Claude Code process outside the worker holds open
+//! (Claude Code's registry of live sessions, read at that moment, [`Registry`]; SPEC §9.3): that
+//! process would go on appending to the moved file while the agent appends too. The hub's
+//! `held_by` may lag, so the worker does not rely on it. Otherwise the start fails and the
+//! transcript stays where it was. A transcript of that folder itself is left alone: it was not
+//! moved.
 //!
 //! The mirror's row for the new path is written first (`cwd` the new folder, `offset` the
 //! file's size, `last_prompt` and `title` of the old row): the mirror reads the row before the
-//! file's records, so it neither imports the file again nor counts it to the old folder.
+//! file's records, so it neither imports the file again nor counts it to the old folder. When
+//! the file does not get there (its folder or the link fails), that row is removed again.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 use uuid::Uuid;
 
+use super::holders::{self, Processes};
+use super::registry::OwnRecords;
 use super::store::{FileRow, Store};
 use crate::adapter::claude_code::paths::encode_project_dir;
 
+/// Claude Code's registry of live sessions (`<config>/sessions`), read before a transcript
+/// moves; the worker's own agent processes are left out, as the mirror does.
+pub struct Registry<'a> {
+    pub dir: &'a Path,
+    pub own: &'a OwnRecords,
+    pub procs: &'a dyn Processes,
+}
+
 /// Moves transcript `uuid` (and its `<uuid>/` folder) under `projects` to the place of the
 /// canonical `workdir`; the new path, or `None` when it is there already or nowhere.
+/// `registry`: `None` when Claude Code's registry is not looked at.
 pub fn relocate(
     projects: &Path,
     store: &Store,
     roots: &[PathBuf],
     uuid: Uuid,
     workdir: &Path,
+    registry: Option<Registry<'_>>,
 ) -> anyhow::Result<Option<PathBuf>> {
     let to = projects
         .join(encode_project_dir(&workdir.to_string_lossy()))
@@ -85,6 +102,16 @@ pub fn relocate(
             dir_to.display()
         );
     }
+    if let Some(r) = registry {
+        let held = holders::read(r.dir, &r.own.pids(), |s| r.own.is_live(s), r.procs);
+        if let Some(h) = held.get(&uuid) {
+            bail!(
+                "transcript {uuid} is open in a Claude Code process outside hqc ({}, pid {}); it is not moved",
+                h.entrypoint,
+                h.pid
+            );
+        }
+    }
     let size = std::fs::metadata(&from)
         .with_context(|| format!("transcript {}", from.display()))?
         .len();
@@ -97,13 +124,21 @@ pub fn relocate(
             title: old.title,
         },
     )?;
-    if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+    let place = || -> anyhow::Result<()> {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        // A link fails where a file is already: the move never replaces one.
+        std::fs::hard_link(&from, &to)
+            .with_context(|| format!("moving {} to {}", from.display(), to.display()))
+    };
+    if let Err(e) = place() {
+        if let Err(r) = store.remove(&to) {
+            tracing::warn!(path = %to.display(), "mirror state: {r:#}");
+        }
+        return Err(e);
     }
-    // A link fails where a file is already: the move never replaces one.
-    std::fs::hard_link(&from, &to)
-        .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
     std::fs::remove_file(&from).with_context(|| format!("removing {}", from.display()))?;
     if dir_from.is_dir() {
         std::fs::rename(&dir_from, &dir_to)
@@ -125,5 +160,136 @@ fn resolve(p: &Path) -> anyhow::Result<PathBuf> {
         }
         rest.push(cur.file_name().context("no existing ancestor")?.to_owned());
         cur = cur.parent().context("no existing ancestor")?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Processes 100 and 200 are alive, each its own group.
+    struct Fake;
+
+    impl Processes for Fake {
+        fn alive(&self, pid: u32) -> bool {
+            [100, 200].contains(&pid)
+        }
+        fn group(&self, pid: u32) -> Option<u32> {
+            self.alive(pid).then_some(pid)
+        }
+    }
+
+    /// `root/a` and `root/b` inside `allowed_roots`, transcript `uuid` written in `a`.
+    struct Setup {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        projects: PathBuf,
+        sessions: PathBuf,
+        store: Store,
+        uuid: Uuid,
+        from: PathBuf,
+        b: PathBuf,
+    }
+
+    fn setup() -> Setup {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (a, b) = (root.join("a"), root.join("b"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (projects, sessions) = (root.join("projects"), root.join("sessions"));
+        std::fs::create_dir_all(&sessions).unwrap();
+        let uuid = Uuid::new_v4();
+        let from = projects
+            .join(encode_project_dir(&a.to_string_lossy()))
+            .join(format!("{uuid}.jsonl"));
+        std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+        std::fs::write(&from, "{}\n").unwrap();
+        let store = Store::memory();
+        let row = FileRow {
+            cwd: Some(a.to_string_lossy().into_owned()),
+            ..FileRow::default()
+        };
+        store.put(&from, &row).unwrap();
+        Setup {
+            _dir: dir,
+            root,
+            projects,
+            sessions,
+            store,
+            uuid,
+            from,
+            b,
+        }
+    }
+
+    impl Setup {
+        fn to(&self) -> PathBuf {
+            self.projects
+                .join(encode_project_dir(&self.b.to_string_lossy()))
+                .join(format!("{}.jsonl", self.uuid))
+        }
+
+        /// A registry entry of process `pid` for the transcript.
+        fn hold(&self, pid: u32) {
+            let e = serde_json::json!({"pid": pid, "sessionId": self.uuid, "cwd": "/x",
+                "entrypoint": "claude-vscode", "status": "idle"});
+            std::fs::write(self.sessions.join(format!("{pid}.json")), e.to_string()).unwrap();
+        }
+
+        fn relocate(&self, own: &OwnRecords) -> anyhow::Result<Option<PathBuf>> {
+            let registry = Registry {
+                dir: &self.sessions,
+                own,
+                procs: &Fake,
+            };
+            relocate(
+                &self.projects,
+                &self.store,
+                std::slice::from_ref(&self.root),
+                self.uuid,
+                &self.b,
+                Some(registry),
+            )
+        }
+    }
+
+    /// A live process outside the worker that holds the transcript keeps it where it is; the
+    /// worker's own agent process does not; a dead one's entry does not.
+    #[test]
+    fn a_held_transcript_stays() {
+        let s = setup();
+        s.hold(100);
+        let e = s.relocate(&OwnRecords::default()).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(
+            msg.contains("claude-vscode") && msg.contains("pid 100"),
+            "{msg}"
+        );
+        assert!(s.from.is_file() && !s.to().exists());
+        assert_eq!(s.store.get(&s.to()).unwrap(), None);
+
+        let own = OwnRecords::default();
+        own.begin(s.uuid, Some(100));
+        s.hold(300);
+        assert_eq!(s.relocate(&own).unwrap(), Some(s.to()));
+        assert!(s.to().is_file() && !s.from.exists());
+    }
+
+    /// The new path's folder cannot be made (a file is there): the row written for the new
+    /// path is removed again and the transcript stays.
+    #[test]
+    fn a_failed_move_leaves_no_row() {
+        let s = setup();
+        std::fs::write(s.to().parent().unwrap(), "").unwrap();
+        let e = s.relocate(&OwnRecords::default()).unwrap_err();
+        assert!(format!("{e:#}").contains("creating"), "{e:#}");
+        assert_eq!(s.store.get(&s.to()).unwrap(), None);
+        assert!(s.from.is_file());
+        assert_eq!(
+            s.store.get(&s.from).unwrap().unwrap().cwd,
+            Some(s.root.join("a").to_string_lossy().into_owned())
+        );
     }
 }

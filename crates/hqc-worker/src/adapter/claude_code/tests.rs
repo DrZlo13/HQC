@@ -1949,6 +1949,42 @@ fn turn_end_cancels_a_foreground_subagents_request() {
     assert_eq!(w[0]["response"]["request_id"], "bg");
 }
 
+/// "No" interrupts the turn for a request of the main agent or a foreground subagent; for a
+/// background subagent's, which may outlive the turn it came in, it only denies the call: the
+/// turn that runs by then is another one.
+#[test]
+fn no_to_a_background_subagent_does_not_interrupt() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_started","task_id":"ac5672f5fc80df8ec","tool_use_id":"toolu_01TYRCeySHmvXd7Md3Y1rgb8","description":"Run ping and reply with 4","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0d"}
+{"type":"system","subtype":"task_started","task_id":"a8b8fdc3b4a031d4f","tool_use_id":"toolu_01BR8iav6ZtPUAhpuCWdQPCt","description":"Touch hqc-live-check file","is_backgrounded":true,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e13"}"#,
+    );
+    for (request_id, agent) in [
+        ("main", None),
+        ("fg", Some("ac5672f5fc80df8ec")),
+        ("bg", Some("a8b8fdc3b4a031d4f")),
+    ] {
+        let mut v: Value =
+            serde_json::from_str(&can_use_tool_line(&fx, request_id, Some("touch x"))).unwrap();
+        if let Some(agent) = agent {
+            v["request"]["agent_id"] = json!(agent);
+        }
+        core.on_line(&v.to_string());
+    }
+    let interrupt = |core: &mut Core, id: &str| {
+        writes(&core.answer_approval(id, "deny", None).unwrap())[0]["response"]["response"]
+            ["interrupt"]
+            .clone()
+    };
+    assert_eq!(interrupt(&mut core, "main"), true);
+    assert_eq!(interrupt(&mut core, "fg"), true);
+    assert_eq!(interrupt(&mut core, "bg"), false);
+}
+
 /// The `status idle` that ends a turn names the turn's input (`in_reply_to`): the hub fails an
 /// `hqc_ask` only for the input whose turn ended without a final message, even when the next
 /// input's ack reaches it first (SPEC §7.1).
@@ -1971,6 +2007,34 @@ fn end_of_turn_status_names_its_input() {
             json!({"state": "idle", "detail": "error_during_execution", "in_reply_to": input})
         );
     }
+}
+
+/// Stop reaches a turn the CLI starts by itself after a background task's end (`init` with no
+/// input of ours): it is interrupted like ours, and after its `result` nothing runs.
+#[test]
+fn a_turn_the_cli_starts_by_itself_can_be_stopped() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    play(
+        &mut core,
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"LAUNCHED","total_cost_usd":0.004,"usage":{"input_tokens":4,"output_tokens":165}}
+{"type":"system","subtype":"task_notification","task_id":"abd6ecd27912266e5","tool_use_id":"toolu_018foiN3RMuTb1fmFn53JffP","status":"completed","summary":"done","uuid":"614bde30-70d7-46cc-9ff9-9e22f9bdc118"}"#,
+    );
+    assert!(core.interrupt().is_none(), "no turn runs");
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5","permissionMode":"default","uuid":"fb2b6af8-8921-4277-a09e-61e710bfcdb2"}"#,
+    );
+    let (req, turn) = core.interrupt().expect("the CLI's own turn runs");
+    assert_eq!(writes(&[req])[0]["request"]["subtype"], "interrupt");
+    assert!(core.turn_running(turn));
+    play(
+        &mut core,
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}"#,
+    );
+    assert!(!core.turn_running(turn));
+    assert!(core.interrupt().is_none());
 }
 
 /// An input written while the CLI runs a turn it started by itself after a background task is

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.70, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.71, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2066,7 +2066,9 @@ you how to proceed." with `interrupt: true`, so the CLI ends the turn at once: t
 with that text, a `user` text `[Request interrupted by user for tool use]` (mapped to nothing)
 and `result` `error_during_execution` (`terminal_reason: aborted_tools`), so the turn ends with
 `status idle` as after a stop, and the process takes the next input (checked live on 2.1.312);
-before 0.69 it was "The user denied this tool call." and the model went on; `always` → allow plus `updatedPermissions`; Claude Code itself writes the
+since 0.71 `interrupt` is `false` for a request of a background subagent (one not started in
+the foreground), which outlives its turn: the call is denied, the turn running by then goes
+on; before 0.69 it was "The user denied this tool call." and the model went on; `always` → allow plus `updatedPermissions`; Claude Code itself writes the
 rule to `.claude/settings.local.json` **at the root of the git repository containing the cwd**
 (or of the cwd itself if there is no repository; checked on 2.1.308). Adapter rule: only the
 `permission_suggestions` items with `type: addRules` and `destination: localSettings` go into
@@ -3455,10 +3457,14 @@ and starts the next turn; one turn per item, in `seq` order. Since 0.70 a Claude
 takes a person's input as the VS Code tab does: while a turn runs, the worker writes the head
 of the queue into it when all of these hold: the input has no `peer` (an `hqc_ask` waits for
 the answer of its own turn) and no `schedule_id` (a run of a schedule, §16), its `text` does not
-start with `/` (a slash command), the turn's own input has no `peer` either (the answer of an
+start with `/` after leading whitespace (a slash command; since 0.71), the turn's own input has no `peer` either (the answer of an
 `hqc_ask` goes to its sender: a person's input would shape it or, carried with the ask into a
 turn the CLI runs by itself, take it), neither the input nor the turn is capped to `ask`
-(§5.3), and the agent has no open `approval` or `clarify`. Otherwise it waits for the end of
+(§5.3), and the agent has no open `approval` or `clarify`. A person's input that carries
+buffered sends of other sessions (`peer_prefix`, §7.1) may join: the cap of §7.1 makes it `ask`
+whenever one of them comes from a session in `ask`, and a capped input never joins. The hub
+honours `joined` only for a `user.message` without `schedule_id`; a `joined` on any other input
+is the worker's mistake, logged, and the input's turn opens (since 0.71). Otherwise it waits for the end of
 the turn as before (scheduled runs and slash commands always do), and so does everything behind
 it, so `seq` order holds. The CLI takes the input at its next step, after the result of the
 tool call running then, and the worker answers `ack {event_id, joined: true}` on its echo; the
@@ -3468,7 +3474,10 @@ as the next turn by itself (§8.1): the first such input becomes that turn, its 
 plain `ack`; the others stay written into it and are acked with `joined: true` when the CLI
 takes them (that turn's `in_reply_to` is then the last of them the CLI took; such inputs are a
 person's, which nothing answers by `in_reply_to`). The same holds for an input sent during a
-turn the CLI began by itself after a background task. The "interrupt and send" button does
+turn the CLI began by itself after a background task; since 0.71 `session.stop` interrupts such
+a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). An input
+the CLI cancels after a `session.stop` (a carried input on a second Stop) fails, not retryable,
+instead of going back to the queue: the person cancelled it. The "interrupt and send" button does
 `session.stop` and then the input. For runtimes with `steer` (Hermes) a "steer" button is
 available: `session.steer` without interrupting. Two users with `write` share the same queue.
 Each turn runs in its own input's mode (since 0.43, T39): a person's input queued behind a turn
@@ -3750,6 +3759,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.70 → 0.71 (after the security pass of #4 and #5)
+§17.2: `session.stop` interrupts a turn the CLI began by itself; an input the CLI cancels after
+a Stop fails instead of running again; the slash check skips leading whitespace; inputs with
+`peer_prefix` may join (the §7.1 cap still holds); the hub honours `joined` only for a person's
+`user.message` without `schedule_id`. §8.1: "No" without text interrupts the turn only for a
+request of the main agent or of a foreground subagent; for a background subagent's request,
+which may outlive its turn, it only denies the call.
 
 ### 0.69 → 0.70 (the agent at work: subagents and a message during a turn)
 §17.2, §5.2, §8.1: a person's message sent during a Claude Code turn goes into that turn, as in

@@ -430,3 +430,29 @@ async fn refusals_and_limits() {
     assert_eq!(s, 404);
     hub.finish().await;
 }
+
+/// SPEC §17.2: a run of a schedule never joins a running turn; a worker that acks it `joined`
+/// all the same is not believed, and the run's turn opens.
+#[tokio::test]
+async fn a_scheduled_run_acked_as_joined_opens_its_turn() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = started(&hub, &mut w, "Reminders").await;
+    hub.app.clock.set(utc("2026-03-01T10:00:00Z"));
+    let args = json!({"session": "personal/reminders", "message": "Check the build",
+                      "at": "2026-03-01T10:30:00Z"});
+    schedule(&mut w, &ta, args, &Uuid::now_v7().to_string()).await;
+    assert_eq!(run_at(&hub, "2026-03-01T10:30:00Z").await, 1);
+    let input = w.expect("session.input").await;
+    let event_id = input["payload"]["event_id"].clone();
+    w.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": event_id, "joined": true}),
+    )
+    .await;
+    hub.wait_session(&a, "running", |v| v["state"] == "running")
+        .await;
+    hub.finish().await;
+}

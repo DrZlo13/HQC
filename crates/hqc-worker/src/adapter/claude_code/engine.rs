@@ -188,6 +188,9 @@ pub struct Core {
     /// `tasks` of the latest `system` `background_tasks_changed`.
     background: Vec<Value>,
     in_turn: bool,
+    /// A turn the CLI started by itself (`system/init` while no turn of ours runs, e.g. after
+    /// a background task's `task_notification`), until its `result`: Stop interrupts it too.
+    self_turn: bool,
     turn: u64,
     pending: HashMap<String, Pending>,
     rules: SessionRules,
@@ -250,6 +253,7 @@ impl Core {
             recount: false,
             background: Vec::new(),
             in_turn: false,
+            self_turn: false,
             turn: 0,
             pending: HashMap::new(),
             rules: SessionRules::default(),
@@ -289,7 +293,7 @@ impl Core {
 
     /// Whether turn number `turn` (from [`Core::interrupt`]) is still running.
     pub fn turn_running(&self, turn: u64) -> bool {
-        self.in_turn && self.turn == turn
+        (self.in_turn || self.self_turn) && self.turn == turn
     }
 
     pub fn session_rules(&self) -> usize {
@@ -364,9 +368,10 @@ impl Core {
         }))
     }
 
-    /// `control_request` `interrupt` for the running turn; `None` if no turn runs.
+    /// `control_request` `interrupt` for the running turn, also one the CLI started by
+    /// itself; `None` if no turn runs.
     pub fn interrupt(&mut self) -> Option<(Action, u64)> {
-        if !self.in_turn {
+        if !self.in_turn && !self.self_turn {
             return None;
         }
         let req = json!({
@@ -423,12 +428,17 @@ impl Core {
                 bail!("request {request_id} is a clarify request");
             }
         };
+        // A background subagent's request outlives the main turn's `result` (`on_result`): its
+        // "No" must not interrupt a turn that runs by then for something else.
+        let foreground = agent_id
+            .as_deref()
+            .is_none_or(|a| self.quiet_tasks.get(a) == Some(&false));
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
             // As the VS Code tab: "No" stops the turn, a text answer lets it go on.
             "deny" => match message {
                 Some(m) => deny_with(request_id, &format!("{DENY_WITH_TEXT}{m}"), false),
-                None => deny_with(request_id, DENY_MESSAGE, true),
+                None => deny_with(request_id, DENY_MESSAGE, foreground),
             },
             "always" if !self.restricted && !local_rules.is_empty() => {
                 allow(request_id, &input, Some(local_rules))
@@ -508,6 +518,7 @@ impl Core {
         self.pending.clear();
         self.awaiting_echo.clear();
         self.in_turn = false;
+        self.self_turn = false;
         let mut out: Vec<Action> = self.flush(false).into_iter().collect();
         // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
         // last word now: the process that ran it is gone.
@@ -552,6 +563,8 @@ impl Core {
             "control_response" => self.on_control_response(&v),
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
+                    // The CLI sends `init` before every turn; one without ours is its own.
+                    self.self_turn = !self.in_turn;
                     self.model = v["model"].as_str().map(str::to_owned);
                     let mut out = self.on_mode(&v["permissionMode"], false);
                     out.extend(self.on_init(&v));
@@ -966,6 +979,7 @@ impl Core {
     }
 
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
+        self.self_turn = false;
         let mut out: Vec<Action> = self.flush(true).into_iter().collect();
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open

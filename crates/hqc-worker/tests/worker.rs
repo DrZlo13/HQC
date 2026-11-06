@@ -2716,6 +2716,45 @@ async fn carried_input_becomes_the_turn_and_the_rest_goes_back() {
     w.stop().await;
 }
 
+// SPEC §17.2: what the runtime drops after the person's Stop (Claude Code cancels a carried
+// input on a second Stop) was cancelled by them: it fails, not retryable, instead of running
+// again; dropped without a Stop it goes back to the queue (above).
+#[tokio::test]
+async fn input_dropped_after_a_stop_fails() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    adapters.set_injectable(true);
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    turn_of(&mut c, &env, &adapters, sid, a).await;
+    let fb = c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("B into the turn", has_call(inject_call(sid, b)))
+        .await;
+    let fs = c.frame("session.stop", json!({"session_id": sid})).await;
+    assert_eq!(ack_of(&mut c, &fs).await["id"], fs.as_str());
+    adapters.end_turn_carrying(sid, vec![], vec![b]).await;
+    let err = loop {
+        let f = c.expect("error").await;
+        if f["id"] == fb.as_str() {
+            break f;
+        }
+    };
+    assert_eq!(err["payload"]["retryable"], false, "{err}");
+    let calls = adapters.calls();
+    assert!(!calls.contains(&input_call(sid, b)), "{calls:?}");
+    assert_eq!(
+        calls.iter().filter(|c| **c == inject_call(sid, b)).count(),
+        1,
+        "{calls:?}"
+    );
+    w.stop().await;
+}
+
 // SPEC §17.2: an input written into the turn the runtime runs next before the end of the turn
 // before it reached the session (Claude Code: the engine takes writes as soon as a `result`
 // carries an input, the session learns of that end from `TurnEnded` still on its way) is

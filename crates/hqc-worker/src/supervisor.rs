@@ -840,6 +840,7 @@ impl Supervisor {
             injected: Vec::new(),
             subagents: 0,
             background_tasks: 0,
+            stop_asked: false,
             delivered: VecDeque::new(),
             last_activity: Instant::now(),
         };
@@ -938,6 +939,9 @@ struct Session {
     subagents: u32,
     /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]); not sent.
     background_tasks: u32,
+    /// A `session.stop` came since the last end of a turn: an input the runtime drops then
+    /// was cancelled by the person, not lost ([`Session::end_turn`]).
+    stop_asked: bool,
     /// Inputs the runtime took, with whether it took them into a running turn (`joined`).
     delivered: VecDeque<(Uuid, bool)>,
     last_activity: Instant,
@@ -1033,7 +1037,10 @@ impl Session {
             }
             Cmd::Input { id, input } => self.on_input(id, input).await,
             Cmd::Stop { id } => {
-                if self.turn.is_some() {
+                // Also with no turn of ours: the runtime may run one it started by itself
+                // (Claude Code after a background task's end); the adapter knows.
+                if self.state == ProcessState::Running {
+                    self.stop_asked = true;
                     if let Err(e) = self.adapter.stop().await {
                         tracing::warn!(session_id = %self.id, "stop failed: {e:#}");
                         self.link.reply(
@@ -1290,7 +1297,7 @@ impl Session {
         let fits = |q: &Queued| {
             q.input.peer.is_none()
                 && q.input.schedule_id.is_none()
-                && !q.input.text.starts_with('/')
+                && !q.input.text.trim_start().starts_with('/')
                 && !capped(&q.input)
         };
         if !self.queue.front().is_some_and(fits)
@@ -1523,15 +1530,19 @@ impl Session {
     /// turn the runtime began by itself), stays the turn; else the first carried input written
     /// into the turn becomes it, the other carried ones stay written. The turn's own input
     /// neither accepted nor carried goes back to the head of the queue, as does a written one
-    /// in `dropped` (the runtime will not take it), in `seq` order. Any other written input
+    /// in `dropped` (the runtime will not take it), in `seq` order, unless a Stop came since
+    /// the last end (then it fails: the person cancelled it). Any other written input
     /// stays written: it went into the turn the runtime runs next before this end reached
     /// the session.
     fn end_turn(&mut self, carried: &[Uuid], dropped: &[Uuid]) {
+        let stopped = std::mem::take(&mut self.stop_asked);
         let mut back = Vec::new();
         let mut next = None;
         if let Some(t) = self.turn.take() {
             if !t.accepted && carried.contains(&t.input.event_id) {
                 next = Some(t);
+            } else if !t.accepted && stopped && dropped.contains(&t.input.event_id) {
+                self.cancelled_by_stop(&t.frame_id, t.input.event_id);
             } else if !t.accepted {
                 back.push(Queued {
                     frame_id: t.frame_id,
@@ -1542,7 +1553,9 @@ impl Session {
         }
         let mut still = Vec::new();
         for q in std::mem::take(&mut self.injected) {
-            if dropped.contains(&q.input.event_id) {
+            if dropped.contains(&q.input.event_id) && stopped {
+                self.cancelled_by_stop(&q.frame_id, q.input.event_id);
+            } else if dropped.contains(&q.input.event_id) {
                 back.push(q);
             } else if !carried.contains(&q.input.event_id) {
                 still.push(q);
@@ -1565,6 +1578,16 @@ impl Session {
         for q in back.into_iter().rev() {
             self.requeue(q);
         }
+    }
+
+    /// An input the runtime cancelled on the person's Stop (SPEC §17.2): it fails instead of
+    /// running again, since they wanted it gone.
+    fn cancelled_by_stop(&self, frame_id: &str, event_id: Uuid) {
+        tracing::info!(session_id = %self.id, %event_id, "input cancelled by stop");
+        self.link.reply(
+            frame_id,
+            wire_error(error_code::INTERNAL, "cancelled by Stop".to_string(), false),
+        );
     }
 
     /// Input `q` ended a turn without being taken: back to the head of the queue.

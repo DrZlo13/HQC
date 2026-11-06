@@ -255,6 +255,13 @@ pub async fn on_input_ack(
         // already running (`joined`). The ack bypasses the worker's outbox and may come
         // after the turn's own events (SPEC §5.2): a turn that already has its final answer
         // stays closed, and a joined input's ack after that answer must not open it again.
+        // Only a person's message joins (§17.2): a `joined` on another input (a
+        // `peer.message`, a run of a schedule) is the worker's mistake, and its turn opens.
+        let joinable = row.kind == "user.message" && row.payload.get("schedule_id").is_none();
+        if joined && !joinable {
+            tracing::warn!(%session_id, %event_id, kind = %row.kind, "a worker joined an input that cannot join a turn; its turn opens");
+        }
+        let joined = joined && joinable;
         if !joined && !db::turn_answered(&app.db, session_id, event_id).await? {
             db::set_turn(&app.db, session_id, true, false).await?;
         }

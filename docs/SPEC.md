@@ -3770,7 +3770,7 @@ without a hub each of these would have to be done peer-to-peer.
 ## 23. Change history
 
 ### 0.72 → 0.73 (a dot on the tab's icon)
-§6 client layout: the tab's icon (the mark) gets an amber dot while a session of any project
+§6 client layout: the tab's icon (the mark) gets a small amber dot in its lower right corner, with a clear gap cut around it, while a session of any project
 waits for the user and a light one while nothing waits but one has unread events, as the
 project tiles do.
 

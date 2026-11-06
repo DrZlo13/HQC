@@ -185,6 +185,7 @@ pub fn start(db: PgPool, config: Config, push: Arc<dyn push::PushSender>) -> App
         tokio::spawn(watchdog::turn_watchdog_loop(app.clone(), limit));
     }
     tokio::spawn(schedules::cron_loop(app.clone()));
+    tokio::spawn(moves::recover(app.clone()));
     if let Some(keep) = app.config.artifacts.retention {
         tokio::spawn(artifacts::cleanup_loop(app.clone(), keep));
     }

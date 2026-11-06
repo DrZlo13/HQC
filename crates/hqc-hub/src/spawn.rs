@@ -126,7 +126,7 @@ pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<A
         let ws = worktree(&app, &caller, &c, &chain, &a).await?;
         let ws = ready(&app, ws).await?;
         let s = create(&app, &caller, id, &chain, &a, Some(&ws)).await?;
-        started(&app, &caller, &c, &a, &s, &chain).await
+        started(&app, &caller, &c, &a, &s, &chain).await.map(Some)
     })))
 }
 

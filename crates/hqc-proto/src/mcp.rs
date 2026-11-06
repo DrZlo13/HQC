@@ -40,7 +40,9 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     reads this session in the hqc chat. Show the user files you make (images, charts, reports, \
     diffs) with hqc_attach, not just a path. Other sessions: hqc_list_sessions, hqc_send, \
     hqc_ask, hqc_spawn; history: hqc_search_history; later or recurring messages: hqc_schedule; \
-    moving this session to another folder or project, only when the user asks: hqc_move.";
+    moving this session to another folder or project, only when the user asks (a folder that is \
+    not one of the user's workspaces in the same environment waits for the user to allow it): \
+    hqc_move.";
 
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -281,9 +283,13 @@ pub const TOOLS: &[Tool] = &[
         description: "Move this session to another folder on the same machine. Call it only \
             when the user asks you to (\"move this into project foo\"). `path` becomes this \
             session's working folder, in `project` when given, otherwise in a new project named \
-            after the folder; a folder that is a workspace already comes with its project. A \
-            missing folder is created; it must lie inside the machine's allowed roots and \
-            neither inside nor around another workspace. Returns `{address, project, path}`: \
+            after the folder; a folder that is a workspace already comes with its project. Into \
+            one of the user's workspaces in the environment of your folder now the session moves \
+            at once; any other folder (a new one, one that is no workspace yet, one in another \
+            environment) waits until the user allows it in the chat, and the call fails if the \
+            user denies it. A missing folder is created once allowed; it must lie inside the \
+            machine's allowed roots and neither inside nor around another workspace. Returns \
+            `{address, project, path}`: \
             your new address, the project's slug and the folder's canonical path. After the \
             call, end your turn: from the next turn you work in `path`, the conversation goes \
             on, and your address is now `address`.",
@@ -293,7 +299,7 @@ pub const TOOLS: &[Tool] = &[
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The folder's absolute path on this machine; created when missing."
+                        "description": "The folder's absolute path on this machine; created when missing, once the user allows it."
                     },
                     "project": {
                         "type": "string",

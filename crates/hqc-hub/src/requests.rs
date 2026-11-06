@@ -12,6 +12,10 @@
 //! A worker's own request (`worker.approval.request`, kind `worker_approval`, SPEC §10.2)
 //! lives in its service session: `approval.request` with the options `once` / `deny`, the
 //! answer or the hub's cancellation goes back as `worker.approval.response`.
+//!
+//! An agent's `hqc_move` that needs the owner (kind `move`, SPEC §7, §10.1) lives in the
+//! calling session: `approval.request` with the options `once` / `deny`; the session owner
+//! answers it, the call gets the outcome as its `mcp.result` ([`crate::moves`]).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -129,9 +133,36 @@ pub async fn answer(
                 event["message"] = json!(m);
             }
             (
-                json!({"type": "approval.response", "payload": frame}),
+                Some(json!({"type": "approval.response", "payload": frame})),
                 "approval.response",
                 event,
+            )
+        }
+        "move" => {
+            if body.message.is_some() {
+                return Err(ApiError::BadRequest(
+                    "a move request takes no message".into(),
+                ));
+            }
+            // Only the session owner, whose session moves (SPEC §7, §10.1).
+            if s.owner_id != user.id {
+                return Err(ApiError::Forbidden(
+                    "only the session owner answers a move of it".into(),
+                ));
+            }
+            let option_id = body
+                .option_id
+                .ok_or_else(|| ApiError::BadRequest("option_id is required".into()))?;
+            if !options(&p.payload).iter().any(|o| o.id == option_id) {
+                return Err(ApiError::BadRequest(format!(
+                    "unknown option `{option_id}`"
+                )));
+            }
+            // Allowed, the result is known once the session moved: none here.
+            (
+                (option_id != worker_approval::ONCE).then(|| crate::moves::denied(request_id)),
+                "approval.response",
+                json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
             )
         }
         "worker_approval" => {
@@ -159,7 +190,7 @@ pub async fn answer(
                 )));
             }
             (
-                worker_response(request_id, &option_id),
+                Some(worker_response(request_id, &option_id)),
                 "approval.response",
                 json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
             )
@@ -180,15 +211,15 @@ pub async fn answer(
             let mut answers = serde_json::to_value(answers).map_err(anyhow::Error::from)?;
             hqc_proto::replace_nul_json(&mut answers);
             (
-                json!({"type": "clarify.response",
-                       "payload": {"session_id": s.id, "request_id": request_id, "answers": answers}}),
+                Some(json!({"type": "clarify.response",
+                       "payload": {"session_id": s.id, "request_id": request_id, "answers": answers}})),
                 "clarify.response",
                 json!({"request_id": request_id, "answers": answers}),
             )
         }
         _ => return Err(ApiError::NotFound),
     };
-    if !db::close_request(&app.db, p.id, Some(&frame)).await? {
+    if !db::close_request(&app.db, p.id, frame.as_ref()).await? {
         return Err(ApiError::Conflict(
             "request_closed",
             "the request is already closed".into(),
@@ -204,14 +235,20 @@ pub async fn answer(
         None,
     )
     .await?;
-    deliver_result(
-        app,
-        &PendingRow {
-            result: Some(frame),
-            ..p
-        },
-    )
-    .await;
+    match frame {
+        Some(frame) => {
+            deliver_result(
+                app,
+                &PendingRow {
+                    result: Some(frame),
+                    ..p
+                },
+            )
+            .await
+        }
+        // An allowed move: the hub moves the session now and answers the call then.
+        None => crate::moves::allowed(app, p),
+    }
     Ok(EventRowOut {
         event_id: row.event_id,
         seq: row.seq,
@@ -249,7 +286,7 @@ async fn cancel_inner(
         return Ok(());
     };
     let ev_type = match p.kind.as_str() {
-        "approval" | "worker_approval" => "approval.cancel",
+        "approval" | "worker_approval" | "move" => "approval.cancel",
         "clarify" => "clarify.cancel",
         _ => return Ok(()),
     };
@@ -275,6 +312,7 @@ async fn cancel_inner(
                    "payload": {"session_id": s.id, "request_id": p.request_id, "option_id": option_id}})
         }),
         "worker_approval" => Some(worker_response(&p.request_id, worker_approval::DENY)),
+        "move" => Some(crate::moves::cancelled(&p.request_id, reason)),
         _ => Some(json!({"type": "clarify.response",
                          "payload": {"session_id": s.id, "request_id": p.request_id, "answers": {}}})),
     };
@@ -318,9 +356,13 @@ pub async fn cancel_open_of_session(
     Ok(())
 }
 
-/// `auto_approve`: answer with the first `canonical: once` option, `by: auto` (SPEC §10.1).
+/// `auto_approve`: answer with the first `canonical: once` option, `by: auto` (SPEC §10.1);
+/// only the runtime's own approvals, never a move of the session (SPEC §7).
 pub async fn auto_approve(app: &AppState, s: &SessionRow, request_id: &str) -> anyhow::Result<()> {
-    let Some(p) = db::find_open_request(&app.db, s.id, request_id).await? else {
+    let Some(p) = db::find_open_request(&app.db, s.id, request_id)
+        .await?
+        .filter(|p| p.kind == "approval")
+    else {
         return Ok(());
     };
     let Some(opt) = options(&p.payload)
@@ -622,9 +664,9 @@ struct OpenRow {
     event_id: Option<Uuid>,
 }
 
-/// Every open `approval`, `clarify` and `worker_approval` in the sessions of `owner`, oldest
-/// first, each with its event and the sessions waiting on it (SPEC §6 `GET /api/requests`).
-/// Only the owner's sessions: another user's requests are never listed.
+/// Every open `approval`, `clarify`, `worker_approval` and `move` in the sessions of `owner`,
+/// oldest first, each with its event and the sessions waiting on it (SPEC §6 `GET
+/// /api/requests`). Only the owner's sessions: another user's requests are never listed.
 pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequest>> {
     let rows: Vec<OpenRow> = sqlx::query_as(
         "SELECT p.session_id, p.request_id, p.kind, pr.slug || '/' || s.slug AS address,
@@ -638,7 +680,7 @@ pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequ
          JOIN sessions s ON s.id = p.session_id
          JOIN projects pr ON pr.id = s.project_id
          LEFT JOIN workers w ON w.id = s.worker_id
-         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval')
+         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move')
            AND s.owner_id = $1 AND NOT s.archived
          ORDER BY p.created_at, p.id",
     )

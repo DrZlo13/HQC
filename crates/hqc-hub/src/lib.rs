@@ -27,6 +27,7 @@ pub mod events;
 pub mod icons;
 pub mod mcp;
 pub mod mirror;
+pub mod moves;
 pub mod peers;
 pub mod push;
 pub mod requests;
@@ -128,6 +129,7 @@ pub fn router(app: AppState) -> Router {
         .route("/api/workers/{id}/dirs", get(api::worker_dirs))
         .route("/api/workers/{id}/candidates", get(api::worker_candidates))
         .route("/api/sessions/{id}/takeover", post(api::takeover))
+        .route("/api/sessions/{id}/move", post(api::move_session))
         .route("/api/push/vapid", get(api::vapid))
         .route(
             "/api/push/subscribe",

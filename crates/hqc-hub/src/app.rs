@@ -57,7 +57,23 @@ pub struct Inner {
     /// `(what, owner)` -> a lock held while a cap is counted and the row it counts is
     /// written ([`AppState::owner_lock`]).
     owner_locks: Mutex<HashMap<(&'static str, Uuid), OwnerLock>>,
+    /// The text of the answer being written ([`AppState::live_text`]).
+    live: Mutex<LiveText>,
 }
+
+/// A session's `agent.delta` text since its last `agent.message` or `status` other than
+/// `running`, so a client that subscribes mid-answer sees all of it (SPEC §6). Deltas are
+/// numbered across sessions: a subscription skips the ones its copy of the text holds.
+#[derive(Default)]
+struct LiveText {
+    next: u64,
+    /// Session -> the first delta of the text (its envelope for the copy) and the text;
+    /// `None` once the text outgrew [`MAX_LIVE_TEXT`].
+    texts: HashMap<Uuid, Option<(Value, String)>>,
+}
+
+/// Over this, a subscription mid-answer gets only the deltas after it, as before.
+const MAX_LIVE_TEXT: usize = 512 * 1024;
 
 impl Deref for AppState {
     type Target = Inner;
@@ -69,10 +85,10 @@ impl Deref for AppState {
 /// What client connections need to hear about.
 #[derive(Debug)]
 pub enum Notice {
-    /// A stored event (with `seq`) or an `agent.delta` (without), as clients get it.
+    /// A stored event, as clients get it.
     Event {
         session_id: Uuid,
-        seq: Option<i64>,
+        seq: i64,
         event: Value,
     },
     /// A stored event sent again with a field the hub adds for clients, now known
@@ -80,6 +96,12 @@ pub enum Notice {
     Resent {
         session_id: Uuid,
         seq: i64,
+        event: Value,
+    },
+    /// An `agent.delta`, numbered for [`AppState::live_text`].
+    Delta {
+        session_id: Uuid,
+        at: u64,
         event: Value,
     },
     /// `delivery` of an input changed (SPEC §3 Event).
@@ -117,6 +139,7 @@ impl AppState {
             budget: Budget::default(),
             searches: Arc::new(Semaphore::new(config.limits.search_concurrency)),
             owner_locks: Mutex::new(HashMap::new()),
+            live: Mutex::default(),
             config,
         }))
     }
@@ -142,6 +165,52 @@ impl AppState {
     pub fn notify(&self, n: Notice) {
         // No receivers is fine: nobody is watching.
         let _ = self.bus.send(Arc::new(n));
+    }
+
+    /// Fan an `agent.delta` out to clients and add it to the session's text. Under the lock
+    /// of the text, so the bus carries deltas in the order of their numbers.
+    pub fn delta(&self, session_id: Uuid, event: Value, text: &str) {
+        let mut live = self.live.lock().unwrap();
+        let at = live.next;
+        live.next += 1;
+        let slot = live
+            .texts
+            .entry(session_id)
+            .or_insert_with(|| Some((event.clone(), String::new())));
+        if let Some((_, t)) = slot {
+            if t.len() + text.len() > MAX_LIVE_TEXT {
+                *slot = None;
+            } else {
+                t.push_str(text);
+            }
+        }
+        self.notify(Notice::Delta {
+            session_id,
+            at,
+            event,
+        });
+    }
+
+    /// The session's answer was stored or its turn ended: the text is done. Called before
+    /// the event is stored, so that a subscription that missed the event in its backfill
+    /// cannot get a copy of the text after it.
+    pub fn end_live_text(&self, session_id: Uuid) {
+        self.live.lock().unwrap().texts.remove(&session_id);
+    }
+
+    /// The session's text as one `agent.delta` (`None` if there is none), and the number of
+    /// the first delta not in it.
+    pub fn live_text(&self, session_id: Uuid) -> (Option<Value>, u64) {
+        let live = self.live.lock().unwrap();
+        let copy = match live.texts.get(&session_id) {
+            Some(Some((envelope, text))) if !text.is_empty() => {
+                let mut ev = envelope.clone();
+                ev["payload"] = serde_json::json!({ "text": text });
+                Some(ev)
+            }
+            _ => None,
+        };
+        (copy, live.next)
     }
 
     /// The worker sent something for the session (any event, `agent.delta` included).

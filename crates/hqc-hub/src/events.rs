@@ -79,6 +79,15 @@ fn ends_turn(kind: &EventKind) -> bool {
     )
 }
 
+/// The event ends the text of `agent.delta` clients show (SPEC §6), as the client does.
+fn ends_live_text(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::AgentMessage { .. } => true,
+        EventKind::Status { state, .. } => *state != SessionState::Running,
+        _ => false,
+    }
+}
+
 /// An `event` frame from a worker: `ack {event_id, seq}`; a duplicate gets the stored
 /// `seq`; an event for a session the hub does not know (or that is not this worker's)
 /// gets `ack` without `seq` and is dropped (SPEC §5.2). So is an event for an archived
@@ -123,14 +132,13 @@ pub async fn ingest_worker_event(
         return Ok(dropped);
     }
     app.worker_activity(s.id);
-    if matches!(ev.kind, EventKind::AgentDelta { .. }) {
+    if let EventKind::AgentDelta { text } = &ev.kind {
         // Transport only: to clients without seq, never stored (SPEC §4).
-        app.notify(Notice::Event {
-            session_id: s.id,
-            seq: None,
-            event: raw,
-        });
+        app.delta(s.id, raw, text);
         return Ok(dropped);
+    }
+    if ends_live_text(&ev.kind) {
+        app.end_live_text(s.id);
     }
     let str_field = |k: &str| raw.get(k).and_then(Value::as_str).map(str::to_string);
     let new = NewEvent {
@@ -267,6 +275,9 @@ async fn store_hub_event_as(
     hqc_proto::replace_nul_json(&mut payload);
     let client_op_id = client_op_id.map(|c| hqc_proto::replace_nul(&c).into_owned());
     let typed: EventKind = serde_json::from_value(json!({"type": kind, "payload": payload}))?;
+    if ends_live_text(&typed) {
+        app.end_live_text(s.id);
+    }
     let new = NewEvent {
         event_id,
         session_id: s.id,
@@ -380,7 +391,7 @@ async fn after_store(
     // store further events.
     app.notify(Notice::Event {
         session_id: s.id,
-        seq: Some(row.seq),
+        seq: row.seq,
         event: row.to_json(),
     });
     match kind {

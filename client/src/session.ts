@@ -1,11 +1,14 @@
 // One open chat: history over REST, live tail over /api/ws, actions over REST (SPEC §6).
 
-import type { Api } from './api';
+import type { Api, EventPage } from './api';
 import type { ClarifyAnswer } from './proto';
 import { Timeline, type PendingAttachment } from './timeline';
 import type { HubSocket } from './ws';
 
-const PAGE = 200;
+/** The newest events, shown before the rest of the history loads. */
+const TAIL = 100;
+/** Older history, loaded page by page behind the tail. */
+const PAGE = 1000;
 
 /** A file picked in the composer, with its preview. */
 export interface OutgoingFile {
@@ -35,23 +38,20 @@ export class ChatSession {
     readonly id: string,
   ) {}
 
-  /** Loads history page by page, then subscribes from the last seen `seq`. */
+  /** Loads the newest page of history and subscribes from it; resolves then, so a long chat
+   *  shows at once. The older pages load after that, newest first (`Timeline.olderFrom`). */
   async open(): Promise<void> {
+    const t = this.timeline;
     try {
-      for (;;) {
-        const page = await this.api.events(this.id, this.timeline.lastSeq, PAGE);
-        if (this.closed) return;
-        this.timeline.applyAll(page.events);
-        for (const inv of page.invalid) this.timeline.addInvalid(inv.raw, inv.error);
-        this.timeline.lastSeq = Math.max(this.timeline.lastSeq, page.maxSeq);
-        if (page.count < PAGE) break;
-      }
+      const page = await this.api.eventsBefore(this.id, undefined, TAIL);
+      if (this.closed) return;
+      this.applyPage(page);
+      t.olderFrom = page.count < TAIL ? 0 : (page.minSeq ?? 0);
     } catch (e) {
       // History over REST is an optimisation: subscribe replays everything after lastSeq.
       console.warn('history load failed, relying on subscribe', e);
     }
     if (this.closed) return;
-    const t = this.timeline;
     this.unsubscribe = this.socket.subscribe(this.id, {
       afterSeq: () => t.resumeSeq(),
       onEvent: (ev) => t.apply(ev),
@@ -59,6 +59,29 @@ export class ChatSession {
       onInvalid: (raw, err) => t.addInvalid(raw, err),
       onReset: () => t.reset(),
     });
+    void this.loadOlder();
+  }
+
+  private async loadOlder(): Promise<void> {
+    const t = this.timeline;
+    try {
+      while (t.olderFrom > 1 && !this.closed) {
+        const page = await this.api.eventsBefore(this.id, t.olderFrom, PAGE);
+        if (this.closed) return;
+        t.olderFrom = page.count < PAGE ? 0 : (page.minSeq ?? 0);
+        this.applyPage(page);
+      }
+      t.olderFrom = 0;
+    } catch (e) {
+      console.warn('older history load failed', e);
+    }
+  }
+
+  private applyPage(page: EventPage): void {
+    const t = this.timeline;
+    t.applyAll(page.events);
+    for (const inv of page.invalid) t.addInvalid(inv.raw, inv.error);
+    t.lastSeq = Math.max(t.lastSeq, page.maxSeq);
   }
 
   close(): void {

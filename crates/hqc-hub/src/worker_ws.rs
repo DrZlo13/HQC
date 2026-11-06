@@ -316,6 +316,8 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         let _ = db::worker_seen(&app.db, worker_id).await;
         if let Ok(ids) = db::sessions_of_worker(&app.db, worker_id).await {
             for id in ids {
+                // Its deltas stopped with it.
+                app.end_live_text(id);
                 app.session_changed(id);
             }
         }

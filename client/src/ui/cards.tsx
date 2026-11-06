@@ -83,7 +83,10 @@ export interface ChatActions {
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
-  const blocks = buildFeed(items, actions.timeline);
+  return <FeedBlocks blocks={buildFeed(items, actions.timeline)} actions={actions} />;
+}
+
+export function FeedBlocks({ blocks, actions }: { blocks: Block[]; actions: ChatActions }) {
   // `data-seq`: the first event of the block, for the jump to a search hit (Chat).
   return (
     <>
@@ -96,7 +99,7 @@ export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActi
   );
 }
 
-function blockSeq(b: Block): number | undefined {
+export function blockSeq(b: Block): number | undefined {
   switch (b.kind) {
     case 'agent':
     case 'approval':

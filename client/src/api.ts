@@ -80,6 +80,8 @@ export interface EventPage {
   invalid: { raw: unknown; error: string }[];
   /** Highest `seq` in the page, valid or not. */
   maxSeq: number;
+  /** Lowest `seq` in the page, valid or not. */
+  minSeq: number | undefined;
   count: number;
 }
 
@@ -334,13 +336,24 @@ export class Api {
   }
 
   async events(id: string, afterSeq: number, limit = 200): Promise<EventPage> {
-    const q = `after_seq=${afterSeq}&limit=${limit}`;
+    return this.eventPage(id, `after_seq=${afterSeq}&limit=${limit}`, afterSeq);
+  }
+
+  /** The last `limit` events before `beforeSeq` (all of them: the newest), oldest first. */
+  async eventsBefore(id: string, beforeSeq = Number.MAX_SAFE_INTEGER, limit = 200): Promise<EventPage> {
+    return this.eventPage(id, `before_seq=${beforeSeq}&limit=${limit}`, 0);
+  }
+
+  private async eventPage(id: string, q: string, from: number): Promise<EventPage> {
     const data = await this.req('GET', `/api/sessions/${enc(id)}/events?${q}`);
-    const page: EventPage = { events: [], invalid: [], maxSeq: afterSeq, count: 0 };
+    const page: EventPage = { events: [], invalid: [], maxSeq: from, minSeq: undefined, count: 0 };
     for (const raw of parseEventPage(data).events) {
       page.count++;
       const seq = (raw as { seq?: unknown })?.seq;
-      if (typeof seq === 'number') page.maxSeq = Math.max(page.maxSeq, seq);
+      if (typeof seq === 'number') {
+        page.maxSeq = Math.max(page.maxSeq, seq);
+        page.minSeq = Math.min(page.minSeq ?? seq, seq);
+      }
       try {
         page.events.push(parseEvent(raw));
       } catch (e) {

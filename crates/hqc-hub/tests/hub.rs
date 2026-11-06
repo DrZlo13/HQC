@@ -995,6 +995,45 @@ async fn after_seq_and_delta() {
     hub.finish().await;
 }
 
+/// A client that subscribes mid-answer gets the text written so far as one `agent.delta`,
+/// then only the deltas after it; the answer stored ends the text (SPEC §6).
+#[tokio::test]
+async fn subscribe_mid_answer_gets_the_text_so_far() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("stream").await;
+    ack_start(&mut w, &sid).await;
+    for t in ["Hello ", "world"] {
+        w.event(agent_event(&sid, "agent.delta", json!({"text": t})))
+            .await;
+    }
+
+    let mut c = FakeClient::connect(&hub).await;
+    let backlog = c.subscribe(&sid, 0).await;
+    let copy = backlog.last().unwrap();
+    assert_eq!(copy["type"], "agent.delta");
+    assert!(copy.get("seq").is_none());
+    assert_eq!(copy["payload"]["text"], "Hello world");
+
+    w.event(agent_event(&sid, "agent.delta", json!({"text": ", how"})))
+        .await;
+    let live = c.until("event").await["event"].clone();
+    assert_eq!(live["payload"]["text"], ", how");
+
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Hello world, how", "final": false}),
+    ))
+    .await;
+    assert_eq!(c.until("event").await["event"]["type"], "agent.message");
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    assert!(backlog.iter().all(|e| e["type"] != "agent.delta"));
+    hub.finish().await;
+}
+
 /// Web Push on approval.request when nobody watches; no push while a client is subscribed.
 #[tokio::test]
 async fn push_only_without_live_subscription() {

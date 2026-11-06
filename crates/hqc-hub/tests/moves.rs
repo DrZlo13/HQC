@@ -1001,23 +1001,26 @@ async fn the_owner_denies_a_move() {
 }
 
 /// An existing folder that is no workspace yet asks too; allowed, a move the core refuses
-/// (inside the session's own workspace) gives the call that error.
+/// (a workspace made inside the folder meanwhile) gives the call that error.
 #[tokio::test]
 async fn an_allowed_move_can_fail() {
     let hub = TestHub::start().await;
     let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
     let before = projects(&hub).await.len();
     let rid = Uuid::now_v7().to_string();
-    call_deferred(&mut w, &token, &rid, &turn, json!({"path": "/w/hqc/sub"})).await;
+    call_deferred(&mut w, &token, &rid, &turn, json!({"path": "/w/plain"})).await;
     let events = hub.events(&sid).await;
     let d = move_requests(&events)[0]["payload"]["description"]
         .as_str()
         .unwrap()
         .to_string();
     assert!(
-        d.contains("not one of your workspaces") && d.contains("/w/hqc/sub"),
+        d.contains("not one of your workspaces") && d.contains("/w/plain"),
         "{d}"
     );
+    let pid = hub.personal_project().await;
+    let (s, v) = hub.add_workspace(&mut w, &pid, "/w/plain/inner").await;
+    assert_eq!(s, 201, "{v}");
 
     let c = answer_move(&hub, &mut w, &sid, &rid, "once").await;
     let e = &c.result["error"];
@@ -1152,6 +1155,166 @@ async fn stop_cancels_a_move_request() {
     hub.finish().await;
 }
 
+/// `mcp.cancel` of a call that waits for the owner (SPEC §5.2): its request closes with
+/// `approval.cancel {stopped}`, nothing goes to the worker, nothing moves, and an answer
+/// after it is `409 request_closed`.
+#[tokio::test]
+async fn mcp_cancel_closes_a_move_request() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let before = projects(&hub).await.len();
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-gone"}),
+    )
+    .await;
+
+    let id = w
+        .send("mcp.cancel", json!({"request_id": rid, "reason": "eof"}))
+        .await;
+    assert_eq!(w.expect("ack").await["id"], id.as_str());
+    assert_eq!(open_moves(&hub, &sid).await, 0);
+    let events = hub.events(&sid).await;
+    let cancel: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "approval.cancel")
+        .collect();
+    assert_eq!(cancel.len(), 1, "{events:?}");
+    assert_eq!(
+        cancel[0]["payload"],
+        json!({"request_id": rid, "reason": "stopped"})
+    );
+
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/{rid}"),
+            json!({"option_id": "once"}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some("request_closed")),
+        "{v}"
+    );
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert_eq!(projects(&hub).await.len(), before);
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert!(moved_events(&hub.events(&sid).await).is_empty());
+    hub.finish().await;
+}
+
+/// What the worker gets until an `mcp.result`: the first `fair` `fs.stat`s answered as
+/// [`FakeWorker::fs_reply`] does, the rest as if their folder resolved to `/w/elsewhere` now
+/// (a symlink swapped in since the move was decided on).
+async fn swapped(w: &mut FakeWorker, mut fair: usize) -> Value {
+    loop {
+        let f = w.recv().await;
+        match f["type"].as_str().unwrap() {
+            "mcp.result" => return f,
+            "fs.stat" if fair > 0 => {
+                fair -= 1;
+                let (ty, payload) = w.fs_reply(&f);
+                w.reply(&f["id"], ty, payload).await;
+            }
+            "fs.stat" => {
+                let rid = f["payload"]["request_id"].clone();
+                let st = json!({"request_id": rid, "exists": true, "is_dir": true,
+                                "canonical": "/w/elsewhere", "inside_allowed_roots": true});
+                w.reply(&f["id"], "result", st).await;
+            }
+            "ack" => {}
+            _ => panic!("unexpected frame {f}"),
+        }
+    }
+}
+
+/// The move lands in the folder it was decided on: when the move's own `fs.stat` reports
+/// another canonical path than the one checked before, or shown to the owner, the call gets an
+/// error and nothing is recorded, at once and after the owner's answer.
+#[tokio::test]
+async fn a_folder_swapped_meanwhile_is_refused() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let (s, other) = hub.post("/api/projects", json!({"name": "Other"})).await;
+    assert_eq!(s, 201, "{other}");
+    let (s, v) = hub
+        .add_workspace(&mut w, other["id"].as_str().unwrap(), "/w/other")
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let before = projects(&hub).await.len();
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+
+    // At once: the workspace `/w/other` when the tool looks, another folder when it moves.
+    let rid = Uuid::now_v7().to_string();
+    let id = w
+        .send(
+            "mcp.call",
+            json!({"request_id": rid, "session_token": token, "tool": "hqc_move",
+                   "args": {"path": "/w/other"}, "turn_input": turn}),
+        )
+        .await;
+    let f = swapped(&mut w, 1).await;
+    assert_eq!(f["id"], id.as_str(), "{f}");
+    let e = &f["payload"]["error"];
+    assert_eq!(e["code"], "invalid_args", "{f}");
+    assert!(
+        e["message"].as_str().unwrap().contains("/w/elsewhere"),
+        "{f}"
+    );
+
+    // After the owner's answer: the folder on the card resolves elsewhere when it is made.
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-swap"}),
+    )
+    .await;
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/{rid}"),
+            json!({"option_id": "once"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let f = swapped(&mut w, 0).await;
+    w.reply(&f["id"], "ack", json!({})).await;
+    assert_eq!(f["payload"]["request_id"], rid.as_str(), "{f}");
+    let e = &f["payload"]["error"];
+    assert_eq!(e["code"], "invalid_args", "{f}");
+    assert!(
+        e["message"].as_str().unwrap().contains("/w/elsewhere"),
+        "{f}"
+    );
+
+    assert_eq!(projects(&hub).await.len(), before);
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    let (_, list) = hub.get("/api/workspaces").await;
+    assert!(
+        list["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|ws| ws["path"] != "/w/elsewhere"),
+        "{list}"
+    );
+    let events = hub.events(&sid).await;
+    assert!(moved_events(&events).is_empty());
+    let inputs = events
+        .iter()
+        .filter(|e| e["type"] == "user.message")
+        .count();
+    assert_eq!(inputs, 1, "only the person's: {events:?}");
+    hub.finish().await;
+}
+
 /// The error code and message of an `hqc_move` that is refused before anything starts.
 async fn refusal(w: &mut FakeWorker, token: &str, turn: &Value, args: Value) -> (String, String) {
     let c = call_move(w, token, &Uuid::now_v7().to_string(), turn, args).await;
@@ -1190,6 +1353,19 @@ async fn the_tool_refuses() {
         &token,
         &turn,
         json!({"path": "/w/two", "project": "nope"}),
+    )
+    .await;
+    assert_eq!(code, "not_found");
+    // Into a folder that would ask the owner, what refuses the move anyway refuses it before
+    // any card: inside the session's own workspace, an unknown project (a subagent below).
+    let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/hqc/sub"})).await;
+    assert_eq!(code, "invalid_args");
+    assert!(m.contains("workspace_conflict"), "{m}");
+    let (code, _) = refusal(
+        &mut w,
+        &token,
+        &turn,
+        json!({"path": "/w/missing-p", "project": "nope"}),
     )
     .await;
     assert_eq!(code, "not_found");
@@ -1251,6 +1427,9 @@ async fn the_tool_refuses() {
         .await
         .unwrap();
     let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/two"})).await;
+    assert_eq!(code, "unavailable");
+    assert!(m.contains("subagent"), "{m}");
+    let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/missing-sub"})).await;
     assert_eq!(code, "unavailable");
     assert!(m.contains("subagent"), "{m}");
     sqlx::query("UPDATE sessions SET subagents = 0 WHERE id = $1")

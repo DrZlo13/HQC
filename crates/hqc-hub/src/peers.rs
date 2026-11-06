@@ -36,7 +36,7 @@
 
 use chrono::{DateTime, Utc};
 use hqc_proto::{
-    event::{ArtifactKind, Chain},
+    event::{ArtifactKind, CancelReason, Chain},
     frame::{McpCall, McpCancel, McpError, McpResult, PeerPrefix, PermissionMode},
     mcp::{cancel_reason, error_code, ReplyArtifact, MAX_FILES},
 };
@@ -1194,18 +1194,24 @@ pub async fn expire(app: &AppState) -> anyhow::Result<()> {
 }
 
 /// `mcp.cancel` from `worker_id`: an open ask of that call is closed and the asking
-/// session gets `system ask_cancelled`; the target's turn goes on (SPEC §5.2). A fast call
-/// has nothing open here.
+/// session gets `system ask_cancelled`; the target's turn goes on (SPEC §5.2). An open request
+/// of an `hqc_move` that waits for the owner gets `approval.cancel {stopped}`, and nothing
+/// moves (SPEC §7, §10.1). A fast call has nothing open here.
 pub async fn cancelled(app: &AppState, worker_id: Uuid, c: &McpCancel) -> anyhow::Result<()> {
     let open: Option<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
-         WHERE kind = 'ask' AND request_id = $1 AND worker_id = $2 AND closed_at IS NULL"
+         WHERE kind IN ('ask', 'move') AND request_id = $1 AND worker_id = $2
+           AND closed_at IS NULL"
     ))
     .bind(&c.request_id)
     .bind(worker_id)
     .fetch_optional(&app.db)
     .await?;
     let Some(p) = open else { return Ok(()) };
+    if p.kind == crate::moves::KIND {
+        // Without a frame, as the ask: nobody waits for the call's result.
+        return requests::cancel_without_frame(app, &p, CancelReason::Stopped).await;
+    }
     let Some(joined) = close_ask(app, p.id, None).await? else {
         return Ok(());
     };

@@ -12,7 +12,9 @@
 //!   codes of `POST /api/workspaces`; the canonical path it reports is the target. With
 //!   `create` the overlap and readiness checks below run on the requested path first, so a
 //!   refused move makes no folder (unless the path reaches a workspace through a symlink,
-//!   which only the canonical path shows).
+//!   which only the canonical path shows). The tool's move passes the canonical path it was
+//!   decided on; a canonical path other than that one refuses the move before anything is
+//!   recorded (the folder may have been swapped for a symlink since).
 //! - A workspace of the owner on that worker at exactly that path is taken with its project
 //!   (`project`, when given, must be that one), unless it is not `ready` (`409
 //!   workspace_not_ready`, as for a new session); a path that equals another owner's
@@ -36,7 +38,8 @@
 //!
 //! The tool moves at once only into a workspace of the owner in the environment of the
 //! session's folder now; anything else waits for the owner's answer, a PendingRequest of kind
-//! [`KIND`] in the calling session (SPEC §3, §7, §10.1).
+//! [`KIND`] in the calling session (SPEC §3, §7, §10.1), unless the move would be refused
+//! anyway ([`refused`]).
 
 use std::path::Path;
 
@@ -82,11 +85,12 @@ struct MoveArgs {
 /// run by hqc (`locked_by: hqc`), in a turn without an `ask` cap (SPEC §7.1), looks at the
 /// folder with `fs.stat` on the connection the call came by ([`Answer::Wait`]), creating
 /// nothing ([`target`]). Into a workspace of the owner in the environment of its folder now
-/// it moves at once by [`move_session`]; anything else waits for the owner's answer
-/// ([`ask_owner`]), and the call is answered later, as `hqc_ask` is. After the move an input
-/// of the owner, "you moved to …", goes into its queue as a run of `hqc_schedule` does (SPEC
-/// §16): a `user.message` with the call's chain moved on, so the turn it starts runs in the
-/// session's own mode and, after the move, in the new folder.
+/// it moves at once by [`move_session`]; anything else that would not be refused anyway
+/// ([`refused`]) waits for the owner's answer ([`ask_owner`]), and the call is answered later,
+/// as `hqc_ask` is. Either way the move lands only in the canonical path it was decided on.
+/// After the move an input of the owner, "you moved to …", goes into its queue as a run of
+/// `hqc_schedule` does (SPEC §16): a `user.message` with the call's chain moved on, so the
+/// turn it starts runs in the session's own mode and, after the move, in the new folder.
 /// Once per `request_id`: a repeat finds the session moved and the input stored, or the
 /// request it opened, and answers the same.
 pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
@@ -129,13 +133,17 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
     Ok(Answer::Wait(Box::pin(async move {
         match target(&app, &caller, &a.path).await? {
             Target::Workspace(path) => {
-                let m = move_session(&app, &caller, &path, a.project.as_deref(), false)
+                let project = a.project.as_deref();
+                let m = move_session(&app, &caller, &path, project, false, Some(path.as_str()))
                     .await
                     .map_err(tool_error)?;
                 woken(&app, &m, wake, chain).await.map(Some)
             }
             Target::Ask { path, why } => {
                 let project = a.project.as_deref();
+                refused(&app, &caller, &path, project)
+                    .await
+                    .map_err(tool_error)?;
                 ask_owner(&app, &caller, &request_id, &path, project, &why, chain).await?;
                 Ok(None)
             }
@@ -169,13 +177,14 @@ async fn woken(app: &AppState, m: &Moved, wake: Uuid, chain: Value) -> Result<Va
     Ok(json!({"address": address, "project": m.project.slug, "path": m.workspace.path}))
 }
 
-/// Where `hqc_move` goes.
+/// Where `hqc_move` goes: the path is the one the move is decided on, and the one it must land
+/// in ([`move_session`]'s `decided`).
 enum Target {
     /// Exactly a workspace of the owner on the session's worker, in the environment of the
     /// session's folder now: the session moves at once.
     Workspace(String),
-    /// Anything else waits for the owner: the canonical path (as given, when missing) and what
-    /// the owner is asked about.
+    /// Anything else waits for the owner: the canonical path (as given, when missing), shown
+    /// to the owner, and what the owner is asked about.
     Ask { path: String, why: String },
 }
 
@@ -286,10 +295,10 @@ async fn ask_owner(
 }
 
 /// The owner allowed the move of request `p` (closed already, without a result): the session
-/// moves as the call asked, a missing folder made, and then as [`tool`] goes on after a move;
-/// the call gets that result, or the move's error, as an `mcp.result` of its own, kept in the
-/// request until the worker acknowledges it. Off the answer's HTTP request, so that a client
-/// that goes away does not cut the move short.
+/// moves as the call asked, into the path the owner was shown, a missing folder made, and then
+/// as [`tool`] goes on after a move; the call gets that result, or the move's error, as an
+/// `mcp.result` of its own, kept in the request until the worker acknowledges it. Off the
+/// answer's HTTP request, so that a client that goes away does not cut the move short.
 pub fn allowed(app: &AppState, p: PendingRow) {
     let app = app.clone();
     tokio::spawn(async move {
@@ -323,7 +332,7 @@ async fn carry_out(app: &AppState, p: &PendingRow) -> Result<Value, McpError> {
         .await
         .map_err(internal)?
         .ok_or_else(|| McpError::new(error_code::UNAVAILABLE, "the session is gone"))?;
-    let moved = move_session(app, &s, path, m["project"].as_str(), true)
+    let moved = move_session(app, &s, path, m["project"].as_str(), true, Some(path))
         .await
         .map_err(tool_error)?;
     let wake = once_id(WAKE, s.id, &p.request_id);
@@ -384,26 +393,30 @@ fn unavailable(message: &str) -> ApiError {
 }
 
 /// Moves session `s` into folder `path` of its worker, in `project` (a slug or id of the
-/// owner's) or a new project named after the folder.
+/// owner's) or a new project named after the folder. `decided`: the canonical path the move
+/// was decided on (`hqc_move`; `None` from `POST /api/sessions/{id}/move`), which the worker's
+/// `fs.stat` here must report, or nothing is recorded.
 pub async fn move_session(
     app: &AppState,
     s: &SessionRow,
     path: &str,
     project: Option<&str>,
     create: bool,
+    decided: Option<&str>,
 ) -> ApiResult<Moved> {
     let worker = movable(app, s).await?;
     if create {
         // Before the worker makes the folder: a refused move leaves none.
-        let requested = api::check_path(path)?;
-        if let Some(x) = db::overlapping_workspace(&app.db, worker.id, requested).await? {
-            if x.owner_id != s.owner_id || Path::new(&x.path) != Path::new(requested) {
-                return Err(api::workspace_conflict(app, requested, &x).await?);
-            }
-            ready(&x)?;
-        }
+        overlap(app, worker.id, s, api::check_path(path)?).await?;
     }
     let path = api::stat_folder(app, worker.id, path, create).await?;
+    // The folder may have been swapped for a symlink since the move was decided on.
+    if let Some(d) = decided.filter(|d| Path::new(d) != Path::new(&path)) {
+        return Err(ApiError::BadRequest(format!(
+            "{d} is {path} now, not the folder the move was decided on; nothing moved: \
+             call again with the canonical path"
+        )));
+    }
     // Held until the session is moved: a repeat that comes in parallel finds what this made.
     let _lock = app.owner_lock("move", s.owner_id).await;
     let s = db::session(&app.db, s.id)
@@ -562,6 +575,34 @@ async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
         ));
     }
     Ok(worker)
+}
+
+/// What refuses a move of `s` into `path` in `project` anyway, checked before the owner is
+/// asked (SPEC §7): [`movable`], an unknown `project` (`404`) and an [`overlap`] of `path`.
+async fn refused(
+    app: &AppState,
+    s: &SessionRow,
+    path: &str,
+    project: Option<&str>,
+) -> ApiResult<()> {
+    let worker = movable(app, s).await?;
+    if let Some(p) = project {
+        owner_project(app, s.owner_id, p).await?;
+    }
+    overlap(app, worker.id, s, path).await
+}
+
+/// `409 workspace_conflict` when `path` equals another owner's workspace on `worker`, lies
+/// inside a workspace there or contains one; the owner's own workspace at exactly `path` is
+/// none, but `409 workspace_not_ready` while it is not ready.
+async fn overlap(app: &AppState, worker: Uuid, s: &SessionRow, path: &str) -> ApiResult<()> {
+    if let Some(x) = db::overlapping_workspace(&app.db, worker, path).await? {
+        if x.owner_id != s.owner_id || Path::new(&x.path) != Path::new(path) {
+            return Err(api::workspace_conflict(app, path, &x).await?);
+        }
+        ready(&x)?;
+    }
+    Ok(())
 }
 
 /// The owner's project by slug or id; another owner's is `404`, as a missing one.

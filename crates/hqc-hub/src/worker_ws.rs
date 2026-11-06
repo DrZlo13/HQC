@@ -546,8 +546,8 @@ async fn handle_text(
             Ok(())
         }
         WorkerFrame::McpCancel(c) => {
-            // Only a deferred call (`hqc_ask`) has anything on the hub to close; a fast one
-            // was answered already.
+            // Only a deferred call (`hqc_ask`, an `hqc_move` waiting for the owner) has
+            // anything on the hub to close; a fast one was answered already.
             tracing::info!(worker_id = %conn.worker_id, request_id = %c.request_id, reason = %c.reason, "mcp call cancelled by the worker");
             let r = crate::peers::cancelled(app, conn.worker_id, &c).await;
             conn.reply(&id, HubFrame::Ack(Ack::default()));

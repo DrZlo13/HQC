@@ -104,6 +104,33 @@ pub async fn ensure_user(db: &PgPool, email: &str) -> sqlx::Result<UserRow> {
     Ok(u)
 }
 
+/// An OIDC sign-in (SPEC §3 User, §6): the user bound to `sub`; else the user of `email`
+/// ([`ensure_user`]), bound to `sub` now if it has no subject yet. `None`: the user of `email`
+/// is bound to another subject.
+pub async fn ensure_oidc_user(
+    db: &PgPool,
+    email: &str,
+    sub: &str,
+) -> sqlx::Result<Option<UserRow>> {
+    if let Some(u) = sqlx::query_as::<_, UserRow>("SELECT * FROM users WHERE oidc_sub = $1")
+        .bind(sub)
+        .fetch_optional(db)
+        .await?
+    {
+        return Ok(Some(u));
+    }
+    let u = ensure_user(db, email).await?;
+    // `oidc_sub = $2`: a concurrent first sign-in of the same subject bound it meanwhile.
+    sqlx::query_as::<_, UserRow>(
+        "UPDATE users SET oidc_sub = $2, updated_at = now()
+         WHERE id = $1 AND (oidc_sub IS NULL OR oidc_sub = $2) RETURNING *",
+    )
+    .bind(u.id)
+    .bind(sub)
+    .fetch_optional(db)
+    .await
+}
+
 /// In the user's order (`project_order`), the projects missing from it last, oldest first.
 pub async fn projects_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<ProjectRow>> {
     sqlx::query_as(

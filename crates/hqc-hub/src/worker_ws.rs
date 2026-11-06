@@ -659,6 +659,8 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
         }
         // Nor do the answers to its asks that came while it was away (SPEC §5.2).
         crate::peers::after_hello(app, conn.worker_id).await?;
+        // The moves the previous hub process left half done for it (SPEC §3 PendingRequest).
+        crate::moves::after_hello(app, conn.worker_id);
         crate::mirror::after_hello(app, conn).await?;
         crate::rules::after_hello(app, conn).await?;
         crate::workspaces::after_hello(app, conn, restarted).await?;

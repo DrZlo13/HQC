@@ -60,6 +60,15 @@ impl PushSender for RecordingPush {
     }
 }
 
+/// Serves `app` on a free local port; its address.
+async fn serve(app: &AppState) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let service = hqc_hub::service(app.clone());
+    tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+    addr
+}
+
 pub struct TestHub {
     pub app: AppState,
     pub base: String,
@@ -258,11 +267,8 @@ impl TestHub {
         configure(&mut config);
         std::fs::create_dir_all(&config.artifacts.dir).unwrap();
         let push = Arc::new(RecordingPush::default());
-        let app = hqc_hub::start(pool, config, push.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let service = hqc_hub::service(app.clone());
-        tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+        let app = hqc_hub::start(pool, config, push.clone()).await;
+        let addr = serve(&app).await;
         TestHub {
             app,
             base: format!("http://{addr}"),
@@ -273,6 +279,26 @@ impl TestHub {
             boot_id: Uuid::new_v4(),
             schema,
             admin,
+        }
+    }
+
+    /// The hub started again over the same database, as its process after a restart: a new
+    /// state on a new port, the same user and [`TestHub::boot_id`]. This hub keeps running
+    /// beside it; close its workers first, and finish only the new one.
+    pub async fn restart(&self) -> TestHub {
+        let push = Arc::new(RecordingPush::default());
+        let app = hqc_hub::start(self.app.db.clone(), self.app.config.clone(), push.clone()).await;
+        let addr = serve(&app).await;
+        TestHub {
+            app,
+            base: format!("http://{addr}"),
+            ws_base: format!("ws://{addr}"),
+            http: reqwest::Client::new(),
+            push,
+            email: self.email.clone(),
+            boot_id: self.boot_id,
+            schema: self.schema.clone(),
+            admin: self.admin.clone(),
         }
     }
 

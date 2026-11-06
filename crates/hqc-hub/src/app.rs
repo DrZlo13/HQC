@@ -54,6 +54,9 @@ pub struct Inner {
     pub budget: Budget,
     /// Searches running at once (SPEC §15, §20).
     pub searches: Arc<Semaphore>,
+    /// Worker -> the moves the owner allowed whose result the previous hub process did not
+    /// store, found on start and carried out once that worker says `hello` ([`crate::moves`]).
+    pub left_moves: Mutex<HashMap<Uuid, Vec<crate::db::PendingRow>>>,
     /// `(what, owner)` -> a lock held while a cap is counted and the row it counts is
     /// written ([`AppState::owner_lock`]).
     owner_locks: Mutex<HashMap<(&'static str, Uuid), OwnerLock>>,
@@ -138,6 +141,7 @@ impl AppState {
             clock: Default::default(),
             budget: Budget::default(),
             searches: Arc::new(Semaphore::new(config.limits.search_concurrency)),
+            left_moves: Mutex::new(HashMap::new()),
             owner_locks: Mutex::new(HashMap::new()),
             live: Mutex::default(),
             config,

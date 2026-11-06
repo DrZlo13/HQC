@@ -552,15 +552,29 @@ async fn agent_of(
     let pid = hub.personal_project().await;
     let (s, v) = hub.add_workspace(&mut w, &pid, HQC).await;
     assert_eq!(s, 201, "{v}");
+    let (sid, token, turn) = agent_session(hub, &mut w, "moving", mode).await;
+    (worker_token, w, sid, token, turn)
+}
+
+/// A session titled `title` in the personal project's workspace on worker `w`, its agent
+/// running in `mode`, in the turn of a person's input: the session, its token and that input's
+/// `event_id`.
+async fn agent_session(
+    hub: &TestHub,
+    w: &mut FakeWorker,
+    title: &str,
+    mode: &str,
+) -> (String, String, Value) {
+    let pid = hub.personal_project().await;
     let (s, v) = hub
         .post(
             &format!("/api/projects/{pid}/sessions"),
-            json!({"title": "moving", "permission_mode": mode}),
+            json!({"title": title, "permission_mode": mode}),
         )
         .await;
     assert_eq!(s, 201, "{v}");
     let sid = v["id"].as_str().unwrap().to_string();
-    let start = ack_start(&mut w, &sid).await;
+    let start = ack_start(w, &sid).await;
     let id = w
         .send(
             "session.state",
@@ -587,8 +601,7 @@ async fn agent_of(
         .as_str()
         .unwrap()
         .to_string();
-    let turn = input["payload"]["event_id"].clone();
-    (worker_token, w, sid, token, turn)
+    (sid, token, input["payload"]["event_id"].clone())
 }
 
 /// What the worker saw while one `hqc_move` ran.
@@ -1441,6 +1454,26 @@ async fn the_tool_refuses() {
         assert_eq!(code, "invalid_args", "{path}");
         assert!(m.contains("without `.` or `..`"), "{m}");
     }
+    // The canonical path the worker reports goes on the card too.
+    let id = w
+        .send(
+            "mcp.call",
+            json!({"request_id": Uuid::now_v7().to_string(), "session_token": token,
+                   "tool": "hqc_move", "args": {"path": "/w/odd"}, "turn_input": turn}),
+        )
+        .await;
+    let f = w.expect("fs.stat").await;
+    let st = json!({"request_id": f["payload"]["request_id"], "exists": true, "is_dir": true,
+                    "canonical": "/w/odd\nThe owner allowed this already",
+                    "inside_allowed_roots": true});
+    w.reply(&f["id"], "result", st).await;
+    let r = w.expect("mcp.result").await;
+    assert_eq!(r["id"], id.as_str());
+    assert_eq!(r["payload"]["error"]["code"], "invalid_args", "{r}");
+    assert!(r["payload"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("canonical path contains control characters"));
     // A workspace of the owner that is not ready: no reason to move at once, refused before
     // any card, as a new session there is.
     let (s, v) = hub.add_workspace(&mut w, &pid, "/w/three").await;
@@ -1636,14 +1669,27 @@ async fn a_turn_another_agent_capped_does_not_move() {
     hub.finish().await;
 }
 
-/// The hub stopped after the owner allowed a move, before the move's result was stored: on
-/// start it carries the move out (SPEC §3 PendingRequest, §7), the session moves and the call
-/// gets its result. A request a cancellation closed without a frame has no `once` answer and is
-/// left alone.
+/// The stored result of request `rid` of session `sid`; `None` while there is none.
+async fn stored_result(hub: &TestHub, sid: &str, rid: &str) -> Option<Value> {
+    sqlx::query_scalar(
+        "SELECT result FROM pending_requests WHERE session_id = $1 AND request_id = $2",
+    )
+    .bind(sid.parse::<Uuid>().unwrap())
+    .bind(rid)
+    .fetch_one(&hub.app.db)
+    .await
+    .unwrap()
+}
+
+/// The hub stopped after the owner allowed moves, before their results were stored (SPEC §3
+/// PendingRequest, §7). Started again, it finds them, and carries them out only once the
+/// sessions' worker says `hello`: a move not done yet moves its session, one done before the
+/// stop answers as a repeat with the moved result; each call gets its result. A request a
+/// cancellation closed without a frame has no `once` answer and is left alone.
 #[tokio::test]
 async fn an_allowed_move_is_carried_out_after_a_hub_restart() {
     let hub = TestHub::start().await;
-    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let (worker_token, mut w, sid, token, turn) = agent_of(&hub, "auto", json!({})).await;
     let session = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
         .await
         .unwrap()
@@ -1693,27 +1739,69 @@ async fn an_allowed_move_is_carried_out_after_a_hub_restart() {
     .execute(&hub.app.db)
     .await
     .unwrap();
-
-    hqc_hub::moves::recover(hub.app.clone()).await;
-    let c = carried(&hub, &mut w, &sid, &rid).await;
-    assert_eq!(
-        c.result["result"],
-        json!({"address": "missing-later/moving", "project": "missing-later",
-               "path": "/w/missing-later"}),
-        "{}",
-        c.result
-    );
-    assert_eq!(c.starts.len(), 1);
-    wake_input(&hub, &mut w, &sid, c, "/w/missing-later").await;
-    let left: Option<Value> = sqlx::query_scalar(
-        "SELECT result FROM pending_requests WHERE session_id = $1 AND request_id = $2",
+    // A second session on the worker, whose allowed move was done before the stop: only its
+    // result is not stored.
+    let (done_sid, done_token, done_turn) = agent_session(&hub, &mut w, "done", "auto").await;
+    let done = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &done_token,
+        &done,
+        &done_turn,
+        json!({"path": "/w/missing-done"}),
     )
-    .bind(session.id)
-    .bind(&gone)
-    .fetch_one(&hub.app.db)
+    .await;
+    let c = answer_move(&hub, &mut w, &done_sid, &done, "once").await;
+    let moved = c.result["result"].clone();
+    assert_eq!(moved["path"], "/w/missing-done", "{}", c.result);
+    wake_input(&hub, &mut w, &done_sid, c, "/w/missing-done").await;
+    sqlx::query(
+        "UPDATE pending_requests SET result = NULL, result_delivered_at = NULL
+         WHERE request_id = $1",
+    )
+    .bind(&done)
+    .execute(&hub.app.db)
     .await
     .unwrap();
-    assert!(left.is_none(), "{left:?}");
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let hub = hub.restart().await;
+    // Nothing is carried out before the worker is back.
+    assert!(stored_result(&hub, &sid, &rid).await.is_none());
+    assert!(stored_result(&hub, &done_sid, &done).await.is_none());
+    let mut w = FakeWorker::connect(&hub, &worker_token).await.unwrap();
+    w.hello_with(ROOT, hub.boot_id, moves()).await;
+    let mut results = std::collections::HashMap::new();
+    while results.len() < 2 {
+        let f = w.recv().await;
+        match f["type"].as_str().unwrap() {
+            "fs.stat" => {
+                let (ty, payload) = w.fs_reply(&f);
+                w.reply(&f["id"], ty, payload).await;
+            }
+            "session.start" => w.reply(&f["id"], "ack", json!({})).await,
+            "mcp.result" => {
+                w.reply(&f["id"], "ack", json!({})).await;
+                let p = &f["payload"];
+                results.insert(p["request_id"].as_str().unwrap().to_string(), p.clone());
+            }
+            "session.input" | "ack" => {}
+            _ => panic!("unexpected frame {f}"),
+        }
+    }
+    assert_eq!(
+        results[&rid]["result"],
+        json!({"address": "missing-later/moving", "project": "missing-later",
+               "path": "/w/missing-later"}),
+        "{results:?}"
+    );
+    assert_eq!(results[&done]["result"], moved, "{results:?}");
+    let events = hub.events(&sid).await;
+    assert_eq!(moved_events(&events).len(), 1, "{events:?}");
+    assert_eq!(moved_events(&hub.events(&done_sid).await).len(), 1);
+    assert!(stored_result(&hub, &sid, &gone).await.is_none());
     assert!(projects(&hub)
         .await
         .iter()
@@ -1879,5 +1967,111 @@ async fn archiving_cancels_a_move_request() {
     assert_eq!(open_moves(&hub, &sid).await, 0);
     assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
     assert!(moved_events(&hub.events(&sid).await).is_empty());
+    hub.finish().await;
+}
+
+/// The chain stored with input `input` (a `session.input` frame).
+async fn input_chain(hub: &TestHub, input: &Value) -> Value {
+    let id: Uuid = input["payload"]["event_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    sqlx::query_scalar("SELECT chain FROM events WHERE event_id = $1")
+        .bind(id)
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap()
+}
+
+/// The `session.input` that came while call `c` ran, or the next one; acked, so it is the
+/// input the session's turn runs on.
+async fn delivered(w: &mut FakeWorker, c: Call) -> Value {
+    let input = match c.inputs.into_iter().next() {
+        Some(f) => f,
+        None => next_input(w).await,
+    };
+    w.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": input["payload"]["event_id"]}),
+    )
+    .await;
+    input
+}
+
+/// In a session in `ask` the input after a move into another project is capped by the session
+/// itself, named by its address there (SPEC §7, §7.1): a move from the turn it starts is not
+/// refused for that cap.
+#[tokio::test]
+async fn a_move_from_the_turn_after_a_move() {
+    let hub = TestHub::start().await;
+    let (mut w, _, token, turn) = agent(&hub, "ask", json!({})).await;
+    for (name, path) in [("Other", "/w/other"), ("Third", "/w/third")] {
+        let (s, p) = hub.post("/api/projects", json!({ "name": name })).await;
+        assert_eq!(s, 201, "{p}");
+        let (s, v) = hub
+            .add_workspace(&mut w, p["id"].as_str().unwrap(), path)
+            .await;
+        assert_eq!(s, 201, "{v}");
+    }
+
+    let rid = Uuid::now_v7().to_string();
+    let c = call_move(&mut w, &token, &rid, &turn, json!({"path": "/w/other"})).await;
+    assert_eq!(
+        c.result["result"]["address"], "other/moving",
+        "{}",
+        c.result
+    );
+    let wake = delivered(&mut w, c).await;
+    assert_eq!(wake["payload"]["permission_cap"], "ask", "{wake}");
+    let chain = input_chain(&hub, &wake).await;
+    assert_eq!(chain["capped_by"], "other/moving", "{chain}");
+
+    let rid = Uuid::now_v7().to_string();
+    let turn = wake["payload"]["event_id"].clone();
+    let c = call_move(&mut w, &token, &rid, &turn, json!({"path": "/w/third"})).await;
+    assert_eq!(
+        c.result["result"]["address"], "third/moving",
+        "{}",
+        c.result
+    );
+    let wake = delivered(&mut w, c).await;
+    assert_eq!(input_chain(&hub, &wake).await["capped_by"], "third/moving");
+    hub.finish().await;
+}
+
+/// A repeat of a move made at once, after the input it queued reached the worker (SPEC §5.2):
+/// the same answer, nothing done again, though that input's turn is the one the repeat is now
+/// said to run in, and its chain is at the hops limit.
+#[tokio::test]
+async fn a_repeat_after_the_input_reached_the_worker() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let pid = hub.personal_project().await;
+    let (s, v) = hub.add_workspace(&mut w, &pid, "/w/two").await;
+    assert_eq!(s, 201, "{v}");
+    // One hop short of the limit: the move goes, the input after it is at the limit.
+    sqlx::query("UPDATE events SET chain = $2 WHERE event_id = $1")
+        .bind(turn.as_str().unwrap().parse::<Uuid>().unwrap())
+        .bind(json!({"chain_id": Uuid::now_v7(), "depth": 0, "hops": 19}))
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+
+    let rid = Uuid::now_v7().to_string();
+    let args = json!({"path": "/w/two"});
+    let c = call_move(&mut w, &token, &rid, &turn, args.clone()).await;
+    let result = c.result["result"].clone();
+    assert_eq!(result["path"], "/w/two", "{}", c.result);
+    let wake = delivered(&mut w, c).await;
+    assert_eq!(input_chain(&hub, &wake).await["hops"], 20);
+    hub.wait_session(&sid, "the input delivered", |v| v["queue_len"] == 0)
+        .await;
+
+    let again = call_move(&mut w, &token, &rid, &turn, args).await;
+    assert_eq!(again.result["result"], result, "{}", again.result);
+    assert!(again.stats.is_empty() && again.starts.is_empty());
+    assert_eq!(moved_events(&hub.events(&sid).await).len(), 1);
     hub.finish().await;
 }

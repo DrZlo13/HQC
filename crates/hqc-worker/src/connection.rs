@@ -341,7 +341,14 @@ impl Connection {
                     self.send_outbox(ws, &mut sent_upto, &mut in_flight).await?;
                 }
                 d = self.direct.recv() => match d {
-                    Some(d) => self.send_direct(ws, d).await?,
+                    Some(d) => {
+                        // A session's state goes after the events it wrote before (SPEC §5.2):
+                        // `stopped` right after a turn must not overtake its final answer.
+                        if matches!(d.frame, WorkerFrame::SessionState { .. }) {
+                            self.send_outbox(ws, &mut sent_upto, &mut in_flight).await?;
+                        }
+                        self.send_direct(ws, d).await?
+                    }
                     None => return Ok(()),
                 },
                 m = ws.next() => {
@@ -374,6 +381,10 @@ impl Connection {
         let deadline = Instant::now() + self.opts.flush_timeout;
         let r: Result<(), String> = async {
             while let Ok(d) = self.direct.try_recv() {
+                // As while connected: a session's state after the events it wrote before.
+                if matches!(d.frame, WorkerFrame::SessionState { .. }) {
+                    self.send_outbox(ws, sent_upto, in_flight).await?;
+                }
                 self.send_direct(ws, d).await?;
             }
             self.send_outbox(ws, sent_upto, in_flight).await?;

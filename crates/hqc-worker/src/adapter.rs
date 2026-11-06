@@ -49,7 +49,8 @@ pub enum AdapterEvent {
     Subagents(u32),
     /// How many background tasks the runtime lists now, its subagents' included (Claude Code:
     /// the `tasks` of `system/background_tasks_changed`, SPEC §8.1). Not sent to the hub: the
-    /// agent is not idle while it is above 0 (SPEC §17.3). Reported when it changes.
+    /// agent is not idle while it is above 0 (SPEC §17.3), and a move tells the agent how many
+    /// it stopped (SPEC §5.3). Reported when it changes.
     BackgroundTasks(u32),
     /// The runtime reported its own session id (ACP); sent in `session.state`.
     RuntimeSessionId(String),

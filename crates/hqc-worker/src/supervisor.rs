@@ -4,11 +4,16 @@
 //! - `session.start` is checked against the local config first; a mismatch is answered
 //!   with `error {invalid_frame}` and nothing is created or spawned (SPEC §2.1, §14).
 //!   `mode: new` calls [`Adapter::start`], `mode: resume` [`Adapter::resume`] (SPEC §5.3).
-//!   `session.start` for a live process is acked without touching it.
+//!   `session.start` for a live process is acked without touching it, unless it names another
+//!   folder: a move, which waits until no turn and no subagent runs, nothing is written into
+//!   a turn and no capped input waits, then stops the process and starts the next one there;
+//!   before every start of a Claude Code agent its transcript is moved to where the working
+//!   directory puts it, if it is elsewhere ([`crate::mirror::relocate`]).
 //!   A failed spawn is `error {agent_start_failed, retryable: true}` (SPEC §5.2).
 //! - A folder the worker has not run sessions in ([`KnownPaths`]), for a session that is
 //!   neither the worker owner's (`owner_is_worker_owner`) nor in a workspace the owner
-//!   added (`requested_by_owner`), needs the owner's consent first (SPEC §10.2): the start
+//!   added (`requested_by_owner`), needs the owner's consent first (SPEC §10.2), also when a
+//!   running session moves there: the start
 //!   waits for `worker.approval.request` -> `worker.approval.response`. `once` remembers
 //!   the folder and goes on; `deny`, the hub's timeout or ours answers the start with
 //!   `error {invalid_frame}`. Starts for the same folder wait for the same request, which is
@@ -72,8 +77,8 @@ use std::path::{Path, PathBuf};
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
-    ProcessState, RequestResult, ResultBody, SessionInput, SessionStart, StartMode, TitleRequest,
-    TitleResult, WireError, WorkerApprovalRequest, WorkerFrame,
+    ProcessState, RequestResult, ResultBody, Runtime, SessionInput, SessionStart, StartMode,
+    TitleRequest, TitleResult, WireError, WorkerApprovalRequest, WorkerFrame,
 };
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -207,6 +212,8 @@ struct SessionHandle {
     task: JoinHandle<()>,
     /// `runtime_session_id` of the last `session.start`: the transcript the session runs.
     runtime_session_id: Option<String>,
+    /// The workspace of the last `session.start` the session took: another one is a move.
+    workspace: PathBuf,
 }
 
 #[derive(Debug)]
@@ -413,7 +420,12 @@ impl Supervisor {
                     }
                 };
                 let sid = spec.session_id;
-                if s.workspace_path.is_some() && !self.sessions.contains_key(&sid) {
+                // A new session, or one that moves to another folder (SPEC §5.3).
+                let new_folder = self
+                    .sessions
+                    .get(&sid)
+                    .is_none_or(|h| h.workspace != spec.workspace);
+                if s.workspace_path.is_some() && new_folder {
                     if s.owner_is_worker_owner || s.requested_by_owner {
                         self.remember(&spec.workspace);
                     } else if !self.known.contains(&spec.workspace) {
@@ -433,6 +445,7 @@ impl Supervisor {
                 }
                 if let Some(h) = self.sessions.get_mut(&sid) {
                     h.runtime_session_id = spec.runtime_session_id.clone();
+                    h.workspace = spec.workspace.clone();
                 }
                 (
                     sid,
@@ -846,6 +859,7 @@ impl Supervisor {
             link: self.link.clone(),
             artifacts: self.artifacts.clone(),
             roots: self.cfg.allowed_roots.clone(),
+            mirror: self.mirror.clone(),
             idle_timeout: self.cfg.idle_timeout,
             slots: self.slots.clone(),
             max_sessions: self.cfg.max_sessions,
@@ -856,6 +870,7 @@ impl Supervisor {
             commands: None,
             permission_mode: None,
             asked_mode: spec.permission_mode,
+            moving: None,
             lowering: None,
             released: false,
             started_once: false,
@@ -866,6 +881,7 @@ impl Supervisor {
             subagents: 0,
             background_tasks: 0,
             stop_asked: false,
+            stopped_by_move: 0,
             delivered: VecDeque::new(),
             last_activity: Instant::now(),
         };
@@ -873,6 +889,7 @@ impl Supervisor {
             tx,
             task: tokio::spawn(s.run(rx)),
             runtime_session_id: spec.runtime_session_id.clone(),
+            workspace: spec.workspace.clone(),
         }
     }
 }
@@ -933,6 +950,9 @@ struct Session {
     /// `allowed_roots` of the worker config: `.hqc/` is added to a git exclude file only
     /// inside them (SPEC §14).
     roots: Vec<std::path::PathBuf>,
+    /// The mirror's projects folder and state: a moved session's transcript is moved there
+    /// ([`crate::mirror::relocate`]); `None`: transcripts are not moved.
+    mirror: Option<MirrorHandle>,
     idle_timeout: Option<Duration>,
     slots: Arc<Semaphore>,
     max_sessions: usize,
@@ -950,6 +970,9 @@ struct Session {
     /// The mode last asked of the running process: its start flag or our last switch. The
     /// session's own mode is `spec.permission_mode`; they differ under a cap (T39).
     asked_mode: PermissionMode,
+    /// A `session.start` with another folder that came while the agent ran (a move, SPEC
+    /// §5.3): the next process starts with it.
+    moving: Option<Box<StartSpec>>,
     /// A capped input waiting for the runtime's `ask` (T39).
     lowering: Option<Lowering>,
     /// Stopped for that writer: `locked_by: vscode` until the next `session.start`.
@@ -968,6 +991,9 @@ struct Session {
     /// A `session.stop` came since the last end of a turn: an input the runtime drops then
     /// was cancelled by the person, not lost ([`Session::end_turn`]).
     stop_asked: bool,
+    /// The background tasks a move stopped with the process; told to the agent with its input
+    /// until the runtime takes one ([`Session::prepared`]).
+    stopped_by_move: u32,
     /// Inputs the runtime took, with whether it took them into a running turn (`joined`).
     delivered: VecDeque<(Uuid, bool)>,
     last_activity: Instant,
@@ -1041,12 +1067,20 @@ impl Session {
                     // Switches the worker missed while it was offline (T38).
                     self.switch_mode(spec.permission_mode).await;
                     self.switch_model(spec.model.clone()).await;
-                    if *spec != self.spec {
+                    // Another folder is a move (SPEC §5.3): the agent goes there once no turn
+                    // and no subagent runs; the same folder again cancels a move still waiting.
+                    let moving = spec.workdir != self.spec.workdir;
+                    if moving {
+                        tracing::info!(session_id = %self.id, workdir = %spec.workdir.display(), "session.start with another folder; the agent moves there after its turn and subagents");
+                    } else if *spec != self.spec {
                         tracing::warn!(session_id = %self.id, "session.start for a running agent; keeping the running one");
                     }
+                    self.moving = moving.then_some(spec);
                     self.link.reply(&id, ack(None));
+                    self.restart_for_move().await;
                     return;
                 }
+                self.moving = None;
                 self.spec = *spec;
                 self.resume_requested = mode == StartMode::Resume;
                 // A takeover (SPEC §9.3): the hub decided this worker runs the session again.
@@ -1178,6 +1212,71 @@ impl Session {
         if let Err(e) = self.adapter.set_model(&m).await {
             tracing::warn!(session_id = %self.id, model = %m, "model not switched until the next start: {e:#}");
         }
+    }
+
+    /// A move waits (SPEC §5.3): the running process is stopped and started again in the new
+    /// folder, its transcript moved there ([`Session::ensure_running`]), once no turn and no
+    /// subagent runs, nothing is written into a turn and no capped input waits for `ask`
+    /// (T39); the end of a turn calls this again. Not the end of a background subagent: the
+    /// runtime then runs a turn of its own on its result, and the end of that turn moves.
+    /// Background commands of the agent itself die with the process; its next input says so.
+    async fn restart_for_move(&mut self) {
+        if self.moving.is_none()
+            || self.state != ProcessState::Running
+            || self.turn.is_some()
+            || self.subagents > 0
+            || !self.injected.is_empty()
+            || self.lowering.is_some()
+        {
+            return;
+        }
+        self.stopped_by_move += self.background_tasks;
+        self.kill_process("moved to another folder").await;
+        if let Err(e) = self.ensure_running().await {
+            self.fail_queue(&e);
+        }
+    }
+
+    /// The spec of a waiting move becomes the session's, with what changed since that start
+    /// (token, mode, model) kept.
+    fn take_move(&mut self) {
+        let Some(next) = self.moving.take() else {
+            return;
+        };
+        self.spec = StartSpec {
+            session_token: self.spec.session_token.clone(),
+            permission_mode: self.spec.permission_mode,
+            model: self.spec.model.clone(),
+            ..*next
+        };
+    }
+
+    /// A Claude Code transcript that is not where the working directory puts it is moved
+    /// there from wherever it is ([`crate::mirror::relocate`]): the session moved. (`&mut`: as
+    /// in [`Session::prepared`].)
+    async fn relocate(&mut self) -> anyhow::Result<()> {
+        let (Some(m), Runtime::ClaudeCode) = (&self.mirror, self.spec.runtime) else {
+            return Ok(());
+        };
+        let Some(uuid) = self
+            .runtime_session_id
+            .as_deref()
+            .or(self.spec.runtime_session_id.as_deref())
+            .and_then(|r| r.parse::<Uuid>().ok())
+        else {
+            return Ok(());
+        };
+        let (projects, store, roots, workdir) = (
+            m.projects.clone(),
+            m.store.clone(),
+            self.roots.clone(),
+            self.spec.workdir.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            crate::mirror::relocate::relocate(&projects, &store, &roots, uuid, &workdir)
+        })
+        .await??;
+        Ok(())
     }
 
     /// A capped turn runs or waits for the runtime's `ask` (T39).
@@ -1323,7 +1422,30 @@ impl Session {
     /// across the await would need the adapter to be `Sync`.)
     async fn prepared(&mut self, q: &Queued) -> Option<(SessionInput, Vec<InboxFile>)> {
         match inbox::prepare(&self.artifacts, &self.spec, &q.input, &self.roots).await {
-            Ok((input, files)) => Some((crate::peer::runtime_input(&input), files)),
+            Ok((input, files)) => {
+                let mut input = crate::peer::runtime_input(&input);
+                // An input that is no slash command (the runtime would not read it as one)
+                // tells the agent, until the runtime takes one (`InputAccepted`); not one
+                // written into a turn whose input tells it already (nothing was in flight at
+                // the move).
+                let told = self
+                    .turn
+                    .iter()
+                    .map(|t| &t.input)
+                    .chain(self.injected.iter().map(|q| &q.input))
+                    .any(|i| !i.text.starts_with('/'));
+                if self.stopped_by_move > 0 && !q.input.text.starts_with('/') && !told {
+                    input.text = format!(
+                        "[hqc] Moving this session to {} stopped {} background task(s) you had \
+                         running (commands or monitors started in the background); start again \
+                         the ones you still need.\n---\n\n{}",
+                        self.spec.workdir.display(),
+                        self.stopped_by_move,
+                        input.text
+                    );
+                }
+                Some((input, files))
+            }
             Err(e) => {
                 tracing::warn!(session_id = %self.id, event_id = %q.input.event_id, "attachments: {e:#}");
                 self.link.reply(
@@ -1472,12 +1594,12 @@ impl Session {
                 }
             }
             AdapterEvent::InputAccepted { event_id } => {
-                let joined = if let Some(t) =
+                let (joined, slash) = if let Some(t) =
                     self.turn.as_mut().filter(|t| t.input.event_id == event_id)
                 {
                     t.accepted = true;
                     self.link.reply(&t.frame_id, ack(Some(event_id)));
-                    false
+                    (false, t.input.text.starts_with('/'))
                 } else if let Some(i) = self
                     .injected
                     .iter()
@@ -1486,11 +1608,15 @@ impl Session {
                     // Taken into the running turn: delivered, no turn of its own.
                     let q = self.injected.remove(i);
                     self.link.reply(&q.frame_id, joined_ack(event_id));
-                    true
+                    (true, q.input.text.starts_with('/'))
                 } else {
                     tracing::warn!(session_id = %self.id, %event_id, "adapter accepted an input that is not in flight");
                     return;
                 };
+                // It carried the note of a move that stopped background tasks (`prepared`).
+                if !slash {
+                    self.stopped_by_move = 0;
+                }
                 self.delivered.push_back((event_id, joined));
                 if self.delivered.len() > DELIVERED_MEMORY {
                     self.delivered.pop_front();
@@ -1504,6 +1630,7 @@ impl Session {
                     self.after_capped_turn().await;
                     self.send_state();
                 }
+                self.restart_for_move().await;
                 self.pump().await;
             }
             // A count read from a process already stopped would outlive it.
@@ -1676,7 +1803,13 @@ impl Session {
                 ),
             }
         }
+        self.take_move();
         self.set_state(ProcessState::Starting);
+        if let Err(e) = self.relocate().await {
+            tracing::warn!(session_id = %self.id, "agent start failed: {e:#}");
+            self.set_state(ProcessState::Stopped);
+            return Err(e);
+        }
         // Its MCP server may connect as soon as the process runs (SPEC §7.2).
         self.link.mcp().bind(
             self.id,

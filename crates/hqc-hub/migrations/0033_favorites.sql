@@ -1,4 +1,4 @@
--- SPEC 0.69: a person's favorite sessions and projects, since when. Per user and apart from
+-- SPEC 0.74: a person's favorite sessions and projects, since when. Per user and apart from
 -- the session row: a session may be shared with other users, and a write to `sessions`
 -- moves its `updated_at`.
 CREATE TABLE session_favorites (

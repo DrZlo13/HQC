@@ -85,7 +85,7 @@ SPEC 0.68: `worker.session.state.json` carries `subagents`, the subagents the ag
 `hub.session.input.scheduled.json` — a run of a schedule (`schedule_id`, §16): the worker never
 writes it into a running turn (§17.2).
 
-SPEC 0.69: `api.session.json`, `client.session.summary.json`, `api.project.json` and the second
+SPEC 0.74: `api.session.json`, `client.session.summary.json`, `api.project.json` and the second
 project of `api.projects.json` carry `favorite_at`, the time the requesting user starred them
 (absent: not a favorite). A session's model: `hub.session.model.json` switches the model,
 `hub.session.model.default.json` (`model: null`) goes back to the runtime's default;

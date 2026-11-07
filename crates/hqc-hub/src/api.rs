@@ -21,7 +21,8 @@ use hqc_proto::{
     },
     event::CancelReason,
     frame::{
-        FsListDirs, FsStat, HubFrame, ListCandidates, PermissionMode, ResultBody, SessionCleanup,
+        FsListDirs, FsStat, FsStatResult, HubFrame, ListCandidates, PermissionMode, ResultBody,
+        SessionCleanup,
     },
 };
 use serde::Deserialize;
@@ -473,9 +474,19 @@ pub(crate) async fn stat_folder(
     path: &str,
     create: bool,
 ) -> ApiResult<String> {
-    let path = check_path(path)?;
-    let request = path.to_string();
-    let st = match ask_worker(app, worker_id, |request_id| {
+    let st = fs_stat(app, worker_id, path, create).await?;
+    folder(path, &st)
+}
+
+/// The online worker's `fs.stat` of `path` as it answered, for a path [`check_path`] takes.
+pub(crate) async fn fs_stat(
+    app: &AppState,
+    worker_id: Uuid,
+    path: &str,
+    create: bool,
+) -> ApiResult<FsStatResult> {
+    let request = check_path(path)?.to_string();
+    match ask_worker(app, worker_id, |request_id| {
         HubFrame::FsStat(FsStat {
             request_id,
             path: request,
@@ -484,11 +495,15 @@ pub(crate) async fn stat_folder(
     })
     .await?
     {
-        ResultBody::FsStat(st) => st,
-        other => {
-            return Err(anyhow::anyhow!("fs.stat answered with {other:?}").into());
-        }
-    };
+        ResultBody::FsStat(st) => Ok(st),
+        other => Err(anyhow::anyhow!("fs.stat answered with {other:?}").into()),
+    }
+}
+
+/// The canonical path in the worker's answer `st` to `fs.stat` of `path`, with the codes of
+/// [`stat_folder`].
+pub(crate) fn folder(path: &str, st: &FsStatResult) -> ApiResult<String> {
+    let path = check_path(path)?;
     if !st.inside_allowed_roots {
         return Err(ApiError::Invalid(
             "outside_allowed_roots",
@@ -509,8 +524,9 @@ pub(crate) async fn stat_folder(
     }
     let canonical = st
         .canonical
+        .as_deref()
         .ok_or_else(|| anyhow::anyhow!("fs.stat without canonical for an existing path"))?;
-    let canonical = check_path(&canonical)?;
+    let canonical = check_path(canonical)?;
     // The overlap check compares components: they must be resolved already.
     if std::path::Path::new(canonical).components().any(|c| {
         matches!(

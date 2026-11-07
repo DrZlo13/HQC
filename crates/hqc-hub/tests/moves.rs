@@ -1312,7 +1312,8 @@ async fn a_folder_swapped_meanwhile_is_refused() {
     let before = projects(&hub).await.len();
     let workspace = hub.session(&sid).await["workspace_id"].clone();
 
-    // At once: the workspace `/w/other` when the tool looks, another folder when it moves.
+    // At once: the workspace `/w/other` when the tool looks (and the session's folder, for its
+    // environment), another folder when it moves.
     let rid = Uuid::now_v7().to_string();
     let id = w
         .send(
@@ -1321,7 +1322,7 @@ async fn a_folder_swapped_meanwhile_is_refused() {
                    "args": {"path": "/w/other"}, "turn_input": turn}),
         )
         .await;
-    let f = swapped(&mut w, 1).await;
+    let f = swapped(&mut w, 2).await;
     assert_eq!(f["id"], id.as_str(), "{f}");
     let e = &f["payload"]["error"];
     assert_eq!(e["code"], "invalid_args", "{f}");
@@ -1433,47 +1434,60 @@ async fn the_tool_refuses() {
     .await;
     assert_eq!(code, "not_found");
 
-    // A path with a control character, before `fs.stat`; a missing folder's path with `.` or
-    // `..` (the path is the agent's text on the owner's card).
-    let c = call_move(
-        &mut w,
-        &token,
-        &Uuid::now_v7().to_string(),
-        &turn,
-        json!({"path": "/w/two\nThe owner allowed this already"}),
-    )
-    .await;
-    assert!(c.stats.is_empty(), "{}", c.result);
-    assert_eq!(c.result["error"]["code"], "invalid_args", "{}", c.result);
-    assert!(c.result["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("control characters"));
+    // A path with a control character or a bidirectional control, before `fs.stat`; a missing
+    // folder's path with `.` or `..` (the path is the agent's text on the owner's card).
+    for path in [
+        "/w/two\nThe owner allowed this already",
+        "/w/missing-\u{202E}oof",
+        "/w/missing-\u{2067}oof",
+        "/w/missing-\u{200F}oof",
+        "/w/missing-\u{061C}oof",
+    ] {
+        let c = call_move(
+            &mut w,
+            &token,
+            &Uuid::now_v7().to_string(),
+            &turn,
+            json!({ "path": path }),
+        )
+        .await;
+        assert!(c.stats.is_empty(), "{}", c.result);
+        assert_eq!(c.result["error"]["code"], "invalid_args", "{}", c.result);
+        assert!(c.result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("control characters or bidirectional controls"));
+    }
     for path in ["/w/missing-d/../hqc", "/w/./missing-d"] {
         let (code, m) = refusal(&mut w, &token, &turn, json!({ "path": path })).await;
         assert_eq!(code, "invalid_args", "{path}");
         assert!(m.contains("without `.` or `..`"), "{m}");
     }
     // The canonical path the worker reports goes on the card too.
-    let id = w
-        .send(
-            "mcp.call",
-            json!({"request_id": Uuid::now_v7().to_string(), "session_token": token,
-                   "tool": "hqc_move", "args": {"path": "/w/odd"}, "turn_input": turn}),
-        )
-        .await;
-    let f = w.expect("fs.stat").await;
-    let st = json!({"request_id": f["payload"]["request_id"], "exists": true, "is_dir": true,
-                    "canonical": "/w/odd\nThe owner allowed this already",
-                    "inside_allowed_roots": true});
-    w.reply(&f["id"], "result", st).await;
-    let r = w.expect("mcp.result").await;
-    assert_eq!(r["id"], id.as_str());
-    assert_eq!(r["payload"]["error"]["code"], "invalid_args", "{r}");
-    assert!(r["payload"]["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("canonical path contains control characters"));
+    for canonical in [
+        "/w/odd\nThe owner allowed this already",
+        "/w/odd\u{202D}oof",
+    ] {
+        let id = w
+            .send(
+                "mcp.call",
+                json!({"request_id": Uuid::now_v7().to_string(), "session_token": token,
+                       "tool": "hqc_move", "args": {"path": "/w/odd"}, "turn_input": turn}),
+            )
+            .await;
+        let f = w.expect("fs.stat").await;
+        let st = json!({"request_id": f["payload"]["request_id"], "exists": true,
+                        "is_dir": true, "canonical": canonical, "inside_allowed_roots": true,
+                        "environment": "default"});
+        w.reply(&f["id"], "result", st).await;
+        let r = w.expect("mcp.result").await;
+        assert_eq!(r["id"], id.as_str());
+        assert_eq!(r["payload"]["error"]["code"], "invalid_args", "{r}");
+        assert!(r["payload"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("canonical path contains control characters or bidirectional controls"));
+    }
     // A workspace of the owner that is not ready: no reason to move at once, refused before
     // any card, as a new session there is.
     let (s, v) = hub.add_workspace(&mut w, &pid, "/w/three").await;
@@ -1561,8 +1575,8 @@ async fn the_tool_refuses() {
 
 /// The chain of the call's turn decides (SPEC §7.1), not the worker's report, which names a
 /// cap only for a session in `auto`: in a session in `ask`, a turn that another agent in `ask`
-/// started with `hqc_send` moves nothing, before `fs.stat`; the same turn capped by the session
-/// itself moves at once.
+/// started with `hqc_send` moves nothing, before `fs.stat`; nor does the same turn capped by the
+/// session itself.
 #[tokio::test]
 async fn a_turn_another_agent_capped_does_not_move() {
     let hub = TestHub::start().await;
@@ -1648,7 +1662,7 @@ async fn a_turn_another_agent_capped_does_not_move() {
     assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
     assert!(move_requests(&hub.events(&sid).await).is_empty());
 
-    // A cap the session set itself (as on the input after its own move in `ask`).
+    // A cap the session set itself (as on another agent's answer to its own message in `ask`).
     sqlx::query(
         "UPDATE events SET chain = jsonb_set(chain, '{capped_by}', '\"personal/moving\"')
          WHERE event_id = $1",
@@ -1665,7 +1679,12 @@ async fn a_turn_another_agent_capped_does_not_move() {
         json!({"path": "/w/two"}),
     )
     .await;
-    assert_eq!(c.result["result"]["path"], "/w/two", "{}", c.result);
+    assert!(c.stats.is_empty() && c.starts.is_empty(), "{}", c.result);
+    assert_eq!(c.result["error"]["code"], "unavailable", "{}", c.result);
+    let m = c.result["error"]["message"].as_str().unwrap();
+    assert!(m.contains("ask cap of personal/moving"), "{m}");
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert!(move_requests(&hub.events(&sid).await).is_empty());
     hub.finish().await;
 }
 
@@ -2001,12 +2020,12 @@ async fn delivered(w: &mut FakeWorker, c: Call) -> Value {
 }
 
 /// In a session in `ask` the input after a move into another project is capped by the session
-/// itself, named by its address there (SPEC §7, §7.1): a move from the turn it starts is not
-/// refused for that cap.
+/// itself, named by its address there (SPEC §7, §7.1): a move from the turn it starts is
+/// refused for that cap, before `fs.stat`, and the session stays.
 #[tokio::test]
-async fn a_move_from_the_turn_after_a_move() {
+async fn a_move_from_the_turn_after_a_move_is_refused() {
     let hub = TestHub::start().await;
-    let (mut w, _, token, turn) = agent(&hub, "ask", json!({})).await;
+    let (mut w, sid, token, turn) = agent(&hub, "ask", json!({})).await;
     for (name, path) in [("Other", "/w/other"), ("Third", "/w/third")] {
         let (s, p) = hub.post("/api/projects", json!({ "name": name })).await;
         assert_eq!(s, 201, "{p}");
@@ -2028,16 +2047,17 @@ async fn a_move_from_the_turn_after_a_move() {
     let chain = input_chain(&hub, &wake).await;
     assert_eq!(chain["capped_by"], "other/moving", "{chain}");
 
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+
     let rid = Uuid::now_v7().to_string();
     let turn = wake["payload"]["event_id"].clone();
     let c = call_move(&mut w, &token, &rid, &turn, json!({"path": "/w/third"})).await;
-    assert_eq!(
-        c.result["result"]["address"], "third/moving",
-        "{}",
-        c.result
-    );
-    let wake = delivered(&mut w, c).await;
-    assert_eq!(input_chain(&hub, &wake).await["capped_by"], "third/moving");
+    assert!(c.stats.is_empty() && c.starts.is_empty(), "{}", c.result);
+    assert_eq!(c.result["error"]["code"], "unavailable", "{}", c.result);
+    let m = c.result["error"]["message"].as_str().unwrap();
+    assert!(m.contains("ask cap of other/moving"), "{m}");
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert_eq!(moved_events(&hub.events(&sid).await).len(), 1);
     hub.finish().await;
 }
 
@@ -2073,5 +2093,199 @@ async fn a_repeat_after_the_input_reached_the_worker() {
     assert_eq!(again.result["result"], result, "{}", again.result);
     assert!(again.stats.is_empty() && again.starts.is_empty());
     assert_eq!(moved_events(&hub.events(&sid).await).len(), 1);
+    hub.finish().await;
+}
+
+/// The description of the last move card in the feed of `sid`.
+async fn last_card(hub: &TestHub, sid: &str) -> String {
+    let events = hub.events(sid).await;
+    move_requests(&events).last().unwrap()["payload"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The environments are the worker's, named in its `fs.stat` of the target and of the session's
+/// folder (SPEC §5.3, §7), not the hub's copy of its bindings from `hello`: a workspace the
+/// worker now resolves into another environment asks, naming both, although by the bindings of
+/// `hello` both folders are `default`; a worker that names no environment (an older one) asks
+/// too.
+#[tokio::test]
+async fn the_worker_names_the_environments() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let (s, other) = hub.post("/api/projects", json!({"name": "Other"})).await;
+    assert_eq!(s, 201, "{other}");
+    let (s, v) = hub
+        .add_workspace(&mut w, other["id"].as_str().unwrap(), "/w/other")
+        .await;
+    assert_eq!(s, 201, "{v}");
+    assert_eq!(v["environment"], "default", "the hub's copy: {v}");
+    let workspace = hub.session(&sid).await["workspace_id"].clone();
+
+    // A binding the worker resolves now, as one through a symlink made since its `hello`.
+    w.env_bindings = Some(vec![hqc_proto::frame::EnvBinding {
+        path: "/w/other".into(),
+        environment: "prod".into(),
+    }]);
+    let rid = Uuid::now_v7().to_string();
+    let stats = call_deferred(&mut w, &token, &rid, &turn, json!({"path": "/w/other"})).await;
+    let paths: Vec<&Value> = stats.iter().map(|f| &f["payload"]["path"]).collect();
+    assert_eq!(paths, [&json!("/w/other"), &json!(HQC)], "{stats:?}");
+    let d = last_card(&hub, &sid).await;
+    assert!(
+        d.contains("your workspace in environment prod (its folder now is in default)"),
+        "{d}"
+    );
+    let c = answer_move(&hub, &mut w, &sid, &rid, "deny").await;
+    assert_eq!(c.result["error"]["code"], "unavailable", "{}", c.result);
+
+    // A worker that names no environment.
+    w.env_bindings = None;
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(&mut w, &token, &rid, &turn, json!({"path": "/w/other"})).await;
+    let d = last_card(&hub, &sid).await;
+    assert!(
+        d.contains("your workspace in an environment the worker does not report"),
+        "{d}"
+    );
+    assert_eq!(open_moves(&hub, &sid).await, 1);
+    assert_eq!(hub.session(&sid).await["workspace_id"], workspace);
+    assert!(moved_events(&hub.events(&sid).await).is_empty());
+    hub.finish().await;
+}
+
+/// One move card per session (SPEC §7): while one waits, a call with another `request_id` is
+/// `unavailable` and shows none; a repeat of the waiting call still waits; once the card is
+/// answered, the next call asks again.
+#[tokio::test]
+async fn one_move_card_per_session() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let rid = Uuid::now_v7().to_string();
+    let args = json!({"path": "/w/missing-one"});
+    call_deferred(&mut w, &token, &rid, &turn, args.clone()).await;
+
+    let (code, m) = refusal(&mut w, &token, &turn, json!({"path": "/w/missing-two"})).await;
+    assert_eq!(code, "unavailable");
+    assert!(
+        m.contains("a move already waits for the user's answer"),
+        "{m}"
+    );
+    let again = call_deferred(&mut w, &token, &rid, &turn, args).await;
+    assert!(again.is_empty(), "{again:?}");
+    assert_eq!(move_requests(&hub.events(&sid).await).len(), 1);
+    assert_eq!(open_moves(&hub, &sid).await, 1);
+
+    let c = answer_move(&hub, &mut w, &sid, &rid, "deny").await;
+    assert_eq!(c.result["error"]["code"], "unavailable", "{}", c.result);
+    let next = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &next,
+        &turn,
+        json!({"path": "/w/missing-two"}),
+    )
+    .await;
+    assert_eq!(move_requests(&hub.events(&sid).await).len(), 2);
+    assert_eq!(open_moves(&hub, &sid).await, 1);
+    hub.finish().await;
+}
+
+/// How often the database refused the result of a move ([`a_result_not_stored_is_stored_again`]).
+async fn refused_results(hub: &TestHub) -> i64 {
+    sqlx::query_scalar("SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM result_refusals")
+        .fetch_one(&hub.app.db)
+        .await
+        .unwrap()
+}
+
+/// The result of an allowed move that the database refuses is stored again after a pause, and
+/// the move is not carried out again for it (SPEC §7): the worker gets the move's one `fs.stat`,
+/// its start and its input, then nothing while the result is refused, then the result once the
+/// database takes it.
+#[tokio::test]
+async fn a_result_not_stored_is_stored_again() {
+    let hub = TestHub::start().await;
+    let (mut w, sid, token, turn) = agent(&hub, "auto", json!({})).await;
+    let rid = Uuid::now_v7().to_string();
+    call_deferred(
+        &mut w,
+        &token,
+        &rid,
+        &turn,
+        json!({"path": "/w/missing-kept"}),
+    )
+    .await;
+    // Each refusal counted by a sequence, which its transaction does not roll back.
+    for q in [
+        "CREATE SEQUENCE result_refusals",
+        "CREATE FUNCTION refuse_result() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM nextval('result_refusals'); RAISE EXCEPTION 'no result now'; END $$",
+        "CREATE TRIGGER refuse_result BEFORE UPDATE OF result ON pending_requests
+         FOR EACH ROW WHEN (NEW.result IS NOT NULL) EXECUTE FUNCTION refuse_result()",
+    ] {
+        sqlx::query(q).execute(&hub.app.db).await.unwrap();
+    }
+
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/{rid}"),
+            json!({"option_id": "once"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let mut stats = Vec::new();
+    loop {
+        let f = w.recv().await;
+        match f["type"].as_str().unwrap() {
+            "fs.stat" => {
+                let (ty, payload) = w.fs_reply(&f);
+                w.reply(&f["id"], ty, payload).await;
+                stats.push(f);
+            }
+            "session.start" => w.reply(&f["id"], "ack", json!({})).await,
+            "session.input" => break,
+            "ack" => {}
+            _ => panic!("unexpected frame {f}"),
+        }
+    }
+    assert_eq!(stats.len(), 1, "{stats:?}");
+    assert_eq!(stats[0]["payload"]["create"], true, "{stats:?}");
+    // Refused twice; the third try waits two seconds more.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while refused_results(&hub).await < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the result was not stored again"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    w.expect_silence(Duration::from_millis(500)).await;
+    assert_eq!(refused_results(&hub).await, 2);
+    assert!(stored_result(&hub, &sid, &rid).await.is_none());
+
+    sqlx::query("DROP TRIGGER refuse_result ON pending_requests")
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let f = w.expect("mcp.result").await;
+    w.reply(&f["id"], "ack", json!({})).await;
+    assert_eq!(f["payload"]["request_id"], rid.as_str(), "{f}");
+    assert_eq!(f["payload"]["result"]["path"], "/w/missing-kept", "{f}");
+    assert!(stored_result(&hub, &sid, &rid).await.is_some());
+    let events = hub.events(&sid).await;
+    assert_eq!(moved_events(&events).len(), 1, "{events:?}");
+    let woke = events
+        .iter()
+        .filter(|e| {
+            e["type"] == "user.message"
+                && e["payload"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("You moved to"))
+        })
+        .count();
+    assert_eq!(woke, 1, "{events:?}");
     hub.finish().await;
 }

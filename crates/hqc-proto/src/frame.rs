@@ -782,6 +782,11 @@ pub struct FsStatResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical: Option<String>,
     pub inside_allowed_roots: bool,
+    /// Since SPEC 0.76, inside `allowed_roots` only: the environment a session in the folder
+    /// runs in (SPEC §14), by the worker's bindings as they resolve now; for a missing folder,
+    /// that of the path it would be made at. Absent from an older worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// Result of `fs.list_dirs`: folders only, no hidden ones, sorted by name, at most
@@ -905,8 +910,8 @@ pub struct EnvBinding {
 
 /// The environment of a workspace path (SPEC §14): the binding with the longest path that
 /// equals or contains it, compared by path components (`/a/b` does not contain `/a/bc`);
-/// [`DEFAULT_ENVIRONMENT`] when none does. The worker decides with this for its sessions; the
-/// hub shows it and decides with it whether an agent's `hqc_move` asks the owner (SPEC §7).
+/// [`DEFAULT_ENVIRONMENT`] when none does. The worker decides with this for its sessions, the
+/// hub only for display.
 pub fn environment_for<'a>(bindings: &'a [EnvBinding], path: &str) -> &'a str {
     binding_for(bindings, path).map_or(DEFAULT_ENVIRONMENT, |b| b.environment.as_str())
 }

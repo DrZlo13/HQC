@@ -6,6 +6,7 @@
     "exists": true,
     "is_dir": true,
     "canonical": "/Users/home-mac/work/hqc",
-    "inside_allowed_roots": true
+    "inside_allowed_roots": true,
+    "environment": "default"
   }
 }

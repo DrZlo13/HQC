@@ -37,16 +37,16 @@
 //!   the tool queues the input that wakes the agent there.
 //!
 //! The tool moves at once only into a ready workspace of the owner in the environment of the
-//! session's folder now; anything else waits for the owner's answer, a PendingRequest of kind
-//! [`KIND`] in the calling session (SPEC §3, §7, §10.1), unless the move would be refused
-//! anyway ([`refused`]).
+//! session's folder now, both as the worker reports them; anything else waits for the owner's
+//! answer, a PendingRequest of kind [`KIND`] in the calling session (SPEC §3, §7, §10.1),
+//! unless the move would be refused anyway ([`refused`]).
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use hqc_proto::{
     api::WorkspaceState,
     event::{CancelReason, Chain},
-    frame::{environment_for, worker_approval, McpCall, McpError, McpResult, PermissionMode},
+    frame::{worker_approval, McpCall, McpError, McpResult, PermissionMode},
     mcp::error_code,
 };
 use serde::Deserialize;
@@ -73,6 +73,8 @@ pub const KIND: &str = "move";
 const PROJECT: &str = "hqc_move project";
 /// What [`crate::mcp::once_id`] derives the `event_id` of the input after a tool move from.
 const WAKE: &str = "hqc_move wake";
+/// The longest pause before the result of an allowed move is stored again ([`allowed`]).
+const MAX_STORE_PAUSE: Duration = Duration::from_secs(60);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,17 +84,17 @@ struct MoveArgs {
 }
 
 /// `hqc_move(path, project?)` (SPEC §7): `{address, project, path}`. The calling session,
-/// run by hqc (`locked_by: hqc`), in a turn whose chain no other session capped to `ask`
-/// (SPEC §7.1), whatever the session's own mode, looks at the folder with `fs.stat` on the
-/// connection the call came by ([`Answer::Wait`]), creating nothing ([`target`]). Into a ready
-/// workspace of the owner in the environment of its folder now it moves at once by
-/// [`move_session`]; anything else that would not be refused anyway
+/// run by hqc (`locked_by: hqc`), in a turn whose chain is not capped to `ask` (SPEC §7.1;
+/// a person's turn has no cap of its own, but one that carries buffered messages of a session
+/// in `ask` has theirs), whatever the session's own mode, looks at the folder with
+/// `fs.stat` on the connection the call came by ([`Answer::Wait`]), creating nothing
+/// ([`target`]). Into a ready workspace of the owner in the environment of its folder now it
+/// moves at once by [`move_session`]; anything else that would not be refused anyway
 /// ([`refused`]) waits for the owner's answer ([`ask_owner`]), and the call is answered later,
 /// as `hqc_ask` is. Either way the move lands only in the canonical path it was decided on.
 /// After the move an input of the owner, "you moved to …", goes into its queue as a run of
 /// `hqc_schedule` does (SPEC §16): a `user.message` with the call's chain moved on ([`woken`]),
-/// so the turn it starts runs in the session's own mode (or in `ask` when the call's turn carried
-/// the session's own cap) and, after the move, in the new folder.
+/// so the turn it starts runs in the session's own mode and, after the move, in the new folder.
 /// Once per `request_id`: a repeat finds the request it opened, or the input stored after a
 /// move at once, and answers the same.
 pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
@@ -132,27 +134,22 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         ));
     }
     // The chain the turn runs on, not the worker's report, which names a cap only while the
-    // session runs in `auto`. A cap the session set itself (the first session in `ask` up the
-    // chain is this one: the input after its own move, an answer to its own message, a run of
-    // its own schedule) leaves it free to move.
+    // session runs in `auto`. Any `ask` cap refuses, one the session set itself too (the input
+    // after its own move, an answer to its own message, a run of its own schedule).
     let turn = crate::peers::call_chain(app, caller, c)
         .await
         .map_err(internal)?;
-    let me = crate::peers::address(app, caller).await.map_err(internal)?;
     if let Some(t) = turn
         .as_ref()
         .filter(|t| t.permission_cap == Some(PermissionMode::Ask))
     {
-        if t.capped_by.as_deref() != Some(me.as_str()) {
-            let by = t.capped_by.as_deref().unwrap_or("another session");
-            return Err(McpError::new(
-                error_code::UNAVAILABLE,
-                format!(
-                    "this turn runs under the ask cap of {by}; the session does not move from it"
-                ),
-            ));
-        }
+        let by = t.capped_by.as_deref().unwrap_or("a session up the chain");
+        return Err(McpError::new(
+            error_code::UNAVAILABLE,
+            format!("this turn runs under the ask cap of {by}; the session does not move from it"),
+        ));
     }
+    let me = crate::peers::address(app, caller).await.map_err(internal)?;
     // The chain moves on as for a schedule; one at its limit moves nothing (SPEC §7.1). The
     // input's chain is built after the move ([`woken`]), from the same turn.
     crate::peers::next_chain(turn.clone(), false, crate::peers::sender_mode(caller), &me)?;
@@ -198,10 +195,9 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
 }
 
 /// After a move of the calling session: the owner's input "you moved to …" in its queue, once
-/// per call (`wake`), and the call's result. Its chain is that of the call's turn (`turn`)
-/// moved on, built now: an `ask` cap in `turn` is the session's own (another's refused the
-/// call), so it is named by the session's address in the new project, and a move from the turn
-/// the input starts is not refused for it (SPEC §7, §7.1).
+/// per call (`wake`), and the call's result. Its chain is that of the call's turn (`turn`, not
+/// capped to `ask`: such a call is refused) moved on, built now, so a cap of the session's own
+/// mode is named by its address in the new project (SPEC §7, §7.1).
 async fn woken(
     app: &AppState,
     m: &Moved,
@@ -211,12 +207,6 @@ async fn woken(
     let address = crate::peers::address(app, &m.session)
         .await
         .map_err(internal)?;
-    let turn = turn.map(|mut t| {
-        if t.permission_cap == Some(PermissionMode::Ask) {
-            t.capped_by = None;
-        }
-        t
-    });
     let mode = crate::peers::sender_mode(&m.session);
     let chain = crate::peers::next_chain(turn, false, mode, &address)?;
     let chain = serde_json::to_value(chain).map_err(internal)?;
@@ -266,18 +256,29 @@ enum Target {
     Ask { path: String, why: String },
 }
 
-/// Where a move of `s` into `path` goes (SPEC §7): the worker's `fs.stat` without `create`,
-/// the owner's workspaces on that worker and the environments of the worker's bindings (as
-/// [`db::set_workspace_environments`] has them) for the target and for the session's folder.
-/// A folder the worker refuses is the tool's error at once; a missing one asks. The path is
-/// the agent's text the owner may be shown: one with a control character is refused, and so is
-/// a missing folder's with a `.` or `..` component, and an existing folder whose canonical path
-/// (shown instead) has a control character.
+/// What the card may not show of a path: control characters, and the bidirectional controls
+/// (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), which reorder the text around them.
+fn unshowable(path: &str) -> bool {
+    path.chars().any(|c| {
+        c.is_control()
+            || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}')
+            || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    })
+}
+
+/// Where a move of `s` into `path` goes (SPEC §7): the worker's `fs.stat` without `create`
+/// of the target, the owner's workspaces on that worker, and the environments the worker's
+/// `fs.stat` names for the target and for the session's folder; one it does not name (an
+/// older worker) asks. A folder the worker refuses is the tool's error at once; a missing one
+/// asks. The path is the agent's text the owner may be shown: one with a control character or
+/// a bidirectional control ([`unshowable`]) is refused, and so is a missing folder's with a
+/// `.` or `..` component, and an existing folder whose canonical path (shown instead) has
+/// such a character.
 async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, McpError> {
-    if path.chars().any(char::is_control) {
+    if unshowable(path) {
         return Err(McpError::new(
             error_code::INVALID_ARGS,
-            "path must not contain control characters",
+            "path must not contain control characters or bidirectional controls",
         ));
     }
     let worker = match s.worker_id {
@@ -295,11 +296,14 @@ async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, Mc
             "the session has no folder to move from",
         )
     })?;
-    let (path, exists) = match api::stat_folder(app, worker.id, path, false).await {
-        Ok(p) if p.chars().any(char::is_control) => {
+    let st = api::fs_stat(app, worker.id, path, false)
+        .await
+        .map_err(tool_error)?;
+    let (path, exists) = match api::folder(path, &st) {
+        Ok(p) if unshowable(&p) => {
             return Err(McpError::new(
                 error_code::INVALID_ARGS,
-                "the folder's canonical path contains control characters",
+                "the folder's canonical path contains control characters or bidirectional controls",
             ));
         }
         Ok(p) => (p, true),
@@ -323,12 +327,14 @@ async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, Mc
             .is_some_and(|w| {
                 w.path == path && w.owner_id == s.owner_id && w.state() == WorkspaceState::Ready
             });
-    let bindings = db::env_bindings(worker.env_bindings);
-    let (to, from) = (
-        environment_for(&bindings, &path),
-        environment_for(&bindings, &here.path),
-    );
-    if workspace && to == from {
+    // As the worker resolves its bindings now, not as its `hello` reported them: the agent
+    // starts in what the worker resolves.
+    let to = st.environment;
+    let from = api::fs_stat(app, worker.id, &here.path, false)
+        .await
+        .map_err(tool_error)?
+        .environment;
+    if workspace && to.is_some() && to == from {
         return Ok(Target::Workspace(path));
     }
     let folder = if !exists {
@@ -338,10 +344,16 @@ async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, Mc
     } else {
         "your workspace"
     };
-    let env = if to == from {
-        String::new()
-    } else {
-        format!(" in environment {to} (its folder now is in {from})")
+    let env = match (to.as_deref(), from.as_deref()) {
+        (Some(t), Some(f)) if t == f => String::new(),
+        (Some(t), Some(f)) => format!(" in environment {t} (its folder now is in {f})"),
+        (Some(t), None) => format!(
+            " in environment {t} (the worker does not report the environment of its folder now)"
+        ),
+        (None, Some(f)) => {
+            format!(" in an environment the worker does not report (its folder now is in {f})")
+        }
+        (None, None) => " in an environment the worker does not report".to_string(),
     };
     Ok(Target::Ask {
         why: format!("{folder}{env}"),
@@ -353,7 +365,8 @@ async fn target(app: &AppState, s: &SessionRow, path: &str) -> Result<Target, Mc
 /// of the hub in the session's feed with `description` and the options `once` / `deny`, and an
 /// open request of kind [`KIND`] keyed by the call's `request_id`, which keeps what the move
 /// needs (`move`: the path, the project, the chain of the call's turn). No expiry; a repeat of
-/// the call opens none and stores no second event.
+/// the call opens none and stores no second event. One card per session: while a request of
+/// another call waits, the call is `unavailable`.
 async fn ask_owner(
     app: &AppState,
     s: &SessionRow,
@@ -375,11 +388,27 @@ async fn ask_owner(
     let mut stored = payload.clone();
     stored["move"] = json!({"path": path, "project": project, "turn": turn});
     hqc_proto::replace_nul_json(&mut stored);
-    if !db::open_request(&app.db, KIND, s.id, request_id, &stored, None, s.worker_id)
-        .await
-        .map_err(internal)?
     {
-        return Ok(());
+        // Held until the request is stored: parallel calls of one session open one card.
+        let _lock = app.owner_lock("move request", s.owner_id).await;
+        let open = db::open_requests_of_session(&app.db, s.id)
+            .await
+            .map_err(internal)?;
+        if open
+            .iter()
+            .any(|p| p.kind == KIND && p.request_id != request_id)
+        {
+            return Err(McpError::new(
+                error_code::UNAVAILABLE,
+                "a move already waits for the user's answer",
+            ));
+        }
+        if !db::open_request(&app.db, KIND, s.id, request_id, &stored, None, s.worker_id)
+            .await
+            .map_err(internal)?
+        {
+            return Ok(());
+        }
     }
     tracing::info!(session_id = %s.id, %request_id, %path, "hqc_move asks the owner");
     events::store_hub_event(
@@ -401,8 +430,9 @@ async fn ask_owner(
 /// as [`tool`] goes on after a move; the call gets that result, or the move's error, as an
 /// `mcp.result` of its own, kept in the request until the worker acknowledges it. Off the
 /// answer's HTTP request, so that a client that goes away does not cut the move short. A result
-/// that is not stored carries the move out again, as [`after_hello`] does after a hub restart:
-/// a move already done answers as a repeat, and the input after it is stored once.
+/// that is not stored is stored again after a pause, a second at first, doubled each time up to
+/// [`MAX_STORE_PAUSE`]; the move is not carried out again from here (only a hub started anew
+/// does that, [`after_hello`]), and the result is delivered once stored.
 pub fn allowed(app: &AppState, p: PendingRow) {
     let app = app.clone();
     tokio::spawn(async move {
@@ -412,10 +442,11 @@ pub fn allowed(app: &AppState, p: PendingRow) {
         };
         tracing::info!(session_id = %p.session_id, request_id = %p.request_id, ok = r.error.is_none(), "allowed hqc_move carried out");
         let frame = json!({"type": "mcp.result", "payload": r});
-        if let Err(e) = db::set_request_result(&app.db, p.id, &frame).await {
-            tracing::error!(request_id = %p.request_id, error = %e, "the result of an allowed move not stored; carrying it out again");
-            allowed(&app, p);
-            return;
+        let mut pause = Duration::from_secs(1);
+        while let Err(e) = db::set_request_result(&app.db, p.id, &frame).await {
+            tracing::error!(request_id = %p.request_id, error = %e, retry_in_s = pause.as_secs(), "the result of an allowed move not stored; storing it again");
+            tokio::time::sleep(pause).await;
+            pause = (pause * 2).min(MAX_STORE_PAUSE);
         }
         requests::deliver_result(
             &app,

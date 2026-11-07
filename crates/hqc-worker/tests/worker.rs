@@ -1751,7 +1751,7 @@ async fn fs_requests_answer_inside_allowed_roots() {
     assert_eq!(
         r["payload"],
         json!({"request_id": "rq-1", "exists": true, "is_dir": true, "canonical": ws,
-               "inside_allowed_roots": true})
+               "inside_allowed_roots": true, "environment": "default"})
     );
     let outside = tempfile::tempdir().unwrap();
     let outside = outside.path().display().to_string();

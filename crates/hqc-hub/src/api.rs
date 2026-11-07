@@ -2061,9 +2061,19 @@ mod tests {
     fn typed_models() {
         use super::typed_model;
         assert_eq!(typed_model("/model fable"), Some(Some("fable".into())));
-        assert_eq!(typed_model("  /model  claude-fable-5-1 \n"), Some(Some("claude-fable-5-1".into())));
+        assert_eq!(
+            typed_model("  /model  claude-fable-5-1 \n"),
+            Some(Some("claude-fable-5-1".into()))
+        );
         assert_eq!(typed_model("/model default"), Some(None));
-        for no in ["/model", "/model a b", "/models x", "model x", "/model opus[1m]", "hi /model x"] {
+        for no in [
+            "/model",
+            "/model a b",
+            "/models x",
+            "model x",
+            "/model opus[1m]",
+            "hi /model x",
+        ] {
             assert_eq!(typed_model(no), None, "{no}");
         }
     }

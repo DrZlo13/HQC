@@ -780,6 +780,9 @@ impl Adapter for ClaudeCodeAdapter {
         };
         tracing::info!(session_id = %self.session_id, model, "switching the model");
         let action = lock(&p.core).set_model(model);
+        // The CLI writes the switch into the transcript as a typed `/model <name>`; it is ours,
+        // not a prompt of someone else for the mirror to import.
+        p.io.own.sent(p.io.runtime, &format!("/model {model}"));
         p.io.run(vec![action]).await
     }
 

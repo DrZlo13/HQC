@@ -32,6 +32,9 @@ export class ChatSession {
   private reportedRead = 0;
   private closed = false;
 
+  /** Called with the text of each message once the hub stored it. */
+  onStored?: (text: string) => void;
+
   constructor(
     private readonly api: Api,
     private readonly socket: HubSocket,
@@ -129,6 +132,7 @@ export class ChatSession {
         (ev) => {
           this.outgoing.delete(op);
           this.timeline.applyReply(ev);
+          this.onStored?.(o.text);
         },
         (e: Error) => this.timeline.failPending(op, e.message),
       );

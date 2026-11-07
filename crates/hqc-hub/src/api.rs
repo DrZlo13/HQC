@@ -891,6 +891,25 @@ pub fn valid_model(m: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-'))
 }
 
+/// The model a typed `/model <name>` switches the agent to (SPEC §6): `Some(None)` for
+/// `default`, the runtime's default; `None` for any other text, and for a name hqc does not
+/// take ([`valid_model`]), which the runtime still gets as the command.
+fn typed_model(text: &str) -> Option<Option<String>> {
+    let mut words = text.split_whitespace();
+    if words.next()? != "/model" {
+        return None;
+    }
+    let name = words.next()?;
+    if words.next().is_some() {
+        return None;
+    }
+    match name {
+        "default" => Some(None),
+        n if valid_model(n) => Some(Some(n.to_string())),
+        _ => None,
+    }
+}
+
 fn check_model(m: &str) -> ApiResult<()> {
     if !valid_model(m) {
         return Err(ApiError::BadRequest(
@@ -1357,6 +1376,20 @@ pub async fn input(
             return Err(e.into());
         }
     };
+    // A typed `/model` switches the agent as `PATCH {model}` does; otherwise the next
+    // `session.start` would bring the stored model back.
+    if let Some(m) = typed_model(&b.text).filter(|m| *m != s.model) {
+        db::set_model(&app.db, id, m.as_deref()).await?;
+        send_to_worker(
+            &app,
+            &s,
+            HubFrame::SessionModel {
+                session_id: id,
+                model: m,
+            },
+        );
+        app.session_changed(id);
+    }
     delivery::kick(&app, id, false).await;
     Ok(reply(StatusCode::CREATED, &row))
 }
@@ -2021,6 +2054,17 @@ mod tests {
         }
         for bad in ["", "-x y", "a b", "a;b", "--resume", &"x".repeat(65), "мод"] {
             assert!(!valid_model(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn typed_models() {
+        use super::typed_model;
+        assert_eq!(typed_model("/model fable"), Some(Some("fable".into())));
+        assert_eq!(typed_model("  /model  claude-fable-5-1 \n"), Some(Some("claude-fable-5-1".into())));
+        assert_eq!(typed_model("/model default"), Some(None));
+        for no in ["/model", "/model a b", "/models x", "model x", "/model opus[1m]", "hi /model x"] {
+            assert_eq!(typed_model(no), None, "{no}");
         }
     }
 

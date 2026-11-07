@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'preact/hooks';
 
 /** The model aliases Claude Code takes; any other name is typed in. */
-export const MODEL_ALIASES = ['opus', 'sonnet', 'haiku'] as const;
+export const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'] as const;
 
 const isAlias = (m: string) => (MODEL_ALIASES as readonly string[]).includes(m);
 
@@ -36,6 +36,7 @@ export function ModelField({ value, onChange }: { value?: string; onChange: (mod
           <option value="opus">Opus</option>
           <option value="sonnet">Sonnet</option>
           <option value="haiku">Haiku</option>
+          <option value="fable">Fable</option>
           <option value="custom">Another model…</option>
         </select>
       </label>

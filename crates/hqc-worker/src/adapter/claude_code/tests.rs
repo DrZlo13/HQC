@@ -2415,6 +2415,27 @@ async fn takeover_records_are_registered_as_own() {
     assert!(!own.is_live(runtime));
 }
 
+/// The record the CLI writes for our `set_model`, `<command-name>/model</command-name> …
+/// <command-args>name</command-args>` (seen on 2.1.312), is the adapter's: the mirror does not
+/// import it as a prompt of someone else.
+#[tokio::test]
+async fn a_model_switch_record_is_own() {
+    let runtime = Uuid::new_v4();
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+    let s = spec(Uuid::now_v7(), work.path(), runtime);
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.set_model("claude-fable-5-1").await.unwrap();
+    assert!(own.claim(runtime, Uuid::new_v4(), Some("/model claude-fable-5-1")));
+    a.kill().await.unwrap();
+}
+
 /// `show_in_vscode` (the default from the worker config): the child gets
 /// `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, whatever the worker's own environment says;
 /// without it the variable is removed and the CLI writes its own `sdk-cli`.

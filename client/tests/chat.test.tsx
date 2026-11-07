@@ -19,7 +19,7 @@ import {
   type SessionState,
   type SpawnedBy,
 } from '../src/proto';
-import { AUTO_CONFIRM } from '../src/ui/labels';
+import { AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
 import type { HubSocket } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
 
@@ -304,6 +304,7 @@ describe('model', () => {
       'Opus',
       'Sonnet',
       'Haiku',
+      'Fable',
       'Another model…',
     ]);
     await set('model', 'sonnet');
@@ -319,6 +320,19 @@ describe('model', () => {
     await set('model', '');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: null });
     expect(field('model_name')).toBeNull();
+  });
+
+  it('the header names a model switched to since the last turn at once', async () => {
+    const { app } = setup('running', { model: 'fable' });
+    await mount(app);
+    expect($('.chat-model')!.textContent).toBe('Fable');
+    expect(shownModel('opus', 'claude-opus-5-5')).toBe('claude-opus-5-5');
+    expect(shownModel('claude-fable-5-1', 'claude-fable-5-1')).toBe('claude-fable-5-1');
+    expect(shownModel(undefined, 'claude-opus-5-5')).toBe('claude-opus-5-5');
+    expect(shownModel('claude-fable-5-1', 'claude-opus-5-5')).toBe('claude-fable-5-1');
+    expect(shownModel('sonnet', undefined)).toBe('sonnet');
+    expect(modelName('sonnet')).toBe('Sonnet');
+    expect(modelName('qwen3.8-27b:q4_K')).toBe('qwen3.8-27b:q4_K');
   });
 
   it('a name that is no alias shows as typed', async () => {

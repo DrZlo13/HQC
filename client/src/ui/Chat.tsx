@@ -11,7 +11,7 @@ import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { IconArchive, IconAttach, IconBack, IconCode, IconMore, IconSend, IconShield, IconStop } from './icons';
-import { AUTO_CONFIRM, STATE_LABELS, agentsLabel, formatCost, homePath, modelName } from './labels';
+import { AUTO_CONFIRM, STATE_LABELS, agentsLabel, formatCost, homePath, modelName, shownModel } from './labels';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
 import { MoveSession } from './ProjectSettings';
@@ -35,7 +35,15 @@ export function Chat({
   phone?: boolean;
   focusSeq?: number;
 }) {
-  const chat = useMemo(() => new ChatSession(app.api, app.socket, sessionId), [app, sessionId]);
+  const chat = useMemo(() => {
+    const c = new ChatSession(app.api, app.socket, sessionId);
+    // A typed `/model` switches the session's model on the hub, which the summary does not
+    // carry: the session object is fetched again.
+    c.onStored = (text) => {
+      if (/^\/model\s+\S/.test(text.trim())) void app.refreshSession(sessionId);
+    };
+    return c;
+  }, [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
   const [requestsOnly, setRequestsOnly] = useState(false);
   const [schedules, setSchedules] = useState(false);
@@ -256,7 +264,9 @@ export function Chat({
     void act(() => app.setPermissionMode(sessionId, mode), 'Not switched');
   };
   const setAgent = (patch: AgentPatch) => void act(() => app.setAgentSettings(sessionId, patch), 'Not changed');
-  const { model, cost } = t.usageTotals();
+  const usage = t.usageTotals();
+  const model = shownModel(info?.model, usage.model);
+  const cost = usage.cost;
   const pill = <StatePill state={state} timeline={t} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.conn !== 'open' && <span class="conn-lost">offline</span>;

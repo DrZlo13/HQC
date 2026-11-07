@@ -23,6 +23,9 @@ jobs:
           --health-retries 10
     env:
       HQC_TEST_DATABASE_URL: postgresql://hqc:hqc@localhost:5432/hqc_test
+      # Full debug info makes the clippy and test build ~12 GB, about all the runner's disk
+      # holds; line tables keep file:line in backtraces and halve it.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

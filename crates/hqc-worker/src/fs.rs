@@ -10,8 +10,10 @@ use hqc_proto::frame::{DirEntry, FsListDirsResult, FsStatResult, MAX_DIR_ENTRIES
 use crate::config::Config;
 
 /// `fs.stat`; with `create` a missing folder inside `allowed_roots` is made first, at the
-/// path its existing ancestor resolves to. `Err` (a relative or non-UTF-8 path, a folder that
-/// could not be made) is answered with `error {invalid_frame}`.
+/// path its existing ancestor resolves to. Inside `allowed_roots` it names the environment a
+/// session there runs in ([`Config::environment`] of the canonical path, or of the path a
+/// missing folder would be made at). `Err` (a relative or non-UTF-8 path, a folder that could
+/// not be made) is answered with `error {invalid_frame}`.
 pub fn stat(cfg: &Config, path: &str, create: bool) -> Result<FsStatResult, String> {
     let p = Path::new(path);
     if !p.is_absolute() {
@@ -29,21 +31,30 @@ pub fn stat(cfg: &Config, path: &str, create: bool) -> Result<FsStatResult, Stri
         is_dir: false,
         canonical: None,
         inside_allowed_roots: false,
+        environment: None,
     };
+    let environment = |p: &Path| Some(cfg.environment(p).name.clone());
     match p.canonicalize() {
         Ok(c) if cfg.inside_roots(&c) => Ok(FsStatResult {
             exists: true,
             is_dir: c.is_dir(),
             canonical: Some(utf8(&c)?),
             inside_allowed_roots: true,
+            environment: environment(&c),
         }),
         Ok(_) => Ok(outside),
-        // Missing: inside or not by where it would be, its existing ancestor resolved.
-        Err(_) if cfg.inside_roots(&resolve_missing(p)) => Ok(FsStatResult {
-            inside_allowed_roots: true,
-            ..outside
-        }),
-        Err(_) => Ok(outside),
+        Err(_) => {
+            // Missing: inside or not by where it would be, its existing ancestor resolved.
+            let target = resolve_missing(p);
+            if !cfg.inside_roots(&target) {
+                return Ok(outside);
+            }
+            Ok(FsStatResult {
+                inside_allowed_roots: true,
+                environment: environment(&target),
+                ..outside
+            })
+        }
     }
 }
 
@@ -197,7 +208,8 @@ mod tests {
                     exists: false,
                     is_dir: false,
                     canonical: None,
-                    inside_allowed_roots: false
+                    inside_allowed_roots: false,
+                    environment: None,
                 },
                 "{}",
                 p.display()
@@ -240,6 +252,33 @@ mod tests {
         assert_eq!(names, ["link", "real"], "a link out is not listed");
         assert!(list_dirs(&c, root.join("out").to_str()).is_err());
         assert!(list_dirs(&c, root.join("out/inner").to_str()).is_err());
+    }
+
+    /// `fs.stat` names the environment a session in the folder runs in, by the bindings as
+    /// they resolve now: a binding written before its folder existed, through a symlink made
+    /// later, names the link's target; a missing folder is judged where it would be made;
+    /// outside `allowed_roots` nothing is named.
+    #[cfg(unix)]
+    #[test]
+    fn stat_names_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("root");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        let c = Config::parse(&format!(
+            "hub_url = \"https://h\"\nallowed_roots = [{root:?}]\n[environments.infra]\n\
+             [[env_bindings]]\npath = \"{}\"\nenvironment = \"infra\"\n",
+            root.join("later").display()
+        ))
+        .unwrap();
+        let env = |p: &Path| stat(&c, p.to_str().unwrap(), false).unwrap().environment;
+        assert_eq!(env(&root.join("real")).as_deref(), Some("default"));
+        std::os::unix::fs::symlink(root.join("real"), root.join("later")).unwrap();
+        assert_eq!(env(&root.join("real")).as_deref(), Some("infra"));
+        assert_eq!(env(&root.join("later")).as_deref(), Some("infra"));
+        assert_eq!(env(&root.join("real/missing")).as_deref(), Some("infra"));
+        assert_eq!(env(&root.join("plain")).as_deref(), Some("default"));
+        assert_eq!(env(dir.path()), None);
     }
 
     #[test]

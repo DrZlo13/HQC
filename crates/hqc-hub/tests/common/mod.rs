@@ -567,6 +567,10 @@ pub struct FakeWorker {
     pub rules: Vec<Value>,
     /// `allowed_roots` of its `hello`; [`FakeWorker::fs_reply`] answers by them.
     pub roots: Vec<String>,
+    /// `env_bindings` of its `hello`, by which [`FakeWorker::fs_reply`] names a folder's
+    /// `environment`; a test may change them after `hello` (the worker resolves its bindings
+    /// anew), and `None` answers without `environment`, as an older worker does.
+    pub env_bindings: Option<Vec<hqc_proto::frame::EnvBinding>>,
     /// From `hello.ack`.
     pub worker_id: String,
 }
@@ -592,6 +596,7 @@ impl FakeWorker {
                 see_rules: false,
                 rules: vec![],
                 roots: vec![],
+                env_bindings: Some(vec![]),
                 worker_id: String::new(),
             }),
             Err(e) => Err(e.to_string()),
@@ -661,19 +666,21 @@ impl FakeWorker {
         for (k, v) in extra.as_object().unwrap() {
             payload[k] = v.clone();
         }
+        let bindings = serde_json::from_value(payload["env_bindings"].clone()).ok();
         let id = self.send("hello", payload).await;
         let ack = self.recv().await;
         assert_eq!(ack["type"], "hello.ack", "{ack}");
         assert_eq!(ack["id"], id);
         self.roots = vec![root.to_string()];
+        self.env_bindings = bindings;
         self.worker_id = ack["payload"]["worker_id"].as_str().unwrap().to_string();
         ack
     }
 
     /// What this fake answers to `fs.stat` / `fs.list_dirs` (SPEC §5.3), by its `roots`:
     /// a path containing `missing` does not exist, one ending in `.txt` is a file, a path
-    /// ending in `/link` resolves to its parent, and `fs.list_dirs` outside the roots is an
-    /// error.
+    /// ending in `/link` resolves to its parent, inside the roots `environment` is named by its
+    /// `env_bindings`, and `fs.list_dirs` outside the roots is an error.
     pub fn fs_reply(&self, frame: &Value) -> (&'static str, Value) {
         let p = &frame["payload"];
         let rid = p["request_id"].clone();
@@ -693,19 +700,18 @@ impl FakeWorker {
                                "inside_allowed_roots": false}),
                     );
                 }
-                // `create` (SPEC 0.64): the worker makes a missing folder.
-                if path.contains("missing") && p["create"] != true {
-                    return (
-                        "result",
-                        json!({"request_id": rid, "exists": false, "is_dir": false,
-                               "inside_allowed_roots": true}),
-                    );
+                let mut st = json!({"request_id": rid, "exists": false, "is_dir": false,
+                                    "inside_allowed_roots": true});
+                if let Some(b) = &self.env_bindings {
+                    st["environment"] = hqc_proto::frame::environment_for(b, canonical).into();
                 }
-                (
-                    "result",
-                    json!({"request_id": rid, "exists": true, "is_dir": !path.ends_with(".txt"),
-                           "canonical": canonical, "inside_allowed_roots": true}),
-                )
+                // `create` (SPEC 0.64): the worker makes a missing folder.
+                if !(path.contains("missing") && p["create"] != true) {
+                    st["exists"] = true.into();
+                    st["is_dir"] = (!path.ends_with(".txt")).into();
+                    st["canonical"] = canonical.into();
+                }
+                ("result", st)
             }
             Some("fs.list_dirs") => match p["path"].as_str() {
                 None => {

@@ -166,12 +166,21 @@ export function formatCost(usd: number, precise = false): string {
   return `$${usd.toFixed(precise || usd < 0.01 ? 3 : 2)}`;
 }
 
-/** `claude-opus-5-5` → `Opus 5.5`; other names as they are. */
+const MODEL_ID = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/;
+
+/** `claude-opus-5-5` → `Opus 5.5`, an alias `fable` → `Fable`; other names as they are. */
 export function modelName(model: string): string {
-  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-\d{8})?$/.exec(model);
-  if (!m) return model;
+  const m = MODEL_ID.exec(model);
+  if (!m) return /^[a-z]+$/.test(model) ? model[0].toUpperCase() + model.slice(1) : model;
   const family = m[1][0].toUpperCase() + m[1].slice(1);
   return `${family} ${m[2]}${m[3] ? `.${m[3]}` : ''}`;
+}
+
+/** The model the header names: the one the last turn used (`used`), unless the session was
+ *  switched to another one since (`chosen`, an alias or a full name), which shows at once. */
+export function shownModel(chosen: string | undefined, used: string | undefined): string | undefined {
+  if (!chosen || !used) return chosen ?? used;
+  return used === chosen || MODEL_ID.exec(used)?.[1] === chosen ? used : chosen;
 }
 
 /** First line, cut to `max` characters, for collapsed previews. */

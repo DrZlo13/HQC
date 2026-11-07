@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.76, 2026-11-06. Status: the architecture agreed after six reviews and a survey of
+Version 0.77, 2026-11-07. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1302,7 +1302,12 @@ the rest is marked "later"):
   `model` (since 0.74) — absent: unchanged, `null`: the runtime's default; it is checked as on
   creation before anything is written, the service session answers `409 system_session`, and
   the hub sends the worker `session.model` (§5.3). It is not in `session.summary`: another
-  device sees the change when it fetches the session object. `permission_mode` in `PATCH`:
+  device sees the change when it fetches the session object. A message typed as
+  `/model <name>` (since 0.77; `POST /input`, the text being that command alone) does the same
+  once stored: `default` stores `null`, a name outside the field limits (§20) is not stored and
+  goes to the runtime only; the client fetches the session object after sending one. The chat
+  header names the model the last turn used, or the stored one when the session was switched to
+  another model since (an alias `opus` matches `claude-opus-…`). `permission_mode` in `PATCH`:
   `permission_mode` switches the session's mode and sends the worker `session.permission_mode`
   (§5.3); `auto` only by the worker owner (`403`, as for `auto_approve`), `ask` by whoever may
   manage the session; the service session: `409 system_session`. The reply carries the stored
@@ -2540,7 +2545,8 @@ Model (since 0.74). `agent.model` goes to `--model`; `session.model` for a runni
 "set_model", "model": "<name>"}}`, whose answer is only logged. Checked live on 2.1.312 with
 haiku: the CLI answers `success` with the full model name at once, also during a Bash call, and
 the next model call of the same turn already uses the new model (the turn's `modelUsage` has
-both).
+both). The CLI writes the switch into the transcript as a typed `/model <name>` record; the
+adapter counts it as its own input (§9.3), so the mirror imports no prompt from it (since 0.77).
 
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
 "interrupt"}` to stdin; the CLI ends the turn with a `result` record with `subtype:
@@ -4047,6 +4053,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.76 → 0.77 (the model: Fable, a typed `/model`, the header)
+§6: a message typed as `/model <name>` stores the session's model as `PATCH {model}` does
+(`default`: `null`) and sends the worker `session.model`, so the next `session.start` no longer
+brings the old model back; the client fetches the session object after sending it. The menu's
+model field offers Fable with Opus, Sonnet and Haiku. The header names the stored model while
+the last turn used another one. §8.1: the transcript record of a `set_model` switch is the
+adapter's own, not a prompt the mirror shows as the user's.
 
 ### 0.75 → 0.76 (an agent moves its own session: `hqc_move`)
 §7, §7.2: the tool `hqc_move(path, project?)` moves the calling session, run by hqc, by the core

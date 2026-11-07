@@ -880,9 +880,13 @@ MCP calls (worker → hub → worker):
   cancellation; the Claude Code adapter answers the `can_use_tool` for `AskUserQuestion` with
   the `deny` behavior, and the model continues the turn without answers.
 - `fs.stat` {request_id, path, create?} → `result {request_id, exists, is_dir, canonical?,
-  inside_allowed_roots}` — checking a folder before creating a workspace (§13.1). `canonical` —
-  the path with symlinks resolved, present if the path exists; `inside_allowed_roots` is computed
-  from it (for a non-existent path — from the nearest existing ancestor). Outside `allowed_roots`
+  inside_allowed_roots, environment?}` — checking a folder before creating a workspace (§13.1).
+  `canonical` — the path with symlinks resolved, present if the path exists;
+  `inside_allowed_roots` is computed from it (for a non-existent path — from the nearest existing
+  ancestor). Since 0.76 `environment` — inside `allowed_roots`, the name of the environment a
+  session in the folder runs in (§14), by the worker's bindings as it resolves them at that
+  moment, as on a `session.start` (for a non-existent path — of the path it would be made at);
+  an older worker does not send it. Outside `allowed_roots`
   the worker reports nothing about the path: `{exists: false, is_dir: false, inside_allowed_roots:
   false}`. A relative path gets `error {invalid_frame}`. Since 0.64 `create: true` (only when
   the user asked for it) makes a missing folder with its missing parents first, at the path its
@@ -1795,26 +1799,35 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   list nor delete schedules; the owner does that in the client (§6).
 - `hqc_move(path, project?)` (since 0.76) — the calling session moves to folder `path` of its
   worker, by the core of `POST /api/sessions/{id}/move` (§6). The path is the agent's text the
-  owner may be shown: one with a control character is `invalid_args` before anything else, and
-  so is a missing folder's path with a `.` or `..` component. The hub first looks at the folder
-  with the worker's `fs.stat` without `create`, on the connection the call came by, as a spawn
-  with a worktree does; a folder the worker refuses is the call's error at once, and so is one
-  whose canonical path has a control character (that path goes on the card). The session
-  moves at once (`create: false`) only into a ready workspace (not `creating` or `failed`) of
-  its owner on that worker at exactly that canonical path whose environment (`environment_for`
-  over the worker's `env_bindings` of its last `hello`, §14) is that of the session's folder
-  now. Anything else — a missing folder, a folder that is no workspace of the owner, another
-  environment — waits for the owner's answer, unless the move would be refused anyway: before
+  owner may be shown: one with a control character or a bidirectional control (U+061C, U+200E,
+  U+200F, U+202A–U+202E, U+2066–U+2069, which reorder the path shown) is `invalid_args` before
+  anything else, and so is a missing folder's path with a `.` or `..` component. The hub first
+  looks at the folder with the worker's `fs.stat` without `create`, on the connection the call
+  came by, as a spawn with a worktree does; a folder the worker refuses is the call's error at
+  once, and so is one whose canonical path has such a character (that path goes on the card).
+  The session moves at once (`create: false`) only into a ready workspace (not `creating` or
+  `failed`) of its owner on that worker at exactly that canonical path whose environment is
+  that of the session's folder now, both as the worker names them in `fs.stat` (`environment`,
+  §5.3: its bindings as it resolves them then, which the agent starts by; not the hub's copy of
+  `env_bindings` from `hello`, which may differ, e.g. for a binding through a symlink made
+  since): the hub sends a second `fs.stat`, of the session's folder, for it, and an environment
+  the worker does not name (an older worker) counts as another one. Anything else — a missing
+  folder, a folder that is no workspace of the owner, another environment — waits for the
+  owner's answer, unless the move would be refused anyway: before
   it opens a request the hub runs the endpoint's refusals of the calling session (its `409`s,
   below), resolves `project` (unknown: `not_found`), checks the path for an overlap as the
   endpoint does before it makes a missing folder (`workspace_conflict`) and checks a workspace
   of the owner at exactly that path: not ready, it is `409 workspace_not_ready` as for a new
   session there (`unavailable`, with the reason); of another project than `project` names,
-  `invalid_args`; any of them is the call's error at once, and no card is shown. The request is
+  `invalid_args`; any of them is the call's error at once, and no card is shown. A session has
+  at most one such request open: while the request of another call waits, the call is
+  `unavailable` ("a move already waits for the user's answer") and no card is shown; a repeat
+  of the waiting call is not refused (below). The request is
   a PendingRequest `move` of the calling session (§3) with the hub's `approval.request` in its
   feed (§10.1), `author {kind: system}`, `tool: hqc_move`, a `description` saying why it asks
   (a new folder, made if allowed; a folder that is no workspace of the owner yet; the
-  environment of the target and that of the folder now) and where the session lands ("in
+  environment of the target and that of the folder now, or that the worker does not name one)
+  and where the session lands ("in
   project <name>", of `project` or of the workspace at the path, or "in a new project <folder
   name>"), with the path on a line of its own — the canonical path of that `fs.stat`, or the
   path as given when the folder is missing — and, for a folder that is no workspace yet, the
@@ -1827,7 +1840,9 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   gets `409 request_closed`. `once`: the hub moves
   the session into the path on the card with `create: true` (a missing folder is made, inside
   `allowed_roots` only) and goes on as after a move at once; a move that fails then gives the
-  call its error; a hub that stops before it has stored the call's result carries the move out
+  call its error; a result the hub fails to store is stored again after a pause (1 s at first,
+  doubled each time up to 60 s), and the move is not carried out again for it; a hub that stops
+  before it has stored the call's result carries the move out
   again once the session's worker sends `hello` to the hub started anew (§3). `deny`:
   `unavailable` ("the user did not allow the move"), nothing is made. A cancellation of
   the request (§10.1) gives the call `unavailable`; after a worker restart nothing is sent, the
@@ -1844,30 +1859,32 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   endpoint's; the result is `{address, project, path}` — the session's new address, its
   project's slug and the canonical path. The caller must be run by hqc (`locked_by: hqc`), and
   the chain of the input its turn runs on (the one the call's chain is taken from, §7.1) must
-  not be capped to `ask` by another session (`capped_by` other than the session's own address),
-  whatever the session's own mode: a turn another agent in `ask` started moves nothing
-  (`unavailable`), before `fs.stat`; a cap the session set itself does not refuse — any chain
-  whose first session in `ask` up the chain is the caller: the input after its own move in
+  not be capped to `ask`, whoever capped it and whatever the session's own mode: such a turn
+  moves nothing (`unavailable`, naming `capped_by`), before `fs.stat` — a turn another agent in
+  `ask` started, and as well one the session capped itself: the input after its own move in
   `ask`, another agent's answer to a message the session sent in `ask`, a run of its own
-  `hqc_schedule` made in `ask`. Errors: `invalid_args` with the worker's reason for a folder
+  `hqc_schedule` made in `ask`. A person's input has no cap of its own (§7.1): a session in `ask`
+  moves when its user asks in the chat, unless the input carries buffered messages of a session
+  in `ask` (T40), which cap it. Errors: `invalid_args` with the worker's reason for a folder
   outside the roots or one it cannot make, for a path or a canonical path with a control
-  character or a missing folder's path with `.` or `..`, and for a path that is another
+  character or a bidirectional control or a missing folder's path with `.` or `..`, and for a
+  path that is another
   project's workspace while
   `project` names another; `invalid_args` with the text `workspace_conflict` for a folder
   inside or around another workspace; `not_found` for an unknown project; `unavailable` for a
   session that may not move (the endpoint's `409`s: not Claude Code, no workspace, VS Code or a
   live holder, a subagent still running, a worker without `claude_code.moves`, archived), for a
-  workspace that is not ready, for a session not run by hqc or under another session's `ask`
-  cap; `limit_exceeded` when the call's chain is at its limit, before anything moves. A move that
+  workspace that is not ready, for a session not run by hqc or under an `ask` cap, and while
+  another move of the session waits for the owner; `limit_exceeded` when the call's chain is at
+  its limit, before anything moves. A move that
   waited for the owner meets the endpoint's refusals again after the answer. Then the hub queues
   the owner's `user.message` "You moved to <path>, project <name>; continue the task." in the
   session, as a run of an agent's `hqc_schedule` does (§16): no `peer`, so it waits for no
   answer as an ask would; its chain is the chain of the call's turn (kept in the request while
-  it waits) moved on (§7.1), built after the move: an `ask` cap there is the session's own
-  (another's refused the call), and is named by the session's address in the new project, so a
-  move from the turn the input starts is not refused for it; that turn runs in the session's
-  own mode, or in `ask` when the call's turn carried the session's own cap, and moves after
-  moves end at the hops limit. The worker writes no input into the
+  it waits; it has no `ask` cap, which refused the call) moved on (§7.1), built after the move,
+  so the cap of a session in `ask` is named by its address in the new project; that turn runs
+  in the session's own mode: in `ask` a move from it is refused for that cap, in `auto` moves
+  after moves end at the hops limit. The worker writes no input into the
   running turn while a move waits (§17.2), so that input starts the agent's first turn in the
   new folder. Once per `request_id` (§5.2): the input's `event_id` is `once_id("hqc_move wake",
   …)`; a repeat of a move made at once finds that input and answers from where the session is,
@@ -4038,14 +4055,19 @@ endpoint's codes (`invalid_args`, with `workspace_conflict` in the text for an o
 `not_found`; `unavailable`; `limit_exceeded` for a chain at its limit, before anything moves).
 After the security review: it looks at the folder with `fs.stat` without `create` and moves at
 once only into a ready workspace of the owner at exactly that path in the environment of the
-session's folder now; a missing folder, one that is no workspace of the owner and another
+session's folder now, both as the worker names them in `fs.stat` (§5.3: the new `environment`
+of its answer, by its bindings as it resolves them then, not the hub's copy from `hello`; an
+answer without it, from an older worker, asks); a missing folder, one that is no workspace of the owner and another
 environment wait for the owner's answer, a card in the session's own chat (not the worker's
 flow of §10.2) that names the project the session lands in and, for a folder that is no
 workspace yet, that it becomes a mirrored workspace whose Claude Code sessions are imported,
 and the call is deferred as `hqc_ask` is; `once` moves with `create: true`, `deny` and a
-cancellation are `unavailable`; a turn whose chain another session capped to `ask` moves
-nothing, whatever the session's own mode. A path or a canonical path with a control character,
-and a missing folder's path with `.` or `..`, is `invalid_args`. A move the endpoint would refuse anyway (its
+cancellation are `unavailable`; a turn whose chain is capped to `ask` moves nothing, whoever
+capped it (the session itself too) and whatever the session's own mode; a person's input has no
+cap of its own (one that carries buffered messages of a session in `ask` has theirs). A session
+has at most one move request open: another call meanwhile is `unavailable`. A path or a
+canonical path with a control character or a bidirectional control, and a missing
+folder's path with `.` or `..`, is `invalid_args`. A move the endpoint would refuse anyway (its
 `409`s, an unknown project, an overlap of the path, a workspace at the path that is not ready
 or of another project than `project`) is the call's error before any card. The move lands only
 in the canonical path it was decided on (the one on the card): a different canonical path from
@@ -4056,12 +4078,12 @@ call waits for the owner. §3 PendingRequest, §6 `GET /api/requests`, §10.1, �
 answered by the session owner only, without `message`, never by `auto_approve`, counted as any
 open request; the client's card says "The agent asks to move this session"; an allowed move
 whose result the previous hub process did not store (it stopped meanwhile) is found on start
-and carried out again once the session's worker sends `hello`. It then
+and carried out again once the session's worker sends `hello`; a result the hub fails to store
+is stored again after a pause growing from 1 s to 60 s, the move not carried out again. It then
 queues the owner's input "You moved to …; continue the task." as a run of an agent's
-`hqc_schedule` (§16): a `user.message` in the call's chain moved on, built after the move (a
-cap of the session's own is named by its new address), so the turn runs in the session's own
-mode or under that cap; a cap of the session's own (the first session in `ask` up the chain is
-the caller) never refuses the call; once per `request_id`, a repeat of a move made at once answered from that input before
+`hqc_schedule` (§16): a `user.message` in the call's chain moved on, built after the move (the
+cap of a session in `ask` is named by its new address), so the turn runs in the session's own
+mode; once per `request_id`, a repeat of a move made at once answered from that input before
 anything the turn's chain decides. `INSTRUCTIONS` name it: only when the user asks, and
 a folder other than one of the user's workspaces in the same environment waits for the user. A
 move from the client still queues nothing (§6). §4: that input is a `user.message` the hub

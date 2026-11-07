@@ -141,6 +141,11 @@ pub async fn move_session(
             .await?
             .map_or_else(|| "?".to_string(), |p| p.name);
         db::move_session(&app.db, &s, project.id, ws.id).await?;
+        // The row is moved: the next input starts the agent in the new folder, also when a
+        // step below fails and the input goes out before a repeat of the move.
+        if let Some(conn) = app.workers.get(worker.id) {
+            conn.st.lock().await.sessions.entry(s.id).or_default().start = StartState::NotStarted;
+        }
         let moved = db::session(&app.db, s.id)
             .await?
             .ok_or(ApiError::NotFound)?;

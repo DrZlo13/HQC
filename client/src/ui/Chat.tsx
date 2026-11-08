@@ -505,6 +505,8 @@ export function Chat({
       )}
       {!system && !disabled && !sheet && (
         <Composer
+          initial={app.draft(sessionId)}
+          onDraft={(text) => app.setDraft(sessionId, text)}
           insertQuote={insertQuote}
           phone={phone}
           commands={info?.commands}
@@ -774,6 +776,8 @@ export function Composer({
   onFiles = () => {},
   onRemove = () => {},
   insertQuote,
+  initial = '',
+  onDraft,
 }: {
   onSend: (text: string) => void;
   placeholder?: string;
@@ -786,8 +790,17 @@ export function Composer({
   /** Set here to a function that puts a quote of the feed into the message (`withQuote`),
    *  focused, the caret at its end. */
   insertQuote?: { current: ((text: string) => void) | null };
+  /** The text not sent last time (a draft), and where every change of it goes. */
+  initial?: string;
+  onDraft?: (text: string) => void;
 }) {
-  const [text, setText] = useState('');
+  const [text, setText] = useState(initial);
+  const typed = useRef(false);
+  useEffect(() => {
+    // Not the draft it opened with: that one is kept already.
+    if (typed.current) onDraft?.(text);
+    typed.current = true;
+  }, [text]);
   const area = useRef<HTMLTextAreaElement>(null);
   const caretToEnd = useRef(false);
   useEffect(() => {

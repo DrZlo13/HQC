@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.77, 2026-11-07. Status: the architecture agreed after six reviews and a survey of
+Version 0.78, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1477,7 +1477,10 @@ projects: an amber dot while a session waits, else a light one while one has unr
 are dragged (or moved with ↑/↓ when focused) instead of opened, ✓ stores the order with `PUT
 /api/me/project_order`, ✕ drops it; a phone's chips follow the same order. Since 0.64 a project opened on a desktop opens the session last open in it
 on this device (kept in the browser's storage; none, archived or deleted: the empty main
-column); a phone's project screen stays its session list. The theme is the user's `theme` plus the current project's `color`, as CSS
+column); a phone's project screen stays its session list. Since 0.78 a message typed into a
+session and not sent stays its draft on this device (the browser's storage, `hqc.drafts`): the
+input shows it again when the session is opened, and the session's row, unless it is the one
+open, says "Draft"; sending the message or clearing the input drops it. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on
 them (amber waiting, green online, red danger, violet between sessions). The project settings
 (`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance" dialog: the name,
@@ -4053,6 +4056,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.77 → 0.78 (drafts)
+§6 client layout: what is typed into a session and not sent stays its draft on this device;
+the input shows it again when the session opens, and the session's row in the list says
+"Draft" while another session is open. Sending or clearing the input drops it.
 
 ### 0.76 → 0.77 (the model: Fable, a typed `/model`, the header)
 §6: a message typed as `/model <name>` stores the session's model as `PATCH {model}` does

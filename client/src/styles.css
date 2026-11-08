@@ -833,6 +833,12 @@ select.input {
   text-overflow: ellipsis;
 }
 
+.session-draft {
+  flex: none;
+  font-size: 12px;
+  color: var(--accent);
+}
+
 .session-when {
   flex: none;
   font-size: 12px;

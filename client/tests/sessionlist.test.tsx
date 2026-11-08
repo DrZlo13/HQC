@@ -232,6 +232,22 @@ describe('SessionList (desktop column)', () => {
     expect(sub('Stone textures').querySelector('.session-agents')!.textContent).toBe(' · 2 agents');
   });
 
+  it('marks a session with an unsent message as a draft, not the open one', async () => {
+    localStorage.clear();
+    const app = makeApp(LIST);
+    app.setDraft('stones', 'half a thought');
+    app.setDraft('net', 'typed here');
+    await mount(<SessionList app={app} current="net" />);
+    const row = (title: string) =>
+      [...root.querySelectorAll('.session-row')].find((r) => r.querySelector('.session-title')!.textContent === title)!;
+    expect(row('Stone textures').querySelector('.session-draft')!.textContent).toBe('Draft');
+    expect(row('Network sync').querySelector('.session-draft')).toBeNull();
+    expect(row('Step determinism').querySelector('.session-draft')).toBeNull();
+    await act(async () => app.setDraft('stones', '  '));
+    expect(row('Stone textures').querySelector('.session-draft')).toBeNull();
+    localStorage.clear();
+  });
+
   it('creates a session with a model from the form', async () => {
     const base = hubApi();
     let app!: AppState;

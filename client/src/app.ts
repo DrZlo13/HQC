@@ -24,6 +24,18 @@ import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 /** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
 export const ARCHIVE_UNDO_MS = 5000;
 
+/** Unsent messages by session id, on this device: a convenience, so storage that fails or is
+ *  empty only loses them on a reload. */
+const DRAFTS_KEY = 'hqc.drafts';
+function loadDrafts(): Map<string, string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(DRAFTS_KEY) ?? '{}');
+    return new Map(Object.entries(v ?? {}).filter((e): e is [string, string] => typeof e[1] === 'string'));
+  } catch {
+    return new Map();
+  }
+}
+
 export class AppState {
   me: Me | null = null;
   error: string | null = null;
@@ -48,6 +60,7 @@ export class AppState {
   /** A list action the hub refused (archive, restore, delete, rename, order). */
   listNotice: string | null = null;
   private readonly listeners = new Set<() => void>();
+  private readonly drafts = loadDrafts();
   private refreshing: Promise<void> | null = null;
 
   constructor(
@@ -63,6 +76,25 @@ export class AppState {
   onChange(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  /** The message typed into session `id` and not sent yet; `''` when none. */
+  draft(id: string): string {
+    return this.drafts.get(id) ?? '';
+  }
+
+  /** Keeps what is typed into session `id` until it is sent; the list learns only when the
+   *  session gets or loses a draft. */
+  setDraft(id: string, text: string): void {
+    const had = this.drafts.has(id);
+    if (text.trim() === '') this.drafts.delete(id);
+    else this.drafts.set(id, text);
+    try {
+      localStorage.setItem(DRAFTS_KEY, JSON.stringify(Object.fromEntries(this.drafts)));
+    } catch {
+      // Not kept past a reload.
+    }
+    if (had !== this.drafts.has(id)) this.changed();
   }
 
   private changed(): void {

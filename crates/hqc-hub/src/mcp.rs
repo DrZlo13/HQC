@@ -304,7 +304,7 @@ struct ListArgs {
 }
 
 /// `hqc_list_sessions(project?)` (SPEC §7): the owner's sessions, archived ones and the
-/// workers' service sessions left out, as `{address, title, status, current?}`.
+/// workers' service sessions left out, as `{address, title, status, subagents?, current?}`.
 async fn list_sessions(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
     let a: ListArgs = args(v)?;
     let owner = caller.owner_id;
@@ -336,6 +336,10 @@ async fn list_sessions(app: &AppState, caller: &SessionRow, v: Value) -> ToolRes
                 "title": s.title,
                 "status": s.state,
             });
+            // Background subagents run on after the turn: an idle session may still work.
+            if s.subagents > 0 {
+                v["subagents"] = json!(s.subagents);
+            }
             if s.id == caller.id {
                 v["current"] = json!(true);
             }

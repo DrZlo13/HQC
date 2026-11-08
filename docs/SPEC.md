@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.78, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.79, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1784,10 +1784,11 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   `branch` then.
 - `hqc_list_sessions(project?)` — addresses, titles, statuses. Since 0.33 (T30): `project` is
   a slug or an id of the owner's project (another owner's or an unknown one: `not_found`); the
-  result is `{sessions: [{address, title, status, current?}], truncated}`: the owner's
+  result is `{sessions: [{address, title, status, subagents?, current?}], truncated}`: the owner's
   sessions, the most recently active first, at most 200 (`truncated: true` beyond), archived
   sessions and the workers' service sessions left out; `status` is the session's `state`
-  (§17.1); `current: true` marks the calling session.
+  (§17.1); `subagents` (since 0.79) the subagents running now, when any, also of an `idle`
+  session whose background subagents outlive its turn; `current: true` marks the calling session.
 - `hqc_search_history(query, project?, fuzzy?)` — history search, respecting grants. Since
   0.36 (T33): `hqc_search_history(query, project?, fuzzy?, cursor?)` runs the query of `GET
   /api/search` (§6, §15) for the calling session's owner, 20 hits per call; the result is
@@ -4056,6 +4057,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.78 → 0.79 (a session with running subagents is active)
+§7: `hqc_list_sessions` names the subagents running in a session (`subagents`, when any), so
+an `idle` session whose background subagents still run no longer looks like it does nothing.
+§6 client layout: a worker's row in the sidebar counts such a session as active.
 
 ### 0.77 → 0.78 (drafts)
 §6 client layout: what is typed into a session and not sent stays its draft on this device;

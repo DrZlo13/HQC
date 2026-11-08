@@ -217,7 +217,23 @@ async fn list_sessions_of_the_owner() {
         .find(|s| s["address"] == "personal/other-one")
         .unwrap();
     assert!(theirs_view.get("current").is_none());
-    let _ = other;
+    assert!(theirs_view.get("subagents").is_none());
+
+    // An idle session whose background subagents run says how many.
+    sqlx::query("UPDATE sessions SET subagents = 2 WHERE id = $1")
+        .bind(other.parse::<Uuid>().unwrap())
+        .execute(db)
+        .await
+        .unwrap();
+    let r = list(&mut w, &token, json!({})).await;
+    let other_view = r["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["address"] == "personal/other-one")
+        .unwrap()
+        .clone();
+    assert_eq!(other_view["subagents"], 2, "{r}");
 
     // By slug and by id; an empty project; another user's project and an unknown one are
     // not found.

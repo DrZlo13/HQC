@@ -309,6 +309,14 @@ describe('SessionList (desktop column)', () => {
     expect(root.querySelector('.empty')!.textContent).toBe('No sessions match');
   });
 
+  it('counts an idle session whose subagents still run as active on its worker', async () => {
+    const idle = LIST.find((s) => s.worker_id === 'wk1' && s.state === 'idle')!;
+    const list = LIST.map((s) => (s.id === idle.id ? { ...s, subagents: 2 } : s));
+    await mount(<SessionList app={makeApp(list)} />);
+    const home = [...root.querySelectorAll('.worker-list .worker-row')].find((r) => r.querySelector('.worker-name')!.textContent === 'home-mac')!;
+    expect(home.querySelector('.worker-state')!.textContent).toBe('3 active');
+  });
+
   it('lists the workers with their active sessions, offline ones grey', async () => {
     await mount(<SessionList app={makeApp()} />);
     const rows = [...root.querySelectorAll('.worker-list .worker-row')];

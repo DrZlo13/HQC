@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.87, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
+Version 0.88, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1535,9 +1535,11 @@ session and not sent stays its draft on this device (the browser's storage, `hqc
 input shows it again when the session is opened, and the session's row, unless it is the one
 open, says "Draft"; sending the message or clearing the input drops it. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on
-them (amber waiting, green online, red danger, violet between sessions). The project settings
-(`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance" dialog: the name,
-icon as an emoji, letters or an image, the color, the app theme, a live preview; on a phone a
+them (amber waiting, green online, red danger, violet between sessions). Since 0.88 the app
+theme is picked on the Settings page (`#/settings`, the first section "Theme": a tile per theme,
+a click applies it at once). The project settings (`#/p/<id>/settings`, the gear) have
+Appearance (the "Project appearance" dialog: the name, icon as an emoji, letters or an image,
+the color, a live preview in the app theme; before 0.88 it also had the app theme; on a phone a
 full-screen sheet; "Delete project" next to the button that opens it; since 0.64, before it a
 section "Project" had "Rename" and "Delete project"; the personal project has neither the name
 field nor the delete) and Workspaces (the workspace records with "VS Code
@@ -4187,6 +4189,10 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.87 → 0.88 (the app theme in Settings)
+§6: the app theme moved from the "Project appearance" dialog to the Settings page, a tile per
+theme applied at once.
 
 ### 0.86 → 0.87 (at most 256 outbox entries un-acked)
 §5.2: the worker keeps at most 256 outbox entries un-acked (`MAX_IN_FLIGHT` in the worker's

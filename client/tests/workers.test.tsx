@@ -29,7 +29,12 @@ const buttons = (text: string) =>
   [...root.querySelectorAll<HTMLButtonElement>('button')].filter((b) => b.textContent?.trim() === text);
 
 function settingsApp(api: Partial<Api>) {
-  return { api, me: { email: 'me@example.com' }, refreshSessions: vi.fn(async () => {}) } as unknown as AppState;
+  return {
+    api,
+    me: { email: 'me@example.com' },
+    theme: () => 'warm',
+    refreshSessions: vi.fn(async () => {}),
+  } as unknown as AppState;
 }
 
 const live: WorkerInfo = { id: 'w-live', name: 'home-mac', os: 'macos', status: 'online' };

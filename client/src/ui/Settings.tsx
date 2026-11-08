@@ -2,7 +2,17 @@ import { useEffect, useState } from 'preact/hooks';
 import { IconBack } from './icons';
 import type { AppState } from '../app';
 import { ApiError, type WorkerInfo } from '../api';
+import type { Theme } from '../proto';
 import { pushStatus, subscribePush, type PushStatus } from '../push';
+import { BASES, THEMES } from '../theme';
+
+/** A theme tile's swatch: the background at 60 %, then the cards (the border for the
+ *  high-contrast theme). */
+function swatch(id: Theme): string {
+  const b = BASES[id];
+  const side = id === 'contrast' ? b.border : b.surface;
+  return `linear-gradient(90deg, ${b.bg} 0 60%, ${side} 60% 100%)`;
+}
 
 const PUSH_TEXT: Record<PushStatus, string> = {
   unsupported:
@@ -18,6 +28,7 @@ export function Settings({ app }: { app: AppState }) {
   const [push, setPush] = useState<PushStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [themeError, setThemeError] = useState<string | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
 
   useEffect(() => {
@@ -60,6 +71,16 @@ export function Settings({ app }: { app: AppState }) {
     }
   };
 
+  /** The app theme (T49) for every project and device: applied at once, no "Save". */
+  const pickTheme = async (t: Theme) => {
+    setThemeError(null);
+    try {
+      await app.setTheme(t);
+    } catch (e) {
+      setThemeError((e as Error).message);
+    }
+  };
+
   const subscribe = async () => {
     setBusy(true);
     setError(null);
@@ -72,6 +93,7 @@ export function Settings({ app }: { app: AppState }) {
     }
   };
 
+  const theme = app.theme();
   return (
     <section class="page">
       <header class="bar">
@@ -84,6 +106,25 @@ export function Settings({ app }: { app: AppState }) {
         </div>
       </header>
       <div class="page-body">
+        <h2>Theme</h2>
+        <div class="theme-picks">
+          <div class="base-picks">
+            {THEMES.map((t) => (
+              <button
+                type="button"
+                key={t.id}
+                class={`base-pick ${theme === t.id ? 'is-on' : ''}`}
+                aria-pressed={theme === t.id}
+                onClick={() => void pickTheme(t.id)}
+              >
+                <span class="base-swatch" style={{ background: swatch(t.id) }} />
+                <span>{t.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        {themeError && <div class="error-text">{themeError}</div>}
+
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>
         {(push === 'available' || push === 'subscribed') && (

@@ -77,8 +77,8 @@ only push.
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the
     project's workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
     sessions", make default, remove), rename and delete; `Appearance.tsx` — the project's tile
-    (`ProjectGlyph`) and the "Project appearance" dialog (icon, color, app theme, live preview;
-    a full-screen sheet on a phone);
+    (`ProjectGlyph`) and the "Project appearance" dialog (icon, color, a live preview in the app
+    theme; a full-screen sheet on a phone);
   - `Chat.tsx` — the composer completes `/` from the session's `commands` (T27: arrows, Tab or
     Enter, Esc, a tap);
   - `Chat.tsx` — the header (state pill, worker, path, model and cost from `usage`,
@@ -88,7 +88,8 @@ only push.
     reply, `usage` under the final answer, `tool.call` inside the card of its request;
   - `cards.tsx` — messages, tool groups, service lines, the agent's question;
     `permission.tsx` — the permission card (Enter/Esc, reply with text, collapsed line);
-  - `Settings`, `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
+  - `Settings` (the app theme first, applied on a click; notifications; workers), `Enroll` —
+    pages; `Markdown.tsx` — markdown and code blocks with
     "Copy"; `icons.tsx` — icons; `labels.ts` — labels and formats.
   `src/clipboard.ts` — copying through `navigator.clipboard`, or a hidden textarea if the API is missing
   (http in a LAN).

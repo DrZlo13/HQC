@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
-import type { Project, ProjectColor, Theme } from '../proto';
-import { BASES, PROJECT_COLORS, STATUS, THEMES, alpha, colorHex, themeVars } from '../theme';
+import type { Project, ProjectColor } from '../proto';
+import { PROJECT_COLORS, alpha, colorHex, themeVars } from '../theme';
 import { IconCross } from './icons';
 import { projectInitials } from './sessions';
 
@@ -42,9 +42,9 @@ export function iconFileError(f: File): string | null {
   return null;
 }
 
-/** "Project appearance" (T49, `Appearance.dc.html`): icon, project color, app theme, with a
- *  live preview of the project bar and the sidebar. Nothing is saved before "Save"; a phone
- *  shows it as a full-screen sheet. */
+/** "Project appearance" (T49, `Appearance.dc.html`): name, icon and project color, with a
+ *  live preview of the project bar and the sidebar in the app theme (picked on the Settings
+ *  page). Nothing is saved before "Save"; a phone shows it as a full-screen sheet. */
 export function AppearanceDialog({
   app,
   project,
@@ -65,7 +65,6 @@ export function AppearanceDialog({
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [title, setTitle] = useState(project.name);
   const [color, setColor] = useState<ProjectColor>(project.color);
-  const [base, setBase] = useState<Theme>(app.theme());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const box = useRef<HTMLElement>(null);
@@ -119,7 +118,6 @@ export function AppearanceDialog({
       }
       if (patch.color || patch.icon) await app.setAppearance(project.id, patch);
       if (!project.is_personal && newName !== project.name) await app.renameProject(project.id, newName);
-      await app.setTheme(base);
       onClose();
     } catch (e) {
       setError((e as Error).message);
@@ -138,7 +136,7 @@ export function AppearanceDialog({
         role="dialog"
         aria-modal="true"
         aria-label="Project appearance"
-        style={themeVars(colorHex(color), base)}
+        style={themeVars(colorHex(color), app.theme())}
       >
         <header class="appearance-head">
           <div class="appearance-title">
@@ -255,32 +253,6 @@ export function AppearanceDialog({
                 every project.
               </span>
             </div>
-
-            <div class="ap-section">
-              <div class="ap-row-base">
-                <span class="ap-label">App theme</span>
-                <span class="ap-note">for all projects</span>
-              </div>
-              <div class="base-picks">
-                {THEMES.map((t) => (
-                  <button
-                    type="button"
-                    key={t.id}
-                    class={`base-pick ${base === t.id ? 'is-on' : ''}`}
-                    aria-pressed={base === t.id}
-                    onClick={() => setBase(t.id)}
-                  >
-                    <span
-                      class="base-swatch"
-                      style={{
-                        background: `linear-gradient(90deg, ${BASES[t.id].bg} 0 60%, ${t.id === 'contrast' ? BASES[t.id].border : BASES[t.id].surface} 60% 100%)`,
-                      }}
-                    />
-                    <span>{t.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
 
           <div class="appearance-preview" aria-hidden="true">
@@ -338,7 +310,7 @@ function PreviewRow({ on, dot, title, sub }: { on?: boolean; dot: 'run' | 'wait'
       <span class={`dot dot-${dot}`} />
       <span class="preview-text">
         <span class="preview-title">{title}</span>
-        <span class="preview-sub" style={dot === 'wait' ? { color: STATUS.waiting } : undefined}>
+        <span class="preview-sub" style={dot === 'wait' ? { color: 'var(--waiting)' } : undefined}>
           {sub}
         </span>
       </span>

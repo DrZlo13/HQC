@@ -1,6 +1,7 @@
 // T49 through the UI against the mock hub: the project settings page (Appearance, the
 // workspaces moved in from the sidebar, Project), the Appearance dialog with its live preview,
-// and the theme on the document root following the user's theme and the current project.
+// the app theme on the Settings page, and the theme on the document root following the user's
+// theme and the current project.
 
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { render } from 'preact';
@@ -109,7 +110,7 @@ it('opens the project settings from the sidebar gear: appearance, workspaces, pr
   expect($('.project-settings .bar .state')!.textContent).toBe('Personal');
   expect($$('.project-settings h2').map((h) => h.textContent)).toEqual(['Appearance', 'Workspaces']);
   // The personal project gets an appearance, but no rename or delete (SPEC §3).
-  expect($('.ps-look .ps-color')!.textContent).toBe('Slate · Warm theme');
+  expect($('.ps-look .ps-color')!.textContent).toBe('Slate');
   const row = await until('workspace row', () => $('.workspace-row'));
   expect(row.querySelector('.workspace-name')!.textContent).toBe('home-mac');
   // The worker's name once the workers are loaded.
@@ -123,7 +124,7 @@ it('opens the project settings from the sidebar gear: appearance, workspaces, pr
   expect($('.btn-delete-project')).toBeNull();
 });
 
-it('previews in the dialog, changes nothing on Cancel and saves color, icon and theme', async () => {
+it('previews in the dialog, changes nothing on Cancel and saves color and icon', async () => {
   const pid = app.me!.personal_project_id;
   expect(rootVar('--accent')).toBe(colorHex('slate'));
   expect(rootVar('--bg')).toBe('#1D1B18');
@@ -137,10 +138,12 @@ it('previews in the dialog, changes nothing on Cancel and saves color, icon and 
   button('Emoji', '[role=dialog]')!.click();
   (await until('emoji grid', () => $<HTMLButtonElement>('button[aria-label="Use 🛰️"]')))!.click();
   $<HTMLButtonElement>('button.color-pick[aria-label="Plum"]')!.click();
-  button('Graphite', '[role=dialog]')!.click();
-  // Live: the dialog and its preview take the choice, the app does not until Save.
+  // The app theme is on the Settings page, not here.
+  expect(button('Graphite', '[role=dialog]')).toBeUndefined();
+  // Live: the dialog and its preview take the choice, in the app theme; the app does not
+  // until Save.
   await until('preview', () => $('.preview-tile.is-current')?.textContent === '🛰️');
-  const preview = themeVars(colorHex('plum'), 'graphite');
+  const preview = themeVars(colorHex('plum'), 'warm');
   const box = $('[role=dialog]')!;
   expect(box.style.getPropertyValue('--accent')).toBe(preview['--accent']);
   expect(box.style.getPropertyValue('--rail')).toBe(preview['--rail']);
@@ -158,21 +161,19 @@ it('previews in the dialog, changes nothing on Cancel and saves color, icon and 
   button('Emoji', '[role=dialog]')!.click();
   (await until('emoji grid', () => $<HTMLButtonElement>('button[aria-label="Use 🛰️"]')))!.click();
   $<HTMLButtonElement>('button.color-pick[aria-label="Plum"]')!.click();
-  button('Graphite', '[role=dialog]')!.click();
   await until('picked', () => $('.color-pick.is-on')?.getAttribute('aria-label') === 'Plum');
   button('Save', '[role=dialog]')!.click();
   await until('saved', () => !$('[role=dialog]'));
   expect(app.projects.get(pid)).toMatchObject({ color: 'plum', icon: { kind: 'emoji', value: '🛰️' } });
-  expect(app.me!.theme).toBe('graphite');
+  expect(app.me!.theme).toBe('warm');
   // On the hub, as another device sees it after a reload.
-  expect((await app.api.me()).theme).toBe('graphite');
   expect((await app.api.projects()).find((p) => p.id === pid)).toMatchObject({ color: 'plum', icon: { value: '🛰️' } });
-  // The root follows: the project's accent, the graphite neutrals; the rail shows the emoji.
+  // The root follows: the project's accent, the neutrals of the theme; the rail shows the emoji.
   await until('root vars', () => rootVar('--accent') === colorHex('plum'));
-  expect(rootVar('--bg')).toBe('#1A1C1F');
+  expect(rootVar('--bg')).toBe('#1D1B18');
   expect(rootVar('--waiting')).toBe('#F2B35B');
   expect($('.rail-project.is-current')!.textContent).toBe('🛰️');
-  expect($('.ps-look .ps-color')!.textContent).toBe('Plum · Graphite theme');
+  expect($('.ps-look .ps-color')!.textContent).toBe('Plum');
 });
 
 it('saves letters in upper case and uploads an image; a wrong file never leaves the client', async () => {
@@ -217,18 +218,32 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
   expect(res.headers.get('content-type')).toBe('image/png');
 });
 
+it('picks the app theme on the Settings page: a tile applies at once and goes to the hub', async () => {
+  location.hash = '#/settings';
+  await until('theme tiles', () => $$('.theme-picks .base-pick').length === 3);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Notifications', 'Workers']);
+  expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
+  button('Graphite', '.theme-picks')!.click();
+  await until('picked', () => app.me?.theme === 'graphite');
+  // On the hub (`PATCH /api/me`), as another device sees it after a reload.
+  expect((await app.api.me()).theme).toBe('graphite');
+  // No "Save": the root takes it at once.
+  await until('root vars', () => rootVar('--bg') === '#1A1C1F');
+  expect($$('.base-pick[aria-pressed=true]').map((b) => b.textContent)).toEqual(['Graphite']);
+});
+
 it('is a full-screen sheet on a phone, with the same sections', async () => {
   const pid = app.me!.personal_project_id;
   location.hash = '#/';
   render(<ProjectSettings app={app} projectId={pid} phone />, root);
   const change = await until('appearance card', () => $<HTMLButtonElement>('.is-phone button.ps-look'));
   expect(change.querySelector('.ps-change')!.textContent).toBe('Change');
-  expect(change.querySelector('.ps-color')!.textContent).toBe('Plum · Graphite');
+  expect(change.querySelector('.ps-color')!.textContent).toBe('Plum');
   await until('workspace card', () => $('.is-phone .workspace-row'));
   change.click();
   const scrim = await until('sheet', () => $('.modal-scrim.modal-phone'));
   expect(scrim.querySelector('[role=dialog]')).not.toBeNull();
-  expect($$('.modal-phone .ap-label').map((l) => l.textContent)).toEqual(['Icon', 'Project color', 'App theme']);
+  expect($$('.modal-phone .ap-label').map((l) => l.textContent)).toEqual(['Icon', 'Project color']);
   button('Cancel', '[role=dialog]')!.click();
   await until('closed', () => !$('.modal-scrim'));
   render(<App app={app} />, root);

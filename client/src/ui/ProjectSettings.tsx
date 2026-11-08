@@ -9,7 +9,7 @@ import {
   type Workspace,
   type WorkspaceInspection,
 } from '../proto';
-import { THEMES, colorLabel } from '../theme';
+import { colorLabel } from '../theme';
 import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconPlus, IconShield } from './icons';
@@ -83,8 +83,8 @@ function making(w: Workspace): { tag: string; failed: string; note: string } {
 }
 
 /** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened with the
- *  gear of the sidebar header: Appearance (the dialog for name, icon, color and the app theme,
- *  and deleting the project; no rename or delete for the personal project, SPEC §3) and
+ *  gear of the sidebar header: Appearance (the dialog for name, icon and color, and deleting
+ *  the project; no rename or delete for the personal project, SPEC §3) and
  *  Workspaces (SPEC §3, §13: list, add, import, make default, "VS Code sessions", remove the
  *  record). */
 export function ProjectSettings({ app, projectId, phone }: { app: AppState; projectId: string; phone?: boolean }) {
@@ -171,7 +171,6 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
       Delete project
     </button>
   );
-  const theme = THEMES.find((t) => t.id === app.theme())?.label ?? 'Warm';
   const look = project && (
     <>
       <span class="ps-tile">
@@ -181,7 +180,7 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
         <span class="ps-name">{name}</span>
         <span class="ps-color">
           <span class="ps-dot" />
-          {colorLabel(project.color)} · {phone ? theme : `${theme} theme`}
+          {colorLabel(project.color)}
         </span>
       </span>
     </>

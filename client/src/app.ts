@@ -474,7 +474,8 @@ export class AppState {
     let n = 0;
     for (const s of this.sessions.values()) {
       if (s.system || s.archived || s.worker_id !== workerId) continue;
-      if (s.state === 'running' || s.state === 'waiting' || s.state === 'queued') n++;
+      // An idle session whose background subagents still run works too.
+      if (s.state === 'running' || s.state === 'waiting' || s.state === 'queued' || (s.subagents ?? 0) > 0) n++;
     }
     return n;
   }

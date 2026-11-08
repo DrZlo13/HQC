@@ -956,6 +956,66 @@ environment = "infra"
     assert_eq!(var(&other.env, "GITHUB_TOKEN"), None);
 }
 
+/// SPEC §8.1, §14: a session in a folder whose environment has `project_settings` reads the
+/// project setting source too; a session elsewhere on the same worker does not, and a
+/// restricted one stays `--restricted` with no `--setting-sources`.
+#[tokio::test]
+async fn command_line_reads_project_settings_by_the_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    for d in ["mine", "other"] {
+        std::fs::create_dir(root.join(d)).unwrap();
+    }
+    let cfg = crate::config::Config::parse(&format!(
+        r#"hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.mine]
+project_settings = true
+[[env_bindings]]
+path = "{}"
+environment = "mine"
+"#,
+        root.join("mine").display()
+    ))
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let a = ClaudeCodeAdapter {
+        session_id: Uuid::nil(),
+        opts: factory.opts.clone(),
+        spawner: factory.spawner.clone(),
+        events: mpsc::channel(1).0,
+        proc: None,
+    };
+    let args = |dir: &str, restricted: bool| {
+        let mut s = spec(Uuid::now_v7(), &root.join(dir), Uuid::new_v4());
+        s.environment = cfg.environment(&s.workspace);
+        s.restricted = restricted;
+        a.command(&s, &Uuid::nil(), Launch::New, None).args
+    };
+    let sources = |args: &[String]| {
+        args.iter()
+            .position(|a| a == "--setting-sources")
+            .map(|i| args[i + 1].clone())
+    };
+
+    assert_eq!(
+        sources(&args("mine", false)).as_deref(),
+        Some("user,project,local")
+    );
+    assert_eq!(
+        sources(&args("other", false)).as_deref(),
+        Some("user,local")
+    );
+    let restricted = args("mine", true);
+    assert!(
+        restricted.contains(&"--restricted".to_string()),
+        "{restricted:?}"
+    );
+    assert_eq!(sources(&restricted), None, "{restricted:?}");
+}
+
 /// T38: a running process switches with `set_permission_mode` (`default` for ask, the
 /// name 2.1.308 takes), and what the CLI then reports in `system/status` and
 /// `system/init` becomes [`AdapterEvent::PermissionMode`] when it changes. Fixture

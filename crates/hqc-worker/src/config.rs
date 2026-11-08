@@ -28,6 +28,7 @@
 //! env = { GITHUB_TOKEN = "..." } # variables on top of the child allowlist
 //! ssh_keys = ["infra_ed25519"]   # T44: keys of $HQC_HOME/keys/, an ssh-agent per process
 //! allow_local_mcp = false        # true: the machine's MCP servers too (no --strict-mcp-config)
+//! project_settings = false       # true: the repository's CLAUDE.md and .claude/settings.json too
 //! [environments.infra.permissions]
 //! unblock = ["Bash(ssh:*)"]      # rules of the worker's deny lifted here only
 //! allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -115,6 +116,8 @@ struct RawEnvironment {
     #[serde(default)]
     allow_local_mcp: bool,
     #[serde(default)]
+    project_settings: bool,
+    #[serde(default)]
     permissions: RawEnvPermissions,
 }
 
@@ -170,6 +173,9 @@ pub struct Environment {
     /// ssh-agent of its own with them. Empty: no `SSH_AUTH_SOCK` at all.
     pub ssh_keys: Vec<String>,
     pub allow_local_mcp: bool,
+    /// Claude Code reads the project setting source too (`--setting-sources
+    /// user,project,local`); worker-local, not in `hello`.
+    pub project_settings: bool,
     /// `[environments.<name>.permissions]` as written.
     pub rules: EnvPermissions,
     /// What its sessions run with ([`Permissions::for_environment`]).
@@ -184,6 +190,7 @@ impl Environment {
             env: EnvVars::default(),
             ssh_keys: vec![],
             allow_local_mcp: false,
+            project_settings: false,
             rules: EnvPermissions::default(),
             permissions: permissions.clone(),
         }
@@ -260,6 +267,7 @@ fn parse_environment(
         env: EnvVars(raw.env),
         ssh_keys: raw.ssh_keys,
         allow_local_mcp: raw.allow_local_mcp,
+        project_settings: raw.project_settings,
         permissions: worker.for_environment(&rules)?,
         rules,
     })
@@ -1088,6 +1096,32 @@ environment = "infra"
         )
         .unwrap();
         assert_eq!(c.unbound_environments(), vec!["homemac"]);
+    }
+
+    /// `project_settings` is per environment and off unless set, `default` included.
+    #[test]
+    fn project_settings_per_environment() {
+        let c = Config::parse(
+            r#"
+hub_url = "https://h"
+allowed_roots = ["/a"]
+[environments.infra]
+project_settings = true
+[environments.lab]
+allow_local_mcp = true
+[[env_bindings]]
+path = "/a/infra"
+environment = "infra"
+[[env_bindings]]
+path = "/a/lab"
+environment = "lab"
+"#,
+        )
+        .unwrap();
+        let env = |n: &str| c.environments.iter().find(|e| e.name == n).unwrap();
+        assert!(env("infra").project_settings);
+        assert!(!env("lab").project_settings);
+        assert!(!c.default_environment.project_settings);
     }
 
     /// T43: a session.start resolves the environment from the canonical workspace path,

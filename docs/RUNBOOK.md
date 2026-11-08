@@ -797,6 +797,7 @@ environment and bind the folder to it:
 env = { GITHUB_TOKEN = "..." }        # variables for the agent, on top of the allowlist below
 ssh_keys = ["infra_ed25519"]          # keys of the store $HQC_HOME/keys/ (below)
 allow_local_mcp = false               # true: the machine's MCP servers too (hqc's stays)
+project_settings = false              # true: the repository's CLAUDE.md, .claude/settings.json too
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # deny rules of [permissions] lifted here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -1114,7 +1115,9 @@ Per §19.1 and the notes `docs/notes/t2..t6-questions.md`:
 - **Claude Code adapter**: `system_prompt` and `disallowed_tools` are passed
   (`--append-system-prompt`, `--disallowedTools`), `restricted` as `--restricted`;
   the repository's `.claude/settings.json` is not applied (`--setting-sources user,local`), but
-  `.claude/settings.local.json` is (that is where `always` writes). `MCP_TOOL_TIMEOUT` is not
+  `.claude/settings.local.json` is (that is where `always` writes); in an environment with
+  `project_settings = true` the repository's `CLAUDE.md` and `.claude/settings.json` apply too
+  (`--setting-sources user,project,local`, SPEC §14). `MCP_TOOL_TIMEOUT` is not
   passed; there is no turn limit (`--max-turns`). Read-only commands
   (e.g. `echo`) the CLI allows by itself, without a request (§8.1). The format of the answer to a
   multiple-choice question (`AskUserQuestion`) has not been verified on a live build.

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.82, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.83, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2219,7 +2219,8 @@ The process `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
 --permission-prompt-tool stdio --thinking-display summarized [--strict-mcp-config] --mcp-config '<json>'
 --allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules>']
-(--setting-sources user,local | --restricted) --permission-mode <"ask" mode | auto>
+(--setting-sources user,local | --setting-sources user,project,local | --restricted)
+--permission-mode <"ask" mode | auto>
 [--append-system-prompt <text>] --session-id <uuid>` for a new session
 (the hub assigns the uuid and puts it in `runtime_session_id`) and `--resume <uuid>` to
 continue. The choice between them depends on whether the transcript
@@ -2306,7 +2307,15 @@ before that `default`; on start the worker reads `claude --help` and picks the o
 (a session in `auto`, §3, §14, gets `auto` instead). Checked on 2.1.308 (T12,
 fixture `always-git-push`): with `--setting-sources user,local --permission-mode manual`,
 `always` is still offered and writes the rule to `settings.local.json`; `manual` shows in
-`system/init` as `"permissionMode": "default"`.
+`system/init` as `"permissionMode": "default"`. Since 0.83 the worker owner can lift this for
+one environment (§14, `project_settings`): its sessions get `--setting-sources
+user,project,local`, so the CLI also reads the project source, the repository's `CLAUDE.md`
+and `.claude/settings.json` (checked on 2.1.312 with `claude -p --model haiku`: with
+`user,local` the agent does not see the project's `CLAUDE.md`, with `user,project,local` it
+does). Turning it on
+trusts every repository in that environment's folders: its hooks and permission rules apply,
+and so does its `defaultMode` as far as the explicit `--permission-mode` does not override it.
+A restricted session still gets `--restricted` and no `--setting-sources`.
 The process environment is scrubbed: from the worker's environment only `PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `CLAUDE_*`,
 `ANTHROPIC_*` pass, then the `env` of the session's environment (§14; it may replace one of
@@ -3566,6 +3575,7 @@ both launched by the worker):
 env = { GITHUB_TOKEN = "..." }        # variables on top of the child allowlist
 ssh_keys = ["infra_ed25519"]          # keys of the worker's store, $HQC_HOME/keys/
 allow_local_mcp = false
+project_settings = false
 [environments.infra.permissions]
 unblock = ["Bash(ssh:*)"]             # lift worker-wide deny rules here only
 allow = ["Bash(ssh debian@192.168.1.20:*)"]
@@ -3603,6 +3613,13 @@ environment = "infra"
 - `allow_local_mcp`: allow MCP servers from the machine (Claude Code: without
   `--strict-mcp-config`, the hqc server stays; Hermes: without
   `HERMES_ACP_SKIP_CONFIGURED_MCP`); default false;
+- `project_settings` (since 0.83): Claude Code reads the project setting source too,
+  `--setting-sources user,project,local` instead of `user,local` (§8.1): the repository's
+  `CLAUDE.md` and `.claude/settings.json`. Turning it on trusts every repository in the
+  environment's folders: their hooks and permission rules apply, and their `defaultMode` as far
+  as the explicit `--permission-mode` does not override it. A restricted session (§8.4) still
+  gets `--restricted`. Kept on the worker like `ssh_keys`: not in `hello`, `hqc-worker env`
+  shows it. **Claude Code only**, ACP agents ignore it; default false;
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
 
@@ -4105,6 +4122,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.82 → 0.83 (project settings per environment)
+§14: `[environments.<name>] project_settings = true` (default false) makes the Claude Code
+sessions of that environment's folders read the project setting source: §8.1, the adapter passes
+`--setting-sources user,project,local` instead of `user,local`, so the repository's `CLAUDE.md`
+and `.claude/settings.json` (its hooks, permission rules and `defaultMode` as far as the explicit
+`--permission-mode` does not override it) apply. A restricted session still gets `--restricted`.
+The field stays on the worker, like `ssh_keys`: not in `hello`; `hqc-worker env` shows it. ACP
+agents ignore it.
 
 ### 0.81 → 0.82 (a fork of a fork)
 §6 fork: a copied event keeps its origin (migration 0035: `events.origin_id`,

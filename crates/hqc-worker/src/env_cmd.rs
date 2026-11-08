@@ -52,6 +52,7 @@ pub fn summary(cfg: &Config) -> String {
         }
         vars(&mut out, e);
         let _ = writeln!(out, "    allow_local_mcp: {}", e.allow_local_mcp);
+        let _ = writeln!(out, "    project_settings: {}", e.project_settings);
         list(&mut out, "unblock", &e.rules.unblock);
         list(&mut out, "allow", &e.rules.allow);
         list(&mut out, "deny", &e.rules.deny);
@@ -95,6 +96,15 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
             "allowed"
         } else {
             "off (--strict-mcp-config)"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "    project settings: {}",
+        if e.project_settings {
+            "read (--setting-sources user,project,local)"
+        } else {
+            "off (--setting-sources user,local)"
         }
     );
     let p = &cfg.permissions;

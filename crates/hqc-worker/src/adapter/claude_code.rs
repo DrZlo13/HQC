@@ -69,8 +69,11 @@ const EXIT_DRAIN: Duration = Duration::from_secs(2);
 const STDERR_TAIL: usize = 2048;
 
 /// Settings files the CLI reads: the user's own and `.claude/settings.local.json` (where
-/// `always` writes, SPEC §8.1), not the repository's `.claude/settings.json`.
+/// `always` writes, SPEC §8.1), not the repository's `.claude/settings.json` or `CLAUDE.md`;
+/// in an environment with `project_settings` (SPEC §14) those too,
+/// [`PROJECT_SETTING_SOURCES`].
 pub const SETTING_SOURCES: &str = "user,local";
+pub const PROJECT_SETTING_SOURCES: &str = "user,project,local";
 
 /// The agent's environment: only these variables of the worker's (SPEC §8.1), never `HQC_*`
 /// (the worker's token store, config) or other secrets the worker runs with. `SHELL` and
@@ -407,7 +410,8 @@ impl ClaudeCodeAdapter {
     /// - `--setting-sources user,local` and `--permission-mode` (the ask mode or `auto`,
     ///   T38): a repository's own
     ///   `.claude/settings.json` (hooks, `defaultMode`) is not applied; `local` stays for the
-    ///   rules `always` writes;
+    ///   rules `always` writes; `--setting-sources user,project,local` when the environment has
+    ///   `project_settings` (the owner trusts every repository in its folders, SPEC §14);
     /// - `restricted` → `--restricted` (no command-running tools, file tools confined to the
     ///   working directory, no settings files; SPEC §8.4);
     /// - the allow/deny rules of the session's environment (`[permissions]` merged with the
@@ -466,7 +470,12 @@ impl ClaudeCodeAdapter {
         if spec.restricted {
             args.push("--restricted".into());
         } else {
-            args.extend(["--setting-sources".into(), SETTING_SOURCES.into()]);
+            let sources = if spec.environment.project_settings {
+                PROJECT_SETTING_SOURCES
+            } else {
+                SETTING_SOURCES
+            };
+            args.extend(["--setting-sources".into(), sources.into()]);
         }
         args.extend([
             "--permission-mode".into(),

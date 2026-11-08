@@ -2988,15 +2988,18 @@ pub async fn set_session_fork(db: &PgPool, id: Uuid, fork: &Value) -> sqlx::Resu
 }
 
 /// The `agent.message` events of session `id` before `seq`, newest first, at most `limit`:
-/// where a fork before that message may cut the conversation (SPEC §6).
+/// where a fork before that message may cut the conversation (SPEC §6). Each as the record it
+/// stands for: the id it got from the runtime and the transcript it was written in, a copy's
+/// origin (`events.origin_*`), else its own id in `runtime`, the session's transcript.
 pub async fn agent_messages_before(
     db: &PgPool,
     id: Uuid,
     seq: i64,
     limit: i64,
-) -> sqlx::Result<Vec<Uuid>> {
-    sqlx::query_scalar(
-        "SELECT event_id FROM events
+    runtime: &str,
+) -> sqlx::Result<Vec<(Uuid, String)>> {
+    sqlx::query_as(
+        "SELECT COALESCE(origin_id, event_id), COALESCE(origin_runtime, $4) FROM events
          WHERE session_id = $1 AND seq < $2 AND type = 'agent.message'
            AND author ->> 'kind' = 'agent'
          ORDER BY seq DESC LIMIT $3",
@@ -3004,30 +3007,36 @@ pub async fn agent_messages_before(
     .bind(id)
     .bind(seq)
     .bind(limit)
+    .bind(runtime)
     .fetch_all(db)
     .await
 }
 
 /// The events of session `from` before `seq` whose type is in `types`, copied in order into
 /// the empty session `to` under new ids, at `seq` 1.. (SPEC §6 fork): what its feed shows of
-/// the conversation it forks. Copied inputs are no inputs to deliver. The number copied.
+/// the conversation it forks. Each keeps its origin: a copy's, else its own id in `runtime`,
+/// the transcript of `from`. Copied inputs are no inputs to deliver. The number copied.
 pub async fn copy_events(
     db: &PgPool,
     from: Uuid,
     to: Uuid,
     seq: i64,
     types: &[&str],
+    runtime: &str,
 ) -> sqlx::Result<i64> {
     let mut tx = db.begin().await?;
     let n = sqlx::query(
-        "INSERT INTO events (event_id, session_id, seq, ts, author, type, payload)
-         SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type, payload
+        "INSERT INTO events
+           (event_id, session_id, seq, ts, author, type, payload, origin_id, origin_runtime)
+         SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type,
+                payload, COALESCE(origin_id, event_id), COALESCE(origin_runtime, $5)
          FROM events WHERE session_id = $1 AND seq < $3 AND type = ANY($4)",
     )
     .bind(from)
     .bind(to)
     .bind(seq)
     .bind(types)
+    .bind(runtime)
     .execute(&mut *tx)
     .await?
     .rows_affected() as i64;

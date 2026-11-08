@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.81, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.82, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1364,7 +1364,13 @@ the rest is marked "later"):
   `agent.message`, `agent.thinking`, `tool.call`, `tool.result`, `attachment`, `peer.message`
   and `system` events before the message under new ids, at `seq` 1.., none of them an input to
   deliver, then `system forked_from`, all read by the owner; requests, statuses and usage stay
-  with the source. The agent starts at once. The client puts the message's text into the new
+  with the source. Since 0.82 a copy keeps its origin (`events.origin_id`, `origin_runtime`,
+  not on the wire): the id the runtime's record gave the event and the transcript that record
+  was first written in. The cut's events are each named by their origin, and the fork goes to
+  the transcript of the newest one with only the events in it: a fork of a fork before a
+  message of its copied history cuts in the transcript that history came from, which stays on
+  the worker when the sessions between never ran (the CLI writes a fork's transcript at its
+  first message) or were deleted (§17.4). The agent starts at once. The client puts the message's text into the new
   session's input as its draft and opens it.
 - `POST /api/sessions/{id}/move` {path, project?, create?} → the session object (since 0.75;
   `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
@@ -4099,6 +4105,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.81 → 0.82 (a fork of a fork)
+§6 fork: a copied event keeps its origin (migration 0035: `events.origin_id`,
+`origin_runtime`), and the cut goes to the transcript the newest cut event was first written
+in, by the ids the runtime gave it. Before, a fork of a fork failed: the copies' ids are in no
+transcript, and a fork that never ran has none of its own. Copies made before 0.82 have no
+origin; a fork in that copied history still fails.
 
 ### 0.80 → 0.81 (usage limits in the "More" menu)
 §5.4: the worker frame `worker.limits {five_hour?, seven_day?}`, from Claude Code's

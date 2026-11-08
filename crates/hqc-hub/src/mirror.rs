@@ -193,13 +193,15 @@ pub async fn ingest(
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("session {id} vanished"))?;
             tracing::info!(session_id = %id, runtime_session_id = %m.runtime_session_id, workspace = %ws.path, %cwd, locked_by = lock, "session imported from Claude Code");
-            events::system(
+            let created = events::system(
                 app,
                 &s,
                 "session_created",
                 "Session imported from Claude Code",
             )
             .await?;
+            // An imported session comes in read (SPEC §9.1).
+            db::set_read_cursor(&app.db, s.owner_id, id, created.seq).await?;
             s
         }
     };
@@ -232,6 +234,11 @@ pub async fn ingest(
     };
     let ack = match db::insert_event(&app.db, &new).await? {
         Inserted::New(row) => {
+            // A record written before the hub had the session is taken as history the owner
+            // has seen in VS Code: read; what is written after it is unread (SPEC §9.1).
+            if m.event.ts < s.created_at {
+                db::set_read_cursor(&app.db, s.owner_id, s.id, row.seq).await?;
+            }
             events::after_mirror_store(app, &s, &row, &m.event.kind).await?;
             if m.recent && !s.archived {
                 db::touch_vscode(&app.db, s.id).await?;

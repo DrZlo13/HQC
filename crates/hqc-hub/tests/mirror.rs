@@ -358,6 +358,58 @@ async fn quiet_import_and_live_release() {
     hub.finish().await;
 }
 
+/// An imported session comes in read: its history, written before the hub had the session,
+/// is not unread, and what VS Code writes after the import is (SPEC §9.1).
+#[tokio::test]
+async fn imported_history_is_read() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
+    let pid = project(&hub, "cad").await;
+    import_workspace(&hub, &mut w, &pid).await;
+    let runtime = Uuid::new_v4().to_string();
+    let prompt = record_event(
+        "user.message",
+        json!({"text": "old", "artifact_ids": []}),
+        true,
+    );
+    mirror_event(&mut w, &runtime, prompt, None, false).await;
+    let answer = record_event(
+        "agent.message",
+        json!({"text": "old answer", "final": true}),
+        false,
+    );
+    mirror_event(&mut w, &runtime, answer, None, false).await;
+    let list = sessions(&hub, &pid).await;
+    let sid = list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(list[0]["unread"], 0, "{}", list[0]);
+
+    let mut later = record_event(
+        "agent.message",
+        json!({"text": "new answer", "final": true}),
+        false,
+    );
+    later["ts"] = json!("2099-01-01T00:00:00Z");
+    mirror_event(&mut w, &runtime, later, None, false).await;
+    assert_eq!(hub.session(&sid).await["unread"], 1);
+
+    // A transcript whose first record is newer than the import: its `session_created` is
+    // read, the record is not.
+    let fresh = Uuid::new_v4().to_string();
+    let mut first = record_event(
+        "agent.message",
+        json!({"text": "new chat", "final": true}),
+        false,
+    );
+    first["ts"] = json!("2099-01-01T00:00:00Z");
+    mirror_event(&mut w, &fresh, first, None, false).await;
+    let list = sessions(&hub, &pid).await;
+    let s = list.iter().find(|s| s["id"] != sid.as_str()).unwrap();
+    assert_eq!(s["unread"], 1, "{s}");
+    hub.finish().await;
+}
+
 const VSCODE_IDLE: &str = r#"{"entrypoint": "claude-vscode", "status": "idle"}"#;
 
 fn vscode_idle() -> Value {

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.85, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.86, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2896,7 +2896,11 @@ the frame's `recent` flag: the worker sets it if the file was modified less than
 it was read (the worker's clock, not the hub's); then `vscode`, otherwise `none`. An author the
 worker does not know is filled in by the hub: the workspace owner for `user.message`, the
 session's agent for the rest. No push is sent for mirror events (an import is hundreds of old
-replies).
+replies). Since 0.86 a mirrored record whose `ts` is before its session's `created_at` on the
+hub (the record's time is the worker's clock, `created_at` the hub's) is read for the session's
+owner (§3 ReadCursor), and so is the `session_created` of an
+imported session: an imported session comes in read, with the history the owner has seen in VS
+Code; a record written after the import counts as unread by the rule of §6.
 
 **Import limits** (§20, since 0.23 T22; behaviour at the daily limit since 0.24). New sessions
 from the mirror: at most 200 per 24 h per worker (since 0.85 `HQC_MIRROR_SESSIONS_PER_DAY`;
@@ -4174,6 +4178,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.85 → 0.86 (an imported session comes in read)
+§9.1: the hub moves the owner's read cursor over the `session_created` of an imported session
+and over every mirrored record older than the session on the hub, so adding a folder with a long
+history of Claude Code sessions does not mark them all unread; what is written after the import
+is unread as before.
 
 ### 0.84 → 0.85 (the mirror's daily limit is a hub setting)
 §9.1, §20: `HQC_MIRROR_SESSIONS_PER_DAY` (a whole number, default 200) sets how many sessions the

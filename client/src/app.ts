@@ -527,6 +527,16 @@ export class AppState {
     return s;
   }
 
+  /** Forks the session before the user's message `eventId`: the new session joins the list
+   *  with `text`, the message left out, as its draft. */
+  async forkSession(sessionId: string, eventId: string, text: string): Promise<SessionInfo> {
+    const s = await this.api.forkSession(sessionId, eventId);
+    this.sessions.set(s.id, s);
+    this.setDraft(s.id, text);
+    this.changed();
+    return s;
+  }
+
   /** Switches the session's permission mode (T38); the hub tells a running agent at once. */
   async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
     const s = await this.api.patchSession(sessionId, { permission_mode: mode });

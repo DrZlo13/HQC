@@ -1062,6 +1062,28 @@ pub async fn new_session(
     db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkSession {
+    event_id: Uuid,
+}
+
+/// `POST /api/sessions/{id}/fork {event_id}` (SPEC §6): a new session whose conversation is
+/// this one's before the user's message `event_id` ([`crate::fork`]); `201` and the session
+/// object.
+pub async fn fork_session(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<ForkSession>,
+) -> ApiResult<impl IntoResponse> {
+    let s = session_for(&app, &user, id, Action::Manage).await?;
+    not_system(&s)?;
+    let new = crate::fork::fork(&app, &s, b.event_id).await?;
+    let v = state::view(&app, user.id, new).await?;
+    Ok((StatusCode::CREATED, Json(json!(v))))
+}
+
 pub async fn get_session(
     State(app): State<AppState>,
     user: CurrentUser,

@@ -2967,6 +2967,79 @@ pub async fn project_favorites(
     .await
 }
 
+// ---------------------------------------------------------------- forks
+
+/// `sessions.fork` of session `id` (SPEC §5.3 `session.start.fork`); `None`: no fork.
+pub async fn session_fork(db: &PgPool, id: Uuid) -> sqlx::Result<Option<Value>> {
+    sqlx::query_scalar("SELECT fork FROM sessions WHERE id = $1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+        .map(Option::flatten)
+}
+
+pub async fn set_session_fork(db: &PgPool, id: Uuid, fork: &Value) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET fork = $2 WHERE id = $1")
+        .bind(id)
+        .bind(fork)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// The `agent.message` events of session `id` before `seq`, newest first, at most `limit`:
+/// where a fork before that message may cut the conversation (SPEC §6).
+pub async fn agent_messages_before(
+    db: &PgPool,
+    id: Uuid,
+    seq: i64,
+    limit: i64,
+) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT event_id FROM events
+         WHERE session_id = $1 AND seq < $2 AND type = 'agent.message'
+           AND author ->> 'kind' = 'agent'
+         ORDER BY seq DESC LIMIT $3",
+    )
+    .bind(id)
+    .bind(seq)
+    .bind(limit)
+    .fetch_all(db)
+    .await
+}
+
+/// The events of session `from` before `seq` whose type is in `types`, copied in order into
+/// the empty session `to` under new ids, at `seq` 1.. (SPEC §6 fork): what its feed shows of
+/// the conversation it forks. Copied inputs are no inputs to deliver. The number copied.
+pub async fn copy_events(
+    db: &PgPool,
+    from: Uuid,
+    to: Uuid,
+    seq: i64,
+    types: &[&str],
+) -> sqlx::Result<i64> {
+    let mut tx = db.begin().await?;
+    let n = sqlx::query(
+        "INSERT INTO events (event_id, session_id, seq, ts, author, type, payload)
+         SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type, payload
+         FROM events WHERE session_id = $1 AND seq < $3 AND type = ANY($4)",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(seq)
+    .bind(types)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected() as i64;
+    sqlx::query("UPDATE sessions SET last_seq = $2 WHERE id = $1 AND last_seq = 0")
+        .bind(to)
+        .bind(n)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(n)
+}
+
 // ---------------------------------------------------------------- read cursors, push
 
 pub async fn set_read_cursor(

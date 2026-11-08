@@ -134,6 +134,13 @@ export function Chat({
     sheetRequest,
     findSession: (ref) => app.findSession(ref),
     peerMessage,
+    fork: !system && info?.workspace_id
+      ? (e) =>
+          void app.forkSession(sessionId, e.event_id, e.payload.text).then(
+            (s) => (location.hash = `#/s/${s.id}`),
+            (err: Error) => setNotice(`Not forked: ${err.message}`),
+          )
+      : undefined,
     openArtifact: (id, download) => {
       // Open the window synchronously, or mobile browsers block it as a popup.
       const w = window.open('about:blank', '_blank');

@@ -15,6 +15,7 @@ import {
   type HeldBy,
   type HqcEvent,
   type PermissionMode,
+  type EventOf,
   type SessionInfo,
   type SessionState,
   type SpawnedBy,
@@ -93,6 +94,8 @@ function setup(
       effective_permission_mode: patch.permission_mode,
       model: patch.model === undefined ? info.model : (patch.model ?? undefined),
     })),
+    // POST /api/sessions/{id}/fork: the new session.
+    forkSession: vi.fn(async () => ({ ...info, id: 's2', title: 'test 12 (fork)', last_seq: 4, last_read_seq: 4 })),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -684,6 +687,37 @@ describe('history', () => {
     });
     expect(blocks().length).toBe(120);
     expect(blocks()[0].textContent).toContain('answer 331');
+  });
+});
+
+describe('fork', () => {
+  it('forks before a message of the user: the new session opens with the message as its draft', async () => {
+    const { app, api } = setup('idle');
+    await mount(app);
+    const forks = [...root.querySelectorAll<HTMLButtonElement>('.btn-fork')];
+    // The user's two messages; none on the agent's.
+    expect(forks).toHaveLength(2);
+    expect(root.querySelector('.msg-agent .btn-fork')).toBeNull();
+    await act(async () => {
+      forks[1].click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    const second = HISTORY[3] as EventOf<'user.message'>;
+    expect(api.forkSession).toHaveBeenCalledWith('s1', second.event_id);
+    expect(app.sessions.get('s2')!.title).toBe('test 12 (fork)');
+    expect(app.draft('s2')).toBe(second.payload.text);
+    expect(location.hash).toBe('#/s/s2');
+  });
+
+  it('the service session has no fork', async () => {
+    const { app } = setup('idle');
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(async () => {
+      render(<Chat app={app} sessionId="sys" />, root);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(root.querySelector('.btn-fork')).toBeNull();
   });
 });
 

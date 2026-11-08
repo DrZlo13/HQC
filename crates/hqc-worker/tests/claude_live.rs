@@ -127,6 +127,7 @@ async fn live_repo_settings_ignored() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -258,6 +259,7 @@ async fn live_environment_ssh() {
                 ask_timeout_s: 600,
                 permission_mode: PermissionMode::Ask,
                 folder_rules: None,
+                fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
             let (tx, mut rx) = mpsc::channel(4096);
@@ -480,6 +482,7 @@ async fn live_environment_ssh_keys() {
                 ask_timeout_s: 600,
                 permission_mode: PermissionMode::Ask,
                 folder_rules: None,
+                fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
             let (tx, mut rx) = mpsc::channel(4096);
@@ -622,6 +625,7 @@ async fn live_folder_rules() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: Some(rules),
+        fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -721,6 +725,7 @@ async fn live_permission_mode_switch() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -869,6 +874,7 @@ async fn live_bash_turn_with_approval() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -1102,6 +1108,7 @@ async fn live_permission_policy() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -1230,6 +1237,7 @@ async fn live_ai_title() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -1408,6 +1416,7 @@ async fn live_input_joins_turn() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
     let mut adapter = factory.create(&spec, tx);
@@ -1554,6 +1563,7 @@ async fn live_move_resumes_in_the_new_folder() {
         ask_timeout_s: 600,
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     };
     let input = |text: &str| SessionInput {
         session_id,

@@ -1,8 +1,10 @@
 //! SPEC 0.80 live end-to-end (§6 fork, §5.3, §8.1): a Claude Code session remembers APPLE,
 //! then BANANA; a fork before the second message knows APPLE only, the source keeps both, and
 //! the fork's feed has the copied history once, with no records imported by the mirror.
+//! SPEC 0.82: a fork of a fork that never ran, before a message of its copied history, knows
+//! APPLE only too.
 //!
-//! Spends the subscription (`claude-haiku-5-5`, `--max-turns 2`, three short turns), so it
+//! Spends the subscription (`claude-haiku-5-5`, `--max-turns 2`, five short turns), so it
 //! runs only with `HQC_LIVE_CLAUDE=1`:
 //!
 //! ```
@@ -218,9 +220,38 @@ async fn live_a_fork_knows_only_what_came_before() {
     assert!(held.get("held_by").is_none_or(Value::is_null), "{held}");
 
     // The source still has both.
-    let (_, words) = turn(&hub, &a, ask).await;
+    let (last, words) = turn(&hub, &a, ask).await;
     assert!(
         words.contains("APPLE") && words.contains("BANANA"),
+        "{words}"
+    );
+
+    // A fork that never runs (no transcript of its own), then a fork of it before BANANA in
+    // its copied history: cut in A's transcript, it knows APPLE only.
+    let fork_of = |sid: String, at: Value| {
+        let hub = &hub;
+        async move {
+            let (st, f) = hub
+                .post(
+                    &format!("/api/sessions/{sid}/fork"),
+                    json!({"event_id": at["event_id"]}),
+                )
+                .await;
+            assert_eq!(st, 201, "{f}");
+            f["id"].as_str().unwrap().to_string()
+        }
+    };
+    let idle = fork_of(a.clone(), last).await;
+    let banana = hub
+        .events(&idle)
+        .await
+        .into_iter()
+        .find(|e| e["payload"]["text"] == "Also remember the word BANANA. Reply only OK.")
+        .unwrap();
+    let c = fork_of(idle, banana).await;
+    let (_, words) = turn(&hub, &c, ask).await;
+    assert!(
+        words.contains("APPLE") && !words.contains("BANANA"),
         "{words}"
     );
 

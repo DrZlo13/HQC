@@ -9,7 +9,11 @@
 //!   conversation at the record of the first one it finds (SPEC §5.3, §8.1). With none (the
 //!   message was the first), the new session starts with no conversation and no fork.
 //! - The new session's feed gets the source's events before the message ([`COPIED`]) under
-//!   new ids, read already, and a `system forked_from`. The worker's history is the CLI's:
+//!   new ids, read already, and a `system forked_from`. A copy keeps its origin: the id the
+//!   runtime's record gave the event and the transcript the record was written in. A fork of
+//!   a fork cuts by them in that transcript when the cut is in the copied history, since the
+//!   copies' ids are in no transcript and the source fork's own transcript may not exist (the
+//!   CLI writes it at its first message) or its session may be gone. The worker's history is the CLI's:
 //!   requests, statuses and usage of the source are not copied.
 
 use serde_json::json;
@@ -64,7 +68,17 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
         .await?
         .filter(|e| e.session_id == s.id && e.kind == "user.message" && e.author["kind"] == "user")
         .ok_or(ApiError::NotFound)?;
-    let cuts = db::agent_messages_before(&app.db, s.id, at.seq, CUTS).await?;
+    let runtime = s.runtime_session_id.clone().unwrap_or(s.id.to_string());
+    // The records the cut may be at, in the transcript of the newest: a fork's own turns are in
+    // its transcript, its copied history in the one it was first written in (a fork that never
+    // ran, or that was deleted, has none of it).
+    let records = db::agent_messages_before(&app.db, s.id, at.seq, CUTS, &runtime).await?;
+    let source = records.first().map(|(_, r)| r.clone());
+    let cuts: Vec<Uuid> = records
+        .iter()
+        .filter(|(_, r)| Some(r) == source.as_ref())
+        .map(|(e, _)| *e)
+        .collect();
     let title: String = format!("{} (fork)", s.title)
         .chars()
         .take(crate::api::MAX_TITLE)
@@ -87,11 +101,10 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
         },
     )
     .await?;
-    if !cuts.is_empty() {
-        let source = s.runtime_session_id.clone().unwrap_or(s.id.to_string());
+    if let Some(source) = source {
         let f = json!({"runtime_session_id": source, "at_event_ids": cuts});
         db::set_session_fork(&app.db, id, &f).await?;
-        db::copy_events(&app.db, s.id, id, at.seq, COPIED).await?;
+        db::copy_events(&app.db, s.id, id, at.seq, COPIED, &runtime).await?;
     }
     let new = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     let from = crate::peers::address(app, s).await?;

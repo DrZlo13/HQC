@@ -616,8 +616,8 @@ async fn command_line_new_then_resume() {
     assert_eq!(cmd.program, std::path::PathBuf::from("/opt/test/claude"));
     assert_eq!(cmd.cwd, s.workdir);
     let settings = crate::permissions::Permissions::default()
-        .settings_json()
-        .unwrap();
+        .settings()
+        .to_string();
     let expect = |mode: &str| -> Vec<String> {
         [
             "-p",
@@ -2396,22 +2396,106 @@ fn nul_never_reaches_an_event() {
     assert_eq!(seen, 3, "{kinds:?}");
 }
 
-/// `allow_native_messaging` in the worker config keeps Claude Code's ListAgents/SendMessage.
+/// SPEC §8.1: Claude Code's own cross-session messaging by the worker config. By default the
+/// command line is as without these options: `ListAgents` and `SendMessage` disallowed, no
+/// `crossSessionInbound`. `allow_subagent_messages` keeps `SendMessage` (not in restricted
+/// mode) and refuses other sessions' messages; `allow_native_messaging` wins over it: both
+/// tools, no `crossSessionInbound`.
 #[tokio::test]
-async fn native_messaging_tools_can_be_kept() {
+async fn native_messaging_follows_the_worker_config() {
     let work = tempfile::tempdir().unwrap();
-    let config = tempfile::tempdir().unwrap();
-    let claude = ScriptedClaude::new("");
-    let mut opts = options(config.path());
-    opts.always_disallowed.clear();
-    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
-    let s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
-    let (tx, _rx) = mpsc::channel(16);
-    let mut a = factory.create(&s, tx);
-    a.start(&s).await.unwrap();
-    let args = claude.commands()[0].args.clone();
-    assert!(!args.contains(&"--disallowedTools".to_string()), "{args:?}");
-    a.kill().await.unwrap();
+    let base = format!(
+        "hub_url = \"https://h\"\nallowed_roots = [{0:?}]\n",
+        work.path().display().to_string()
+    );
+    let args = |toml: &str, restricted: bool| -> Vec<String> {
+        let cfg = crate::config::Config::parse(&format!("{base}{toml}")).unwrap();
+        let f = ClaudeCodeAdapters::from_config(&cfg, "default".into());
+        let a = ClaudeCodeAdapter {
+            session_id: Uuid::nil(),
+            opts: f.opts.clone(),
+            spawner: f.spawner.clone(),
+            events: mpsc::channel(1).0,
+            proc: None,
+        };
+        let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+        s.restricted = restricted;
+        a.command(&s, &Uuid::nil(), Launch::New, None).args
+    };
+    let disallowed = |args: &[String]| -> Vec<String> {
+        let i = args.iter().position(|a| a == "--disallowedTools");
+        i.map(|i| {
+            args[i + 1..]
+                .iter()
+                .take_while(|a| !a.starts_with("--"))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+    let settings = |args: &[String]| -> Value {
+        let i = args.iter().position(|a| a == "--settings").unwrap();
+        serde_json::from_str(&args[i + 1]).unwrap()
+    };
+
+    // Default: the whole command line, as without these options.
+    let deny = crate::permissions::DEFAULT_DENY;
+    let plain = json!({"voiceEnabled": false, "permissions": {"allow": [], "deny": deny}});
+    let want: Vec<String> = [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--permission-prompts",
+        "host",
+        "--permission-prompt-tool",
+        "stdio",
+        "--thinking-display",
+        "summarized",
+        "--strict-mcp-config",
+        "--allowedTools",
+        "mcp__hqc",
+        "--disallowedTools",
+        "ListAgents",
+        "SendMessage",
+        "--settings",
+        &plain.to_string(),
+        "--setting-sources",
+        "user,local",
+        "--permission-mode",
+        "default",
+        "--session-id",
+        &Uuid::nil().to_string(),
+        "--verbose",
+        "--model",
+        "claude-haiku-5-5",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(args("", false), want);
+
+    let subagents = "allow_subagent_messages = true\n";
+    let sub = args(subagents, false);
+    assert_eq!(disallowed(&sub), ["ListAgents"]);
+    assert_eq!(settings(&sub)["crossSessionInbound"], "refuse");
+    // `--restricted` does not remove `SendMessage` by itself.
+    let restricted = args(subagents, true);
+    assert!(
+        restricted.contains(&"--restricted".to_string()),
+        "{restricted:?}"
+    );
+    assert_eq!(disallowed(&restricted), ["ListAgents", "SendMessage"]);
+    assert_eq!(settings(&restricted)["crossSessionInbound"], "refuse");
+
+    let on = args(
+        "allow_native_messaging = true\nallow_subagent_messages = true\n",
+        false,
+    );
+    assert_eq!(disallowed(&on), Vec::<String>::new());
+    assert_eq!(settings(&on).get("crossSessionInbound"), None, "{on:?}");
 }
 
 /// T15 (SPEC §9.3), fixture `vscode-takeover` (2.1.308): the takeover turn registers the

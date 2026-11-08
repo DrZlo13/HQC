@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.83, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.84, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -124,7 +124,10 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   up the chain run in `auto`, so a session in `ask` gets no work done without asking through
   one in `auto`; since 0.44 (T40) neither through a buffered send nor through a schedule
   made while it ran in `auto`. The hub computes the cap and the worker applies it; a compromised hub could
-  lift it, as it can answer requests itself (above).
+  lift it, as it can answer requests itself (above). On a worker with `allow_subagent_messages`
+  (§8.1, since 0.84) an agent can also start a turn in another Claude session that accepts
+  messages from other sessions (a local one of the same machine; per §8.1 **[verify]** also the
+  account's cloud and Remote Control sessions), past the hub and these limits.
 - A worker is trusted for its own sessions only (§5.2, §20): it writes their agent events and
   mirrored records, but no event that only the hub writes, nothing in another worker's
   sessions, and no `chain` or `delivery` (since 0.39: the hub drops them from a worker's
@@ -2224,7 +2227,7 @@ worker's responsibility, not the adapter's (§17.2).
 The process `claude -p --output-format stream-json --input-format stream-json
 --include-partial-messages --replay-user-messages --permission-prompts host
 --permission-prompt-tool stdio --thinking-display summarized [--strict-mcp-config] --mcp-config '<json>'
---allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules>']
+--allowedTools mcp__hqc [--disallowedTools <rules…>] [--settings '<json: the environment's rules, crossSessionInbound?>']
 (--setting-sources user,local | --setting-sources user,project,local | --restricted)
 --permission-mode <"ask" mode | auto>
 [--append-system-prompt <text>] --session-id <uuid>` for a new session
@@ -2270,7 +2273,8 @@ jsonl file. `--strict-mcp-config` disables MCP servers from `~/.claude.json`
 and the project's `.mcp.json`; they can be allowed only through the environment (§14,
 `allow_local_mcp`: since 0.56 such a session runs without the flag, the hqc server still comes
 in `--mcp-config`). `--settings` carries the effective rules of the session's environment
-(§14: `[permissions]` merged with the environment's), and the adapter's own policy (deny
+(§14: `[permissions]` merged with the environment's; since 0.84 with `allow_subagent_messages`
+also `crossSessionInbound`, below), and the adapter's own policy (deny
 before asking, `policy_hint`) reads the same merged lists. In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
 1e8 ms, minimum 1000 ms (checked on 2.1.307).
 
@@ -2661,9 +2665,40 @@ per worker.
 
 Claude Code's built-in tools `ListAgents` and `SendMessage` find other Claude sessions
 on the same machine and inject messages into them directly, bypassing the hub: the second
-session gets a turn with no input event in its history. The worker always adds them to
+session gets a turn with no input event in its history. By default the worker adds both to
 `--disallowedTools`; `allow_native_messaging = true` in `worker.toml` brings them back.
 Agents talk to each other through `hqc_send`/`hqc_ask` (§7).
+
+`SendMessage` is also how an agent continues its own subagent: with `--disallowedTools
+ListAgents SendMessage`, `system/init` of `claude -p` 2.1.312 lists neither tool (`Task` and
+`TaskStop` are there). `allow_subagent_messages = true` in `worker.toml` (since 0.84; default
+false, `allow_native_messaging` wins over it) keeps `SendMessage` for that: only `ListAgents`
+goes to `--disallowedTools`, and `--settings` carries `"crossSessionInbound": "refuse"`, the
+CLI setting (`accept` | `hold` | `refuse`) for messages from other sessions, so no other local
+session starts a turn in an hqc session past the hub. The setting is in the binaries of
+2.1.304, 2.1.312 and 2.1.318. Checked live on 2.1.312 (`claude -p` with haiku,
+`--disallowedTools ListAgents`, `--settings
+'{"voiceEnabled":false,"crossSessionInbound":"refuse"}'`): the agent started a subagent and
+continued it with `SendMessage` (the subagent answered the second message); of two background
+`claude -p --input-format stream-json` sessions, both listed by another session's
+`ListAgents`, the one with `refuse` ran no turn and the sender got the delivery notice "that
+session is not accepting cross-session messages", the one with `accept` ran a turn and
+answered. The other direction stays open, and that is what the worker owner accepts by turning
+the option on: checked live on 2.1.312, a sender `claude -p --permission-mode manual
+--disallowedTools ListAgents --settings '{…"crossSessionInbound":"refuse"}'` called
+`SendMessage` to a background session with `accept`; it was delivered without a permission
+request and the receiver ran a turn. So an hqc agent in `ask` can hand work to any local
+session that accepts such messages (a VS Code tab in `auto`, say) past the hub, its permission
+requests and the chain limits (§7.1); without `ListAgents` it has to know the session's name.
+Per the 2.1.312 binary, not checked live **[verify]**: the permission check of `SendMessage`
+allows the call in every mode but `auto`; the permission-mode parity hold stops only a receiver
+in `bypassPermissions`; the tool can also reach the account's cloud and Remote Control
+sessions. A restricted session (§8.4) keeps `SendMessage` disallowed under the option too:
+`--restricted` does not remove it (it is not among the tools `--help` of 2.1.312 names for the
+flag). Which
+`crossSessionInbound` applies, per the 2.1.312 binary **[verify]**: the first one set of
+managed policy, `--settings` and user settings; project settings and `settings.local.json` can
+only tighten it (`accept` < `hold` < `refuse`).
 
 ### 8.2 ACP agents (generic adapter)
 The adapter starts **a separate ACP process for each hqc session** (stdio JSON-RPC)
@@ -4138,6 +4173,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.83 → 0.84 (opt-in `SendMessage` for an agent's own subagents)
+§8.1: `allow_subagent_messages = true` in `worker.toml` (default false; `allow_native_messaging`
+wins over it) keeps `SendMessage`, which is also how an agent continues its own subagent: only
+`ListAgents` goes to `--disallowedTools` (a restricted session keeps both disallowed), and
+`--settings` carries `"crossSessionInbound": "refuse"`, so messages other local sessions send to
+an hqc session are refused (checked live on 2.1.312). The agent can then hand work to another
+local session that accepts such messages, past the hub (checked live; §2.1). Without the option
+the command line is as before.
 
 ### 0.82 → 0.83 (project settings per environment)
 §14: `[environments.<name>] project_settings = true` (default false) makes the Claude Code

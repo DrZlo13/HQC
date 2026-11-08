@@ -713,6 +713,11 @@ allow_foreign_sessions = false
 # launchd PATH is short (~/.local/bin is not in it), so better set it explicitly.
 claude_bin = "/Users/me/.local/bin/claude"
 
+# Let agents continue their own subagents with Claude Code's SendMessage (by default it is
+# disallowed together with ListAgents). Messages from other local sessions are then refused,
+# but an agent can hand work to any local Claude session that accepts them, past hqc (SPEC §8.1).
+# allow_subagent_messages = false
+
 # The [workspace] block is gone (since T14): workspaces are hub objects added in the client
 # (project → Workspaces → "Add a workspace"). The worker ignores the old iteration 1 block and
 # logs a warning about it on start; remove it from the file.

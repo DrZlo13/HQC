@@ -16,6 +16,7 @@
 //! # clone_timeout = 600          # seconds a `git clone` of a new workspace may take (T45)
 //! # insecure_http = false        # allow http:// to a non-loopback hub (never in production)
 //! # allow_native_messaging = false  # keep Claude Code's ListAgents/SendMessage (bypass the hub)
+//! # allow_subagent_messages = false # keep SendMessage for own subagents, refuse other sessions'
 //! # show_in_vscode = true          # sessions run by hqc appear in VS Code's history
 //!
 //! [permissions]                  # optional, see crate::permissions
@@ -96,6 +97,8 @@ struct RawConfig {
     clone_timeout: u64,
     #[serde(default)]
     allow_native_messaging: bool,
+    #[serde(default)]
+    allow_subagent_messages: bool,
     #[serde(default = "default_true")]
     show_in_vscode: bool,
     #[serde(default)]
@@ -341,6 +344,11 @@ pub struct Config {
     /// default: they bypass the hub, so the other session's history misses the input that
     /// started its turn. Agent-to-agent traffic goes through `hqc_send`/`hqc_ask` (SPEC §7).
     pub allow_native_messaging: bool,
+    /// Keep `SendMessage` only, which is also how an agent continues its own subagent, and
+    /// refuse messages from other sessions (`crossSessionInbound`). The agent can still send
+    /// to another local session that accepts them, past the hub (SPEC §8.1). Off by default;
+    /// `allow_native_messaging` wins.
+    pub allow_subagent_messages: bool,
     /// Write transcripts with `entrypoint: claude-vscode`, so sessions run by hqc appear in
     /// the VS Code extension's history (it lists only its own entrypoint, SPEC §9).
     pub show_in_vscode: bool,
@@ -503,6 +511,7 @@ impl Config {
             claude_bin: raw.claude_bin,
             insecure_http: raw.insecure_http,
             allow_native_messaging: raw.allow_native_messaging,
+            allow_subagent_messages: raw.allow_subagent_messages,
             show_in_vscode: raw.show_in_vscode,
             default_environment: Arc::new(Environment::default_of(&permissions)),
             permissions,

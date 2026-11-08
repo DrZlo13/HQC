@@ -96,6 +96,41 @@ pub fn child_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, S
     env
 }
 
+/// What a session keeps of Claude Code's own cross-session messaging (SPEC §8.1): one value,
+/// so `--disallowedTools` and `crossSessionInbound` cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeMessaging {
+    /// The default: [`NATIVE_MESSAGING_TOOLS`] disallowed.
+    Off,
+    /// `allow_subagent_messages`: only `ListAgents` disallowed, so an agent continues its own
+    /// subagents with `SendMessage` (a restricted session keeps it disallowed too), and
+    /// `"crossSessionInbound": "refuse"` in `--settings`.
+    Subagents,
+    /// `allow_native_messaging`: nothing disallowed, no `crossSessionInbound`.
+    On,
+}
+
+impl NativeMessaging {
+    pub fn from_config(cfg: &Config) -> Self {
+        if cfg.allow_native_messaging {
+            Self::On
+        } else if cfg.allow_subagent_messages {
+            Self::Subagents
+        } else {
+            Self::Off
+        }
+    }
+
+    /// What goes into `--disallowedTools` after the session's own rules.
+    fn disallowed(self, restricted: bool) -> &'static [&'static str] {
+        match self {
+            Self::Subagents if !restricted => &["ListAgents"],
+            Self::Off | Self::Subagents => NATIVE_MESSAGING_TOOLS,
+            Self::On => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClaudeOptions {
     /// `claude_bin` from the worker config; `claude` from `PATH` if unset.
@@ -115,10 +150,9 @@ pub struct ClaudeOptions {
     /// passed, so that a `defaultMode` from settings (`bypassPermissions`, `acceptEdits`)
     /// does not apply: this, or `auto` for a session in auto (T38).
     pub ask_mode: String,
-    /// Tools disallowed in every session on top of `session.start.disallowed_tools`. By
-    /// default Claude Code's own cross-session messaging, which bypasses the hub
-    /// (`allow_native_messaging` in the worker config keeps it).
-    pub always_disallowed: Vec<String>,
+    /// Claude Code's own cross-session messaging, on top of `session.start.disallowed_tools`
+    /// (`allow_native_messaging` and `allow_subagent_messages` in the worker config).
+    pub native_messaging: NativeMessaging,
     /// Interrupt → SIGINT fallback delay.
     pub stop_grace: Duration,
     /// A process that dies this soon after spawning fails `start` instead of being
@@ -141,10 +175,7 @@ impl Default for ClaudeOptions {
             mcp: None,
             extra_args: vec![],
             ask_mode: "default".into(),
-            always_disallowed: NATIVE_MESSAGING_TOOLS
-                .iter()
-                .map(|t| t.to_string())
-                .collect(),
+            native_messaging: NativeMessaging::Off,
             stop_grace: Duration::from_secs(10),
             early_exit: Duration::from_millis(500),
             own_records: Arc::default(),
@@ -223,14 +254,7 @@ impl ClaudeCodeAdapters {
                 entrypoint: cfg.show_in_vscode.then(|| "claude-vscode".to_string()),
                 ask_mode,
                 ssh: cfg.ssh.clone(),
-                always_disallowed: if cfg.allow_native_messaging {
-                    vec![]
-                } else {
-                    NATIVE_MESSAGING_TOOLS
-                        .iter()
-                        .map(|t| t.to_string())
-                        .collect()
-                },
+                native_messaging: NativeMessaging::from_config(cfg),
                 ..ClaudeOptions::default()
             },
             Arc::new(OsSpawner),
@@ -417,6 +441,9 @@ impl ClaudeCodeAdapter {
     /// - the allow/deny rules of the session's environment (`[permissions]` merged with the
     ///   environment's, T43) → `--settings`, in restricted mode too (the CLI applies
     ///   `--settings` there, checked on 2.1.308);
+    /// - [`NATIVE_MESSAGING_TOOLS`] → `--disallowedTools`, by [`NativeMessaging`]: none with
+    ///   `allow_native_messaging`; with `allow_subagent_messages` only `ListAgents` (both in
+    ///   restricted mode) and `"crossSessionInbound": "refuse"` in `--settings`;
     /// - `--strict-mcp-config` unless the environment has `allow_local_mcp` (the hqc server
     ///   is in `--mcp-config` either way); [`crate::config::Environment::process_env`];
     ///   `SSH_AUTH_SOCK` only as `ssh_agent`, the socket of the process's own ssh-agent (T44);
@@ -454,9 +481,9 @@ impl ClaudeCodeAdapter {
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);
         let mut disallowed: Vec<String> = spec.disallowed_tools.clone();
-        for t in &self.opts.always_disallowed {
-            if !disallowed.contains(t) {
-                disallowed.push(t.clone());
+        for t in self.opts.native_messaging.disallowed(spec.restricted) {
+            if !disallowed.iter().any(|d| d == t) {
+                disallowed.push(t.to_string());
             }
         }
         if !disallowed.is_empty() {
@@ -464,9 +491,11 @@ impl ClaudeCodeAdapter {
             args.push("--disallowedTools".into());
             args.extend(disallowed);
         }
-        if let Some(settings) = spec.environment.permissions.settings_json() {
-            args.extend(["--settings".into(), settings]);
+        let mut settings = spec.environment.permissions.settings();
+        if self.opts.native_messaging == NativeMessaging::Subagents {
+            settings["crossSessionInbound"] = "refuse".into();
         }
+        args.extend(["--settings".into(), settings.to_string()]);
         if spec.restricted {
             args.push("--restricted".into());
         } else {

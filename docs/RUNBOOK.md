@@ -759,9 +759,10 @@ Three levels of `[permissions]`, from strongest to weakest:
    folder and `git push --force` if the user asked for it), so in this mode `deny` is the only
    boundary.
 
-In an environment with `project_settings = true` (§14 of the SPEC) none of the three levels
-covers the repository's own hooks: Claude Code runs them itself, without a card and outside
-`deny`.
+In an environment with `project_settings = true` (§14 of the SPEC) the permission rules of the
+repository's `.claude/settings.json` join levels 1 and 2 (the rules screen lists them), and none
+of the three levels covers the repository's own hooks: Claude Code runs them itself, without a
+card and outside `deny`.
 
 **The mode of each session** (T38). Every session runs in "Ask" or "Auto". The chat header
 shows which: an orange "Auto" badge, or "Ask" in plain text ("Ask (Auto asked)" when the

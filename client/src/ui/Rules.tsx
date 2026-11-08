@@ -287,7 +287,8 @@ export function RulesScreen({
               <span>
                 Rules from files are read-only here. Edit them on the worker: <span class="mono">worker.toml</span> in the HQC
                 worker config, <span class="mono">~/.claude/settings.json</span> for all your Claude Code projects,{' '}
-                <span class="mono">.claude/settings.local.json</span> inside this folder.
+                <span class="mono">.claude/settings.local.json</span> inside this folder, and in an environment with{' '}
+                <span class="mono">project_settings</span> the repository's <span class="mono">.claude/settings.json</span>.
               </span>
             </div>
           </section>

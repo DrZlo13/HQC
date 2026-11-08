@@ -100,6 +100,11 @@ export function App({ app }: { app: AppState }) {
       : route.name === 'projectSettings' || route.name === 'rules'
         ? route.projectId
         : sessionProject;
+  // The first render already shows the route's project: effects run after the first paint,
+  // and a remembered list would show the personal project for that frame.
+  useState(() => {
+    if (routeProject) app.selectProject(routeProject);
+  });
   useEffect(() => {
     if (routeProject) app.selectProject(routeProject);
   }, [app, routeProject]);

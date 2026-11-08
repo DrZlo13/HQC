@@ -10,8 +10,10 @@ import './styles.css';
 // recomputes it with the user's theme and project.
 applyTheme(document.documentElement, 'teal', storedTheme());
 const app = createApp();
+// Before the first render: a kept list (`hqc.list`) the render throws on is still replaced by
+// the hub's answer, so the next load works.
+void app.init();
 render(<App app={app} />, document.getElementById('app')!);
 watchTabIcon(app);
-void app.init();
 void registerServiceWorker();
 listenForNavigation();

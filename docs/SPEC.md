@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.88, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
+Version 0.89, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1327,6 +1327,10 @@ the rest is marked "later"):
 - `GET /api/workers/{id}/dirs?path=` → `{entries[{name, path}]}`: an `fs.list_dirs` frame to
   the worker (§5.3); without `path`: `allowed_roots`; outside them: `400 invalid_path`;
   offline: `409 worker_offline`
+- `GET /api/sessions` (since 0.89) → `{sessions: [<session>]}`: every session of every project
+  of the user in one list, the objects of `GET /api/projects/{id}/sessions` (archived and
+  service sessions included), the newest `updated_at` first. The client fetches its list with
+  it and `GET /api/projects`, not one request per project
 - `GET/POST /api/projects/{id}/sessions` (list: `{sessions: [<session>]}`; create:
   {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?} → `201` and
   the session object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4).
@@ -1536,7 +1540,16 @@ on this device (kept in the browser's storage; none, archived or deleted: the em
 column); a phone's project screen stays its session list. Since 0.78 a message typed into a
 session and not sent stays its draft on this device (the browser's storage, `hqc.drafts`): the
 input shows it again when the session is opened, and the session's row, unless it is the one
-open, says "Draft"; sending the message or clearing the input drops it. The theme is the user's `theme` plus the current project's `color`, as CSS
+open, says "Draft"; sending the message or clearing the input drops it. Since 0.89 the
+projects, the sessions and the list orders the hub gave on this page load are kept on this
+device as well (the
+browser's storage, `hqc.list`, with the id of the personal project), written after each fetch
+of the list and when the page is hidden or left, dropped when a write fails: on a reload the
+project bar and the list (of the project of the open session or project, else the personal
+one) show them at once, and the hub's answer replaces them; a kept list order is asked from
+the hub again once per page load. Before any list (nothing kept, no answer yet) the list's head has no counts, and
+"offline" (the list's head, the chat's header) appears only once the socket's first connect has
+ended. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on
 the project (amber waiting, green online, red danger, violet between sessions); since 0.88 the
 light themes have darker variants of them, and there the project's color is darkened where it
@@ -4197,6 +4210,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.88 → 0.89 (the list at once on a reload)
+§6: `GET /api/sessions` gives every session of every project of the user in one list; the
+client fetches its list with it and `GET /api/projects` instead of one request per project
+(with 37 projects, 37 requests over HTTP/1.1, six at a time, the last answered after 1.5 s).
+§6 client layout: the list is kept on this device (`hqc.list`) and shown at once
+on a reload until the hub answers; before any list the head says neither "No sessions yet" nor
+"offline", and "offline" (there and in the chat's header) waits for the end of the socket's
+first connect.
 
 ### 0.87 → 0.88 (light themes, the app theme in Settings)
 §3 User: `theme` gets the light counterparts of the three dark bases, `warm_light`,

@@ -97,6 +97,7 @@ pub fn router(app: AppState) -> Router {
             "/api/projects/{id}/session_order",
             get(api::get_session_order).put(api::put_session_order),
         )
+        .route("/api/sessions", get(api::all_sessions))
         .route(
             "/api/sessions/{id}",
             get(api::get_session)

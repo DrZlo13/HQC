@@ -192,6 +192,11 @@ export class Api {
     return parseSessionList(await this.req('GET', `/api/projects/${enc(projectId)}/sessions`));
   }
 
+  /** The sessions of every project of the user in one request. */
+  async allSessions(): Promise<SessionInfo[]> {
+    return parseSessionList(await this.req('GET', '/api/sessions'));
+  }
+
   /** No `title`: the hub's default "Session N", which the runtime's title may replace. No
    *  `workspace_id`: the project's default workspace; `cwd` is relative to it (SPEC §13.4). */
   async createSession(projectId: string, title?: string, opts: NewSessionOptions = {}): Promise<SessionInfo> {

@@ -628,6 +628,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/projects/:pid/sessions', (p) => ({
     sessions: [...sessions.values()].filter((s) => s.project_id === p.pid).map(info),
   }));
+  route('GET', '/api/sessions', () => ({ sessions: [...sessions.values()].map(info) }));
   // The order of the list (T50), by the hub's rules: only the project's unarchived sessions,
   // the missing ones first, newest first.
   const orderOf = (pid) => {

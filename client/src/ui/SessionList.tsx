@@ -78,7 +78,7 @@ export function SessionList({
   const project = app.currentProject();
   useEffect(() => {
     if (project && !app.workspaces.has(project.id)) app.loadWorkspaces(project.id).catch(() => {});
-    if (project && !app.orders.has(project.id)) void app.loadOrder(project.id);
+    if (project && !app.orderLoaded(project.id)) void app.loadOrder(project.id);
   }, [app, project?.id]);
   if (project && app.archiveMode) return <ArchiveList app={app} project={project} current={current} phone={phone} />;
   return <LiveList app={app} current={current} phone={phone} requests={requests} />;
@@ -117,8 +117,9 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     const list = app.sortedSessions().filter((s) => matchesQuery(s, pathOf(s), query));
     groups = groupSessions(list, mode, now, (pid && app.orders.get(pid)?.session_ids) || []);
   }
-  const conn = app.conn !== 'open' ? ' · offline' : '';
-  const counts = headCounts(app.sortedSessions());
+  // Nothing before the first list and the socket's first connect: not "No sessions yet · offline".
+  const counts = app.listed ? headCounts(app.sortedSessions()) : '';
+  const conn = app.offline ? (counts ? ' · offline' : 'offline') : '';
 
   const startReorder = () => {
     // The order sent must hold every live session: the waiting archive goes first.

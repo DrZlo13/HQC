@@ -10,7 +10,8 @@ import { act } from 'preact/test-utils';
 import type { Api } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
 import type { ListMode, SessionInfo, SessionState } from '../src/proto';
-import type { HubSocket } from '../src/ws';
+import type { ConnState, HubSocket } from '../src/ws';
+import { App } from '../src/ui/App';
 import { ProjectRail } from '../src/ui/ProjectRail';
 import { SessionList } from '../src/ui/SessionList';
 import { activeLabel, arrange, bucketOf, groupSessions, headCounts, matchesQuery, moveTo, projectInitials } from '../src/ui/sessions';
@@ -55,6 +56,8 @@ beforeEach(() => {
 afterEach(() => {
   if (root) render(null, root);
   document.body.innerHTML = '';
+  // Leaving the page and refreshing keep the list there (`hqc.list`): the next app would load it.
+  localStorage.clear();
   vi.useRealTimers();
 });
 
@@ -391,6 +394,9 @@ describe('archive from the row (T50)', () => {
     expect(api.archive.mock.calls).toEqual([['net', false]]);
     expect(root.querySelector('.toast-text')!.textContent).toBe('Archived «Cave scene port»');
 
+    // The list kept for the next load has the session archived on leaving.
+    const kept = () =>
+      (JSON.parse(localStorage.getItem('hqc.list')!).sessions as SessionInfo[]).filter((s) => s.archived).map((s) => s.id);
     await act(async () => {
       doc.visibilityState = 'hidden';
       doc.dispatchEvent(new Event('visibilitychange'));
@@ -399,12 +405,36 @@ describe('archive from the row (T50)', () => {
       ['net', false],
       ['cave', true],
     ]);
+    expect(kept()).toContain('cave');
     expect(root.querySelector('.toast')).toBeNull();
     await click(rowOf('Stone textures').querySelector('.btn-row-archive'));
     await act(async () => {
       win.dispatchEvent(new Event('pagehide'));
     });
     expect(api.archive.mock.calls.at(-1)).toEqual(['stones', true]);
+    expect(kept()).toContain('stones');
+  });
+
+  it('forgets the kept list when it cannot be written', () => {
+    const app = makeApp();
+    const win = new EventTarget() as unknown as Window;
+    Object.defineProperty(win, 'document', { value: Object.assign(new EventTarget(), { visibilityState: 'visible' }) });
+    app.watchPageLeave(win);
+    // A full storage: the write throws, the stale list must not stay.
+    const full = {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error('QuotaExceededError');
+      },
+      removeItem: vi.fn(),
+    };
+    vi.stubGlobal('localStorage', full);
+    try {
+      win.dispatchEvent(new Event('pagehide'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(full.removeItem).toHaveBeenCalledWith('hqc.list');
   });
 
   it('returns an undone session to its place in Custom; a new session goes on top', async () => {
@@ -819,5 +849,173 @@ describe('favorites', () => {
     await click(root.querySelector('.rail-menu .btn-favorite'));
     expect(api.setProjectFavorite).toHaveBeenLastCalledWith('p2', false);
     expect(order()).toEqual(['kiln', 'Personal', 'physics-mp', 'boards']);
+  });
+});
+
+describe('the list on a reload', () => {
+  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const };
+  /** A hub that has not answered yet. */
+  const pending = () => new Promise<never>(() => {});
+  /** A socket that has not connected; `state` plays its connect. */
+  function quietSocket() {
+    const listeners: ((s: ConnState) => void)[] = [];
+    const socket = {
+      onState: (fn: (s: ConnState) => void) => (listeners.push(fn), () => {}),
+      onRequests: () => () => {},
+      onSummary: () => () => {},
+      start: () => {},
+    } as unknown as HubSocket;
+    return { socket, state: (s: ConnState) => listeners.forEach((fn) => fn(s)) };
+  }
+
+  it('refreshSessions asks for the projects and every session in one request each', async () => {
+    const api = {
+      ...hubApi(),
+      projects: vi.fn(async () => [...makeApp().projects.values()]),
+      sessions: vi.fn(async () => []),
+      allSessions: vi.fn(async () => LIST),
+    };
+    const app = new AppState(api as unknown as Api, quietSocket().socket);
+    app.me = ME;
+    await app.refreshSessions();
+    expect(api.projects).toHaveBeenCalledTimes(1);
+    expect(api.allSessions).toHaveBeenCalledTimes(1);
+    expect(api.sessions).not.toHaveBeenCalled();
+    expect([...app.sessions.keys()]).toEqual(LIST.map((s) => s.id));
+  });
+
+  it('shows the remembered projects, sessions, order and current project before the hub answers', async () => {
+    const mine = LIST.map((s) => ({ ...s, project_id: 'p0' }));
+    const before = new AppState(
+      {
+        ...hubApi({ mode: 'recent', session_ids: [] }),
+        projects: async () => [...makeApp().projects.values()],
+        allSessions: async () => mine,
+        // Per project too, as the list was fetched before `GET /api/sessions`.
+        sessions: async (pid: string) => (pid === 'p0' ? mine : []),
+      } as unknown as Api,
+      quietSocket().socket,
+    );
+    before.me = ME;
+    await before.loadOrder('p0');
+    await before.refreshSessions();
+
+    const api = {
+      ...hubApi(),
+      me: vi.fn(pending),
+      projects: vi.fn(pending),
+      allSessions: vi.fn(pending),
+      sessionOrder: vi.fn(pending),
+    };
+    const app = new AppState(api as unknown as Api, quietSocket().socket);
+    void app.init();
+    await mount(
+      <>
+        <ProjectRail app={app} />
+        <SessionList app={app} />
+      </>,
+    );
+    expect(api.me).toHaveBeenCalled();
+    expect(app.me).toBeNull();
+    expect(app.currentProjectId).toBe('p0');
+    expect([...root.querySelectorAll('.rail-project')].map((r) => r.getAttribute('aria-label'))).toEqual(['Personal', 'physics-mp']);
+    expect(root.querySelector('.rail-project.is-current')!.getAttribute('aria-label')).toBe('Personal');
+    expect(root.querySelector('.project-title')!.textContent).toBe('Personal');
+    expect(root.querySelector('.side-counts')!.textContent).toBe('1 needs you · 2 running');
+    expect(groups()).toEqual([
+      ['Today', '3', ['Stone textures', 'Step determinism', 'Network sync']],
+      ['Yesterday', '1', ['Collision profiling']],
+      ['Earlier', '1', ['Cave scene port']],
+    ]);
+  });
+
+  it('with nothing remembered the head has no counts and no "offline" until the hub and the socket answer', async () => {
+    const api = { ...hubApi(), me: vi.fn(pending), projects: vi.fn(pending), allSessions: vi.fn(pending) };
+    const { socket, state } = quietSocket();
+    const app = new AppState(api as unknown as Api, socket);
+    void app.init();
+    await mount(<SessionList app={app} />);
+    expect(root.querySelector('.project-title')!.textContent).toBe('HQC');
+    expect(root.querySelector('.side-counts')!.textContent).toBe('');
+    await mount(<SessionList app={app} phone />);
+    expect(root.querySelector('.m-head-state')).toBeNull();
+    // The first connect is pending: still not offline.
+    await act(async () => state('connecting'));
+    expect(root.querySelector('.m-head-state')).toBeNull();
+    // It failed: offline now.
+    await act(async () => state('closed'));
+    expect(root.querySelector('.m-head-state')!.textContent).toBe('offline');
+    await mount(<SessionList app={app} />);
+    expect(root.querySelector('.side-counts')!.textContent).toBe('offline');
+  });
+
+  it("the first frame on a project's address shows that project, not the personal one", async () => {
+    const before = new AppState(
+      { ...hubApi(), projects: async () => [...makeApp().projects.values()], allSessions: async () => LIST } as unknown as Api,
+      quietSocket().socket,
+    );
+    before.me = ME;
+    await before.refreshSessions();
+
+    const api = { ...hubApi(), me: vi.fn(pending), projects: vi.fn(pending), allSessions: vi.fn(pending), sessionOrder: vi.fn(pending) };
+    const app = new AppState(api as unknown as Api, quietSocket().socket);
+    location.hash = '#/p/p1';
+    try {
+      root = document.createElement('div');
+      document.body.appendChild(root);
+      // No act: the frame before any effect has run.
+      render(<App app={app} />, root);
+      expect(root.querySelector('.rail-project.is-current')!.getAttribute('aria-label')).toBe('physics-mp');
+    } finally {
+      location.hash = '';
+    }
+  });
+
+  it('does not write back a kept list order the hub has not given on this load', async () => {
+    const before = new AppState(
+      {
+        ...hubApi({ mode: 'recent', session_ids: [] }),
+        projects: async () => [...makeApp().projects.values()],
+        allSessions: async () => LIST,
+      } as unknown as Api,
+      quietSocket().socket,
+    );
+    before.me = ME;
+    await before.loadOrder('p0');
+    await before.refreshSessions();
+
+    // The next load has the kept order but never asks the hub for it, then refreshes.
+    const app = new AppState(
+      { ...hubApi(), projects: async () => [...makeApp().projects.values()], allSessions: async () => LIST } as unknown as Api,
+      quietSocket().socket,
+    );
+    expect(app.listMode('p0')).toBe('recent');
+    app.me = ME;
+    await app.refreshSessions();
+    expect(JSON.parse(localStorage.getItem('hqc.list')!).orders).toEqual({});
+  });
+
+  it('asks the hub again for a remembered list order', async () => {
+    const before = new AppState(
+      {
+        ...hubApi({ mode: 'recent', session_ids: [] }),
+        projects: async () => [...makeApp().projects.values()],
+        allSessions: async () => LIST,
+      } as unknown as Api,
+      quietSocket().socket,
+    );
+    before.me = ME;
+    await before.loadOrder('p0');
+    await before.refreshSessions();
+
+    // The order was changed elsewhere: the hub now says `state`.
+    const api = { ...hubApi(), me: vi.fn(pending), projects: vi.fn(pending), allSessions: vi.fn(pending) };
+    const app = new AppState(api as unknown as Api, quietSocket().socket);
+    void app.init();
+    expect(app.listMode('p0')).toBe('recent');
+    await mount(<SessionList app={app} />);
+    await act(async () => {});
+    expect(api.sessionOrder).toHaveBeenCalledWith('p0');
+    expect(app.listMode('p0')).toBe('state');
   });
 });

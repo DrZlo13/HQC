@@ -1583,3 +1583,94 @@ async fn subagents_are_kept_on_the_session() {
     assert!(v.get("subagents").is_none(), "{v}");
     hub.finish().await;
 }
+
+/// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
+/// service sessions included, the newest `updated_at` first; another user's sessions are not in
+/// it.
+#[tokio::test]
+async fn all_sessions_are_the_union_of_the_projects_lists() {
+    let hub = TestHub::start().await;
+    let db = &hub.app.db;
+    let me = hqc_hub::db::ensure_user(db, &hub.email).await.unwrap();
+    let personal = me.personal_project_id.unwrap();
+    let boards = hqc_hub::db::create_project(db, me.id, "Boards", "")
+        .await
+        .unwrap()
+        .id;
+    let stranger = hqc_hub::db::ensure_user(
+        db,
+        &format!("stranger-{}@example.com", Uuid::new_v4().simple()),
+    )
+    .await
+    .unwrap();
+    let theirs = hqc_hub::db::create_project(db, stranger.id, "Theirs", "")
+        .await
+        .unwrap()
+        .id;
+    let new = |owner: Uuid, project: Uuid, title: &'static str| async move {
+        hqc_hub::db::create_session(
+            db,
+            hqc_hub::db::NewSession {
+                project_id: project,
+                owner_id: owner,
+                workspace_id: None,
+                worker_id: None,
+                cwd: ".",
+                title: Some(title),
+                model: None,
+                auto_approve: false,
+                permission_mode: None,
+            },
+        )
+        .await
+        .unwrap()
+    };
+    new(me.id, personal, "Notes").await;
+    new(me.id, boards, "Power board").await;
+    let archived = new(me.id, boards, "Old layout").await;
+    let system = new(me.id, personal, "home-mac").await;
+    let foreign = new(stranger.id, theirs, "Not mine").await;
+    sqlx::query("UPDATE sessions SET archived = true, archived_at = now() WHERE id = $1")
+        .bind(archived)
+        .execute(db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET system = true WHERE id = $1")
+        .bind(system)
+        .execute(db)
+        .await
+        .unwrap();
+
+    let (s, v) = hub.get("/api/sessions").await;
+    assert_eq!(s, 200, "{v}");
+    let all = v["sessions"].as_array().unwrap().clone();
+    let (_, projects) = hub.get("/api/projects").await;
+    let mut union = Vec::new();
+    for p in projects["projects"].as_array().unwrap() {
+        let (s, l) = hub
+            .get(&format!(
+                "/api/projects/{}/sessions",
+                p["id"].as_str().unwrap()
+            ))
+            .await;
+        assert_eq!(s, 200, "{l}");
+        union.extend(l["sessions"].as_array().unwrap().iter().cloned());
+    }
+    let by_id = |l: &[Value]| {
+        let mut l = l.to_vec();
+        l.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        l
+    };
+    assert_eq!(by_id(&all), by_id(&union));
+    assert_eq!(all.len(), 4, "{v}");
+    let row = |id: Uuid| all.iter().find(|s| s["id"] == id.to_string().as_str());
+    assert_eq!(row(archived).unwrap()["archived"], true);
+    assert_eq!(row(system).unwrap()["system"], true);
+    assert!(row(foreign).is_none(), "{v}");
+    let times: Vec<chrono::DateTime<Utc>> = all
+        .iter()
+        .map(|s| s["updated_at"].as_str().unwrap().parse().unwrap())
+        .collect();
+    assert!(times.windows(2).all(|w| w[0] >= w[1]), "{times:?}");
+    hub.finish().await;
+}

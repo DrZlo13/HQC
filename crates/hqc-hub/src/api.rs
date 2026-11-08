@@ -808,6 +808,18 @@ pub async fn project_sessions(
     }))
 }
 
+/// `GET /api/sessions` (SPEC §6): the sessions of every project of the user in one list, the
+/// objects of `GET /api/projects/{id}/sessions`, the newest `updated_at` first.
+pub async fn all_sessions(
+    State(app): State<AppState>,
+    user: CurrentUser,
+) -> ApiResult<Json<SessionList>> {
+    let rows = db::sessions_of_owned_projects(&app.db, user.id).await?;
+    Ok(Json(SessionList {
+        sessions: state::views(&app, user.id, rows).await?,
+    }))
+}
+
 /// `live` (the project's listed sessions, newest first) in the order of `placed`: ids of
 /// `placed` that are not in `live` are dropped, sessions of `live` missing from `placed` go
 /// first, newest first (T50: a new session is on top of a custom order).

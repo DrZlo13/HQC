@@ -1641,6 +1641,18 @@ pub async fn sessions_of_project(db: &PgPool, project: Uuid) -> sqlx::Result<Vec
     .await
 }
 
+/// Every session of every project `owner` owns, the newest `updated_at` first: the union of
+/// [`sessions_of_project`] over the owner's projects (`GET /api/sessions`).
+pub async fn sessions_of_owned_projects(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<SessionRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {SESSION_COLS} FROM sessions s JOIN projects p ON p.id = s.project_id
+         WHERE p.owner_id = $1 ORDER BY s.updated_at DESC"
+    ))
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
 /// The sessions a project's list shows (T50): unarchived, not a worker's service session,
 /// the newest first.
 pub async fn live_session_ids(db: &PgPool, project: Uuid) -> sqlx::Result<Vec<Uuid>> {

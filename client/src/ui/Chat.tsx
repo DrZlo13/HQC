@@ -277,7 +277,7 @@ export function Chat({
   const cost = usage.cost;
   const pill = <StatePill state={state} timeline={t} />;
   const agents = agentsLabel(info?.subagents);
-  const conn = app.conn !== 'open' && <span class="conn-lost">offline</span>;
+  const conn = app.offline && <span class="conn-lost">offline</span>;
 
   // T50: archived — read-only, no input; restore and delete are on the archive's rows.
   const archived = info?.archived ?? false;

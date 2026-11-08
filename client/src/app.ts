@@ -37,6 +37,18 @@ function loadDrafts(): Map<string, string> {
   }
 }
 
+/** The projects, sessions and list orders as last shown, on this device: shown at once on a
+ *  reload, replaced when the hub answers. Storage that fails or holds something else: none. */
+const LIST_KEY = 'hqc.list';
+function loadList(): { home: string; projects: Project[]; sessions: SessionInfo[]; orders: [string, SessionOrder][] } | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(LIST_KEY) ?? '');
+    return { home: v.home, projects: [...v.projects], sessions: [...v.sessions], orders: Object.entries(v.orders) };
+  } catch {
+    return null;
+  }
+}
+
 export class AppState {
   me: Me | null = null;
   error: string | null = null;
@@ -47,10 +59,14 @@ export class AppState {
   /** The project shown in the left column; the personal one until another is picked. */
   currentProjectId: string | null = null;
   conn: ConnState = 'closed';
+  /** The socket's first connect has ended, open or closed: "offline" is not shown before. */
+  connTried = false;
   /** Every open request of the user, oldest first, as the hub last sent it (T37). */
   requests: OpenRequest[] = [];
   /** By project id: the user's list order (T50), as the hub last gave it; `loadOrder`. */
   readonly orders = new Map<string, SessionOrder>();
+  /** Projects whose order came from the hub on this page load, not only from storage. */
+  private readonly loadedOrders = new Set<string>();
   /** Archived from the list, not sent yet: hidden at once, sent when the Undo toast ends,
    *  when another one is archived, before Reorder or archive mode, or when the page is left
    *  (T50). */
@@ -70,8 +86,27 @@ export class AppState {
   ) {
     socket.onState((s) => {
       this.conn = s;
+      if (s !== 'connecting') this.connTried = true;
       this.changed();
     });
+    const list = loadList();
+    if (list) {
+      for (const p of list.projects) this.projects.set(p.id, p);
+      for (const s of list.sessions) this.sessions.set(s.id, s);
+      for (const [id, o] of list.orders) this.orders.set(id, o);
+      this.currentProjectId = list.home;
+    }
+  }
+
+  /** There is a list to show, remembered or from the hub (the personal project is always in
+   *  it); before it the list's head has no counts. */
+  get listed(): boolean {
+    return this.projects.size > 0;
+  }
+
+  /** The socket is down: not while its first connect at page load is still pending. */
+  get offline(): boolean {
+    return this.connTried && this.conn !== 'open';
   }
 
   onChange(fn: () => void): () => void {
@@ -120,12 +155,41 @@ export class AppState {
   }
 
   /** Leaving the page (or hiding it: a phone switching apps) within the Undo window archives
-   *  at once; `keepalive` lets the request outlive the page (T50). */
+   *  at once; `keepalive` lets the request outlive the page (T50). The list is kept for the
+   *  next load then too. */
   watchPageLeave(win: Window): void {
-    win.addEventListener('pagehide', () => this.commitArchive(true));
-    win.document.addEventListener('visibilitychange', () => {
-      if (win.document.visibilityState === 'hidden') this.commitArchive(true);
+    win.addEventListener('pagehide', () => {
+      this.commitArchive(true);
+      this.rememberList();
     });
+    win.document.addEventListener('visibilitychange', () => {
+      if (win.document.visibilityState !== 'hidden') return;
+      this.commitArchive(true);
+      this.rememberList();
+    });
+  }
+
+  /** Keeps the list for the next load of the page; one that cannot be kept is forgotten. */
+  private rememberList(): void {
+    if (!this.me) return;
+    try {
+      localStorage.setItem(
+        LIST_KEY,
+        JSON.stringify({
+          home: this.me.personal_project_id,
+          projects: [...this.projects.values()],
+          sessions: [...this.sessions.values()],
+          // Only the hub's orders of this page load: a kept one is not written back unchecked.
+          orders: Object.fromEntries([...this.orders].filter(([id]) => this.loadedOrders.has(id))),
+        }),
+      );
+    } catch {
+      try {
+        localStorage.removeItem(LIST_KEY);
+      } catch {
+        // No storage: nothing is remembered.
+      }
+    }
   }
 
   /** The hub's zone of the user follows the browser's: schedules default to it (SPEC §16). */
@@ -138,19 +202,20 @@ export class AppState {
     );
   }
 
-  /** Projects and the sessions of every project. */
+  /** Projects and the sessions of every project, in two requests; the list is kept for the
+   *  next load of the page. */
   async refreshSessions(): Promise<void> {
     if (!this.me) return;
     this.refreshing ??= (async () => {
-      const projects = await this.api.projects();
-      const lists = await Promise.all(projects.map((p) => this.api.sessions(p.id)));
+      const [projects, sessions] = await Promise.all([this.api.projects(), this.api.allSessions()]);
       this.projects.clear();
       for (const p of projects) this.projects.set(p.id, p);
       this.sessions.clear();
-      for (const s of lists.flat()) this.sessions.set(s.id, s);
+      for (const s of sessions) this.sessions.set(s.id, s);
       if (!this.currentProjectId || !this.projects.has(this.currentProjectId)) {
         this.currentProjectId = this.me!.personal_project_id;
       }
+      this.rememberList();
       this.changed();
     })().finally(() => (this.refreshing = null));
     return this.refreshing;
@@ -334,10 +399,16 @@ export class AppState {
     return arrange(this.sortedSessions(projectId), (projectId && this.orders.get(projectId)?.session_ids) || []);
   }
 
+  /** The project's order came from the hub on this page load: a remembered one is asked again. */
+  orderLoaded(projectId: string): boolean {
+    return this.loadedOrders.has(projectId);
+  }
+
   /** Errors are dropped: the list then stays in `state`, the next look tries again. */
   async loadOrder(projectId: string): Promise<void> {
     try {
       this.orders.set(projectId, await this.api.sessionOrder(projectId));
+      this.loadedOrders.add(projectId);
       this.changed();
     } catch {
       // Offline: the default order.
@@ -360,6 +431,7 @@ export class AppState {
     this.changed();
     try {
       this.orders.set(projectId, await this.api.putSessionOrder(projectId, body));
+      this.loadedOrders.add(projectId);
     } catch (e) {
       if (before) this.orders.set(projectId, before);
       else this.orders.delete(projectId);

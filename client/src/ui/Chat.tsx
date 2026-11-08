@@ -172,12 +172,12 @@ export function Chat({
     app.api.takeover(sessionId).then(
       () => {
         setNotice(null);
-        return app.refreshSessions();
+        return app.reloadSessions();
       },
       (e: unknown) => {
         if (e instanceof ApiError && e.code === 'vscode_open') {
           setNotice(e.message);
-          return app.refreshSessions();
+          return app.reloadSessions();
         }
         setNotice(
           e instanceof ApiError && e.code === 'vscode_active'

@@ -33,7 +33,7 @@ function settingsApp(api: Partial<Api>) {
     api,
     me: { email: 'me@example.com' },
     theme: () => 'warm',
-    refreshSessions: vi.fn(async () => {}),
+    reloadSessions: vi.fn(async () => {}),
   } as unknown as AppState;
 }
 
@@ -65,7 +65,7 @@ it('lists revoked workers with "Delete" and deletes them', async () => {
   await act(async () => {});
   expect(purgeWorker).toHaveBeenCalledWith('w-gone');
   expect(revokeWorker).not.toHaveBeenCalled();
-  expect(app.refreshSessions).toHaveBeenCalled();
+  expect(app.reloadSessions).toHaveBeenCalled();
   expect(root.querySelectorAll('.plain-list li')).toHaveLength(1);
   expect(buttons('Delete')).toHaveLength(0);
 });
@@ -100,7 +100,7 @@ it('revokes a worker and refreshes the sessions', async () => {
   await act(async () => {});
   await act(async () => buttons('Revoke')[0].click());
   expect(revokeWorker).toHaveBeenCalledWith('w-live');
-  expect(app.refreshSessions).toHaveBeenCalled();
+  expect(app.reloadSessions).toHaveBeenCalled();
 });
 
 function serviceSession(id: string, title: string, archived: boolean): SessionInfo {

@@ -75,12 +75,28 @@ function png(): File {
   return new File([b], 'logo.png', { type: 'image/png' });
 }
 
+/** While set, the answers to `GET …/sessions` wait for it: a refresh of the lists stays in
+ *  flight, as on a hub with many sessions. */
+let hold: Promise<void> | null = null;
+let held = 0;
+/** `GET /api/projects` requests: one per round of a refresh. */
+let projectLists = 0;
+const holdingFetch: typeof fetch = async (input, init) => {
+  if (init?.method === 'GET' && /\/api\/projects$/.test(String(input))) projectLists++;
+  const res = await fetch(input, init);
+  if (hold && init?.method === 'GET' && /\/sessions$/.test(String(input))) {
+    held++;
+    await hold;
+  }
+  return res;
+};
+
 beforeAll(async () => {
   mock = await startMock({ speed: 0.05 });
   win = new Window({ url: 'http://hqc.test/' });
   installGlobals(win);
   app = new AppState(
-    new Api(mock.url, fetch),
+    new Api(mock.url, holdingFetch),
     new HubSocket({ url: mock.url.replace('http', 'ws') + '/api/ws', WebSocketImpl: WebSocket }),
   );
   root = win.document.createElement('div') as unknown as HTMLElement;
@@ -233,6 +249,78 @@ it('picks the app theme on the Settings page: a light tile applies at once and g
   expect(document.documentElement.style.getPropertyValue('color-scheme')).toBe('light');
   const on = $$('.base-pick[aria-pressed=true]');
   expect(on.map((b) => b.closest('.theme-group')!.getAttribute('aria-label') + ' ' + b.textContent)).toEqual(['Light themes Graphite']);
+});
+
+it('keeps a change saved while the lists are loading again', async () => {
+  const pid = app.me!.personal_project_id;
+  let release!: () => void;
+  hold = new Promise((r) => (release = r));
+  held = 0;
+  // A session imported elsewhere makes the client fetch the projects and their sessions.
+  const refresh = app.refreshSessions();
+  try {
+    await until('lists in flight', () => held > 0);
+
+    location.hash = `#/p/${pid}/settings`;
+    (await until('appearance button', () => button('Change icon and color')))!.click();
+    await until('dialog', () => $('[role=dialog]'));
+    button('Emoji', '[role=dialog]')!.click();
+    (await until('emoji grid', () => $<HTMLButtonElement>('button[aria-label="Use 🦊"]')))!.click();
+    await until('preview', () => $('.preview-tile.is-current')?.textContent === '🦊');
+    button('Save', '[role=dialog]')!.click();
+    await until('saved', () => !$('[role=dialog]'));
+    expect($('.rail-project.is-current')!.textContent).toBe('🦊');
+  } finally {
+    hold = null;
+    release();
+  }
+  await refresh;
+  // The lists fetched before the save do not put the image back.
+  expect(app.projects.get(pid)!.icon).toEqual({ kind: 'emoji', value: '🦊' });
+  await new Promise((r) => setTimeout(r, 50));
+  expect($('.rail-project.is-current')!.textContent).toBe('🦊');
+});
+
+it('loads the lists again when asked after a hub change made while they were loading', async () => {
+  const pid = app.me!.personal_project_id;
+  let release!: () => void;
+  hold = new Promise((r) => (release = r));
+  held = 0;
+  const refresh = app.refreshSessions();
+  let reload: Promise<void>;
+  try {
+    await until('lists in flight', () => held > 0);
+    // As a takeover or a revoked worker: the hub changes, only the lists bring it.
+    await app.api.patchProject(pid, { description: 'Changed on the hub' });
+    reload = app.reloadSessions();
+  } finally {
+    hold = null;
+    release();
+  }
+  await refresh;
+  await reload!;
+  expect(app.projects.get(pid)!.description).toBe('Changed on the hub');
+});
+
+it('does not fetch the lists again for what the hub pushes or a read while they load', async () => {
+  const s = [...app.sessions.values()].find((x) => !x.system)!;
+  let release!: () => void;
+  hold = new Promise((r) => (release = r));
+  held = 0;
+  projectLists = 0;
+  const refresh = app.refreshSessions();
+  try {
+    await until('lists in flight', () => held > 0);
+    // An open chat of a working agent: a summary and a read on every event.
+    const summary = { session_id: s.id, project_id: s.project_id, title: s.title, queue_len: 0, last_seq: s.last_seq + 1, last_read_seq: s.last_read_seq };
+    app.mergeSummary([{ ...summary, state: 'running', unread: 1 }]);
+    app.markRead(s.id, summary.last_seq);
+  } finally {
+    hold = null;
+    release();
+  }
+  await refresh;
+  expect(projectLists).toBe(1);
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

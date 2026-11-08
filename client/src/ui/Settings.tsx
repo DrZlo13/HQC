@@ -48,7 +48,7 @@ export function Settings({ app }: { app: AppState }) {
       await app.api.revokeWorker(w.id);
       setWorkers(await app.api.workers({ includeRevoked: true }));
       // Its service session is archived now: the "Workers" group drops it.
-      await app.refreshSessions().catch(() => {});
+      await app.reloadSessions().catch(() => {});
     } catch (e) {
       setError((e as Error).message);
     }
@@ -61,7 +61,7 @@ export function Settings({ app }: { app: AppState }) {
     try {
       await app.api.purgeWorker(w.id);
       setWorkers(await app.api.workers({ includeRevoked: true }));
-      await app.refreshSessions().catch(() => {});
+      await app.reloadSessions().catch(() => {});
     } catch (e) {
       if (e instanceof ApiError && e.code === 'worker_has_sessions') {
         const n = (e.body as { sessions_count?: number } | undefined)?.sessions_count;

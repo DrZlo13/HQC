@@ -433,7 +433,7 @@ function ImportFromClaude({
     }
     await app.workspacesChanged(projectId).catch(() => {});
     // The worker sends the history in the background; sessions appear as it arrives.
-    await app.refreshSessions().catch(() => {});
+    await app.reloadSessions().catch(() => {});
     setBusy(false);
     if (failed.length) setErrors(failed);
     else onDone();

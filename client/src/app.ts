@@ -81,6 +81,8 @@ export class AppState {
   private refreshing: Promise<void> | null = null;
   /** The sessions the hub pushed a summary of while the lists were on their way. */
   private pushedWhileRefreshing = new Set<string>();
+  /** Counts the user's changes to projects and sessions (`edited`), for `refreshSessions`. */
+  private edits = 0;
 
   constructor(
     readonly api: Api,
@@ -137,6 +139,13 @@ export class AppState {
 
   private changed(): void {
     for (const fn of this.listeners) fn();
+  }
+
+  /** `changed` after the user changed a project or a session, from the hub's answer or as a
+   *  local echo. */
+  private edited(): void {
+    this.edits++;
+    this.changed();
   }
 
   async init(): Promise<void> {
@@ -205,12 +214,20 @@ export class AppState {
   }
 
   /** Projects and the sessions of every project, in two requests; the list is kept for the
-   *  next load of the page. */
+   *  next load of the page. A change the user made while the lists were on their way is
+   *  newer than them: they are fetched again, else they would undo it (a project's change
+   *  has no `session.summary` to bring it back). */
   async refreshSessions(): Promise<void> {
     if (!this.me) return;
     this.refreshing ??= (async () => {
       this.pushedWhileRefreshing.clear();
-      const [projects, sessions] = await Promise.all([this.api.projects(), this.api.allSessions()]);
+      let seen: number;
+      let projects: Project[];
+      let sessions: SessionInfo[];
+      do {
+        seen = this.edits;
+        [projects, sessions] = await Promise.all([this.api.projects(), this.api.allSessions()]);
+      } while (seen !== this.edits);
       this.projects.clear();
       for (const p of projects) this.projects.set(p.id, p);
       const fresh = sessions.map((s) => this.keepRead(s));
@@ -226,6 +243,13 @@ export class AppState {
       this.changed();
     })().finally(() => (this.refreshing = null));
     return this.refreshing;
+  }
+
+  /** `refreshSessions` after the user changed on the hub what only the lists bring back (a
+   *  takeover, a revoked or deleted worker): a refresh on its way fetches them again. */
+  reloadSessions(): Promise<void> {
+    this.edits++;
+    return this.refreshSessions();
   }
 
   /** One session from the hub again: its `commands` (T27) are not in the summary. Errors are
@@ -331,7 +355,7 @@ export class AppState {
     const favorite_at = await this.api.setProjectFavorite(id, on);
     const p = this.projects.get(id);
     if (p) this.projects.set(id, { ...p, favorite_at });
-    this.changed();
+    this.edited();
   }
 
   /** The project bar in the order of `ids` at once, then as the hub keeps it. */
@@ -339,7 +363,7 @@ export class AppState {
     const put = (list: Project[]) => {
       this.projects.clear();
       for (const p of list) this.projects.set(p.id, p);
-      this.changed();
+      this.edited();
     };
     const known = ids.map((id) => this.projects.get(id)).filter((p): p is Project => !!p);
     put([...known, ...[...this.projects.values()].filter((p) => !ids.includes(p.id))]);
@@ -386,7 +410,7 @@ export class AppState {
     const favorite_at = await this.api.setSessionFavorite(id, on);
     const s = this.sessions.get(id);
     if (s) this.sessions.set(id, { ...s, favorite_at });
-    this.changed();
+    this.edited();
   }
 
   /** Archived sessions of the project, the last archived first: archive mode (T50). */
@@ -474,16 +498,16 @@ export class AppState {
     const s = this.sessions.get(p.id);
     // In the archive at once; the hub's object replaces this.
     if (s) this.sessions.set(p.id, { ...s, archived: true, state: 'archived', archived_at: new Date().toISOString() });
-    this.changed();
+    this.edited();
     this.api.archive(p.id, keepalive).then(
       (v) => {
         this.sessions.set(v.id, v);
-        this.changed();
+        this.edited();
       },
       (e: Error) => {
         if (s) this.sessions.set(p.id, s);
         this.listNotice = `Not archived «${p.title}»: ${e.message}`;
-        this.changed();
+        this.edited();
       },
     );
   }
@@ -492,7 +516,7 @@ export class AppState {
   async restoreSession(id: string): Promise<void> {
     const s = await this.api.unarchive(id);
     this.sessions.set(s.id, s);
-    this.changed();
+    this.edited();
   }
 
   async deleteSession(id: string): Promise<void> {
@@ -503,7 +527,7 @@ export class AppState {
   async renameSession(id: string, title: string): Promise<void> {
     const s = await this.api.patchSession(id, { title });
     this.sessions.set(s.id, s);
-    this.changed();
+    this.edited();
   }
 
   setListNotice(notice: string | null): void {
@@ -513,7 +537,7 @@ export class AppState {
 
   /** Forgets a session the hub has deleted. */
   removeSession(id: string): void {
-    if (this.sessions.delete(id)) this.changed();
+    if (this.sessions.delete(id)) this.edited();
   }
 
   /** The workers' service sessions (SPEC §10.2), by worker name: the "Workers" group.
@@ -591,7 +615,7 @@ export class AppState {
     if (!this.me || !projectId) throw new Error('not signed in');
     const s = await this.api.createSession(projectId, title, opts);
     this.sessions.set(s.id, s);
-    this.changed();
+    this.edited();
     return s;
   }
 
@@ -604,7 +628,7 @@ export class AppState {
     }
     this.sessions.set(s.id, s);
     this.workspaces.delete(s.project_id);
-    this.changed();
+    this.edited();
     return s;
   }
 
@@ -614,7 +638,7 @@ export class AppState {
     const s = await this.api.forkSession(sessionId, eventId);
     this.sessions.set(s.id, s);
     this.setDraft(s.id, text);
-    this.changed();
+    this.edited();
     return s;
   }
 
@@ -622,7 +646,7 @@ export class AppState {
   async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
     const s = await this.api.patchSession(sessionId, { permission_mode: mode });
     this.sessions.set(s.id, s);
-    this.changed();
+    this.edited();
   }
 
   /** Changes the session's model (`null`: the runtime's default). A running agent switches
@@ -630,14 +654,14 @@ export class AppState {
   async setAgentSettings(sessionId: string, patch: Pick<SessionPatch, 'model'>): Promise<void> {
     const s = await this.api.patchSession(sessionId, patch);
     this.sessions.set(s.id, s);
-    this.changed();
+    this.edited();
   }
 
   async createProject(name: string): Promise<Project> {
     const p = await this.api.createProject(name);
     this.projects.set(p.id, p);
     this.currentProjectId = p.id;
-    this.changed();
+    this.edited();
     return p;
   }
 
@@ -657,20 +681,20 @@ export class AppState {
   async setAppearance(id: string, patch: { color?: ProjectColor; icon?: { kind: 'emoji' | 'letters'; value: string } }): Promise<void> {
     const p = await this.api.patchProject(id, patch);
     this.projects.set(p.id, p);
-    this.changed();
+    this.edited();
   }
 
   /** An image as the project's icon; the hub checks it (`422 invalid_icon`). */
   async uploadProjectIcon(id: string, file: File): Promise<void> {
     const p = await this.api.uploadProjectIcon(id, file, file.name);
     this.projects.set(p.id, p);
-    this.changed();
+    this.edited();
   }
 
   async renameProject(id: string, name: string): Promise<void> {
     const p = await this.api.patchProject(id, { name });
     this.projects.set(p.id, p);
-    this.changed();
+    this.edited();
   }
 
   async deleteProject(id: string): Promise<void> {
@@ -679,7 +703,7 @@ export class AppState {
     this.workspaces.delete(id);
     for (const [sid, s] of this.sessions) if (s.project_id === id) this.sessions.delete(sid);
     if (this.currentProjectId === id) this.currentProjectId = this.me?.personal_project_id ?? null;
-    this.changed();
+    this.edited();
   }
 
   async loadWorkspaces(projectId: string): Promise<Workspace[]> {
@@ -694,17 +718,18 @@ export class AppState {
     const [list, projects] = await Promise.all([this.api.workspaces(projectId), this.api.projects()]);
     this.workspaces.set(projectId, list);
     for (const p of projects) this.projects.set(p.id, p);
-    this.changed();
+    this.edited();
   }
 
   async setDefaultWorkspace(projectId: string, workspaceId: string): Promise<void> {
     const p = await this.api.patchProject(projectId, { default_workspace_id: workspaceId });
     this.projects.set(p.id, p);
-    this.changed();
+    this.edited();
   }
 
   /** Local echo of the read cursor up to `seq`, so the badge clears before the summary
-   *  arrives; the cursor is kept for `keepRead`. */
+   *  arrives; the cursor is kept for `keepRead`. Not `edited`: it runs on every event of an
+   *  open chat, a refresh would start over and over. */
   markRead(sessionId: string, seq: number): void {
     const s = this.sessions.get(sessionId);
     if (!s || (!s.unread && s.last_read_seq >= seq)) return;

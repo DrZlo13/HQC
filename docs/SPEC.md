@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.86, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.87, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -622,6 +622,15 @@ Worker → hub:
   `session_id`, §5.4, §9.3) and `mcp.call` (stored without `session_token`, see "MCP calls"
   below).
 - The hub answers `ack {event_id, seq}`; until the ack the worker resends after reconnecting.
+- Since 0.87 the worker keeps at most 256 outbox entries un-acked: with that many in flight it
+  reads the hub's frames (the acks) before sending the next one, and when no answer frees a
+  slot within its dead time (60 s, pings do not count) it drops the connection and sends the
+  outbox again after reconnecting. The window counts on the hub answering each outbox entry
+  under its frame id (`ack`, `error` or `mcp.result`); an entry it leaves unanswered (a holder
+  report whose database write fails) holds its slot until the connection ends. A worker that
+  sent a large outbox (40 000 mirrored records after an import) without reading filled the
+  hub's bounded send queue (§20); the hub dropped it, and both sides stayed blocked writing to
+  a socket neither read, so the worker never reconnected.
 - Duplicates are dropped by `event_id` (unique index) and get an `ack` with the `seq` of the
   already stored event. Events for sessions the hub does not know (deleted) get an
   `ack` with `seq: null` (the field may also be absent) and are dropped.
@@ -4178,6 +4187,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.86 → 0.87 (at most 256 outbox entries un-acked)
+§5.2: the worker keeps at most 256 outbox entries un-acked (`MAX_IN_FLIGHT` in the worker's
+`connection.rs`); with that many in flight it reads the hub's frames before sending the next
+one, and drops the connection when no answer frees a slot within its dead time; an entry the
+hub leaves unanswered holds its slot only until then. A worker that sent 40 000 mirrored
+records at once without reading the acks filled the hub's bounded send queue (§20) and was
+dropped, and both sides stayed blocked writing to a socket neither read, so the worker never
+reconnected.
 
 ### 0.85 → 0.86 (an imported session comes in read)
 §9.1: the hub moves the owner's read cursor over the `session_created` of an imported session

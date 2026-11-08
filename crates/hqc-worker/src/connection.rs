@@ -7,7 +7,9 @@
 //!   after a successful `hello.ack`.
 //! - Heartbeat: a WebSocket ping every 20 s; a connection silent for
 //!   [`ConnOptions::dead_after`] is dropped.
-//! - After `hello.ack` the whole outbox is sent in order, then new entries as they come;
+//! - After `hello.ack` the whole outbox is sent in order, then new entries as they come, with
+//!   at most [`MAX_IN_FLIGHT`] entries un-acked at a time: while that many wait, the worker
+//!   reads the hub's frames before sending the next one (SPEC §5.2).
 //!   `ack {event_id}` deletes the entry. A non-retryable `error` on an event frame drops
 //!   the event (it would fail the same way forever); a retryable one keeps it for the next
 //!   connection, up to [`MAX_EVENT_ATTEMPTS`] such errors (SPEC §5.2).
@@ -37,6 +39,12 @@ use crate::token::Secret;
 /// Retryable hub errors on one event after which it is dropped: a hub that fails it on
 /// every resend must not keep it in the outbox forever (SPEC §5.2).
 pub const MAX_EVENT_ATTEMPTS: u32 = 10;
+
+/// Outbox entries sent and not yet acked, at most (SPEC §5.2). The hub's queue of frames to
+/// a worker is bounded (SPEC §20): a worker that sends a large outbox without reading the
+/// acks fills it, the hub drops the connection, and both sides then block writing to a
+/// socket neither of them reads.
+pub const MAX_IN_FLIGHT: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct ConnOptions {
@@ -326,10 +334,11 @@ impl Connection {
     async fn connected(&mut self, ws: &mut Ws, stop: &CancellationToken) -> Result<(), String> {
         let mut sent_upto = 0i64;
         let mut in_flight: HashMap<String, Uuid> = HashMap::new();
-        self.send_outbox(ws, &mut sent_upto, &mut in_flight).await?;
+        let mut last_rx = Instant::now();
+        self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx)
+            .await?;
         let mut heartbeat = tokio::time::interval(self.opts.heartbeat);
         heartbeat.tick().await;
-        let mut last_rx = Instant::now();
         let ready = self.link.outbox_ready.clone();
         loop {
             tokio::select! {
@@ -338,14 +347,14 @@ impl Connection {
                     return Ok(());
                 }
                 _ = ready.notified() => {
-                    self.send_outbox(ws, &mut sent_upto, &mut in_flight).await?;
+                    self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx).await?;
                 }
                 d = self.direct.recv() => match d {
                     Some(d) => {
                         // A session's state goes after the events it wrote before (SPEC §5.2):
                         // `stopped` right after a turn must not overtake its final answer.
                         if matches!(d.frame, WorkerFrame::SessionState { .. }) {
-                            self.send_outbox(ws, &mut sent_upto, &mut in_flight).await?;
+                            self.send_outbox(ws, &mut sent_upto, &mut in_flight, true, &mut last_rx).await?;
                         }
                         self.send_direct(ws, d).await?
                     }
@@ -383,11 +392,13 @@ impl Connection {
             while let Ok(d) = self.direct.try_recv() {
                 // As while connected: a session's state after the events it wrote before.
                 if matches!(d.frame, WorkerFrame::SessionState { .. }) {
-                    self.send_outbox(ws, sent_upto, in_flight).await?;
+                    self.send_outbox(ws, sent_upto, in_flight, false, &mut Instant::now())
+                        .await?;
                 }
                 self.send_direct(ws, d).await?;
             }
-            self.send_outbox(ws, sent_upto, in_flight).await?;
+            self.send_outbox(ws, sent_upto, in_flight, false, &mut Instant::now())
+                .await?;
             while !self.link.outbox.is_empty().map_err(|e| e.to_string())? {
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
@@ -415,6 +426,8 @@ impl Connection {
         ws: &mut Ws,
         sent_upto: &mut i64,
         in_flight: &mut HashMap<String, Uuid>,
+        dispatch: bool,
+        last_rx: &mut Instant,
     ) -> Result<(), String> {
         let entries = self
             .link
@@ -422,6 +435,25 @@ impl Connection {
             .after(*sent_upto)
             .map_err(|e| format!("reading outbox: {e:#}"))?;
         for mut e in entries {
+            // A full window: read the hub's frames (its acks) before sending more.
+            // The deadline is for a slot to free up, not for the next frame: the hub's pings
+            // would otherwise keep a worker waiting forever on entries the hub never answers.
+            let stalled = Instant::now() + self.opts.dead_after;
+            while in_flight.len() >= MAX_IN_FLIGHT {
+                let m = tokio::time::timeout_at(stalled, ws.next())
+                    .await
+                    .map_err(|_| "the hub answers no outbox entry".to_string())?;
+                // A frame read here is a sign of life like one read in `connected`: a long
+                // send must not end in a false heartbeat timeout.
+                *last_rx = Instant::now();
+                match m {
+                    None => return Err("closed by hub".into()),
+                    Some(Err(err)) => return Err(format!("read: {err}")),
+                    Some(Ok(Message::Text(t))) => self.on_text(ws, &t, in_flight, dispatch).await?,
+                    Some(Ok(Message::Close(c))) => return Err(format!("closed by hub: {c:?}")),
+                    Some(Ok(_)) => {}
+                }
+            }
             *sent_upto = e.seq;
             if e.frame == crate::outbox::FRAME_MCP_CALL {
                 // The token is added only now (SPEC §7.2); a call nobody waits for any more

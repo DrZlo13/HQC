@@ -368,6 +368,11 @@ impl HubConn {
     pub async fn close(mut self) {
         let _ = self.ws.close(None).await;
     }
+
+    /// A WebSocket ping, as the hub sends on its heartbeat; a closed connection is ignored.
+    pub async fn ping(&mut self) {
+        let _ = self.ws.send(Message::Ping(Default::default())).await;
+    }
 }
 
 pub fn event_id(frame: &Value) -> Uuid {
@@ -514,6 +519,32 @@ pub fn start_worker_logs(
     adapters: Arc<dyn AdapterFactory>,
     logs: Option<hqc_worker::worker_log::LogReceiver>,
 ) -> RunningWorker {
+    start_worker_opts(env, config, adapters, logs, fast_conn())
+}
+
+/// A worker with its own connection options.
+pub fn start_worker_conn(
+    env: &Env,
+    hub_url: &str,
+    adapters: &FakeAdapters,
+    conn: ConnOptions,
+) -> RunningWorker {
+    start_worker_opts(
+        env,
+        env.config(hub_url),
+        Arc::new(adapters.clone()),
+        None,
+        conn,
+    )
+}
+
+fn start_worker_opts(
+    env: &Env,
+    config: Config,
+    adapters: Arc<dyn AdapterFactory>,
+    logs: Option<hqc_worker::worker_log::LogReceiver>,
+    conn: ConnOptions,
+) -> RunningWorker {
     let w = Worker {
         config,
         token: Secret::new(TOKEN),
@@ -523,7 +554,7 @@ pub fn start_worker_logs(
         outbox_dir: env.outbox(),
         known_paths_file: env.known_paths(),
         logs,
-        conn: fast_conn(),
+        conn,
         shutdown_timeout: Duration::from_secs(5),
         machine_id: None,
         mcp_socket: Some(env.mcp_socket()),

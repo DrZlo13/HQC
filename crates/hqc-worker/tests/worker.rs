@@ -350,6 +350,100 @@ async fn event_failing_retryably_is_dropped_after_ten_attempts() {
     w.stop().await;
 }
 
+// SPEC §5.2: a large outbox goes out with at most `MAX_IN_FLIGHT` entries un-acked; the rest
+// follow as the acks come, in order.
+#[tokio::test]
+async fn outbox_keeps_at_most_max_in_flight_unacked() {
+    use hqc_worker::connection::MAX_IN_FLIGHT;
+    let env = Env::new();
+    let sid = Uuid::now_v7();
+    let ob = Outbox::open(&env.outbox()).unwrap();
+    let want: Vec<Uuid> = (0..2 * MAX_IN_FLIGHT + 10)
+        .map(|i| {
+            let ev = agent_message(sid, &format!("m{i}"));
+            ob.push(ev.event_id, &serde_json::to_value(&ev).unwrap())
+                .unwrap();
+            ev.event_id
+        })
+        .collect();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+
+    let mut frames = vec![];
+    while frames.len() < MAX_IN_FLIGHT {
+        frames.push(c.expect("event").await);
+    }
+    assert!(
+        c.try_recv(Duration::from_millis(500)).await.is_none(),
+        "sent before any ack"
+    );
+    for (i, f) in frames.iter().enumerate() {
+        c.ack_event(f, i as u64 + 1).await;
+    }
+    while frames.len() < want.len() {
+        let f = c.expect("event").await;
+        c.ack_event(&f, frames.len() as u64 + 1).await;
+        frames.push(f);
+    }
+    let got: Vec<Uuid> = frames.iter().map(event_id).collect();
+    assert_eq!(got, want, "sent in order");
+    wait_outbox(&env, "all acked", |ob| ob.is_empty().unwrap()).await;
+    w.stop().await;
+}
+
+// SPEC §5.2: a full window that no answer frees within `dead_after` drops the connection,
+// also while the hub keeps pinging; the next connection sends the outbox again.
+#[tokio::test]
+async fn outbox_window_reconnects_when_no_entry_is_answered() {
+    use hqc_worker::connection::{ConnOptions, MAX_IN_FLIGHT};
+    let env = Env::new();
+    let sid = Uuid::now_v7();
+    let ob = Outbox::open(&env.outbox()).unwrap();
+    let want: Vec<Uuid> = (0..MAX_IN_FLIGHT + 1)
+        .map(|i| {
+            let ev = agent_message(sid, &format!("m{i}"));
+            ob.push(ev.event_id, &serde_json::to_value(&ev).unwrap())
+                .unwrap();
+            ev.event_id
+        })
+        .collect();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let conn = ConnOptions {
+        dead_after: Duration::from_secs(1),
+        ..fast_conn()
+    };
+    let w = start_worker_conn(&env, &hub.url(), &adapters, conn);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    for _ in 0..MAX_IN_FLIGHT {
+        c.expect("event").await;
+    }
+
+    // Pings every 200 ms, never an ack: the worker must still give up after a second.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut c2 = loop {
+        assert!(
+            Instant::now() < deadline,
+            "worker kept a full window while the hub pinged"
+        );
+        tokio::select! {
+            c2 = hub.accept() => break c2,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => c.ping().await,
+        }
+    };
+    c2.handshake().await;
+    assert_eq!(
+        event_id(&c2.expect("event").await),
+        want[0],
+        "outbox sent again"
+    );
+    w.stop().await;
+}
+
 // 3. An input arriving during a turn waits for the turn to end and then goes to the
 //    adapter; each ack comes only after the adapter confirms the input.
 #[tokio::test]

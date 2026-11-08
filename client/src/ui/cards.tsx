@@ -22,7 +22,7 @@ import {
   type ToolRow,
 } from './feed';
 import { useAction, useNow } from './hooks';
-import { IconCheck, IconChevron, IconCross, IconWarn } from './icons';
+import { IconCheck, IconChevron, IconCross, IconFork, IconWarn } from './icons';
 import {
   CANCEL_LABELS,
   LOG_LEVEL_LABELS,
@@ -82,6 +82,9 @@ export interface ChatActions {
   findSession?(ref: string): { id: string; address: string; title?: string } | undefined;
   /** The event at `seq` of session `sessionId`: a message this session sent there (T51). */
   peerMessage?(sessionId: string, seq: number): Promise<HqcEvent | undefined>;
+  /** A new session with the conversation before this message of the user, the message in
+   *  its input (SPEC §6 fork); absent where a session cannot fork. */
+  fork?(event: EventOf<'user.message'>): void;
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {
@@ -368,6 +371,17 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
       </div>
       <div class="meta">
         {event.payload.text && <CopyButton text={event.payload.text} />}
+        {actions.fork && event.author.kind === 'user' && d !== 'pending' && d !== 'failed' && (
+          <button
+            type="button"
+            class="btn-copy btn-copy-idle btn-fork"
+            aria-label="Fork from here"
+            title="Fork from here: a new session with the conversation before this message"
+            onClick={() => actions.fork!(event)}
+          >
+            <IconFork />
+          </button>
+        )}
         {formatTime(event.ts)}
         {event.payload.schedule_id && <span class="scheduled"> · scheduled</span>}
         {d === 'pending' && <span class="delivery"> · awaiting delivery</span>}

@@ -382,6 +382,9 @@ pub struct StartSpec {
     /// hqc's allow rules of the workspace (T48), shared by every session in it; `None` for a
     /// session without workspace.
     pub folder_rules: Option<crate::permissions::FolderRules>,
+    /// `session.start.fork` (SPEC §5.3): the conversation this session forks, at its first
+    /// start; the Claude Code adapter reads the source transcript in the same folder only.
+    pub fork: Option<hqc_proto::frame::ForkFrom>,
 }
 
 impl StartSpec {
@@ -554,6 +557,7 @@ impl Config {
             permission_mode: self.permission_mode(s.session_id, s.permission_mode),
             // The supervisor gives a session in a workspace the folder's shared list.
             folder_rules: None,
+            fork: s.fork.clone(),
         })
     }
 

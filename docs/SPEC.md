@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.79, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.80, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -468,6 +468,7 @@ the client renders only them. The "source" column is the component that produces
 | `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
 | `peer_evicted` | hub | in the target session: the send buffer was over its limit and its oldest messages were dropped unread (§7.1), since 0.35 |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
+| `forked_from` | hub | since 0.80: the end of a forked session's copied history (§6 `POST /api/sessions/{id}/fork`); `text` "Forked from <address> before the message of <time>" |
 | `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6, or `hqc_move`, §7); `text` names the old project, the new one and the folder |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
@@ -773,8 +774,13 @@ MCP calls (worker → hub → worker):
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
   cwd, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?,
-  permission_mode?, allow_rules?[]}
-  — `mode`: `new` | `resume` (§5.2); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
+  permission_mode?, allow_rules?[], fork?}
+  — `mode`: `new` | `resume` (§5.2); `fork` (since 0.80) — {runtime_session_id, at_event_ids[]}
+  of a session forked before a message of its user (§6): the Claude Code adapter, while the
+  session has no transcript yet, reads transcript `runtime_session_id` in the session's own
+  folder, finds the record holding the first of `at_event_ids` (by the event ids of §3, newest
+  first) and starts the fork there (§8.1); with none of them in it the start fails; once the
+  transcript is there, the start resumes it; `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto`, the
@@ -1340,6 +1346,20 @@ the rest is marked "later"):
   holds the transcript: `409 vscode_open` with `held_by`; no registry data and VS Code wrote
   less than 30 s ago: `409 vscode_active`; worker offline: `409 worker_offline`; archived:
   `409 archived`; service session: `409 system_session`
+- `POST /api/sessions/{id}/fork` {event_id} → `201` and the new session object (since 0.80;
+  `manage` level): a new session in the same project, workspace, worker and `cwd`, with the
+  source's model, `permission_mode` and `auto_approve`, titled "<title> (fork)", whose
+  conversation is the source's before the user's message `event_id` (a `user.message` of a
+  person in this session, else `404`); a session that is not Claude Code or has no workspace on
+  a worker of its owner: `409 not_forkable`. The cut is the source's last `agent.message`
+  events before the message (up to 20, newest first): they go as `session.start.fork` (§5.3)
+  with the source's `runtime_session_id`; with none (the first message) the session starts
+  with no conversation and no fork. Its feed gets the source's `user.message`,
+  `agent.message`, `agent.thinking`, `tool.call`, `tool.result`, `attachment`, `peer.message`
+  and `system` events before the message under new ids, at `seq` 1.., none of them an input to
+  deliver, then `system forked_from`, all read by the owner; requests, statuses and usage stay
+  with the source. The agent starts at once. The client puts the message's text into the new
+  session's input as its draft and opens it.
 - `POST /api/sessions/{id}/move` {path, project?, create?} → the session object (since 0.75;
   `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
   folder's project (§3 Session). The hub checks the folder with `fs.stat` as `POST
@@ -2549,7 +2569,15 @@ Model (since 0.74). `agent.model` goes to `--model`; `session.model` for a runni
 "set_model", "model": "<name>"}}`, whose answer is only logged. Checked live on 2.1.312 with
 haiku: the CLI answers `success` with the full model name at once, also during a Bash call, and
 the next model call of the same turn already uses the new model (the turn's `modelUsage` has
-both). The CLI writes the switch into the transcript as a typed `/model <name>` record; the
+both).
+
+Fork (since 0.80). A session with `session.start.fork` and no transcript yet starts with
+`--resume <source> --fork-session --session-id <its uuid> --resume-session-at <record>`: the CLI
+writes a new transcript with the source's records up to and including `<record>` (their
+`uuid`s kept) and continues there; the source is not touched. Checked live on 2.1.310 with
+haiku in stream-json mode: the forked conversation knows only what came before the cut. The
+adapter registers the copied main-chain records as its own (§9.3), so the mirror neither
+imports them nor takes them for another writer. The CLI writes the switch into the transcript as a typed `/model <name>` record; the
 adapter counts it as its own input (§9.3), so the mirror imports no prompt from it (since 0.77).
 
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
@@ -4057,6 +4085,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.79 → 0.80 (fork a session before a message)
+§6: `POST /api/sessions/{id}/fork {event_id}` makes a new session in the same folder whose
+conversation is the source's before that message of the user; its feed gets the source's
+history before it under new ids and `system forked_from`; the client opens it with the message
+in its input. §5.3: `session.start.fork {runtime_session_id, at_event_ids}`. §8.1: the Claude
+Code adapter forks with `--fork-session --resume-session-at`, the copied records counted as its
+own. A message of the user in the feed has "Fork from here". Migration 0034 adds
+`sessions.fork`.
 
 ### 0.78 → 0.79 (a session with running subagents is active)
 §7: `hqc_list_sessions` names the subagents running in a session (`subagents`, when any), so

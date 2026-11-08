@@ -18,7 +18,7 @@ use uuid::Uuid;
 use super::engine::{Action, Core};
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
-use super::{ClaudeCodeAdapter, ClaudeCodeAdapters, ClaudeOptions};
+use super::{ClaudeCodeAdapter, ClaudeCodeAdapters, ClaudeOptions, Launch};
 use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
 use crate::config::StartSpec;
 
@@ -175,6 +175,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         ask_timeout_s: 600,
         permission_mode: crate::permissions::PermissionMode::Ask,
         folder_rules: None,
+        fork: None,
     }
 }
 
@@ -845,7 +846,7 @@ async fn command_line_carries_permissions() {
     let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
     assert_eq!(f.opts.ask_mode, "manual");
     let mode = |a: &ClaudeCodeAdapter, s: &StartSpec| -> String {
-        let args = a.command(s, &Uuid::nil(), false, None).args;
+        let args = a.command(s, &Uuid::nil(), Launch::New, None).args;
         let i = args.iter().position(|a| a == "--permission-mode").unwrap();
         args[i + 1].clone()
     };
@@ -864,7 +865,7 @@ async fn command_line_carries_permissions() {
     assert_eq!(mode(&a, &s), "auto");
     // The deny list goes with auto as with ask.
     assert!(a
-        .command(&s, &Uuid::nil(), false, None)
+        .command(&s, &Uuid::nil(), Launch::New, None)
         .args
         .contains(&"--settings".to_string()));
 }
@@ -912,7 +913,7 @@ environment = "infra"
     let command = |dir: &str| {
         let mut s = spec(Uuid::now_v7(), &root.join(dir), Uuid::new_v4());
         s.environment = cfg.environment(&s.workspace);
-        a.command(&s, &Uuid::nil(), false, None)
+        a.command(&s, &Uuid::nil(), Launch::New, None)
     };
     let settings = |args: &[String]| -> Value {
         let i = args.iter().position(|a| a == "--settings").unwrap();
@@ -2434,6 +2435,115 @@ async fn a_model_switch_record_is_own() {
     a.set_model("claude-fable-5-1").await.unwrap();
     assert!(own.claim(runtime, Uuid::new_v4(), Some("/model claude-fable-5-1")));
     a.kill().await.unwrap();
+}
+
+/// Two turns of a source transcript: prompt, reply; prompt, reply.
+fn two_turns() -> (String, [Uuid; 4]) {
+    let ids = [
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let line = |i: usize, kind: &str, content: Value| {
+        let parent = (i > 0).then(|| ids[i - 1].to_string());
+        json!({"type": kind, "uuid": ids[i], "parentUuid": parent, "isSidechain": false,
+            "message": {"role": kind, "content": content}})
+        .to_string()
+    };
+    let text = [
+        line(0, "user", json!("Remember APPLE.")),
+        json!({"type": "attachment", "uuid": Uuid::new_v4()}).to_string(),
+        line(
+            1,
+            "assistant",
+            json!([{"type": "thinking", "thinking": ""}, {"type": "text", "text": "OK"}]),
+        ),
+        line(2, "user", json!("Remember BANANA.")),
+        line(3, "assistant", json!([{"type": "text", "text": "OK"}])),
+    ]
+    .join("\n");
+    (text, ids)
+}
+
+/// The fork point is the record of the first event found, by any of its blocks; the records
+/// up to it are copied. No event in the transcript: no fork point.
+#[test]
+fn a_fork_cuts_at_the_first_event_found() {
+    let (text, ids) = two_turns();
+    let reply = super::engine::record_event_id(&ids[1], 1);
+    let missing = Uuid::new_v4();
+    assert_eq!(
+        super::fork_point(&text, &[missing, reply]),
+        Some((ids[1], vec![ids[0], ids[1]]))
+    );
+    assert_eq!(super::fork_point(&text, &[missing]), None);
+}
+
+/// SPEC §8.1: a session that forks starts with `--resume <source> --fork-session --session-id
+/// <its own> --resume-session-at <record>`, the copied records are its own; once its
+/// transcript is there it resumes it.
+#[tokio::test]
+async fn a_fork_starts_from_the_source_transcript() {
+    let (text, ids) = two_turns();
+    let (source, runtime) = (Uuid::new_v4(), Uuid::new_v4());
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let from = super::paths::transcript_path(config.path(), work.path(), &source);
+    std::fs::create_dir_all(from.parent().unwrap()).unwrap();
+    std::fs::write(&from, &text).unwrap();
+    let claude = ScriptedClaude::new("");
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(claude.clone()));
+    let mut s = spec(Uuid::now_v7(), work.path(), runtime);
+    s.fork = Some(hqc_proto::frame::ForkFrom {
+        runtime_session_id: source.to_string(),
+        at_event_ids: vec![
+            super::engine::record_event_id(&ids[3], 0),
+            super::engine::record_event_id(&ids[1], 1),
+        ]
+        .into_iter()
+        .rev()
+        .collect(),
+    });
+    let (tx, _rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let args = claude.commands()[0].args.clone();
+    let at = args.iter().position(|a| a == "--resume").unwrap();
+    assert_eq!(
+        args[at..at + 7],
+        [
+            "--resume".to_string(),
+            source.to_string(),
+            "--fork-session".into(),
+            "--session-id".into(),
+            runtime.to_string(),
+            "--resume-session-at".into(),
+            ids[1].to_string(),
+        ]
+    );
+    assert!(own.is_own(runtime, ids[0]) && own.is_own(runtime, ids[1]));
+    assert!(!own.is_own(runtime, ids[3]));
+    a.kill().await.unwrap();
+
+    // The fork made the session's transcript: the next start resumes it.
+    let to = super::paths::transcript_path(config.path(), work.path(), &runtime);
+    std::fs::write(&to, "").unwrap();
+    a.start(&s).await.unwrap();
+    let args = claude.commands()[1].args.clone();
+    assert!(!args.contains(&"--fork-session".to_string()), "{args:?}");
+    assert!(args
+        .windows(2)
+        .any(|w| w == ["--resume".to_string(), runtime.to_string()]));
+    a.kill().await.unwrap();
+
+    // A source that does not hold the message refuses the start.
+    std::fs::remove_file(&to).unwrap();
+    s.fork.as_mut().unwrap().at_event_ids = vec![Uuid::new_v4()];
+    let e = a.start(&s).await.unwrap_err();
+    assert!(format!("{e:#}").contains("not in"), "{e:#}");
 }
 
 /// `show_in_vscode` (the default from the worker config): the child gets

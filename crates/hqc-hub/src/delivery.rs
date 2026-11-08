@@ -181,6 +181,10 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         requested_by_owner,
         permission_mode: s.permission_mode.as_deref().and_then(PermissionMode::parse),
         allow_rules,
+        // Every start sends it; the worker forks only while the session has no transcript.
+        fork: db::session_fork(&app.db, s.id)
+            .await?
+            .and_then(|v| serde_json::from_value(v).ok()),
     })
 }
 

@@ -31,7 +31,7 @@ pub const NATIVE_MESSAGING_TOOLS: &[&str] = &["ListAgents", "SendMessage"];
 use anyhow::Context;
 use async_trait::async_trait;
 use hqc_proto::event::ClarifyAnswer;
-use hqc_proto::frame::{Runtime, SessionInput};
+use hqc_proto::frame::{ForkFrom, Runtime, SessionInput};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -350,6 +350,43 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How the CLI is launched for a transcript (SPEC §8.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// `--session-id`: a new conversation.
+    New,
+    /// `--resume`: the transcript exists.
+    Resume,
+    /// `--resume <from> --fork-session --session-id <uuid> --resume-session-at <at>`: a new
+    /// transcript with `from`'s records up to `at`.
+    Fork { from: Uuid, at: Uuid },
+}
+
+/// Where a fork cuts transcript `text`: the record of the first of `at` (event ids, SPEC §3)
+/// whose content block it holds, and the main-chain user/assistant records up to it, which the
+/// fork copies; `None` when no event is in it.
+pub fn fork_point(text: &str, at: &[Uuid]) -> Option<(Uuid, Vec<Uuid>)> {
+    let (records, _) = hqc_claude_jsonl::parse_str(text);
+    let mut main = Vec::new();
+    let mut found = std::collections::HashMap::new();
+    for r in &records {
+        let (hqc_claude_jsonl::Record::User(m) | hqc_claude_jsonl::Record::Assistant(m)) = r else {
+            continue;
+        };
+        if !m.is_main() {
+            continue;
+        }
+        for i in 0..m.blocks().len().max(1) {
+            found
+                .entry(engine::record_event_id(&m.uuid, i))
+                .or_insert(main.len());
+        }
+        main.push(m.uuid);
+    }
+    let i = at.iter().find_map(|e| found.get(e).copied())?;
+    Some((main[i], main[..=i].to_vec()))
+}
+
 impl ClaudeCodeAdapter {
     /// The claude session uuid: `runtime_session_id` from the hub, or the hqc session id
     /// when the hub sent none.
@@ -385,7 +422,7 @@ impl ClaudeCodeAdapter {
         &self,
         spec: &StartSpec,
         uuid: &Uuid,
-        resume: bool,
+        launch: Launch,
         ssh_agent: Option<&std::path::Path>,
     ) -> CommandSpec {
         let mut args: Vec<String> = [
@@ -441,10 +478,20 @@ impl ClaudeCodeAdapter {
         if let Some(p) = spec.system_prompt.as_deref().filter(|p| !p.is_empty()) {
             args.extend(["--append-system-prompt".into(), p.to_string()]);
         }
-        args.extend([
-            if resume { "--resume" } else { "--session-id" }.into(),
-            uuid.to_string(),
-        ]);
+        match launch {
+            Launch::New => args.extend(["--session-id".into(), uuid.to_string()]),
+            Launch::Resume => args.extend(["--resume".into(), uuid.to_string()]),
+            // A new transcript `uuid` with the source's records up to `at` (SPEC §8.1).
+            Launch::Fork { from, at } => args.extend([
+                "--resume".into(),
+                from.to_string(),
+                "--fork-session".into(),
+                "--session-id".into(),
+                uuid.to_string(),
+                "--resume-session-at".into(),
+                at.to_string(),
+            ]),
+        }
         args.push("--verbose".into());
         if let Some(m) = &spec.model {
             args.extend(["--model".into(), m.clone()]);
@@ -478,6 +525,31 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// The fork of `f` for transcript `uuid` (SPEC §8.1): the source transcript in the
+    /// session's own folder, cut at the record of the first of `f.at_event_ids` in it. The
+    /// records the fork copies are registered as the adapter's, so the mirror does not take
+    /// them for another writer's.
+    fn fork(&self, spec: &StartSpec, f: &ForkFrom, uuid: Uuid) -> anyhow::Result<Launch> {
+        let from: Uuid = f
+            .runtime_session_id
+            .parse()
+            .with_context(|| format!("fork source {:?} is not a uuid", f.runtime_session_id))?;
+        let dir = self
+            .opts
+            .config_dir
+            .as_deref()
+            .context("no Claude Code config folder to fork a transcript in")?;
+        let path = paths::transcript_path(dir, &spec.workdir, &from);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("fork source {}", path.display()))?;
+        let (at, copied) = fork_point(&text, &f.at_event_ids)
+            .with_context(|| format!("the message to fork at is not in {}", path.display()))?;
+        for u in copied {
+            self.opts.own_records.add(uuid, u);
+        }
+        Ok(Launch::Fork { from, at })
+    }
+
     async fn spawn(&mut self, spec: &StartSpec, why: &str) -> anyhow::Result<()> {
         if self.proc.is_some() {
             self.kill().await?;
@@ -490,6 +562,12 @@ impl ClaudeCodeAdapter {
             .as_deref()
             .map(|d| paths::transcript_path(d, &spec.workdir, &uuid));
         let resume = transcript.as_ref().is_some_and(|p| p.exists());
+        // A fork is made once, by the first start: after it the session has its transcript.
+        let launch = match (&spec.fork, resume) {
+            (_, true) => Launch::Resume,
+            (Some(f), false) => self.fork(spec, f, uuid)?,
+            (None, false) => Launch::New,
+        };
         // T44: an ssh-agent of this process's own; it stops when the process has exited
         // (the monitor drops it), or right here if the spawn fails.
         let ssh_agent = match spec.environment.ssh_keys.as_slice() {
@@ -502,7 +580,7 @@ impl ClaudeCodeAdapter {
                     .context("the environment's ssh keys")?,
             ),
         };
-        let cmd = self.command(spec, &uuid, resume, ssh_agent.as_ref().map(|a| a.socket()));
+        let cmd = self.command(spec, &uuid, launch, ssh_agent.as_ref().map(|a| a.socket()));
         let spawned = self
             .spawner
             .spawn(&cmd)
@@ -510,7 +588,11 @@ impl ClaudeCodeAdapter {
         tracing::info!(
             session_id = %self.session_id,
             runtime_session_id = %uuid,
-            mode = if resume { "resume" } else { "new" },
+            mode = match launch {
+                Launch::New => "new",
+                Launch::Resume => "resume",
+                Launch::Fork { .. } => "fork",
+            },
             why,
             cwd = %spec.workdir.display(),
             environment = %spec.environment.name,

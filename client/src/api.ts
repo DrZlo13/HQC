@@ -316,6 +316,12 @@ export class Api {
     return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/move`, body));
   }
 
+  /** A new session in the same project and folder whose conversation is this one's before
+   *  the user's message `eventId` (SPEC §6). */
+  async forkSession(id: string, eventId: string): Promise<SessionInfo> {
+    return parseSessionInfo(await this.req('POST', `/api/sessions/${enc(id)}/fork`, { event_id: eventId }));
+  }
+
   /** Removes the record; the folder is not touched (SPEC §13.2) unless `removeFolder` is set
    *  for a folder hqc created, which the worker then deletes (T45). `force`: the user saw and
    *  confirmed the uncommitted files, which `git worktree remove` keeps otherwise (T46).

@@ -1052,6 +1052,20 @@ pub struct SessionStart {
     /// empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_rules: Vec<String>,
+    /// Since SPEC 0.80: the session is a fork of another one in the same folder, cut before a
+    /// message of the user ([`ForkFrom`]); the worker forks the conversation at the agent's
+    /// first start, when the session has no transcript yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkFrom>,
+}
+
+/// Where a forked session's conversation comes from (SPEC §5.3, §8.1): transcript
+/// `runtime_session_id` in the session's folder, up to and including the record of the first
+/// of `at_event_ids` (events of the source session, newest first) found in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkFrom {
+    pub runtime_session_id: String,
+    pub at_event_ids: Vec<Uuid>,
 }
 
 /// `workspace.rules {workspace_path, allow_rules[]}` -> `ack` (since SPEC 0.52, T48): the

@@ -36,6 +36,8 @@ let root: HTMLElement;
 afterEach(() => {
   if (root) render(null, root);
   document.body.innerHTML = '';
+  // Drafts stay on the device (`hqc.drafts`), from one test to the next too.
+  localStorage.clear();
 });
 
 const HISTORY = [
@@ -682,6 +684,31 @@ describe('history', () => {
     });
     expect(blocks().length).toBe(120);
     expect(blocks()[0].textContent).toContain('answer 331');
+  });
+});
+
+describe('draft', () => {
+  const area = () => $('.composer-input') as HTMLTextAreaElement;
+  const type = (text: string) =>
+    act(() => {
+      area().value = text;
+      area().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+  it('keeps an unsent message when the chat closes, on this device too, and drops it once sent', async () => {
+    let { app } = setup('idle');
+    await mount(app);
+    await type('not sent yet');
+    render(null, root);
+    expect(app.draft('s1')).toBe('not sent yet');
+
+    // Another page load reads it from the device.
+    ({ app } = setup('idle'));
+    await mount(app);
+    expect(area().value).toBe('not sent yet');
+    await type('');
+    expect(app.draft('s1')).toBe('');
+    expect(localStorage.getItem('hqc.drafts')).toBe('{}');
   });
 });
 

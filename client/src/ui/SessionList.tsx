@@ -332,6 +332,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   key={s.id}
                   s={s}
                   current={s.id === current}
+                  draft={app.draft(s.id) !== ''}
                   phone={phone}
                   when={mode === 'recent' ? formatWhen(s.updated_at, now) : undefined}
                   where={[projectOf(s), whereOf(s)].filter(Boolean).join(' · ')}
@@ -358,6 +359,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   key={s.id}
                   s={s}
                   current={s.id === current}
+                  draft={app.draft(s.id) !== ''}
                   phone={phone}
                   when={mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
                   where={whereOf(s)}
@@ -453,6 +455,7 @@ type GripHandlers = {
 function SessionRow({
   s,
   current,
+  draft,
   phone,
   when,
   where,
@@ -466,6 +469,8 @@ function SessionRow({
 }: {
   s: SessionInfo;
   current: boolean;
+  /** A message is typed into it and not sent (on this device). */
+  draft?: boolean;
   phone?: boolean;
   when?: string;
   where: string;
@@ -494,6 +499,7 @@ function SessionRow({
       <span class="session-main">
         <span class="session-top">
           <span class="session-title">{title}</span>
+          {draft && !current && <span class="session-draft">Draft</span>}
           {when && <span class="session-when">{when}</span>}
           {s.unread > 0 && (
             <span class="badge" aria-label={`unread: ${s.unread}`}>

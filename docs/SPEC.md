@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.84, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.85, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2899,14 +2899,15 @@ session's agent for the rest. No push is sent for mirror events (an import is hu
 replies).
 
 **Import limits** (§20, since 0.23 T22; behaviour at the daily limit since 0.24). New sessions
-from the mirror: at most 200 per 24 h per worker and 2000 in total per workspace;
+from the mirror: at most 200 per 24 h per worker (since 0.85 `HQC_MIRROR_SESSIONS_PER_DAY`;
+`0` imports no new transcript, known ones go on) and 2000 in total per workspace;
 `runtime_session_id` is a uuid, `cwd` is up to 4096 bytes. The first wave after the update to
 0.23 (migration `0011` turned the mirror on for every workspace) may bring more transcripts than
 fit in a day: the hub does not accept a record of a new transcript over the daily limit:
 `error mirror_quota`, `retryable: true`. On such a reply the worker removes the record from the
 outbox (the §5.2 attempt counter does not grow) and rewinds the transcript to the start: the file
 is not read until an **hour** has passed since the last rejection, then it goes again in full
-with the same `event_id`s. So the wave spreads over several days (200 sessions per 24 h) without
+with the same `event_id`s. So the wave spreads over several days (200 sessions per 24 h by default) without
 losing anything; what is deferred lives in the worker's memory, and after a worker restart such
 a transcript is read at once (and deferred again if the limit is used up). Over 2000 per
 workspace and with an invalid `runtime_session_id`/`cwd` the record is dropped (`ack` without
@@ -4056,7 +4057,7 @@ buffered send from a session in `ask` (§7.1).
   | … `description` | up to 4096 bytes (stored up to 2000 characters, as in §10.2) | `error invalid_frame` |
   | … `expires_at` | in the future, at most 24 h ahead (before 0.23 it was truncated to a day; §10.2 aligned in 0.24) | `error invalid_frame` |
   | push on worker requests (§16) | 1 per 10 s per worker | the request is written, the push is skipped |
-  | `mirror.event` (§9.2): new sessions per worker | 200 per 24 h (sliding window) | the record of a new transcript is not accepted: `error mirror_quota`, `retryable: true`, warn in the hub's log; the worker removes it from the outbox and rereads the transcript from the start no sooner than an hour later (§9.1, since 0.24) |
+  | `mirror.event` (§9.2): new sessions per worker | 200 per 24 h (sliding window); since 0.85 `HQC_MIRROR_SESSIONS_PER_DAY` | the record of a new transcript is not accepted: `error mirror_quota`, `retryable: true`, warn in the hub's log; the worker removes it from the outbox and rereads the transcript from the start no sooner than an hour later (§9.1, since 0.24) |
   | … mirror sessions per workspace | 2000 in total | the event is dropped, `ack` without `seq`, warn in the hub's log |
   | … `runtime_session_id` | lowercase uuid with hyphens | same |
   | … `cwd` | up to 4096 bytes and inside the workspace path | same |
@@ -4173,6 +4174,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.84 → 0.85 (the mirror's daily limit is a hub setting)
+§9.1, §20: `HQC_MIRROR_SESSIONS_PER_DAY` (a whole number, default 200) sets how many sessions the
+mirror may create per worker in 24 h, so an owner who adds the folders of many projects at once
+can take their history in one go instead of 200 sessions a day.
 
 ### 0.83 → 0.84 (opt-in `SendMessage` for an agent's own subagents)
 §8.1: `allow_subagent_messages = true` in `worker.toml` (default false; `allow_native_messaging`

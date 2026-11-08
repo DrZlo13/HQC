@@ -137,7 +137,8 @@ pub struct Limits {
     pub push_subs_per_user: i64,
     /// Open `worker.approval.request` per worker; more get `error invalid_frame` (SPEC §20).
     pub worker_approvals_open: i64,
-    /// Sessions the mirror may create per worker in 24 h (SPEC §9.2, §20).
+    /// Sessions the mirror may create per worker in 24 h (SPEC §9.2, §20);
+    /// `HQC_MIRROR_SESSIONS_PER_DAY`.
     pub mirror_sessions_per_day: i64,
     /// Sessions of a workspace created by the mirror, in total (SPEC §9.2, §20).
     pub mirror_sessions_per_workspace: i64,
@@ -181,7 +182,7 @@ impl Default for Limits {
             ws_auth_concurrency: 16,
             push_subs_per_user: 10,
             worker_approvals_open: 20,
-            mirror_sessions_per_day: 200,
+            mirror_sessions_per_day: DEFAULT_MIRROR_SESSIONS_PER_DAY,
             mirror_sessions_per_workspace: 2000,
             worker_fs_concurrency: 4,
             mcp_calls_per_session_min: 60,
@@ -300,13 +301,27 @@ pub fn turn_watchdog_from(v: Option<&str>) -> anyhow::Result<Option<Duration>> {
     Ok((secs > 0).then(|| Duration::from_secs(secs)))
 }
 
+pub const DEFAULT_MIRROR_SESSIONS_PER_DAY: i64 = 200;
+
+/// `HQC_MIRROR_SESSIONS_PER_DAY`: a whole number of sessions, unset =
+/// [`DEFAULT_MIRROR_SESSIONS_PER_DAY`]; `0` imports no new transcript, known ones go on.
+pub fn mirror_sessions_per_day_from(v: Option<&str>) -> anyhow::Result<i64> {
+    match v.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(DEFAULT_MIRROR_SESSIONS_PER_DAY),
+        Some(v) => Ok(i64::from(v.parse::<u32>().with_context(|| {
+            format!("HQC_MIRROR_SESSIONS_PER_DAY={v}: expected a whole number of sessions")
+        })?)),
+    }
+}
+
 impl Config {
     /// Variables: `HQC_DATABASE_URL`, `HQC_HUB_LISTEN`, `HQC_ACCESS_TEAM_DOMAIN`,
     /// `HQC_ACCESS_AUD`, `HQC_OIDC_ISSUER`, `HQC_OIDC_AUD`, `HQC_OIDC_JWKS_URL`,
     /// `HQC_OIDC_ALLOWED_EMAILS`, `HQC_DEV`, `HQC_DEV_USER`, `HQC_VAPID_PRIVATE`,
     /// `HQC_VAPID_PUBLIC`, `HQC_VAPID_SUBJECT`, `HQC_CLIENT_DIR`, `HQC_TURN_WATCHDOG_S`,
     /// `HQC_ARTIFACT_DIR`, `HQC_ARTIFACT_PUBLIC_BASE`, `HQC_ARTIFACT_KEY`,
-    /// `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`, `HQC_CLIENT_IP_HEADER`.
+    /// `HQC_ARTIFACT_RETENTION_DAYS`, `HQC_PUBLIC_ORIGINS`, `HQC_CLIENT_IP_HEADER`,
+    /// `HQC_MIRROR_SESSIONS_PER_DAY`.
     pub fn from_env() -> anyhow::Result<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let database_url = var("HQC_DATABASE_URL").context("HQC_DATABASE_URL is not set")?;
@@ -365,7 +380,12 @@ impl Config {
                 turn_watchdog: turn_watchdog_from(var("HQC_TURN_WATCHDOG_S").as_deref())?,
                 ..Timing::default()
             },
-            limits: Limits::default(),
+            limits: Limits {
+                mirror_sessions_per_day: mirror_sessions_per_day_from(
+                    var("HQC_MIRROR_SESSIONS_PER_DAY").as_deref(),
+                )?,
+                ..Limits::default()
+            },
             artifacts,
             public_origins: public_origins(var("HQC_PUBLIC_ORIGINS").as_deref())?,
             client_ip_header: var("HQC_CLIENT_IP_HEADER")
@@ -548,6 +568,15 @@ mod tests {
         assert_eq!(retention_from(Some("7")).unwrap(), days(7));
         assert_eq!(retention_from(Some("0")).unwrap(), None);
         assert!(retention_from(Some("2w")).is_err());
+    }
+
+    #[test]
+    fn mirror_sessions_per_day_variable() {
+        assert_eq!(mirror_sessions_per_day_from(None).unwrap(), 200);
+        assert_eq!(mirror_sessions_per_day_from(Some(" ")).unwrap(), 200);
+        assert_eq!(mirror_sessions_per_day_from(Some("5000")).unwrap(), 5000);
+        assert!(mirror_sessions_per_day_from(Some("-1")).is_err());
+        assert!(mirror_sessions_per_day_from(Some("1k")).is_err());
     }
 
     #[test]

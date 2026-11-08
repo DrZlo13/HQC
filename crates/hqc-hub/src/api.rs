@@ -1605,10 +1605,16 @@ pub async fn workers(
     } else {
         db::workers_of(&app.db, user.id).await?
     };
+    let limits = app.limits.lock().unwrap().clone();
     let ws: Vec<Value> = rows
         .into_iter()
         .map(|w| {
+            // The account's usage limits as the worker last reported them (SPEC §6).
+            let limits = limits
+                .get(&w.id)
+                .map(|(l, at)| json!({"five_hour": l.five_hour, "seven_day": l.seven_day, "reported_at": at}));
             json!({
+                "limits": limits,
                 "id": w.id,
                 "name": w.name,
                 "os": w.os,

@@ -52,6 +52,9 @@ pub enum AdapterEvent {
     /// agent is not idle while it is above 0 (SPEC §17.3), and a move tells the agent how many
     /// it stopped (SPEC §5.3). Reported when it changes.
     BackgroundTasks(u32),
+    /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
+    /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
+    Limits(hqc_proto::frame::Limits),
     /// The runtime reported its own session id (ACP); sent in `session.state`.
     RuntimeSessionId(String),
     /// The runtime named the session (Claude Code: `ai-title` in the transcript, read when

@@ -340,6 +340,46 @@ describe('model', () => {
     expect(modelName('qwen3.8-27b:q4_K')).toBe('qwen3.8-27b:q4_K');
   });
 
+  it('shows the usage limits of the session\'s worker under the model', async () => {
+    const { app, api } = setup('idle');
+    const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
+    (api as any).workers = vi.fn(async () => [
+      { id: 'other', name: 'x', limits: { five_hour: { utilization: 0.99, resets_at: soon }, reported_at: '' } },
+      {
+        id: 'wk1',
+        name: 'drzlo-mac',
+        limits: {
+          five_hour: { utilization: 0.39, resets_at: soon },
+          seven_day: { utilization: 0.934, resets_at: soon + 3 * 86400 },
+          reported_at: '2026-11-08T12:00:00Z',
+        },
+      },
+    ]);
+    await mount(app);
+    await open();
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
+    const rows = [...root.querySelectorAll('.menu-settings .limit-row')].map((r) => [
+      r.querySelector('.limit-name')!.textContent,
+      r.querySelector('.limit-pct')!.textContent,
+    ]);
+    expect(rows).toEqual([
+      ['Session', '39%'],
+      ['Week', '93%'],
+    ]);
+    expect(root.querySelectorAll('.limit-high')).toHaveLength(1);
+    const week = root.querySelectorAll('.limit-reset')[1].textContent!;
+    expect(week).toMatch(/^resets \S+ \d/);
+  });
+
+  it('shows no limits while the worker has reported none', async () => {
+    const { app, api } = setup('idle');
+    (api as any).workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac' }]);
+    await mount(app);
+    await open();
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
+    expect(root.querySelector('.limits')).toBeNull();
+  });
+
   it('a name that is no alias shows as typed', async () => {
     const { app } = setup('idle', { model: 'claude-sonnet-5-5' });
     await mount(app);

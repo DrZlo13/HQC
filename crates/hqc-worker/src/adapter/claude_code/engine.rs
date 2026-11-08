@@ -28,6 +28,8 @@
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
+//! - `rate_limit_event` → [`AdapterEvent::Limits`] with the 5-hour and 7-day windows of its
+//!   `rate_limit_info.unifiedWindows` (2.1.310: one before each turn's answer);
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
@@ -577,6 +579,10 @@ impl Core {
             "user" if v["isReplay"] == true => self.on_echo(&v),
             "user" if !sub => self.on_user(&v),
             "command_lifecycle" => self.on_lifecycle(&v),
+            "rate_limit_event" => limits(&v["rate_limit_info"]["unifiedWindows"])
+                .map(|l| Action::Emit(AdapterEvent::Limits(l)))
+                .into_iter()
+                .collect(),
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
             "control_response" => self.on_control_response(&v),
@@ -1418,6 +1424,23 @@ impl Core {
 /// Event id of content block `index` of a jsonl record. Claude Code writes one block per
 /// record, so this is `Event::id_from_claude_record(uuid)`; a further block of the same
 /// record (not seen on 2.1.307/2.1.308) gets v5 of `"<uuid>/<index>"`.
+/// The 5-hour and 7-day windows of a `rate_limit_event`'s `unifiedWindows`; `None` when it
+/// names neither.
+fn limits(w: &Value) -> Option<hqc_proto::frame::Limits> {
+    let window = |name: &str| {
+        let v = &w[name];
+        Some(hqc_proto::frame::LimitWindow {
+            utilization: v["utilization"].as_f64()?,
+            resets_at: v["resetsAt"].as_i64()?,
+        })
+    };
+    let l = hqc_proto::frame::Limits {
+        five_hour: window("five_hour"),
+        seven_day: window("seven_day"),
+    };
+    (l.five_hour.is_some() || l.seven_day.is_some()).then_some(l)
+}
+
 pub fn record_event_id(uuid: &Uuid, index: usize) -> Uuid {
     Event::id_from_claude_block(uuid, index)
 }

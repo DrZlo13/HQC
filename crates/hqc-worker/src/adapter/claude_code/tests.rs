@@ -268,6 +268,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::Commands(_) => "commands".into(),
             // Every `system/init` carries it; the T38 tests look at it on their own.
             AdapterEvent::PermissionMode(_) => continue,
+            // Every turn's `rate_limit_event`; `limits_of_a_rate_limit_event` looks at it.
+            AdapterEvent::Limits(_) => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -2435,6 +2437,26 @@ async fn a_model_switch_record_is_own() {
     a.set_model("claude-fable-5-1").await.unwrap();
     assert!(own.claim(runtime, Uuid::new_v4(), Some("/model claude-fable-5-1")));
     a.kill().await.unwrap();
+}
+
+/// SPEC §8.1: a `rate_limit_event` (2.1.310) gives the 5-hour and 7-day windows of its
+/// `unifiedWindows`; one that names neither gives nothing.
+#[test]
+fn limits_of_a_rate_limit_event() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1794150000,"rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.39,"resetsAt":1794150000,"status":"allowed"},"seven_day":{"utilization":0.23,"resetsAt":1794283200,"status":"allowed"}}},"uuid":"c4eef22b-3339-410d-a1d4-64ea1db4f46e","session_id":"fe2b6ce5-0e5c-46bb-afc3-9c91cd7dff97"}"#;
+    let out = core.on_line(line);
+    let [Action::Emit(AdapterEvent::Limits(l))] = out.as_slice() else {
+        panic!("{out:?}");
+    };
+    assert_eq!(
+        serde_json::to_value(l).unwrap(),
+        json!({"five_hour": {"utilization": 0.39, "resets_at": 1794150000},
+               "seven_day": {"utilization": 0.23, "resets_at": 1794283200}})
+    );
+    assert!(core
+        .on_line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#)
+        .is_empty());
 }
 
 /// Two turns of a source transcript: prompt, reply; prompt, reply.

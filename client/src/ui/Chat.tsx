@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { ApiError, type SessionPatch } from '../api';
+import { ApiError, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize } from '../artifacts';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
 import type { Timeline } from '../timeline';
 import { ModelField } from './agentSettings';
+import { Limits } from './limits';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
@@ -408,6 +409,7 @@ export function Chat({
             path={path}
             model={model}
             cost={cost}
+            loadLimits={() => app.api.workers().then((ws) => ws.find((w) => w.id === info.worker_id)?.limits ?? undefined)}
             onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
             onSchedules={() => setSchedules(true)}
             onMove={() => setMoving(true)}
@@ -644,6 +646,7 @@ function MoreMenu({
   onMove,
   onPermissionMode,
   onAgent,
+  loadLimits,
 }: {
   info: SessionInfo;
   phone: boolean;
@@ -658,6 +661,8 @@ function MoreMenu({
   onPermissionMode: (mode: PermissionMode) => void;
   /** A change PATCHes at once; `null` is the runtime's default. */
   onAgent: (patch: AgentPatch) => void;
+  /** The usage limits of the session's worker account, read when the menu opens. */
+  loadLimits: () => Promise<WorkerLimits | undefined>;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -732,6 +737,7 @@ function MoreMenu({
           {!info.archived && (
             <div class="menu-settings">
               <ModelField value={info.model} onChange={(m) => onAgent({ model: m ?? null })} />
+              <Limits load={loadLimits} />
             </div>
           )}
         </div>

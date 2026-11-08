@@ -1681,6 +1681,7 @@ impl Session {
                     self.background_tasks = n;
                 }
             }
+            AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
             AdapterEvent::RuntimeSessionId(r) => {
                 self.runtime_session_id = Some(r);
                 self.send_state();

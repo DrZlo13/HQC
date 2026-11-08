@@ -553,6 +553,12 @@ async fn handle_text(
             conn.reply(&id, HubFrame::Ack(Ack::default()));
             r
         }
+        WorkerFrame::WorkerLimits(l) => {
+            let now = app.clock.now();
+            app.limits.lock().unwrap().insert(conn.worker_id, (l, now));
+            conn.reply(&id, HubFrame::Ack(Ack::default()));
+            Ok(())
+        }
         WorkerFrame::WorkspaceCreated(c) => {
             match crate::workspaces::created(app, conn, &c).await {
                 Ok(()) => {

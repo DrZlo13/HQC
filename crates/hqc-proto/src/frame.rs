@@ -166,6 +166,10 @@ pub enum WorkerFrame {
     /// the clone ends and again whenever the hub repeats the `workspace.create`.
     #[serde(rename = "workspace.created")]
     WorkspaceCreated(WorkspaceCreated),
+    /// The usage limits of the account the worker's agents run on, as the runtime last
+    /// reported them (since SPEC 0.81, §5.4); answered with `ack {}`.
+    #[serde(rename = "worker.limits")]
+    WorkerLimits(Limits),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -1059,6 +1063,26 @@ pub struct SessionStart {
     pub fork: Option<ForkFrom>,
 }
 
+/// Usage limits of the worker's account (SPEC §5.4 `worker.limits`): Claude Code's
+/// `rate_limit_event`, its `unifiedWindows`. A window it does not name is absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Limits {
+    /// The 5-hour window ("Current session" of `/usage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<LimitWindow>,
+    /// The 7-day window of all models ("Current week").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<LimitWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LimitWindow {
+    /// Used share, 0..1.
+    pub utilization: f64,
+    /// When the window resets, Unix seconds.
+    pub resets_at: i64,
+}
+
 /// Where a forked session's conversation comes from (SPEC §5.3, §8.1): transcript
 /// `runtime_session_id` in the session's folder, up to and including the record of the first
 /// of `at_event_ids` (events of the source session, newest first) found in it.
@@ -1261,6 +1285,7 @@ mod tests {
         "mcp.call",
         "mcp.cancel",
         "workspace.created",
+        "worker.limits",
         "ack",
         "error",
     ];
@@ -1478,6 +1503,10 @@ mod tests {
             "workspace.created",
             include_str!("../examples/wire/worker.workspace.created.error.json"),
         ),
+        (
+            "worker.limits",
+            include_str!("../examples/wire/worker.worker.limits.json"),
+        ),
         ("ack", include_str!("../examples/wire/worker.ack.json")),
         (
             "ack",
@@ -1527,6 +1556,7 @@ mod tests {
             WorkerFrame::McpCall(_) => "mcp.call",
             WorkerFrame::McpCancel(_) => "mcp.cancel",
             WorkerFrame::WorkspaceCreated(_) => "workspace.created",
+            WorkerFrame::WorkerLimits(_) => "worker.limits",
             WorkerFrame::Ack(_) => "ack",
             WorkerFrame::Error(_) => "error",
         }

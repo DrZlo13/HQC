@@ -48,6 +48,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::Title(t) => format!("title:{t}"),
         AdapterEvent::Commands(c) => format!("commands:{}", c.len()),
         AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
+        AdapterEvent::Limits(_) => "limits".into(),
         AdapterEvent::Subagents(n) => format!("subagents:{n}"),
         AdapterEvent::BackgroundTasks(n) => format!("background_tasks:{n}"),
     }

@@ -612,6 +612,14 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStr(p, 'canonical');
     optStr(p, 'error');
   },
+  'worker.limits': (p) => {
+    for (const k of ['five_hour', 'seven_day']) {
+      if (p[k] === undefined) continue;
+      const w = obj(p[k], k);
+      num(w, 'utilization');
+      num(w, 'resets_at');
+    }
+  },
   'workspace.inspect': (p) => {
     str(p, 'request_id');
     str(p, 'path');

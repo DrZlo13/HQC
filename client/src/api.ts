@@ -103,6 +103,23 @@ export interface WorkerInfo {
   status?: string;
   revoked_at?: string | null;
   last_seen?: string;
+  /** The usage limits of the worker's account as it last reported them (SPEC §6); absent
+   *  until a turn has run there since the hub started. */
+  limits?: WorkerLimits | null;
+}
+
+/** `utilization` 0..1, `resets_at` Unix seconds. */
+export interface LimitWindow {
+  utilization: number;
+  resets_at: number;
+}
+
+export interface WorkerLimits {
+  /** The 5-hour window ("Current session" of Claude Code's `/usage`). */
+  five_hour?: LimitWindow | null;
+  /** The 7-day window of all models. */
+  seven_day?: LimitWindow | null;
+  reported_at: string;
 }
 
 export class Api {

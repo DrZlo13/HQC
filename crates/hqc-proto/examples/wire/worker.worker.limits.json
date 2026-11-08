@@ -1,0 +1,14 @@
+{
+  "id": "w-40",
+  "type": "worker.limits",
+  "payload": {
+    "five_hour": {
+      "utilization": 0.39,
+      "resets_at": 1794150000
+    },
+    "seven_day": {
+      "utilization": 0.23,
+      "resets_at": 1794283200
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.80, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
+Version 0.81, 2026-11-08. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1093,6 +1093,12 @@ MCP calls (worker → hub → worker):
   (deferred, §5.2); through the outbox without the token (since 0.33, T30)
 - `mcp.cancel` {request_id, reason} → `ack {}` — a call that died on the worker's side
   (§5.2, §7.2)
+- `worker.limits` {five_hour?, seven_day?} → `ack {}` (since 0.81) — the usage limits of the
+  account the worker's agents run on, each window `{utilization (0..1), resets_at (Unix
+  seconds)}`: the 5-hour window ("Current session" of Claude Code's `/usage`) and the 7-day
+  window of all models. Sent whenever the runtime reports them (Claude Code: every
+  `rate_limit_event`, §8.1). The hub keeps the latest per worker in memory, with when it came,
+  and shows it in `GET /api/workers`; after a hub restart there is none until the next turn.
 - `workspace.created` {request_id, canonical | error} → `ack {}` (since 0.58, T45) — the outcome
   of `workspace.create`: the folder is ready at `canonical`, or it was not made (`error`, a
   message for the user; nothing is left on disk). Sent directly when the clone (or since 0.60 the
@@ -1433,7 +1439,10 @@ the rest is marked "later"):
   starred projects first on the rail, each part in the hub's project order.
 - `GET /api/workers` → `{workers[]}`: workers that are not revoked; `?include_revoked=1` adds
   the revoked ones (the "Settings" screen). The worker object is `{id, name, os, status: online
-  | offline | revoked, revoked_at?, last_seen?, system_session_id, ...}` (§3 Worker).
+  | offline | revoked, revoked_at?, last_seen?, system_session_id, limits, ...}` (§3 Worker);
+  `limits` (since 0.81) — `{five_hour?, seven_day?, reported_at}` of the latest
+  `worker.limits` (§5.4), `null` while there is none. The chat's "More" menu shows them for
+  the session's worker under the model field: a bar, the share used and when it resets.
   `GET /api/workers/enroll/{code}` → `{name, os, created_at, country?, replaceable?}`
   (`EnrollInfo`; `country` is `CF-IPCountry` of the `enroll` request, absent with
   `HQC_CLIENT_IP_HEADER`, §5.1; `replaceable`: §5.1, workers
@@ -2570,6 +2579,11 @@ Model (since 0.74). `agent.model` goes to `--model`; `session.model` for a runni
 haiku: the CLI answers `success` with the full model name at once, also during a Bash call, and
 the next model call of the same turn already uses the new model (the turn's `modelUsage` has
 both).
+
+Limits (since 0.81). The CLI writes a `rate_limit_event` before each turn's answer (2.1.310):
+`rate_limit_info.unifiedWindows.{five_hour, seven_day}` with `utilization` and `resetsAt`; the
+adapter sends them as `worker.limits` (§5.4). Per-model weekly windows (`/usage`'s "Current
+week (Fable)") are not in it.
 
 Fork (since 0.80). A session with `session.start.fork` and no transcript yet starts with
 `--resume <source> --fork-session --session-id <its uuid> --resume-session-at <record>`: the CLI
@@ -4085,6 +4099,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.80 → 0.81 (usage limits in the "More" menu)
+§5.4: the worker frame `worker.limits {five_hour?, seven_day?}`, from Claude Code's
+`rate_limit_event` (§8.1). §6: `GET /api/workers` has the latest as `limits`; the chat's "More"
+menu shows the session's worker account's 5-hour and 7-day windows under the model field.
 
 ### 0.79 → 0.80 (fork a session before a message)
 §6: `POST /api/sessions/{id}/fork {event_id}` makes a new session in the same folder whose

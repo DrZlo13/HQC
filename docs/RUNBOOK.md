@@ -759,6 +759,10 @@ Three levels of `[permissions]`, from strongest to weakest:
    folder and `git push --force` if the user asked for it), so in this mode `deny` is the only
    boundary.
 
+In an environment with `project_settings = true` (§14 of the SPEC) none of the three levels
+covers the repository's own hooks: Claude Code runs them itself, without a card and outside
+`deny`.
+
 **The mode of each session** (T38). Every session runs in "Ask" or "Auto". The chat header
 shows which: an orange "Auto" badge, or "Ask" in plain text ("Ask (Auto asked)" when the
 session asked for Auto but the worker runs it in Ask). It is chosen in the new-session form
@@ -810,7 +814,7 @@ environment = "infra"
 
 - A session's environment is the binding with the longest path that contains its workspace
   (`/a/b` does not contain `/a/bc`; symlinks are resolved), else `default` (no variables, no
-  local MCP, `[permissions]` as it is). A binding may name `default` to give a subfolder back.
+  local MCP, no project settings, `[permissions]` as it is). A binding may name `default` to give a subfolder back.
   The worker decides this itself on every start; the hub only shows it (the rules screen's
   header, "env infra" on the workspace row in the project settings).
 - Effective rules in a bound folder: the deny of `[permissions]` minus `unblock`, plus the

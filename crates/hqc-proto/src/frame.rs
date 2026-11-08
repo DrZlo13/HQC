@@ -1120,6 +1120,9 @@ pub struct PermissionsInspect {
 pub mod rule_source {
     pub const WORKER: &str = "worker.toml";
     pub const USER: &str = "~/.claude/settings.json";
+    /// The folder's own `.claude/settings.json`, only in an environment with
+    /// `project_settings` (since SPEC 0.83).
+    pub const PROJECT: &str = ".claude/settings.json";
     pub const LOCAL: &str = ".claude/settings.local.json";
     pub const HQC: &str = "hqc";
 
@@ -1135,8 +1138,9 @@ pub struct InspectResult {
     /// `[permissions] mode` of the worker: the mode of a session that asks for none.
     pub mode: PermissionMode,
     pub allow_auto: bool,
-    /// `worker.toml`, `~/.claude/settings.json`, `.claude/settings.local.json` of the folder,
-    /// in this order; a file that is absent has empty lists.
+    /// `worker.toml`, the folder's environment unless `default`, `~/.claude/settings.json`,
+    /// the folder's `.claude/settings.json` in an environment with `project_settings` and its
+    /// `.claude/settings.local.json`, in this order; a file that is absent has empty lists.
     pub sources: Vec<RuleSource>,
     /// hqc's rules the worker holds for the folder (the last `workspace.rules`).
     #[serde(default)]

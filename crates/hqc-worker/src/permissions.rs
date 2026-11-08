@@ -678,16 +678,18 @@ fn settings_rules(source: &str, path: &Path) -> RuleSource {
 
 /// `permissions.inspect` (T48, SPEC §5.3): the rules of `worker.toml` (`[permissions]`
 /// without what the folder's environment unblocks, then the environment's own as a source of
-/// their own, T43), the user's Claude Code settings (`<claude_dir>/settings.json`) and the
-/// folder's `.claude/settings.local.json`, with hqc's rules the worker holds for the folder,
-/// and a check of `tool` or `command` by this module's matcher: deny rules of every source
-/// first, then every part must be covered by an allow rule. `root` is the canonical
-/// workspace, already checked by the caller.
+/// their own, T43), the user's Claude Code settings (`<claude_dir>/settings.json`), the
+/// folder's `.claude/settings.json` when its environment has `project_settings` (the CLI
+/// reads it then, SPEC §14) and its `.claude/settings.local.json`, with hqc's rules the worker
+/// holds for the folder, and a check of `tool` or `command` by this module's matcher: deny
+/// rules of every source first, then every part must be covered by an allow rule. `root` is
+/// the canonical workspace, already checked by the caller.
 #[allow(clippy::too_many_arguments)]
 pub fn inspect(
     perms: &Permissions,
     env_name: &str,
     env: &EnvPermissions,
+    project_settings: bool,
     claude_dir: Option<&Path>,
     root: &Path,
     hqc: Vec<String>,
@@ -721,11 +723,17 @@ pub fn inspect(
             ..RuleSource::default()
         },
     };
-    let local = settings_rules(
+    sources.push(user);
+    if project_settings {
+        sources.push(settings_rules(
+            rule_source::PROJECT,
+            &root.join(".claude").join("settings.json"),
+        ));
+    }
+    sources.push(settings_rules(
         rule_source::LOCAL,
         &root.join(".claude").join("settings.local.json"),
-    );
-    sources.extend([user, local]);
+    ));
     let check = match (tool.filter(|t| !t.trim().is_empty()), command) {
         (Some(t), _) => Some((t.trim(), None)),
         (None, Some(c)) if !c.trim().is_empty() => Some(("Bash", Some(c))),
@@ -1240,6 +1248,7 @@ mod tests {
                 &perms,
                 "default",
                 &EnvPermissions::default(),
+                false,
                 Some(&claude),
                 &root,
                 hqc.clone(),
@@ -1312,6 +1321,7 @@ mod tests {
             &perms,
             "default",
             &EnvPermissions::default(),
+            false,
             Some(tmp.path()),
             &root,
             vec![],
@@ -1386,6 +1396,7 @@ mod tests {
                 &Permissions::default(),
                 "infra",
                 &env,
+                false,
                 Some(tmp.path()),
                 tmp.path(),
                 vec![],
@@ -1417,6 +1428,96 @@ mod tests {
             (c.verdict, c.source.as_deref()),
             (Verdict::Deny, Some(rule_source::WORKER))
         );
+    }
+
+    /// SPEC §14: in an environment with `project_settings` the CLI reads the folder's
+    /// `.claude/settings.json`, so the screen lists it between the user's file and the local
+    /// one and the check counts its rules; without it the file is neither listed nor counted.
+    #[test]
+    fn inspect_with_project_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        std::fs::write(
+            root.join(".claude").join("settings.json"),
+            r#"{"permissions": {"allow": ["Bash(git push:*)"], "deny": ["Edit"], "ask": ["WebFetch"]}}"#,
+        )
+        .unwrap();
+        let r = |project_settings: bool, command: Option<&str>, tool: Option<&str>| {
+            inspect(
+                &Permissions::default(),
+                "infra",
+                &EnvPermissions::default(),
+                project_settings,
+                Some(tmp.path()),
+                &root,
+                vec![],
+                command,
+                tool,
+            )
+        };
+        let env = rule_source::environment("infra");
+
+        let on = r(true, None, None);
+        let names: Vec<&str> = on.sources.iter().map(|s| s.source.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                rule_source::WORKER,
+                env.as_str(),
+                rule_source::USER,
+                rule_source::PROJECT,
+                rule_source::LOCAL
+            ]
+        );
+        assert_eq!(
+            on.sources[3],
+            RuleSource {
+                source: rule_source::PROJECT.into(),
+                allow: vec!["Bash(git push:*)".into()],
+                deny: vec!["Edit".into()],
+                ask: vec!["WebFetch".into()],
+                error: None,
+            }
+        );
+        let c = r(true, Some("git push origin main"), None).check.unwrap();
+        assert_eq!(
+            (c.verdict, c.rule.as_deref(), c.source.as_deref()),
+            (
+                Verdict::Allow,
+                Some("Bash(git push:*)"),
+                Some(rule_source::PROJECT)
+            )
+        );
+        let c = r(true, None, Some("Edit")).check.unwrap();
+        assert_eq!(
+            (c.verdict, c.source.as_deref()),
+            (Verdict::Deny, Some(rule_source::PROJECT))
+        );
+        // The worker's deny still wins over the project's allow.
+        let c = r(true, Some("git push --force origin"), None)
+            .check
+            .unwrap();
+        assert_eq!(
+            (c.verdict, c.source.as_deref()),
+            (Verdict::Deny, Some(rule_source::WORKER))
+        );
+
+        let off = r(false, None, None);
+        let names: Vec<&str> = off.sources.iter().map(|s| s.source.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                rule_source::WORKER,
+                env.as_str(),
+                rule_source::USER,
+                rule_source::LOCAL
+            ]
+        );
+        let c = r(false, Some("git push origin main"), None).check.unwrap();
+        assert_eq!(c.verdict, Verdict::Ask);
+        let c = r(false, None, Some("Edit")).check.unwrap();
+        assert_eq!(c.verdict, Verdict::Ask);
     }
 
     #[test]

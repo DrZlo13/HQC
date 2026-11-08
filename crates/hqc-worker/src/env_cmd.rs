@@ -37,7 +37,7 @@ pub fn summary(cfg: &Config) -> String {
     let mut out = String::from("environments:\n");
     let _ = writeln!(
         out,
-        "  {DEFAULT_ENVIRONMENT}: folders without a binding; [permissions] only, no ssh keys, no local MCP"
+        "  {DEFAULT_ENVIRONMENT}: folders without a binding; [permissions] only, no ssh keys, no local MCP, no project settings"
     );
     let unbound = cfg.unbound_environments();
     for e in &cfg.environments {

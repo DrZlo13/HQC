@@ -617,6 +617,7 @@ impl Supervisor {
                         &perms,
                         &env.name,
                         &env.rules,
+                        env.project_settings,
                         claude_dir.as_deref(),
                         &root,
                         hqc,

@@ -92,7 +92,10 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   (since 0.42, T38): the worker runs `ask` and reports it. Where `auto` is allowed, a hub that
   switches a session to it gains nothing it did not have (it can answer `once` itself); the
   worker's `deny` stays in force in both modes. The same holds for hqc's allow rules of a folder
-  (since 0.52, T48): standing answers the worker applies after its `deny`, never over it.
+  (since 0.52, T48): standing answers the worker applies after its `deny`, never over it. In an
+  environment with `project_settings` (since 0.83, §14) a repository's own hooks run outside the
+  worker's `deny` and without an approval request, so a hub that clones a repository of its
+  choice into one of that environment's folders runs that repository's code there.
 - The promise about local MCP servers holds for Claude Code (`--strict-mcp-config`)
   and Hermes (`HERMES_ACP_SKIP_CONFIGURED_MCP=1`, the worker always sets it). For other
   ACP agents there is no general way: in the local config each `acp_agent` declares
@@ -244,7 +247,8 @@ command with any arguments); `<words>` are words of letters, digits and `-_./=+,
 single spaces, without quotes, shell operators or a `*` other than the final one
 (`hqc_proto::rules`). Limits: §20. The rules never go into `--settings`, so a change needs no
 restart and reaches running sessions at their next request. The rules screen (§6) shows them with
-the rules the worker reads for the folder (`worker.toml`, `~/.claude/settings.json`,
+the rules the worker reads for the folder (`worker.toml`, `~/.claude/settings.json`, in an
+environment with `project_settings` (§14) the folder's `.claude/settings.json`,
 `.claude/settings.local.json`); the hub keeps no copy of those.
 A workspace is a **logical** boundary: all hqc operations (session cwd, inbox, mirror,
 deletion) are confined to its path. It gives no enforced file system isolation.
@@ -1000,7 +1004,9 @@ MCP calls (worker → hub → worker):
   since 0.56 without the rules the folder's environment `unblock`s), then for a folder bound to
   an environment other than `default` its own `worker.toml [environments.<name>]` (its `allow`
   and `deny`, §14), `~/.claude/settings.json` (the user's Claude Code settings in its config
-  folder) and
+  folder), in an environment with `project_settings` (since 0.83, §14)
+  `<workspace>/.claude/settings.json` (source `.claude/settings.json`, the file the CLI then
+  reads too) and
   `<workspace>/.claude/settings.local.json`, in this order: the `permissions.allow`, `deny`,
   `ask` arrays of each file (non-strings skipped; a missing file has empty lists; a file over
   1 MB or that is not JSON has `error`); nothing else of the files leaves the worker. `hqc` — the
@@ -2313,9 +2319,11 @@ user,project,local`, so the CLI also reads the project source, the repository's 
 and `.claude/settings.json` (checked on 2.1.312 with `claude -p --model haiku`: with
 `user,local` the agent does not see the project's `CLAUDE.md`, with `user,project,local` it
 does). Turning it on
-trusts every repository in that environment's folders: its hooks and permission rules apply,
-and so does its `defaultMode` as far as the explicit `--permission-mode` does not override it.
-A restricted session still gets `--restricted` and no `--setting-sources`.
+trusts every repository in that environment's folders with everything its
+`.claude/settings.json` sets: hooks that run outside the worker's `deny` and approval requests,
+permission rules, `env` that reaches the CLI itself, `defaultMode` as far as the explicit
+`--permission-mode` does not override it (§14). A restricted session still gets `--restricted`
+and no `--setting-sources`.
 The process environment is scrubbed: from the worker's environment only `PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `CLAUDE_*`,
 `ANTHROPIC_*` pass, then the `env` of the session's environment (§14; it may replace one of
@@ -3615,11 +3623,19 @@ environment = "infra"
   `HERMES_ACP_SKIP_CONFIGURED_MCP`); default false;
 - `project_settings` (since 0.83): Claude Code reads the project setting source too,
   `--setting-sources user,project,local` instead of `user,local` (§8.1): the repository's
-  `CLAUDE.md` and `.claude/settings.json`. Turning it on trusts every repository in the
-  environment's folders: their hooks and permission rules apply, and their `defaultMode` as far
-  as the explicit `--permission-mode` does not override it. A restricted session (§8.4) still
-  gets `--restricted`. Kept on the worker like `ssh_keys`: not in `hello`, `hqc-worker env`
-  shows it. **Claude Code only**, ACP agents ignore it; default false;
+  `CLAUDE.md` and `.claude/settings.json` (and, per Claude Code's documentation, the skills,
+  agents and commands in its `.claude`). Turning it on trusts every repository in the
+  environment's folders as Claude Code's folder-trust dialog would: everything its
+  `.claude/settings.json` sets applies — hooks (shell commands the CLI runs itself, at session
+  start too; the worker's `deny`, `--disallowedTools` and approval requests do not see them),
+  permission rules, `env` (per Claude Code's documentation it reaches the CLI itself, e.g.
+  `ANTHROPIC_BASE_URL`) and the rest; `defaultMode` as far as the explicit `--permission-mode`
+  does not override it. A repository hqc clones into such a folder (§5.3 `workspace.create`) is
+  trusted the same way. Claude Code reads the project source from the session's working
+  directory, while the environment is chosen by the workspace: a subfolder bound back to
+  `default` is still read when a session of the bound workspace runs in it. A restricted
+  session (§8.4) still gets `--restricted`. Kept on the worker like `ssh_keys`: not in `hello`,
+  `hqc-worker env` shows it. **Claude Code only**, ACP agents ignore it; default false;
 - `launch`: `process` (the only value in the first version; `os-user` and `container`
   are reserved).
 
@@ -4127,10 +4143,14 @@ without a hub each of these would have to be done peer-to-peer.
 §14: `[environments.<name>] project_settings = true` (default false) makes the Claude Code
 sessions of that environment's folders read the project setting source: §8.1, the adapter passes
 `--setting-sources user,project,local` instead of `user,local`, so the repository's `CLAUDE.md`
-and `.claude/settings.json` (its hooks, permission rules and `defaultMode` as far as the explicit
-`--permission-mode` does not override it) apply. A restricted session still gets `--restricted`.
-The field stays on the worker, like `ssh_keys`: not in `hello`; `hqc-worker env` shows it. ACP
-agents ignore it.
+and `.claude/settings.json` apply: its hooks (outside the worker's `deny` and approval
+requests), permission rules, `env`, and `defaultMode` as far as the explicit `--permission-mode`
+does not override it; a repository hqc clones into such a folder is trusted the same way. §2.1:
+what that means for a hub. A restricted session still gets `--restricted`. The field stays on
+the worker, like `ssh_keys`: not in `hello`; `hqc-worker env` shows it. ACP agents ignore it.
+§3 Workspace, §5.3 `permissions.inspect`: in such an environment the rules screen lists the
+folder's `.claude/settings.json` as a source of its own, between `~/.claude/settings.json` and
+`.claude/settings.local.json`, and its check counts that file's allow and deny rules.
 
 ### 0.81 → 0.82 (a fork of a fork)
 §6 fork: a copied event keeps its origin (migration 0035: `events.origin_id`,

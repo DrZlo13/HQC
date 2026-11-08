@@ -1301,8 +1301,9 @@ function parseSuggestions(o: Obj, key: string): RuleSuggestion[] {
   });
 }
 
-/** The rules of one file the worker read (T48): `worker.toml`, `~/.claude/settings.json`,
- *  `.claude/settings.local.json`. */
+/** The rules of one file the worker read (T48): `worker.toml`, `worker.toml
+ *  [environments.<name>]`, `~/.claude/settings.json`, `.claude/settings.json` (an environment
+ *  with `project_settings`), `.claude/settings.local.json`. */
 export interface RuleSource {
   source: string;
   allow: string[];

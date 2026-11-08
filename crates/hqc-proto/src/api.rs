@@ -321,7 +321,8 @@ pub enum ProjectIcon {
     },
 }
 
-/// The app's base palette (SPEC §3 User, T49), the same on every device of the user.
+/// The app's base palette (SPEC §3 User, T49), the same on every device of the user: three
+/// dark ones and their light counterparts (since 0.88).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
@@ -329,6 +330,9 @@ pub enum Theme {
     Warm,
     Graphite,
     Contrast,
+    WarmLight,
+    GraphiteLight,
+    ContrastLight,
 }
 
 impl Theme {
@@ -337,13 +341,23 @@ impl Theme {
             Theme::Warm => "warm",
             Theme::Graphite => "graphite",
             Theme::Contrast => "contrast",
+            Theme::WarmLight => "warm_light",
+            Theme::GraphiteLight => "graphite_light",
+            Theme::ContrastLight => "contrast_light",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [Theme::Warm, Theme::Graphite, Theme::Contrast]
-            .into_iter()
-            .find(|t| t.as_str() == s)
+        [
+            Theme::Warm,
+            Theme::Graphite,
+            Theme::Contrast,
+            Theme::WarmLight,
+            Theme::GraphiteLight,
+            Theme::ContrastLight,
+        ]
+        .into_iter()
+        .find(|t| t.as_str() == s)
     }
 }
 
@@ -811,7 +825,8 @@ pub struct PatchMe {
     /// IANA name; the default zone of the user's schedules (SPEC §16).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
-    /// T49: `warm` | `graphite` | `contrast`; anything else `422`.
+    /// T49: `warm` | `graphite` | `contrast` | `warm_light` | `graphite_light` |
+    /// `contrast_light`; anything else `422`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<Theme>,
 }
@@ -1221,6 +1236,22 @@ mod tests {
         assert_eq!(m.theme, Some(Theme::Graphite));
         let me: Me = roundtrip(include_str!("../examples/wire/api.me.json"));
         assert_eq!(me.theme, Theme::Contrast);
+    }
+
+    #[test]
+    fn theme_names_agree_on_the_wire_and_in_the_database() {
+        // The JSON name (serde) is what the hub stores (`as_str`) and reads back (`parse`).
+        for t in [
+            Theme::Warm,
+            Theme::Graphite,
+            Theme::Contrast,
+            Theme::WarmLight,
+            Theme::GraphiteLight,
+            Theme::ContrastLight,
+        ] {
+            assert_eq!(serde_json::to_value(t).unwrap(), t.as_str());
+            assert_eq!(Theme::parse(t.as_str()), Some(t));
+        }
     }
 
     #[test]

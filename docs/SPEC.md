@@ -151,9 +151,12 @@ OIDC sign-in, §6; hub migration `0031_oidc_subject`), `display_name`, `api_keys
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
 project, created on first sign-in; the personal assistant session lives in it), `theme`.
 
-`theme` (since 0.51, T49) — the client's base palette: `warm` (default) | `graphite` |
-`contrast`, all dark; one for the whole app and the same on every device of the user (`PATCH
-/api/me`, §6). The client applies it at start (`warm` until `/api/me` answers) and after a change.
+`theme` (since 0.51, T49) — the client's base palette: three dark ones, `warm` (default) |
+`graphite` | `contrast`, and since 0.88 their light counterparts `warm_light` |
+`graphite_light` | `contrast_light`; one for the whole app and the same on every device of the
+user (`PATCH /api/me`, §6). The client applies it at start (until `/api/me` answers, the one
+last applied on this device, kept in the browser's storage as `hqc.theme`; without it `warm`)
+and after a change.
 
 `timezone` (since 0.38, T35) — an IANA name, `UTC` until set; the default zone of new
 schedules (§16). The client sets it to the browser's zone (`PATCH /api/me`, §6) when it starts
@@ -1535,11 +1538,16 @@ session and not sent stays its draft on this device (the browser's storage, `hqc
 input shows it again when the session is opened, and the session's row, unless it is the one
 open, says "Draft"; sending the message or clearing the input drops it. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on
-them (amber waiting, green online, red danger, violet between sessions). Since 0.88 the app
-theme is picked on the Settings page (`#/settings`, the first section "Theme": a tile per theme,
-a click applies it at once). The project settings (`#/p/<id>/settings`, the gear) have
-Appearance (the "Project appearance" dialog: the name, icon as an emoji, letters or an image,
-the color, a live preview in the app theme; before 0.88 it also had the app theme; on a phone a
+the project (amber waiting, green online, red danger, violet between sessions); since 0.88 the
+light themes have darker variants of them, and there the project's color is darkened where it
+is text. Since 0.88 the app theme is picked on the Settings page (`#/settings`, the first
+section "Theme": a row of dark and a row of light tiles, a click applies it at once). On a
+light theme the client switches `apple-mobile-web-app-status-bar-style` from
+`black-translucent` (white status text) to `default` (dark text) **[verify]**: whether an
+iPhone's Home Screen app picks the change up at once, at its next start or only when added
+again. The project settings (`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance"
+dialog: the name, icon as an emoji, letters or an image, the color, a live preview in the app
+theme; before 0.88 it also had the app theme; on a phone a
 full-screen sheet; "Delete project" next to the button that opens it; since 0.64, before it a
 section "Project" had "Rename" and "Delete project"; the personal project has neither the name
 field nor the delete) and Workspaces (the workspace records with "VS Code
@@ -4190,9 +4198,14 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.87 → 0.88 (the app theme in Settings)
-§6: the app theme moved from the "Project appearance" dialog to the Settings page, a tile per
-theme applied at once.
+### 0.87 → 0.88 (light themes, the app theme in Settings)
+§3 User: `theme` gets the light counterparts of the three dark bases, `warm_light`,
+`graphite_light`, `contrast_light` (migration 0036 widens the check). §6: the app theme moved
+from the "Project appearance" dialog to the Settings page, a row of dark and a row of light
+tiles applied at once; on light themes the status colors are darker and the project's color is
+darkened where it is text; until `/api/me` answers the client starts with the theme last
+applied on the device instead of `warm`; on a light theme the client switches the iPhone
+status bar style to `default` (dark text) instead of `black-translucent` **[verify]**.
 
 ### 0.86 → 0.87 (at most 256 outbox entries un-acked)
 §5.2: the worker keeps at most 256 outbox entries un-acked (`MAX_IN_FLIGHT` in the worker's

@@ -59,8 +59,8 @@ export const START_MODES = ['new', 'resume'] as const;
 /** A session's permission mode (T38): ask the worker owner, or Claude Code decides. */
 export const PERMISSION_MODES = ['ask', 'auto'] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
-/** The app's base palette (T49). */
-export const THEME_NAMES = ['warm', 'graphite', 'contrast'] as const;
+/** The app's base palette (T49): three dark ones and their light counterparts. */
+export const THEME_NAMES = ['warm', 'graphite', 'contrast', 'warm_light', 'graphite_light', 'contrast_light'] as const;
 export type Theme = (typeof THEME_NAMES)[number];
 /** A project's color (T49); `theme.ts` maps it to its hex value. */
 export const PROJECT_COLOR_NAMES = ['teal', 'plum', 'blue', 'rose', 'moss', 'coral', 'cyan', 'slate'] as const;

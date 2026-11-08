@@ -6,11 +6,16 @@ import type { Theme } from '../proto';
 import { pushStatus, subscribePush, type PushStatus } from '../push';
 import { BASES, THEMES } from '../theme';
 
-/** A theme tile's swatch: the background at 60 %, then the cards (the border for the
- *  high-contrast theme). */
+const THEME_GROUPS = [
+  { id: 'dark', label: 'Dark' },
+  { id: 'light', label: 'Light' },
+] as const;
+
+/** A theme tile's swatch: the background at 60 %, then the cards (the border for both
+ *  high-contrast themes). */
 function swatch(id: Theme): string {
   const b = BASES[id];
-  const side = id === 'contrast' ? b.border : b.surface;
+  const side = id === 'contrast' || id === 'contrast_light' ? b.border : b.surface;
   return `linear-gradient(90deg, ${b.bg} 0 60%, ${side} 60% 100%)`;
 }
 
@@ -108,20 +113,25 @@ export function Settings({ app }: { app: AppState }) {
       <div class="page-body">
         <h2>Theme</h2>
         <div class="theme-picks">
-          <div class="base-picks">
-            {THEMES.map((t) => (
-              <button
-                type="button"
-                key={t.id}
-                class={`base-pick ${theme === t.id ? 'is-on' : ''}`}
-                aria-pressed={theme === t.id}
-                onClick={() => void pickTheme(t.id)}
-              >
-                <span class="base-swatch" style={{ background: swatch(t.id) }} />
-                <span>{t.label}</span>
-              </button>
-            ))}
-          </div>
+          {THEME_GROUPS.map((g) => (
+            <div key={g.id} class="theme-group" role="group" aria-label={`${g.label} themes`}>
+              <span class="theme-group-label">{g.label}</span>
+              <div class="base-picks">
+                {THEMES.filter((t) => t.group === g.id).map((t) => (
+                  <button
+                    type="button"
+                    key={t.id}
+                    class={`base-pick ${theme === t.id ? 'is-on' : ''}`}
+                    aria-pressed={theme === t.id}
+                    onClick={() => void pickTheme(t.id)}
+                  >
+                    <span class="base-swatch" style={{ background: swatch(t.id) }} />
+                    <span>{t.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
         {themeError && <div class="error-text">{themeError}</div>}
 

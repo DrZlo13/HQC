@@ -218,18 +218,21 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
   expect(res.headers.get('content-type')).toBe('image/png');
 });
 
-it('picks the app theme on the Settings page: a tile applies at once and goes to the hub', async () => {
+it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
-  await until('theme tiles', () => $$('.theme-picks .base-pick').length === 3);
+  await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
   expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Notifications', 'Workers']);
+  expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
-  button('Graphite', '.theme-picks')!.click();
-  await until('picked', () => app.me?.theme === 'graphite');
+  button('Graphite', '[aria-label="Light themes"]')!.click();
+  await until('picked', () => app.me?.theme === 'graphite_light');
   // On the hub (`PATCH /api/me`), as another device sees it after a reload.
-  expect((await app.api.me()).theme).toBe('graphite');
-  // No "Save": the root takes it at once.
-  await until('root vars', () => rootVar('--bg') === '#1A1C1F');
-  expect($$('.base-pick[aria-pressed=true]').map((b) => b.textContent)).toEqual(['Graphite']);
+  expect((await app.api.me()).theme).toBe('graphite_light');
+  // No "Save": the root takes it at once, light neutrals and a light color scheme.
+  await until('root vars', () => rootVar('--bg') === '#F6F7F9');
+  expect(document.documentElement.style.getPropertyValue('color-scheme')).toBe('light');
+  const on = $$('.base-pick[aria-pressed=true]');
+  expect(on.map((b) => b.closest('.theme-group')!.getAttribute('aria-label') + ' ' + b.textContent)).toEqual(['Light themes Graphite']);
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

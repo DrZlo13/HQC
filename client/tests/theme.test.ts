@@ -1,21 +1,33 @@
-// T49: the theme tokens are those of the mockups' theme.js for every base and project color,
-// the status colors do not depend on either, and the app puts them on the document root.
+// T49: the theme tokens are those of the mockups' theme.js for every dark base and project
+// color (the light bases and their tokens are on top of them), the status colors do not depend
+// on the project, and the app puts them on the document root.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Window } from 'happy-dom';
 // @ts-expect-error plain JS module of the mockups, without types
 import * as mockup from '../../docs/design/redesign-2026-11-01/theme.js';
-import { PROJECT_COLOR_NAMES, THEME_NAMES } from '../src/proto';
-import { BASES, PROJECT_COLORS, STATUS, alpha, applyTheme, colorHex, mix, statusVars, themeVars } from '../src/theme';
+import { PROJECT_COLOR_NAMES, type Theme } from '../src/proto';
+import {
+  BASES,
+  PROJECT_COLORS,
+  STATUS,
+  STATUS_LIGHT,
+  alpha,
+  applyTheme,
+  colorHex,
+  mix,
+  statusVars,
+  storedTheme,
+  themeVars,
+} from '../src/theme';
 
 describe('theme tokens', () => {
-  it('match the mockups for every base and color', () => {
-    expect(Object.keys(BASES)).toEqual(Object.keys(mockup.BASES));
-    expect(BASES).toEqual(mockup.BASES);
+  it('match the mockups for every dark base and color', () => {
+    expect(BASES).toMatchObject(mockup.BASES);
     expect(PROJECT_COLORS.map((c) => [c.label, c.hex])).toEqual(Object.entries(mockup.PROJECT_COLORS));
-    for (const base of THEME_NAMES) {
+    for (const base of Object.keys(mockup.BASES) as Theme[]) {
       for (const c of PROJECT_COLORS) {
-        expect(themeVars(c.hex, base), `${base} ${c.id}`).toEqual(mockup.themeVars(c.hex, base));
+        expect(themeVars(c.hex, base), `${base} ${c.id}`).toMatchObject(mockup.themeVars(c.hex, base));
       }
     }
     expect(STATUS).toMatchObject(mockup.STATUS);
@@ -50,10 +62,47 @@ describe('theme tokens', () => {
     expect(root.style.getPropertyValue('--waiting-ink')).toBe(STATUS.waitingInk);
     expect(statusVars()['--danger-fill']).toBe('#C8483A');
     expect(doc.querySelector('meta[name="theme-color"]')!.getAttribute('content')).toBe(themeVars('#6E9BFF', 'contrast')['--side']);
+    expect(root.style.getPropertyValue('color-scheme')).toBe('dark');
     // Another project: the accent follows, the amber stays.
     applyTheme(root, 'moss', 'contrast');
     expect(root.style.getPropertyValue('--accent')).toBe('#8DBA5B');
     expect(root.style.getPropertyValue('--waiting')).toBe('#F2B35B');
     void win.happyDOM.close();
+  });
+
+  it('gives a light base a light color scheme, darker status colors and a darker accent text', () => {
+    const win = new Window();
+    const doc = win.document as unknown as Document;
+    doc.head.innerHTML = '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">';
+    const bar = () => doc.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')!.getAttribute('content');
+    const root = doc.documentElement;
+    applyTheme(root, 'blue', 'warm_light');
+    expect(root.style.getPropertyValue('color-scheme')).toBe('light');
+    expect(root.style.getPropertyValue('--bg')).toBe('#FAF7F2');
+    expect(root.style.getPropertyValue('--waiting')).toBe(STATUS_LIGHT.waiting);
+    expect(root.style.getPropertyValue('--accent')).toBe('#6E9BFF');
+    expect(root.style.getPropertyValue('--accent-text')).toBe(mix('#6E9BFF', '#000000', 0.55));
+    // The iPhone status bar: dark text over a light base, white over a dark one.
+    expect(bar()).toBe('default');
+    applyTheme(root, 'blue', 'graphite');
+    expect(bar()).toBe('black-translucent');
+    void win.happyDOM.close();
+  });
+
+  it('remembers the applied base on this device for the next start', () => {
+    const win = new Window();
+    vi.stubGlobal('localStorage', win.localStorage);
+    try {
+      expect(storedTheme()).toBe('warm');
+      applyTheme(win.document.documentElement as unknown as HTMLElement, 'teal', 'graphite_light');
+      expect(storedTheme()).toBe('graphite_light');
+      expect(win.localStorage.getItem('hqc.theme')).toBe('graphite_light');
+      // Not a theme name: Warm.
+      win.localStorage.setItem('hqc.theme', 'light');
+      expect(storedTheme()).toBe('warm');
+    } finally {
+      vi.unstubAllGlobals();
+      void win.happyDOM.close();
+    }
   });
 });

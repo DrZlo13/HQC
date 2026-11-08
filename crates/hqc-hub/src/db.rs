@@ -33,7 +33,8 @@ pub struct UserRow {
     pub display_name: String,
     pub timezone: String,
     pub personal_project_id: Option<Uuid>,
-    /// `warm` | `graphite` | `contrast` (T49).
+    /// `warm` | `graphite` | `contrast` | `warm_light` | `graphite_light` | `contrast_light`
+    /// (T49).
     pub theme: String,
 }
 

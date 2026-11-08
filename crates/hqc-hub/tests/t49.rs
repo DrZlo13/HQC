@@ -57,10 +57,19 @@ async fn the_theme_round_trips_on_the_user() {
     assert_eq!(s, 200, "{me}");
     assert_eq!(me["theme"], "graphite");
 
-    let (s, _) = hub.patch("/api/me", json!({"theme": "light"})).await;
-    assert_eq!(s, 422, "no light theme");
+    // A light theme (since 0.88) is stored like a dark one.
+    let (s, me) = hub
+        .patch("/api/me", json!({"theme": "contrast_light"}))
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["theme"], "contrast_light");
     let (_, me) = hub.get("/api/me").await;
-    assert_eq!(me["theme"], "graphite");
+    assert_eq!(me["theme"], "contrast_light");
+
+    let (s, _) = hub.patch("/api/me", json!({"theme": "light"})).await;
+    assert_eq!(s, 422, "not a theme");
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(me["theme"], "contrast_light");
     hub.finish().await;
 }
 

@@ -53,10 +53,11 @@ only push.
   `agent.delta` stream, optimistic messages by `client_op_id`, the fate of requests);
   `src/session.ts` — the open chat: history over REST, the tail over WS, actions.
 - `src/theme.ts` — the theme of the round 2 mockups (T49, `docs/design/redesign-2026-11-01/theme.js`,
-  `tests/theme.test.ts` checks they agree): a base palette (`BASES`: Warm, Graphite, High contrast)
-  plus the project color (`PROJECT_COLORS`) → CSS variables (`themeVars`) and the fixed status
-  colors (`statusVars`), put on the document root by `applyTheme`: `main.tsx` at start (Warm),
-  `App.tsx` whenever the user's theme or the current project changes. `styles.css` uses only
+  `tests/theme.test.ts` checks they agree): a base palette (`BASES`: Warm, Graphite, High contrast
+  and their light counterparts) plus the project color (`PROJECT_COLORS`) → CSS variables
+  (`themeVars`) and the status colors (`statusVars`, darker on a light base), put on the document
+  root by `applyTheme`, which also keeps the base in `localStorage` (`hqc.theme`): `main.tsx` at
+  start (that stored base, Warm without one), `App.tsx` whenever the user's theme or the current project changes. `styles.css` uses only
   these variables, no palette of its own.
 - `src/ui/` — the interface per the round 2 mockups (`docs/design/redesign-2026-11-01`; the
   T26 ones of `redesign-2026-10-24` for what round 2 did not redraw):
@@ -88,8 +89,8 @@ only push.
     reply, `usage` under the final answer, `tool.call` inside the card of its request;
   - `cards.tsx` — messages, tool groups, service lines, the agent's question;
     `permission.tsx` — the permission card (Enter/Esc, reply with text, collapsed line);
-  - `Settings` (the app theme first, applied on a click; notifications; workers), `Enroll` —
-    pages; `Markdown.tsx` — markdown and code blocks with
+  - `Settings` (the app theme first: a row of dark and a row of light tiles, applied on a
+    click; notifications; workers), `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
     "Copy"; `icons.tsx` — icons; `labels.ts` — labels and formats.
   `src/clipboard.ts` — copying through `navigator.clipboard`, or a hidden textarea if the API is missing
   (http in a LAN).

@@ -546,7 +546,9 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   // hub checks the magic bytes and the size in pixels).
   route('PATCH', '/api/me', (_, body) => {
     if (body?.theme !== undefined) {
-      if (!['warm', 'graphite', 'contrast'].includes(body.theme)) throw fail(422, 'unprocessable', 'unknown theme');
+      if (!['warm', 'graphite', 'contrast', 'warm_light', 'graphite_light', 'contrast_light'].includes(body.theme)) {
+        throw fail(422, 'unprocessable', 'unknown theme');
+      }
       me.theme = body.theme;
     }
     if (body?.timezone !== undefined) me.timezone = body.timezone;

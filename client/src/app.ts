@@ -18,6 +18,7 @@ import type {
   Theme,
   Workspace,
 } from './proto';
+import { storedTheme } from './theme';
 import { arrange } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
@@ -560,9 +561,10 @@ export class AppState {
     return p;
   }
 
-  /** The app theme (T49): the user's, `warm` until `/api/me` answers. */
+  /** The app theme (T49): the user's; until `/api/me` answers, the one last applied on this
+   *  device (Warm without one), so App does not repaint a light theme dark at start. */
   theme(): Theme {
-    return this.me?.theme ?? 'warm';
+    return this.me?.theme ?? storedTheme();
   }
 
   async setTheme(theme: Theme): Promise<void> {

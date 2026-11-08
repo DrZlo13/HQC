@@ -135,10 +135,10 @@ body {
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 a:hover {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 code,
@@ -195,7 +195,7 @@ button {
 
 .sidebar {
   background: var(--side);
-  border-right: 1px solid rgba(0, 0, 0, 0.3);
+  border-right: 1px solid color-mix(in srgb, var(--shade) 30%, transparent);
 }
 
 .layout-phone .sessions {
@@ -354,7 +354,7 @@ select.input {
   font: 500 11px var(--sans);
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.18);
+  background: color-mix(in srgb, var(--shade) 18%, transparent);
   margin-left: 2px;
 }
 
@@ -428,7 +428,7 @@ select.input {
 
 .rail {
   background: var(--rail);
-  border-right: 1px solid rgba(0, 0, 0, 0.3);
+  border-right: 1px solid color-mix(in srgb, var(--shade) 30%, transparent);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -526,7 +526,7 @@ select.input {
   box-shadow: 0 0 0 2px var(--accent);
 }
 .rail-done {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* A tile's context menu: fixed at the pointer, the bar would clip it. */
@@ -673,7 +673,7 @@ select.input {
   height: 34px;
   padding: 0 10px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.22);
+  background: color-mix(in srgb, var(--shade) 22%, transparent);
   border: 1px solid var(--border);
   color: var(--muted);
 }
@@ -698,7 +698,7 @@ select.input {
   gap: 2px;
   padding: 3px;
   border-radius: 9px;
-  background: rgba(0, 0, 0, 0.22);
+  background: color-mix(in srgb, var(--shade) 22%, transparent);
   border: 1px solid var(--border);
 }
 
@@ -721,7 +721,7 @@ select.input {
 .seg.is-on {
   background: var(--surface);
   color: var(--text);
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--shade) 25%, transparent);
 }
 
 .session-scroll {
@@ -836,7 +836,7 @@ select.input {
 .session-draft {
   flex: none;
   font-size: 12px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .session-when {
@@ -905,7 +905,7 @@ select.input {
   width: 38px;
   height: 38px;
   border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.22);
+  background: color-mix(in srgb, var(--shade) 22%, transparent);
 }
 
 .reorder-bar {
@@ -919,7 +919,7 @@ select.input {
 }
 .reorder-icon {
   display: flex;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .reorder-title {
   flex: 1;
@@ -932,7 +932,7 @@ select.input {
   padding: 0 10px;
 }
 .is-reordering .group-reorder .group-label {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .session-item {
@@ -950,7 +950,7 @@ select.input {
   background: var(--row-hover);
   box-shadow:
     0 0 0 1px var(--accent-line),
-    0 10px 24px rgba(0, 0, 0, 0.45);
+    0 10px 24px color-mix(in srgb, var(--shade) 45%, transparent);
   z-index: 2;
 }
 .session-item.is-confirming {
@@ -1032,7 +1032,7 @@ select.input {
   border-radius: 10px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--shade) 35%, transparent);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1055,7 +1055,7 @@ select.input {
 .btn-undo {
   height: 30px;
   padding: 0 10px;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1098,7 +1098,7 @@ select.input {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 -16px 40px color-mix(in srgb, var(--shade) 45%, transparent);
 }
 .action-sheet-grab {
   align-self: center;
@@ -1161,7 +1161,7 @@ select.input {
 
 /* Archive mode (`Archive`, `MArchive2`): no project tint, hatching on top. */
 .stripes {
-  background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0 8px, transparent 8px 16px);
+  background-image: repeating-linear-gradient(135deg, color-mix(in srgb, var(--text) 4%, transparent) 0 8px, transparent 8px 16px);
 }
 .sessions-archive,
 .layout-phone .sessions.sessions-archive {
@@ -1248,7 +1248,7 @@ select.input {
   padding: 0 10px;
 }
 .btn-restore {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .archive-row .row-confirm {
   margin: 8px 0 0 26px;
@@ -1394,7 +1394,7 @@ select.input {
   padding: 0 12px;
   border-radius: 19px;
   border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.18);
+  background: color-mix(in srgb, var(--shade) 18%, transparent);
   color: var(--text2);
   font: 500 14px var(--sans);
   display: flex;
@@ -1567,7 +1567,7 @@ select.input {
   padding: 6px 6px 6px 14px;
   border-radius: 12px;
   font-size: 14px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--shade) 45%, transparent);
 }
 .sessions-phone.sessions-archive .toast {
   bottom: calc(24px + env(safe-area-inset-bottom));
@@ -1642,7 +1642,7 @@ select.input {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--shade) 45%, transparent);
 }
 
 /* ---- chat ---- */
@@ -1785,7 +1785,7 @@ select.input {
 .pill.state-running,
 .pill.state-queued {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .pill.state-running .pill-dot,
 .pill.state-queued .pill-dot {
@@ -1842,7 +1842,7 @@ select.input {
 .btn-filter.is-on {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .menu-box {
@@ -1859,7 +1859,7 @@ select.input {
   border-radius: 10px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--shade) 45%, transparent);
   display: flex;
   flex-direction: column;
 }
@@ -2374,7 +2374,7 @@ select.input {
 }
 
 .activity-label {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .activity-queued .activity-label {
@@ -2469,7 +2469,7 @@ select.input {
 }
 
 .relay-peer {
-  color: color-mix(in srgb, var(--relay-text) 45%, #fff);
+  color: color-mix(in srgb, var(--relay-text) 45%, var(--text));
   font-weight: 500;
 }
 
@@ -2507,7 +2507,7 @@ a.relay-peer {
 .relay-file {
   padding: 8px 8px 8px 12px;
   border-radius: 9px;
-  background: rgba(0, 0, 0, 0.25);
+  background: color-mix(in srgb, var(--shade) 25%, transparent);
   border: 1px solid color-mix(in srgb, var(--relay) 18%, transparent);
 }
 
@@ -2778,7 +2778,7 @@ a.relay-peer {
   align-self: flex-start;
   margin: 4px 10px 12px;
   font-size: 13px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .perm-reply {
@@ -2853,7 +2853,7 @@ a.relay-peer {
   border-radius: 18px 18px 0 0;
   border: 0;
   border-top: 1px solid var(--permission-border);
-  box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 -12px 32px color-mix(in srgb, var(--shade) 40%, transparent);
   padding-bottom: env(safe-area-inset-bottom);
   max-height: 75dvh;
   overflow-y: auto;
@@ -2910,13 +2910,13 @@ a.relay-peer {
 /* "Allow in this folder" (T48): a pattern per part, then "Save and allow". */
 .btn-folder.is-on {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .perm-folder {
   margin: 4px 16px 16px;
   padding: 14px;
   border-radius: 10px;
-  background: rgba(0, 0, 0, 0.22);
+  background: color-mix(in srgb, var(--shade) 22%, transparent);
   border: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -3031,7 +3031,7 @@ a.relay-peer {
   position: fixed;
   z-index: 20;
   transform: translateX(-50%);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--shade) 35%, transparent);
 }
 
 .composer-wrap {
@@ -3072,7 +3072,7 @@ a.relay-peer {
   border-radius: 10px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--shade) 45%, transparent);
 }
 
 .cmd-item {
@@ -3230,7 +3230,7 @@ a.relay-peer {
   height: 36px;
   border-radius: 9px;
   background: var(--bubble);
-  color: var(--accent);
+  color: var(--accent-text);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3532,7 +3532,7 @@ button.ps-look {
 
 .ps-change {
   font-size: 14px;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .ps-buttons {
@@ -3746,7 +3746,7 @@ button.ps-look {
   padding: 10px 12px;
   border-radius: 8px;
   font-size: 13.5px;
-  background: rgba(0, 0, 0, 0.2);
+  background: color-mix(in srgb, var(--shade) 20%, transparent);
 }
 .rules-result-label {
   flex: none;
@@ -3843,7 +3843,7 @@ button.ps-look {
   display: inline-flex;
   align-items: center;
   font-size: 11.5px;
-  background: rgba(0, 0, 0, 0.25);
+  background: color-mix(in srgb, var(--shade) 25%, transparent);
   color: var(--text2);
 }
 .rule-source.is-hqc {
@@ -3906,7 +3906,7 @@ button.ps-look {
   gap: 10px;
   padding: 14px;
   border-top: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.18);
+  background: color-mix(in srgb, var(--shade) 18%, transparent);
 }
 .rules-form-label {
   font-size: 13px;
@@ -3994,7 +3994,7 @@ button.ps-look {
   border-radius: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 24px 60px color-mix(in srgb, var(--shade) 55%, transparent);
   color: var(--text);
   overflow: hidden;
 }
@@ -4075,7 +4075,7 @@ button.ps-look {
   border: 0;
   border-radius: 9px;
   padding: 0;
-  background: rgba(0, 0, 0, 0.22);
+  background: color-mix(in srgb, var(--shade) 22%, transparent);
   font-size: 19px;
   cursor: pointer;
 }
@@ -4133,7 +4133,7 @@ button.ps-look {
 }
 
 .drop-zone .link {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .drop-zone .muted {
@@ -4162,7 +4162,7 @@ button.ps-look {
 .appearance-preview {
   padding: 20px;
   border-left: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.15);
+  background: color-mix(in srgb, var(--shade) 15%, transparent);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -4363,12 +4363,26 @@ button.ps-look {
   border-radius: 12px;
 }
 
-/* ---- the app theme on the Settings page (T49): three tiles to a row down to a 390 px
-   phone ---- */
+/* ---- the app theme on the Settings page (T49): a row of dark and a row of light tiles,
+   three to a row down to a 390 px phone ---- */
 
 .theme-picks {
   width: 100%;
   max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.theme-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.theme-group-label {
+  font-size: 12.5px;
+  color: var(--muted);
 }
 
 .base-picks {
@@ -4386,7 +4400,7 @@ button.ps-look {
   padding: 10px;
   border-radius: 10px;
   border: 2px solid transparent;
-  background: rgba(0, 0, 0, 0.18);
+  background: color-mix(in srgb, var(--shade) 18%, transparent);
   color: var(--text);
   font: 600 13px var(--sans);
   text-align: left;
@@ -4401,7 +4415,7 @@ button.ps-look {
   width: 100%;
   height: 30px;
   border-radius: 6px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 12%, transparent);
 }
 
 .plain-list {
@@ -4794,7 +4808,7 @@ button.ps-look {
 }
 
 .md-code-diff .diff-hunk {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .md-code-diff .diff-file {
@@ -4808,7 +4822,7 @@ button.ps-look {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--accent);
+  color: var(--accent-text);
   font: inherit;
   text-align: inherit;
   text-decoration: underline dotted;
@@ -4937,7 +4951,7 @@ button.ps-look {
 }
 .search-snippet mark {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   border-radius: 3px;
 }
 .search-archived {
@@ -5043,7 +5057,7 @@ button.ps-look {
 .req-head {
   padding: 4px 8px 2px;
   font-size: 13px;
-  color: var(--accent);
+  color: var(--accent-text);
   min-width: 0;
 }
 .req-from {
@@ -5066,7 +5080,7 @@ button.ps-look {
   font-size: 12px;
 }
 .req-worker {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .req-waiting {
   font-size: 12px;
@@ -5082,7 +5096,7 @@ button.ps-look {
   border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--accent-soft);
   text-decoration: none;
 }
@@ -5107,7 +5121,7 @@ button.ps-look {
 
 .tag-progress {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .tag-failed {
@@ -5151,7 +5165,7 @@ button.ps-look {
   border-radius: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 24px 60px color-mix(in srgb, var(--shade) 55%, transparent);
   color: var(--text);
   overflow: hidden;
 }
@@ -5252,7 +5266,7 @@ button.ps-look {
 
 .workspace-branch {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 500;
 }
 

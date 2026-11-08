@@ -232,13 +232,15 @@ pub async fn ingest(
             .then(|| "delivered".to_string()),
         delivered_at: m.event.delivered_at,
     };
-    let ack = match db::insert_event(&app.db, &new).await? {
+    // A record written before the hub had the session is taken as history the owner has seen
+    // in VS Code: read; what is written after it is unread (SPEC §9.1).
+    let inserted = if m.event.ts < s.created_at {
+        db::insert_event_read(&app.db, &new, s.owner_id).await?
+    } else {
+        db::insert_event(&app.db, &new).await?
+    };
+    let ack = match inserted {
         Inserted::New(row) => {
-            // A record written before the hub had the session is taken as history the owner
-            // has seen in VS Code: read; what is written after it is unread (SPEC §9.1).
-            if m.event.ts < s.created_at {
-                db::set_read_cursor(&app.db, s.owner_id, s.id, row.seq).await?;
-            }
             events::after_mirror_store(app, &s, &row, &m.event.kind).await?;
             if m.recent && !s.archived {
                 db::touch_vscode(&app.db, s.id).await?;

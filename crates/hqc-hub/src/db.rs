@@ -2426,7 +2426,15 @@ pub fn is_data_error(e: &anyhow::Error) -> bool {
 /// Append an event, assigning the next `seq` of its session (SPEC §5.2). The session row
 /// lock serializes appends per session; the unique `event_id` drops duplicates.
 pub async fn insert_event(db: &PgPool, e: &NewEvent) -> sqlx::Result<Inserted> {
-    Ok(insert(db, e, None)
+    Ok(insert(db, e, None, None)
+        .await?
+        .expect("an event that closes no request is never refused"))
+}
+
+/// [`insert_event`] of an event that is read for `user` at once: the read cursor moves over
+/// it in the same transaction, so an imported record costs one commit (SPEC §9.1).
+pub async fn insert_event_read(db: &PgPool, e: &NewEvent, user: Uuid) -> sqlx::Result<Inserted> {
+    Ok(insert(db, e, None, Some(user))
         .await?
         .expect("an event that closes no request is never refused"))
 }
@@ -2440,13 +2448,14 @@ pub async fn insert_worker_cancel(
     kind: &str,
     request_id: &str,
 ) -> sqlx::Result<Option<Inserted>> {
-    insert(db, e, Some((kind, request_id))).await
+    insert(db, e, Some((kind, request_id)), None).await
 }
 
 async fn insert(
     db: &PgPool,
     e: &NewEvent,
     closes: Option<(&str, &str)>,
+    read_by: Option<Uuid>,
 ) -> sqlx::Result<Option<Inserted>> {
     if let Some(seq) = existing_seq(db, e.event_id).await? {
         return Ok(Some(Inserted::Duplicate(seq)));
@@ -2496,6 +2505,9 @@ async fn insert(
     .await?;
     match row {
         Some(row) => {
+            if let Some(user) = read_by {
+                set_read_cursor(&mut *tx, user, e.session_id, row.seq).await?;
+            }
             tx.commit().await?;
             Ok(Some(Inserted::New(Box::new(row))))
         }
@@ -3051,8 +3063,8 @@ pub async fn copy_events(
 
 // ---------------------------------------------------------------- read cursors, push
 
-pub async fn set_read_cursor(
-    db: &PgPool,
+pub async fn set_read_cursor<'e>(
+    db: impl sqlx::PgExecutor<'e>,
     user: Uuid,
     session: Uuid,
     seq: i64,

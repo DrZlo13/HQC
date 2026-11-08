@@ -31,7 +31,10 @@ async fn a_workers_limits_are_listed_with_it() {
         w.expect("ack").await;
     }
     let l = limits(&hub).await;
-    assert_eq!(l["five_hour"], json!({"utilization": 0.41, "resets_at": 1794150000}));
+    assert_eq!(
+        l["five_hour"],
+        json!({"utilization": 0.41, "resets_at": 1794150000})
+    );
     assert_eq!(l["seven_day"]["utilization"], 0.23);
     assert!(l["reported_at"].is_string(), "{l}");
     hub.finish().await;

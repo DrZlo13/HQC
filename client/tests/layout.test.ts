@@ -58,4 +58,9 @@ describe('layout widths', () => {
   it("the user's message keeps its line breaks", () => {
     expect(rule('.msg-text')['white-space']).toBe('pre-wrap');
   });
+
+  it("an option's box keeps its 18px beside a long description, the Other field takes the rest", () => {
+    expect(rule('.choice input')['flex']).toBe('none');
+    expect(rule('.choice-other .input')['flex']).toBe('1');
+  });
 });

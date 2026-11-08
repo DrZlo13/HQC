@@ -2601,7 +2601,10 @@ a.relay-peer {
   min-height: 36px;
 }
 
+/* The row is a flex box: without `flex: none` a long description squeezes the box narrower than
+   18px on a phone, and the options' boxes stop lining up. */
 .choice input {
+  flex: none;
   width: 18px;
   height: 18px;
   accent-color: var(--accent);

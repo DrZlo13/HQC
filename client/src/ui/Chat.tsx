@@ -18,7 +18,7 @@ import { PermissionBlock } from './permission';
 import { MoveSession } from './ProjectSettings';
 import { WaitedRequests } from './requests';
 import { SchedulesPanel } from './Schedules';
-import { archivedLabel } from './sessions';
+import { archivedLabel, subagentsAtWork } from './sessions';
 
 const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
@@ -275,8 +275,8 @@ export function Chat({
   const usage = t.usageTotals();
   const model = shownModel(info?.model, usage.model);
   const cost = usage.cost;
-  // The turn ended, a background subagent still works: Running, as in the list (bucketOf).
-  const shown = state === 'idle' && (info?.subagents ?? 0) > 0 ? 'running' : state;
+  // Running, as in the list, while a background subagent works after the turn.
+  const shown = info && subagentsAtWork(info) ? 'running' : state;
   const pill = <StatePill state={shown} timeline={t} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;

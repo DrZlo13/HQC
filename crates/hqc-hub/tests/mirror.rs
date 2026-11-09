@@ -830,9 +830,9 @@ async fn only_session(hub: &TestHub, pid: &str) -> String {
 /// A chat continued in another project's folder from a copy of its transcript (SPEC §9.2):
 /// the copy's records come from that workspace, and the session follows them there, with
 /// `cwd` `.` as an import there would get, every record stored once and nothing in the feed
-/// about it. A record older than the session's newest one leaves it where it is (the old window
-/// wrote it, or the old file is read again); the newest one itself, from the copy, takes it
-/// there, and a newer one from the old file takes it back.
+/// about it. A record the session already has (the copy read from its start) or one older than
+/// its newest (the old window wrote it) leaves it where it is; a new newest one from the copy
+/// takes it there, and a newer one from the old file takes it back.
 #[tokio::test]
 async fn a_session_follows_its_transcript_into_another_workspace() {
     let hub = TestHub::start().await;
@@ -851,23 +851,30 @@ async fn a_session_follows_its_transcript_into_another_workspace() {
     assert_eq!(place(&hub.session(&sid).await), in_a);
 
     // The copy in B, read from its start: the old records again, then the new window's.
-    assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &one)
+    for e in [&one, &two] {
+        assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, e)
+            .await
+            .is_u64());
+        assert_eq!(place(&hub.session(&sid).await), in_a, "a record it has");
+    }
+    let zero = answer_at("2026-11-09T10:00:30Z", "zero");
+    assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &zero)
         .await
         .is_u64());
-    assert_eq!(place(&hub.session(&sid).await), in_a, "older than two");
-    assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &two)
-        .await
-        .is_u64());
-    assert_eq!(place(&hub.session(&sid).await), in_b, "two is the newest");
+    assert_eq!(place(&hub.session(&sid).await), in_a, "new, older than two");
     assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &three)
         .await
         .is_u64());
-    assert_eq!(place(&hub.session(&sid).await), in_b);
+    assert_eq!(
+        place(&hub.session(&sid).await),
+        in_b,
+        "three is new and the newest"
+    );
     assert!(sessions(&hub, &pa).await.is_empty());
     assert_eq!(only_session(&hub, &pb).await, sid);
     assert_eq!(
         texts(&hub.events(&sid).await),
-        ["session_created", "one", "two", "three"]
+        ["session_created", "one", "two", "zero", "three"]
     );
 
     // The old window wrote one more record before the copy's newest: the session stays.
@@ -880,7 +887,15 @@ async fn a_session_follows_its_transcript_into_another_workspace() {
     assert_eq!(place(&hub.session(&sid).await), in_a);
     assert_eq!(
         texts(&hub.events(&sid).await),
-        ["session_created", "one", "two", "three", "late", "newer"]
+        [
+            "session_created",
+            "one",
+            "two",
+            "zero",
+            "three",
+            "late",
+            "newer"
+        ]
     );
     hub.finish().await;
 }

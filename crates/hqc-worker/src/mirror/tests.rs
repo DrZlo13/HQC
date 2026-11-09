@@ -1127,6 +1127,24 @@ fn a_transcript_stays_in_its_folder_after_a_cd() {
     assert_eq!(t.cwd().as_deref(), Some(A));
 }
 
+/// A copy written anew (`cp` again), shorter than where the last search in it ended: it is
+/// searched from its start, and the new window's record in it settles it in `b`.
+#[test]
+fn a_copy_written_anew_shorter_is_searched_from_its_start() {
+    let mut t = Two::new(B);
+    for text in ["one", "two", "three"] {
+        t.prompt(A, text);
+    }
+    assert_eq!(t.poll().len(), 3);
+    assert_eq!(t.cwd().as_deref(), Some(A));
+    std::fs::write(&t.file, "").unwrap();
+    t.last = None;
+    t.prompt(A, "one");
+    t.prompt(B, "four");
+    t.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(t.cwd().as_deref(), Some(B));
+}
+
 /// The import's candidates (SPEC §9.1) count a continued copy to its folder, also when its row
 /// was cached with the folder of its first record.
 #[test]

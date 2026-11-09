@@ -3022,15 +3022,19 @@ that is not mirrored is found too), the worker searches the file for a `cwd` tha
 file the first time in its process and afterwards only the bytes appended since the last search
 (the size searched is kept in memory); a `cwd` found becomes the row's, and the records of that
 pass go out with it. The hub keeps one session per transcript and finds it by worker and
-`runtime_session_id`, not by workspace; when a record comes from another workspace of the
-session's owner than the session's, the session moves there before the record is stored: into
-that workspace's project, `cwd` the transcript's folder (the frame's `cwd`) relative to the
-workspace, as an import there would get it, the connection's start state back to "not started"
-as after a move (§6). A record older than the session's newest event that is not `system` (most
-`system` events are the hub's own, with its clock) does not move it: right after a copy the old
-window still writes a few records into the old file, and both files may be read again from the
-start, so the session ends where the newest record was written. No event goes into the feed:
-right after a copy both files get records for a while, and the session may switch a few times.
+`runtime_session_id`, not by workspace; when a record the session does not have yet comes from
+another workspace of the session's owner than the session's, the session moves there once the
+record is stored: into that workspace's project, `cwd` the transcript's folder (the frame's
+`cwd`) relative to the workspace, as an import there would get it, the connection's start state
+back to "not started" as after a move (§6). A record the session already has does not move it:
+a copy read from its start brings all of the old file's records again. Nor does one older than
+the session's newest event that is not `system` (most `system` events are the hub's own, with
+its clock): right after a copy the old window still writes a few records into the old file, and
+both files may be read again from the start, so the session ends where the newest record was
+written. The hub keeps the newest time it read per session for the connection: it only grows,
+so an older record needs no query (a copy out of a folder that is not mirrored has no `since`
+and comes whole). No event goes into the feed: right after a copy both files get records for a
+while, and the session may switch a few times.
 
 The worker recognises its own records by `uuid`: the Claude Code adapter puts into a shared
 in-memory registry (by `runtime_session_id`) the uuid of every `user`/`assistant` message of the
@@ -4367,8 +4371,8 @@ records, so the mirror sent the copy's records with the old workspace, and the h
 the session by `runtime_session_id` alone, showed the new dialog in the session of the old project
 (53 sessions on one laptop). §9.2: a row whose `cwd` is not its folder is searched for one that is
 (the whole file once per worker process, then what is appended); the hub moves a session whose
-record comes from another workspace of its owner into it and its project, unless the record is
-older than the session's newest non-system event, without a line in the feed.
+new record comes from another workspace of its owner into it and its project, unless the record
+is older than the session's newest non-system event, without a line in the feed.
 
 ### 0.88 → 0.89 (the list at once on a reload)
 §6: `GET /api/sessions` gives every session of every project of the user in one list; the

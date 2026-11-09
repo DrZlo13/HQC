@@ -81,6 +81,9 @@ pub enum StartState {
 pub struct SessConn {
     pub start: StartState,
     pub inflight: HashSet<Uuid>,
+    /// The session's newest record time the mirror last read from the database
+    /// (`mirror::follow`).
+    pub newest: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Default)]

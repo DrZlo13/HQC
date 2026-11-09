@@ -141,21 +141,15 @@ pub async fn ingest(
     }
     let title = m.title.as_deref().and_then(crate::worker_ws::runtime_title);
     let held = m.held_by.as_ref().and_then(|h| h.as_ref());
-    let s = match db::session_by_runtime(&app.db, conn.worker_id, &m.runtime_session_id).await? {
-        Some(s) => {
-            let s = if s.workspace_id == Some(ws.id) {
-                s
-            } else {
-                follow(app, conn, s, &ws, &cwd, m).await?
-            };
-            match &m.held_by {
-                Some(h) => {
-                    holder(app, &s, h.clone()).await?;
-                    db::session(&app.db, s.id).await?.unwrap_or(s)
-                }
-                None => s,
+    let mut s = match db::session_by_runtime(&app.db, conn.worker_id, &m.runtime_session_id).await?
+    {
+        Some(s) => match &m.held_by {
+            Some(h) => {
+                holder(app, &s, h.clone()).await?;
+                db::session(&app.db, s.id).await?.unwrap_or(s)
             }
-        }
+            None => s,
+        },
         None => {
             let limits = &app.config.limits;
             let (today, in_workspace) = db::imported_counts(&app.db, conn.worker_id, ws.id).await?;
@@ -264,6 +258,12 @@ pub async fn ingest(
                     }
                 }
             }
+            // A record the session already has says nothing about where its chat goes on: a
+            // copy read from its start brings all of them again (SPEC §9.2). Last, so that a
+            // failed move leaves the stored record handled.
+            if s.workspace_id != Some(ws.id) {
+                s = follow(app, conn, s, &ws, &cwd, m).await?;
+            }
             Ack {
                 event_id: Some(event_id),
                 seq: Some(row.seq as u64),
@@ -284,12 +284,12 @@ pub async fn ingest(
     Ok(ack.into())
 }
 
-/// The record `m` of session `s`'s transcript comes from workspace `ws`, not the session's
-/// (SPEC §9.2): a chat continued in another folder from a copy of its transcript. Unless the
-/// record is older than the session's newest one or `ws` is another owner's, the session
-/// follows it into `ws` and its project, with `cwd` as an import there would get it. Nothing
-/// goes into the feed: right after a copy both files get records, and the session may go back
-/// and forth a few times.
+/// The new record `m` of session `s`'s transcript, just stored, comes from workspace `ws`, not
+/// the session's (SPEC §9.2): a chat continued in another folder from a copy of its
+/// transcript. Unless the record is older than the session's newest one or `ws` is another
+/// owner's, the session follows it into `ws` and its project, with `cwd` as an import there
+/// would get it. Nothing goes into the feed: right after a copy both files get records, and
+/// the session may go back and forth a few times.
 async fn follow(
     app: &AppState,
     conn: &WorkerConn,
@@ -303,11 +303,28 @@ async fn follow(
         return Ok(s);
     }
     // The old window writes into the old file for a while, and both files may be read
-    // again from the start: the session ends where the newest record was written.
-    if db::newest_record_ts(&app.db, s.id)
-        .await?
-        .is_some_and(|t| m.event.ts < t)
-    {
+    // again from the start: the session ends where the newest record was written. The newest
+    // only grows while the connection lasts, so a record older than the one last seen needs
+    // no query: a copy with no `since` (its old folder not mirrored) comes whole.
+    let seen = conn
+        .st
+        .lock()
+        .await
+        .sessions
+        .get(&s.id)
+        .and_then(|c| c.newest);
+    if seen.is_some_and(|t| m.event.ts < t) {
+        return Ok(s);
+    }
+    let newest = db::newest_record_ts(&app.db, s.id).await?;
+    conn.st
+        .lock()
+        .await
+        .sessions
+        .entry(s.id)
+        .or_default()
+        .newest = newest;
+    if newest.is_some_and(|t| m.event.ts < t) {
         return Ok(s);
     }
     db::move_session(&app.db, &s, ws.project_id, ws.id, cwd).await?;

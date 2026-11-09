@@ -360,7 +360,14 @@ impl Mirror {
         if row.cwd.as_deref().is_some_and(|c| in_folder(path, c)) {
             return Ok(());
         }
-        let from = self.searched.get(path).copied().unwrap_or(0);
+        // A file written anew shorter than where the last search ended is searched from 0.
+        let len = std::fs::metadata(path)?.len();
+        let from = self
+            .searched
+            .get(path)
+            .copied()
+            .filter(|&f| f <= len)
+            .unwrap_or(0);
         let (found, upto) = folder_cwd(path, from)?;
         self.searched.insert(path.to_path_buf(), upto);
         let cwd = found

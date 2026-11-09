@@ -31,7 +31,7 @@ export function Snippet({ text, query }: { text: string; query: string }) {
   return <>{text.split(re).map((part, i) => (i % 2 ? <mark key={i}>{part}</mark> : part))}</>;
 }
 
-/** The hub's hits for `query`, newest first, with "More" for the next page. */
+/** The hub's hits for `query`, best first, with "More" for the next page. */
 export function SearchHits({ app, query }: { app: AppState; query: string }) {
   const [fuzzy, setFuzzy] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -86,7 +86,7 @@ export function SearchHits({ app, query }: { app: AppState; query: string }) {
     <div class="search-hits" aria-busy={busy}>
       <div class="group-head">
         <span class="group-label">In messages</span>
-        <label class="search-fuzzy" title="Also other word forms and typos">
+        <label class="search-fuzzy" title="Also typos">
           <input type="checkbox" checked={fuzzy} onChange={(e) => setFuzzy((e.currentTarget as HTMLInputElement).checked)} />
           Similar words
         </label>

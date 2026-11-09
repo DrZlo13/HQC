@@ -165,9 +165,13 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: SEARCH_HISTORY,
         description: "Search the history of your owner's hqc sessions (archived ones too): \
-            the messages of users and agents, messages between sessions, hqc's notices and \
-            session titles; not tool output. Exact words by default (\"quoted phrase\", \
-            `or`, `-word`); `fuzzy: true` also finds other word forms and typos. Newest first, \
+            the messages of users and agents, messages between sessions, hqc's notices, \
+            answers to questions, tool calls with their arguments, tool output and session \
+            titles. A word finds its other forms (\"deploy\" finds \"deployed\", \"переезд\" \
+            finds \"переезда\"); all words must be there; \"quoted phrase\", `or`, `-word` \
+            (a dash before four letters or more, or before a quoted phrase, excludes it), \
+            `word*` for a prefix; `fuzzy: true` also finds typos. A command pasted with its \
+            flags finds its call: `-rf`, `-lah`, `--force` are words. Best match first, \
             20 per call; pass `next_cursor` as `cursor` for more. Each hit has the session's \
             address, the event's `seq` and a snippet.",
         input_schema: || {

@@ -1,6 +1,7 @@
 //! T33 (SPEC §15, §7): `GET /api/search` and `hqc_search_history` over the index of
-//! migration 0016: exact and fuzzy hits, Russian and English, only the owner's sessions
-//! (service sessions left out, archived ones marked), paging, the backfill of old rows.
+//! migration 0037: word forms and typos, Russian and English, messages, tool calls and output,
+//! best match first, only the owner's sessions (service sessions left out, archived ones
+//! marked), paging, the backfill of old rows, the vocabulary of fuzzy queries.
 
 mod common;
 
@@ -149,8 +150,8 @@ async fn exact_and_fuzzy_hits_of_the_owner_only() {
         t(2),
     )
     .await;
-    // Tool output is not indexed.
-    event(
+    // Tool calls and output are found too, below what people and agents wrote.
+    let a3 = event(
         &db,
         a,
         "tool.call",
@@ -158,7 +159,7 @@ async fn exact_and_fuzzy_hits_of_the_owner_only() {
         t(3),
     )
     .await;
-    event(
+    let a4 = event(
         &db,
         a,
         "tool.result",
@@ -235,9 +236,9 @@ async fn exact_and_fuzzy_hits_of_the_owner_only() {
     let pa = |seq| ("personal/deploy".to_string(), Some(seq));
     let wb = |seq| ("work/notes".to_string(), Some(seq));
 
-    // Exact words, English: newest first; tool output and others' sessions never appear.
+    // English: best match first (a shorter text ranks higher); others' sessions never appear.
     let v = search(&hub, "q=tunnel").await;
-    assert_eq!(hits(&v), vec![wb(b3), pa(a2)], "{v}");
+    assert_eq!(hits(&v), vec![wb(b3), pa(a2), pa(a3), pa(a4)], "{v}");
     assert!(v.get("next_cursor").is_none());
     let h = &v["results"][1];
     assert_eq!(h["session_id"], a.to_string());
@@ -245,48 +246,72 @@ async fn exact_and_fuzzy_hits_of_the_owner_only() {
     assert_eq!(h["type"], "agent.message");
     assert_eq!(h["archived"], false);
     assert_eq!(h["snippet"], "Deployment finished, the tunnel is up");
-    // The title is searched too: a hit without `seq`, at the session's creation.
+    // The title is searched too: a hit without `seq`, at the session's creation. A word finds
+    // its other forms ("Deployment"); equal ranks go newest first.
     let v = search(&hub, "q=deploy").await;
     assert_eq!(
         hits(&v),
-        vec![pa(a1), ("personal/deploy".to_string(), None)],
+        vec![
+            ("personal/deploy".to_string(), None),
+            pa(a2),
+            pa(a1),
+            pa(a3),
+            pa(a4)
+        ],
         "{v}"
     );
-    assert_eq!(v["results"][1]["snippet"], "Deploy the hub");
-    // Exact means the word: "deployment" is another word in `simple`.
-    assert!(!hits(&search(&hub, "q=deployment").await).contains(&pa(a1)));
+    assert_eq!(v["results"][0]["snippet"], "Deploy the hub");
+    assert_eq!(v["results"][3]["snippet"], "Bash deploy --tunnel");
+    assert_eq!(v["results"][4]["snippet"], "tunnel deploy ok");
+    assert!(hits(&search(&hub, "q=deployment").await).contains(&pa(a1)));
     // A phrase, and `-word`.
     assert_eq!(
         hits(&search(&hub, &format!("q={}", q("\"the tunnel is up\""))).await),
         vec![pa(a2)]
     );
+    // A negated word leaves the ranks as they are: the better match first.
     assert_eq!(
         hits(&search(&hub, &format!("q={}", q("tunnel -restarted"))).await),
-        vec![pa(a2)]
+        vec![pa(a2), pa(a3), pa(a4)]
     );
+    // Only a negated word: every other hit, newest first (the titles at the sessions'
+    // creation).
+    let v = search(&hub, &format!("q={}", q("-restarted"))).await;
+    let got = hits(&v);
+    assert_eq!(got.len(), 8, "{v}");
+    assert_eq!(
+        got[..6],
+        [wb(b2), wb(b1), pa(a4), pa(a3), pa(a2), pa(a1)],
+        "{v}"
+    );
+    assert!(got[6..].iter().all(|(_, seq)| seq.is_none()), "{v}");
 
-    // Russian: exact needs the same form, fuzzy finds the others.
+    // Russian: a word finds its other forms, fuzzy too.
     let v = search(&hub, &format!("q={}", q("миграцию"))).await;
-    assert_eq!(hits(&v), vec![wb(b1)], "{v}");
+    assert_eq!(
+        hits(&v),
+        vec![wb(b2), ("work/notes".to_string(), None), wb(b1)],
+        "{v}"
+    );
     let v = search(&hub, &format!("q={}&fuzzy=1", q("миграция"))).await;
     let got = hits(&v);
     for want in [wb(b1), wb(b2), ("work/notes".to_string(), None)] {
         assert!(got.contains(&want), "{want:?} in {v}");
     }
-    // Fuzzy English: another form and a typo.
+    // Fuzzy English: another form, and a typo through the vocabulary.
     let got = hits(&search(&hub, "q=deploying&fuzzy=true").await);
     assert!(got.contains(&pa(a1)) && got.contains(&pa(a2)), "{got:?}");
     let got = hits(&search(&hub, "q=tunnle&fuzzy=1").await);
     assert!(got.contains(&pa(a2)), "{got:?}");
     // Case does not matter.
-    assert_eq!(hits(&search(&hub, "q=TUNNEL").await).len(), 2);
+    assert_eq!(hits(&search(&hub, "q=TUNNEL").await).len(), 4);
 
     // One project, by id or slug; another user's project is a 404.
     let v = search(&hub, &format!("q=tunnel&project={work}")).await;
     assert_eq!(hits(&v), vec![wb(b3)]);
     assert_eq!(
         hits(&search(&hub, "q=tunnel&project=personal").await),
-        vec![pa(a2)]
+        vec![pa(a2), pa(a3), pa(a4)]
     );
     let (s, _) = hub
         .get(&format!("/api/search?q=tunnel&project={other_project}"))
@@ -333,6 +358,252 @@ async fn exact_and_fuzzy_hits_of_the_owner_only() {
     hub.finish().await;
 }
 
+/// Commands and their output, the answers to a question, word forms in both languages, a
+/// prefix, a typo through the vocabulary the insert trigger fills, the better match first.
+#[tokio::test]
+async fn commands_output_word_forms_and_typos() {
+    let hub = TestHub::start().await;
+    let db = hub.app.db.clone();
+    let (owner, personal) = me(&hub).await;
+    let s = session(&db, owner, personal, "ops", "Ops").await;
+    let user = |text: &str| json!({"text": text, "artifact_ids": []});
+    let agent = |text: &str| json!({"text": text, "final": true});
+    let args = r#"{"command":"launchctl kickstart -k gui/501/xyz.hqc.worker\nlaunchctl list"}"#;
+    let call = event(
+        &db,
+        s,
+        "tool.call",
+        json!({"call_id": "c1", "tool": "Bash", "args_preview": args}),
+        t(1),
+    )
+    .await;
+    let refused = "curl: (7) Failed to connect to 10.20.30.226 port 3284: Connection refused";
+    let output = event(
+        &db,
+        s,
+        "tool.result",
+        json!({"call_id": "c1", "result_preview": refused, "error": true}),
+        t(2),
+    )
+    .await;
+    let moving = event(
+        &db,
+        s,
+        "user.message",
+        user("План переезда хаба на новый сервер"),
+        t(3),
+    )
+    .await;
+    let deployed = event(&db, s, "agent.message", agent("The hub is deployed"), t(4)).await;
+    let kube = event(
+        &db,
+        s,
+        "agent.message",
+        agent("kubectl get pods shows nothing"),
+        t(5),
+    )
+    .await;
+    let answers = event(
+        &db,
+        s,
+        "clarify.response",
+        json!({"request_id": "r1", "answers": {
+            "q1": "Реплики посреди хода", "q2": ["Команды и вывод", "Словоформы"]}}),
+        t(6),
+    )
+    .await;
+    let modbus = event(
+        &db,
+        s,
+        "user.message",
+        user("Read the Modbus registers of the relay"),
+        t(7),
+    )
+    .await;
+    // Newer, but tool output: a weaker match.
+    let poll = event(
+        &db,
+        s,
+        "tool.result",
+        json!({"call_id": "c2", "result_preview": "modbus poll: timeout", "error": true}),
+        t(8),
+    )
+    .await;
+    let ops = |seq| ("personal/ops".to_string(), Some(seq));
+
+    let v = search(&hub, &format!("q={}", q("launchctl kickstart"))).await;
+    assert_eq!(hits(&v), vec![ops(call)], "{v}");
+    assert_eq!(v["results"][0]["type"], "tool.call");
+    let snippet = v["results"][0]["snippet"].as_str().unwrap();
+    assert!(
+        snippet.starts_with("Bash {") && snippet.contains("worker launchctl list"),
+        "{snippet}"
+    );
+    // The `\n` of the JSON arguments is a space: "launchctl list" is a phrase there.
+    assert_eq!(
+        hits(&search(&hub, &format!("q={}", q("\"launchctl list\""))).await),
+        vec![ops(call)]
+    );
+    let v = search(&hub, &format!("q={}", q("\"connection refused\""))).await;
+    assert_eq!(hits(&v), vec![ops(output)], "{v}");
+    assert_eq!(v["results"][0]["snippet"], refused);
+    assert_eq!(
+        hits(&search(&hub, &format!("q={}", q("переезд"))).await),
+        vec![ops(moving)]
+    );
+    assert_eq!(hits(&search(&hub, "q=deploy").await), vec![ops(deployed)]);
+    assert_eq!(
+        hits(&search(&hub, &format!("q={}", q("kube*"))).await),
+        vec![ops(kube)]
+    );
+    let v = search(&hub, &format!("q={}", q("словоформа"))).await;
+    assert_eq!(hits(&v), vec![ops(answers)], "{v}");
+    assert_eq!(
+        v["results"][0]["snippet"],
+        "Реплики посреди хода; Команды и вывод; Словоформы"
+    );
+    // A person's message above newer tool output.
+    assert_eq!(
+        hits(&search(&hub, "q=modbus").await),
+        vec![ops(modbus), ops(poll)]
+    );
+    // A typo: nothing exact, fuzzy finds the word in the vocabulary.
+    assert!(hits(&search(&hub, "q=modbas").await).is_empty());
+    assert_eq!(
+        hits(&search(&hub, "q=modbas&fuzzy=1").await),
+        vec![ops(modbus), ops(poll)]
+    );
+    // Fuzzy finds all that exact does, though the stem of "прощание", "прощан", stemmed again
+    // is "проща"; and the typo "прщание" finds "прощан" in the vocabulary as it is.
+    let farewell = event(&db, s, "user.message", user("Прощание с котом"), t(9)).await;
+    let restemmed: String = sqlx::query_scalar("SELECT to_tsquery('hqc', 'прощан')::text")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(restemmed, "'проща'");
+    let exact = hits(&search(&hub, &format!("q={}", q("прощание"))).await);
+    assert_eq!(exact, vec![ops(farewell)]);
+    let fuzzy = hits(&search(&hub, &format!("q={}&fuzzy=1", q("прощание"))).await);
+    assert!(exact.iter().all(|h| fuzzy.contains(h)), "{fuzzy:?}");
+    assert!(hits(&search(&hub, &format!("q={}", q("прщание"))).await).is_empty());
+    assert_eq!(
+        hits(&search(&hub, &format!("q={}&fuzzy=1", q("прщание"))).await),
+        vec![ops(farewell)]
+    );
+
+    // The insert trigger adds an event's words: of letters only, 3 to 40 long.
+    let vocab = || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT word FROM search_vocab WHERE word = ANY($1) ORDER BY word",
+        )
+        .bind(&["quokka", "wombat", "and", "at", "ab", "3f2a9c"][..])
+        .fetch_all(&db)
+    };
+    assert!(vocab().await.unwrap().is_empty());
+    event(
+        &db,
+        s,
+        "agent.message",
+        agent("Quokka and wombat at 3f2a9c ab"),
+        t(9),
+    )
+    .await;
+    assert_eq!(vocab().await.unwrap(), ["and", "quokka", "wombat"]);
+
+    // A path or an address is the words of its parts in a row; a prefix is the word unstemmed
+    // too ("copy*" is no prefix of the stem "copi").
+    let read = event(
+        &db,
+        s,
+        "tool.call",
+        json!({"call_id": "c3", "tool": "Read",
+               "args_preview": r#"{"file_path":"/Users/me/hqc/crates/hqc-hub/src/search.rs"}"#}),
+        t(10),
+    )
+    .await;
+    let ping = event(
+        &db,
+        s,
+        "tool.result",
+        json!({"call_id": "c4", "result_preview": "PING 10.31.80.253: 56 data bytes",
+               "error": false}),
+        t(11),
+    )
+    .await;
+    let clip = event(
+        &db,
+        s,
+        "agent.message",
+        agent("The button calls copyToClipboard()"),
+        t(12),
+    )
+    .await;
+    // A command pasted with its flags finds its call; `-` before four letters still excludes.
+    let push = event(
+        &db,
+        s,
+        "tool.call",
+        json!({"call_id": "c5", "tool": "Bash",
+               "args_preview": r#"{"command":"rm -rf build && ls -lah && git push --force"}"#}),
+        t(13),
+    )
+    .await;
+    event(
+        &db,
+        s,
+        "tool.call",
+        json!({"call_id": "c6", "tool": "Bash",
+               "args_preview": r#"{"command":"git push --force && echo restarted"}"#}),
+        t(14),
+    )
+    .await;
+    // Only "work" and "mode", which "worker*" and "model*" do not find.
+    event(&db, s, "agent.message", agent("The work is done"), t(15)).await;
+    let model = event(
+        &db,
+        s,
+        "agent.message",
+        agent("Use the larger model"),
+        t(16),
+    )
+    .await;
+    event(&db, s, "agent.message", agent("Fast mode is on"), t(17)).await;
+    for (query, want) in [
+        ("search.rs", read),
+        ("search", read),
+        ("10.31.80.253", ping),
+        ("copy*", clip),
+        // A prefix longer than the stem of its word: "connection" is "connect" in the index.
+        ("connecti*", output),
+        ("deploym*", deployed),
+        ("worker*", call),
+        ("model*", model),
+        ("launchctl kickstart -k gui/501/xyz.hqc.worker", call),
+        ("rm -rf build", push),
+        ("ls -lah", push),
+        ("git push --force -restarted", push),
+    ] {
+        assert_eq!(
+            hits(&search(&hub, &format!("q={}", q(query))).await),
+            vec![ops(want)],
+            "{query}"
+        );
+    }
+    // A stub of the word, as a preview cut there leaves, does not hide the stem of the word.
+    let stub = event(
+        &db,
+        s,
+        "tool.result",
+        json!({"call_id": "c7", "result_preview": "curl: (7) Failed to connecti", "error": true}),
+        t(18),
+    )
+    .await;
+    let mut got = hits(&search(&hub, &format!("q={}", q("connecti*"))).await);
+    got.sort();
+    assert_eq!(got, [ops(output), ops(stub)]);
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn pages_follow_the_cursor() {
     let hub = TestHub::start().await;
@@ -372,14 +643,14 @@ async fn pages_follow_the_cursor() {
         }
     }
     seqs.reverse();
-    assert_eq!(got, seqs, "every hit once, newest first");
+    assert_eq!(got, seqs, "every hit once; equal ranks newest first");
     // The limit is capped.
     let v = search(&hub, "q=needle&limit=1000").await;
     assert_eq!(v["results"].as_array().unwrap().len(), 25);
     hub.finish().await;
 }
 
-/// Migration 0016 backfills the events stored before it.
+/// Migration 0037 indexes the events stored before it, tool output too.
 #[tokio::test]
 async fn the_migration_indexes_old_events() {
     const SEED: &str = r#"
@@ -402,11 +673,14 @@ async fn the_migration_indexes_old_events() {
     "#;
     let hub = TestHub::start_upgrading(16, SEED).await;
     let v = search(&hub, "q=pineapple").await;
-    assert_eq!(
-        hits(&v),
-        vec![("personal/old-one".to_string(), Some(1))],
-        "{v}"
-    );
+    let old = vec![
+        ("personal/old-one".to_string(), Some(1)),
+        ("personal/old-one".to_string(), Some(2)),
+    ];
+    assert_eq!(hits(&v), old, "{v}");
+    // The vocabulary holds the old events' words: a typo finds them.
+    let v = search(&hub, "q=pinapple&fuzzy=1").await;
+    assert_eq!(hits(&v), old, "{v}");
     hub.finish().await;
 }
 
@@ -499,7 +773,7 @@ async fn seed(db: &PgPool, owner: Uuid, project: Uuid, words: &str) {
 /// SPEC §15, T33: queries over 100k events, two corpora: 20 words in all (every word in
 /// most events, the worst case for common words) and 10 000 words with natural frequencies.
 /// Prints the timings; run with `cargo test --release -p hqc-hub --test search -- --ignored
-/// --nocapture` (the numbers are in docs/notes/t33-questions.md).
+/// --nocapture` (the numbers are in SPEC §15).
 #[tokio::test]
 #[ignore]
 async fn timing_over_100k_events() {
@@ -534,25 +808,23 @@ async fn timing_over_100k_events() {
         let started = Instant::now();
         seed(&db, owner, personal, words).await;
         let n: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE search_text IS NOT NULL")
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE search_words IS NOT NULL")
                 .fetch_one(&db)
                 .await
                 .unwrap();
         println!(
-            "{name}: seeded 100000 events ({n} with text) in {:?}",
+            "{name}: seeded 100000 events ({n} indexed) in {:?}",
             started.elapsed()
         );
-        let sizes: (String, String, String, String) = sqlx::query_as(
-            "SELECT pg_size_pretty(sum(pg_column_size(search_text))),
-                    pg_size_pretty(sum(pg_column_size(search_words))),
-                    pg_size_pretty(pg_relation_size('events_search_words')),
-                    pg_size_pretty(pg_relation_size('events_search_trgm'))
+        let sizes: (String, String) = sqlx::query_as(
+            "SELECT pg_size_pretty(sum(pg_column_size(search_words))),
+                    pg_size_pretty(pg_relation_size('events_search_words'))
              FROM events",
         )
         .fetch_one(&db)
         .await
         .unwrap();
-        println!("  search_text, search_words, words index, trigram index: {sizes:?}");
+        println!("  search_words, words index: {sizes:?}");
         for query in queries {
             let mut best = std::time::Duration::MAX;
             let mut v = Value::Null;

@@ -152,8 +152,8 @@ impl Attachment {
     }
 }
 
-/// The working directory of a transcript: `cwd` of its first record that has one. The
-/// folder name under `projects/` cannot be decoded back (SPEC §9), so this is the source.
+/// `cwd` of the first record of `s` that has one. The folder name under `projects/` cannot be
+/// decoded back (SPEC §9), so recorded `cwd`s are the source of a transcript's folder.
 pub fn first_cwd(s: &str) -> Option<String> {
     s.lines().filter(|l| l.contains("\"cwd\"")).find_map(|l| {
         let v: serde_json::Value = serde_json::from_str(l).ok()?;

@@ -9,7 +9,7 @@
 //!
 //! The worker does not trust the hub with paths (SPEC §2.1): it moves exactly one transcript
 //! of that uuid, only one whose folder (the mirror row's `cwd`, which a move sets, else the
-//! first recorded `cwd`; symlinks resolved, through its deepest existing ancestor when the
+//! folder its records give; symlinks resolved, through its deepest existing ancestor when the
 //! folder is gone) lies inside `allowed_roots`, and never over a file or folder at the new
 //! place. Nor does it move one that a live Claude Code process outside the worker holds open
 //! (Claude Code's registry of live sessions, read at that moment, [`Registry`]; SPEC §9.3): that

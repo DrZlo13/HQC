@@ -171,7 +171,7 @@ async fn a_repeat_sends_what_did_not_go_out() {
     let db = &hub.app.db;
     let id: Uuid = sid.parse().unwrap();
     let row = hqc_hub::db::session(db, id).await.unwrap().unwrap();
-    hqc_hub::db::move_session(db, &row, pid, wsid)
+    hqc_hub::db::move_session(db, &row, pid, wsid, ".")
         .await
         .unwrap();
     let moved = hqc_hub::db::session(db, id).await.unwrap().unwrap();

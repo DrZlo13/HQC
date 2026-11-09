@@ -1705,14 +1705,15 @@ pub async fn put_session_order(
     Ok(())
 }
 
-/// Moves the session into `workspace` of `project` with `cwd = '.'` (SPEC §3 Session): its
-/// slug stays if no other session of that project has it, else gets `-2`, `-3`, … A project
-/// it left drops it from its saved session orders; one it stays in keeps its place.
+/// Moves the session into `workspace` of `project` with `cwd` (SPEC §3 Session): its slug
+/// stays if no other session of that project has it, else gets `-2`, `-3`, … A project it
+/// left drops it from its saved session orders; one it stays in keeps its place.
 pub async fn move_session(
     db: &PgPool,
     s: &SessionRow,
     project: Uuid,
     workspace: Uuid,
+    cwd: &str,
 ) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
     let mut slug = s.slug.clone();
@@ -1731,7 +1732,7 @@ pub async fn move_session(
         slug = format!("{}-{i}", s.slug);
     }
     sqlx::query(
-        "UPDATE sessions SET project_id = $2, workspace_id = $3, cwd = '.', slug = $4,
+        "UPDATE sessions SET project_id = $2, workspace_id = $3, cwd = $5, slug = $4,
             updated_at = now()
          WHERE id = $1",
     )
@@ -1739,6 +1740,7 @@ pub async fn move_session(
     .bind(project)
     .bind(workspace)
     .bind(&slug)
+    .bind(cwd)
     .execute(&mut *tx)
     .await?;
     if project != s.project_id {
@@ -2193,6 +2195,18 @@ pub async fn mirror_since(
     .bind(MAX_MIRROR_SINCE)
     .fetch_all(db)
     .await
+}
+
+/// The time of the session's newest event that is not `system` (most of those are the hub's own,
+/// with its clock, not a record's); `None` without such events.
+pub async fn newest_record_ts(
+    db: &PgPool,
+    session_id: Uuid,
+) -> sqlx::Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar("SELECT max(ts) FROM events WHERE session_id = $1 AND type <> 'system'")
+        .bind(session_id)
+        .fetch_one(db)
+        .await
 }
 
 /// A session found by the mirror: it runs transcript `runtime_session_id`; `locked_by` and,

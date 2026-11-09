@@ -647,7 +647,7 @@ pub async fn move_session(
         let from = db::project(&app.db, s.project_id)
             .await?
             .map_or_else(|| "?".to_string(), |p| p.name);
-        db::move_session(&app.db, &s, project.id, ws.id).await?;
+        db::move_session(&app.db, &s, project.id, ws.id, ".").await?;
         // The row is moved: the next input starts the agent in the new folder, also when a
         // step below fails and the input goes out before a repeat of the move.
         if let Some(conn) = app.workers.get(worker.id) {

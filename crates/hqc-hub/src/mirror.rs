@@ -1,7 +1,8 @@
 //! Sessions of Claude Code mirrored from a worker, and who drives them (SPEC §9).
 //!
 //! - `mirror.event` ([`ingest`]): the event is stored in the session of its transcript
-//!   (`runtime_session_id` on that worker); an unknown transcript becomes a session in the
+//!   (`runtime_session_id` on that worker), which follows the transcript into the event's
+//!   workspace ([`follow`]); an unknown transcript becomes a session in the
 //!   workspace's project with `cwd` from the record, the `ai-title` as title, and
 //!   `locked_by: vscode` if the worker saw the file written within 30 s, else `none`
 //!   (SPEC §9.1). A new event marked `recent` makes the session `locked_by: vscode`; if hqc
@@ -36,7 +37,7 @@ use crate::{
     delivery,
     error::{ApiError, ApiResult},
     events,
-    worker_ws::WorkerConn,
+    worker_ws::{StartState, WorkerConn},
 };
 
 /// `system.code` written when hqc takes a session over from VS Code (SPEC §4, §9.3).
@@ -141,13 +142,20 @@ pub async fn ingest(
     let title = m.title.as_deref().and_then(crate::worker_ws::runtime_title);
     let held = m.held_by.as_ref().and_then(|h| h.as_ref());
     let s = match db::session_by_runtime(&app.db, conn.worker_id, &m.runtime_session_id).await? {
-        Some(s) => match &m.held_by {
-            Some(h) => {
-                holder(app, &s, h.clone()).await?;
-                db::session(&app.db, s.id).await?.unwrap_or(s)
+        Some(s) => {
+            let s = if s.workspace_id == Some(ws.id) {
+                s
+            } else {
+                follow(app, conn, s, &ws, &cwd, m).await?
+            };
+            match &m.held_by {
+                Some(h) => {
+                    holder(app, &s, h.clone()).await?;
+                    db::session(&app.db, s.id).await?.unwrap_or(s)
+                }
+                None => s,
             }
-            None => s,
-        },
+        }
         None => {
             let limits = &app.config.limits;
             let (today, in_workspace) = db::imported_counts(&app.db, conn.worker_id, ws.id).await?;
@@ -274,6 +282,40 @@ pub async fn ingest(
     }
     app.session_changed(s.id);
     Ok(ack.into())
+}
+
+/// The record `m` of session `s`'s transcript comes from workspace `ws`, not the session's
+/// (SPEC §9.2): a chat continued in another folder from a copy of its transcript. Unless the
+/// record is older than the session's newest one or `ws` is another owner's, the session
+/// follows it into `ws` and its project, with `cwd` as an import there would get it. Nothing
+/// goes into the feed: right after a copy both files get records, and the session may go back
+/// and forth a few times.
+async fn follow(
+    app: &AppState,
+    conn: &WorkerConn,
+    s: SessionRow,
+    ws: &db::WorkspaceRow,
+    cwd: &str,
+    m: &MirrorEvent,
+) -> anyhow::Result<SessionRow> {
+    // As a move (SPEC §3 Session): only into a workspace of the session's owner.
+    if ws.owner_id != s.owner_id {
+        return Ok(s);
+    }
+    // The old window writes into the old file for a while, and both files may be read
+    // again from the start: the session ends where the newest record was written.
+    if db::newest_record_ts(&app.db, s.id)
+        .await?
+        .is_some_and(|t| m.event.ts < t)
+    {
+        return Ok(s);
+    }
+    db::move_session(&app.db, &s, ws.project_id, ws.id, cwd).await?;
+    // The next start runs the agent in the new folder.
+    conn.st.lock().await.sessions.entry(s.id).or_default().start = StartState::NotStarted;
+    tracing::info!(session_id = %s.id, runtime_session_id = %m.runtime_session_id, from = ?s.workspace_id, workspace = %ws.path, %cwd, "session follows its transcript into another workspace");
+    app.session_changed(s.id);
+    Ok(db::session(&app.db, s.id).await?.unwrap_or(s))
 }
 
 /// The new `locked_by` when the worker reports `reported` for a session that has `prev`

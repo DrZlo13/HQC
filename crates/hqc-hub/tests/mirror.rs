@@ -21,7 +21,12 @@ async fn project(hub: &TestHub, name: &str) -> String {
 /// `POST /api/workspaces` with `mirror_enabled`: the worker answers `fs.stat`, then gets
 /// `mirror.set`.
 async fn import_workspace(hub: &TestHub, w: &mut FakeWorker, pid: &str) -> Value {
-    let body = json!({"project_id": pid, "worker_id": w.worker_id, "path": WS,
+    import_workspace_at(hub, w, pid, WS).await
+}
+
+/// [`import_workspace`] of folder `path`.
+async fn import_workspace_at(hub: &TestHub, w: &mut FakeWorker, pid: &str, path: &str) -> Value {
+    let body = json!({"project_id": pid, "worker_id": w.worker_id, "path": path,
                       "mirror_enabled": true});
     let (res, set) = tokio::join!(hub.post("/api/workspaces", body), async {
         w.answer_fs().await;
@@ -34,7 +39,7 @@ async fn import_workspace(hub: &TestHub, w: &mut FakeWorker, pid: &str) -> Value
     assert_eq!(ws["mirror_enabled"], true);
     assert_eq!(
         set["payload"],
-        json!({"workspace_path": WS, "enabled": true})
+        json!({"workspace_path": path, "enabled": true})
     );
     ws
 }
@@ -751,5 +756,212 @@ async fn mirrored_answers_are_the_owners() {
     assert_eq!(s, 200, "{list}");
     assert_eq!(list["requests"], json!([]), "{list}");
     assert_ne!(hub.session(&sid).await["state"], "waiting");
+    hub.finish().await;
+}
+
+/// `mirror.event` of a transcript in mirrored workspace `ws`, written in `cwd`; the `seq`.
+async fn mirror_event_in(
+    w: &mut FakeWorker,
+    ws: &str,
+    cwd: &str,
+    runtime: &str,
+    event: &Value,
+) -> Value {
+    let p = json!({"workspace_path": ws, "runtime_session_id": runtime, "cwd": cwd,
+                   "event": event, "recent": false});
+    let id = w.send("mirror.event", p).await;
+    let ack = w.expect("ack").await;
+    assert_eq!(ack["id"], id);
+    ack["payload"]["seq"].clone()
+}
+
+const HOME: &str = "/w/home";
+const POPCORN: &str = "/w/popcorn";
+
+/// A worker with mirrored workspaces [`HOME`] of project `home` and [`POPCORN`] of project
+/// `popcorn`; each as (project id, workspace id).
+async fn home_and_popcorn(hub: &TestHub) -> (FakeWorker, (String, String), (String, String)) {
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
+    let mut places = Vec::new();
+    for (name, path) in [("home", HOME), ("popcorn", POPCORN)] {
+        let pid = project(hub, name).await;
+        let ws = import_workspace_at(hub, &mut w, &pid, path).await;
+        places.push((pid, ws["id"].as_str().unwrap().to_string()));
+    }
+    let popcorn = places.pop().unwrap();
+    (w, places.pop().unwrap(), popcorn)
+}
+
+/// The answer `text` written at `ts`.
+fn answer_at(ts: &str, text: &str) -> Value {
+    let mut e = record_event("agent.message", json!({"text": text, "final": true}), false);
+    e["ts"] = json!(ts);
+    e
+}
+
+/// Where session `s` is: (project id, workspace id, cwd).
+fn place(s: &Value) -> (String, String, String) {
+    (
+        s["project_id"].as_str().unwrap().to_string(),
+        s["workspace_id"].as_str().unwrap().to_string(),
+        s["cwd"].as_str().unwrap().to_string(),
+    )
+}
+
+/// The text of each event, the code of a system one.
+fn texts(evs: &[Value]) -> Vec<String> {
+    evs.iter()
+        .map(|e| match e["type"].as_str().unwrap() {
+            "system" => e["payload"]["code"].as_str().unwrap().to_string(),
+            _ => e["payload"]["text"].as_str().unwrap().to_string(),
+        })
+        .collect()
+}
+
+/// The id of the one session of project `pid`.
+async fn only_session(hub: &TestHub, pid: &str) -> String {
+    let list = sessions(hub, pid).await;
+    assert_eq!(list.len(), 1, "{list:?}");
+    list[0]["id"].as_str().unwrap().to_string()
+}
+
+/// A chat continued in another project's folder from a copy of its transcript (SPEC §9.2):
+/// the copy's records come from that workspace, and the session follows them there, with
+/// `cwd` `.` as an import there would get, every record stored once and nothing in the feed
+/// about it. A record older than the session's newest one leaves it where it is (the old window
+/// wrote it, or the old file is read again); the newest one itself, from the copy, takes it
+/// there, and a newer one from the old file takes it back.
+#[tokio::test]
+async fn a_session_follows_its_transcript_into_another_workspace() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (pb, wb)) = home_and_popcorn(&hub).await;
+    let runtime = Uuid::new_v4().to_string();
+    let one = answer_at("2026-11-09T10:00:00Z", "one");
+    let two = answer_at("2026-11-09T10:01:00Z", "two");
+    let three = answer_at("2026-11-09T10:02:00Z", "three");
+    let home_sub = format!("{HOME}/sub");
+    for e in [&one, &two] {
+        mirror_event_in(&mut w, HOME, &home_sub, &runtime, e).await;
+    }
+    let sid = only_session(&hub, &pa).await;
+    let in_a = (pa.clone(), wa, "sub".to_string());
+    let in_b = (pb.clone(), wb, ".".to_string());
+    assert_eq!(place(&hub.session(&sid).await), in_a);
+
+    // The copy in B, read from its start: the old records again, then the new window's.
+    assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &one)
+        .await
+        .is_u64());
+    assert_eq!(place(&hub.session(&sid).await), in_a, "older than two");
+    assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &two)
+        .await
+        .is_u64());
+    assert_eq!(place(&hub.session(&sid).await), in_b, "two is the newest");
+    assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &three)
+        .await
+        .is_u64());
+    assert_eq!(place(&hub.session(&sid).await), in_b);
+    assert!(sessions(&hub, &pa).await.is_empty());
+    assert_eq!(only_session(&hub, &pb).await, sid);
+    assert_eq!(
+        texts(&hub.events(&sid).await),
+        ["session_created", "one", "two", "three"]
+    );
+
+    // The old window wrote one more record before the copy's newest: the session stays.
+    let late = answer_at("2026-11-09T10:01:30Z", "late");
+    mirror_event_in(&mut w, HOME, &home_sub, &runtime, &late).await;
+    assert_eq!(place(&hub.session(&sid).await), in_b);
+    // A newer one takes it back.
+    let newer = answer_at("2026-11-09T10:03:00Z", "newer");
+    mirror_event_in(&mut w, HOME, &home_sub, &runtime, &newer).await;
+    assert_eq!(place(&hub.session(&sid).await), in_a);
+    assert_eq!(
+        texts(&hub.events(&sid).await),
+        ["session_created", "one", "two", "three", "late", "newer"]
+    );
+    hub.finish().await;
+}
+
+/// A copy in a workspace of another owner on the same worker: the session does not follow it
+/// (a move only goes into the owner's own workspaces), and its records are stored in the
+/// session where it is, once.
+#[tokio::test]
+async fn a_session_does_not_follow_into_another_owners_workspace() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (_, wb)) = home_and_popcorn(&hub).await;
+    let stranger = hqc_hub::db::ensure_user(&hub.app.db, "stranger-mirror@example.com")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workspaces SET owner_id = $2 WHERE id = $1::uuid")
+        .bind(&wb)
+        .bind(stranger.id)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let runtime = Uuid::new_v4().to_string();
+    let one = answer_at("2026-11-09T10:00:00Z", "one");
+    mirror_event_in(&mut w, HOME, HOME, &runtime, &one).await;
+    let sid = only_session(&hub, &pa).await;
+    let two = answer_at("2026-11-09T10:01:00Z", "two");
+    for _ in 0..2 {
+        assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &two)
+            .await
+            .is_u64());
+    }
+    assert_eq!(place(&hub.session(&sid).await), (pa, wa, ".".to_string()));
+    assert_eq!(
+        texts(&hub.events(&sid).await),
+        ["session_created", "one", "two"]
+    );
+    hub.finish().await;
+}
+
+/// A session the hub has started on this connection follows its transcript: its next input
+/// starts the agent again, in the new folder, instead of going to the one started in the old.
+#[tokio::test]
+async fn a_session_that_followed_its_transcript_starts_there() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, _), _) = home_and_popcorn(&hub).await;
+    let runtime = Uuid::new_v4().to_string();
+    let one = answer_at("2026-11-09T10:00:00Z", "one");
+    mirror_event_in(&mut w, HOME, HOME, &runtime, &one).await;
+    let sid = only_session(&hub, &pa).await;
+    let (st, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "go", "client_op_id": "a"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    let start = ack_start(&mut w, &sid).await;
+    assert_eq!(start["payload"]["workspace_path"], HOME);
+    let input = w.expect("session.input").await;
+    w.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": input["payload"]["event_id"]}),
+    )
+    .await;
+
+    let two = answer_at("2026-11-09T10:01:00Z", "two");
+    mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &two).await;
+    let (st, next) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "next", "client_op_id": "b"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{next}");
+    let start = ack_start(&mut w, &sid).await;
+    let p = &start["payload"];
+    assert_eq!(
+        (p["workspace_path"].as_str(), p["cwd"].as_str()),
+        (Some(POPCORN), Some("."))
+    );
+    let input = w.expect("session.input").await;
+    assert_eq!(input["payload"]["event_id"], next["event"]["event_id"]);
     hub.finish().await;
 }

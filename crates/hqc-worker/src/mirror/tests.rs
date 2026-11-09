@@ -1009,3 +1009,120 @@ fn first_pass_skips_old_messages_typed_during_a_turn() {
     let out = s.mirror.poll(Instant::now(), SystemTime::now());
     assert_eq!(labels(&out), ["user:Now the docs", "user:and the README"]);
 }
+
+const A: &str = "/tmp/hqc-fixture/a";
+const B: &str = "/tmp/hqc-fixture/b";
+
+/// Workspaces [`A`] and [`B`], both mirrored, and transcript `runtime` in the folder Claude
+/// Code keeps for `folder`; `last`: the uuid of its last record.
+struct Two {
+    _dir: tempfile::TempDir,
+    file: PathBuf,
+    runtime: Uuid,
+    last: Option<Uuid>,
+    mirror: Mirror,
+}
+
+impl Two {
+    fn new(folder: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let runtime = Uuid::new_v4();
+        let file = projects
+            .join(encode_project_dir(folder))
+            .join(format!("{runtime}.jsonl"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let mut mirror = Mirror::new(
+            projects,
+            Arc::new(Store::memory()),
+            Arc::new(OwnRecords::default()),
+        );
+        for w in [A, B] {
+            mirror.set(PathBuf::from(w), true, vec![]);
+        }
+        Self {
+            _dir: dir,
+            file,
+            runtime,
+            last: None,
+            mirror,
+        }
+    }
+
+    /// Appends the prompt `text`, written in `cwd`, after the last record.
+    fn prompt(&mut self, cwd: &str, text: &str) {
+        let uuid = Uuid::new_v4();
+        let line = serde_json::json!({
+            "parentUuid": self.last, "isSidechain": false, "type": "user",
+            "message": {"role": "user", "content": text},
+            "uuid": uuid, "timestamp": "2026-11-09T10:00:00.000Z",
+            "cwd": cwd, "sessionId": self.runtime
+        });
+        append(&self.file, &format!("{line}\n"));
+        self.last = Some(uuid);
+    }
+
+    /// Each event of a poll: what it is, its workspace and its `cwd`.
+    fn poll(&mut self) -> Vec<(String, String, String)> {
+        let out = self.mirror.poll(Instant::now(), SystemTime::now());
+        labels(&out)
+            .into_iter()
+            .zip(&out)
+            .map(|(l, o)| match o {
+                Output::Event(e) => (l, e.workspace_path.clone(), e.cwd.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn cwd(&self) -> Option<String> {
+        self.mirror.store.get(&self.file).unwrap().unwrap().cwd
+    }
+}
+
+/// `text` from `ws`, in its root.
+fn from(ws: &str, text: &str) -> (String, String, String) {
+    (format!("user:{text}"), ws.to_string(), ws.to_string())
+}
+
+/// A chat continued in another folder from a copy of its transcript (SPEC §9): the copy in
+/// `b`'s folder starts with the records written in `a`. Its folder is `b`, so every record
+/// goes out from `b`, those written in `a` too.
+#[test]
+fn a_copied_transcript_goes_out_from_its_folder() {
+    let mut t = Two::new(B);
+    t.prompt(A, "one");
+    t.prompt(A, "two");
+    t.prompt(B, "three");
+    assert_eq!(t.poll(), [from(B, "one"), from(B, "two"), from(B, "three")]);
+    assert_eq!(t.cwd().as_deref(), Some(B));
+}
+
+/// The copy is read before the new window writes to it: its records were all written in `a`,
+/// so they go out from `a`. The first record the new window appends settles it in `b`: that
+/// record and every later one go out from `b`, also one written after a `cd` into `a`.
+#[test]
+fn a_copy_goes_out_from_its_folder_once_continued_there() {
+    let mut t = Two::new(B);
+    t.prompt(A, "one");
+    assert_eq!(t.poll(), [from(A, "one")]);
+    assert_eq!(t.cwd().as_deref(), Some(A));
+    t.prompt(B, "two");
+    t.prompt(A, "three");
+    assert_eq!(t.poll(), [from(B, "two"), from(B, "three")]);
+    assert_eq!(t.cwd().as_deref(), Some(B));
+    t.prompt(A, "four");
+    assert_eq!(t.poll(), [from(B, "four")]);
+}
+
+/// A transcript written in `a` whose agent went into `b` (`cd`): it stays in `a`.
+#[test]
+fn a_transcript_stays_in_its_folder_after_a_cd() {
+    let mut t = Two::new(A);
+    t.prompt(A, "one");
+    t.prompt(B, "two");
+    assert_eq!(t.poll(), [from(A, "one"), from(A, "two")]);
+    t.prompt(B, "three");
+    assert_eq!(t.poll(), [from(A, "three")]);
+    assert_eq!(t.cwd().as_deref(), Some(A));
+}

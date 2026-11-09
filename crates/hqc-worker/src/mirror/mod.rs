@@ -76,6 +76,7 @@ use uuid::Uuid;
 pub use registry::OwnRecords;
 use store::{FileRow, Store};
 
+use crate::adapter::claude_code::paths::encode_project_dir;
 use crate::link::HubLink;
 use crate::supervisor::Inbound;
 
@@ -135,6 +136,9 @@ pub struct Mirror {
     /// Transcripts refused with `mirror_quota`: not read before this moment.
     deferred: HashMap<Uuid, Instant>,
     pub quota_retry: Duration,
+    /// Transcripts whose row is not settled in their folder ([`Mirror::settle`]): how far
+    /// they were searched in this process.
+    searched: HashMap<PathBuf, u64>,
 }
 
 impl Mirror {
@@ -160,6 +164,7 @@ impl Mirror {
             skipping: HashMap::new(),
             deferred: HashMap::new(),
             quota_retry: QUOTA_RETRY,
+            searched: HashMap::new(),
         }
     }
 
@@ -342,15 +347,33 @@ impl Mirror {
                 return Ok(r.clone());
             }
         }
-        let mut row = self.store.get(path)?.unwrap_or_default();
-        if row.cwd.is_none() {
-            row.cwd = read_cwd(path);
-            if row.cwd.is_some() {
-                self.store.put(path, &row)?;
-            }
-        }
+        let row = self.store.get(path)?.unwrap_or_default();
         self.files.insert(path.to_path_buf(), row.clone());
         Ok(row)
+    }
+
+    /// `row.cwd` of transcript `path` becomes its folder (SPEC §9) unless it is already
+    /// ([`in_folder`]): the first recorded `cwd` that is, searched from where the last search
+    /// in this process ended (the whole file the first time); none found, a row without `cwd`
+    /// takes the first recorded one.
+    fn settle(&mut self, path: &Path, row: &mut FileRow) -> anyhow::Result<()> {
+        if row.cwd.as_deref().is_some_and(|c| in_folder(path, c)) {
+            return Ok(());
+        }
+        let from = self.searched.get(path).copied().unwrap_or(0);
+        let (found, upto) = folder_cwd(path, from)?;
+        self.searched.insert(path.to_path_buf(), upto);
+        let cwd = found
+            .or_else(|| row.cwd.clone())
+            .or_else(|| first_recorded_cwd(path));
+        if cwd != row.cwd {
+            if let Some(old) = &row.cwd {
+                tracing::info!(path = %path.display(), from = %old, to = ?cwd, "mirror: a transcript copied from another folder goes out from its own now");
+            }
+            row.cwd = cwd;
+            self.save(path, row.clone())?;
+        }
+        Ok(())
     }
 
     fn save(&mut self, path: &Path, row: FileRow) -> anyhow::Result<()> {
@@ -377,6 +400,8 @@ impl Mirror {
         }
         let meta = std::fs::metadata(path)?;
         let mut row = self.row(path)?;
+        // Before the workspace is picked: a copy out of a folder that is not mirrored too.
+        self.settle(path, &mut row)?;
         let Some(cwd) = row.cwd.clone() else {
             return Ok(());
         };
@@ -609,14 +634,53 @@ fn read_tree(path: &Path, upto: u64) -> anyhow::Result<fork::Tree> {
     Ok(tree)
 }
 
-/// `cwd` of the first record that has one, reading at most [`CWD_LINES`] lines.
+/// The folder transcript `path` was written in (SPEC §9): the first recorded `cwd` that
+/// encodes to the name of its folder under `projects/` (a transcript copied there from another
+/// folder and continued starts with that folder's records), else [`first_recorded_cwd`].
 pub(crate) fn read_cwd(path: &Path) -> Option<String> {
+    folder_cwd(path, 0)
+        .ok()
+        .and_then(|(c, _)| c)
+        .or_else(|| first_recorded_cwd(path))
+}
+
+/// `cwd` of the first record that has one, reading at most [`CWD_LINES`] lines.
+fn first_recorded_cwd(path: &Path) -> Option<String> {
     let f = std::fs::File::open(path).ok()?;
     std::io::BufReader::new(f)
         .lines()
         .take(CWD_LINES)
         .map_while(Result::ok)
         .find_map(|l| hqc_claude_jsonl::first_cwd(&l))
+}
+
+/// `cwd` encodes to the name of the folder of transcript `path`: Claude Code keeps a
+/// transcript under the folder it was started in.
+fn in_folder(path: &Path, cwd: &str) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|f| f == encode_project_dir(cwd).as_str())
+}
+
+/// From byte `from` of transcript `path`, the first recorded `cwd` that is its folder
+/// ([`in_folder`]), and the end of the last whole line read: a line still being written is
+/// searched again.
+fn folder_cwd(path: &Path, from: u64) -> std::io::Result<(Option<String>, u64)> {
+    let mut f = std::io::BufReader::new(std::fs::File::open(path)?);
+    f.seek(SeekFrom::Start(from))?;
+    let (mut pos, mut line) = (from, Vec::new());
+    loop {
+        line.clear();
+        let n = f.read_until(b'\n', &mut line)?;
+        if line.last() != Some(&b'\n') {
+            return Ok((None, pos));
+        }
+        pos += n as u64;
+        let cwd = hqc_claude_jsonl::first_cwd(&String::from_utf8_lossy(&line));
+        if let Some(c) = cwd.filter(|c| in_folder(path, c)) {
+            return Ok((Some(c), pos));
+        }
+    }
 }
 
 /// `workspace.list_candidates` (SPEC §9.1): transcripts grouped by working directory, only
@@ -629,7 +693,8 @@ pub fn candidates(
     let mut by_cwd: BTreeMap<String, (u32, SystemTime)> = BTreeMap::new();
     for (path, _) in transcripts(projects) {
         let cwd = match store.get(&path) {
-            Ok(Some(FileRow { cwd: Some(c), .. })) => c,
+            // A row not settled in its folder is read anew (SPEC §9).
+            Ok(Some(FileRow { cwd: Some(c), .. })) if in_folder(&path, &c) => c,
             Ok(row) => {
                 let Some(c) = read_cwd(&path) else { continue };
                 let mut row = row.unwrap_or_default();

@@ -1061,6 +1061,11 @@ pub struct SessionStart {
     /// first start, when the session has no transcript yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<ForkFrom>,
+    /// Since SPEC 0.100: the session has had a conversation (an `agent.message` in its feed),
+    /// so its runtime should have a transcript to resume; the worker says in the feed when it
+    /// has none (`system transcript_missing`). Absent when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_history: bool,
 }
 
 /// Usage limits of the worker's account (SPEC §5.4 `worker.limits`): Claude Code's

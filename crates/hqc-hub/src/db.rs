@@ -2995,6 +2995,17 @@ pub async fn project_favorites(
 // ---------------------------------------------------------------- forks
 
 /// `sessions.fork` of session `id` (SPEC §5.3 `session.start.fork`); `None`: no fork.
+/// The session has had a conversation: an `agent.message` in its feed (SPEC §5.3
+/// `session.start.has_history`).
+pub async fn session_has_history(db: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE session_id = $1 AND type = 'agent.message')",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await
+}
+
 pub async fn session_fork(db: &PgPool, id: Uuid) -> sqlx::Result<Option<Value>> {
     sqlx::query_scalar("SELECT fork FROM sessions WHERE id = $1")
         .bind(id)

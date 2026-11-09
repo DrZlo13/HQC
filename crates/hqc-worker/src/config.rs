@@ -401,6 +401,9 @@ pub struct StartSpec {
     /// `session.start.fork` (SPEC §5.3): the conversation this session forks, at its first
     /// start; the Claude Code adapter reads the source transcript in the same folder only.
     pub fork: Option<hqc_proto::frame::ForkFrom>,
+    /// `session.start.has_history` (SPEC §5.3): the session has had a conversation, so a
+    /// missing transcript is reported, not just started anew.
+    pub has_history: bool,
 }
 
 impl StartSpec {
@@ -575,6 +578,7 @@ impl Config {
             // The supervisor gives a session in a workspace the folder's shared list.
             folder_rules: None,
             fork: s.fork.clone(),
+            has_history: s.has_history,
         })
     }
 

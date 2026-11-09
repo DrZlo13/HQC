@@ -1122,6 +1122,11 @@ Per §19.1 and the notes `docs/notes/t2..t6-questions.md`:
   worker's environment, plus the `env` of the folder's environment, plus (since T44)
   `SSH_AUTH_SOCK` of its own ssh-agent if the environment has `ssh_keys`; `HQC_*`, the user's
   `SSH_AUTH_SOCK` and everything else are not passed.
+- **Transcripts are kept by Claude Code**: at its start the CLI deletes transcripts older than
+  `cleanupPeriodDays` (30 days by default), and a session whose transcript is gone continues
+  without its conversation (the feed says `transcript_missing`, SPEC §8.1). On a worker set it
+  high in `~/.claude/settings.json` of the account the worker runs as:
+  `"cleanupPeriodDays": 100000` (about 270 years).
 - **One user**: no sharing and no grants; keep `allow_foreign_sessions` `false`.
 - **Claude Code adapter**: `system_prompt` and `disallowed_tools` are passed
   (`--append-system-prompt`, `--disallowedTools`), `restricted` as `--restricted`;

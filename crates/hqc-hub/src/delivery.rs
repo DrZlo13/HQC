@@ -185,6 +185,7 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
         fork: db::session_fork(&app.db, s.id)
             .await?
             .and_then(|v| serde_json::from_value(v).ok()),
+        has_history: db::session_has_history(&app.db, s.id).await?,
     })
 }
 

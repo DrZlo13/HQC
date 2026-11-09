@@ -175,6 +175,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         ask_timeout_s: 600,
         permission_mode: crate::permissions::PermissionMode::Ask,
         folder_rules: None,
+        has_history: false,
         fork: None,
     }
 }
@@ -672,6 +673,51 @@ async fn command_line_new_then_resume() {
     a.kill().await.unwrap();
 
     // Killed processes are not reported as exited.
+    assert!(rx.try_recv().is_err());
+}
+
+/// SPEC §8.1: a session that had a conversation (`session.start.has_history`) whose transcript
+/// is gone starts anew and says so in the feed; with its transcript, or without a
+/// conversation, nothing is said.
+#[tokio::test]
+async fn a_missing_transcript_of_a_session_with_history_is_reported() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let claude_session = Uuid::new_v4();
+    let mut s = spec(Uuid::now_v7(), work.path(), claude_session);
+    let (tx, mut rx) = mpsc::channel(16);
+    let mut a = factory.create(&s, tx);
+
+    // No conversation yet: a new start, quietly.
+    a.start(&s).await.unwrap();
+    a.kill().await.unwrap();
+    assert!(rx.try_recv().is_err());
+
+    s.has_history = true;
+    a.resume(&s).await.unwrap();
+    assert!(claude.commands()[1]
+        .args
+        .contains(&"--session-id".to_string()));
+    let Ok(AdapterEvent::Event(ev)) = rx.try_recv() else {
+        panic!("no event for the missing transcript");
+    };
+    assert_eq!(ev.author, Author::System);
+    let EventKind::System { code, text, .. } = &ev.kind else {
+        panic!("{ev:?}");
+    };
+    assert_eq!(code, super::TRANSCRIPT_MISSING);
+    assert!(text.contains("cleanupPeriodDays"), "{text}");
+    a.kill().await.unwrap();
+
+    // With the transcript on disk it resumes, quietly.
+    let t = super::paths::transcript_path(config.path(), &s.workdir, &claude_session);
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, "").unwrap();
+    a.resume(&s).await.unwrap();
+    assert!(claude.commands()[2].args.contains(&"--resume".to_string()));
+    a.kill().await.unwrap();
     assert!(rx.try_recv().is_err());
 }
 

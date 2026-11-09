@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.89, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
+Version 0.100, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -482,6 +482,7 @@ the client renders only them. The "source" column is the component that produces
 | `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6, or `hqc_move`, §7); `text` names the old project, the new one and the folder |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
+| `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
 | `worker_replaced` | hub | in the service session: the worker was re-enrolled with replacement (§5.1); extra fields `old_name`, `new_name` |
@@ -799,7 +800,9 @@ MCP calls (worker → hub → worker):
   session has no transcript yet, reads transcript `runtime_session_id` in the session's own
   folder, finds the record holding the first of `at_event_ids` (by the event ids of §3, newest
   first) and starts the fork there (§8.1); with none of them in it the start fails; once the
-  transcript is there, the start resumes it; `allow_rules` (since 0.52, T48) — hqc's allow rules of the
+  transcript is there, the start resumes it; `has_history` (since 0.100) — `true` once the
+  session's feed has an `agent.message`, absent otherwise: the runtime should have a transcript
+  to resume (§8.1 `transcript_missing`); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto`, the
@@ -2267,7 +2270,10 @@ The process `claude -p --output-format stream-json --input-format stream-json
 continue. The choice between them depends on whether the transcript
 `<config>/projects/<encoded cwd>/<uuid>.jsonl` exists (§9), not on `mode` from `session.start`:
 both `start` and `resume` of the adapter use `--resume` when the file exists, otherwise
-`--session-id`. A session that moved (§5.3, §6) finds no file there: since 0.75, before every
+`--session-id`. Since 0.100 a session with `has_history` that gets `--session-id` (its
+transcript is gone: the CLI deletes those older than `cleanupPeriodDays` at its start, 30 days
+by default; RUNBOOK sets it high) has `system transcript_missing` in its feed once the process
+started: the agent goes on without the conversation, and the owner knows. A session that moved (§5.3, §6) finds no file there: since 0.75, before every
 start, when the transcript is not at the place of the working directory, the worker looks for
 `<uuid>.jsonl` in every folder of `<config>/projects`, by uuid rather than by the old folder, so
 a move also survives a worker restart between the hub's `session.start` and the agent's start,
@@ -4210,6 +4216,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.89 → 0.100 (a missing transcript is reported)
+§5.3: `session.start.has_history` — the session's feed has an `agent.message`. §8.1, §4: the
+Claude Code adapter that starts such a session anew because its transcript is gone (Claude
+Code's `cleanupPeriodDays`, 30 days by default) writes `system transcript_missing`; before, the
+agent silently went on without the conversation. 0.90–0.99 are taken by open pull requests.
 
 ### 0.88 → 0.89 (the list at once on a reload)
 §6: `GET /api/sessions` gives every session of every project of the user in one list; the

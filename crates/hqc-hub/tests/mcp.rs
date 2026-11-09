@@ -441,3 +441,105 @@ async fn attach_writes_one_event_per_request() {
     }
     hub.finish().await;
 }
+
+/// `hqc_rename` (SPEC §7): the client's Rename of this session or of another one of the owner.
+#[tokio::test]
+async fn rename_sets_the_users_title() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (me, token) = started(&hub, &mut w, "Me").await;
+    // Another session with the default title, which the runtime's title would replace.
+    let pid = hub.personal_project().await;
+    let (s, v) = hub
+        .post(&format!("/api/projects/{pid}/sessions"), json!({}))
+        .await;
+    assert_eq!(
+        (s, v["title_source"].as_str()),
+        (201, Some("default")),
+        "{v}"
+    );
+    let other = v["id"].as_str().unwrap().to_string();
+    let slug = v["slug"].as_str().unwrap().to_string();
+    ack_start(&mut w, &other).await;
+    let titled = |v: &Value| {
+        (
+            v["title"].as_str().map(String::from),
+            v["title_source"].as_str().map(String::from),
+            v["slug"].as_str().map(String::from),
+        )
+    };
+    let expect = |title: &str, slug: &str| {
+        (
+            Some(title.to_string()),
+            Some("user".to_string()),
+            Some(slug.to_string()),
+        )
+    };
+
+    // This session, the title trimmed; the address stays.
+    let r = call(
+        &mut w,
+        &token,
+        "hqc_rename",
+        json!({"title": "  Renamed  "}),
+    )
+    .await;
+    assert_eq!(
+        r["result"],
+        json!({"address": "personal/me", "title": "Renamed"}),
+        "{r}"
+    );
+    assert_eq!(titled(&hub.session(&me).await), expect("Renamed", "me"));
+
+    // Another session by its address; the runtime's title no longer replaces the new one.
+    let address = format!("personal/{slug}");
+    let r = call(
+        &mut w,
+        &token,
+        "hqc_rename",
+        json!({"title": "Other renamed", "session": address}),
+    )
+    .await;
+    assert_eq!(
+        r["result"],
+        json!({"address": address, "title": "Other renamed"}),
+        "{r}"
+    );
+    w.send(
+        "session.state",
+        json!({"session_id": other, "process_state": "running", "locked_by": "hqc", "title": "Runtime title"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert_eq!(
+        titled(&hub.session(&other).await),
+        expect("Other renamed", &slug)
+    );
+
+    // An empty title, a too long one; an unknown session. Nothing changes.
+    let r = call(&mut w, &token, "hqc_rename", json!({"title": "   "})).await;
+    assert_eq!(code(&r), "invalid_args", "{r}");
+    let r = call(
+        &mut w,
+        &token,
+        "hqc_rename",
+        json!({"title": "x".repeat(201)}),
+    )
+    .await;
+    assert_eq!(code(&r), "invalid_args", "{r}");
+    let r = call(
+        &mut w,
+        &token,
+        "hqc_rename",
+        json!({"title": "Lost", "session": "personal/nope"}),
+    )
+    .await;
+    assert_eq!(code(&r), "not_found", "{r}");
+    assert_eq!(titled(&hub.session(&me).await), expect("Renamed", "me"));
+    assert_eq!(
+        titled(&hub.session(&other).await),
+        expect("Other renamed", &slug)
+    );
+    hub.finish().await;
+}

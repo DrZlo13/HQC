@@ -1754,7 +1754,7 @@ pub async fn move_session(
     tx.commit().await
 }
 
-/// A title from the user (`PATCH`): the runtime's never replaces it.
+/// A title from the user (`PATCH`) or an agent's `hqc_rename`: the runtime's never replaces it.
 pub async fn set_user_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE sessions SET title = $2, title_source = 'user', updated_at = now() WHERE id = $1",

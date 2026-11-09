@@ -1105,7 +1105,8 @@ MCP calls (worker → hub → worker):
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
   outside it and the other refusals of §20 — without `seq`); a record of a new transcript over the
   daily limit gets `error mirror_quota`, `retryable: true` (since 0.24, §9.1).
-  `workspace_path` — the path from `mirror.set`, `cwd` — the absolute path from the record,
+  `workspace_path` — the path from `mirror.set`, `cwd` — the transcript's folder by the rule of
+  §9 (an absolute path),
   `title` — the file's last `ai-title`, `recent` — the file was modified less than 30 s before the
   worker read the record, `held_by` — the transcript's holder at the time of reading, as in
   `session.state`. The hub looks the session up by worker and `runtime_session_id` and creates it
@@ -2296,9 +2297,10 @@ start, when the transcript is not at the place of the working directory, the wor
 a move also survives a worker restart between the hub's `session.start` and the agent's start,
 and moves it there with its `<uuid>/` folder (subagents): only when exactly one file has that
 uuid, only one written in another folder (the `cwd` of its mirror row, which a move sets, else
-of its first record; symlinks resolved, through its deepest existing ancestor when the folder
-is gone, as a worktree deleted after the move) inside `allowed_roots`, never over an existing file
-or folder (a hard link, then the old name is removed), and not while a live Claude Code process
+the folder its records give, §9; symlinks resolved, through its deepest existing ancestor when
+the folder is gone, as a worktree deleted after the move) inside `allowed_roots`, never over an
+existing file or folder (a hard link, then the old name is removed), and not while a live Claude
+Code process
 outside the worker holds it: such a process would go on appending to the moved file while the
 agent appends too. The worker reads Claude Code's registry of live sessions (§9.3) at that
 moment, its own agent processes left out as the mirror leaves them out, and does not rely on the
@@ -2867,8 +2869,15 @@ unit that is not an ASCII letter or digit is replaced with `-`; if the result is
 32-bit hash of the string (`h = (h << 5) - h + unit | 0` over UTF-16 units). This is how the
 adapter and the mirror find the file for a path. The name is **not decoded** back (`/a/b.c` and
 `/a/b-c` collide), so the worker takes the session's working directory from the `cwd` field of
-the jsonl records, keeps a "file → cwd" cache on disk (§5.2) and uses the folder name only as a
-key. Subfolders with subagent transcripts and files that are not `<uuid>.jsonl` are ignored.
+the jsonl records, keeps a "file → cwd" cache on disk (§5.2) and uses the folder name as a key
+and, since 0.95, to tell which recorded `cwd` is the transcript's folder. A record's `cwd` is
+where the agent was when it was written: it changes inside one transcript when the agent `cd`s
+(worktrees, sibling projects, `/private/tmp`), and a chat moved to another project by copying
+its transcript into that project's folder (same file name, so the same uuid) and continued there
+starts with the old folder's records. So the transcript's folder is the first recorded `cwd`
+whose encoding equals the name of the transcript's folder under `projects/`; when no record has
+such a `cwd`, the first recorded `cwd`. Subfolders with subagent transcripts and files that are
+not `<uuid>.jsonl` are ignored.
 Verified on 2.1.307: besides `user`/`assistant` the file has `attachment`,
 `file-history-snapshot`, `api-request*`, `last-prompt`, `ai-title`, `cost-state`,
 `queue-operation`, `system` and other records; the parser skips them, except `ai-title`, which
@@ -2904,8 +2913,8 @@ Format on 2.1.308 (T15, fixtures `vscode-takeover-2.1.308` and `adapter-then-out
 
 ### 9.1 Import
 Candidates come from `workspace.list_candidates` (§5.3, `GET /api/workers/{id}/candidates`):
-the worker walks `<config>/projects/*/<uuid>.jsonl`, takes `cwd` from the first record that
-has one (the "file → cwd" cache on disk, §5.2), groups by `cwd` with the session count and
+the worker walks `<config>/projects/*/<uuid>.jsonl`, takes each transcript's folder by the rule
+of §9 (the "file → cwd" cache on disk, §5.2), groups by `cwd` with the session count and
 `last_active` (modification time of the newest file) and returns only folders inside
 `allowed_roots`. In the client, the "Import from Claude Code" button on the Workspaces screen
 shows the candidates; the selected folders become workspaces of the project through the
@@ -3005,6 +3014,23 @@ before it is moved: `cwd` the new folder, the offset at the file's end, the old 
 and `ai-title`. The mirror reads the row before the records, so it neither imports the file
 again nor counts it to the old folder by the `cwd` of its old records. When the file does not
 get there (its folder or the link fails), the row is removed again.
+
+**The session follows its transcript** (since 0.95). A row whose `cwd` is not its file's folder
+by the rule of §9 (a copy read before the new window wrote to it; a copy's row written before
+0.95) is not settled: on every pass, before the workspace is picked (so a copy out of a folder
+that is not mirrored is found too), the worker searches the file for a `cwd` that is, the whole
+file the first time in its process and afterwards only the bytes appended since the last search
+(the size searched is kept in memory); a `cwd` found becomes the row's, and the records of that
+pass go out with it. The hub keeps one session per transcript and finds it by worker and
+`runtime_session_id`, not by workspace; when a record comes from another workspace of the
+session's owner than the session's, the session moves there before the record is stored: into
+that workspace's project, `cwd` the transcript's folder (the frame's `cwd`) relative to the
+workspace, as an import there would get it, the connection's start state back to "not started"
+as after a move (§6). A record older than the session's newest event that is not `system` (most
+`system` events are the hub's own, with its clock) does not move it: right after a copy the old
+window still writes a few records into the old file, and both files may be read again from the
+start, so the session ends where the newest record was written. No event goes into the feed:
+right after a copy both files get records for a while, and the session may switch a few times.
 
 The worker recognises its own records by `uuid`: the Claude Code adapter puts into a shared
 in-memory registry (by `runtime_session_id`) the uuid of every `user`/`assistant` message of the
@@ -4332,6 +4358,17 @@ excludes only before a phrase or four letters, so a command pasted with its flag
 call; hits come by `ts_rank`, paged by an offset; fuzzy widens the query with similar words
 from a vocabulary of the index instead of a trigram search over all text. The
 `hqc_search_history` description says so.
+
+### 0.94 → 0.95 (a session follows its transcript)
+§9: a transcript's folder is the first recorded `cwd` that encodes to the name of its folder
+under `projects/`, else the first recorded `cwd` as before. A chat moved to another project by
+copying its transcript there and continued in that project's folder starts with the old folder's
+records, so the mirror sent the copy's records with the old workspace, and the hub, which finds
+the session by `runtime_session_id` alone, showed the new dialog in the session of the old project
+(53 sessions on one laptop). §9.2: a row whose `cwd` is not its folder is searched for one that is
+(the whole file once per worker process, then what is appended); the hub moves a session whose
+record comes from another workspace of its owner into it and its project, unless the record is
+older than the session's newest non-system event, without a line in the feed.
 
 ### 0.88 → 0.89 (the list at once on a reload)
 §6: `GET /api/sessions` gives every session of every project of the user in one list; the

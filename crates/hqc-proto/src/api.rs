@@ -585,7 +585,7 @@ pub struct EventPage {
     pub last_seq: u64,
 }
 
-/// `GET /api/search` (SPEC §15): hits newest first; `next_cursor` fetches the next page
+/// `GET /api/search` (SPEC §15): hits best first; `next_cursor` fetches the next page
 /// (`&cursor=`), absent on the last one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchPage {

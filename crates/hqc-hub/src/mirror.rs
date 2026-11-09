@@ -212,7 +212,10 @@ pub async fn ingest(
         .unwrap_or_default()
         .to_string();
     let author = match m.event.kind {
-        EventKind::UserMessage { .. } => events::user_author(s.owner_id),
+        // A prompt, and the answers to a question card (SPEC §9.1).
+        EventKind::UserMessage { .. } | EventKind::ClarifyResponse { .. } => {
+            events::user_author(s.owner_id)
+        }
         // `session_forked` (SPEC §9.3).
         EventKind::System { .. } => json!({"kind": "system"}),
         _ => json!({"kind": "agent", "id": s.id}),

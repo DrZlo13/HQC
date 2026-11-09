@@ -805,3 +805,207 @@ fn task_notification_is_the_adapters_while_it_runs() {
     };
     assert_eq!(*in_reply_to, Some(p.event.event_id));
 }
+
+const MIDTURN_SESSION: &str = "5e1f0c4a-8d3b-4c7e-9a21-3f6b8d0e2c17";
+
+/// A record of transcript [`MIDTURN_SESSION`]: the common fields and `rest`.
+fn midturn_line(u: Uuid, parent: Option<Uuid>, ts: &str, rest: serde_json::Value) -> String {
+    let mut v = serde_json::json!({"parentUuid": parent, "isSidechain": false, "uuid": u,
+        "timestamp": ts, "cwd": "/tmp/hqc-fixture/midturn", "sessionId": MIDTURN_SESSION,
+        "version": "2.1.318"});
+    v.as_object_mut()
+        .unwrap()
+        .extend(rest.as_object().unwrap().clone());
+    v.to_string()
+}
+
+/// The attachment of a message typed while a turn ran (2.1.318).
+fn queued_command(text: &str, ts: &str) -> serde_json::Value {
+    serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command",
+        "prompt": [{"type": "text", "text": text}], "source_uuid": Uuid::new_v4(),
+        "commandMode": "prompt", "origin": {"kind": "human"}, "timestamp": ts,
+        "humanTurn": true}, "renderedRole": "system"})
+}
+
+/// A turn with a message typed while it ran, in 2.1.318 shapes: the prompt, a Bash call, its
+/// result, the `queued_command` attachment (written after the result, stamped when typed) and
+/// the answer. The uuids: prompt, call, result, attachment, answer.
+fn midturn_transcript() -> (String, [Uuid; 5]) {
+    let ids = [(); 5].map(|_| Uuid::new_v4());
+    let [prompt, call, result, queued, answer] = ids;
+    let lines = [
+        midturn_line(
+            prompt,
+            None,
+            "2026-11-08T20:56:00.000Z",
+            serde_json::json!({"type": "user",
+                "message": {"role": "user", "content": "Count the files"}}),
+        ),
+        midturn_line(
+            call,
+            Some(prompt),
+            "2026-11-08T20:56:10.000Z",
+            serde_json::json!({"type": "assistant", "message": {"model": "claude-opus-5-5",
+                "role": "assistant", "stop_reason": "tool_use", "content": [{"type": "tool_use",
+                "id": "toolu_01", "name": "Bash", "input": {"command": "ls | wc -l"}}]}}),
+        ),
+        midturn_line(
+            result,
+            Some(call),
+            "2026-11-08T20:56:49.898Z",
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_01", "content": "12",
+                 "is_error": false}]}}),
+        ),
+        serde_json::json!({"type": "queue-operation", "operation": "remove",
+            "timestamp": "2026-11-08T20:56:49.920Z", "sessionId": MIDTURN_SESSION,
+            "content": "Skip the tests folder", "reason": "absorbed_mid_turn"})
+        .to_string(),
+        midturn_line(
+            queued,
+            Some(result),
+            "2026-11-08T20:56:46.218Z",
+            queued_command("Skip the tests folder", "2026-11-08T20:56:46.218Z"),
+        ),
+        midturn_line(
+            answer,
+            Some(queued),
+            "2026-11-08T20:56:55.000Z",
+            serde_json::json!({"type": "assistant", "message": {"model": "claude-opus-5-5",
+                "role": "assistant", "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "11 files"}]}}),
+        ),
+    ];
+    (lines.join("\n") + "\n", ids)
+}
+
+/// In a session the worker does not run, a message typed while a turn ran is the user's
+/// message at the time it was typed, with its block's id; the answer after it still replies
+/// to the turn's prompt.
+#[test]
+fn typed_during_a_turn_is_imported() {
+    let (transcript, [.., queued, _]) = midturn_transcript();
+    let mut s = setup("midturn", &transcript);
+    append(&s.file, &transcript);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(
+        labels(&out),
+        [
+            "user:Count the files",
+            "call",
+            "result",
+            "user:Skip the tests folder",
+            "agent:11 files"
+        ]
+    );
+    let ev = |i: usize| match &out[i] {
+        Output::Event(e) => &e.event,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(ev(3).event_id, Event::id_from_claude_block(&queued, 0));
+    assert_eq!(ev(3).ts.to_rfc3339(), "2026-11-08T20:56:46.218+00:00");
+    let EventKind::AgentMessage { in_reply_to, .. } = &ev(4).kind else {
+        panic!("{:?}", ev(4))
+    };
+    assert_eq!(*in_reply_to, Some(ev(0).event_id));
+}
+
+/// While the worker's own process runs the session, a message typed during the turn is the
+/// adapter's input, whose attachment stream-json does not repeat: neither emitted nor waited
+/// on nor taken for another writer, also without the registry.
+#[test]
+fn typed_during_a_turn_is_the_adapters_while_it_runs() {
+    let (transcript, [prompt, call, result, _, answer]) = midturn_transcript();
+    let mut s = setup("midturn", &transcript);
+    s.own.begin(s.runtime, None);
+    for u in [prompt, call, result, answer] {
+        s.own.add(s.runtime, u);
+    }
+    append(&s.file, &transcript);
+    let t0 = Instant::now();
+    for later in [0, 10] {
+        let out = s
+            .mirror
+            .poll(t0 + Duration::from_secs(later), SystemTime::now());
+        assert!(out.is_empty(), "{later} s: {:?}", labels(&out));
+    }
+    let row = s.mirror.store.get(&s.file).unwrap().unwrap();
+    assert_eq!(row.offset, transcript.len() as u64, "read past it at once");
+}
+
+/// The process ended before the mirror read the message the adapter gave it during the turn:
+/// the input's text claims the attachment, which so does not come back as a second copy.
+#[test]
+fn typed_during_a_turn_is_claimed_by_its_text() {
+    let (transcript, [prompt, call, result, _, answer]) = midturn_transcript();
+    let mut s = setup("midturn", &transcript);
+    for u in [prompt, call, result, answer] {
+        s.own.add(s.runtime, u);
+    }
+    s.own.sent(s.runtime, "Skip the tests folder");
+    append(&s.file, &transcript);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert!(out.is_empty(), "{:?}", labels(&out));
+}
+
+/// The message the adapter gave the running turn uses up its input when its attachment comes
+/// while the process runs: a prompt with the same text typed in VS Code later is not taken for
+/// the adapter's.
+#[test]
+fn typed_during_a_turn_uses_up_its_input() {
+    let (transcript, [prompt, call, result, _, answer]) = midturn_transcript();
+    let transcript = transcript.replace("Skip the tests folder", "?");
+    let mut s = setup("midturn", &transcript);
+    s.own.begin(s.runtime, None);
+    for u in [prompt, call, result, answer] {
+        s.own.add(s.runtime, u);
+    }
+    s.own.sent(s.runtime, "?");
+    append(&s.file, &transcript);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert!(out.is_empty(), "{:?}", labels(&out));
+
+    s.own.end(s.runtime, None);
+    let foreign = midturn_line(
+        Uuid::new_v4(),
+        Some(answer),
+        "2026-11-08T21:00:00.000Z",
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": "?"}}),
+    );
+    append(&s.file, &(foreign + "\n"));
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(labels(&out), ["user:?"]);
+}
+
+/// T21: the first pass over a transcript the hub has skips a message typed during an old turn
+/// by its own time, like the records around it; one typed during a later turn goes out.
+#[test]
+fn first_pass_skips_old_messages_typed_during_a_turn() {
+    let (transcript, [.., answer]) = midturn_transcript();
+    let mut s = setup("midturn", &transcript);
+    let since: DateTime<Utc> = "2026-11-08T20:56:55Z".parse().unwrap();
+    s.mirror.set(
+        PathBuf::from("/tmp/hqc-fixture"),
+        true,
+        vec![(s.runtime, since)],
+    );
+    let prompt = Uuid::new_v4();
+    let later = [
+        midturn_line(
+            prompt,
+            Some(answer),
+            "2026-11-08T21:00:00.000Z",
+            serde_json::json!({"type": "user",
+                "message": {"role": "user", "content": "Now the docs"}}),
+        ),
+        midturn_line(
+            Uuid::new_v4(),
+            Some(prompt),
+            "2026-11-08T21:00:05.000Z",
+            queued_command("and the README", "2026-11-08T21:00:05.000Z"),
+        ),
+    ];
+    append(&s.file, &(transcript + &later.join("\n") + "\n"));
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(labels(&out), ["user:Now the docs", "user:and the README"]);
+}

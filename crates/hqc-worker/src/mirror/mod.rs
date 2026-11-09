@@ -18,7 +18,8 @@
 //! known by uuid or, for prompts, by the input's text ([`OwnRecords`], fed by the adapter) and
 //! skipped: the adapter sent them. So is a background task's notification while that process
 //! runs ([`map::is_task_notification`]): the adapter reported it from stream-json under
-//! another uuid. Any other main-chain record is someone else's:
+//! another uuid; and a message typed during a turn then ([`map::is_queued_prompt`]), which
+//! stream-json does not repeat. Any other main-chain record is someone else's:
 //! - while a process of this worker runs the session (`locked_by: hqc`) the mirror does not
 //!   emit it and does not move past it for [`GRACE`] (stream-json may lag behind the file).
 //!   Then, with Claude Code's registry of live sessions (below), it goes out like any other
@@ -473,14 +474,20 @@ impl Mirror {
             let typed = map::typed_text(&rec);
             // A background task's notification while the worker's process runs the session:
             // the adapter reported its stream-json line (`system task_notification`), which
-            // has another uuid; the record is the CLI's own, not another writer's.
-            let reported = live && map::is_task_notification(&rec);
-            if reported || self.own.claim(runtime, uuid, typed.as_deref()) {
+            // has another uuid; the record is the CLI's own, not another writer's. So is a
+            // message typed during a turn: only the adapter writes that process's stdin, and
+            // the hub has the input already.
+            let reported = live && (map::is_task_notification(&rec) || map::is_queued_prompt(&rec));
+            // The claim first: it uses up the input the record stands for, which would
+            // otherwise later take a message with the same text from someone else.
+            if self.own.claim(runtime, uuid, typed.as_deref()) || reported {
                 if let Some(f) = self.track(path, runtime, link, &rec) {
                     out.push(wrap(f, row.title.clone()));
                 }
-                row.last_prompt =
-                    map::prompt_id(&map::record_events(&rec, None)).or(row.last_prompt);
+                if matches!(rec, Record::User(_)) {
+                    row.last_prompt =
+                        map::prompt_id(&map::record_events(&rec, None)).or(row.last_prompt);
+                }
                 self.held.remove(&uuid);
                 pos = end;
                 continue;
@@ -509,7 +516,11 @@ impl Mirror {
                 out.push(wrap(f, row.title.clone()));
             }
             let events = map::record_events(&rec, row.last_prompt);
-            row.last_prompt = map::prompt_id(&events).or(row.last_prompt);
+            // A message typed during a turn is not the turn's input: the answers that follow
+            // still reply to its prompt, as from the adapter.
+            if matches!(rec, Record::User(_)) {
+                row.last_prompt = map::prompt_id(&events).or(row.last_prompt);
+            }
             // The hub has this part already (T21).
             let old = skip_until.is_some_and(|t| record_ts(&rec).is_some_and(|ts| ts <= t));
             if !old {
@@ -560,14 +571,14 @@ pub fn transcripts(projects: &Path) -> Vec<(PathBuf, Uuid)> {
 
 /// The record's own `timestamp`, if it has one.
 fn record_ts(rec: &Record) -> Option<DateTime<Utc>> {
-    match rec {
-        Record::User(m) | Record::Assistant(m) => m
-            .timestamp
-            .as_deref()
-            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-            .map(|t| t.with_timezone(&Utc)),
+    let t = match rec {
+        Record::User(m) | Record::Assistant(m) => m.timestamp.as_deref(),
+        Record::Attachment(a) => a.timestamp.as_deref(),
         _ => None,
-    }
+    }?;
+    DateTime::parse_from_rfc3339(t)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// A prompt a person typed: what counts as a turn in a line of the tree.

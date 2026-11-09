@@ -696,3 +696,60 @@ async fn forked_event_is_stored() {
     assert_eq!(f[0]["payload"]["at_uuid"], at.to_string());
     hub.finish().await;
 }
+
+/// The answers to a question card in VS Code are the owner's, like a prompt; the card is the
+/// agent's.
+#[tokio::test]
+async fn mirrored_answers_are_the_owners() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online_bare(&hub, &token, ROOT, hub.boot_id).await;
+    w.see_mirror_set = true;
+    let pid = project(&hub, "cad").await;
+    import_workspace(&hub, &mut w, &pid).await;
+    let runtime = Uuid::new_v4().to_string();
+    let prompt = record_event(
+        "user.message",
+        json!({"text": "Ask me", "artifact_ids": []}),
+        true,
+    );
+    let request = record_event(
+        "clarify.request",
+        json!({"request_id": "toolu_01",
+               "questions": [{"id": "1", "text": "Which?", "options": ["A", "B"]}]}),
+        false,
+    );
+    let mut response = record_event(
+        "clarify.response",
+        json!({"request_id": "toolu_01", "answers": {"1": "A"}}),
+        false,
+    );
+    response["author"] = json!({"kind": "user", "id": Uuid::nil()});
+    for e in [prompt, request, response] {
+        let ack = mirror_event(&mut w, &runtime, e, None, false).await;
+        assert!(ack["seq"].as_u64().is_some(), "{ack}");
+    }
+    let sid = sessions(&hub, &pid).await[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let evs = hub.events(&sid).await;
+    let types: Vec<&str> = evs.iter().map(|e| e["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        types,
+        [
+            "system",
+            "user.message",
+            "clarify.request",
+            "clarify.response"
+        ]
+    );
+    assert_eq!(evs[2]["author"], json!({"kind": "agent", "id": sid}));
+    assert_eq!(evs[3]["author"], evs[1]["author"], "the owner");
+    // A mirrored question is history: it opens no request to answer.
+    let (s, list) = hub.get("/api/requests").await;
+    assert_eq!(s, 200, "{list}");
+    assert_eq!(list["requests"], json!([]), "{list}");
+    assert_ne!(hub.session(&sid).await["state"], "waiting");
+    hub.finish().await;
+}

@@ -20,8 +20,11 @@ pub enum Record {
     Assistant(Message),
     /// The session title Claude Code generates after the first prompt (SPEC §8.1, §9).
     AiTitle(AiTitle),
-    /// Everything else: attachment, file-history-snapshot, system, queue-operation,
-    /// last-prompt, cost-state, atis-latch, summary, ... (SPEC §9).
+    /// What the CLI adds to the conversation: among others a message a person typed while a
+    /// turn ran ([`Attachment::queued_prompt`]).
+    Attachment(Attachment),
+    /// Everything else: file-history-snapshot, system, queue-operation, last-prompt,
+    /// cost-state, atis-latch, summary, ... (SPEC §9).
     #[serde(other)]
     Other,
 }
@@ -52,6 +55,18 @@ pub struct Message {
     #[serde(default)]
     pub origin: Option<serde_json::Value>,
     pub message: serde_json::Value,
+    /// `toolUseResult` of a `tool_result` record, the tool's own result: for an answered
+    /// `AskUserQuestion` `{questions, answers}`, the answers keyed by question text. Only a
+    /// result with `answers` is kept: other tools' results (a whole file for `Read`) would
+    /// stay in memory with every record of a parsed transcript.
+    #[serde(default, deserialize_with = "answers_only")]
+    pub tool_use_result: Option<serde_json::Value>,
+}
+
+fn answers_only<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    Ok(Option::<serde_json::Value>::deserialize(d)?.filter(|v| v.get("answers").is_some()))
 }
 
 impl Message {
@@ -90,6 +105,49 @@ impl Message {
             }
             Some(serde_json::Value::Array(a)) => a.clone(),
             _ => vec![],
+        }
+    }
+}
+
+/// An `attachment` record. A message a person typed while a turn ran, which the CLI gave the
+/// running turn, is `{"type": "queued_command", "commandMode": "prompt", "prompt": [blocks] or
+/// "text", "origin": {"kind": "human"}}` (no `origin` before 2.1.210, nor on some later ones
+/// that carry `delivery_id`; seen up to 2.1.318); a
+/// peer's message has `origin.kind: peer` and `isMeta: true`, a finished background task
+/// `commandMode: task-notification`. Fields are optional: the record keeps its place in the
+/// fork tree whatever it holds.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    #[serde(default)]
+    pub uuid: Option<Uuid>,
+    #[serde(default)]
+    pub is_sidechain: bool,
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub attachment: serde_json::Value,
+}
+
+impl Attachment {
+    /// The content blocks of a message a person typed while a turn ran, a plain string as one
+    /// `text` block; `None` for any other attachment and for a subagent's.
+    pub fn queued_prompt(&self) -> Option<Vec<serde_json::Value>> {
+        let a = &self.attachment;
+        let typed = a["type"] == "queued_command"
+            && a["commandMode"] == "prompt"
+            && matches!(a["origin"]["kind"].as_str(), None | Some("human"))
+            && a["isMeta"] != true
+            && !self.is_sidechain;
+        if !typed {
+            return None;
+        }
+        match &a["prompt"] {
+            serde_json::Value::String(s) => {
+                Some(vec![serde_json::json!({"type": "text", "text": s})])
+            }
+            serde_json::Value::Array(a) => Some(a.clone()),
+            _ => None,
         }
     }
 }
@@ -476,6 +534,42 @@ mod tests {
         assert!(!m(r#","isSidechain":true"#).is_main());
         assert!(!m(r#","isCompactSummary":true"#).is_main());
         assert_eq!(m("").blocks()[0]["text"], "x");
+    }
+
+    /// The shapes of `queued_command` (2.1.318, the `origin` and `isMeta` of older versions):
+    /// only a message a person typed is a queued prompt.
+    #[test]
+    fn queued_prompt_is_a_typed_message() {
+        let a = |attachment: &str, extra: &str| {
+            let line = format!(
+                r#"{{"type":"attachment","uuid":"{}","timestamp":"2026-11-08T20:56:46.218Z","attachment":{attachment}{extra}}}"#,
+                Uuid::nil()
+            );
+            match parse_line(&line).unwrap() {
+                Record::Attachment(a) => a,
+                other => panic!("{other:?}"),
+            }
+        };
+        let human = r#"{"type":"queued_command","prompt":[{"type":"text","text":"also the docs"},{"type":"image","source":{}}],"commandMode":"prompt","origin":{"kind":"human"},"humanTurn":true}"#;
+        let blocks = a(human, "").queued_prompt().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["text"], "also the docs");
+        assert_eq!(a(human, "").uuid, Some(Uuid::nil()));
+        let plain = r#"{"type":"queued_command","prompt":"also the docs","commandMode":"prompt"}"#;
+        assert_eq!(
+            a(plain, "").queued_prompt().unwrap(),
+            [serde_json::json!({"type": "text", "text": "also the docs"})]
+        );
+        assert_eq!(a(human, r#","isSidechain":true"#).queued_prompt(), None);
+        for other in [
+            r#"{"type":"queued_command","prompt":"<cross-session-message>hi</cross-session-message>","commandMode":"prompt","origin":{"kind":"peer"},"isMeta":true}"#,
+            r#"{"type":"queued_command","prompt":"[Cross-session delivery]","commandMode":"prompt","isMeta":true}"#,
+            r#"{"type":"queued_command","prompt":"<task-notification></task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}"#,
+            r#"{"type":"deferred_tools_delta","addedNames":[]}"#,
+            r#"{"stripped":true}"#,
+        ] {
+            assert_eq!(a(other, "").queued_prompt(), None, "{other}");
+        }
     }
 
     /// SPEC §8.1, §9.3: stream-json and the transcript share message uuids, and the

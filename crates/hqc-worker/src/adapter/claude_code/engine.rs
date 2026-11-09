@@ -1516,7 +1516,7 @@ fn describe(req: &Value, input: &Value, tool: &str) -> String {
     preview(&parts.join("\n"), PREVIEW_LIMIT)
 }
 
-fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Vec<String>)> {
+pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Vec<String>)> {
     let qs = input["questions"].as_array().filter(|q| !q.is_empty())?;
     let mut questions = Vec::new();
     let mut texts = Vec::new();

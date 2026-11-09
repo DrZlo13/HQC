@@ -1,10 +1,14 @@
 //! Transcript records to SPEC §4 events, for the mirror and the import (SPEC §9.1, §9.2).
 //!
-//! Only main-chain `user`/`assistant` records ([`Message::is_main`]); every content block
-//! is one event with the id of SPEC §3 Event ([`Event::id_from_claude_block`]), the same the
-//! adapter gives the same block in stream-json:
+//! Only main-chain `user`/`assistant` records ([`Message::is_main`]) and messages typed during
+//! a turn; every content block is one event with the id of SPEC §3 Event
+//! ([`Event::id_from_claude_block`]), the same the adapter gives the same block in stream-json:
 //! - `user` text (a typed prompt) → `user.message` with `delivery: delivered`;
-//! - `user` `tool_result` → `tool.result`;
+//! - `attachment` `queued_command` a person typed while a turn ran
+//!   ([`Attachment::queued_prompt`]) → `user.message` the same way, at the time it was typed;
+//! - `user` `tool_result` → `tool.result`; of an answered `AskUserQuestion` (`toolUseResult`
+//!   with `questions` and `answers`) also `clarify.request` and `clarify.response`, ids
+//!   [`Event::id_from_claude_part`], which the client draws as the closed question card;
 //! - `assistant` text → `agent.message`, `final` when the record's `stop_reason` is
 //!   `end_turn` (2.1.308 writes it on every block of the turn's last message), `in_reply_to`
 //!   the last prompt of the file;
@@ -20,13 +24,16 @@
 //! `session_id` and the author ids are nil: the worker does not know the hqc session, the
 //! hub fills them in (`mirror.event`, SPEC §5.4). Timestamps are the records' own.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
-use hqc_claude_jsonl::{Message, Record};
-use hqc_proto::event::{Author, Delivery, Event, EventKind};
+use hqc_claude_jsonl::{Attachment, Message, Record};
+use hqc_proto::event::{Author, ClarifyAnswer, Delivery, Event, EventKind};
 use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
-    preview, result_text, text, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, SYNTHETIC_MODEL, TASK_NOTIFICATION,
+    parse_questions, preview, result_text, text, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, SYNTHETIC_MODEL,
+    TASK_NOTIFICATION,
 };
 
 /// `origin.kind` of the `user` record of a background task's notification (2.1.312).
@@ -37,11 +44,17 @@ pub fn is_task_notification(record: &Record) -> bool {
     matches!(record, Record::User(m) if m.is_main() && m.origin_kind() == Some(TASK_NOTIFICATION_ORIGIN))
 }
 
+/// A message a person typed while a turn ran ([`Attachment::queued_prompt`]).
+pub fn is_queued_prompt(record: &Record) -> bool {
+    matches!(record, Record::Attachment(a) if a.queued_prompt().is_some())
+}
+
 /// The events of one record; `in_reply_to`: event id of the file's last prompt.
 pub fn record_events(record: &Record, in_reply_to: Option<Uuid>) -> Vec<Event> {
     match record {
         Record::User(m) if m.is_main() => user(m),
         Record::Assistant(m) if m.is_main() => assistant(m, in_reply_to),
+        Record::Attachment(a) => queued(a),
         _ => vec![],
     }
 }
@@ -56,19 +69,26 @@ pub fn prompt_id(events: &[Event]) -> Option<Uuid> {
 }
 
 pub(crate) fn ts(m: &Message) -> DateTime<Utc> {
-    m.timestamp
-        .as_deref()
-        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+    parse_ts(m.timestamp.as_deref())
+}
+
+/// A record's `timestamp`; now when it has none or a bad one.
+fn parse_ts(t: Option<&str>) -> DateTime<Utc> {
+    t.and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map(|t| t.with_timezone(&Utc))
         .unwrap_or_else(Utc::now)
 }
 
 fn event(m: &Message, index: usize, author: Author, kind: EventKind) -> Event {
+    event_at(m.uuid, ts(m), index, author, kind)
+}
+
+/// The event of content block `index` of record `uuid`, written at `ts`.
+fn event_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, author: Author, kind: EventKind) -> Event {
     let user = matches!(kind, EventKind::UserMessage { .. });
-    let ts = ts(m);
     Event {
         session_id: Uuid::nil(),
-        event_id: Event::id_from_claude_block(&m.uuid, index),
+        event_id: Event::id_from_claude_block(&uuid, index),
         seq: None,
         ts,
         author,
@@ -129,22 +149,19 @@ fn user(m: &Message) -> Vec<Event> {
                     m,
                     i,
                     Author::User { id: Uuid::nil() },
-                    EventKind::UserMessage {
-                        text: text(t),
-                        artifact_ids: vec![],
-                        schedule_id: None,
-                    },
+                    user_message(t),
                 ));
             }
             Some("tool_result") => {
                 let t = result_text(&b["content"]);
                 let error = b["is_error"] == true;
+                let call_id = b["tool_use_id"].as_str().unwrap_or("");
                 out.push(event(
                     m,
                     i,
                     agent(),
                     EventKind::ToolResult {
-                        call_id: b["tool_use_id"].as_str().unwrap_or("").into(),
+                        call_id: call_id.into(),
                         result_preview: preview(&t, PREVIEW_LIMIT),
                         error,
                         error_text: error.then(|| preview(&t, ERROR_TEXT_LIMIT)),
@@ -152,11 +169,124 @@ fn user(m: &Message) -> Vec<Event> {
                         artifact_id: None,
                     },
                 ));
+                out.extend(answered(m, i, call_id));
             }
             _ => {}
         }
     }
     out
+}
+
+fn user_message(t: &str) -> EventKind {
+    EventKind::UserMessage {
+        text: text(t),
+        artifact_ids: vec![],
+        schedule_id: None,
+    }
+}
+
+/// A message typed while a turn ran: one `user.message` per non-empty text block, as for a
+/// prompt.
+fn queued(a: &Attachment) -> Vec<Event> {
+    let (Some(uuid), Some(blocks)) = (a.uuid, a.queued_prompt()) else {
+        return vec![];
+    };
+    let ts = parse_ts(a.timestamp.as_deref());
+    blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b["type"] == "text")
+        .filter_map(|(i, b)| Some((i, b["text"].as_str()?)))
+        .filter(|(_, t)| !t.trim().is_empty())
+        .map(|(i, t)| {
+            event_at(
+                uuid,
+                ts,
+                i,
+                Author::User { id: Uuid::nil() },
+                user_message(t),
+            )
+        })
+        .collect()
+}
+
+/// The question card of an answered `AskUserQuestion`, from block `index` of its
+/// `tool_result` record: `toolUseResult` holds the questions and the answers keyed by
+/// question text. A multi-select answer is the labels joined with ", ", typed text included
+/// ([`split_labels`]). Request and response come from the one record, so the card is never
+/// open.
+fn answered(m: &Message, index: usize, request_id: &str) -> Vec<Event> {
+    let Some(r) = &m.tool_use_result else {
+        return vec![];
+    };
+    let (Some((questions, texts)), Some(given)) = (parse_questions(r), r["answers"].as_object())
+    else {
+        return vec![];
+    };
+    let mut answers = BTreeMap::new();
+    for (q, raw) in questions.iter().zip(&texts) {
+        let Some(a) = given.get(raw).and_then(|a| a.as_str()) else {
+            continue;
+        };
+        let a = text(a);
+        let answer = if q.multi == Some(true) {
+            ClarifyAnswer::Many(split_labels(&a, q.options.as_deref().unwrap_or_default()))
+        } else {
+            ClarifyAnswer::One(a)
+        };
+        answers.insert(q.id.clone(), answer);
+    }
+    let part = |name: &str, author: Author, kind: EventKind| Event {
+        event_id: Event::id_from_claude_part(&m.uuid, index, name),
+        ..event(m, index, author, kind)
+    };
+    vec![
+        part(
+            "clarify.request",
+            agent(),
+            EventKind::ClarifyRequest {
+                request_id: request_id.into(),
+                questions,
+            },
+        ),
+        part(
+            "clarify.response",
+            Author::User { id: Uuid::nil() },
+            EventKind::ClarifyResponse {
+                request_id: request_id.into(),
+                answers,
+            },
+        ),
+    ]
+}
+
+/// A multi-select answer back into its parts: labels may hold ", " themselves, so at each
+/// point the longest label followed by the end or ", " is taken; where none fits, the rest is
+/// one part, the text typed as Other (the client shows parts that are not options there).
+fn split_labels(answer: &str, labels: &[String]) -> Vec<String> {
+    // The split is quadratic in the answer's length; real answers are short (at most 332
+    // characters and 4 options in 2147 answered cards), so a longer one stays whole.
+    if answer.len() > 4096 || labels.len() > 32 {
+        return vec![answer.to_string()];
+    }
+    let mut longest_first: Vec<&String> = labels.iter().collect();
+    longest_first.sort_by_key(|l| std::cmp::Reverse(l.len()));
+    let mut parts = Vec::new();
+    let mut rest = answer;
+    while !rest.is_empty() {
+        let label = longest_first.iter().find(|l| {
+            rest.strip_prefix(l.as_str())
+                .is_some_and(|after| after.is_empty() || after.starts_with(", "))
+        });
+        let Some(label) = label else {
+            parts.push(rest.to_string());
+            break;
+        };
+        parts.push(label.to_string());
+        rest = &rest[label.len()..];
+        rest = rest.strip_prefix(", ").unwrap_or(rest);
+    }
+    parts
 }
 
 fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
@@ -203,15 +333,14 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
 /// ([`crate::mirror::OwnRecords::claim`]): the text of its first text block, and for a slash
 /// command, which 2.1.308 writes as `<command-name>/compact</command-name>
 /// <command-message>…</command-message> <command-args>…</command-args>`, the command and its
-/// arguments. `None` for records that are not a main-chain `user` prompt.
+/// arguments; for a message typed while a turn ran, its first text block too. `None` for other
+/// records.
 pub fn typed_text(record: &Record) -> Option<String> {
-    let Record::User(m) = record else {
-        return None;
+    let blocks = match record {
+        Record::User(m) if m.is_main() => m.blocks(),
+        Record::Attachment(a) => a.queued_prompt()?,
+        _ => return None,
     };
-    if !m.is_main() {
-        return None;
-    }
-    let blocks = m.blocks();
     let t = blocks
         .iter()
         .filter(|b| b["type"] == "text")
@@ -234,8 +363,9 @@ pub fn typed_text(record: &Record) -> Option<String> {
 }
 
 /// `uuid` of a record that counts for the foreign-writer check (SPEC §9.3): a main-chain
-/// `user`/`assistant` record that maps to at least one event. A signature-only thinking
-/// record, which stream-json may not repeat, is not evidence of another writer.
+/// `user`/`assistant` record or a message typed while a turn ran that maps to at least one
+/// event. A signature-only thinking record, which stream-json may not repeat, is not evidence
+/// of another writer.
 pub fn counted_uuid(record: &Record) -> Option<Uuid> {
     match record {
         Record::User(m) | Record::Assistant(m)
@@ -243,6 +373,7 @@ pub fn counted_uuid(record: &Record) -> Option<Uuid> {
         {
             Some(m.uuid)
         }
+        Record::Attachment(a) if !record_events(record, None).is_empty() => a.uuid,
         _ => None,
     }
 }
@@ -390,6 +521,174 @@ mod tests {
                 &"c294c442-b0d3-4724-94a4-17d06e405b0a".parse().unwrap(),
                 0
             )
+        );
+    }
+
+    /// A message typed while a turn ran and an answered `AskUserQuestion`, in 2.1.318 shapes.
+    /// The message is the user's, at the time it was typed, one event per text block with the
+    /// block's id; a peer's message and a task's notification stay without events. The answer
+    /// is the tool result, then the question card and its answers with ids of their own, a
+    /// multi-select answer split by its labels; a declined question is the error result only.
+    #[test]
+    fn typed_during_a_turn_and_answered_questions() {
+        use hqc_proto::event::ClarifyQuestion;
+        use serde_json::json;
+        let rec = |v: serde_json::Value| hqc_claude_jsonl::parse_line(&v.to_string()).unwrap();
+        let queued_command = |a: serde_json::Value| {
+            let uuid = Uuid::new_v4();
+            let r = rec(json!({"parentUuid": Uuid::new_v4(), "isSidechain": false,
+                "type": "attachment", "uuid": uuid, "timestamp": "2026-11-08T20:56:46.218Z",
+                "attachment": a, "renderedRole": "system", "version": "2.1.318"}));
+            (r, uuid)
+        };
+        let (typed, uuid) = queued_command(json!({"type": "queued_command", "prompt": [
+                {"type": "text", "text": "Skip the tests folder"},
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/png", "data": ""}},
+                {"type": "text", "text": "  "},
+                {"type": "text", "text": "and the docs"}],
+            "source_uuid": Uuid::new_v4(), "commandMode": "prompt", "origin": {"kind": "human"},
+            "timestamp": "2026-11-08T20:56:46.218Z", "humanTurn": true}));
+        let evs = record_events(&typed, None);
+        assert_eq!(
+            evs.iter().map(label).collect::<Vec<_>>(),
+            ["user:Skip the tests folder", "user:and the docs"]
+        );
+        assert_eq!(
+            evs.iter().map(|e| e.event_id).collect::<Vec<_>>(),
+            [
+                Event::id_from_claude_block(&uuid, 0),
+                Event::id_from_claude_block(&uuid, 3)
+            ]
+        );
+        assert_eq!(evs[0].ts.to_rfc3339(), "2026-11-08T20:56:46.218+00:00");
+        assert_eq!(evs[0].author, Author::User { id: Uuid::nil() });
+        assert_eq!(evs[0].delivery, Some(Delivery::Delivered));
+        assert_eq!(typed_text(&typed).as_deref(), Some("Skip the tests folder"));
+        assert_eq!(counted_uuid(&typed), Some(uuid));
+        for other in [
+            json!({"type": "queued_command",
+                "prompt": "<cross-session-message>hi</cross-session-message>",
+                "commandMode": "prompt", "origin": {"kind": "peer"}, "isMeta": true}),
+            json!({"type": "queued_command", "prompt": "<task-notification></task-notification>",
+                "commandMode": "task-notification", "origin": {"kind": "task-notification"}}),
+        ] {
+            let (r, _) = queued_command(other);
+            assert!(record_events(&r, None).is_empty(), "{r:?}");
+            assert_eq!((typed_text(&r), counted_uuid(&r)), (None, None));
+        }
+
+        let answer = |content: &str, error: bool, result: serde_json::Value| {
+            let block = json!({"type": "tool_result", "content": content, "is_error": error,
+                "tool_use_id": "toolu_01"});
+            let v = json!({"parentUuid": Uuid::new_v4(), "isSidechain": false, "type": "user",
+                "uuid": Uuid::new_v4(), "timestamp": "2026-11-08T23:55:39.726Z",
+                "message": {"role": "user", "content": [block]},
+                "toolUseResult": result, "version": "2.1.318"});
+            rec(v)
+        };
+        let option =
+            |label: &str, description: &str| json!({"label": label, "description": description});
+        let answered = answer(
+            "Your questions have been answered: \"Which parts?\"=\"Feed, Search\". …",
+            false,
+            json!({"questions": [
+                {"question": "Which parts?", "header": "Parts", "multiSelect": true, "options": [
+                    option("Feed", "The chat feed"), option("Search", ""), option("Settings", "")]},
+                {"question": "Which order?", "header": "Order", "multiSelect": false, "options": [
+                    option("Newest first", ""), option("Oldest first", "")]},
+                {"question": "Which checks?", "header": "Checks", "multiSelect": true, "options": [
+                    option("Always on", ""), option("Always on, with references", ""),
+                    option("Service, twice a year", "")]},
+                {"question": "Which else?", "header": "Else", "multiSelect": true, "options": [
+                    option("Feed", ""), option("Search", "")]}],
+                "answers": {"Which parts?": "Feed, Search", "Which order?": "By relevance",
+                    "Which checks?": "Always on, with references, Service, twice a year",
+                    "Which else?": "Feed, my own"}}),
+        );
+        let Record::User(m) = &answered else {
+            unreachable!()
+        };
+        let evs = record_events(&answered, None);
+        let [result, request, response] = &evs[..] else {
+            panic!("{evs:?}")
+        };
+        assert_eq!(label(result), "result:false");
+        assert_eq!(result.event_id, Event::id_from_claude_block(&m.uuid, 0));
+        let EventKind::ClarifyRequest {
+            request_id,
+            questions,
+        } = &request.kind
+        else {
+            panic!("{request:?}")
+        };
+        assert_eq!(request_id, "toolu_01");
+        assert_eq!(
+            questions[0],
+            ClarifyQuestion {
+                id: "1".into(),
+                text: "Which parts?".into(),
+                header: Some("Parts".into()),
+                options: Some(vec!["Feed".into(), "Search".into(), "Settings".into()]),
+                option_descriptions: Some(vec!["The chat feed".into(), "".into(), "".into()]),
+                multi: Some(true),
+            }
+        );
+        assert_eq!(
+            questions.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(),
+            ["1", "2", "3", "4"]
+        );
+        assert_eq!(
+            response.kind,
+            EventKind::ClarifyResponse {
+                request_id: "toolu_01".into(),
+                answers: [
+                    (
+                        "1".to_string(),
+                        ClarifyAnswer::Many(vec!["Feed".into(), "Search".into()])
+                    ),
+                    ("2".to_string(), ClarifyAnswer::One("By relevance".into())),
+                    // Labels that hold ", " themselves, the longest one first.
+                    (
+                        "3".to_string(),
+                        ClarifyAnswer::Many(vec![
+                            "Always on, with references".into(),
+                            "Service, twice a year".into()
+                        ])
+                    ),
+                    // A label and the text typed as Other.
+                    (
+                        "4".to_string(),
+                        ClarifyAnswer::Many(vec!["Feed".into(), "my own".into()])
+                    ),
+                ]
+                .into(),
+            }
+        );
+        assert_eq!(
+            (request.event_id, response.event_id),
+            (
+                Event::id_from_claude_part(&m.uuid, 0, "clarify.request"),
+                Event::id_from_claude_part(&m.uuid, 0, "clarify.response")
+            )
+        );
+        assert_eq!(
+            (&request.author, &response.author),
+            (&agent(), &Author::User { id: Uuid::nil() })
+        );
+        assert_eq!(response.ts.to_rfc3339(), "2026-11-08T23:55:39.726+00:00");
+
+        let declined = answer(
+            "The user doesn't want to proceed with this tool use.",
+            true,
+            json!("User rejected tool use"),
+        );
+        assert_eq!(
+            record_events(&declined, None)
+                .iter()
+                .map(label)
+                .collect::<Vec<_>>(),
+            ["result:true"]
         );
     }
 

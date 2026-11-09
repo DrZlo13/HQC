@@ -34,6 +34,7 @@ pub const SEARCH_HISTORY: &str = "hqc_search_history";
 pub const SPAWN: &str = "hqc_spawn";
 pub const SCHEDULE: &str = "hqc_schedule";
 pub const MOVE: &str = "hqc_move";
+pub const RENAME: &str = "hqc_rename";
 /// `instructions` of `initialize` (SPEC §7.2): the runtime keeps them in the system prompt while
 /// the tools themselves wait behind its tool search, so each tool is named here by its use.
 pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's owner; the user \
@@ -42,7 +43,7 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     hqc_ask, hqc_spawn; history: hqc_search_history; later or recurring messages: hqc_schedule; \
     moving this session to another folder or project, only when the user asks (a folder that is \
     not one of the user's workspaces in the same environment waits for the user to allow it): \
-    hqc_move.";
+    hqc_move; renaming a session: hqc_rename.";
 
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -315,6 +316,28 @@ pub const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: RENAME,
+        description: "Rename an hqc session of your owner: this one when `session` is absent, \
+            otherwise the session at that address (<project-slug>/<session-slug>) or id. The \
+            title is set as the user sets it in the client: the session list and the chat show \
+            it, and the session's automatic title no longer replaces it. The address does not \
+            change. At most 200 characters.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "The new title."},
+                    "session": {
+                        "type": "string",
+                        "description": "The session to rename: <project-slug>/<session-slug> or its id; this session when absent."
+                    }
+                },
+                "required": ["title"],
+                "additionalProperties": false
+            })
+        },
+    },
 ];
 
 /// The `files` argument of [`SEND`] and [`ASK`] (since 0.46, T41).
@@ -428,6 +451,7 @@ mod tests {
         assert!(tool(SEND).is_some() && tool(ASK).is_some());
         assert!(tool(SEARCH_HISTORY).is_some());
         assert!(tool(MOVE).is_some());
+        assert!(tool(RENAME).is_some());
     }
 
     #[test]

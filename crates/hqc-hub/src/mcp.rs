@@ -12,7 +12,8 @@
 //! - Every error has the one shape `{code, message}` ([`McpError`]).
 //! - A call whose answer was lost is sent again with the same `request_id` (SPEC §5.2). A
 //!   tool with side effects acts once per `request_id`: what it writes is keyed by it
-//!   ([`once_id`]) and a repeat answers from what the first call wrote.
+//!   ([`once_id`]) and a repeat answers from what the first call wrote; `hqc_rename` keys
+//!   nothing, a repeat writes the same title again.
 //! - A deferred tool (`hqc_ask`) answers [`Answer::Later`]: the hub acks the call frame and
 //!   sends `mcp.result` on its own later.
 //! - A tool that waits for the worker (`hqc_spawn` with a worktree, T47; `hqc_move`) answers
@@ -113,6 +114,10 @@ pub const REGISTRY: &[HubTool] = &[
     HubTool {
         name: hqc_proto::mcp::MOVE,
         run: |app, caller, c| Box::pin(crate::moves::tool(app, caller, c)),
+    },
+    HubTool {
+        name: hqc_proto::mcp::RENAME,
+        run: |app, caller, c| Box::pin(now(rename(app, caller, c.args.clone()))),
     },
 ];
 
@@ -406,6 +411,46 @@ async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolRe
         out["next_cursor"] = json!(c);
     }
     Ok(out)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameArgs {
+    title: String,
+    session: Option<String>,
+}
+
+/// `hqc_rename(title, session?)` (SPEC §7): the client's Rename (`PATCH /api/sessions/{id}`
+/// with `title`) of the calling session, or of the owner's session `session` names, as
+/// `{address, title}`. The address does not change.
+async fn rename(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
+    let a: RenameArgs = args(v)?;
+    let t = a.title.trim();
+    if t.is_empty() {
+        return Err(err(error_code::INVALID_ARGS, "title must not be empty"));
+    }
+    if t.chars().count() > crate::api::MAX_TITLE {
+        return Err(err(
+            error_code::INVALID_ARGS,
+            format!("title is longer than {} characters", crate::api::MAX_TITLE),
+        ));
+    }
+    let (id, address) = match a.session {
+        Some(s) => {
+            let (s, address) = crate::peers::target(app, caller, &s).await?;
+            (s.id, address)
+        }
+        None => (
+            caller.id,
+            crate::peers::address(app, caller).await.map_err(internal)?,
+        ),
+    };
+    let title = hqc_proto::replace_nul(t);
+    db::set_user_title(&app.db, id, &title)
+        .await
+        .map_err(internal)?;
+    app.session_changed(id);
+    Ok(json!({ "address": address, "title": title }))
 }
 
 /// The id of what call `request_id` of `tool` from session `caller` writes: the same for a

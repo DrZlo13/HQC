@@ -3779,40 +3779,62 @@ only `env` and `permissions`, no `ssh_keys`.
 
 ## 15. Search
 
-Postgres: `tsvector` with the `simple` configuration (mixed Russian and English text)
-plus `pg_trgm` for fuzzy search over `event.payload.text` and session titles. Results
-are filtered by grants. Limitation: `simple` has no stemming, word forms are found
-only by the trigram search. One index, two consumers: the search bar in the client
-and `hqc_search_history`.
+Postgres full-text search over what a session said and did, and session titles. Results are
+filtered by grants. One index, two consumers: the search bar in the client and
+`hqc_search_history`.
 
-Since 0.36 (T33; `crates/hqc-hub/src/search.rs`, migration `0016`, measurements in
-`docs/notes/t33-questions.md`):
-- **What is indexed.** The text a human reads: `payload.text` of `user.message`,
-  `agent.message` (final or not), `peer.message` and `system`; not tool calls, tool results,
-  thinking, requests or attachments. Two stored generated columns of `events`, `search_text`
-  (that text or null) and `search_words` (its `simple` tsvector), so Postgres keeps them on
-  every insert and the migration's table rewrite backfills old rows; GIN indexes on
-  `search_words` and on `search_text` with `gin_trgm_ops`, and on session titles (expression
-  indexes, as titles change). `pg_trgm` is a trusted extension, created by the migration.
+Since 0.36 (T33; `crates/hqc-hub/src/search.rs`, its measurements in
+`docs/notes/t33-questions.md`), reworked in 0.97 (migration `0037`) so that
+it finds commands, their output and word forms and puts the best match first:
+- **What is indexed.** `payload.text` of `user.message`, `agent.message` (final or not),
+  `peer.message` and `system`; since 0.97 also a `tool.call` (the tool's name and its
+  `args_preview`), a `tool.result` (`result_preview`) and a `clarify.response` (the strings of
+  its `answers`); in previews the JSON escapes `\n`, `\r`, `\t` are read as spaces, so a word
+  after a line break stays a word, and everywhere `/` and `.` are, so a path, a file name, an
+  address or a URL is a sequence of words (`search` finds `crates/hqc-hub/src/search.rs`). Not
+  thinking, requests or attachments. One stored generated column of `events`, `search_words`,
+  the `tsvector` of that text in the `hqc` configuration, weighted A for messages and answers,
+  B for calls, D for output, so Postgres keeps it on every insert and the migration's table
+  rewrite backfills old rows; a GIN index on it and one on session titles (an expression
+  index, as titles change).
+- **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
+  to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
+  "переезд" finds "переезда", "deploy" finds "deployed".
 - **Whose.** Until grants (iteration 6): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out.
-- **Matching.** Exact: `search_words @@ websearch_to_tsquery('simple', q)` (words in any
-  case; `"a phrase"`, `or`, `-word`). Fuzzy adds `q <% text` (trigram word similarity) with
-  `pg_trgm.word_similarity_threshold` 0.5 for the query (the default 0.6 misses one typo in
-  a short word); it finds other word forms and typos, at least 3 characters. Titles are
-  matched the same way; a title hit has no `seq` and stands at the session's creation time.
-- **Order and pages.** Newest first by `(ts, id)` (the event's time and id, for a title the
-  session's creation and id); the cursor is that pair of the page's last hit, so pages do not
-  repeat or skip hits when new events arrive. No ranking by relevance.
-- **Snippet.** About 160 characters on one line around the first query word found in the text
-  (ignoring case), else its beginning; `…` marks a cut.
-- **Cost.** A query runs with `statement_timeout` 5 s; over it the query is refused. Over 100k
-  events a rare or common exact word takes 1–20 ms, a phrase 10–20 ms, fuzzy with a rare word
-  4–90 ms, fuzzy with a word in most events about 1 s (measured on home-mac). Since 0.39 (T36,
-  §20): per owner 30 searches a minute, 10 of them fuzzy (`GET /api/search` and
-  `hqc_search_history` together; `429 search_limit` / `limit_exceeded`), and at most 4 searches
-  run at once on the hub (`503 busy` / `unavailable`), so one owner's agent cannot keep the
-  database busy with fuzzy queries.
+- **Matching.** The hub parses the query itself into a `to_tsquery('hqc', …)`: every word must
+  be there, `"a phrase"` in sequence, `or` either side, `-word` without it, `word*` a prefix
+  of the word as typed or of its stem; a prefix of Latin letters also finds the whole stems,
+  of 4 letters at least, shorter than it and beginning it, that the stemmer gives it with
+  common English endings (`s`, `ed`, `ing`, `ion`, `ment`, `er` and the like, not `y`, `ies`,
+  `ly`), as the stem of a longer word may be shorter than the prefix (`connecti*` finds
+  "connection", whose stem is `connect`), while `worker*` does not find "work"; `/` and `.`
+  in a word are spaces, as in the index, so `docs/SPEC.md` is a phrase; each word and phrase
+  is quoted, so punctuation cannot become an operator. A `-` excludes only before a quoted
+  phrase or four letters or more (`-test`, `-staging`; a shorter word is excluded in quotes,
+  `-"ok"`); before anything else it is part of the word, so a command pasted with its flags
+  finds its call: `-rf`, `-lah`, `--force` are the words `rf`, `lah`, `force`, as the index
+  reads them. Fuzzy (at least 3 characters) widens each plain word of 3 or more characters,
+  leading dashes not counted, with up to 6 similar words (`pg_trgm` `similarity` 0.4 to its
+  stem) from `search_vocab`, the words of the index (letters only, 3–40 characters) that the
+  migration collects and a trigger on `events` adds to; it finds typos (`pg_trgm` is a trusted
+  extension, created by migration `0016`). Titles are matched with the same query; a title hit
+  has no `seq`.
+- **Order and pages.** Best match first: `ts_rank(search_words, q, 1)` (the query without its
+  `-word`s), then newest; a title is ranked as text of weight A. The cursor is the number of
+  hits already shown, so a page after new events may repeat or skip a hit.
+- **Snippet.** About 160 characters on one line around the first query word (or fuzzy
+  alternative) found in the text (ignoring case), else its beginning; `…` marks a cut. The
+  text of a call is the tool and its arguments, of an answer its strings joined with "; ".
+- **Cost.** Each statement of a search (reading the query, then finding the hits) runs with
+  `statement_timeout` 5 s; over it the search is refused. Over our hub's 916k events (720k
+  indexed): a rare or ordinary word or phrase 14–80 ms, a word in 11–36k events 0.2–0.6 s,
+  "the" (229k events) about 2 s; fuzzy 40–560 ms, with a word in most events 2–3 s (SPEC
+  0.97, a copy on a shared build host). The migration took 4–5 minutes there, holding
+  `events` locked. Since 0.39 (T36, §20): per owner 30 searches a minute, 10 of them fuzzy
+  (`GET /api/search` and `hqc_search_history` together; `429 search_limit` /
+  `limit_exceeded`), and at most 4 searches run at once on the hub (`503 busy` /
+  `unavailable`), so one owner's agent cannot keep the database busy with fuzzy queries.
 - **Client.** Desktop: the left column's search field filters the project's sessions by title
   and path at once (as before) and, from 2 characters and 300 ms after typing, shows the hub's
   hits below them ("In messages", "Similar words" for fuzzy, "More" for the next page). Phone:
@@ -4252,6 +4274,17 @@ question to a closed `clarify.request`/`clarify.response` card built from the re
 `toolUseResult`, a multi-select answer split back by the option labels; the hub authors a
 mirrored `clarify.response` as the owner. While the session's hqc process is alive a typed
 message is the adapter's own input, so it is neither sent twice nor taken for another writer.
+
+### 0.96 → 0.97 (search finds commands, output and word forms, best match first)
+§15: search found only messages, word by exact form, newest first, and a fuzzy query on a
+common word ran into the 5 s timeout. Migration `0037` indexes tool calls, tool output and
+answers to questions as well, with `/` and `.` read as spaces, in a configuration `hqc` that
+stems Russian and English without stop words; the query parser adds `word*` (also the
+shorter stems the stemmer gives the prefix with common English endings), and `-`
+excludes only before a phrase or four letters, so a command pasted with its flags finds its
+call; hits come by `ts_rank`, paged by an offset; fuzzy widens the query with similar words
+from a vocabulary of the index instead of a trigram search over all text. The
+`hqc_search_history` description says so.
 
 ### 0.88 → 0.89 (the list at once on a reload)
 §6: `GET /api/sessions` gives every session of every project of the user in one list; the

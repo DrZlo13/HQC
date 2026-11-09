@@ -275,7 +275,9 @@ export function Chat({
   const usage = t.usageTotals();
   const model = shownModel(info?.model, usage.model);
   const cost = usage.cost;
-  const pill = <StatePill state={state} timeline={t} />;
+  // The turn ended, a background subagent still works: Running, as in the list (bucketOf).
+  const shown = state === 'idle' && (info?.subagents ?? 0) > 0 ? 'running' : state;
+  const pill = <StatePill state={shown} timeline={t} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
 
@@ -570,7 +572,8 @@ function approvalCall(items: ReturnType<Timeline['items']>, t: Timeline, request
   return b?.kind === 'approval' ? b.call : undefined;
 }
 
-/** The state in the header: a pill, pulsing while a turn is on. */
+/** The state in the header: a pill, pulsing while the session works (a turn, or a background
+ *  subagent after it). */
 function StatePill({ state, timeline }: { state: SessionState; timeline: Timeline }) {
   let label = STATE_LABELS[state];
   if (state === 'waiting') {

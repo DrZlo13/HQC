@@ -422,6 +422,20 @@ describe('header', () => {
     expect($('.chat-agents')).toBeNull();
   });
 
+  it('says Running while a background subagent works after the turn ended', async () => {
+    let { app } = setup('idle', { subagents: 1 });
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Running');
+    expect($('.pill.state-running .pulse')).not.toBeNull();
+    expect(button('Stop')).toBeUndefined();
+    render(null, root);
+
+    ({ app } = setup('idle', { subagents: 0 }));
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Idle');
+    expect($('.pill .pulse')).toBeNull();
+  });
+
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
     const { app } = setup('waiting');
     await mount(app);

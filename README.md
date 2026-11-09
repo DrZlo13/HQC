@@ -1,6 +1,7 @@
 # hqc
 
-Self-hosted control of Claude Code sessions from a phone or a browser.
+Self-hosted control of Claude Code sessions from a browser or a phone: one place for all your
+projects on all your machines, and agents can talk to each other, across machines too.
 
 - **hub** (`crates/hqc-hub`): the server with Postgres, behind Cloudflare Access; it stores sessions and relays events.
 - **worker** (`crates/hqc-worker`): runs on your machines, starts the agents and streams their sessions to the hub.

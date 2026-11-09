@@ -450,6 +450,17 @@ impl Event {
             )
         }
     }
+
+    /// Event id of a further event `part` drawn from content block `index` of a jsonl record,
+    /// beside the block's own ([`Event::id_from_claude_block`]): v5 of
+    /// `"<uuid>/<index>/<part>"`. The mirror names the `clarify.request` and
+    /// `clarify.response` of an answered `AskUserQuestion` so (SPEC §3 Event, §9.1).
+    pub fn id_from_claude_part(record_uuid: &Uuid, index: usize, part: &str) -> Uuid {
+        Uuid::new_v5(
+            &CLAUDE_RECORD_NS,
+            format!("{record_uuid}/{index}/{part}").as_bytes(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -754,5 +765,20 @@ mod tests {
             Event::id_from_claude_record(&u)
         );
         assert_ne!(Event::id_from_claude_record(&u), u);
+    }
+
+    /// The ids of the events drawn from one block are fixed (a resend dedupes by them) and
+    /// differ from each other and from the block's own.
+    #[test]
+    fn claude_part_id_is_stable() {
+        let u = Uuid::parse_str("36c72c19-b4ad-4d95-a482-ce4e281952cb").unwrap();
+        let (req, resp) = (
+            Event::id_from_claude_part(&u, 0, "clarify.request"),
+            Event::id_from_claude_part(&u, 0, "clarify.response"),
+        );
+        assert_eq!(req.to_string(), "6035cfda-c03f-5f8e-8027-0f3d69125170");
+        assert_eq!(resp.to_string(), "c2a3d750-3b5a-5be9-8a81-587f88e43e22");
+        assert_ne!(req, Event::id_from_claude_block(&u, 0));
+        assert_ne!(req, Event::id_from_claude_part(&u, 1, "clarify.request"));
     }
 }

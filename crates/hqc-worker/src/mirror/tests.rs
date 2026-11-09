@@ -1126,3 +1126,23 @@ fn a_transcript_stays_in_its_folder_after_a_cd() {
     assert_eq!(t.poll(), [from(A, "three")]);
     assert_eq!(t.cwd().as_deref(), Some(A));
 }
+
+/// The import's candidates (SPEC §9.1) count a continued copy to its folder, also when its row
+/// was cached with the folder of its first record.
+#[test]
+fn a_cached_copy_is_a_candidate_of_its_folder() {
+    let mut t = Two::new(B);
+    t.prompt(A, "one");
+    t.prompt(B, "two");
+    let store = t.mirror.store.clone();
+    let row = FileRow {
+        cwd: Some(A.to_string()),
+        ..FileRow::default()
+    };
+    store.put(&t.file, &row).unwrap();
+    let projects = t._dir.path().join("projects");
+    let found = candidates(&projects, &store, |_| true);
+    let paths: Vec<&str> = found.candidates.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, [B]);
+    assert_eq!(t.cwd().as_deref(), Some(B));
+}

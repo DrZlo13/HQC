@@ -926,7 +926,9 @@ async fn a_session_that_followed_its_transcript_starts_there() {
     let hub = TestHub::start().await;
     let (mut w, (pa, _), _) = home_and_popcorn(&hub).await;
     let runtime = Uuid::new_v4().to_string();
-    let one = answer_at("2026-11-09T10:00:00Z", "one");
+    // Around the input "go", which the hub stores with its own clock: "one" before, "two" after.
+    let now = chrono::Utc::now();
+    let one = answer_at(&(now - chrono::Duration::minutes(1)).to_rfc3339(), "one");
     mirror_event_in(&mut w, HOME, HOME, &runtime, &one).await;
     let sid = only_session(&hub, &pa).await;
     let (st, v) = hub
@@ -946,7 +948,7 @@ async fn a_session_that_followed_its_transcript_starts_there() {
     )
     .await;
 
-    let two = answer_at("2026-11-09T10:01:00Z", "two");
+    let two = answer_at(&(now + chrono::Duration::minutes(1)).to_rfc3339(), "two");
     mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &two).await;
     let (st, next) = hub
         .post(

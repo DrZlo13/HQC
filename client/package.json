@@ -2,6 +2,7 @@
   "name": "hqc-client",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "hqc web client (PWA), SPEC §6, iteration 1 task T5",
   "type": "module",
   "scripts": {

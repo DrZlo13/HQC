@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.100, 2026-11-09. Status: the architecture agreed after six reviews and a survey of
+Version 0.102, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1573,10 +1573,12 @@ sessions", "Make default", "Remove"; "Add a workspace", "Import from Claude Code
 longer in the sidebar).
 
 The session list (since 0.53, T50): a State / Recent / Custom switch (State groups Needs you /
-Running / Idle, Recent Today / Yesterday / Earlier, Custom is one list in the saved order) and a
-Reorder button; Reorder replaces the switch with "Reorder · Cancel · Done" and gives each row a
-handle (on the left on a desktop, on the right on a phone), dragged with pointer events (mouse
-and finger) or moved with ↑/↓ while focused; Done stores the order with `mode: custom`, Cancel
+Running / Idle, Recent Today / Yesterday / Earlier, Custom is one list in the saved order;
+since 0.102 an `idle` session whose subagents still work after its turn ended, `subagents` > 0,
+is under Running and its row says "Running") and a Reorder button; Reorder replaces the switch
+with "Reorder · Cancel · Done" and gives each row a handle (on the left on a desktop, on the
+right on a phone), dragged with pointer events (mouse and finger) or moved with ↑/↓ while
+focused; Done stores the order with `mode: custom`, Cancel
 restores the previous one. Both are `session_order` above. A row shows, on hover or focus, an
 archive button and "⋯" (Rename, Delete with a confirmation in the row); on a phone a long press
 (or a right click) opens a bottom sheet with Archive, Rename and Delete (confirmed in a second
@@ -4258,6 +4260,11 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.100 → 0.102 (a session with a subagent at work is Running)
+§6 client layout: an `idle` session whose subagents still run (`subagents`) is in the list's
+Running group and its row says "Running"; before, a session whose main agent had ended its turn
+sat under Idle while its background subagent worked.
 
 ### 0.89 → 0.100 (a missing transcript is reported)
 §5.3: `session.start.has_history` — the session's feed has an `agent.message`. §8.1, §4: the

@@ -14,7 +14,7 @@ import type { ConnState, HubSocket } from '../src/ws';
 import { App } from '../src/ui/App';
 import { ProjectRail } from '../src/ui/ProjectRail';
 import { SessionList } from '../src/ui/SessionList';
-import { activeLabel, arrange, bucketOf, groupSessions, headCounts, matchesQuery, moveTo, projectInitials } from '../src/ui/sessions';
+import { activeLabel, arrange, bucketOf, groupSessions, headCounts, matchesQuery, moveTo, projectInitials, subLabel } from '../src/ui/sessions';
 
 const NOW = Date.parse('2026-10-24T19:50:00');
 const at = (hoursAgo: number) => new Date(NOW - hoursAgo * 3_600_000).toISOString();
@@ -69,6 +69,18 @@ describe('list logic', () => {
     expect(bucketOf(sess('a', 'a', 'locked_vscode', at(1), { held_by: { entrypoint: 'claude-vscode', status: 'busy' } }))).toBe('run');
     expect(bucketOf(sess('a', 'a', 'locked_vscode', at(1)))).toBe('idle');
     expect(bucketOf(sess('a', 'a', 'worker_offline', at(1)))).toBe('idle');
+    expect(bucketOf(sess('a', 'a', 'worker_offline', at(1), { subagents: 2 }))).toBe('idle');
+  });
+
+  it('an idle session whose background subagent still works is in Running and says so', () => {
+    const busy = sess('bg', 'Background build', 'idle', at(1), { subagents: 1 });
+    const free = sess('free', 'Nothing left', 'idle', at(2), { subagents: 0 });
+    expect(groupSessions([busy, free], 'state', NOW).map((g) => [g.label, g.items.map((s) => s.id)])).toEqual([
+      ['Running', ['bg']],
+      ['Idle', ['free']],
+    ]);
+    expect(subLabel(busy)).toBe('Running');
+    expect(subLabel(free)).toBe('Idle');
   });
 
   it('groups by state and by recency, newest first, empty groups left out', () => {

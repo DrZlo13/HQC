@@ -32,12 +32,14 @@ export function moveTo(order: string[], id: string, to: number): string[] {
 }
 
 /** Which group of "State" a session is in: it waits for the user (a request or an
- *  error to retry), works (a turn, queued input, VS Code busy with it) or is free. */
+ *  error to retry), works (a turn, queued input, a subagent still at work after the turn
+ *  ended, VS Code busy with it) or is free. */
 export type Bucket = 'wait' | 'run' | 'idle';
 
 export function bucketOf(s: SessionInfo): Bucket {
   if (s.state === 'waiting' || s.state === 'error') return 'wait';
   if (s.state === 'running' || s.state === 'queued') return 'run';
+  if (s.state === 'idle' && (s.subagents ?? 0) > 0) return 'run';
   if (s.state === 'locked_vscode' && s.held_by?.status === 'busy') return 'run';
   return 'idle';
 }
@@ -74,7 +76,8 @@ export function subLabel(s: SessionInfo): string {
       t = 'Archived';
       break;
     case 'idle':
-      t = 'Idle';
+      // The turn ended, a background subagent still works: Running, as its group.
+      t = (s.subagents ?? 0) > 0 ? 'Running' : 'Idle';
       break;
     default:
       t = 'Unknown';

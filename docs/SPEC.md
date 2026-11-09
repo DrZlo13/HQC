@@ -356,7 +356,9 @@ last N messages as the starting prompt.
 by the adapter, the mirror and the import alike — it is a uuid v5 of the record's `uuid`, so
 the same fact from two sources yields one `event_id`; if a record has several content
 blocks, block 0 gets v5 of `uuid` and block `i > 0` gets v5 of the string `"<uuid>/<i>"`
-in the same namespace; the rule is mandatory for all three sources (§9.2);
+in the same namespace; the rule is mandatory for all three sources (§9.2); since 0.98 the
+question card the mirror builds from block `i` gets v5 of `"<uuid>/<i>/clarify.request"` and
+`"<uuid>/<i>/clarify.response"` (§9.1);
 for everything else — v7 from the sender), `seq` (assigned by the hub, monotonic within the
 session), `ts`, `author` (`{kind: user|agent, id}` or `{kind: system}` without `id`; for an
 agent `id` = its `session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops,
@@ -2855,7 +2857,8 @@ key. Subfolders with subagent transcripts and files that are not `<uuid>.jsonl` 
 Verified on 2.1.307: besides `user`/`assistant` the file has `attachment`,
 `file-history-snapshot`, `api-request*`, `last-prompt`, `ai-title`, `cost-state`,
 `queue-operation`, `system` and other records; the parser skips them, except `ai-title`, which
-it parses separately (the `aiTitle` field); the adapter takes the session title from it (§8.1).
+it parses separately (the `aiTitle` field; the adapter takes the session title from it, §8.1),
+and since 0.98 `attachment`, whose `queued_command` is a message typed during a turn (§9.1).
 
 Format on 2.1.308 (T15, fixtures `vscode-takeover-2.1.308` and `adapter-then-outside-2.1.308`,
 `docs/notes/t15-questions.md`):
@@ -2922,9 +2925,22 @@ its `stop_reason` as any other; a `user` record with `origin.kind: task-notifica
 `origin {kind, producer: session-task, runId}`, `promptSource: system`, `turnOrigin:
 task_notification`, text `<task-notification><task-id>…<status>…</status><summary>…</summary>…`)
 → `system task_notification` with the `<summary>`, else "Background task", never a `user.message`
-and not a prompt (an answer after it points at the last prompt a person typed). Records that yield no
-events (`attachment`, snapshots, `api-request*`, `queue-operation`, empty `thinking`, images)
-are skipped.
+and not a prompt (an answer after it points at the last prompt a person typed). Since 0.98: a
+message the person typed during a turn — an `attachment` record with `attachment.type:
+queued_command`, `commandMode: prompt`, `origin.kind` `human` or no `origin` (before 2.1.210,
+and on some later ones that carry `delivery_id`),
+not `isMeta` (another session's message) and not a sidechain; its `prompt` is a list of blocks or
+(2.1.296+) a string — → a `user.message` (`delivery: delivered`) per non-empty text block, at the
+attachment's own `timestamp` (when it was typed); it is not a prompt either (an answer after it
+points at the turn's prompt). An answered `AskUserQuestion` — a `tool_result` whose record has
+`toolUseResult {questions, answers}`, `answers` keyed by the question's text — gives after its
+`tool.result` a `clarify.request` with the questions as the adapter parses them (§8.1) and a
+`clarify.response` with the answers by question id, so the client shows the closed card with the
+chosen options; the CLI joins a multi-select answer with ", ", which the mirror splits back by the
+question's option labels, the longest label first, and any rest is one answer typed as "Other".
+A declined question (`is_error`, no `questions` in the record) stays a `tool.result`. Records
+that yield no events (other `attachment`s, snapshots, `api-request*`, `queue-operation`, empty
+`thinking`, images) are skipped.
 
 For an unknown `runtime_session_id` of this worker the hub creates a session in the
 workspace's project: `cwd` is the record's path relative to the workspace, the title is the
@@ -2932,9 +2948,9 @@ workspace's project: `cwd` is the record's path relative to the workspace, the t
 `system session_created` "Session imported from Claude Code". The initial `locked_by` follows
 the frame's `recent` flag: the worker sets it if the file was modified less than 30 s before
 it was read (the worker's clock, not the hub's); then `vscode`, otherwise `none`. An author the
-worker does not know is filled in by the hub: the workspace owner for `user.message`, the
-session's agent for the rest. No push is sent for mirror events (an import is hundreds of old
-replies). Since 0.86 a mirrored record whose `ts` is before its session's `created_at` on the
+worker does not know is filled in by the hub: the workspace owner for `user.message` (and
+since 0.98 `clarify.response`), the session's agent for the rest. No push is sent for mirror
+events (an import is hundreds of old replies). Since 0.86 a mirrored record whose `ts` is before its session's `created_at` on the
 hub (the record's time is the worker's clock, `created_at` the hub's) is read for the session's
 owner (§3 ReadCursor), and so is the `session_created` of an
 imported session: an imported session comes in read, with the history the owner has seen in VS
@@ -2988,7 +3004,11 @@ arguments. This makes own records of the `/compact` command record (it is not in
 2.1.308) and of the prompt if its echo comes with a different `uuid` (see §9.3). Since 0.69 a
 background task's notification record (§9.1) is own while the session's hqc process is alive:
 the adapter reported its stream-json `system task_notification` line, which has another `uuid`
-(2.1.312), so the record is neither emitted nor held nor taken for another writer. The mirror
+(2.1.312), so the record is neither emitted nor held nor taken for another writer. Since 0.98 a
+message typed during a turn (§9.1) is matched by its typed text (its first text block) like a
+prompt, and while the session's hqc process is alive it is own even when unmatched: stream-json
+does not carry the attachment, and only hqc writes to that process's stdin. Its `timestamp`
+counts for the first pass's `since_ts` like any record's. The mirror
 **never emits** own records (the adapter has sent them, including the prompt, as a hub
 `user.message` with its own `event_id`). The rule for foreign records:
 
@@ -4222,6 +4242,16 @@ without a hub each of these would have to be done peer-to-peer.
 Claude Code adapter that starts such a session anew because its transcript is gone (Claude
 Code's `cleanupPeriodDays`, 30 days by default) writes `system transcript_missing`; before, the
 agent silently went on without the conversation. 0.90–0.99 are taken by open pull requests.
+
+### 0.97 → 0.98 (messages typed during a turn and answered questions in a mirrored chat)
+§9, §9.1, §9.2, §3 Event: a chat mirrored or imported from a Claude Code transcript lacked the
+messages the person typed while a turn ran, which the CLI writes as an `attachment` record of
+type `queued_command`, and showed an answered `AskUserQuestion` only as a folded tool row. The
+mirror now maps such a message to a `user.message` at the time it was typed, and an answered
+question to a closed `clarify.request`/`clarify.response` card built from the record's
+`toolUseResult`, a multi-select answer split back by the option labels; the hub authors a
+mirrored `clarify.response` as the owner. While the session's hqc process is alive a typed
+message is the adapter's own input, so it is neither sent twice nor taken for another writer.
 
 ### 0.88 → 0.89 (the list at once on a reload)
 §6: `GET /api/sessions` gives every session of every project of the user in one list; the

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.102, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
+Version 0.103, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -305,7 +305,7 @@ a session has exactly one agent; people's access to a session is determined by G
 
 Title: creating without `title` gives "Session N" (N — the session's ordinal number in the
 project, archived ones included; `slug` — `session-N`) with `title_source: default`; `title` on
-creation and `PATCH title` set `user`. The hub applies a title from the runtime
+creation, `PATCH title` and an agent's `hqc_rename` (§7) set `user`. The hub applies a title from the runtime
 (`session.state.title`, §5.4; for Claude Code — `ai-title`, §8.1) and sets `runtime` only if
 `title_source` is not `user`: the runtime does not rename a session the user has renamed.
 
@@ -757,7 +757,8 @@ MCP calls (worker → hub → worker):
   repeat finds the session, stores the message if the first call did not get that far, and
   answers the same `{address}`; since 0.61 (T47) the ephemeral worktree of a spawn with
   isolation is keyed too (`hqc_spawn worktree` as the tool), so a repeat waits for the same
-  worktree instead of making another. The same `request_id` from another
+  worktree instead of making another. `hqc_rename` (since 0.103) keys nothing: a repeat
+  writes the same title again. The same `request_id` from another
   session is another call.
 - A deferred answer (since 0.35): the hub keeps the `mcp.result` frame in
   `PendingRequest.result` and sends it to the asking session's worker, now if it is
@@ -1988,6 +1989,15 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   and that from the next turn it works in `path`, the conversation goes on and its address is
   `address`; `INSTRUCTIONS` (§7.2) say the same in short. Only this tool queues an input; a move
   from the client does not (§6).
+- `hqc_rename(title, session?)` (since 0.103) — renames a session as the client's Rename does
+  (`PATCH /api/sessions/{id}` with `title`, §6): the calling session when `session` is absent,
+  otherwise the session `session` names, an address or an id of a session of the owner, not
+  archived, not a worker's service session, else `not_found` (the target rules of §7.1, except
+  that the calling session itself and a session driven from VS Code are accepted). The title
+  is trimmed; an empty one or one longer than 200 characters is `invalid_args`. It is stored
+  with `title_source: user` (§3 Session), so the runtime's title no longer replaces it; the
+  address does not change. The result is `{address, title}` — the session's address and the
+  title as stored. A repeat of the call (§5.2) sets the same title again.
 
 Session address: `<project-slug>/<session-slug>` or the id. A slug is unique within the project
 and does not change on rename.
@@ -1995,9 +2005,9 @@ and does not change on rename.
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
 since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
 `hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34; `hqc_schedule` since 0.38, T35;
-`hqc_move` since 0.76); the list is shared by the worker's MCP server and the hub
-(`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next to it
-(`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
+`hqc_move` since 0.76; `hqc_rename` since 0.103); the list is shared by the worker's MCP
+server and the hub (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next
+to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
@@ -4260,6 +4270,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.102 → 0.103 (an agent renames a session)
+§7: the tool `hqc_rename(title, session?)` renames the calling session, or another session of
+the owner by its address or id, as the client's Rename does (`PATCH /api/sessions/{id}` with
+`title`): the title is trimmed, at most 200 characters, and stored with `title_source: user`,
+so the runtime's title no longer replaces it; the address stays. The result is `{address,
+title}`. Before, an agent could not rename a session. `INSTRUCTIONS` (§7.2) name it.
 
 ### 0.100 → 0.102 (a session with a subagent at work is Running)
 §6 client layout: an `idle` session whose subagents still run (`subagents`) is in the list's

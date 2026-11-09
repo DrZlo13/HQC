@@ -28,9 +28,16 @@ use std::time::Duration;
 /// agent-to-agent traffic through `hqc_send`/`hqc_ask` instead).
 pub const NATIVE_MESSAGING_TOOLS: &[&str] = &["ListAgents", "SendMessage"];
 
+/// `system.code` of a session that had a conversation but whose transcript is gone, so the
+/// agent starts without it (SPEC §4, §8.1).
+pub const TRANSCRIPT_MISSING: &str = "transcript_missing";
+pub const TRANSCRIPT_MISSING_TEXT: &str = "The Claude Code transcript of this session is gone \
+    (Claude Code deletes transcripts older than its cleanupPeriodDays setting, 30 days by \
+    default): the agent continues without the earlier conversation";
+
 use anyhow::Context;
 use async_trait::async_trait;
-use hqc_proto::event::ClarifyAnswer;
+use hqc_proto::event::{Author, ClarifyAnswer, EventKind};
 use hqc_proto::frame::{ForkFrom, Runtime, SessionInput};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
@@ -637,6 +644,22 @@ impl ClaudeCodeAdapter {
             ssh_keys = ?spec.environment.ssh_keys,
             "claude started"
         );
+        // The session talked before, but its transcript is gone (Claude Code deletes those
+        // older than its `cleanupPeriodDays`, 30 days by default): the agent starts without the
+        // conversation, and the feed says so (SPEC §8.1).
+        if matches!(launch, Launch::New) && spec.has_history {
+            tracing::warn!(session_id = %self.session_id, runtime_session_id = %uuid, transcript = ?transcript, "the session's transcript is gone; the agent starts without its conversation");
+            let ev = crate::adapter::new_event(
+                self.session_id,
+                Author::System,
+                EventKind::System {
+                    text: TRANSCRIPT_MISSING_TEXT.into(),
+                    code: TRANSCRIPT_MISSING.into(),
+                    fork: None,
+                },
+            );
+            let _ = self.events.send(AdapterEvent::Event(ev)).await;
+        }
 
         // The CLI carries the session's cost over `--resume` from the transcript's last
         // `cost-state`; per-turn costs are counted from there (T27).

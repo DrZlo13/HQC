@@ -805,6 +805,39 @@ async fn answer_while_offline_is_delivered_after_hello() {
     hub.finish().await;
 }
 
+/// SPEC §5.3: `session.start.has_history` once the session's feed has an `agent.message`, so
+/// the worker can tell a lost transcript from a session that never talked.
+#[tokio::test]
+async fn session_start_says_when_the_session_has_talked() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("history").await;
+    let st = ack_start(&mut w, &sid).await;
+    assert!(st["payload"].get("has_history").is_none(), "{st}");
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Hi.", "final": true}),
+    ))
+    .await;
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let (s, _) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "go on"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let st = ack_start(&mut w, &sid).await;
+    assert_eq!(st["payload"]["has_history"], true, "{st}");
+    hub.finish().await;
+}
+
 /// SPEC §5.2, §17.3: a reconnect with the same boot_id keeps an open approval; a new
 /// boot_id (worker restart) cancels it with `worker_restart`, without a frame, and loses the
 /// turn.

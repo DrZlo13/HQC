@@ -62,6 +62,9 @@ export type PermissionMode = (typeof PERMISSION_MODES)[number];
 /** The app's base palette (T49): three dark ones and their light counterparts. */
 export const THEME_NAMES = ['warm', 'graphite', 'contrast', 'warm_light', 'graphite_light', 'contrast_light'] as const;
 export type Theme = (typeof THEME_NAMES)[number];
+/** The client's look (SPEC §3 User): everything dense, or the roomy default. */
+export const LOOK_NAMES = ['compact', 'spacious'] as const;
+export type LookName = (typeof LOOK_NAMES)[number];
 /** A project's color (T49); `theme.ts` maps it to its hex value. */
 export const PROJECT_COLOR_NAMES = ['teal', 'plum', 'blue', 'rose', 'moss', 'coral', 'cyan', 'slate'] as const;
 export type ProjectColor = (typeof PROJECT_COLOR_NAMES)[number];
@@ -110,6 +113,9 @@ export interface UserMessage {
   /** Set by the hub: the agent's text was being written when it came, so it stands under that
    *  text (SPEC §6, since 0.108). Absent = false. */
   during_text?: boolean;
+  /** The runtime took it into the turn already running (SPEC §17.2); the hub sets it on
+   *  delivery. */
+  joined?: boolean;
 }
 export interface AgentDelta {
   text: string;
@@ -378,6 +384,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
     schedule_id: optStr(p, 'schedule_id'),
     during_text: optBool(p, 'during_text'),
+    joined: optBool(p, 'joined'),
   }),
   'agent.delta': (p) => ({ text: str(p, 'text') }),
   'subagents.live': (p) => ({
@@ -912,6 +919,8 @@ export interface DeliveryChange {
   seq: number;
   delivery: Delivery;
   delivered_at?: string;
+  /** The input went into the turn already running (SPEC §17.2): `payload.joined` with it. */
+  joined?: boolean;
 }
 
 export type ServerFrame =
@@ -963,6 +972,7 @@ export function parseDelivery(v: unknown): DeliveryChange {
     seq: num(d, 'seq'),
     delivery: strictEnum(d, 'delivery', DELIVERIES),
     delivered_at: optStr(d, 'delivered_at'),
+    joined: optBool(d, 'joined'),
   };
 }
 
@@ -1017,6 +1027,8 @@ export interface Me {
   timezone?: string;
   /** The app's base palette (T49), the same on every device. */
   theme: Theme;
+  /** The client's look, the same on every device. */
+  look: LookName;
 }
 
 /** The fields of the hub's session object (SPEC §6) the client uses. */
@@ -1085,6 +1097,7 @@ export function parseMe(v: unknown): Me {
     personal_project_id: str(o, 'personal_project_id'),
     timezone: optStr(o, 'timezone'),
     theme: oneOf(o, 'theme', THEME_NAMES) ?? 'warm',
+    look: oneOf(o, 'look', LOOK_NAMES) ?? 'spacious',
   };
 }
 
@@ -1212,6 +1225,8 @@ export interface Project {
   created_at: string;
   /** When the user made it a favorite; absent: not one. */
   favorite_at?: string;
+  /** Since when it is archived: off the project bar, found by its search. */
+  archived_at?: string;
 }
 
 /** A project's icon (T49); `url` of an image changes with the image. */
@@ -1240,6 +1255,7 @@ export function parseProject(v: unknown): Project {
     icon: optProjectIcon(o),
     created_at: str(o, 'created_at'),
     favorite_at: optStr(o, 'favorite_at'),
+    archived_at: optStr(o, 'archived_at'),
   };
 }
 
@@ -1248,7 +1264,7 @@ export function parseFavorite(v: unknown): string {
   return str(obj(v, 'favorite'), 'favorite_at');
 }
 
-/** `{projects: [...]}` of `GET /api/projects`. */
+/** `{projects: [...]}` of `GET /api/projects` (`?archived=1`: the archived ones). */
 export function parseProjectList(v: unknown): Project[] {
   return arr(obj(v, 'project list'), 'projects').map(parseProject);
 }

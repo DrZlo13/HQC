@@ -240,7 +240,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Feed', 'Project bar', 'Session list', 'Notifications', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'Notifications', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();
@@ -326,29 +326,24 @@ it('does not fetch the lists again for what the hub pushes or a read while they 
   expect(projectLists).toBe(1);
 });
 
-it('sets the full-width feed, the system font and the time in the gap from "Settings" on the document root', async () => {
-  const classes = () => document.documentElement.classList;
-  expect(classes().contains('feed-wide')).toBe(false);
+it('sets the look from "Settings" on the document root and on the hub', async () => {
+  const five = ['feed-column', 'feed-wide', 'font-system', 'list-compact', 'rail-names'];
+  const on = () => five.filter((c) => document.documentElement.classList.contains(c));
+  expect(on()).toEqual([]);
   location.hash = '#/settings';
-  const wide = await until('feed switches', () => $<HTMLInputElement>('input[name=wide-feed]'));
-  wide.click();
-  await until('full width', () => classes().contains('feed-wide'));
-  expect($<HTMLInputElement>('input[name=wide-feed]')!.checked).toBe(true);
-  $<HTMLInputElement>('input[name=system-font]')!.click();
-  await until('system font', () => classes().contains('font-system'));
-  $<HTMLInputElement>('input[name=wide-feed]')!.click();
-  await until('narrow again', () => !classes().contains('feed-wide'));
-  expect(classes().contains('font-system')).toBe(true);
-  $<HTMLInputElement>('input[name=system-font]')!.click();
-  await until('Inter again', () => !classes().contains('font-system'));
-  $<HTMLInputElement>('input[name=time-in-gap]')!.click();
-  await until('time in the gap', () => classes().contains('time-in-gap'));
-  $<HTMLInputElement>('input[name=time-in-gap]')!.click();
-  await until('time on its line again', () => !classes().contains('time-in-gap'));
-  $<HTMLInputElement>('input[name=compact-list]')!.click();
-  await until('compact list', () => classes().contains('list-compact'));
-  $<HTMLInputElement>('input[name=compact-list]')!.click();
-  await until('roomy list again', () => !classes().contains('list-compact'));
+  const look = (label: string) => button(label, '[aria-label=Look]');
+  (await until('look switch', () => look('Compact')))!.click();
+  await until('compact', () => on().length === 5);
+  expect(look('Compact')!.getAttribute('aria-pressed')).toBe('true');
+  // On the hub (`PATCH /api/me`), as another device sees it after a reload.
+  expect((await app.api.me()).look).toBe('compact');
+  // Compact names the projects on the bar.
+  await until('names on the bar', () => $('.rail-name'));
+  look('Spacious')!.click();
+  await until('spacious', () => on().length === 0);
+  expect((await app.api.me()).look).toBe('spacious');
+  expect($('.rail-name')).toBeNull();
+  expect($$('input[type=checkbox]')).toEqual([]);
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

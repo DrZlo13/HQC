@@ -109,7 +109,7 @@ describe('mock scenario', () => {
     // the approval card, folded after the answer.
     expect(el.querySelector('.msg-agent')!.textContent).toContain('Let me look at the project and run the tests.');
     const group = el.querySelector('.tool-group')!;
-    expect(group.querySelector('.tool-stats')!.textContent).toMatch(/^1 command\b/);
+    expect(group.querySelector('.tool-stats')!.textContent).toMatch(/^1 tool call\b/);
     expect(el.querySelector('.perm-done-row')!.textContent).toContain('$ cargo test');
     expect(el.querySelector('.perm-done-row')!.textContent).toContain('· allowed');
     expect(el.textContent).toContain('All 42 tests passed.');
@@ -141,7 +141,7 @@ describe('mock scenario', () => {
 
     const { renderChatToElement } = await import('./render-helpers');
     const el = renderChatToElement(chat);
-    expect(el.querySelector('.msg-answer .msg-bubble')!.textContent).toBe('Build the project first');
+    expect(el.querySelector('.msg-answer .msg-bubble .msg-text')!.textContent).toBe('Build the project first');
     expect(el.querySelector('.perm-done-row')!.textContent).toContain('denied, replied with text');
     chat.close();
   });

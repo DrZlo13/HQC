@@ -1,5 +1,6 @@
-// What one chat shows: stored events by `seq`, the live `agent.delta` stream, optimistic
-// messages keyed by `client_op_id`, and the fate of approval/clarify requests.
+// What one chat shows: stored events by `seq`, the live `agent.delta` stream and
+// `subagents.live` list, optimistic messages keyed by `client_op_id`, and the fate of
+// approval/clarify requests.
 // Pure logic, no DOM and no network.
 
 import type {
@@ -8,6 +9,7 @@ import type {
   DeliveryChange,
   EventOf,
   HqcEvent,
+  LiveSubagent,
   RequestCancel,
 } from "./proto";
 
@@ -65,6 +67,10 @@ export class Timeline {
   olderFrom = 0;
   /** Text of `agent.delta` since the last `agent.message`. */
   streaming = "";
+  /** The subagents of the latest `subagents.live`. */
+  liveAgents: LiveSubagent[] = [];
+  /** When that list came (`Date.now()`): its `duration_ms` were counted then. */
+  liveAgentsAt = 0;
   version = 0;
 
   onChange(fn: () => void): () => void {
@@ -99,11 +105,17 @@ export class Timeline {
       this.streaming += ev.payload.text;
       return;
     }
+    if (ev.type === "subagents.live") {
+      this.liveAgents = ev.payload.agents;
+      this.liveAgentsAt = Date.now();
+      return;
+    }
     // Clients see only stored events (SPEC §5.2); anything else without seq is dropped.
     if (ev.seq === undefined) return;
     // Events are append-only: a seq seen before (REST page and subscribe backlog overlap,
     // the POST /input reply and its echo) is the same event. Only an input's `delivery`
-    // changes, normally by a `delivery` frame (`applyDelivery`); a frame sent while the socket
+    // changes (and with it a message's `payload.joined`), normally by a `delivery` frame
+    // (`applyDelivery`); a frame sent while the socket
     // was down is lost, so a copy the hub sent again carries the current one. The reply to
     // `POST /input` (`advance: false`) may come after newer copies and never overrides them.
     // The hub also sends a reply to an ask again once it was delivered (`reply_delivered_at`,
@@ -117,14 +129,16 @@ export class Timeline {
           seen.event_id === ev.event_id &&
           (seen.delivery !== ev.delivery ||
             seen.delivered_at !== ev.delivered_at ||
-            seen.reply_delivered_at !== replyAt)
+            seen.reply_delivered_at !== replyAt ||
+            joined(seen) !== joined(ev))
         ) {
-          this.bySeq.set(ev.seq, {
-            ...seen,
-            delivery: ev.delivery,
-            delivered_at: ev.delivered_at,
-            reply_delivered_at: replyAt,
-          });
+          this.bySeq.set(
+            ev.seq,
+            withJoined(
+              { ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt },
+              joined(ev),
+            ),
+          );
           this.sorted = null;
         }
       }
@@ -181,24 +195,22 @@ export class Timeline {
     return Math.max(0, from);
   }
 
-  /** A `delivery` frame (SPEC §6): new `delivery` / `delivered_at` of a stored input. A
-   *  change for an event not loaded yet is dropped: the event arrives with current fields. */
+  /** A `delivery` frame (SPEC §6): new `delivery` / `delivered_at` of a stored input, and
+   *  `joined` when it went into the turn already running. A change for an event not loaded
+   *  yet is dropped: the event arrives with current fields. */
   applyDelivery(d: DeliveryChange): void {
     const ev = this.bySeq.get(d.seq);
     if (!ev || ev.event_id !== d.event_id) return;
-    this.bySeq.set(d.seq, {
-      ...ev,
-      delivery: d.delivery,
-      delivered_at: d.delivered_at,
-    });
+    this.bySeq.set(d.seq, withJoined({ ...ev, delivery: d.delivery, delivered_at: d.delivered_at }, d.joined === true));
     this.sorted = null;
     this.changed();
   }
 
   /** The hub's copies of events already loaded (the newest page fetched again when a kept
-   *  chat opens): `delivery`, `delivered_at` and `reply_delivered_at` may have changed while
-   *  nothing was subscribed, and the hub tells only subscriptions. Events not loaded,
-   *  `lastSeq` and `olderFrom` stay: the subscription brings what came after `lastSeq`. */
+   *  chat opens): `delivery`, `delivered_at`, `reply_delivered_at` and `payload.joined` may
+   *  have changed while nothing was subscribed, and the hub tells only subscriptions. Events
+   *  not loaded, `lastSeq` and `olderFrom` stay: the subscription brings what came after
+   *  `lastSeq`. */
   refresh(evs: HqcEvent[]): void {
     let changed = false;
     for (const ev of evs) {
@@ -208,15 +220,14 @@ export class Timeline {
       if (
         seen.delivery === ev.delivery &&
         seen.delivered_at === ev.delivered_at &&
-        seen.reply_delivered_at === replyAt
+        seen.reply_delivered_at === replyAt &&
+        joined(seen) === joined(ev)
       )
         continue;
-      this.bySeq.set(ev.seq!, {
-        ...seen,
-        delivery: ev.delivery,
-        delivered_at: ev.delivered_at,
-        reply_delivered_at: replyAt,
-      });
+      this.bySeq.set(
+        ev.seq!,
+        withJoined({ ...seen, delivery: ev.delivery, delivered_at: ev.delivered_at, reply_delivered_at: replyAt }, joined(ev)),
+      );
       changed = true;
     }
     if (!changed) return;
@@ -332,10 +343,12 @@ export class Timeline {
     return p;
   }
 
-  /** The socket dropped: deltas after the gap would not continue the buffered text. */
+  /** The socket dropped: deltas after the gap would not continue the buffered text, and the
+   *  subagents may have ended meanwhile (the next subscribe brings the hub's list). */
   reset(): void {
-    if (!this.streaming) return;
+    if (!this.streaming && !this.liveAgents.length) return;
     this.streaming = "";
+    this.liveAgents = [];
     this.changed();
   }
 
@@ -406,4 +419,17 @@ function seqOf(i: Item): number {
   if (i.kind === "event") return i.event.seq ?? Infinity;
   if (i.kind === "invalid") return i.invalid.seq ?? Infinity;
   return Infinity;
+}
+
+/** `payload.joined` of the user's message: the hub sets it when the runtime took the message
+ *  into the turn already running (SPEC §17.2), the one change of a stored payload. */
+function joined(e: HqcEvent): boolean {
+  return e.type === "user.message" && e.payload.joined === true;
+}
+
+/** `e` with `payload.joined` set when `on`; it is never taken back. */
+function withJoined(e: HqcEvent, on: boolean): HqcEvent {
+  return on && e.type === "user.message" && !e.payload.joined
+    ? { ...e, payload: { ...e.payload, joined: true } }
+    : e;
 }

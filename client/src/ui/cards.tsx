@@ -1,8 +1,11 @@
 // The feed of a chat (T26): agent messages as text without a bubble, the user's in a bubble
-// on the right, runs of tool calls folded into groups, request cards, service lines. One
-// component per event type of SPEC §4; unknown and invalid events render as a collapsed
-// row and never throw.
+// on the right (or, in the Compact look, a plate from the left edge and a mark in a
+// gutter before every other item), runs of tool calls folded into groups, request cards,
+// service lines. A message's time sits at the right end of its first line, its copy and fork
+// buttons at the other edge on hover. One component per event type of SPEC §4; unknown and
+// invalid events render as a collapsed row and never throw.
 
+import type { ComponentChildren } from 'preact';
 import { useState } from 'preact/hooks';
 import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
@@ -17,12 +20,24 @@ import {
   groupDuration,
   groupState,
   relativePaths,
+  toolKind,
   toolLabel,
   type Block,
   type ToolRow,
 } from './feed';
-import { useAction, useNow } from './hooks';
-import { IconCheck, IconChevron, IconCross, IconFork, IconWarn } from './icons';
+import { useAction, useIsPhone, useNow } from './hooks';
+import {
+  IconArrowIn,
+  IconArrowOut,
+  IconAttach,
+  IconCheck,
+  IconChevron,
+  IconCross,
+  IconFork,
+  IconQuestion,
+  IconShield,
+  IconWarn,
+} from './icons';
 import {
   CANCEL_LABELS,
   LOG_LEVEL_LABELS,
@@ -98,13 +113,86 @@ export function FeedBlocks({ blocks, actions }: { blocks: Block[]; actions: Chat
   // `data-seq`: the first event of the block, for the jump to a search hit (Chat).
   return (
     <>
-      {blocks.map((b) => (
-        <div key={b.key} class="feed-block" data-seq={blockSeq(b)}>
-          <BlockView block={b} actions={actions} />
-        </div>
-      ))}
+      {blocks.map((b) => {
+        // The request on a phone's bottom sheet is not drawn here, nor its mark.
+        const g: Gutter = b.kind === 'approval' && b.event.payload.request_id === actions.sheetRequest ? {} : gutter(b);
+        return (
+          <div key={b.key} class={g.full ? 'feed-block feed-full' : 'feed-block'} data-seq={blockSeq(b)}>
+            <BlockView block={b} actions={actions} />
+            {/* After the block, so a fold's open state turns its chevron (styles.css). */}
+            {g.mark}
+          </div>
+        );
+      })}
     </>
   );
+}
+
+interface Gutter {
+  mark?: ComponentChildren;
+  full?: boolean;
+}
+
+const mark = (kind: string, icon: ComponentChildren) => (
+  <span class={`feed-mark feed-mark-${kind}`} aria-hidden="true">
+    {icon}
+  </span>
+);
+
+/** The block's mark in the gutter of the one-column feed (the Compact look,
+ *  shown by styles.css only there): a grey dot for the agent's text, the state of a run of
+ *  tools, an arrow for a message between sessions, a shield for a permission request, a
+ *  question for the agent's questions, a clip for a file, a chevron for what folds. The user's
+ *  messages and the service lines between hairlines have none and span the feed (`full`). */
+function gutter(b: Block): Gutter {
+  switch (b.kind) {
+    case 'agent':
+      return { mark: mark('dot', <span class="feed-dot" />) };
+    case 'tools': {
+      const state = groupState(b.rows);
+      if (state === 'running') return { mark: mark('running', <span class="pulse-dot" />) };
+      return { mark: mark(state, state === 'ok' ? <IconCheck size={13} /> : <IconCross size={13} />) };
+    }
+    case 'sent':
+    case 'reply-to':
+      return { mark: mark('relay', <IconArrowOut />) };
+    case 'reply-from':
+      return { mark: mark('relay', <IconArrowIn />) };
+    case 'approval':
+      return { mark: mark('perm', <IconShield size={14} />) };
+    case 'item': {
+      const it = b.item;
+      if (it.kind === 'pending') return { full: true };
+      if (it.kind === 'invalid') return {};
+      const e = it.event;
+      switch (e.type) {
+        case 'user.message':
+          return { full: true };
+        case 'agent.message':
+          return e.payload.runtime ? { full: true } : { mark: mark('dot', <span class="feed-dot" />) };
+        case 'agent.delta':
+          return { mark: mark('dot', <span class="feed-dot" />) };
+        case 'agent.thinking':
+          return { mark: mark('fold', <IconChevron size={12} />) };
+        case 'approval.request':
+          return { mark: mark('perm', <IconShield size={14} />) };
+        case 'clarify.request':
+          return { mark: mark('ask', <IconQuestion />) };
+        case 'attachment':
+          return { mark: mark('file', <IconAttach size={14} />) };
+        case 'peer.message':
+          return { mark: mark('relay', <IconArrowIn />) };
+        case 'system':
+          if (e.payload.code === 'task_notification') return { mark: mark('fold', <IconChevron size={12} />) };
+          return { full: true };
+        case 'unknown':
+          return {};
+        default:
+          // The answer to a request and the other service lines.
+          return { full: true };
+      }
+    }
+  }
 }
 
 export function blockSeq(b: Block): number | undefined {
@@ -210,6 +298,9 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
       return <UserMessage event={event} actions={actions} />;
     case 'agent.delta':
       return <StreamingMessage text={event.payload.text} />;
+    case 'subagents.live':
+      // Above the input (LiveSubagents), never in the feed.
+      return null;
     case 'agent.message':
       // A reply Claude Code wrote itself (an API error, "Credit balance is too low"): a
       // service line, not the agent's text.
@@ -373,12 +464,85 @@ function Line({ kind, children }: { kind: string; children: preact.ComponentChil
   );
 }
 
+/** A message's time at the right end of its first line, as Telegram has it: floated, so the
+ *  text wraps around it; `children` after the time ("· scheduled"). */
+function MessageTime({ ts, before, children }: { ts: string; before?: ComponentChildren; children?: ComponentChildren }) {
+  return (
+    <span class="msg-time">
+      {before}
+      <time dateTime={ts}>{formatTime(ts)}</time>
+      {children}
+    </span>
+  );
+}
+
+/** The user's bubble (a plate in one column) with its time and, when there is one, its note
+ *  ("joined the turn"): in a bubble the first line with the time at its end, the text under
+ *  them; left of the time on a plate (styles.css). */
+function Bubble({
+  ts,
+  note,
+  time,
+  buttons,
+  children,
+}: {
+  ts: string;
+  note?: string;
+  time?: ComponentChildren;
+  /** Shown on hover left of the time (a computer's; a phone has them under the message). */
+  buttons?: ComponentChildren;
+  children: ComponentChildren;
+}) {
+  return (
+    <div class={['msg-bubble', note && 'msg-noted', buttons && 'msg-bubble-acts'].filter(Boolean).join(' ')}>
+      <MessageTime ts={ts} before={buttons && <span class="msg-time-actions">{buttons}</span>}>
+        {time}
+      </MessageTime>
+      {note && <span class="msg-note">{note}</span>}
+      {children}
+    </div>
+  );
+}
+
+/** A message's buttons, shown on hover at the edge opposite its time (styles.css): left of the
+ *  feed, clear of the time and of the next block. The user's message has them in its bubble,
+ *  left of the time, on a computer (`Bubble`). */
+function MessageActions({ children }: { children: ComponentChildren }) {
+  return <div class="msg-actions">{children}</div>;
+}
+
 function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actions: ChatActions }) {
   const d = event.delivery;
   const ids = event.payload.artifact_ids;
+  const fork = actions.fork && event.author.kind === 'user' && d !== 'pending' && d !== 'failed';
+  const phone = useIsPhone();
+  const buttons = (event.payload.text || fork) && [
+    event.payload.text && <CopyButton key="copy" text={event.payload.text} icon />,
+    fork && (
+      <button
+        key="fork"
+        type="button"
+        class="btn-copy btn-copy-idle btn-fork"
+        aria-label="Fork from here"
+        title="Fork from here: a new session with the conversation before this message"
+        onClick={() => actions.fork!(event)}
+      >
+        <IconFork />
+      </button>
+    ),
+  ];
   return (
     <div class="msg-user">
-      <div class="msg-bubble">
+      <Bubble
+        ts={event.ts}
+        buttons={!phone && buttons}
+        note={event.payload.joined ? 'joined the turn' : undefined}
+        time={[
+          event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
+          d === 'pending' && <span class="delivery"> · awaiting delivery</span>,
+          d === 'failed' && <span class="delivery delivery-failed"> · not delivered</span>,
+        ]}
+      >
         {event.payload.text && <UserText text={event.payload.text} />}
         {ids.length > 0 && (
           <div class="attachments">
@@ -387,25 +551,8 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
             ))}
           </div>
         )}
-      </div>
-      <div class="meta">
-        {event.payload.text && <CopyButton text={event.payload.text} />}
-        {actions.fork && event.author.kind === 'user' && d !== 'pending' && d !== 'failed' && (
-          <button
-            type="button"
-            class="btn-copy btn-copy-idle btn-fork"
-            aria-label="Fork from here"
-            title="Fork from here: a new session with the conversation before this message"
-            onClick={() => actions.fork!(event)}
-          >
-            <IconFork />
-          </button>
-        )}
-        {formatTime(event.ts)}
-        {event.payload.schedule_id && <span class="scheduled"> · scheduled</span>}
-        {d === 'pending' && <span class="delivery"> · awaiting delivery</span>}
-        {d === 'failed' && <span class="delivery delivery-failed"> · not delivered</span>}
-      </div>
+      </Bubble>
+      {phone && buttons && <MessageActions>{buttons}</MessageActions>}
     </div>
   );
 }
@@ -421,13 +568,12 @@ function TextAnswer({ event }: { event: EventOf<'approval.response'> }) {
   const text = event.payload.message!;
   return (
     <div class="msg-user msg-answer">
-      <div class="msg-bubble">
+      <Bubble ts={event.ts} note="instead of the request">
         <UserText text={text} />
-      </div>
-      <div class="meta">
-        <CopyButton text={text} />
-        {formatTime(event.ts)} · instead of the request
-      </div>
+      </Bubble>
+      <MessageActions>
+        <CopyButton text={text} icon />
+      </MessageActions>
     </div>
   );
 }
@@ -479,17 +625,18 @@ export function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
 function AgentMessage({ event, usage }: { event: EventOf<'agent.message'>; usage?: EventOf<'usage'> }) {
   return (
     <article class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}`}>
+      <MessageTime ts={event.ts} />
       <Markdown class="text" text={event.payload.text} />
-      <div class="meta">
-        <CopyButton text={event.payload.text} />
-        {formatTime(event.ts)}
-        {usage && (
+      {usage && (
+        <div class="meta">
           <span class="usage">
-            {' · '}
             <UsageParts usage={usage} />
           </span>
-        )}
-      </div>
+        </div>
+      )}
+      <MessageActions>
+        <CopyButton text={event.payload.text} icon />
+      </MessageActions>
     </article>
   );
 }
@@ -515,17 +662,19 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
   );
 }
 
-/** A run of tool calls, collapsed: "N commands · time" and the last call's line, as the tab
- *  shows it; open, a row per call (T26). */
+/** A run of tool calls, collapsed: "N tool calls · time", then the call's line when it is
+ *  one, else the tools it called, each once, in the order first called; open, a row per call
+ *  (T26). */
 function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const calls = callRows(block.rows);
   const state = groupState(block.rows);
   const ms = groupDuration(block.rows);
-  const n = count(calls.length, 'command');
+  const n = count(calls.length, 'tool call');
   const stats = ms !== undefined ? `${n} · ${formatDuration(ms)}` : n;
-  const last = calls.filter((r) => r.call).at(-1)?.call;
-  const peek = last && callPeek(last.payload.tool, last.payload.args_preview, actions.workspaceRoot);
+  const one = calls.length === 1 ? calls[0].call : undefined;
+  const peek = one && callPeek(one.payload.tool, one.payload.args_preview, actions.workspaceRoot);
+  const kinds = [...new Set(calls.flatMap((r) => (r.call ? [toolKind(r.call.payload.tool)] : [])))];
   return (
     <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
       <button type="button" class="tool-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -534,7 +683,11 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
         </span>
         <StateMark state={state} />
         <span class="tool-stats">{stats}</span>
-        {peek && <span class="tool-peek mono">{peek}</span>}
+        {peek ? (
+          <span class="tool-peek mono">{peek}</span>
+        ) : (
+          calls.length > 1 && kinds.length > 0 && <span class="tool-peek tool-kinds">({kinds.join(', ')})</span>
+        )}
       </button>
       {open && (
         <div class="tool-group-body">

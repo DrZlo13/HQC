@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // T26: the chat screen — the header (state pill, worker, path, model and cost of the
-// session, "Stop", "More"), the two handover banners in place of the composer, the
+// session, "Stop", "More"), the composer in one row, the VS Code strip in its place, the
 // request's hotkeys through the chat, and the phone's bottom sheet with the text answer.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -54,6 +54,9 @@ const HISTORY = [
   }),
   ev('event.usage', 7, (e) => (e.payload = { input_tokens: 1, output_tokens: 2, cost_usd: 0.02 })),
 ];
+
+/** The open chat's subscription: what the hub sends it over the socket. */
+let subscriber: SessionSubscriber | undefined;
 
 function setup(
   state: SessionState,
@@ -112,7 +115,13 @@ function setup(
       },
     ]),
   };
-  const socket = { onState: () => () => {}, subscribe: () => () => {} } as unknown as HubSocket;
+  const socket = {
+    onState: () => () => {},
+    subscribe: (_id: string, sub: SessionSubscriber) => {
+      subscriber = sub;
+      return () => {};
+    },
+  } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
   app.conn = 'open';
   const info: SessionInfo = {
@@ -521,6 +530,39 @@ describe('header', () => {
   });
 });
 
+// The subagents running now, one line each, pinned above the input (SPEC §6, since 0.101).
+describe('live subagents', () => {
+  const live = (patch: (e: any) => void = () => {}) =>
+    ev('event.subagents.live', 0, (e) => {
+      delete e.seq;
+      patch(e);
+    });
+  const rows = () =>
+    [...root.querySelectorAll('.live-agents-row')].map((r) => [
+      r.querySelector('.live-agents-what')!.textContent,
+      r.querySelector('.live-agents-stats')!.textContent,
+    ]);
+
+  it('shows a row per subagent above the input, outside the feed, none with an empty list', async () => {
+    const { app } = setup('running', { subagents: 2 });
+    await mount(app);
+    expect($('.live-agents')).toBeNull();
+    await act(async () => subscriber!.onEvent(live()));
+    expect(rows()).toEqual([
+      [
+        'Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
+        '155.3k tokens · 188 tools · 4m 13s',
+      ],
+      ['Reply with number', '1s'],
+    ]);
+    // Pinned: outside the feed's scroller, right above the input.
+    expect($('.timeline .live-agents')).toBeNull();
+    expect($('.live-agents + .composer-wrap')).not.toBeNull();
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = []))));
+    expect($('.live-agents')).toBeNull();
+  });
+});
+
 describe('the request card through the chat', () => {
   it('folds the tool call into the card, explains, and takes Enter', async () => {
     const { api, app } = setup('waiting');
@@ -553,23 +595,48 @@ describe('the focus when a request arrives', () => {
   });
 });
 
-describe('handover banners instead of the composer (SPEC §9.3)', () => {
-  it('open in VS Code right now: close it there, no button', async () => {
+describe('the VS Code strip instead of the composer (SPEC §9.3)', () => {
+  it('open in VS Code right now: where once, in the pill; the strip says to close it there, no button', async () => {
     const { app } = setup('locked_vscode', { held_by: { entrypoint: 'claude-vscode', status: 'idle' }, history: HISTORY.slice(0, 3) });
     await mount(app);
-    expect($('.handover.handover-held .handover-title')!.textContent).toBe('The session is open in VS Code on drzlo-mac.');
-    expect($('.handover-sub')!.textContent).toBe('Close it there to write from here.');
+    expect($('.pill')!.textContent).toBe('In VS Code on drzlo-mac');
+    expect($('.pill .pill-dot')).toBeNull();
+    expect($('.pill svg')).not.toBeNull();
+    // Said once: no "/ VS Code" after the path, no machine of its own.
+    const meta = [...$('.chat-meta')!.children].map((c) => c.textContent);
+    expect(meta.filter((t) => t?.includes('VS Code'))).toEqual(['In VS Code on drzlo-mac']);
+    expect(meta.filter((t) => t?.includes('drzlo-mac'))).toHaveLength(1);
+    // Nor a "/" left before the path.
+    expect($('.chat-meta .chat-path')!.previousElementSibling!.classList.contains('sep')).toBe(false);
+    expect($('.lockbar.lockbar-held')!.textContent).toBe('Close the session in VS Code to write from here.');
+    expect($('.lockbar svg')).not.toBeNull();
     expect(button('Take over here')).toBeUndefined();
     expect($('.composer')).toBeNull();
     expect(root.textContent).not.toContain('read-only');
   });
 
+  it('on a phone too the machine is named once, in the pill: the line beside it has only the folder', async () => {
+    const { app } = setup('locked_vscode', { held_by: { entrypoint: 'claude-vscode', status: 'idle' }, history: HISTORY.slice(0, 3) });
+    await mount(app, true);
+    expect($('.pill')!.textContent).toBe('In VS Code on drzlo-mac');
+    expect($('.chat-meta')!.textContent!.split('drzlo-mac')).toHaveLength(2);
+    expect($('.chat-where')!.textContent).not.toContain('drzlo-mac');
+    expect($('.lockbar.lockbar-held')).not.toBeNull();
+  });
+
+  it('open in Claude Code in a terminal: the pill and the strip name it', async () => {
+    const { app } = setup('locked_vscode', { held_by: { entrypoint: 'cli', status: 'busy' }, history: HISTORY.slice(0, 3) });
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('In Claude Code on drzlo-mac');
+    expect($('.lockbar')!.textContent).toBe('Close the session in Claude Code to write from here.');
+  });
+
   it('last driven by VS Code, nobody holds it: "Take over here"', async () => {
     const { api, app } = setup('locked_vscode', { history: HISTORY.slice(0, 3) });
     await mount(app);
-    expect($('.handover')!.classList.contains('handover-held')).toBe(false);
-    expect($('.handover-title')!.textContent).toBe('VS Code was the last to run this session on drzlo-mac.');
-    expect($('.handover-sub')).toBeNull();
+    expect($('.pill')!.textContent).toBe('In VS Code on drzlo-mac');
+    expect($('.lockbar')!.classList.contains('lockbar-held')).toBe(false);
+    expect($('.lockbar-text')!.textContent).toBe('VS Code was the last to run this session.');
     expect($('.composer')).toBeNull();
     await act(async () => button('Take over here')!.click());
     expect(api.takeover).toHaveBeenCalledWith('s1');
@@ -578,8 +645,44 @@ describe('handover banners instead of the composer (SPEC §9.3)', () => {
   it('a session hqc drives has the composer', async () => {
     const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
     await mount(app);
-    expect($('.handover')).toBeNull();
+    expect($('.lockbar')).toBeNull();
     expect($('.composer textarea')).not.toBeNull();
+    expect($('.chat-meta')!.textContent).toContain('drzlo-mac');
+  });
+});
+
+describe('composer', () => {
+  it('is one row: attach, the field with the hint, send; the field grows with its lines', async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app);
+    const row = $('.composer .composer-row')!;
+    expect([...row.children].map((c) => c.getAttribute('aria-label'))).toEqual(['Attach files', 'Message', 'Send']);
+    const area = row.querySelector('textarea')!;
+    expect(area.getAttribute('rows')).toBe('1');
+    expect(area.getAttribute('placeholder')).toBe('Message · Enter to send, Shift+Enter for a new line');
+    expect($('.composer-hint')).toBeNull();
+    // One line keeps the stylesheet's height; more lines set it (happy-dom has no layout: the
+    // heights are stubbed).
+    Object.defineProperty(area, 'clientHeight', { configurable: true, get: () => 36 });
+    Object.defineProperty(area, 'scrollHeight', { configurable: true, get: () => (area.value.includes('\n') ? 64 : 36) });
+    const type = (v: string) => act(() => {
+      area.value = v;
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await type('one');
+    expect(area.style.height).toBe('');
+    await type('one\ntwo\nthree');
+    expect(area.style.height).toBe('64px');
+    await type('one');
+    expect(area.style.height).toBe('');
+  });
+
+  it('on a phone the same row says only "Message"', async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app, true);
+    const row = $('.composer .composer-row')!;
+    expect([...row.children].map((c) => c.getAttribute('aria-label'))).toEqual(['Attach files', 'Message', 'Send']);
+    expect(row.querySelector('textarea')!.getAttribute('placeholder')).toBe('Message');
   });
 });
 
@@ -1069,43 +1172,82 @@ describe('Quote', () => {
       document.dispatchEvent(new Event('selectionchange'));
     });
 
-  it('puts the text selected in the feed after the draft as «> » lines and focuses the field', async () => {
+  /** A right click on `node` (a text node's element): whether the browser's menu was kept. */
+  const rightClick = async (node: Node) => {
+    let kept = true;
+    await act(() => {
+      kept = (node.parentElement ?? (node as Element)).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 200 }));
+    });
+    return kept;
+  };
+
+  it('on a computer quotes the selected text from the client\'s menu on a right click, after the draft, and focuses the field', async () => {
     const { app } = setup('idle');
     await mount(app);
-    expect($('.btn-quote')).toBeNull();
     await act(() => {
       area().value = 'Look at this';
       area().dispatchEvent(new Event('input', { bubbles: true }));
     });
     await select(textNode('All tests pass.'));
-    expect($('.btn-quote')!.textContent).toBe('Quote');
-    await act(() => $('.btn-quote')!.click());
+    // No floating button on a computer: the menu has it.
+    expect($('.btn-quote')).toBeNull();
+    expect(await rightClick(textNode('All tests pass.')), 'the browser\'s menu is not shown').toBe(false);
+    expect([...document.querySelectorAll('.ctx-menu [role="menuitem"]')].map((b) => b.textContent!.trim())).toEqual(['Quote', 'Copy']);
+    // Its own class: the floating button's style (fixed, shifted) is not the item's.
+    expect($('.ctx-menu .btn-quote')).toBeNull();
+    await act(() => $('.ctx-menu .menu-quote')!.click());
     expect(area().value).toBe('Look at this\n\n> All tests pass.\n\n');
     expect(document.activeElement).toBe(area());
     expect(area().selectionStart).toBe(area().value.length);
     expect(document.getSelection()!.rangeCount).toBe(0);
-    expect($('.btn-quote')).toBeNull();
+    expect($('.ctx-menu')).toBeNull();
     // The next quote goes after the first.
     await select(textNode('All tests pass.'));
-    await act(() => $('.btn-quote')!.click());
+    await rightClick(textNode('All tests pass.'));
+    await act(() => $('.ctx-menu .menu-quote')!.click());
     expect(area().value).toBe('Look at this\n\n> All tests pass.\n\n> All tests pass.\n\n');
   });
 
-  it('offers nothing for text outside the feed, or without a composer', async () => {
+  it('copies the selected text from the same menu', async () => {
+    const writeText = vi.fn(async (_: string) => {});
+    vi.stubGlobal('isSecureContext', true);
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
     const { app } = setup('idle');
     await mount(app);
-    await select(textNode('test 12', '.chat-head'));
-    expect($('.btn-quote')).toBeNull();
     await select(textNode('All tests pass.'));
-    expect($('.btn-quote')).not.toBeNull();
-    await select(null);
-    expect($('.btn-quote'), 'gone with the selection').toBeNull();
+    await rightClick(textNode('All tests pass.'));
+    await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
+    expect(writeText).toHaveBeenCalledWith('All tests pass.');
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves the browser\'s menu to a right click without a selection, outside the feed, or without a composer', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    expect(await rightClick(textNode('All tests pass.')), 'nothing selected').toBe(true);
+    await select(textNode('test 12', '.chat-head'));
+    expect(await rightClick(textNode('test 12', '.chat-head'))).toBe(true);
+    expect($('.ctx-menu')).toBeNull();
     render(null, root);
 
     const locked = setup('locked_vscode');
     await mount(locked.app);
     await select(textNode('All tests pass.'));
+    expect(await rightClick(textNode('All tests pass.'))).toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+  });
+
+  it('on a phone offers the button only for text in the feed, while selected, and keeps the browser\'s menu', async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app, true);
+    await select(textNode('test 12', '.chat-head'));
     expect($('.btn-quote')).toBeNull();
+    await select(textNode('All tests pass.'));
+    expect($('.btn-quote')!.textContent).toBe('Quote');
+    expect(await rightClick(textNode('All tests pass.')), 'no client menu on a phone').toBe(true);
+    expect($('.ctx-menu')).toBeNull();
+    await select(null);
+    expect($('.btn-quote'), 'gone with the selection').toBeNull();
   });
 
   it('on a phone a tap that clears the selection still quotes it', async () => {

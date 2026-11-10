@@ -1152,6 +1152,7 @@ async fn only_the_owner_answers_a_move() {
         timezone: other.timezone,
         personal_project_id: other.personal_project_id.unwrap(),
         theme: Default::default(),
+        look: Default::default(),
     };
     let s = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
         .await

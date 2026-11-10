@@ -375,6 +375,32 @@ impl Theme {
     }
 }
 
+/// How dense the client draws everything (SPEC §3 User), the same on every device of the user:
+/// `compact` — the feed across the chat column in one column, the system font, a line per
+/// session and the projects' names on the project bar; `spacious` — none of that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Look {
+    Compact,
+    #[default]
+    Spacious,
+}
+
+impl Look {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Look::Compact => "compact",
+            Look::Spacious => "spacious",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Look::Compact, Look::Spacious]
+            .into_iter()
+            .find(|l| l.as_str() == s)
+    }
+}
+
 /// `GET /api/projects`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectList {
@@ -858,6 +884,9 @@ pub struct Me {
     /// The app's base palette (T49); `warm` from hubs before it.
     #[serde(default)]
     pub theme: Theme,
+    /// The client's look; `spacious` from hubs before it.
+    #[serde(default)]
+    pub look: Look,
 }
 
 /// `PATCH /api/me`.
@@ -870,6 +899,9 @@ pub struct PatchMe {
     /// `contrast_light`; anything else `422`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<Theme>,
+    /// `compact` | `spacious`; anything else `422`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<Look>,
 }
 
 /// `POST /api/workers/enroll/confirm`; case and the dash of `code` do not matter.
@@ -1283,8 +1315,15 @@ mod tests {
         ));
         let m: PatchMe = roundtrip(include_str!("../examples/wire/api.me.patch.request.json"));
         assert_eq!(m.theme, Some(Theme::Graphite));
+        assert_eq!(m.look, Some(Look::Compact));
         let me: Me = roundtrip(include_str!("../examples/wire/api.me.json"));
         assert_eq!(me.theme, Theme::Contrast);
+        assert_eq!(me.look, Look::Compact);
+        assert!(serde_json::from_str::<PatchMe>(r#"{"look":"dense"}"#).is_err());
+        for l in [Look::Compact, Look::Spacious] {
+            assert_eq!(Look::parse(l.as_str()), Some(l));
+            assert_eq!(serde_json::to_value(l).unwrap(), l.as_str());
+        }
     }
 
     #[test]

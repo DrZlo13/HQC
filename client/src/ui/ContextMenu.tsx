@@ -1,8 +1,7 @@
-// One context menu for the session column: a session row's right click and a phone's long
-// press, the column header's order and project menus. It stands at the point it was opened
-// from, kept inside the window; a round button past its right edge (the archive) stays off the
-// path from that point into the menu, so a pointer moving from the click into the items never
-// crosses it.
+// One context menu for the session column, the project bar and the feed: a session row's right
+// click and a phone's long press, the column header's order and project menus, a project's right
+// click on the bar, a right click on text selected in the feed. It stands at the point it was
+// opened from, kept inside the window.
 
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks';
@@ -11,6 +10,8 @@ import { IconCheck } from './icons';
 /** An item: a button (`onSelect`) or a link (`href`). */
 export interface MenuItem {
   label: string;
+  /** A second, muted part after the label, in the code font (a workspace's worker and path). */
+  detail?: string;
   icon?: ComponentChildren;
   /** A class of its own (tests, styles). */
   cls?: string;
@@ -31,29 +32,28 @@ export type MenuEntry = MenuItem | 'sep';
 /** The space kept between a menu or a card and the window's edge, px. */
 const MARGIN = 8;
 
-/** Moves fixed box `box`, placed at (`x`, `y`), left and up as far as it (with `extra`, a part
- *  sticking out of it) overflows the window. */
-export function fitInView(box: HTMLElement, x: number, y: number, extra?: HTMLElement | null): void {
+/** Moves fixed box `box`, placed at (`x`, `y`), left and up as far as it overflows the window. */
+export function fitInView(box: HTMLElement, x: number, y: number): void {
   const view = box.ownerDocument.defaultView;
   if (!view) return;
   const r = box.getBoundingClientRect();
-  const right = Math.max(r.right, extra?.getBoundingClientRect().right ?? 0);
-  const dx = Math.max(0, right - (view.innerWidth - MARGIN));
+  const dx = Math.max(0, r.right - (view.innerWidth - MARGIN));
   const dy = Math.max(0, r.bottom - (view.innerHeight - MARGIN));
   box.style.left = `${Math.max(MARGIN, x - dx)}px`;
   box.style.top = `${Math.max(MARGIN, y - dy)}px`;
 }
 
-/** The menu at (`x`, `y`): `items`, or `children` in their place (a confirmation step).
- *  A press outside it (but on `anchor`, the button that toggles it) or Esc closes it; ↑/↓
- *  move between its items. Closed, it gives the focus back to what had it before it opened
- *  (else to `anchor`). */
+/** The menu at (`x`, `y`) — with `above`, its bottom left corner there: `items`, or
+ *  `children` in their place (a confirmation step). A press outside it (but on `anchor`, the
+ *  button that toggles it) or Esc closes it; ↑/↓ move between its items. Closed, it gives the
+ *  focus back to what had it before it opened (else to `anchor`). */
 export function ContextMenu({
   x,
   y,
+  above,
   label,
+  heading,
   items = [],
-  outside,
   anchor,
   backdrop,
   onClose,
@@ -61,10 +61,12 @@ export function ContextMenu({
 }: {
   x: number;
   y: number;
+  /** Opens upwards from `y`: the chips over a new session's input. */
+  above?: boolean;
   label: string;
+  /** A line over the items saying what the menu is for (a project's tile has no name). */
+  heading?: string;
   items?: MenuEntry[];
-  /** A round button past the menu's right edge, outside its items. */
-  outside?: MenuItem;
   anchor?: HTMLElement | null;
   /** A phone: a clear layer under the menu over the whole screen, so the tap that closes the
    *  menu does nothing else (opens no session, presses no button). */
@@ -73,7 +75,6 @@ export function ContextMenu({
   children?: ComponentChildren;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const out = useRef<HTMLButtonElement>(null);
   const scrim = useRef<HTMLDivElement>(null);
   // A press that started on the backdrop: only its click closes the menu, not the click that
   // ends the long press which opened it.
@@ -84,7 +85,11 @@ export function ContextMenu({
   close.current = onClose;
   const step = !!children;
   useLayoutEffect(() => {
-    if (box.current) fitInView(box.current, x, y, out.current);
+    const el = box.current;
+    if (!el) return;
+    // Upwards: placed by the height it has now, then kept in the window as any.
+    if (above) el.style.top = `${y - el.offsetHeight}px`;
+    fitInView(el, x, above ? y - el.offsetHeight : y);
   }, [x, y, step]);
   // Where the focus was before the menu; it goes back there when the menu closes and the focus
   // was in the menu or nowhere (Esc, an item picked), not when a press away moved it.
@@ -161,11 +166,12 @@ export function ContextMenu({
   };
   const entry = (it: MenuEntry, i: number) => {
     if (it === 'sep') return <div key={`sep${i}`} class="menu-sep" role="separator" />;
-    const cls = `menu-item ${it.cls ?? ''} ${it.danger ? 'menu-danger' : ''}`;
+    const cls = `menu-item ${it.cls ?? ''} ${it.danger ? 'menu-danger' : ''} ${it.detail ? 'has-detail' : ''}`;
     const face = (
       <>
         {it.checked === undefined ? it.icon : <span class="menu-check">{it.checked && <IconCheck />}</span>}
         <span class="menu-label">{it.label}</span>
+        {it.detail && <span class="menu-detail mono">{it.detail}</span>}
       </>
     );
     return it.href ? (
@@ -217,19 +223,8 @@ export function ContextMenu({
         style={{ left: `${x}px`, top: `${y}px` }}
         onKeyDown={ownKeys}
       >
+        {heading && !step && <div class="menu-head">{heading}</div>}
         {step ? children : items.map(entry)}
-        {outside && !step && (
-          <button
-            ref={out}
-            type="button"
-            class={`menu-out ${outside.cls ?? ''}`}
-            aria-label={outside.label}
-            title={outside.label}
-            onClick={() => pick(outside)}
-          >
-            {outside.icon}
-          </button>
-        )}
       </div>
     </>
   );

@@ -109,8 +109,14 @@ const agentText = (seq: number, text: string, final: boolean) =>
   });
 
 describe("every example event renders", () => {
+  // Transport only: the stream text, and the subagents above the input (chat.test.tsx).
   const names = readdirSync(WIRE)
-    .filter((f) => f.startsWith("event.") && f !== "event.agent.delta.json")
+    .filter(
+      (f) =>
+        f.startsWith("event.") &&
+        f !== "event.agent.delta.json" &&
+        f !== "event.subagents.live.json",
+    )
     .map((f) => f.replace(/\.json$/, ""));
   for (const [i, name] of names.entries()) {
     it(name, () => {
@@ -487,8 +493,11 @@ describe("approval.request (T26 card)", () => {
       "· denied, replied with text",
     );
     const msg = root.querySelector(".msg-user.msg-answer")!;
-    expect(msg.querySelector(".msg-bubble")!.textContent).toBe(
+    expect(msg.querySelector(".msg-bubble .msg-text")!.textContent).toBe(
       "Build first, tests later",
+    );
+    expect(msg.querySelector(".msg-bubble.msg-noted > .msg-note")!.textContent).toBe(
+      "instead of the request",
     );
   });
 
@@ -627,8 +636,11 @@ describe("tool groups (T26)", () => {
     expect(msgs[0].querySelector("strong")!.textContent).toBe("config");
     const g = root.querySelector(".tool-group")!;
     expect(g.querySelector(".tool-stats")!.textContent).toBe(
-      "2 commands · 38 s",
+      "2 tool calls · 38 s",
     );
+    // Two calls: the tools they called, each once, not a command.
+    expect(g.querySelector(".tool-kinds")!.textContent).toBe("(Bash)");
+    expect(g.querySelector(".tool-peek.mono")).toBeNull();
     expect(g.querySelector(".mark-ok")).not.toBeNull();
     await act(async () =>
       g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
@@ -643,7 +655,7 @@ describe("tool groups (T26)", () => {
     expect(rows[1].querySelector(".tool-more")!.textContent).toBe("+3 lines");
   });
 
-  it('says "N commands · time"; other tools show their argument', async () => {
+  it('says "N tool calls · time" and the tools called; other tools show their argument', async () => {
     const t = new Timeline();
     t.apply(agentText(1, "Done.", true));
     t.apply(call(2, "a", "Read", { file_path: "Cargo.toml" }));
@@ -653,8 +665,9 @@ describe("tool groups (T26)", () => {
     show(t);
     const g = root.querySelector(".tool-group")!;
     expect(g.querySelector(".tool-stats")!.textContent).toBe(
-      "2 commands · 3 s",
+      "2 tool calls · 3 s",
     );
+    expect(g.querySelector(".tool-kinds")!.textContent).toBe("(Read, Grep)");
     expect(g.classList.contains("tool-error")).toBe(true);
     await act(async () =>
       g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
@@ -663,6 +676,30 @@ describe("tool groups (T26)", () => {
     expect(rows[0].querySelector(".tool-name")!.textContent).toBe("Read");
     expect(rows[0].querySelector(".tool-line")!.textContent).toBe("Cargo.toml");
     expect(rows[1].querySelector(".mark-error")).not.toBeNull();
+  });
+
+  it("a group lists each tool once, in the order first called, an MCP tool as server/tool; one call shows its line", async () => {
+    const t = new Timeline();
+    t.apply(agentText(1, "Looking.", true));
+    t.apply(call(2, "a", "Bash", { command: "ls" }));
+    t.apply(result(3, "a"));
+    t.apply(call(4, "b", "Read", { file_path: "a.txt" }));
+    t.apply(result(5, "b"));
+    t.apply(call(6, "c", "Bash", { command: "pwd" }));
+    t.apply(result(7, "c"));
+    t.apply(call(8, "d", "mcp__curator__screenshot", {}));
+    t.apply(result(9, "d"));
+    t.apply(agentText(10, "One more.", true));
+    t.apply(call(11, "e", "Bash", { command: "make test" }));
+    t.apply(result(12, "e"));
+    show(t);
+    const [many, one] = [...root.querySelectorAll(".tool-group")];
+    expect(many.querySelector(".tool-stats")!.textContent).toMatch(/^4 tool calls\b/);
+    expect(many.querySelector(".tool-kinds")!.textContent).toBe("(Bash, Read, curator/screenshot)");
+    expect(many.querySelector(".tool-peek.mono")).toBeNull();
+    expect(one.querySelector(".tool-stats")!.textContent).toMatch(/^1 tool call\b/);
+    expect(one.querySelector(".tool-peek.mono")!.textContent).toBe("$ make test");
+    expect(one.querySelector(".tool-kinds")).toBeNull();
   });
 
   it("takes its mark from the last call", () => {
@@ -735,7 +772,7 @@ describe("messages", () => {
     show(t);
     const meta = root.querySelector(".msg-final > .meta")!;
     expect(meta.querySelector(".usage")!.textContent).toBe(
-      " · 1.2k → 340 tokens · cache 9k · $0.012",
+      "1.2k → 340 tokens · cache 9k · $0.012",
     );
     expect(root.querySelector(".line-usage")).toBeNull();
   });
@@ -1428,7 +1465,7 @@ describe("the feed like the Claude Code tab", () => {
     expect(cutJson("not json")).toBeUndefined();
   });
 
-  it("the group's header shows its last call; MCP tools by name and server, paths relative to the session's folder", async () => {
+  it("the group's header: its tools, or its one call; MCP tools by name and server, paths relative to the session's folder", async () => {
     const t = new Timeline();
     t.apply(call(1, "a", "Read", { file_path: "/Users/me/work/hqc/src/main.rs" }));
     t.apply(result(2, "a"));
@@ -1450,7 +1487,7 @@ describe("the feed like the Claude Code tab", () => {
     show(t, { workspaceRoot: "/Users/me/work/hqc" });
     const [g, g2] = [...root.querySelectorAll(".tool-group")];
     expect(g.querySelector(".tool-group-head .tool-peek")!.textContent).toBe(
-      "$ cat Cargo.toml /Users/me/work/hqc-old/x",
+      "(Read, chrome-devtools/take_screenshot, Bash)",
     );
     expect(g2.querySelector(".tool-group-head .tool-peek")!.textContent).toBe(
       "list_issues (gitea) label:bug",

@@ -257,9 +257,18 @@ export function callLine(tool: string, argsPreview: string): { shell: boolean; t
  *  (`mcp__plugin_chrome-devtools-mcp_chrome-devtools__take_screenshot` →
  *  `take_screenshot (chrome-devtools)`); any other tool as it is. */
 export function toolLabel(tool: string): string {
-  const m = /^mcp__(?:plugin_[^_]+_)?([^:\s]*)__([^:\s]+)$/.exec(tool);
+  const m = MCP_TOOL.exec(tool);
   return m ? `${m[2]} (${m[1]})` : tool;
 }
+
+/** A tool in a group's list of the tools it called: an MCP tool as `<server>/<tool>`, any
+ *  other as it is. */
+export function toolKind(tool: string): string {
+  const m = MCP_TOOL.exec(tool);
+  return m ? `${m[1]}/${m[2]}` : tool;
+}
+
+const MCP_TOOL = /^mcp__(?:plugin_[^_]+_)?([^:\s]*)__([^:\s]+)$/;
 
 /** `text` with the paths under `root` (the session's folder, absolute) relative to it: only
  *  where a path starts (at the start, after a space, a quote, `=` or `(`), not inside a

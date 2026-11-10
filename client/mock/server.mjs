@@ -99,6 +99,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     display_name: 'Dev',
     personal_project_id: '0199f3a2-7c10-7000-8000-0000000000d1',
     theme: 'warm',
+    look: 'spacious',
   };
   const workerId = ex['hub.hello.ack'].payload.worker_id;
   const now = () => new Date().toISOString();
@@ -542,14 +543,18 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   };
 
   route('GET', '/api/me', () => me);
-  // T49: the app theme; the project's color and icon, the icon image (checked loosely: the
-  // hub checks the magic bytes and the size in pixels).
+  // T49: the app theme; the look (SPEC §3 User); the project's color and icon, the icon image
+  // (checked loosely: the hub checks the magic bytes and the size in pixels).
   route('PATCH', '/api/me', (_, body) => {
     if (body?.theme !== undefined) {
       if (!['warm', 'graphite', 'contrast', 'warm_light', 'graphite_light', 'contrast_light'].includes(body.theme)) {
         throw fail(422, 'unprocessable', 'unknown theme');
       }
       me.theme = body.theme;
+    }
+    if (body?.look !== undefined) {
+      if (!['compact', 'spacious'].includes(body.look)) throw fail(422, 'unprocessable', 'unknown look');
+      me.look = body.look;
     }
     if (body?.timezone !== undefined) me.timezone = body.timezone;
     return me;
@@ -570,16 +575,39 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (!data) throw fail(404, 'not_found', 'no icon');
     return { [RAW]: { type: 'image/png', data } };
   });
-  // The user's order of the project bar (SPEC 0.64): the rest last, oldest first.
+  // The user's order of the project bar (SPEC 0.64): the rest last, oldest first. Archived
+  // projects are left out, or with `archived` only they are listed.
   let projectOrder = [];
-  const orderedProjects = () => {
+  const allProjects = () => {
     const placed = projectOrder.map((id) => projects.get(id)).filter(Boolean);
     return [...placed, ...[...projects.values()].filter((p) => !projectOrder.includes(p.id))];
   };
-  route('GET', '/api/projects', () => ({ projects: orderedProjects() }));
+  const orderedProjects = (archived = false) => allProjects().filter((p) => !!p.archived_at === archived);
+  route('GET', '/api/projects', (_, __, q) => ({ projects: orderedProjects(q.get('archived') === '1') }));
+  // As the hub: an archived project the new order leaves out keeps the place it had in the
+  // order the bar had, right after the one before it when that one is there, else at its old
+  // index.
   route('PUT', '/api/me/project_order', (_, body) => {
-    projectOrder = [...new Set(body?.project_ids ?? [])].filter((id) => projects.has(id));
+    const next = [...new Set(body?.project_ids ?? [])].filter((id) => projects.has(id));
+    const old = allProjects().map((p) => p.id);
+    old.forEach((id, i) => {
+      if (!projects.get(id)?.archived_at || next.includes(id)) return;
+      const after = i > 0 ? next.indexOf(old[i - 1]) : -1;
+      next.splice(after >= 0 ? after + 1 : Math.min(i, next.length), 0, id);
+    });
+    projectOrder = next;
     return { projects: orderedProjects() };
+  });
+  route('POST', '/api/projects/:pid/archive', (p) => {
+    const pr = projectOr404(p.pid);
+    if (pr.is_personal) throw fail(409, 'personal_project', 'the personal project cannot be archived');
+    pr.archived_at ??= now();
+    return pr;
+  });
+  route('POST', '/api/projects/:pid/unarchive', (p) => {
+    const pr = projectOr404(p.pid);
+    delete pr.archived_at;
+    return pr;
   });
   function newProject(name, description = '') {
     const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';

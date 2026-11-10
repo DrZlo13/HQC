@@ -58,6 +58,14 @@ export const IconCopy = ({ size = 13 }: { size?: number }) => (
   </Svg>
 );
 
+/** Quote marks: put the selected text into the composer as a quote. */
+export const IconQuote = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M4 11h4v5H4v-5Zm0 0c0-3 1-5 4-6" />
+    <path d="M12 11h4v5h-4v-5Zm0 0c0-3 1-5 4-6" />
+  </Svg>
+);
+
 export const IconFork = ({ size = 13 }: { size?: number }) => (
   <Svg size={size}>
     <circle cx="6" cy="4.5" r="1.8" />
@@ -239,6 +247,22 @@ export const IconCode = ({ size = 18 }: { size?: number }) => (
   </Svg>
 );
 
+/** The agent's question, in the gutter of the one-column feed. */
+export const IconQuestion = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <circle cx="10" cy="10" r="7" />
+    <path d="M8 8a2 2 0 1 1 2.8 1.8c-.5.3-.8.7-.8 1.2v.5M10 14v.2" />
+  </Svg>
+);
+
+/** A session held by VS Code: no input from here. */
+export const IconLock = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <rect x="5" y="9" width="10" height="8" rx="1.5" />
+    <path d="M7 9V6.5a3 3 0 0 1 6 0V9" />
+  </Svg>
+);
+
 /** ↗ / ↙ of the blocks between sessions (T51): left this session, came into it. */
 export const IconArrowOut = ({ size = 14 }: { size?: number }) => (
   <Svg size={size}>
@@ -249,5 +273,26 @@ export const IconArrowOut = ({ size = 14 }: { size?: number }) => (
 export const IconArrowIn = ({ size = 14 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M15 5L5 15M12 15H5V8" />
+  </Svg>
+);
+
+/** The chips of a new session: its workspace (a screen), folder and model (a clock). */
+export const IconWorkspace = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <rect x="3" y="4" width="14" height="10" rx="2" />
+    <path d="M7 17h6" />
+  </Svg>
+);
+
+export const IconFolder = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M3 6a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
+  </Svg>
+);
+
+export const IconModel = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <circle cx="10" cy="10" r="6.5" />
+    <path d="M10 6.5v3.5l2.5 1.5" />
   </Svg>
 );

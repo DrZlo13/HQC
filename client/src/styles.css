@@ -118,7 +118,7 @@
   -webkit-text-size-adjust: 100%;
 }
 
-/* "The system font" in Settings, on this device (applyLook): the platform's own UI font. */
+/* The Compact look (applyLook): the platform's own UI font. */
 :root.font-system {
   --sans: -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', sans-serif;
 }
@@ -175,7 +175,7 @@ button {
 /* ---- layout ---- */
 
 /* T49 (README of redesign-2026-11-01): project bar 72px, sidebar 280-310px (narrowing with
-   the window as in T27) unless its right edge was dragged (`--list-w`, `Look.listWidth`), and
+   the window as in T27) unless its right edge was dragged (`--list-w`, `DeviceLayout.listWidth`), and
    never so wide that the chat gets less than 300px; the main column without a minimum: its
    content wraps or scrolls inside itself. Below 900px the phone layout takes over
    (useIsPhone). The column's grip (`.col-grip`) is placed on the grid, out of its flow. */
@@ -452,6 +452,14 @@ select.input {
   flex: none;
 }
 
+/* The mark, and the project search's magnifier under it; with the project names on, one row:
+   the mark, "HQC" (the search field in its place while searching) and the magnifier. */
+.rail-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
 .rail-logo {
   display: flex;
   align-items: center;
@@ -542,6 +550,15 @@ select.input {
   flex: none;
   border: 1px dashed var(--border);
 }
+.rail-search {
+  height: 36px;
+  border-radius: 10px;
+}
+
+/* The project bar's menu is open on it: lit, as under the pointer. */
+.rail-project.is-menu {
+  filter: brightness(1.15);
+}
 
 /* Reorder mode: the tiles are dragged, not opened. */
 .rail-drag {
@@ -556,13 +573,8 @@ select.input {
   color: var(--accent-text);
 }
 
-/* A tile's context menu: fixed at the pointer, the bar would clip it. */
-.menu.rail-menu {
-  position: fixed;
-  right: auto;
-  z-index: 30;
-}
-
+/* A mark only when something goes on in the project: the sessions that wait for you, an arc
+   while one works, a blue dot while one has unread events; none when it is idle. */
 .rail-badge {
   position: absolute;
   top: -6px;
@@ -580,7 +592,7 @@ select.input {
   justify-content: center;
   border: 2px solid var(--rail);
 }
-/* No one waits, but a session has unread events. */
+/* No one waits or works, but a session has unread events. */
 .rail-unread {
   position: absolute;
   top: -3px;
@@ -588,38 +600,36 @@ select.input {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: var(--text);
+  background: var(--unread);
   border: 2px solid var(--rail);
+  pointer-events: none;
 }
-/* No one waits, but a session works: the project's color (inline), pulsing as a running
-   session's dot does (`.dot-run`, also under reduced motion). */
+/* No one waits, but a session works: a stripe that runs around the tile. The ring is the
+   padding left by the mask; the stripe is a conic gradient whose start angle turns. */
+@property --rail-run-turn {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
 .rail-run {
   position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 2px solid var(--rail);
+  inset: -5px;
+  border-radius: 16px;
+  padding: 2px;
+  background: conic-gradient(from var(--rail-run-turn), transparent 0deg 220deg, var(--text2) 360deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: rail-run 1.4s linear infinite;
   pointer-events: none;
-  animation: pulse 1.4s ease-in-out infinite;
 }
-/* Nothing waits, works or is unread: an empty ring, as an idle session's dot. */
-.rail-idle {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--rail);
-  box-shadow:
-    inset 0 0 0 2px var(--rail),
-    inset 0 0 0 3.5px var(--muted);
-  pointer-events: none;
+@keyframes rail-run {
+  to {
+    --rail-run-turn: 360deg;
+  }
 }
 
-/* "Settings" → "Project bar" → names (`Look.railNames`): each project is a 36 px row with its
+/* The Compact look (applyLook) on the project bar: each project is a 36 px row with its
    icon on its color and its full name, and the bar is as wide as the longest name, from 200 to
    320 px (a longer name ends in "…"). The badge or dot sits on the icon's corner, as on a tile,
    so the bar's width does not change with them; clicks go through it to the row. "+ project",
@@ -675,11 +685,13 @@ select.input {
   border-radius: 10px;
   font-size: 12px;
 }
-:root.rail-names .rail-project:not(.is-current):hover {
+:root.rail-names .rail-project:not(.is-current):hover,
+:root.rail-names .rail-project.is-menu:not(.is-current) {
   background: var(--row-hover);
   filter: none;
 }
-:root.rail-names .rail-project .glyph-emoji {
+:root.rail-names .rail-project .glyph-emoji,
+.rail-hit .glyph-emoji {
   font-size: 15px;
 }
 :root.rail-names .rail-badge {
@@ -688,13 +700,53 @@ select.input {
   right: auto;
   pointer-events: none;
 }
-:root.rail-names .rail-unread,
-:root.rail-names .rail-run,
-:root.rail-names .rail-idle {
+:root.rail-names .rail-unread {
   top: 1px;
   left: 24px;
   right: auto;
+}
+/* A favorite project: a star on the tile's bottom right corner, beside any other mark. */
+.rail-fav {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--rail);
+  color: var(--text2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   pointer-events: none;
+}
+.rail-fav path {
+  fill: currentColor;
+}
+:root.rail-names .rail-fav {
+  top: 21px;
+  left: 23px;
+  right: auto;
+  bottom: auto;
+}
+/* Around the 26 px icon, which stands 6 px in and 5 px down in its 36 px row. */
+:root.rail-names .rail-run {
+  inset: auto;
+  top: 1px;
+  left: 2px;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+}
+:root.rail-names .rail-head {
+  flex-direction: row;
+  align-self: stretch;
+}
+:root.rail-names .rail-search {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  margin-left: auto;
 }
 .rail-glyph {
   flex: none;
@@ -714,11 +766,164 @@ select.input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 600 14px var(--sans);
+  font: 500 14px var(--sans);
   color: var(--text2);
 }
 .rail-project.is-current .rail-name {
   color: var(--text);
+  font-weight: 600;
+}
+/* Unread events there: the name in bold, next to the blue dot. */
+.rail-project.has-unread .rail-name {
+  color: var(--text);
+  font-weight: 700;
+}
+
+/* The project search: the field in the place of "HQC" (with tiles, at the top of the bar that
+   opens over the column), the matches with the typed letters marked, an archived project dimmed
+   with its tag, and the keys under them. */
+.rail-find {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  color: var(--muted);
+}
+.rail-find input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  font: 13px var(--sans);
+  outline: none;
+}
+.rail-find-count {
+  flex: none;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.rail-hits {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rail-hit {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 36px;
+  padding: 0 10px 0 6px;
+  border-radius: 10px;
+  color: var(--text);
+  text-decoration: none;
+}
+.rail-hit:hover,
+.rail-hit.is-sel,
+.rail-hit.is-menu {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.rail-hit .rail-glyph {
+  font: 700 12px var(--sans);
+}
+.rail-hit.is-archived {
+  opacity: 0.65;
+}
+.rail-hit mark {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  border-radius: 2px;
+}
+.rail-tag {
+  flex: none;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.rail-hits-none {
+  padding: 8px 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.rail-hint {
+  align-self: stretch;
+  padding: 8px 4px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+/* Tiles: the search opens the bar 290 px wide over the session column, the 44 px tiles with
+   their names. */
+.rail-pop {
+  position: fixed;
+  z-index: 36;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 290px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 10px 0;
+  background: var(--rail);
+  border-right: 1px solid color-mix(in srgb, var(--shade) 30%, transparent);
+  box-shadow: 12px 0 32px color-mix(in srgb, var(--shade) 30%, transparent);
+}
+.rail-pop .rail-head {
+  flex-direction: row;
+  align-self: stretch;
+  padding-left: 3px;
+}
+.rail-pop .rail-hits {
+  min-height: 0;
+  overflow-y: auto;
+  gap: 6px;
+}
+.rail-pop .rail-hit {
+  height: 44px;
+  padding: 0 8px 0 0;
+  border-radius: 12px;
+}
+.rail-pop .rail-glyph {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  font: 700 17px var(--sans);
+}
+.rail-pop .rail-glyph .glyph-emoji {
+  font-size: 21px;
+  font-weight: 400;
+}
+.rail-pop .rail-glyph .glyph-img {
+  padding: 4px;
+}
+
+/* "Archived «…» · Undo" of a project: at the bottom, over the session column. */
+.toast-project {
+  position: fixed;
+  z-index: 45;
+  left: 88px;
+  bottom: 62px;
+  max-width: min(560px, calc(100vw - 104px));
+  margin: 0;
+}
+:root.rail-names .toast-project {
+  left: 16px;
+  bottom: 58px;
 }
 
 /* A project's icon: its emoji, 1-2 letters or image (T49). */
@@ -987,7 +1192,7 @@ select.input {
 }
 
 /* The favorites pinned over the scrolling list on a desktop, a shadow under them; in the
-   default look at most half the column, scrolling inside. */
+   Spacious look at most half the column, scrolling inside. */
 .fav-pinned {
   flex: 0 1 auto;
   min-height: 0;
@@ -1033,6 +1238,16 @@ select.input {
   box-shadow: inset 0 0 0 1.5px var(--muted);
   margin-top: 0;
 }
+/* A session row's dot takes the 12 px of `</>`, centred, so the title does not move when the
+   mark changes between them. */
+.session-item .dot {
+  margin-left: 2px;
+  margin-right: 2px;
+}
+.sessions-phone .session-item .dot {
+  margin-left: 1px;
+  margin-right: 1px;
+}
 /* Open in VS Code and not working there: `</>` in the dot's place, in either look. */
 .dot-vs {
   flex: 0 0 12px;
@@ -1074,6 +1289,13 @@ select.input {
   color: var(--accent-text);
 }
 
+/* The new session open in the main column, on top of the list. */
+.session-row.is-draft .session-title {
+  font-style: italic;
+  font-weight: 500;
+  color: var(--text2);
+}
+
 .session-when {
   flex: none;
   font-size: 12px;
@@ -1108,7 +1330,7 @@ select.input {
   text-overflow: ellipsis;
 }
 
-/* "Compact" session list in Settings, on this device (applyLook), in the desktop column only:
+/* The Compact look (applyLook) in the session list, in the desktop column only:
    a 26 px line per session, tighter gaps; the state is the dot (`</>` while open in VS Code,
    faded while its worker is offline), the subagents after the title, the state line and the
    worker and path in the row's card. Scoped to the live list's groups and rows: the archive and
@@ -1162,14 +1384,15 @@ select.input {
   color: var(--text2);
 }
 
-/* One context menu (ContextMenu.tsx): fixed at the point it was opened from, an icon per item,
-   a round archive button past its right edge. Items 34 px, 26 px in the compact look, 44 px on a
-   phone. Two classes: the plain .menu rule further down must not win. */
+/* One context menu (ContextMenu.tsx): fixed at the point it was opened from, an icon per item.
+   Items 34 px, 26 px in the compact look, 44 px on a phone. Two classes: the plain .menu rule
+   further down must not win. */
 .menu.ctx-menu {
   position: fixed;
   right: auto;
   z-index: 40;
   min-width: 220px;
+  max-width: calc(100vw - 16px);
   padding: 5px;
 }
 .ctx-menu .menu-item {
@@ -1223,12 +1446,23 @@ select.input {
   font-size: 13px;
   color: var(--text2);
 }
-.menu-out {
-  position: absolute;
-  left: calc(100% + 10px);
-  top: 0;
-  width: 42px;
-  height: 42px;
+/* What the menu is for, over its items: a project's tile shows no name. */
+.menu-head {
+  max-width: 280px;
+  padding: 4px 10px 5px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A desktop row's archive: a round button past the column's right edge (and past its width
+   grip), level with the row the mouse is on, so it covers none of the row. */
+.row-archive {
+  position: fixed;
+  z-index: 40;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -1239,8 +1473,8 @@ select.input {
   justify-content: center;
   cursor: pointer;
 }
-.menu-out:hover,
-.menu-out:focus-visible {
+.row-archive:hover,
+.row-archive:focus-visible {
   outline: none;
   background: var(--row-hover);
   color: var(--text);
@@ -1253,17 +1487,9 @@ select.input {
   width: 14px;
   height: 14px;
 }
-:root.list-compact .layout:not(.layout-phone) .menu-out {
-  width: 34px;
-  height: 34px;
-}
 .layout-phone .ctx-menu .menu-item {
   height: 44px;
   font-size: 16px;
-}
-.layout-phone .menu-out {
-  width: 48px;
-  height: 48px;
 }
 /* A phone's menu: a clear layer over the screen under it takes the tap that closes it. */
 .menu-scrim {
@@ -1402,7 +1628,7 @@ select.input {
 }
 
 /* The session column's right edge: a handle dragged, or moved with ←/→, to set the column's
-   width (`Look.listWidth`), so cut titles can be read whole. It stands in the grid's second
+   width (`DeviceLayout.listWidth`), so cut titles can be read whole. It stands in the grid's second
    column, out of the flow, from the column's border into the chat: off the list's scrollbar,
    so dragging the scrollbar never resizes, and outside the column's clipped box. */
 .col-grip {
@@ -1762,22 +1988,6 @@ select.input {
   font-size: 12px;
 }
 
-.new-session {
-  flex: none;
-  margin: 0 12px 10px;
-  padding: 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.new-session p {
-  margin: 0;
-}
-
 .field {
   display: flex;
   flex-direction: column;
@@ -1991,10 +2201,6 @@ select.input {
   padding: 8px 6px;
 }
 
-.sessions-phone .new-session {
-  margin: 0 16px 10px;
-}
-
 .sessions-phone .btn-reorder {
   width: 44px;
   height: 44px;
@@ -2086,10 +2292,6 @@ select.input {
 .sessions-phone .archive-acts .btn-ghost {
   background: var(--surface);
   border-color: var(--border);
-}
-
-.sessions-phone .new-session .input {
-  font-size: 16px;
 }
 
 .fab {
@@ -2414,6 +2616,12 @@ select.input {
   color: var(--text);
 }
 
+/* `--feed-line`: the height of a line of the feed's text, which a message's time and a mark
+   of the one-column gutter take to sit on the first line. */
+.chat {
+  --feed-line: 21.7px;
+}
+
 .timeline {
   flex: 1;
   min-height: 0;
@@ -2431,50 +2639,128 @@ select.input {
   gap: 24px;
 }
 
-/* "Full width" in Settings, on this device (applyLook). */
-:root.feed-wide .feed {
+/* The anchor of a message's hover buttons (`.msg-actions`): the feed's left edge. */
+.feed-block {
+  position: relative;
+}
+
+/* The Compact look (applyLook): the feed and the composer across the chat column. */
+:root.feed-wide .feed,
+:root.feed-wide .composer,
+:root.feed-wide .lockbar,
+:root.feed-wide .live-agents-list {
   max-width: none;
 }
 
-/* "A message's time in the space below it" in Settings, on this device (applyLook): the time
-   and the message's buttons leave the flow and sit, on the right, in the feed's gap under the
-   message. The gap is at least their 24 px, on a phone too, and the feed keeps 24 px in the
-   flow below its last message for its time. */
-:root.time-in-gap .feed {
-  padding-bottom: 24px;
+/* The Compact look (applyLook): the feed as the VS Code tab draws it.
+   Every item but the user's plates and the service lines has a 22 px gutter with its mark
+   (`.feed-mark`, cards.tsx): a grey dot for the agent's text, the state of a run of tools, an
+   arrow, a shield, a question, a clip, a chevron; the marks the items carry themselves go. On a
+   computer the text is 13.5/1.45 and the items 12 px apart. */
+:root.feed-column .chat:not(.chat-phone) {
+  --feed-line: 19.6px;
 }
-:root.time-in-gap .msg-agent,
-:root.time-in-gap .msg-user:not(.msg-pending) {
+:root.feed-column .chat:not(.chat-phone) .timeline {
+  padding: 16px 24px 12px;
+}
+:root.feed-column .chat:not(.chat-phone) .feed {
+  gap: 12px;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+:root.feed-column .feed-block {
+  padding-left: 22px;
+}
+:root.feed-column .feed-block.feed-full {
+  padding-left: 0;
+}
+:root.feed-column .feed > .msg-streaming,
+:root.feed-column .feed > .activity,
+:root.feed-column .feed > .waited-requests {
   position: relative;
+  margin-left: 22px;
 }
-:root.time-in-gap .msg-agent > .meta,
-:root.time-in-gap .msg-user:not(.msg-pending) > .meta {
+.feed-mark {
+  display: none;
+}
+:root.feed-column .feed-mark {
   position: absolute;
-  top: 100%;
-  right: 0;
+  left: 0;
+  top: 0;
+  width: 14px;
+  height: var(--feed-line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
 }
-/* The buttons, hidden until hover, go before the time: after it they would push the time off
-   the right edge, where the bubble and the text end. */
-:root.time-in-gap .msg-agent > .meta .btn-copy,
-:root.time-in-gap .msg-user:not(.msg-pending) > .meta .btn-copy {
-  order: -1;
+/* A card's mark on its title line. */
+:root.feed-column .feed-block > .card ~ .feed-mark {
+  top: 13px;
 }
-:root.time-in-gap .chat-phone .feed {
-  gap: 24px;
+:root.feed-column .feed-block > :is(.relay, .perm-card) ~ .feed-mark {
+  top: 15px;
+}
+:root.feed-column .feed-block > details[open] ~ .feed-mark .icon {
+  transform: rotate(90deg);
+}
+:root.feed-column .feed-block > :is(.tool-group, .thinking, .line-fold) {
+  min-height: var(--feed-line);
+}
+:root.feed-column .feed-block > .tool-group > .tool-group-head {
+  min-height: var(--feed-line);
+  padding: 0 8px 0 6px;
+}
+:root.feed-column .feed-block > .tool-group > .tool-group-head > :is(.mark, .pulse-dot),
+:root.feed-column .feed-block > :is(.thinking, .line-fold) > summary > .icon,
+:root.feed-column .feed-block > .relay > .relay-head > .relay-arrow {
+  display: none;
+}
+.feed-dot,
+:root.feed-column .feed > .msg-streaming::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+:root.feed-column .feed > .msg-streaming::before {
+  content: '';
+  position: absolute;
+  left: -18.5px;
+  top: calc(var(--feed-line) / 2 - 3.5px);
+}
+:root.feed-column .feed-mark-ok {
+  color: var(--online);
+}
+:root.feed-column .feed-mark-error {
+  color: var(--danger);
+}
+:root.feed-column .feed-mark-perm {
+  color: var(--waiting);
+}
+:root.feed-column .feed-block > :is(.perm-done, .perm.is-closed) ~ .feed-mark-perm {
+  color: var(--muted);
+}
+:root.feed-column .feed-mark-ask {
+  color: var(--accent-text);
+}
+:root.feed-column .feed-mark-relay {
+  color: var(--relay-text);
 }
 
 /* ---- messages ---- */
 
 .msg-agent {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
   color: var(--text2);
   overflow-wrap: anywhere;
 }
 
 .msg-agent strong {
   color: var(--text);
+}
+
+.msg-agent > .meta {
+  margin-top: 8px;
 }
 
 .meta {
@@ -2492,8 +2778,6 @@ select.input {
   opacity: 0;
   transition: opacity 0.15s;
 }
-.msg-agent:hover .meta .btn-copy,
-.msg-user:hover .meta .btn-copy,
 .relay:hover .meta .btn-copy,
 .meta .btn-copy:focus-visible,
 .meta .btn-copy:not(.btn-copy-idle) {
@@ -2503,6 +2787,110 @@ select.input {
   .meta .btn-copy {
     opacity: 1;
   }
+}
+
+/* A message's time at the right end of its first line, as Telegram has it; in a bubble or a
+   plate, inside it. */
+.msg-time {
+  float: right;
+  margin-left: 16px;
+  font-size: 12px;
+  line-height: var(--feed-line);
+  font-weight: 400;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.msg-bubble > .msg-time {
+  position: relative;
+  margin-left: 12px;
+}
+/* A bubble's note ("joined the turn", "instead of the request"): the first line, the time at
+   its right end, the text under them. Inline with a line break after it, so the note, the time
+   and the text are in one line box flow and the bubble is as wide as the longer of its lines. */
+.msg-note {
+  display: inline;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.msg-note::after {
+  content: '\A';
+  white-space: pre;
+}
+.msg-noted > .msg-time {
+  line-height: 18px;
+}
+
+/* A message's copy and fork buttons, on hover, at the edge opposite its time: a column in the
+   margin left of the feed, from the message's top, its right edge on the block's left edge so
+   the block's hover holds on the way to it. Narrow enough for the timeline's padding, it
+   covers neither the time nor the next block. */
+.msg-actions {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  left: -26px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 1px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--shade) 30%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+/* A transparent bridge over the seam (its border, a rounded pixel): a slow approach from the
+   message keeps the hover. */
+.chat:not(.chat-phone) .msg-actions::after {
+  content: '';
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: 100%;
+  width: 4px;
+}
+/* The phone keeps the buttons' own 24 px (a row under the message, styles below). */
+.chat:not(.chat-phone) .msg-actions .btn-copy-idle {
+  width: 22px;
+  height: 22px;
+}
+/* The copy result in the button itself, not a caption that widens the column; its colour
+   holds under the pointer too. */
+.msg-actions .btn-copy.btn-copy-done {
+  color: var(--online);
+}
+.msg-actions .btn-copy.btn-copy-failed {
+  color: var(--danger);
+}
+.feed-block:hover .msg-actions,
+.msg-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .msg-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+/* One column: the 24 px margin left of the gutter, as small as the tab's. */
+:root.feed-column .msg-actions {
+  left: -22px;
+  border-radius: 6px;
+}
+:root.feed-column .chat:not(.chat-phone) .msg-actions .btn-copy-idle {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+:root.feed-column .chat:not(.chat-phone) .msg-actions .icon {
+  width: 13px;
+  height: 13px;
 }
 
 .msg-user {
@@ -2519,6 +2907,99 @@ select.input {
   background: var(--bubble);
   color: var(--text);
   overflow-wrap: anywhere;
+}
+/* The user's copy and fork on a computer: in the bubble (or plate), left of the time on its
+   first line, shown on hover over the text's end (on the bubble's colour), taking no room while
+   hidden; small enough for the line. */
+.msg-time-actions {
+  position: absolute;
+  top: 50%;
+  right: 100%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  gap: 2px;
+  padding: 0 6px 0 4px;
+  background: var(--bubble);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.feed-block:hover .msg-time-actions,
+.msg-time-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* A bubble with them is wide enough to hold them, a one-word message too. */
+.msg-bubble-acts {
+  min-width: 7.5em;
+}
+/* On a plate with a note the buttons stand in the line's flow, between the note and the time,
+   not over the note. */
+:root.feed-column .msg-noted .msg-time-actions {
+  position: static;
+  transform: none;
+  padding: 0;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: none;
+}
+/* A touch screen as wide as a computer's has no hover: the buttons stay, in the line's flow so
+   they cover no text. */
+@media (hover: none) {
+  .msg-time-actions {
+    position: static;
+    transform: none;
+    padding: 0;
+    margin-right: 6px;
+    vertical-align: middle;
+    background: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+.chat:not(.chat-phone) .msg-time-actions .btn-copy-idle {
+  width: 18px;
+  height: 18px;
+}
+.chat:not(.chat-phone) .msg-time-actions .icon {
+  width: 13px;
+  height: 13px;
+}
+.msg-time-actions .btn-copy.btn-copy-done {
+  color: var(--online);
+}
+.msg-time-actions .btn-copy.btn-copy-failed {
+  color: var(--danger);
+}
+
+/* One column: the user's message is a plate from the feed's left edge to its right. */
+:root.feed-column .msg-user {
+  display: block;
+}
+:root.feed-column .msg-user > .meta {
+  margin-top: 4px;
+}
+:root.feed-column .msg-bubble {
+  max-width: none;
+  padding: 5px 10px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--muted) 18%, transparent);
+}
+:root.feed-column .msg-bubble > .msg-time {
+  margin-left: 16px;
+}
+/* On a plate the note stands left of the time, on the first line. */
+:root.feed-column .msg-note {
+  float: right;
+  margin: 0 0 0 16px;
+  line-height: var(--feed-line);
+}
+:root.feed-column .msg-note::after {
+  content: none;
+}
+:root.feed-column .msg-noted > .msg-time {
+  margin: 0 0 0 8px;
+  line-height: var(--feed-line);
 }
 
 .msg-pending .msg-bubble {
@@ -2539,6 +3020,12 @@ select.input {
 /* The user's text as typed, line breaks kept (no Markdown, as in the Claude Code tab). */
 .msg-text {
   white-space: pre-wrap;
+}
+/* In a bubble the text is inline, in one line box with the floated time: a block beside the
+   float leaves the time out of the bubble's width, and a short message breaks at every letter
+   next to it. */
+.msg-bubble > .msg-text {
+  display: inline;
 }
 
 .delivery-failed {
@@ -2704,7 +3191,8 @@ select.input {
   max-width: 100%;
   border: 0;
   background: transparent;
-  color: var(--muted);
+  /* Fainter than the text around: the calls are a trace, not the answer. */
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
   font: 13px var(--sans);
   padding: 6px 10px 6px 6px;
   margin-left: -6px;
@@ -2730,7 +3218,6 @@ select.input {
 
 .tool-stats {
   flex: none;
-  color: var(--muted);
 }
 
 .tool-peek {
@@ -2739,7 +3226,6 @@ select.input {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  color: var(--muted);
 }
 
 .mark {
@@ -2847,7 +3333,7 @@ select.input {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: var(--muted);
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
   font-style: italic;
   cursor: pointer;
 }
@@ -3522,7 +4008,7 @@ a.relay-peer {
   justify-content: center;
 }
 
-/* ---- composer and the handover banner ---- */
+/* ---- composer and the VS Code strip ---- */
 
 /* "Quote" under the end of text selected in the feed. */
 .btn-quote {
@@ -3530,6 +4016,80 @@ a.relay-peer {
   z-index: 20;
   transform: translateX(-50%);
   box-shadow: 0 6px 18px color-mix(in srgb, var(--shade) 35%, transparent);
+}
+
+/* The subagents running now, pinned above the input (LiveSubagents, SPEC §6). */
+.live-agents {
+  flex: none;
+  padding: 8px 28px 6px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: center;
+}
+
+.live-agents-list {
+  width: 100%;
+  max-width: 780px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 30dvh;
+  overflow-y: auto;
+}
+
+.live-agents-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.live-agents-what {
+  flex: 1;
+  min-width: 0;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-agents-stats {
+  flex: none;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The new screen: the subagents and the composer are one panel under the feed, each line led by
+   the running dot of the feed's tools; the task in the text colour, what it does now dimmer. */
+.live-agents + .composer-wrap {
+  border-top: 0;
+  padding-top: 6px;
+}
+.live-agents-dot {
+  width: 6px;
+  height: 6px;
+  margin-right: -4px;
+  align-self: center;
+}
+.live-agents-task {
+  color: var(--text);
+}
+/* One column: the dot in the 22 px gutter of the feed's marks, the text on the feed's text. */
+:root.feed-column .chat:not(.chat-phone) .live-agents {
+  padding: 8px 24px 4px;
+}
+:root.feed-column .chat:not(.chat-phone) .live-agents-dot {
+  margin-left: 8px;
+}
+
+.chat-phone .live-agents {
+  padding: 6px 12px 4px;
 }
 
 .composer-wrap {
@@ -3541,6 +4101,7 @@ a.relay-peer {
   justify-content: center;
 }
 
+/* One row: attach, the field, send, the same 6 px around all three; files above the row. */
 .composer {
   position: relative;
   min-width: 0;
@@ -3549,7 +4110,7 @@ a.relay-peer {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 10px 10px 10px 14px;
+  padding: 6px;
   border-radius: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -3604,13 +4165,15 @@ a.relay-peer {
 }
 
 .composer-input {
+  flex: 1;
   resize: none;
   border: 0;
   outline: 0;
   background: transparent;
   color: var(--text);
   font: 14px/1.5 var(--sans);
-  padding: 2px 0;
+  /* One line as tall as the buttons. */
+  padding: 7.5px 4px;
   max-height: 200px;
   min-width: 0;
 }
@@ -3618,28 +4181,24 @@ a.relay-peer {
   opacity: 0.6;
 }
 
+/* The buttons stay at the bottom while the field grows. */
 .composer-row {
   display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.composer-hint {
-  flex: 1;
-  font-size: 12px;
-  color: var(--muted);
+  align-items: flex-end;
+  gap: 4px;
 }
 
 .btn-attach {
-  width: 34px;
-  height: 34px;
+  flex: none;
+  width: 36px;
+  height: 36px;
   color: var(--muted);
 }
 
 .btn-send {
   flex: none;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   border: 0;
   background: var(--accent);
@@ -3710,49 +4269,219 @@ a.relay-peer {
   border-radius: 22px;
 }
 
-.handover {
+/* One column on a computer: the composer of the VS Code tab's size, no line above it. */
+:root.feed-column .chat:not(.chat-phone) .composer-wrap {
+  padding: 8px 24px 14px;
+  border-top: 0;
+}
+:root.feed-column .composer:not(.composer-phone) {
+  padding: 5px;
+}
+:root.feed-column .composer:not(.composer-phone) .composer-input {
+  font-size: 13.5px;
+  line-height: 1.45;
+  padding: 4.2px 6px;
+}
+:root.feed-column .composer:not(.composer-phone) :is(.btn-attach, .btn-send) {
+  width: 28px;
+  height: 28px;
+}
+
+/* A session VS Code has (SPEC §9.3), in place of the composer: only what to do; where it is
+   open is the header's pill. */
+.lockbar {
   width: 100%;
   max-width: 780px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 10px 12px;
   border-radius: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
+  color: var(--text2);
+  font-size: 13px;
 }
-
-.handover-icon {
-  flex: 0 0 36px;
-  height: 36px;
-  border-radius: 9px;
-  background: var(--bubble);
-  color: var(--accent-text);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.lockbar > .icon {
+  flex: none;
+  color: var(--muted);
 }
-
-.handover-text {
-  flex: 1 1 260px;
+.lockbar-text {
+  flex: 1 1 200px;
   min-width: 0;
 }
 
-.handover-title {
-  font-weight: 500;
+/* ---- a new session (NewSession.tsx): a chat window at once, its chips over the input ---- */
+
+.chat-new .timeline {
+  display: flex;
+  flex-direction: column;
 }
 
-.handover-sub {
-  font-size: 13px;
+/* The feed before the first message: what to do, in the middle. */
+.new-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
   color: var(--muted);
+  font-size: 13px;
+}
+.new-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text2);
+}
+:root.feed-column .chat:not(.chat-phone) .new-empty {
+  font-size: 12.5px;
+}
+:root.feed-column .chat:not(.chat-phone) .new-empty-title {
+  font-size: 13.5px;
+}
+
+/* Workspace, folder, permissions, model: a row over the input, in the input's column; the
+   chips and the input are one panel under the feed. */
+.new-chips {
+  flex: none;
+  padding: 12px 28px 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: center;
+}
+.new-chips + .composer-wrap {
+  border-top: 0;
+  padding-top: 8px;
+}
+.new-chips-row {
+  width: 100%;
+  max-width: 780px;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+:root.feed-wide .new-chips-row {
+  max-width: none;
+}
+:root.feed-column .chat:not(.chat-phone) .new-chips {
+  padding: 8px 24px 0;
+  border-top: 0;
+}
+.chat-phone .new-chips {
+  padding: 10px 12px 0;
+}
+
+.new-chip {
+  flex: none;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 8px 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--shade) 18%, transparent);
+  color: var(--text2);
+  font: 13px var(--sans);
+  cursor: pointer;
+}
+.new-chip b {
+  color: var(--text);
+  font-weight: 600;
+}
+.new-chip-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.new-chip:hover:not(:disabled),
+.new-chip.is-open {
+  background: var(--row-on);
+  color: var(--text);
+}
+.new-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.new-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+:root.feed-column .chat:not(.chat-phone) .new-chip {
+  height: 28px;
+  font-size: 12.5px;
+}
+
+/* A workspace in its chip's menu: the name, then the worker and the whole path, wrapped when
+   the window is narrow. */
+.ctx-menu .menu-item.has-detail {
+  height: auto;
+  min-height: 34px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  white-space: normal;
+  text-align: left;
+}
+:root.list-compact .layout:not(.layout-phone) .ctx-menu .menu-item.has-detail {
+  height: auto;
+  min-height: 26px;
+}
+.layout-phone .ctx-menu .menu-item.has-detail {
+  min-height: 44px;
+}
+.has-detail .menu-label {
+  flex: none;
+  font-weight: 600;
+}
+.menu-detail {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* On a phone the path goes under the name, wrapped where it must. */
+.layout-phone .ctx-menu .menu-item.has-detail {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.layout-phone .menu-detail {
+  flex-basis: 100%;
+  padding-left: 26px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* The folder or another model's name, typed in the chip's menu. */
+.menu-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px 6px;
 }
 
 /* ---- phone chat (Mobile-Session) ---- */
 
 .chat-phone {
+  --feed-line: 22.5px;
   font-size: 15px;
   line-height: 1.5;
+}
+
+/* No margin and no hover on a phone: a message's buttons are a row under it. */
+.chat-phone .msg-actions {
+  position: static;
+  flex-direction: row;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .chat-phone .chat-head {
@@ -3936,12 +4665,6 @@ a.relay-peer {
 
 .page-body p {
   margin: 0;
-}
-
-.setting-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 .layout-phone .input {
@@ -4554,7 +5277,8 @@ button.ps-look {
   gap: 12px;
 }
 
-.ap-row .seg-group {
+.ap-row .seg-group,
+.settings-look {
   width: 240px;
 }
 

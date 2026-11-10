@@ -25,18 +25,12 @@ export function workspaceName(w: Workspace): string {
   return w.label || w.path.split('/').filter(Boolean).pop() || w.path;
 }
 
-/** The name, then where it is: the choice of the new-session form. */
-export function workspaceTitle(w: Workspace, workers?: WorkerInfo[]): string {
-  const worker = workers?.find((x) => x.id === w.worker_id)?.name;
-  return `${workspaceName(w)} — ${worker ? `${worker}:` : ''}${w.path}`;
-}
-
 /** Why a workspace could not be added, as the user reads it. */
 function addError(e: unknown, app: AppState): { text: string; link?: { href: string; label: string } } {
   if (e instanceof ApiError) {
     const c = parseWorkspaceConflict(e.body);
     if (c) {
-      const p = app.projects.get(c.existing_project_id);
+      const p = app.project(c.existing_project_id);
       const where = p ? `project “${projectName(p)}”` : 'another project';
       return {
         text: `This folder is already in ${where}: ${c.existing_path}. A folder belongs to one project, and so do its subfolders.`,
@@ -109,7 +103,7 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
   const [branching, setBranching] = useState<string | null>(null);
   const [appearance, setAppearance] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const project = app.projects.get(projectId);
+  const project = app.project(projectId);
   const list = app.workspaces.get(projectId);
 
   useEffect(() => {

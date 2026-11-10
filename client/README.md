@@ -63,7 +63,7 @@ only push.
   T26 ones of `redesign-2026-10-24` for what round 2 did not redraw):
   - `App.tsx` — layout: on desktop the project bar (`ProjectRail`), the sidebar
     (`SessionList`) and the screen; on a phone (narrower than 900px, `useIsPhone`) one screen at a time;
-    widths (T49, narrowing as in T27): the bar is 72px (with "Settings" → "Project bar" → "Names",
+    widths (T49, narrowing as in T27): the bar is 72px (in the Compact look,
     `:root.rail-names`, as wide as the longest name, 200–320px), the sidebar `clamp(280px, 25vw, 310px)`, the
     main column `minmax(0, 1fr)` with no minimum, its feed and input at most 780px; nothing may set a width, a
     minimum width or a flex basis of 300px or more (`tests/layout.test.ts`); long code
@@ -71,7 +71,7 @@ only push.
     wraps;
   - `ProjectRail.tsx` — project tiles with their icon on their color, the current one with the
     pill and `--mark-bg`, its state as a session row's dot: the "needs you" badge, a pulsing
-    dot of its color while a session runs, the unread dot or an empty ring; with "Names" on, a
+    dot of its color while a session runs, the unread dot or an empty ring; in the Compact look, a
     row per project with its icon and full name;
   - `SessionList.tsx` + `sessions.ts` — the sidebar: the header (the project's tile, name, counters, the gear to
     the project settings, "New"), "State"/"Recent" modes (the choice is in
@@ -93,7 +93,7 @@ only push.
   - `cards.tsx` — messages, tool groups, service lines, the agent's question;
     `permission.tsx` — the permission card (Enter/Esc, reply with text, collapsed line);
   - `Settings` (the app theme first: a row of dark and a row of light tiles, applied on a
-    click; notifications; workers), `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
+    click; the look, Compact or Spacious, the user's like the theme; notifications; workers), `Enroll` — pages; `Markdown.tsx` — markdown and code blocks with
     "Copy"; `icons.tsx` — icons; `labels.ts` — labels and formats.
   `src/clipboard.ts` — copying through `navigator.clipboard`, or a hidden textarea if the API is missing
   (http in a LAN).

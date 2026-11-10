@@ -32,8 +32,9 @@ function settingsApp(api: Partial<Api>) {
   return {
     api,
     me: { email: 'me@example.com' },
-    look: { wideFeed: false, systemFont: false, railNames: false, timeInGap: false, compactList: false },
+    device: {},
     theme: () => 'warm',
+    lookName: () => 'spacious',
     reloadSessions: vi.fn(async () => {}),
   } as unknown as AppState;
 }

@@ -1,7 +1,7 @@
-//! T49 (SPEC §3 User, §3 Project, §6, §12): the app theme on the user, a project's color and
-//! icon, and the icon image: PNG, JPEG or WebP by the content, square, 128–1024 px, at most
-//! 256 KB, owner only, served with its checked type and a cache key in its URL, gone with
-//! the project.
+//! T49 (SPEC §3 User, §3 Project, §6, §12): the app theme and the look on the user, a
+//! project's color and icon, and the icon image: PNG, JPEG or WebP by the content, square,
+//! 128–1024 px, at most 256 KB, owner only, served with its checked type and a cache key in
+//! its URL, gone with the project.
 
 mod common;
 
@@ -70,6 +70,38 @@ async fn the_theme_round_trips_on_the_user() {
     assert_eq!(s, 422, "not a theme");
     let (_, me) = hub.get("/api/me").await;
     assert_eq!(me["theme"], "contrast_light");
+    hub.finish().await;
+}
+
+/// The client's look (SPEC §3 User): one switch, kept on the user like the theme.
+#[tokio::test]
+async fn the_look_round_trips_on_the_user() {
+    let hub = TestHub::start().await;
+    let (s, me) = hub.get("/api/me").await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["look"], "spacious", "the default");
+
+    let (s, me) = hub.patch("/api/me", json!({"look": "compact"})).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["look"], "compact");
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(me["look"], "compact", "stored, the same on every device");
+
+    // The theme alone leaves the look, and the look the theme.
+    let (s, me) = hub.patch("/api/me", json!({"theme": "graphite"})).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["look"], "compact");
+    let (s, me) = hub.patch("/api/me", json!({"look": "spacious"})).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["look"], "spacious");
+    assert_eq!(me["theme"], "graphite");
+
+    for odd in ["dense", "Compact"] {
+        let (s, _) = hub.patch("/api/me", json!({"look": odd})).await;
+        assert_eq!(s, 422, "not a look: {odd}");
+    }
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(me["look"], "spacious", "an unknown look changes nothing");
     hub.finish().await;
 }
 

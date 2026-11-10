@@ -37,7 +37,7 @@ describe('layout widths', () => {
     const breakpoint = Number(/max-width: (\d+)px/.exec(HOOKS)![1]) + 1;
     expect(breakpoint).toBe(900);
     expect(72 + Math.max(280, breakpoint / 4)).toBeLessThan(breakpoint / 2);
-    // With the project names on (SPEC 0.91) the bar is as wide as the longest name, at most
+    // In the Compact look the bar is as wide as the longest name, at most
     // 320px: a choice of the user, which leaves the chat at least 300px at the breakpoint.
     const named = rule(':root.rail-names .layout')['grid-template-columns'];
     expect(named).toBe('auto min(var(--list-w, clamp(280px, 25vw, 310px)), calc(100vw - 620px)) minmax(0, 1fr)');

@@ -110,6 +110,14 @@ describe('examples/wire', () => {
     expect(one.type === 'session.summary' && one.session.title).toBe('hqc: run the tests');
     const d = parseServerFrame(load('client.delivery.json'));
     expect(d).toMatchObject({ type: 'delivery', seq: 42, delivery: 'delivered' });
+    expect(d.type === 'delivery' && d.joined).toBeFalsy();
+    // Into the turn already running (SPEC §17.2): the frame says so, and so does the message.
+    const j = parseServerFrame(load('client.delivery.joined.json'));
+    expect(j).toMatchObject({ type: 'delivery', seq: 44, delivery: 'delivered', joined: true });
+    const m = parseEvent(load('event.user.message.joined.json'));
+    expect(m.type === 'user.message' && m.payload.joined).toBe(true);
+    const plain = parseEvent(load('event.user.message.json'));
+    expect(plain.type === 'user.message' && plain.payload.joined).toBeFalsy();
   });
 
   // REST bodies (hqc_proto::api).
@@ -201,10 +209,17 @@ describe('examples/wire', () => {
     expect([p.favorite_at, list[0].favorite_at]).toEqual(['2026-10-24T08:00:00Z', undefined]);
     expect(parseFavorite({ favorite_at: '2026-10-24T08:00:00Z' })).toBe('2026-10-24T08:00:00Z');
     expect(() => parseFavorite({})).toThrow();
+    // An archived project: only in the list of `?archived=1`, with since when.
+    expect(list.map((x) => x.archived_at)).toEqual([undefined, undefined]);
+    expect(parseProjectList(load('api.projects.archived.json'))[0]).toMatchObject({ name: '99bot_ng', archived_at: '2026-11-09T18:20:00Z' });
     const odd = parseProject({ ...(load('api.project.json') as object), color: 'mauve', icon: { kind: 'svg', value: 'x' } });
     expect(odd).toMatchObject({ color: 'teal', icon: undefined });
     expect(parseMe(load('api.me.json')).theme).toBe('contrast');
     expect(parseMe({ ...(load('api.me.json') as object), theme: undefined }).theme).toBe('warm');
+    // The look: Spacious from a hub before it and for a value this build does not know.
+    expect(parseMe(load('api.me.json')).look).toBe('compact');
+    expect(parseMe({ ...(load('api.me.json') as object), look: undefined }).look).toBe('spacious');
+    expect(parseMe({ ...(load('api.me.json') as object), look: 'dense' }).look).toBe('spacious');
     const w = parseWorkspace(load('api.workspace.json'));
     expect(p.default_workspace_id).toBe(w.id);
     expect(w).toMatchObject({ project_id: p.id, kind: 'dir', label: 'home-mac' });

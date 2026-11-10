@@ -1,12 +1,13 @@
 // Application-wide state: who I am, my projects, the sessions of all of them and their live
 // `state`/`queue_len`/unread from `subscribe_summary` (SPEC §6, §17.1), the workspaces and
-// the list order (T50) of the projects that have been looked at, and a session archived from
-// the list that has not gone to the hub yet.
+// the list order (T50) of the projects that have been looked at, a session archived from the
+// list that has not gone to the hub yet, and the archived projects the project search finds.
 
 import { Api, ApiError, type NewSessionOptions, type SessionPatch } from './api';
 import type {
   ClarifyAnswer,
   ListMode,
+  LookName,
   Me,
   OpenRequest,
   PermissionMode,
@@ -18,13 +19,26 @@ import type {
   Theme,
   Workspace,
 } from './proto';
-import { ChatSession } from './session';
-import { storedTheme, type Look } from './theme';
+import { ChatSession, type OutgoingFile } from './session';
+import { storedLook, storedTheme, type DeviceLayout } from './theme';
 import { arrange, bucketOf } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
 /** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
 export const ARCHIVE_UNDO_MS = 5000;
+
+/** A new session not on the hub yet (`#/p/<project>/new`): the project and what its chips
+ *  chose; absent fields are the defaults (the project's default workspace, the worker's
+ *  permission mode, the runtime's model). `started`: the session its first message created,
+ *  which the list leaves out while the draft still stands for it. */
+export interface NewSessionDraft {
+  projectId: string;
+  workspace_id?: string;
+  cwd: string;
+  permission_mode?: PermissionMode;
+  model?: string;
+  started?: string;
+}
 
 /** Chats kept in memory, the most recently used: one of them opens again at once (SPEC §6). */
 const CHATS = 12;
@@ -41,32 +55,37 @@ function loadDrafts(): Map<string, string> {
   }
 }
 
-/** The look on this device (`Look`): a convenience, so storage that fails or is empty only
- *  means the default look. */
-const LOOK_KEY = 'hqc.look';
-function loadLook(): Look {
+/** What this device keeps whatever the look (`DeviceLayout`): a convenience, so storage that
+ *  fails or is empty only means the default width. */
+const DEVICE_KEY = 'hqc.look';
+function loadDevice(): DeviceLayout {
   try {
-    const v = JSON.parse(localStorage.getItem(LOOK_KEY) ?? '{}') ?? {};
-    return {
-      wideFeed: v.wideFeed === true,
-      systemFont: v.systemFont === true,
-      railNames: v.railNames === true,
-      timeInGap: v.timeInGap === true,
-      compactList: v.compactList === true,
-      listWidth: typeof v.listWidth === 'number' ? v.listWidth : undefined,
-    };
+    const v = JSON.parse(localStorage.getItem(DEVICE_KEY) ?? '{}') ?? {};
+    return { listWidth: typeof v.listWidth === 'number' ? v.listWidth : undefined };
   } catch {
-    return { wideFeed: false, systemFont: false, railNames: false, timeInGap: false, compactList: false };
+    return {};
   }
 }
 
 /** The projects, sessions and list orders as last shown, on this device: shown at once on a
  *  reload, replaced when the hub answers. Storage that fails or holds something else: none. */
 const LIST_KEY = 'hqc.list';
-function loadList(): { home: string; projects: Project[]; sessions: SessionInfo[]; orders: [string, SessionOrder][] } | null {
+function loadList(): {
+  home: string;
+  projects: Project[];
+  archived: Project[];
+  sessions: SessionInfo[];
+  orders: [string, SessionOrder][];
+} | null {
   try {
     const v = JSON.parse(localStorage.getItem(LIST_KEY) ?? '');
-    return { home: v.home, projects: [...v.projects], sessions: [...v.sessions], orders: Object.entries(v.orders) };
+    return {
+      home: v.home,
+      projects: [...v.projects],
+      archived: [...(v.archived ?? [])],
+      sessions: [...v.sessions],
+      orders: Object.entries(v.orders),
+    };
   } catch {
     return null;
   }
@@ -74,10 +93,9 @@ function loadList(): { home: string; projects: Project[]; sessions: SessionInfo[
 
 export class AppState {
   me: Me | null = null;
-  /** The full-width feed, the system font and the time in the gap ("Settings" → "Feed"), the
-   *  project names in the project bar ("Settings" → "Project bar"), the compact session list
-   *  ("Settings" → "Session list") and the session column's dragged width, on this device. */
-  look: Look = loadLook();
+  /** The session column's dragged width, on this device; the look itself is the user's
+   *  (`lookName`). */
+  device: DeviceLayout = loadDevice();
   error: string | null = null;
   readonly projects = new Map<string, Project>();
   readonly sessions = new Map<string, SessionInfo>();
@@ -101,8 +119,33 @@ export class AppState {
   private archiveTimer: ReturnType<typeof setTimeout> | undefined;
   /** The list shows the project's archive (T50); back to the sessions on a project switch. */
   archiveMode = false;
+  /** The archived projects, off the project bar: as `refreshSessions` last fetched them, with
+   *  the ones archived or restored here since. The project search finds them; one opened from
+   *  there, from an address or from a session of it is shown like any. */
+  readonly archivedProjects = new Map<string, Project>();
+  /** Projects archived here whose `/archive` is not answered yet, and ones being restored: a
+   *  list read meanwhile may predate the hub's change, so it does not move them
+   *  (`putProjects`, `placeProject`). */
+  private readonly archiving = new Set<string>();
+  private readonly restoring = new Set<string>();
+  /** The bar's order in the hub's latest list (on page load, the bar kept on this device until
+   *  the first list comes), with the projects this client put on the bar since last, as the hub
+   *  orders a new one: a refused archive goes back to its place in it, whatever was archived,
+   *  restored or reordered while the refusal was on its way. */
+  private hubBar: string[] = [];
+  /** A project archived here a moment ago: "Archived «…» · Undo" for `ARCHIVE_UNDO_MS`. */
+  projectUndo: string | null = null;
+  private projectUndoTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The last archive or restore of a project on its way: the next one waits for it, so an
+   *  Undo never reaches the hub before the archive it undoes. */
+  private projectArchiving: Promise<unknown> = Promise.resolve();
   /** A list action the hub refused (archive, restore, delete, rename, order). */
   listNotice: string | null = null;
+  /** The new session open in the main column, one at a time; gone when it is left unsent. */
+  newSession: NewSessionDraft | null = null;
+  /** What a new session's window hands to the chat that replaces it, taken once
+   *  (`takeHandover`). */
+  private handover: { id: string; files: OutgoingFile[] } | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly drafts = loadDrafts();
   private refreshing: Promise<void> | null = null;
@@ -125,6 +168,8 @@ export class AppState {
     const list = loadList();
     if (list) {
       for (const p of list.projects) this.projects.set(p.id, p);
+      this.hubBar = list.projects.map((p) => p.id);
+      for (const p of list.archived) this.archivedProjects.set(p.id, p);
       for (const s of list.sessions) this.sessions.set(s.id, s);
       for (const [id, o] of list.orders) this.orders.set(id, o);
       this.currentProjectId = list.home;
@@ -160,10 +205,10 @@ export class AppState {
     if (had !== this.drafts.has(id)) this.changed();
   }
 
-  setLook(patch: Partial<Look>): void {
-    this.look = { ...this.look, ...patch };
+  setDevice(patch: Partial<DeviceLayout>): void {
+    this.device = { ...this.device, ...patch };
     try {
-      localStorage.setItem(LOOK_KEY, JSON.stringify(this.look));
+      localStorage.setItem(DEVICE_KEY, JSON.stringify(this.device));
     } catch {
       // Kept until a reload.
     }
@@ -251,6 +296,7 @@ export class AppState {
         JSON.stringify({
           home: this.me.personal_project_id,
           projects: [...this.projects.values()],
+          archived: [...this.archivedProjects.values()],
           sessions: [...this.sessions.values()],
           // Only the hub's orders of this page load: a kept one is not written back unchecked.
           orders: Object.fromEntries([...this.orders].filter(([id]) => this.loadedOrders.has(id))),
@@ -275,9 +321,10 @@ export class AppState {
     );
   }
 
-  /** Projects and the sessions of every project, in two requests; the list is kept for the
-   *  next load of the page. A change the user made while the lists were on their way is
-   *  newer than them: they are fetched again, else they would undo it (a project's change
+  /** Projects (on the bar and archived) and the sessions of every project, in three requests;
+   *  the list is kept for the next load of the page. The archived projects are kept as they
+   *  were when their request fails. A change the user made while the lists were on their way
+   *  is newer than them: they are fetched again, else they would undo it (a project's change
    *  has no `session.summary` to bring it back). */
   async refreshSessions(): Promise<void> {
     if (!this.me) return;
@@ -285,19 +332,22 @@ export class AppState {
       this.pushedWhileRefreshing.clear();
       let seen: number;
       let projects: Project[];
+      let archived: Project[] | null;
       let sessions: SessionInfo[];
       do {
         seen = this.edits;
-        [projects, sessions] = await Promise.all([this.api.projects(), this.api.allSessions()]);
+        [projects, archived, sessions] = await Promise.all([
+          this.api.projects(),
+          this.api.archivedProjects().catch(() => null),
+          this.api.allSessions(),
+        ]);
       } while (seen !== this.edits);
-      this.projects.clear();
-      for (const p of projects) this.projects.set(p.id, p);
+      this.putProjects(projects, archived);
       const fresh = sessions.map((s) => this.keepRead(s));
       this.sessions.clear();
       for (const s of fresh) this.sessions.set(s.id, s);
-      if (!this.currentProjectId || !this.projects.has(this.currentProjectId)) {
-        this.currentProjectId = this.me!.personal_project_id;
-      }
+      // Gone: the personal project. An archived one stays open.
+      if (!this.currentProject()) this.currentProjectId = this.me!.personal_project_id;
       // A summary pushed meanwhile may be newer than the lists or older: the session itself,
       // asked now, is newer than both ("closed in VS Code" would otherwise come back open).
       for (const id of this.pushedWhileRefreshing) void this.refreshSession(id);
@@ -340,7 +390,7 @@ export class AppState {
       // project is not on the rail yet.
       if (known.project_id !== s.project_id) {
         this.workspaces.delete(s.project_id);
-        if (this.projects.has(s.project_id)) void this.refreshSession(s.session_id);
+        if (this.project(s.project_id)) void this.refreshSession(s.session_id);
         else unknown = true;
       }
       this.sessions.set(s.session_id, {
@@ -416,25 +466,147 @@ export class AppState {
   /** Marks the project a favorite or not; another device of the user sees it after a reload. */
   async setProjectFavorite(id: string, on: boolean): Promise<void> {
     const favorite_at = await this.api.setProjectFavorite(id, on);
-    const p = this.projects.get(id);
-    if (p) this.projects.set(id, { ...p, favorite_at });
+    for (const list of [this.projects, this.archivedProjects]) {
+      const p = list.get(id);
+      if (p) list.set(id, { ...p, favorite_at });
+    }
     this.edited();
+  }
+
+  /** A project of the user, on the bar or archived. */
+  project(id: string): Project | undefined {
+    return this.projects.get(id) ?? this.archivedProjects.get(id);
+  }
+
+  /** The lists as the hub sent them: `live` (the bar, in its order) and, when fetched, the
+   *  archived ones. A project whose archive or restore is on its way stays where this client
+   *  put it: the list may have been read before the hub stored the change. */
+  private putProjects(live: Project[], archived?: Project[] | null, local = false): void {
+    if (!local) this.hubBar = live.map((p) => p.id);
+    const held = new Map<string, Project>();
+    for (const id of [...this.archiving, ...this.restoring]) {
+      const p = this.archivedProjects.get(id);
+      if (p) held.set(id, p);
+    }
+    this.projects.clear();
+    for (const p of live) if (!held.has(p.id)) this.projects.set(p.id, p);
+    if (archived) {
+      this.archivedProjects.clear();
+      for (const p of archived) if (!this.projects.has(p.id)) this.archivedProjects.set(p.id, p);
+    } else {
+      for (const id of this.projects.keys()) this.archivedProjects.delete(id);
+    }
+    for (const [id, p] of held) this.archivedProjects.set(id, p);
+  }
+
+  /** A project as the hub answered it, into the list its `archived_at` says; one whose
+   *  archive or restore is on its way stays in the list it is in. */
+  private placeProject(p: Project): void {
+    const held = this.archiving.has(p.id) || this.restoring.has(p.id);
+    const before = this.archivedProjects.get(p.id);
+    if (held ? !!before : !!p.archived_at) {
+      this.projects.delete(p.id);
+      this.archivedProjects.set(p.id, { ...p, archived_at: p.archived_at ?? before?.archived_at });
+    } else {
+      this.archivedProjects.delete(p.id);
+      this.projects.set(p.id, p.archived_at ? { ...p, archived_at: undefined } : p);
+      if (!this.hubBar.includes(p.id)) this.hubBar.push(p.id);
+    }
+  }
+
+  /** Archives a project at once, no question: off the bar, the open one gives its place to the
+   *  personal project, "Archived «…» · Undo" for `ARCHIVE_UNDO_MS`. Its sessions stay as they
+   *  are. A refusal of the hub puts it back on the bar. */
+  archiveProject(id: string): void {
+    const p = this.projects.get(id);
+    if (!p) return;
+    // The bar now: the place to go back to when the hub's latest list does not have it.
+    const order = [...this.projects.keys()];
+    this.archiving.add(id);
+    this.projects.delete(id);
+    this.archivedProjects.set(id, { ...p, archived_at: new Date().toISOString() });
+    if (this.currentProjectId === id) this.currentProjectId = this.me?.personal_project_id ?? null;
+    clearTimeout(this.projectUndoTimer);
+    this.projectUndo = id;
+    this.projectUndoTimer = setTimeout(() => {
+      this.projectUndo = null;
+      this.changed();
+    }, ARCHIVE_UNDO_MS);
+    this.changed();
+    this.projectArchiving = this.projectArchiving.then(() =>
+      this.api.archiveProject(id).then(
+        (v) => {
+          this.archiving.delete(id);
+          if (this.archivedProjects.has(id)) {
+            this.projects.delete(id);
+            this.archivedProjects.set(id, v);
+          }
+          // A list on its way was read before the hub stored it: it is read again.
+          this.changed();
+        },
+        (e: Error) => {
+          this.archiving.delete(id);
+          // Its copy now (renamed or made a favorite from the search meanwhile), back on the bar
+          // in the hub's order, which still has it (before the first list, in the bar's order
+          // when it was archived); one neither order has goes last.
+          const back = { ...(this.archivedProjects.get(id) ?? p), archived_at: undefined };
+          this.archivedProjects.delete(id);
+          const now = new Map(this.projects).set(id, back);
+          this.projects.clear();
+          for (const k of this.hubBar.includes(id) ? this.hubBar : order) {
+            const q = now.get(k);
+            if (q) this.projects.set(k, q);
+          }
+          for (const [k, q] of now) if (!this.projects.has(k)) this.projects.set(k, q);
+          if (this.projectUndo === id) this.projectUndo = null;
+          this.listNotice = `Not archived «${p.name}»: ${e.message}`;
+          this.changed();
+        },
+      ),
+    );
+  }
+
+  /** Back from the archive (Undo, or the menu of a project the search found), in its place on
+   *  the bar as the hub keeps the order. */
+  restoreProject(id: string): Promise<void> {
+    if (this.projectUndo === id) {
+      clearTimeout(this.projectUndoTimer);
+      this.projectUndo = null;
+      this.changed();
+    }
+    this.restoring.add(id);
+    const run = this.projectArchiving.then(async () => {
+      try {
+        await this.api.unarchiveProject(id);
+        const list = await this.api.projects();
+        this.restoring.delete(id);
+        this.archivedProjects.delete(id);
+        // Another one archived meanwhile is still on its way: it stays off the bar.
+        this.putProjects(list);
+        this.changed();
+      } finally {
+        this.restoring.delete(id);
+      }
+    });
+    this.projectArchiving = run.catch(() => {});
+    return run;
   }
 
   /** The project bar in the order of `ids` at once, then as the hub keeps it. */
   async saveProjectOrder(ids: string[]): Promise<void> {
-    const put = (list: Project[]) => {
-      this.projects.clear();
-      for (const p of list) this.projects.set(p.id, p);
+    const put = (list: Project[], local = false) => {
+      this.putProjects(list, undefined, local);
       this.edited();
     };
     const known = ids.map((id) => this.projects.get(id)).filter((p): p is Project => !!p);
-    put([...known, ...[...this.projects.values()].filter((p) => !ids.includes(p.id))]);
+    put([...known, ...[...this.projects.values()].filter((p) => !ids.includes(p.id))], true);
     put(await this.api.putProjectOrder(ids));
   }
 
+  /** The project of the left column: one on the bar, or an archived one. */
   currentProject(): Project | undefined {
-    return this.currentProjectId ? this.projects.get(this.currentProjectId) : undefined;
+    const id = this.currentProjectId;
+    return id ? this.project(id) : undefined;
   }
 
   selectProject(id: string): void {
@@ -664,7 +836,7 @@ export class AppState {
    *  its address and title; undefined for a deleted or unknown one. */
   findSession(ref: string): { id: string; address: string; title: string } | undefined {
     const address = (s: SessionInfo) => {
-      const p = this.projects.get(s.project_id);
+      const p = this.project(s.project_id);
       return p ? `${p.slug}/${s.slug}` : undefined;
     };
     const byId = this.sessions.get(ref);
@@ -679,7 +851,7 @@ export class AppState {
 
   /** The session's folder on its worker: the workspace path and `cwd` inside it; undefined
    *  until the project's workspaces are loaded. */
-  sessionPath(s: SessionInfo): string | undefined {
+  sessionPath(s: Pick<SessionInfo, 'project_id' | 'workspace_id' | 'cwd'>): string | undefined {
     const w = this.workspaces.get(s.project_id)?.find((x) => x.id === s.workspace_id);
     if (!w) return undefined;
     const cwd = s.cwd.replace(/^\.\/?/, '').replace(/\/+$/, '');
@@ -694,12 +866,74 @@ export class AppState {
     return s;
   }
 
+  /** Opens a new session of project `projectId` in the main column: nothing on the hub yet,
+   *  the defaults chosen. Another draft is dropped. */
+  openNewSession(projectId: string): void {
+    this.newSession = { projectId, cwd: '' };
+    this.changed();
+  }
+
+  /** What a chip of the open new session chose. */
+  setNewSession(patch: Partial<Omit<NewSessionDraft, 'projectId' | 'started'>>): void {
+    if (!this.newSession) return;
+    this.newSession = { ...this.newSession, ...patch };
+    this.changed();
+  }
+
+  /** The new session was left: unsent, it is gone; sent, its session stands in the list. */
+  closeNewSession(): void {
+    if (!this.newSession) return;
+    this.newSession = null;
+    this.changed();
+  }
+
+  /** A new session's window gives its place to the chat of session `id`: what is typed there
+   *  and not sent becomes the chat's draft, and the chat takes `files` and the caret. */
+  handOver(id: string, text: string, files: OutgoingFile[]): void {
+    this.setDraft(id, text);
+    this.handover = { id, files };
+  }
+
+  /** What was handed over to chat `id`, once; nothing for another chat. */
+  takeHandover(id: string): { files: OutgoingFile[] } | undefined {
+    const h = this.handover;
+    if (h?.id !== id) return undefined;
+    this.handover = null;
+    return h;
+  }
+
+  /** The workspace a new session starts in: the one its chip picked, else the project's
+   *  default (SPEC §13.4), else the project's first. */
+  newSessionWorkspace(d: NewSessionDraft): string | undefined {
+    return d.workspace_id || this.project(d.projectId)?.default_workspace_id || this.workspaces.get(d.projectId)?.[0]?.id;
+  }
+
+  /** The first message of the open new session: the session is created on the hub with the
+   *  draft's choices, and the draft stands for it in the list until its chat replaces the
+   *  draft. */
+  async startNewSession(): Promise<SessionInfo> {
+    const d = this.newSession;
+    if (!d) throw new Error('no new session open');
+    if (!this.me) throw new Error('not signed in');
+    const s = await this.api.createSession(d.projectId, undefined, {
+      workspace_id: this.newSessionWorkspace(d),
+      cwd: d.cwd.trim(),
+      permission_mode: d.permission_mode,
+      model: d.model,
+    });
+    this.sessions.set(s.id, s);
+    // In the same change: the list never shows both the draft and its session.
+    if (this.newSession === d) this.newSession = { ...d, started: s.id };
+    this.changed();
+    return s;
+  }
+
   /** Moves the session to folder `path` of its worker, in `project` or a new one (a new
    *  project joins the rail); its list follows it there. */
   async moveSession(sessionId: string, body: { path: string; project?: string; create?: boolean }): Promise<SessionInfo> {
     const s = await this.api.moveSession(sessionId, body);
-    if (!this.projects.has(s.project_id)) {
-      for (const p of await this.api.projects()) this.projects.set(p.id, p);
+    if (!this.project(s.project_id)) {
+      for (const p of await this.api.projects()) this.placeProject(p);
     }
     this.sessions.set(s.id, s);
     this.workspaces.delete(s.project_id);
@@ -735,6 +969,7 @@ export class AppState {
   async createProject(name: string): Promise<Project> {
     const p = await this.api.createProject(name);
     this.projects.set(p.id, p);
+    this.hubBar.push(p.id);
     this.currentProjectId = p.id;
     this.edited();
     return p;
@@ -752,29 +987,43 @@ export class AppState {
     this.changed();
   }
 
+  /** The look, Compact or Spacious (SPEC §3 User): the user's; until `/api/me` answers, the one
+   *  last applied on this device (Spacious without one), so the first paint is not the wrong
+   *  look. */
+  lookName(): LookName {
+    return this.me?.look ?? storedLook();
+  }
+
+  async setLookName(look: LookName): Promise<void> {
+    if (look === this.lookName()) return;
+    this.me = await this.api.setLook(look);
+    this.changed();
+  }
+
   /** A project's color and emoji or letters (T49); the personal project's too. */
   async setAppearance(id: string, patch: { color?: ProjectColor; icon?: { kind: 'emoji' | 'letters'; value: string } }): Promise<void> {
     const p = await this.api.patchProject(id, patch);
-    this.projects.set(p.id, p);
+    this.placeProject(p);
     this.edited();
   }
 
   /** An image as the project's icon; the hub checks it (`422 invalid_icon`). */
   async uploadProjectIcon(id: string, file: File): Promise<void> {
     const p = await this.api.uploadProjectIcon(id, file, file.name);
-    this.projects.set(p.id, p);
+    this.placeProject(p);
     this.edited();
   }
 
   async renameProject(id: string, name: string): Promise<void> {
     const p = await this.api.patchProject(id, { name });
-    this.projects.set(p.id, p);
+    this.placeProject(p);
     this.edited();
   }
 
   async deleteProject(id: string): Promise<void> {
     await this.api.deleteProject(id);
     this.projects.delete(id);
+    this.archivedProjects.delete(id);
     this.workspaces.delete(id);
     for (const [sid, s] of this.sessions) if (s.project_id === id) this.sessions.delete(sid);
     if (this.currentProjectId === id) this.currentProjectId = this.me?.personal_project_id ?? null;
@@ -788,17 +1037,22 @@ export class AppState {
     return list;
   }
 
-  /** After a workspace was added or removed: the project's default may have changed. */
+  /** After a workspace was added or removed: the project's default may have changed (an
+   *  archived project's too). */
   async workspacesChanged(projectId: string): Promise<void> {
-    const [list, projects] = await Promise.all([this.api.workspaces(projectId), this.api.projects()]);
+    const archived = this.archivedProjects.has(projectId);
+    const [list, projects] = await Promise.all([
+      this.api.workspaces(projectId),
+      archived ? this.api.archivedProjects() : this.api.projects(),
+    ]);
     this.workspaces.set(projectId, list);
-    for (const p of projects) this.projects.set(p.id, p);
+    for (const p of projects) this.placeProject(p);
     this.edited();
   }
 
   async setDefaultWorkspace(projectId: string, workspaceId: string): Promise<void> {
     const p = await this.api.patchProject(projectId, { default_workspace_id: workspaceId });
-    this.projects.set(p.id, p);
+    this.placeProject(p);
     this.edited();
   }
 

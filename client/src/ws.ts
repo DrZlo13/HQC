@@ -21,7 +21,7 @@ export interface SessionSubscriber {
   /** `delivery` of a stored input changed (the event itself is not sent again). */
   onDelivery(d: DeliveryChange): void;
   onInvalid(raw: unknown, error: string): void;
-  /** The socket dropped: transport-only state (agent.delta) is gone. */
+  /** The socket dropped: transport-only state (agent.delta, subagents.live) is gone. */
   onReset(): void;
 }
 

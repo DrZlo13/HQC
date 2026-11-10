@@ -1,11 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
-import type { WorkerInfo } from '../api';
 import type { AppState } from '../app';
-import type { ListMode, PermissionMode, Project, SessionInfo, Workspace } from '../proto';
+import type { ListMode, Project, SessionInfo } from '../proto';
 import { useSubscription } from './hooks';
 import { colorHex } from '../theme';
 import { ProjectGlyph, projectName } from './Appearance';
-import { ModelField } from './agentSettings';
 import { ArchiveList } from './Archive';
 import { ContextMenu, fitInView, type MenuEntry } from './ContextMenu';
 import {
@@ -22,6 +20,7 @@ import {
   IconPlus,
   IconRename,
   IconReorder,
+  IconRestore,
   IconSearch,
   IconSettings,
   IconShield,
@@ -29,8 +28,9 @@ import {
   IconStarOff,
   IconTrash,
 } from './icons';
-import { AUTO_CONFIRM, agentsLabel, formatAge, formatWhen, homePath, shortPath } from './labels';
-import { MoveSession, confirmDeleteProject, workspaceTitle } from './ProjectSettings';
+import { agentsLabel, formatAge, formatWhen, homePath, shortPath } from './labels';
+import { newSessionWhere } from './NewSession';
+import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
 import { SearchHits } from './Search';
 import { LIST_MODES, bucketOf, groupSessions, lastLine, matchesQuery, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
@@ -53,6 +53,14 @@ const LONG_PRESS_MS = 450;
 
 /** The mouse resting this long on a row shows its card; passing over it shows nothing. */
 const CARD_MS = 500;
+
+/** A desktop row's archive button: its size, and how far past the column's right edge it
+ *  stands (past the width grip, which reaches 9 px over the edge), px. */
+const ROW_ARCHIVE_SIZE = 30;
+const ROW_ARCHIVE_GAP = 12;
+/** The button stays this long after the mouse leaves the row or the button: the way from the
+ *  row to the button crosses the column's edge. */
+const ROW_ARCHIVE_LEAVE_MS = 300;
 
 /** The session column's width when dragged by its right edge, px; ←/→ on the edge step it. */
 export const LIST_WIDTH_MIN = 240;
@@ -120,9 +128,10 @@ function remove(app: AppState, s: SessionInfo, current?: string): void {
  *  column next to the project rail on a desktop, the whole first screen on a phone, with
  *  the projects as chips above. T50: the delayed archive with Undo, State / Recent / Custom
  *  and Reorder, archive mode. A row's actions are its menu (a right click; a long press on a
- *  phone); on a desktop the header is one row, the favorites are pinned over the list, a
- *  row's card shows where it runs, the workers are one line at the bottom and the column's
- *  right edge sets its width. */
+ *  phone); on a desktop the header is one row, the favorites are pinned over the list, the
+ *  row under the mouse has a round archive button past the column's edge and its card shows
+ *  where it runs, the workers are one line at the bottom and the column's right edge sets its
+ *  width. */
 export function SessionList({
   app,
   current,
@@ -146,7 +155,6 @@ export function SessionList({
 }
 
 function LiveList({ app, current, phone, requests }: { app: AppState; current?: string; phone?: boolean; requests?: boolean }) {
-  const [creating, setCreating] = useState(false);
   // The session whose "Move to project…" form is open.
   const [moving, setMoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -166,13 +174,30 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   // The card of the row the mouse rests on (desktop), right of the column.
   const [card, setCard] = useState<{ id: string; x: number; y: number } | null>(null);
   const cardTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // The archive button of the row the mouse is on (desktop), past the column's edge: the row's
+  // session and element.
+  const [rowArchive, setRowArchive] = useState<{ id: string; row: HTMLElement } | null>(null);
+  const leaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const rowArchiveBtn = useRef<HTMLButtonElement>(null);
   const project = app.currentProject();
   const pid = project?.id;
   const archivedCount = app.archivedSessions().length;
   const mode = app.listMode();
+  // The project's new session open in the main column: on top of the list, in place of the
+  // session its first message created until that session's chat replaces it.
+  const draft = app.newSession?.projectId === pid ? app.newSession : null;
+  const newSession = () => {
+    if (pid) location.hash = `#/p/${pid}/new`;
+  };
 
   useEffect(() => setReorder(null), [pid]);
-  useEffect(() => () => clearTimeout(cardTimer.current), []);
+  useEffect(
+    () => () => {
+      clearTimeout(cardTimer.current);
+      clearTimeout(leaveTimer.current);
+    },
+    [],
+  );
   useEffect(() => {
     if (searching) searchInput.current?.focus();
     else if (toSearchBtn.current) searchBtn.current?.focus();
@@ -190,7 +215,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     groups = items.length ? [{ id: 'reorder', label: 'Drag to reorder', plain: true, items }] : [];
   } else {
     // A favorite is listed once, in the Favorites block; Reorder still holds every session.
-    const list = app.sortedSessions().filter((s) => !s.favorite_at && matchesQuery(s, pathOf(s), query));
+    const list = app.sortedSessions().filter((s) => !s.favorite_at && s.id !== draft?.started && matchesQuery(s, pathOf(s), query));
     groups = groupSessions(list, mode, now, (pid && app.orders.get(pid)?.session_ids) || []);
   }
   // The phone's head says "offline" (a desktop's workers line does); not before the first list
@@ -202,6 +227,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     app.commitArchive();
     setQuery('');
     setSearching(false);
+    setRowArchive(null);
     setReorder(app.orderedSessions().map((s) => s.id));
   };
   // The archive should list the session archived a moment ago: it goes to the hub now.
@@ -222,27 +248,62 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     clearTimeout(cardTimer.current);
     setCard(null);
   };
-  // A desktop row's card: shown once the mouse has rested on the row for CARD_MS.
+  // The row's archive button goes a moment after the mouse leaves the row or the button, unless
+  // it comes onto the other one meanwhile.
+  const keepRowArchive = () => clearTimeout(leaveTimer.current);
+  const leaveRowArchive = () => {
+    clearTimeout(leaveTimer.current);
+    leaveTimer.current = setTimeout(() => setRowArchive(null), ROW_ARCHIVE_LEAVE_MS);
+  };
+  const hideRowArchive = () => {
+    clearTimeout(leaveTimer.current);
+    setRowArchive(null);
+  };
+  // Where a desktop row's archive button and card go: right of the column, the card past the
+  // button.
+  const colRight = (row: HTMLElement) => (row.closest('.sessions') ?? row).getBoundingClientRect().right;
+  // A desktop row under the mouse: its archive button at once, its card once the mouse has
+  // rested on the row for CARD_MS.
   const cardOn = (id: string) => ({
     onPointerEnter: (e: PointerEvent) => {
       if (e.pointerType !== 'mouse') return;
       const row = e.currentTarget as HTMLElement;
+      clearTimeout(leaveTimer.current);
+      setRowArchive({ id, row });
       clearTimeout(cardTimer.current);
       // Another row's card goes at once, not when this one's comes.
       setCard((c) => (c && c.id !== id ? null : c));
       cardTimer.current = setTimeout(() => {
         // The row moved to another group meanwhile (Running → Idle): its element is gone.
         if (!row.isConnected) return;
-        const r = row.getBoundingClientRect();
-        const col = row.closest('.sessions')?.getBoundingClientRect() ?? r;
-        setCard({ id, x: col.right + 12, y: r.top - 6 });
+        const top = row.getBoundingClientRect().top;
+        setCard({ id, x: colRight(row) + ROW_ARCHIVE_GAP + ROW_ARCHIVE_SIZE + 8, y: top - 6 });
       }, CARD_MS);
     },
-    onPointerLeave: hideCard,
+    onPointerLeave: (e: PointerEvent) => {
+      hideCard();
+      if (e.pointerType === 'mouse') leaveRowArchive();
+    },
     onPointerDown: hideCard,
+  });
+  // The archive button stands where its row is now: a row that moved under a still mouse
+  // (Running → Idle) takes it along, and a row that left the list (another group, archived)
+  // takes it away.
+  useLayoutEffect(() => {
+    const b = rowArchiveBtn.current;
+    if (!rowArchive || !b) return;
+    const { row } = rowArchive;
+    if (!row.isConnected) {
+      hideRowArchive();
+      return;
+    }
+    const r = row.getBoundingClientRect();
+    b.style.left = `${colRight(row) + ROW_ARCHIVE_GAP}px`;
+    b.style.top = `${r.top + r.height / 2 - ROW_ARCHIVE_SIZE / 2}px`;
   });
   const openMenu = (id: string, x: number, y: number) => {
     hideCard();
+    hideRowArchive();
     setMenu({ id, x, y, confirm: false });
   };
 
@@ -374,7 +435,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       // A desktop row has no time: its group says how old it is, its card says exactly.
       when={phone && mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
       where={phone ? whereOf(s) : ''}
-      compact={app.look.compactList && !phone}
+      compact={app.lookName() === 'compact' && !phone}
       grip={reorder ? grip(s.id) : undefined}
       dragging={dragId === s.id}
       menuOpen={menu?.id === s.id}
@@ -402,6 +463,9 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   // No card while a menu is open; a menu whose session was deleted elsewhere is not shown and
   // does not keep the cards away.
   const cardFor = card && !menuFor && app.sessions.get(card.id);
+  // Not for a row that went meanwhile (archived here or elsewhere).
+  const hovered = rowArchive && app.sessions.get(rowArchive.id);
+  const archiveFor = hovered && !hovered.archived && hovered.id !== app.pendingArchive?.id && !menuFor && !reorder ? hovered : undefined;
   const moveFor = moving && app.sessions.get(moving);
 
   return (
@@ -458,8 +522,8 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
               class="btn btn-primary btn-new-session"
               aria-label="New session"
               title="New session"
-              disabled={creating || !app.me}
-              onClick={() => setCreating(true)}
+              disabled={!pid || !app.me}
+              onClick={newSession}
             >
               <IconPlus size={14} />
             </button>
@@ -474,15 +538,26 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           {app.listNotice}
         </div>
       )}
-      {creating && project && <NewSession key={project.id} app={app} projectId={project.id} onDone={() => setCreating(false)} />}
       {moveFor && (
         <div class="move-panel" role="region" aria-label="Move to project">
           <MoveSession key={moveFor.id} app={app} session={moveFor} onDone={() => setMoving(null)} />
         </div>
       )}
       {!phone && favoriteGroup}
-      <div class="session-scroll" ref={scroll} onScroll={card ? hideCard : undefined}>
+      <div
+        class="session-scroll"
+        ref={scroll}
+        onScroll={
+          card || rowArchive
+            ? () => {
+                hideCard();
+                hideRowArchive();
+              }
+            : undefined
+        }
+      >
         {phone && favoriteGroup}
+        {draft && !reorder && <DraftRow app={app} />}
         {groups.map((g) => (
           <div key={g.id} class={`session-group group-${g.id}`}>
             <div class="group-head">
@@ -492,7 +567,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             <ul class="session-list">{g.items.map(row)}</ul>
           </div>
         ))}
-        {app.me && groups.length === 0 && !favorites.some((s) => s.project_id === pid) && (
+        {app.me && groups.length === 0 && (!draft || query) && !favorites.some((s) => s.project_id === pid) && (
           <div class="empty">{query ? 'No sessions match' : 'No sessions yet'}</div>
         )}
         {phone && (groups.length > 0 || favorites.length > 0) && (
@@ -523,8 +598,8 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           type="button"
           class="fab btn-new-session"
           aria-label="New session"
-          disabled={creating || !app.me}
-          onClick={() => setCreating(true)}
+          disabled={!pid || !app.me}
+          onClick={newSession}
         >
           <IconPlus size={20} />
           New
@@ -539,12 +614,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             onMove: () => setMoving(menuFor.id),
             onAskDelete: () => setMenu({ ...menu, confirm: true }),
           })}
-          outside={{
-            label: `Archive «${titleOf(menuFor)}»`,
-            icon: <IconArchive />,
-            cls: 'btn-menu-archive',
-            onSelect: () => app.archiveLater(menuFor),
-          }}
           backdrop={phone}
           onClose={() => setMenu(null)}
         >
@@ -570,6 +639,24 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             </>
           )}
         </ContextMenu>
+      )}
+      {archiveFor && (
+        <button
+          ref={rowArchiveBtn}
+          type="button"
+          class="row-archive btn-row-archive"
+          aria-label={`Archive «${titleOf(archiveFor)}»`}
+          title="Archive"
+          onPointerEnter={keepRowArchive}
+          onPointerLeave={leaveRowArchive}
+          onClick={() => {
+            hideRowArchive();
+            hideCard();
+            app.archiveLater(archiveFor);
+          }}
+        >
+          <IconArchive />
+        </button>
       )}
       {cardFor && <SessionCard key={cardFor.id} app={app} s={cardFor} x={card!.x} y={card!.y} />}
     </section>
@@ -663,11 +750,12 @@ function ModeMenu({
   );
 }
 
-/** "⋯" of the column's header: the project's menu — Open in new tab, favorites, Project
- *  settings…, Delete project… (not the personal project, SPEC §3). */
-function ProjectMenu({ app, project }: { app: AppState; project: Project }) {
-  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
-  const btn = useRef<HTMLButtonElement>(null);
+/** A project's menu, the same on the project bar (a right click) and in the column's header
+ *  ("⋯"): Open in new tab, favorites; Project settings…; Archive project (Restore for an
+ *  archived one) and Delete project…, neither for the personal project (SPEC §3). Archiving the
+ *  open project opens the personal one. */
+export function projectMenu(app: AppState, project: Project): MenuEntry[] {
+  const name = projectName(project);
   const items: MenuEntry[] = [
     { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/p/${project.id}`, newTab: true },
     {
@@ -682,8 +770,27 @@ function ProjectMenu({ app, project }: { app: AppState; project: Project }) {
     'sep',
     { label: 'Project settings…', icon: <IconSettings />, cls: 'btn-project-settings', href: `#/p/${project.id}/settings` },
   ];
-  if (!project.is_personal) {
+  if (project.archived_at) {
     items.push('sep', {
+      label: 'Restore',
+      icon: <IconRestore />,
+      cls: 'btn-restore-project',
+      onSelect: () => void app.restoreProject(project.id).catch((e: Error) => app.setListNotice(`Not restored «${name}»: ${e.message}`)),
+    });
+  } else if (!project.is_personal) {
+    items.push('sep', {
+      label: 'Archive project',
+      icon: <IconArchive />,
+      cls: 'btn-archive-project',
+      onSelect: () => {
+        const open = app.currentProjectId === project.id;
+        app.archiveProject(project.id);
+        if (open && app.me) location.hash = `#/p/${app.me.personal_project_id}`;
+      },
+    });
+  }
+  if (!project.is_personal) {
+    items.push({
       label: 'Delete project…',
       icon: <IconTrash />,
       cls: 'btn-delete-project',
@@ -691,13 +798,21 @@ function ProjectMenu({ app, project }: { app: AppState; project: Project }) {
       onSelect: () => void confirmDeleteProject(app, project).catch((e: Error) => app.setListNotice(`Not deleted: ${e.message}`)),
     });
   }
+  return items;
+}
+
+/** "⋯" of the column's header: the project's menu. */
+function ProjectMenu({ app, project }: { app: AppState; project: Project }) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const items = projectMenu(app, project);
   return (
     <>
       <button
         ref={btn}
         type="button"
         class="icon-btn btn-project-menu"
-        aria-label="Project: settings, favorites"
+        aria-label="Project: settings, favorites, archive"
         title="Project"
         aria-haspopup="menu"
         aria-expanded={!!at}
@@ -721,7 +836,7 @@ type GripHandlers = {
 
 type CardHandlers = {
   onPointerEnter: (e: PointerEvent) => void;
-  onPointerLeave: () => void;
+  onPointerLeave: (e: PointerEvent) => void;
   onPointerDown: () => void;
 };
 
@@ -765,7 +880,7 @@ function SessionRow({
   when?: string;
   /** The worker and the folder, a line of the row on a phone; empty on a desktop (its card). */
   where: string;
-  /** "Compact" in Settings: one line, the state in the dot, the subagents after the title. */
+  /** The Compact look: one line, the state in the dot, the subagents after the title. */
   compact?: boolean;
   grip?: GripHandlers;
   dragging: boolean;
@@ -887,6 +1002,34 @@ function SessionRow({
   );
 }
 
+/** The new session open in the main column (`AppState.newSession`), as the group "Draft" on
+ *  top of the list: "New session", the current row, and under it "Draft" with where it will
+ *  run. No menu, card or archive: it is not on the hub yet. */
+function DraftRow({ app }: { app: AppState }) {
+  const d = app.newSession!;
+  const { worker, path } = newSessionWhere(app, d);
+  return (
+    <div class="session-group group-draft">
+      <div class="group-head">
+        <span class="group-label">Draft</span>
+      </div>
+      <ul class="session-list">
+        <li class="session-item">
+          <a class="session-row is-current is-draft" href={`#/p/${d.projectId}/new`} aria-current="page">
+            <span class="dot dot-idle" aria-hidden="true" />
+            <span class="session-main">
+              <span class="session-top">
+                <span class="session-title">New session</span>
+              </span>
+              <span class="session-sub">{['Draft', worker, path && homePath(path)].filter(Boolean).join(' · ')}</span>
+            </span>
+          </a>
+        </li>
+      </ul>
+    </div>
+  );
+}
+
 /** A desktop row's card in the place of a tooltip, right of the column over the feed: the full
  *  title, the state and how long ago, the worker and the folder, the last line of the turn
  *  once its chat is loaded (resting on the row loads it, `prefetchOn`). */
@@ -979,7 +1122,7 @@ function WorkersLine({ app, current }: { app: AppState; current?: string }) {
 
 /** The session column's right edge (a desktop's layout puts it between the column and the
  *  chat, off the list's scrollbar): dragged (or ←/→ while focused) to make the column wider or
- *  narrower; the width stays on this device with the look (`Look.listWidth`). */
+ *  narrower; the width stays on this device with the look (`DeviceLayout.listWidth`). */
 export function WidthGrip({ app }: { app: AppState }) {
   const self = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; w: number; to: number; moved: boolean } | null>(null);
@@ -992,11 +1135,11 @@ export function WidthGrip({ app }: { app: AppState }) {
   // focus (the window may have been resized since).
   useEffect(() => {
     if (self.current) announce(self.current);
-  }, [app.look.listWidth, app.look.railNames]);
+  }, [app.device.listWidth, app.lookName()]);
   const end = () => {
     const d = drag.current;
     drag.current = null;
-    if (d?.moved) app.setLook({ listWidth: d.to });
+    if (d?.moved) app.setDevice({ listWidth: d.to });
   };
   return (
     <div
@@ -1033,7 +1176,7 @@ export function WidthGrip({ app }: { app: AppState }) {
         const dir = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
         if (!dir) return;
         e.preventDefault();
-        app.setLook({ listWidth: clampListWidth(widthOf(e.currentTarget as HTMLElement) + dir * LIST_WIDTH_STEP) });
+        app.setDevice({ listWidth: clampListWidth(widthOf(e.currentTarget as HTMLElement) + dir * LIST_WIDTH_STEP) });
       }}
     />
   );
@@ -1118,128 +1261,5 @@ function WorkerList({ app, current, onPick }: { app: AppState; current?: string;
         );
       })}
     </nav>
-  );
-}
-
-/** New session: title (empty — "Session N", SPEC §3), workspace (the project's default
- *  preselected, SPEC §13.4) and an optional `cwd` inside it. */
-function NewSession({ app, projectId, onDone }: { app: AppState; projectId: string; onDone: () => void }) {
-  const [list, setList] = useState<Workspace[] | null>(app.workspaces.get(projectId) ?? null);
-  const [workers, setWorkers] = useState<WorkerInfo[] | undefined>();
-  const [title, setTitle] = useState('');
-  const [workspace, setWorkspace] = useState('');
-  const [cwd, setCwd] = useState('');
-  // T38: '' is the worker's own default.
-  const [mode, setMode] = useState<PermissionMode | ''>('');
-  // Absent: the runtime's default.
-  const [model, setModel] = useState<string | undefined>();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const project = app.projects.get(projectId);
-
-  useEffect(() => {
-    app.loadWorkspaces(projectId).then(setList, (e: Error) => setError(e.message));
-    app.api.workers().then(setWorkers, () => {});
-  }, [app, projectId]);
-  const chosen = workspace || project?.default_workspace_id || list?.[0]?.id || '';
-
-  const create = async (e: Event) => {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const s = await app.createSession(
-        title.trim() || undefined,
-        { workspace_id: chosen, cwd: cwd.trim(), permission_mode: mode || undefined, model },
-        projectId,
-      );
-      onDone();
-      location.hash = `#/s/${s.id}`;
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (list && list.length === 0) {
-    return (
-      <div class="new-session">
-        <p class="muted">
-          The project has no workspaces: a session needs a folder on a worker.{' '}
-          <a href={`#/p/${projectId}/settings`}>Add a workspace</a>
-        </p>
-        <button type="button" class="btn btn-small" onClick={onDone}>
-          Cancel
-        </button>
-      </div>
-    );
-  }
-  return (
-    <form class="new-session" onSubmit={create}>
-      <label class="field">
-        <span class="field-label">Title (optional)</span>
-        <input class="input" value={title} onInput={(e) => setTitle((e.target as HTMLInputElement).value)} />
-      </label>
-      <label class="field">
-        <span class="field-label">Workspace</span>
-        <select
-          class="input"
-          name="workspace"
-          value={chosen}
-          disabled={!list}
-          onChange={(e) => setWorkspace((e.target as HTMLSelectElement).value)}
-        >
-          {(list ?? []).map((w) => (
-            <option key={w.id} value={w.id}>
-              {workspaceTitle(w, workers)}
-              {w.id === project?.default_workspace_id ? ' (default)' : ''}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label class="field">
-        <span class="field-label">Folder inside the workspace (optional)</span>
-        <input
-          class="input"
-          name="cwd"
-          placeholder="."
-          value={cwd}
-          onInput={(e) => setCwd((e.target as HTMLInputElement).value)}
-        />
-      </label>
-      <label class="field">
-        <span class="field-label">Permissions</span>
-        <select
-          class="input"
-          name="permission_mode"
-          value={mode}
-          onChange={(e) => {
-            const el = e.target as HTMLSelectElement;
-            const next = el.value as PermissionMode | '';
-            // Auto after a one-line confirmation; Ask and the default at once.
-            if (next === 'auto' && !confirm(AUTO_CONFIRM)) {
-              el.value = mode;
-              return;
-            }
-            setMode(next);
-          }}
-        >
-          <option value="">The worker's default</option>
-          <option value="ask">Ask</option>
-          <option value="auto">Auto</option>
-        </select>
-      </label>
-      <ModelField value={model} onChange={setModel} />
-      {error && <div class="error-text">{error}</div>}
-      <div class="row">
-        <button type="submit" class="btn btn-small btn-primary" disabled={busy || !chosen}>
-          Create
-        </button>
-        <button type="button" class="btn btn-small" onClick={onDone}>
-          Cancel
-        </button>
-      </div>
-    </form>
   );
 }

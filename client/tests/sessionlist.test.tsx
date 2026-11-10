@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Api } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
-import { parseEvent, type ListMode, type SessionInfo, type SessionState } from '../src/proto';
+import { parseEvent, type ListMode, type Project, type SessionInfo, type SessionState } from '../src/proto';
 import { applyLook } from '../src/theme';
 import { Timeline } from '../src/timeline';
 import type { ConnState, HubSocket } from '../src/ws';
@@ -21,6 +21,7 @@ import { App } from '../src/ui/App';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
 import { ProjectRail } from '../src/ui/ProjectRail';
+import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SessionList, WidthGrip } from '../src/ui/SessionList';
 import {
   arrange,
@@ -211,6 +212,7 @@ describe('list logic', () => {
 function hubApi(order: { mode: ListMode; session_ids: string[] } = { mode: 'state', session_ids: [] }) {
   return {
     workspaces: async () => [],
+    archivedProjects: vi.fn(async (): Promise<Project[]> => []),
     search: async () => ({ results: [] }),
     sessionOrder: vi.fn(async () => order),
     putSessionOrder: vi.fn(async (_p: string, b: { mode?: ListMode; session_ids?: string[] }) => ({
@@ -231,7 +233,7 @@ function hubApi(order: { mode: ListMode; session_ids: string[] } = { mode: 'stat
 function makeApp(list = LIST, api = hubApi()) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' };
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious' };
   app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
   app.currentProjectId = 'p1';
@@ -290,10 +292,10 @@ const menuOf = (title: string, x = 40, y = 120) =>
   });
 const menuItems = () => [...root.querySelectorAll('.menu .menu-item')].map((b) => b.textContent);
 const SESSION_MENU = ['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Archive', 'Delete…'];
-/** Archives a row from its menu's round button. */
+/** Archives a row from its menu's item. */
 async function archiveRow(title: string) {
   await menuOf(title);
-  await click(root.querySelector('.btn-menu-archive'));
+  await click(root.querySelector('.menu .btn-archive'));
 }
 /** Reorder, from the header's order menu. */
 async function startReorder() {
@@ -315,7 +317,7 @@ describe('SessionList (desktop column)', () => {
       'physics-mp',
       'Search sessions and messages',
       'Session order: State',
-      'Project: settings, favorites',
+      'Project: settings, favorites, archive',
       'New session',
     ]);
     // No tile, no "1 needs you · 2 running", no gear, no row of State / Recent / Custom.
@@ -338,9 +340,9 @@ describe('SessionList (desktop column)', () => {
     expect(root.querySelector('.session-item button')).toBeNull();
   });
 
-  it('the compact look: a line per row, the subagents after the title, no tooltip (Settings → Session list)', async () => {
+  it('the compact look: a line per row, the subagents after the title, no tooltip (the Compact look)', async () => {
     const app = makeApp(LIST.map((s) => (s.id === 'stones' ? { ...s, subagents: 1 } : s)));
-    app.look = { ...app.look, compactList: true };
+    app.me = { ...app.me!, look: 'compact' };
     await mount(<SessionList app={app} current="net" />);
     expect(root.querySelector('.session-row.is-current')!.getAttribute('title')).toBeNull();
     expect(rowOf('Stone textures').querySelector('.session-ag')!.textContent).toBe('1 agent');
@@ -354,9 +356,9 @@ describe('SessionList (desktop column)', () => {
       sess('vs', 'Fork in VS Code', 'locked_vscode', at(1), { held_by: { entrypoint: 'claude-vscode', status: 'idle' } }),
       sess('vsbusy', 'Busy in VS Code', 'locked_vscode', at(2), { held_by: { entrypoint: 'claude-vscode', status: 'busy' } }),
     ];
-    for (const compactList of [false, true]) {
+    for (const look of ['spacious', 'compact'] as const) {
       const app = makeApp(list);
-      app.look = { ...app.look, compactList };
+      app.me = { ...app.me!, look };
       await mount(<SessionList app={app} />);
       expect(rowOf('Fork in VS Code').querySelector('.dot-vs svg')).not.toBeNull();
       expect(rowOf('Fork in VS Code').querySelector('.dot')).toBeNull();
@@ -413,8 +415,8 @@ describe('SessionList (desktop column)', () => {
       'home-mac · ~/work/games/phys-mp/net',
       'Thinking · The user wants the map',
     ]);
-    // Right of the column (no layout here: the column ends at 0).
-    expect(card.style.left).toBe('12px');
+    // Right of the column, past the row's archive button (no layout here: the column ends at 0).
+    expect(card.style.left).toBe('50px');
     await leave('Network sync');
     expect(root.querySelector('.session-card')).toBeNull();
 
@@ -459,6 +461,120 @@ describe('SessionList (desktop column)', () => {
     expect(root.querySelector('.session-card')).toBeNull();
   });
 
+  it("the row under the mouse: a round archive button past the column's edge, level with the row", async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(NOW);
+    // The column ends at 300 px; every row is 40 px high at y = 100, inside the column.
+    const box = (left: number, top: number, width: number, height: number) =>
+      ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('sessions')) return box(0, 0, 300, 800);
+      if (this.classList.contains('session-item')) return box(8, 100, 284, 40);
+      return box(0, 0, 0, 0);
+    });
+    try {
+      const api = hubApi();
+      const app = makeApp(LIST, api);
+      await mount(<SessionList app={app} />);
+      const ev = (el: Element, type: string, pointerType = 'mouse') =>
+        act(async () => {
+          el.dispatchEvent(new PointerEvent(type, { pointerType }));
+        });
+      const wait = (ms: number) =>
+        act(async () => {
+          vi.advanceTimersByTime(ms);
+        });
+      const button = () => root.querySelector<HTMLElement>('.btn-row-archive');
+      expect(button()).toBeNull();
+
+      await ev(rowOf('Network sync'), 'pointerenter');
+      const b = button()!;
+      expect(b.getAttribute('aria-label')).toBe('Archive «Network sync»');
+      // Outside the row and past the width grip (9 px over the edge), centred on the row.
+      expect([b.style.left, b.style.top]).toEqual(['312px', '105px']);
+      expect(rowOf('Network sync').contains(b)).toBe(false);
+      // The way from the row to the button crosses the column's edge: it stays.
+      await ev(rowOf('Network sync'), 'pointerleave');
+      await wait(200);
+      await ev(b, 'pointerenter');
+      await wait(1000);
+      expect(button()).toBe(b);
+      // Off both: it goes.
+      await ev(b, 'pointerleave');
+      await wait(300);
+      expect(button()).toBeNull();
+
+      // Its card stands past it.
+      await ev(rowOf('Cave scene port'), 'pointerenter');
+      await wait(500);
+      expect(root.querySelector<HTMLElement>('.session-card')!.style.left).toBe('350px');
+      // A click archives the row, with the Undo toast.
+      await click(button());
+      expect(button()).toBeNull();
+      expect(titles()).not.toContain('Cave scene port');
+      expect(root.querySelector('.toast-text')!.textContent).toBe('Archived «Cave scene port»');
+      await click(root.querySelector('.btn-undo'));
+      expect(titles()).toContain('Cave scene port');
+      expect(api.archive).not.toHaveBeenCalled();
+
+      // Not for a touch, not while the row's menu is open.
+      await ev(rowOf('Stone textures'), 'pointerenter', 'touch');
+      expect(button()).toBeNull();
+      await ev(rowOf('Stone textures'), 'pointerenter');
+      expect(button()).not.toBeNull();
+      await menuOf('Stone textures');
+      expect(button()).toBeNull();
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it('the row archive button follows its row under a still mouse, and goes with it', async () => {
+    const box = (left: number, top: number, width: number, height: number) =>
+      ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+    let rowTop = 100;
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('sessions')) return box(0, 0, 300, 800);
+      if (this.classList.contains('session-item')) return box(8, rowTop, 284, 40);
+      return box(0, 0, 0, 0);
+    });
+    try {
+      const app = makeApp();
+      await mount(<SessionList app={app} />);
+      const button = () => root.querySelector<HTMLElement>('.btn-row-archive');
+      await act(async () => {
+        rowOf('Step determinism').dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }));
+      });
+      expect(button()!.style.top).toBe('105px');
+      // The rows above it changed: it stands 60 px lower now, the mouse did not move.
+      rowTop = 160;
+      await act(async () => app.setDevice({}));
+      expect(button()!.style.top).toBe('165px');
+      // It went to another group (Running → Idle): its element is gone, the button too.
+      const det = app.sessions.get('det')!;
+      await act(async () =>
+        app.mergeSummary([
+          {
+            session_id: 'det',
+            project_id: 'p1',
+            title: det.title,
+            state: 'idle',
+            queue_len: 0,
+            unread: 0,
+            last_seq: det.last_seq,
+            last_read_seq: det.last_read_seq,
+            permission_mode: det.permission_mode,
+            effective_permission_mode: det.effective_permission_mode,
+          },
+        ]),
+      );
+      expect(groups().find((g) => g[0] === 'Running')![2]).not.toContain('Step determinism');
+      expect(button()).toBeNull();
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
   it('shows the subagents running in the row, next to the state', async () => {
     const list = LIST.map((s) => (s.id === 'stones' ? { ...s, subagents: 2 } : s.id === 'net' ? { ...s, subagents: 1 } : s));
     await mount(<SessionList app={makeApp(list)} current="net" />);
@@ -484,34 +600,6 @@ describe('SessionList (desktop column)', () => {
     await act(async () => app.setDraft('stones', '  '));
     expect(row('Stone textures').querySelector('.session-draft')).toBeNull();
     localStorage.clear();
-  });
-
-  it('creates a session with a model from the form', async () => {
-    const base = hubApi();
-    let app!: AppState;
-    const api = { ...base, workspaces: async () => app.workspaces.get('p1') ?? [], workers: async () => [] };
-    app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
-    await mount(<SessionList app={app} />);
-    await click(root.querySelector('.btn-new-session'));
-    await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
-    const set = (name: string, value: string) =>
-      act(async () => {
-        const el = root.querySelector<HTMLInputElement>(`.new-session [name=${name}]`)!;
-        el.value = value;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      });
-    await set('model', 'haiku');
-    await act(async () => {
-      root.querySelector('form.new-session')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-      for (let i = 0; i < 5; i++) await Promise.resolve();
-    });
-    expect(base.createSession).toHaveBeenCalledWith('p1', undefined, {
-      workspace_id: 'w1',
-      cwd: '',
-      permission_mode: undefined,
-      model: 'haiku',
-    });
   });
 
   it('switches to "Recent" from the order menu, no time in a row, and keeps the choice on the hub (T50)', async () => {
@@ -629,8 +717,8 @@ describe('archive from the row (T50)', () => {
     const api = hubApi();
     const app = makeApp(LIST, api);
     await mount(<SessionList app={app} />);
-    // The menu stands at the click, the row under it lit; the archive is a round button past
-    // the menu's right edge, and an item in it.
+    // The menu stands at the click, the row under it lit; the archive is an item in it, with
+    // no button beside the menu.
     await menuOf('Network sync', 40, 120);
     const menu = root.querySelector<HTMLElement>('.ctx-menu')!;
     expect([menu.style.left, menu.style.top]).toEqual(['40px', '120px']);
@@ -638,8 +726,7 @@ describe('archive from the row (T50)', () => {
     expect(rowOf('Network sync').querySelector('.session-row.is-menu')).not.toBeNull();
     expect(menuItems()).toEqual(SESSION_MENU);
     expect(menu.querySelectorAll('.menu-sep')).toHaveLength(2);
-    const out = menu.querySelector('.menu-out.btn-menu-archive')!;
-    expect(out.getAttribute('aria-label')).toBe('Archive «Network sync»');
+    expect([...menu.children].every((c) => c.matches('.menu-item, .menu-sep'))).toBe(true);
     // The first item has the focus; ↓ goes on, ↑ from the first goes round to the last.
     expect(document.activeElement!.textContent).toBe('Open in new tab');
     await pressKey('ArrowDown');
@@ -648,7 +735,7 @@ describe('archive from the row (T50)', () => {
     await pressKey('ArrowUp');
     expect(document.activeElement!.textContent).toBe('Delete…');
 
-    await click(out);
+    await click(menu.querySelector('.btn-archive'));
     expect(root.querySelector('.ctx-menu')).toBeNull();
     expect(titles()).not.toContain('Network sync');
     expect(root.querySelector('.toast')!.textContent).toBe('Archived «Network sync»Undo');
@@ -765,8 +852,8 @@ describe('archive from the row (T50)', () => {
       'Delete this session forever? Messages and history go too. Files on disk stay.',
     );
     expect([...menu.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Delete forever', 'Cancel']);
-    // No archive button beside the question.
-    expect(menu.querySelector('.btn-menu-archive')).toBeNull();
+    // The question in place of the items: no Archive beside it.
+    expect(menu.querySelector('.btn-archive')).toBeNull();
     // The focus is on Cancel: Enter right away deletes nothing.
     expect(document.activeElement).toBe(menu.querySelector('.btn-cancel-delete'));
     await click(menu.querySelector('.btn-cancel-delete'));
@@ -965,10 +1052,10 @@ describe('ProjectRail', () => {
     expect(root.querySelector('.avatar')!.getAttribute('title')).toBe('who@example.com');
   });
 
-  it('with names on, a row per project: its icon on its color and its full name (SPEC 0.91)', async () => {
+  it('in the Compact look, a row per project: its icon on its color and its full name', async () => {
     const app = makeApp();
-    // Not setLook: it would keep the names in localStorage for the tests below.
-    app.look = { ...app.look, railNames: true };
+    // As `/api/me` brings it: `setLookName` would ask the hub.
+    app.me = { ...app.me!, look: 'compact' };
     app.projects.set('p2', { id: 'p2', name: 'ukuetis_controller_backend', slug: 'ukuetis', description: '', is_personal: false, color: 'moss', created_at: at(80) });
     await mount(<ProjectRail app={app} />);
     const rows = () => [...root.querySelectorAll<HTMLElement>('.rail-project')];
@@ -1008,7 +1095,7 @@ describe('ProjectRail', () => {
     expect(rows().map((r) => r.getAttribute('title'))).toEqual(['physics-mp', 'ukuetis_controller_backend', 'Personal']);
   });
 
-  it('marks a project with unread events by a dot, unless someone waits there', async () => {
+  it('marks a project with unread events by a blue dot, unless someone waits there', async () => {
     const app = makeApp([
       ...LIST.map((s) => ({ ...s, unread: 2 })),
       sess('notes', 'Notes', 'idle', at(0.5), { project_id: 'p0', unread: 1 }),
@@ -1029,7 +1116,7 @@ describe('ProjectRail', () => {
     expect(dots()[0]).toEqual([false, false]);
   });
 
-  it('marks a project whose session works by a pulsing dot of its color, else an idle one by a ring', async () => {
+  it('marks a project whose session works by a stripe around its tile, an idle one by nothing', async () => {
     const app = makeApp([
       sess('notes', 'Notes', 'running', at(0.5), { project_id: 'p0', unread: 1 }),
       sess('det', 'Step determinism', 'idle', at(0.1)),
@@ -1037,11 +1124,13 @@ describe('ProjectRail', () => {
       sess('gone', 'Gone', 'archived', at(0.5), { state: 'running' }),
     ]);
     const marks = () =>
-      [...root.querySelectorAll('.rail-item')].map((i) => i.querySelector('.rail-badge, .rail-run, .rail-unread, .rail-idle')?.className);
+      [...root.querySelectorAll('.rail-item')].map((i) => i.querySelector('.rail-badge, .rail-run, .rail-unread')?.className ?? null);
     await mount(<ProjectRail app={app} />);
-    // Personal works, over its unread; physics-mp: a service and an archived session do not count.
-    expect(marks()).toEqual(['rail-run', 'rail-idle']);
-    expect(root.querySelector<HTMLElement>('.rail-run')!.style.background).toBe('#8A93A6');
+    // Personal works, over its unread; physics-mp: a service and an archived session do not
+    // count, so it is idle and has no mark at all.
+    expect(marks()).toEqual(['rail-run', null]);
+    expect(root.querySelector('.rail-run')!.getAttribute('aria-label')).toBe('working');
+    expect(root.querySelectorAll('.rail-item')[1].querySelectorAll('[aria-label]')).toHaveLength(1);
     await mount(<SessionList app={app} phone />);
     const chips = () =>
       [...root.querySelectorAll('.chips .chip.project-row')].map((c) => c.querySelector('.chip-badge, .chip-run, .chip-unread, .chip-idle')?.className);
@@ -1054,6 +1143,619 @@ describe('ProjectRail', () => {
     app.sessions.set('net', sess('net', 'Network sync', 'waiting', at(0.2)));
     await mount(<ProjectRail app={app} />);
     expect(marks()).toEqual(['rail-run', 'rail-badge']);
+  });
+
+  it('in the Compact look: the same marks on the icon, an unread project in bold', async () => {
+    const app = makeApp([
+      ...LIST,
+      sess('notes', 'Notes', 'idle', at(0.5), { project_id: 'p0', unread: 1 }),
+      sess('etch', 'Etching', 'running', at(0.5), { project_id: 'p2', unread: 2 }),
+    ]);
+    app.me = { ...app.me!, look: 'compact' };
+    app.projects.set('p2', { id: 'p2', name: 'boards', slug: 'boards', description: '', is_personal: false, color: 'moss', created_at: at(80) });
+    app.projects.set('p3', { id: 'p3', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'coral', created_at: at(70) });
+    await mount(<ProjectRail app={app} />);
+    const rows = [...root.querySelectorAll('.rail-item')].map((i) => [
+      i.querySelector('.rail-name')!.textContent,
+      i.querySelector('.rail-badge, .rail-run, .rail-unread')?.className ?? null,
+      i.querySelector('.rail-project')!.classList.contains('has-unread'),
+    ]);
+    // Personal: unread; physics-mp waits for you; boards works (over its unread); kiln is idle.
+    expect(rows).toEqual([
+      ['Personal', 'rail-unread', true],
+      ['physics-mp', 'rail-badge', false],
+      ['boards', 'rail-run', false],
+      ['kiln', null, false],
+    ]);
+  });
+
+  it('a favorite project has a star on its tile beside its other mark; the others have none', async () => {
+    const app = makeApp([sess('notes', 'Notes', 'running', at(0.5), { project_id: 'p0' })]);
+    app.projects.set('p0', { ...app.projects.get('p0')!, favorite_at: at(1) });
+    await mount(<ProjectRail app={app} />);
+    const rows = () =>
+      [...root.querySelectorAll('.rail-item')].map((i) => [
+        i.querySelector('.rail-project')!.getAttribute('aria-label'),
+        i.querySelector('.rail-fav')?.getAttribute('aria-label') ?? null,
+        i.querySelector('.rail-badge, .rail-run, .rail-unread')?.className ?? null,
+      ]);
+    expect(rows()).toEqual([
+      ['Personal', 'favorite', 'rail-run'],
+      ['physics-mp', null, null],
+    ]);
+    // Unstarred: the star goes, the working stripe stays.
+    app.projects.set('p0', { ...app.projects.get('p0')!, favorite_at: undefined });
+    await mount(<ProjectRail app={app} />);
+    expect(rows()).toEqual([
+      ['Personal', null, 'rail-run'],
+      ['physics-mp', null, null],
+    ]);
+  });
+});
+
+describe('the project bar: search, menu, archive', () => {
+  const project = (id: string, name: string, more: Partial<Project> = {}): Project => ({
+    id,
+    name,
+    slug: name,
+    description: '',
+    is_personal: false,
+    color: 'moss',
+    created_at: at(80),
+    ...more,
+  });
+  const BOT = project('p9', '99bot_ng', { archived_at: at(5) });
+  const ALL = [
+    project('p0', 'Personal', { is_personal: true, color: 'slate' }),
+    project('p1', 'physics-mp'),
+    project('p2', 'caldavllm_bot'),
+    project('p3', 'medication_bot'),
+    project('p4', 'kiln'),
+    project('p9', '99bot_ng'),
+  ];
+  /** The hub's side of archived projects, `p9` archived at first: archive and restore answer
+   *  the project, the bar's list is the rest in the hub's order. */
+  function archiveApi() {
+    const archived = new Map([[BOT.id, BOT]]);
+    return {
+      ...hubApi(),
+      archivedProjects: vi.fn(async () => [...archived.values()]),
+      archiveProject: vi.fn(async (id: string) => {
+        const p = { ...ALL.find((x) => x.id === id)!, archived_at: at(0) };
+        archived.set(id, p);
+        return p;
+      }),
+      unarchiveProject: vi.fn(async (id: string) => {
+        archived.delete(id);
+        return ALL.find((x) => x.id === id)!;
+      }),
+      projects: vi.fn(async () => ALL.filter((p) => !archived.has(p.id))),
+      allSessions: vi.fn(async () => LIST),
+      createProject: vi.fn(async (name: string) => project('p5', name)),
+      moveSession: vi.fn(async (id: string) => sess(id, 'Moved', 'idle', at(0), { project_id: 'p5' })),
+    };
+  }
+  function railApp(names: boolean) {
+    const api = archiveApi();
+    const app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+    app.me = { ...app.me!, look: names ? 'compact' : 'spacious' };
+    for (const p of ALL.slice(2, 5)) app.projects.set(p.id, p);
+    // As the lists brought them.
+    app.archivedProjects.set(BOT.id, BOT);
+    return { app, api };
+  }
+  /** The promises of the hub's (mocked) replies, chained after each other. */
+  const settle = () =>
+    act(async () => {
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+  const field = () => root.querySelector<HTMLInputElement>('input[aria-label="Search projects"]');
+  const typeQuery = (value: string) =>
+    act(async () => {
+      field()!.value = value;
+      field()!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  const hits = () =>
+    [...root.querySelectorAll('.rail-hit')].map((h) => [
+      h.querySelector('.rail-name')!.textContent,
+      h.querySelector('mark')?.textContent ?? null,
+      h.querySelector('.rail-tag')?.textContent ?? null,
+      h.classList.contains('is-sel'),
+    ]);
+  const bar = () => [...root.querySelectorAll('.rail-project')].map((r) => r.getAttribute('aria-label'));
+  const rightClick = (el: Element) =>
+    act(async () => {
+      el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 200 }));
+    });
+  afterEach(() => {
+    location.hash = '';
+  });
+
+  it('in the Compact look: the magnifier swaps "HQC" for a field, the list shrinks to the matches, archived ones too', async () => {
+    const { app, api } = railApp(true);
+    await mount(<ProjectRail app={app} />);
+    const head = root.querySelector('.rail-head')!;
+    expect(head.querySelector('.rail-title')!.textContent).toBe('HQC');
+    expect(head.querySelector('.rail-search')!.getAttribute('aria-label')).toBe('Search projects');
+
+    await click(head.querySelector('.rail-search'));
+    // The archived ones came with the lists: nothing more to fetch.
+    expect(api.archivedProjects).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(field());
+    expect(root.querySelector('.rail-title')).toBeNull();
+    expect(root.querySelector('.rail-hint')!.textContent).toBe('↑↓ select · ↵ open · Esc close');
+    // Nothing typed: the projects on the bar, no archived one.
+    expect(hits().map((h) => h[0])).toEqual(['Personal', 'physics-mp', 'caldavllm_bot', 'medication_bot', 'kiln']);
+
+    await typeQuery('BOT');
+    expect(hits()).toEqual([
+      ['caldavllm_bot', 'bot', null, true],
+      ['medication_bot', 'bot', null, false],
+      ['99bot_ng', 'bot', 'archived', false],
+    ]);
+    expect(root.querySelector('.rail-hit.is-archived .rail-name')!.textContent).toBe('99bot_ng');
+    expect(root.querySelector('.rail-find-count')!.textContent).toBe('3 of 6');
+    // ↓ and ↑ go round; Enter opens the one they stand on and closes the search.
+    await pressKey('ArrowDown');
+    await pressKey('ArrowDown');
+    expect(hits().map((h) => h[3])).toEqual([false, false, true]);
+    await pressKey('ArrowDown');
+    await pressKey('ArrowUp');
+    await pressKey('ArrowUp');
+    expect(hits().map((h) => h[3])).toEqual([false, true, false]);
+    await pressKey('Enter');
+    expect(location.hash).toBe('#/p/p3');
+    expect(field()).toBeNull();
+    expect(root.querySelector('.rail-title')!.textContent).toBe('HQC');
+    expect(bar()).toEqual(['Personal', 'physics-mp', 'caldavllm_bot', 'medication_bot', 'kiln']);
+
+    // Ctrl+K (not on a Mac) opens it from anywhere; no match says so; Esc puts the title and the
+    // list back, the focus on the magnifier.
+    await act(async () => {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement).toBe(field());
+    await typeQuery('zzz');
+    expect(hits()).toEqual([]);
+    expect(root.querySelector('.rail-hits-none')!.textContent).toBe('No projects match');
+    await pressKey('Escape');
+    expect(field()).toBeNull();
+    expect(document.activeElement).toBe(root.querySelector('.rail-search'));
+    expect(bar()).toHaveLength(5);
+    // Again (a capital K too); a press outside the bar closes it.
+    await act(async () => {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'K', ctrlKey: true, bubbles: true, cancelable: true }));
+    });
+    expect(field()).not.toBeNull();
+    await act(async () => {
+      document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    });
+    expect(field()).toBeNull();
+    // Esc on a match (a click or its closed menu leaves the focus there) closes it as well.
+    await click(root.querySelector('.rail-search'));
+    await typeQuery('bot');
+    await act(async () => root.querySelector<HTMLElement>('.rail-hit')!.focus());
+    await pressKey('Escape');
+    expect(field()).toBeNull();
+    expect(document.activeElement).toBe(root.querySelector('.rail-search'));
+  });
+
+  it('its shortcut: ⌘K on a Mac (there Ctrl+K deletes to the end of the line), Ctrl+K elsewhere', async () => {
+    const { app } = railApp(true);
+    await mount(<ProjectRail app={app} />);
+    const press = (mod: 'metaKey' | 'ctrlKey') =>
+      act(async () => {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', [mod]: true, bubbles: true, cancelable: true }));
+      });
+    const platform = vi.spyOn(navigator, 'platform', 'get');
+    try {
+      platform.mockReturnValue('Linux x86_64');
+      await press('metaKey');
+      expect(field()).toBeNull();
+      await press('ctrlKey');
+      expect(field()).not.toBeNull();
+      await pressKey('Escape');
+      expect(root.querySelector('.rail-search')!.getAttribute('title')).toBe('Search projects (Ctrl+K)');
+
+      platform.mockReturnValue('MacIntel');
+      await press('ctrlKey');
+      expect(field()).toBeNull();
+      await press('metaKey');
+      expect(field()).not.toBeNull();
+      await pressKey('Escape');
+      await act(async () => app.setDevice({}));
+      expect(root.querySelector('.rail-search')!.getAttribute('title')).toBe('Search projects (⌘K)');
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it('"+" and Reorder pressed while the search is open: the search closes first', async () => {
+    const { app } = railApp(true);
+    await mount(<ProjectRail app={app} />);
+    // "+" asks for the name; no answer, no project.
+    const before = globalThis.prompt;
+    const ask = vi.fn(() => null);
+    globalThis.prompt = ask;
+    try {
+      await click(root.querySelector('.rail-search'));
+      await typeQuery('bot');
+      await click(root.querySelector('.rail-new'));
+      expect(ask).toHaveBeenCalledTimes(1);
+      expect(field()).toBeNull();
+    } finally {
+      globalThis.prompt = before;
+    }
+    await click(root.querySelector('.rail-search'));
+    await typeQuery('bot');
+    await click(root.querySelector('.rail-reorder'));
+    expect(field()).toBeNull();
+    expect(root.querySelector('.rail-done')).not.toBeNull();
+    expect(bar()).toHaveLength(5);
+  });
+
+  it('with tiles: the magnifier under the mark opens the bar over the column, with the names', async () => {
+    const { app } = railApp(false);
+    await mount(<ProjectRail app={app} />);
+    const head = root.querySelector('.rail-head')!;
+    expect([...head.children].map((c) => c.getAttribute('aria-label') ?? c.getAttribute('title'))).toEqual(['HQC', 'Search projects']);
+    expect(root.querySelector('.rail-pop')).toBeNull();
+    await click(head.querySelector('.rail-search'));
+    const pop = root.querySelector('.rail-pop')!;
+    expect(pop.contains(field())).toBe(true);
+    // The tiles stay under it.
+    expect(bar()).toHaveLength(5);
+    await typeQuery('bot');
+    expect([...pop.querySelectorAll('.rail-hit .rail-name')].map((n) => n.textContent)).toEqual(['caldavllm_bot', 'medication_bot', '99bot_ng']);
+    expect(pop.querySelector('.rail-hint')).not.toBeNull();
+    // A match shows its name: its menu has no line over the items.
+    await rightClick(pop.querySelector('.rail-hit')!);
+    expect(root.querySelector('.ctx-menu')).not.toBeNull();
+    expect(root.querySelector('.ctx-menu .menu-head')).toBeNull();
+    await pressKey('Escape');
+    expect(root.querySelector('.ctx-menu')).toBeNull();
+    expect(root.querySelector('.rail-pop')).not.toBeNull();
+    // A click on a match opens it.
+    const second = pop.querySelectorAll<HTMLAnchorElement>('.rail-hit')[1];
+    expect(second.getAttribute('href')).toBe('#/p/p3');
+    await click(second);
+    expect(root.querySelector('.rail-pop')).toBeNull();
+    await click(root.querySelector('.rail-search'));
+    await pressKey('Escape');
+    expect(root.querySelector('.rail-pop')).toBeNull();
+  });
+
+  it("a project's right click: the column's menu, its name first on a tile; Archive project goes at once, Undo brings it back", async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(NOW);
+    const { app, api } = railApp(false);
+    await mount(<ProjectRail app={app} />);
+    await rightClick(root.querySelector('.rail-project[aria-label="kiln"]')!);
+    const menu = root.querySelector('.ctx-menu')!;
+    expect(menu.getAttribute('aria-label')).toBe('Project «kiln»');
+    expect(menu.querySelector('.menu-head')!.textContent).toBe('kiln');
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Archive project', 'Delete project…']);
+    // Nothing but the items: no button beside the menu.
+    expect([...menu.children].every((c) => c.matches('.menu-head, .menu-item, .menu-sep'))).toBe(true);
+    expect(root.querySelector('.rail-project[aria-label="kiln"]')!.classList.contains('is-menu')).toBe(true);
+
+    await click(menu.querySelector('.btn-archive-project'));
+    expect(root.querySelector('.ctx-menu')).toBeNull();
+    expect(bar()).toEqual(['Personal', 'physics-mp', 'caldavllm_bot', 'medication_bot']);
+    await settle();
+    expect(api.archiveProject).toHaveBeenCalledWith('p4');
+    const toast = root.querySelector('.toast-project')!;
+    expect(toast.querySelector('.toast-text')!.textContent).toBe('Archived «kiln» · find it with the search on the bar');
+    await click(toast.querySelector('.btn-undo'));
+    await settle();
+    expect(api.unarchiveProject).toHaveBeenCalledWith('p4');
+    expect(root.querySelector('.toast-project')).toBeNull();
+    expect(bar()).toEqual(['Personal', 'physics-mp', 'caldavllm_bot', 'medication_bot', 'kiln']);
+    expect(app.archivedProjects.has('p4')).toBe(false);
+
+    // Again, and the toast runs out: it stays archived, the search finds it.
+    await rightClick(root.querySelector('.rail-project[aria-label="kiln"]')!);
+    await click(root.querySelector('.ctx-menu .btn-archive-project'));
+    await settle();
+    await act(async () => {
+      vi.advanceTimersByTime(ARCHIVE_UNDO_MS);
+    });
+    expect(root.querySelector('.toast-project')).toBeNull();
+    expect(api.unarchiveProject).toHaveBeenCalledTimes(1);
+    expect(app.archivedProjects.get('p4')!.archived_at).toBe(at(0));
+
+    // The personal project is neither archived nor deleted.
+    await rightClick(root.querySelector('.rail-project[aria-label="Personal"]')!);
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…']);
+  });
+
+  it('an archived project found by the search: opened, the column keeps it; its menu restores it', async () => {
+    const { app, api } = railApp(true);
+    await mount(
+      <>
+        <ProjectRail app={app} />
+        <SessionList app={app} />
+      </>,
+    );
+    await click(root.querySelector('.rail-search'));
+    await settle();
+    await typeQuery('99');
+    await rightClick(root.querySelector('.rail-hit.is-archived')!);
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Restore', 'Delete project…']);
+    // A line over the items only for a tile: the names are on here.
+    expect(root.querySelector('.ctx-menu .menu-head')).toBeNull();
+    await pressKey('Escape');
+    expect(field()).not.toBeNull();
+
+    // Opened (App selects the project of the address): the column's, and its "⋯" offers
+    // Restore; a refresh of the lists keeps it open.
+    await act(async () => field()!.focus());
+    await pressKey('Enter');
+    expect(location.hash).toBe('#/p/p9');
+    await act(async () => app.selectProject('p9'));
+    expect(root.querySelector('.side-head .project-title')!.textContent).toBe('99bot_ng');
+    await act(async () => app.refreshSessions());
+    expect(app.currentProjectId).toBe('p9');
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect(menuItems()).toContain('Restore');
+    expect(menuItems()).not.toContain('Archive project');
+    await click(root.querySelector('.ctx-menu .btn-restore-project'));
+    await settle();
+    expect(api.unarchiveProject).toHaveBeenCalledWith('p9');
+    expect(app.archivedProjects.has('p9')).toBe(false);
+    expect(bar()).toEqual(['Personal', 'physics-mp', 'caldavllm_bot', 'medication_bot', 'kiln', '99bot_ng']);
+    expect(root.querySelector('.rail-project.is-current')!.getAttribute('aria-label')).toBe('99bot_ng');
+
+    // Archived elsewhere, the open project stays open, archived; deleted, it gives its place to
+    // the personal one at the next refresh.
+    await api.archiveProject('p9');
+    await act(async () => app.refreshSessions());
+    expect(app.currentProjectId).toBe('p9');
+    expect(app.archivedProjects.has('p9')).toBe(true);
+    api.archivedProjects.mockResolvedValueOnce([]);
+    await act(async () => app.refreshSessions());
+    expect(app.currentProjectId).toBe('p0');
+  });
+
+  it("archiving the open project from the column's \"⋯\" opens the personal one", async () => {
+    const { app, api } = railApp(true);
+    await mount(
+      <>
+        <ProjectRail app={app} />
+        <SessionList app={app} />
+      </>,
+    );
+    expect(app.currentProjectId).toBe('p1');
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    await click(root.querySelector('.ctx-menu .btn-archive-project'));
+    await settle();
+    expect(api.archiveProject).toHaveBeenCalledWith('p1');
+    expect(app.currentProjectId).toBe('p0');
+    expect(location.hash).toBe('#/p/p0');
+    expect(bar()).not.toContain('physics-mp');
+    expect(root.querySelector('.toast-project .toast-text')!.textContent).toBe('Archived «physics-mp» · find it with the search on the bar');
+    // Its sessions are as they were.
+    expect(app.sessions.get('net')!.archived).toBe(false);
+  });
+
+  it('a refused archive puts the project back with a notice', async () => {
+    const { app, api } = railApp(false);
+    api.archiveProject.mockRejectedValueOnce(new Error('hub unavailable'));
+    await mount(
+      <>
+        <ProjectRail app={app} />
+        <SessionList app={app} />
+      </>,
+    );
+    await rightClick(root.querySelector('.rail-project[aria-label="kiln"]')!);
+    await click(root.querySelector('.ctx-menu .btn-archive-project'));
+    await settle();
+    expect(bar()).toContain('kiln');
+    expect(root.querySelector('.toast-project')).toBeNull();
+    expect(root.querySelector('.notice')!.textContent).toBe('Not archived «kiln»: hub unavailable');
+  });
+
+  it('an archived project is known without the search: refreshes, a reload, its settings, its sessions', async () => {
+    const api = {
+      ...archiveApi(),
+      allSessions: vi.fn(async () => [...LIST, sess('bot1', 'Bot run', 'idle', at(1), { project_id: 'p9' })]),
+      workers: vi.fn(async () => []),
+      patchProject: vi.fn(async (id: string, patch: { default_workspace_id?: string }) => ({ ...BOT, id, ...patch })),
+    };
+    const socket = { onState: () => () => {} } as unknown as HubSocket;
+    const app = new AppState(api as unknown as Api, socket);
+    app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious' };
+    // The lists bring it, the search never opened.
+    await act(async () => app.refreshSessions());
+    expect(api.archivedProjects).toHaveBeenCalledTimes(1);
+    expect([...app.archivedProjects.keys()]).toEqual(['p9']);
+    expect(app.projects.has('p9')).toBe(false);
+    // Opened from its address (App selects it), or from one of its sessions: a refresh keeps it.
+    app.selectProject('p9');
+    await act(async () => app.refreshSessions());
+    expect(app.currentProjectId).toBe('p9');
+    expect(app.findSession('99bot_ng/bot1')).toEqual({ id: 'bot1', address: '99bot_ng/bot1', title: 'Bot run' });
+    expect(app.findSession('bot1')?.address).toBe('99bot_ng/bot1');
+    // A reload has it from the kept list before the hub answers.
+    const again = new AppState(api as unknown as Api, socket);
+    expect(again.project('p9')?.name).toBe('99bot_ng');
+    expect(again.projects.has('p9')).toBe(false);
+
+    // Its settings page is whole: the name, Appearance and Delete.
+    await mount(<ProjectSettings app={app} projectId="p9" />);
+    expect(root.textContent).toContain('99bot_ng');
+    expect(root.querySelector('.btn-appearance')).not.toBeNull();
+    expect(root.querySelector('.btn-delete-project')).not.toBeNull();
+    // A change made there keeps it off the bar ("Make default" answers the archived project).
+    await act(async () => app.setDefaultWorkspace('p9', 'w9'));
+    expect(app.projects.has('p9')).toBe(false);
+    expect(app.archivedProjects.get('p9')!.default_workspace_id).toBe('w9');
+    // A workspace added or removed there: its new default comes from the archived list.
+    const lists = api.projects.mock.calls.length;
+    const archivedLists = api.archivedProjects.mock.calls.length;
+    api.archivedProjects.mockResolvedValueOnce([{ ...BOT, default_workspace_id: 'w7' }]);
+    await act(async () => app.workspacesChanged('p9'));
+    expect(api.archivedProjects).toHaveBeenCalledTimes(archivedLists + 1);
+    expect(api.projects).toHaveBeenCalledTimes(lists);
+    expect(app.archivedProjects.get('p9')!.default_workspace_id).toBe('w7');
+    expect(app.projects.has('p9')).toBe(false);
+  });
+
+  it('Undo while the archive is on its way: the hub gets the archive first, then the restore', async () => {
+    const { app, api } = railApp(false);
+    let release!: () => void;
+    const latch = new Promise<void>((r) => (release = r));
+    const archive = api.archiveProject.getMockImplementation()!;
+    api.archiveProject.mockImplementationOnce(async (id: string) => {
+      await latch;
+      return archive(id);
+    });
+    await mount(<ProjectRail app={app} />);
+    await rightClick(root.querySelector('.rail-project[aria-label="kiln"]')!);
+    await click(root.querySelector('.ctx-menu .btn-archive-project'));
+    expect(bar()).not.toContain('kiln');
+    await click(root.querySelector('.toast-project .btn-undo'));
+    await settle();
+    expect(api.archiveProject).toHaveBeenCalledWith('p4');
+    expect(api.unarchiveProject).not.toHaveBeenCalled();
+    release();
+    await settle();
+    await settle();
+    expect(api.unarchiveProject).toHaveBeenCalledWith('p4');
+    expect(api.archiveProject.mock.invocationCallOrder[0]).toBeLessThan(api.unarchiveProject.mock.invocationCallOrder[0]);
+    expect(bar()).toEqual(['Personal', 'physics-mp', 'caldavllm_bot', 'medication_bot', 'kiln']);
+  });
+
+  it('a refused archive puts the project back in its place on the bar, not last', async () => {
+    const { app, api } = railApp(true);
+    api.archiveProject.mockRejectedValueOnce(new Error('hub unavailable'));
+    await mount(<ProjectRail app={app} />);
+    const before = bar();
+    expect(before.indexOf('caldavllm_bot')).toBe(2);
+    await rightClick(root.querySelector('.rail-project[aria-label="caldavllm_bot"]')!);
+    await click(root.querySelector('.ctx-menu .btn-archive-project'));
+    await settle();
+    expect(app.listNotice).toBe('Not archived «caldavllm_bot»: hub unavailable');
+    expect(bar()).toEqual(before);
+  });
+
+  it('two refused archives in a row put both back in their places, by the hub\'s order', async () => {
+    const { app, api } = railApp(true);
+    await act(() => app.refreshSessions());
+    let refuse!: () => void;
+    const gate = new Promise<void>((r) => (refuse = r));
+    api.archiveProject.mockImplementationOnce(async () => {
+      await gate;
+      throw new Error('hub unavailable');
+    });
+    api.archiveProject.mockRejectedValueOnce(new Error('hub unavailable'));
+    await mount(<ProjectRail app={app} />);
+    const before = bar();
+    expect(before.slice(2, 4)).toEqual(['caldavllm_bot', 'medication_bot']);
+    // The second archive takes its snapshot of the bar while the first is off it.
+    app.archiveProject('p2');
+    app.archiveProject('p3');
+    refuse();
+    await settle();
+    expect(bar()).toEqual(before);
+  });
+
+  it('a project created here, archived right after an older one, both refused: the bar as it was', async () => {
+    const { app, api } = railApp(true);
+    await act(() => app.refreshSessions());
+    await act(async () => {
+      await app.createProject('glaze');
+    });
+    let refuse!: () => void;
+    const gate = new Promise<void>((r) => (refuse = r));
+    api.archiveProject.mockImplementationOnce(async () => {
+      await gate;
+      throw new Error('hub unavailable');
+    });
+    api.archiveProject.mockRejectedValueOnce(new Error('hub unavailable'));
+    await mount(<ProjectRail app={app} />);
+    const before = bar();
+    expect(before.slice(-2)).toEqual(['kiln', 'glaze']);
+    app.archiveProject('p3');
+    app.archiveProject('p5');
+    refuse();
+    await settle();
+    expect(bar()).toEqual(before);
+  });
+
+  it("a project the hub's list put on the bar here, archived right after an older one, both refused: the bar as it was", async () => {
+    const { app, api } = railApp(true);
+    await act(() => app.refreshSessions());
+    // A session moved into a new project: the client learns the project from the hub's list.
+    api.projects.mockResolvedValueOnce([...ALL.slice(0, 5), project('p5', 'glaze')]);
+    await act(async () => {
+      await app.moveSession('net', { path: '/Users/me/work/glaze', create: true });
+    });
+    let refuse!: () => void;
+    const gate = new Promise<void>((r) => (refuse = r));
+    api.archiveProject.mockImplementationOnce(async () => {
+      await gate;
+      throw new Error('hub unavailable');
+    });
+    api.archiveProject.mockRejectedValueOnce(new Error('hub unavailable'));
+    await mount(<ProjectRail app={app} />);
+    const before = bar();
+    expect(before.slice(-2)).toEqual(['kiln', 'glaze']);
+    app.archiveProject('p3');
+    app.archiveProject('p5');
+    refuse();
+    await settle();
+    expect(bar()).toEqual(before);
+  });
+
+  it('an archive the hub answers after a list read before it: the project stays off the bar', async () => {
+    const { app, api } = railApp(true);
+    let answer!: () => void;
+    const gate = new Promise<void>((r) => (answer = r));
+    const archive = api.archiveProject.getMockImplementation()!;
+    api.archiveProject.mockImplementationOnce(async (id: string) => {
+      await gate;
+      return archive(id);
+    });
+    app.archiveProject('p4');
+    expect(app.projects.has('p4')).toBe(false);
+    // The lists are read before the hub stored the archive: kiln is still among the live ones.
+    await act(async () => app.refreshSessions());
+    expect(api.projects).toHaveBeenCalled();
+    expect(app.projects.has('p4')).toBe(false);
+    expect(app.archivedProjects.has('p4')).toBe(true);
+    expect(app.projectUndo).toBe('p4');
+    answer();
+    await settle();
+    expect(app.projects.has('p4')).toBe(false);
+    expect(app.archivedProjects.get('p4')!.archived_at).toBe(at(0));
+
+    // A restore's list, read before an archive that waits behind it: that one stays off the bar.
+    let restored!: () => void;
+    const back = new Promise<void>((r) => (restored = r));
+    const unarchive = api.unarchiveProject.getMockImplementation()!;
+    api.unarchiveProject.mockImplementationOnce(async (id: string) => {
+      await back;
+      return unarchive(id);
+    });
+    let stored!: () => void;
+    const later = new Promise<void>((r) => (stored = r));
+    api.archiveProject.mockImplementationOnce(async (id: string) => {
+      await later;
+      return archive(id);
+    });
+    const restore = app.restoreProject('p9');
+    app.archiveProject('p3');
+    expect(app.projects.has('p3')).toBe(false);
+    restored();
+    await act(async () => restore);
+    expect(app.projects.has('p9')).toBe(true);
+    expect(app.projects.has('p3')).toBe(false);
+    stored();
+    await settle();
+    expect(api.archiveProject).toHaveBeenLastCalledWith('p3');
+    expect(app.projects.has('p3')).toBe(false);
+    expect(app.archivedProjects.has('p3')).toBe(true);
   });
 });
 
@@ -1171,9 +1873,9 @@ describe('SessionList (phone)', () => {
     expect(root.querySelector('.list-hint')!.textContent).toBe('Press and hold a session to archive, rename or delete it.');
   });
 
-  it('keeps its rows as they are with "Compact" on: their state and place stay visible, no tooltip', async () => {
+  it('keeps its rows as they are in the Compact look: their state and place stay visible, no tooltip', async () => {
     const app = makeApp();
-    app.look = { ...app.look, compactList: true };
+    app.me = { ...app.me!, look: 'compact' };
     await mount(<SessionList app={app} phone />);
     const rows = [...root.querySelectorAll('.session-row')];
     expect(rows.length).toBeGreaterThan(0);
@@ -1206,7 +1908,6 @@ describe('SessionList (phone)', () => {
     expect([menu.style.left, menu.style.top]).toEqual(['30px', '200px']);
     expect(rowOf('Network sync').querySelector('.session-row.is-menu')).not.toBeNull();
     expect(menuItems()).toEqual(SESSION_MENU);
-    expect(menu.querySelector('.btn-menu-archive')).not.toBeNull();
     expect(menu.querySelector('.btn-rules')!.getAttribute('href')).toBe('#/p/p1/rules/w1?session=net');
     await click(menu.querySelector('.btn-archive'));
     expect(root.querySelector('.ctx-menu')).toBeNull();
@@ -1402,34 +2103,34 @@ describe('favorites', () => {
     await act(async () => {
       tile('kiln').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 200 }));
     });
-    const menu = root.querySelector<HTMLElement>('.rail-menu')!;
+    const menu = root.querySelector<HTMLElement>('.ctx-menu')!;
     expect([menu.style.left, menu.style.top]).toEqual(['30px', '200px']);
-    expect(menuItems()).toEqual(['Add to favorites']);
-    await click(root.querySelector('.rail-menu .btn-favorite'));
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Archive project', 'Delete project…']);
+    await click(root.querySelector('.ctx-menu .btn-favorite'));
     expect(api.setProjectFavorite).toHaveBeenCalledWith('p3', true);
-    expect(root.querySelector('.rail-menu')).toBeNull();
+    expect(root.querySelector('.ctx-menu')).toBeNull();
     expect(order()).toEqual(['boards', 'kiln', 'Personal', 'physics-mp']);
 
     await act(async () => {
       tile('boards').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
     });
-    expect(menuItems()).toEqual(['Remove from favorites']);
+    expect(menuItems()[1]).toBe('Remove from favorites');
     // Esc closes it without a change.
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     });
-    expect(root.querySelector('.rail-menu')).toBeNull();
+    expect(root.querySelector('.ctx-menu')).toBeNull();
     await act(async () => {
       tile('boards').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
     });
-    await click(root.querySelector('.rail-menu .btn-favorite'));
+    await click(root.querySelector('.ctx-menu .btn-favorite'));
     expect(api.setProjectFavorite).toHaveBeenLastCalledWith('p2', false);
     expect(order()).toEqual(['kiln', 'Personal', 'physics-mp', 'boards']);
   });
 });
 
 describe('the list on a reload', () => {
-  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const };
+  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const, look: 'spacious' as const };
   /** A hub that has not answered yet. */
   const pending = () => new Promise<never>(() => {});
   /** A socket that has not connected; `state` plays its connect. */
@@ -1680,14 +2381,16 @@ describe('the read mark', () => {
 });
 
 describe("the column's project menu and width (desktop)", () => {
-  it('"⋯": Open in new tab, favorites, Project settings…, Delete project… (not for the personal project)', async () => {
+  it('"⋯": Open in new tab, favorites, Project settings…, Archive project, Delete project… (the last two not for the personal project)', async () => {
     const api = { ...hubApi(), deleteProject: vi.fn(async () => {}) };
     const app = makeApp(LIST, api);
     await mount(<SessionList app={app} />);
     await click(root.querySelector('.side-head .btn-project-menu'));
     const menu = root.querySelector('.ctx-menu')!;
     expect(menu.getAttribute('aria-label')).toBe('Project «physics-mp»');
-    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Delete project…']);
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Archive project', 'Delete project…']);
+    // The column has the name: no line over the items.
+    expect(menu.querySelector('.menu-head')).toBeNull();
     expect(menu.querySelector('.btn-open-tab')!.getAttribute('href')).toBe('#/p/p1');
     expect(menu.querySelector('.btn-open-tab')!.getAttribute('target')).toBe('_blank');
     expect(menu.querySelector('.btn-project-settings')!.getAttribute('href')).toBe('#/p/p1/settings');
@@ -1748,33 +2451,33 @@ describe("the column's project menu and width (desktop)", () => {
       // A click alone keeps the default.
       await ev('pointerdown', 100);
       await ev('pointerup', 100);
-      expect(app.look.listWidth).toBeUndefined();
+      expect(app.device.listWidth).toBeUndefined();
       // 20 px to the right: the column is 20 px wider, not 19.
       await ev('pointerdown', 100);
       await ev('pointermove', 120);
       expect(css()).toBe('320px');
       expect(grip.getAttribute('aria-valuenow')).toBe('320');
-      expect(app.look.listWidth).toBeUndefined();
+      expect(app.device.listWidth).toBeUndefined();
       await ev('pointerup', 120);
-      expect(app.look.listWidth).toBe(320);
+      expect(app.device.listWidth).toBe(320);
       expect(JSON.parse(localStorage.getItem('hqc.look')!).listWidth).toBe(320);
-      expect(new AppState(hubApi() as unknown as Api, { onState: () => () => {} } as unknown as HubSocket).look.listWidth).toBe(320);
+      expect(new AppState(hubApi() as unknown as Api, { onState: () => () => {} } as unknown as HubSocket).device.listWidth).toBe(320);
       await ev('pointerdown', 0);
       await ev('pointermove', 5000);
       await ev('pointerup', 5000);
-      expect(app.look.listWidth).toBe(LIST_WIDTH_MAX);
+      expect(app.device.listWidth).toBe(LIST_WIDTH_MAX);
       await act(async () => {
         grip.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
       });
-      expect(app.look.listWidth).toBe(LIST_WIDTH_MAX - LIST_WIDTH_STEP);
+      expect(app.device.listWidth).toBe(LIST_WIDTH_MAX - LIST_WIDTH_STEP);
       await ev('pointerdown', 5000);
       await ev('pointermove', -5000);
       await ev('pointerup', -5000);
-      expect(app.look.listWidth).toBe(LIST_WIDTH_MIN);
+      expect(app.device.listWidth).toBe(LIST_WIDTH_MIN);
       // The root carries it as `--list-w`; without one the default comes back.
-      applyLook(document.documentElement, app.look);
+      applyLook(document.documentElement, 'spacious', app.device);
       expect(css()).toBe(`${LIST_WIDTH_MIN}px`);
-      applyLook(document.documentElement, { ...app.look, listWidth: undefined });
+      applyLook(document.documentElement, 'spacious', { ...app.device, listWidth: undefined });
       expect(css()).toBe('');
     } finally {
       rect.mockRestore();
@@ -1866,15 +2569,461 @@ describe('menus over a pending permission card', () => {
     await act(async () => {
       tile.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
     });
-    expect(root.querySelector('.rail-menu')).not.toBeNull();
-    expect(root.querySelector('.rail-menu')!.contains(document.activeElement)).toBe(true);
+    expect(root.querySelector('.ctx-menu')).not.toBeNull();
+    expect(root.querySelector('.ctx-menu')!.contains(document.activeElement)).toBe(true);
     await pressKey('Enter');
     await pressKey('Escape');
-    expect(root.querySelector('.rail-menu')).toBeNull();
+    expect(root.querySelector('.ctx-menu')).toBeNull();
     expect(actions.approve).not.toHaveBeenCalled();
     // The menu closed: the card has its keys.
     (document.activeElement as HTMLElement).blur();
     await pressKey('Enter');
     expect(actions.approve).toHaveBeenCalledWith('req-1', 'allow');
+  });
+
+  it('the project search: Esc in its field, Enter and Esc on a match do not answer the request', async () => {
+    const { actions, card } = permissionCard();
+    const app = makeApp();
+    app.me = { ...app.me!, look: 'compact' };
+    await mount(
+      <>
+        <ProjectRail app={app} />
+        {card}
+      </>,
+    );
+    const field = () => root.querySelector('input[aria-label="Search projects"]');
+    await click(root.querySelector('.rail-search'));
+    expect(document.activeElement).toBe(field());
+    await pressKey('Escape');
+    expect(field()).toBeNull();
+    expect(actions.approve).not.toHaveBeenCalled();
+
+    // Enter on a focused match is its link's: not cancelled, the card does not take it.
+    await click(root.querySelector('.rail-search'));
+    const hit = root.querySelector<HTMLAnchorElement>('.rail-hit[href="#/p/p1"]')!;
+    await act(async () => hit.focus());
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+    await act(async () => {
+      hit.dispatchEvent(enter);
+    });
+    expect(enter.defaultPrevented).toBe(false);
+    expect(actions.approve).not.toHaveBeenCalled();
+    // The link opens the project and closes the search.
+    await click(hit);
+    expect(location.hash).toBe('#/p/p1');
+    expect(field()).toBeNull();
+    // Esc on a match closes the search only.
+    await click(root.querySelector('.rail-search'));
+    await act(async () => root.querySelector<HTMLElement>('.rail-hit')!.focus());
+    await pressKey('Escape');
+    expect(field()).toBeNull();
+    expect(actions.approve).not.toHaveBeenCalled();
+    location.hash = '';
+  });
+});
+
+// SPEC §6: "+" opens a new session as a chat window at once, nothing on the hub; chips over its
+// input choose the workspace, folder, permissions and model; the first message creates the
+// session and the window becomes its chat; left unsent, the draft is gone.
+describe('a new session', () => {
+  const started = parseEvent({
+    session_id: 'fresh',
+    event_id: '0199f3a2-7c10-7000-8000-000000000201',
+    seq: 1,
+    ts: at(0),
+    author: { kind: 'system' },
+    type: 'system',
+    payload: { text: 'Session created', code: 'session_created' },
+  });
+  const created = (more: Partial<SessionInfo> = {}) => sess('fresh', 'Session 6', 'idle', at(0), more);
+
+  function draftApp(create: () => Promise<SessionInfo> = async () => created()) {
+    let app!: AppState;
+    // The chat's first page; held back while `loading` is set.
+    let loading: Promise<void> | null = null;
+    const api = {
+      ...hubApi(),
+      workspaces: async () => app.workspaces.get('p1') ?? [],
+      createSession: vi.fn(create),
+      eventsBefore: vi.fn(async (id: string) => {
+        await loading;
+        return id === 'fresh'
+          ? { events: [started], invalid: [], maxSeq: 1, minSeq: 1, count: 1 }
+          : { events: [], invalid: [], maxSeq: 0, count: 0 };
+      }),
+      input: vi.fn(async (id: string, text: string, op: string, ids: string[]) =>
+        parseEvent({
+          session_id: id,
+          event_id: '0199f3a2-7c10-7000-8000-000000000202',
+          seq: 2,
+          ts: at(0),
+          author: { kind: 'user', id: 'u' },
+          type: 'user.message',
+          payload: { text, artifact_ids: ids },
+          client_op_id: op,
+          delivery: 'pending',
+        }),
+      ),
+      uploadArtifact: vi.fn(async (_file: Blob, name: string) => ({ id: `art-${name}` })),
+      readCursor: vi.fn(async () => {}),
+    };
+    app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+    Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+    return { app, api, hold: (p: Promise<void> | null) => (loading = p) };
+  }
+
+  /** The hash change and the hub's (mocked) replies. */
+  const settle = () =>
+    act(async () => {
+      for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+    });
+  const win = () => root.querySelector<HTMLElement>('.main .chat-new');
+  const chips = () => [...root.querySelectorAll('.new-chip')].map((c) => c.textContent);
+  const input = () => root.querySelector<HTMLTextAreaElement>('.chat-new .composer-input')!;
+  const typeMessage = (text: string) =>
+    act(async () => {
+      input().value = text;
+      input().dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  const sendMessage = () =>
+    act(async () => {
+      root.querySelector('.chat-new form.composer')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    });
+  /** Types into the field of a chip's menu and presses Enter there. */
+  const typeInMenu = (name: string, value: string) =>
+    act(async () => {
+      const el = root.querySelector<HTMLInputElement>(`.ctx-menu input[name=${name}]`)!;
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    });
+
+  afterEach(() => {
+    location.hash = '';
+  });
+
+  it('one press of "+" opens its window: nothing on the hub, the caret in its input, the defaults on its chips, "Draft" on top of the list', async () => {
+    const { app, api } = draftApp();
+    location.hash = '#/p/p1';
+    await mount(<App app={app} />);
+    await click(root.querySelector('.side-head .btn-new-session'));
+    await settle();
+    expect(location.hash).toBe('#/p/p1/new');
+    expect(win()!.querySelector('.chat-title')!.textContent).toBe('New session');
+    expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Drafthome-mac/~/work/games/phys-mp');
+    expect(win()!.querySelector('.new-empty')!.textContent).toBe(
+      'Write the first message — the session starts with itWorkspace, folder, permissions and model are above the box; the defaults are already picked.',
+    );
+    expect(chips()).toEqual(['phys-mp · home-mac', 'Folder .', "Permissions: worker's default", 'Model: default']);
+    expect(document.activeElement).toBe(input());
+    // The draft on top of the list, the current row; no form in the column.
+    expect(groups()[0]).toEqual(['Draft', undefined, ['New session']]);
+    const row = root.querySelector('.session-row.is-draft')!;
+    expect(row.getAttribute('aria-current')).toBe('page');
+    expect(row.getAttribute('href')).toBe('#/p/p1/new');
+    expect(row.querySelector('.session-sub')!.textContent).toBe('Draft · home-mac · ~/work/games/phys-mp');
+    expect(root.querySelector('.sidebar form, .sidebar select')).toBeNull();
+    expect(api.createSession).not.toHaveBeenCalled();
+
+    // The workspace's menu: each with its worker and whole path, "Add a workspace…" under them.
+    await click(root.querySelector('.btn-chip-workspace'));
+    expect(root.querySelector('.ctx-menu .menu-head')!.textContent).toBe('Workspace');
+    expect(menuItems()).toEqual(['phys-mphome-mac:~/work/games/phys-mp', 'phys-detdrzlo-mac:~/work/games/phys-det', 'Add a workspace…']);
+    expect(root.querySelector('.ctx-menu .btn-add-workspace')!.getAttribute('href')).toBe('#/p/p1/settings');
+    await click(root.querySelectorAll('.ctx-menu .btn-pick-workspace')[1]);
+    expect(chips()[0]).toBe('phys-det · drzlo-mac');
+    expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Draftdrzlo-mac/~/work/games/phys-det');
+    expect(row.querySelector('.session-sub')!.textContent).toBe('Draft · drzlo-mac · ~/work/games/phys-det');
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it("the first message creates it with the chips' choices and goes in as its first input; the window becomes its chat, the message in it", async () => {
+    let create!: (s: SessionInfo) => void;
+    const { app, api, hold } = draftApp(() => new Promise((r) => (create = r)));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await click(root.querySelector('.btn-chip-folder'));
+    await typeInMenu('cwd', 'net');
+    expect(root.querySelector('.ctx-menu')).toBeNull();
+    await click(root.querySelector('.btn-chip-permissions'));
+    expect(menuItems()).toEqual(["The worker's default", 'Ask', 'Auto']);
+    await click(root.querySelector('.ctx-menu .btn-permissions-ask'));
+    await click(root.querySelector('.btn-chip-model'));
+    expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Another model…']);
+    await click(root.querySelector('.ctx-menu .btn-model-haiku'));
+    expect(chips()).toEqual(['phys-mp · home-mac', 'Folder net', 'Permissions: Ask', 'Model: Haiku']);
+    expect(win()!.querySelector('.chat-meta')!.textContent).toBe('Drafthome-mac/~/work/games/phys-mp/net');
+
+    await typeMessage('Hello there');
+    await sendMessage();
+    expect(api.createSession).toHaveBeenCalledWith('p1', undefined, { workspace_id: 'w1', cwd: 'net', permission_mode: 'ask', model: 'haiku' });
+    // On its way: shown as being sent, the input clear, the chips holding what was sent.
+    expect(win()!.querySelector('.msg-pending')!.textContent).toContain('Hello there');
+    expect(win()!.querySelector('.msg-pending')!.textContent).toContain('sending…');
+    expect(input().value).toBe('');
+    expect([...root.querySelectorAll<HTMLButtonElement>('.new-chip')].every((c) => c.disabled)).toBe(true);
+
+    // Created: the input goes; until the chat's first page is in, the draft stands for the
+    // session in the list, never both.
+    let loaded!: () => void;
+    hold(new Promise((r) => (loaded = r)));
+    await act(async () => create(created({ cwd: 'net' })));
+    await settle();
+    expect(api.input).toHaveBeenCalledWith('fresh', 'Hello there', expect.any(String), []);
+    expect(location.hash).toBe('#/p/p1/new');
+    expect(groups()[0]).toEqual(['Draft', undefined, ['New session']]);
+    expect(titles()).not.toContain('Session 6');
+
+    await act(async () => loaded());
+    await settle();
+    expect(location.hash).toBe('#/s/fresh');
+    expect(win()).toBeNull();
+    const chat = root.querySelector('.main .chat')!;
+    expect(chat.querySelector('.chat-title')!.textContent).toBe('Session 6');
+    expect(chat.textContent).not.toContain('Loading…');
+    expect(chat.querySelector('.feed')!.textContent).toContain('Session started');
+    expect(chat.querySelector('.feed')!.textContent).toContain('Hello there');
+    expect(app.newSession).toBeNull();
+    expect(root.querySelector('.group-draft')).toBeNull();
+    expect(rowOf('Session 6').querySelector('.session-row')!.getAttribute('aria-current')).toBe('page');
+    expect(api.createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('left unsent, it is gone: another session opened, then "+" again opens a new one with the defaults', async () => {
+    const { app, api } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await click(root.querySelector('.btn-chip-model'));
+    await click(root.querySelector('.ctx-menu .btn-model-opus'));
+    await typeMessage('half a thought');
+    expect(chips()[3]).toBe('Model: Opus');
+
+    await click(root.querySelector<HTMLElement>('a.session-row[href="#/s/net"]'));
+    await settle();
+    expect(location.hash).toBe('#/s/net');
+    expect(win()).toBeNull();
+    expect(app.newSession).toBeNull();
+    expect(root.querySelector('.group-draft, .is-draft')).toBeNull();
+
+    await click(root.querySelector('.side-head .btn-new-session'));
+    await settle();
+    expect(input().value).toBe('');
+    expect(chips()).toEqual(['phys-mp · home-mac', 'Folder .', "Permissions: worker's default", 'Model: default']);
+    expect(root.querySelectorAll('.is-draft')).toHaveLength(1);
+    expect(api.createSession).not.toHaveBeenCalled();
+    expect(api.input).not.toHaveBeenCalled();
+  });
+
+  /** A file picked with the input's clip. */
+  const attach = (name: string) =>
+    act(async () => {
+      const picker = root.querySelector<HTMLInputElement>('.chat-new input[type=file]')!;
+      Object.defineProperty(picker, 'files', { value: [new File(['abc'], name, { type: 'text/plain' })], configurable: true });
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  const pressEnter = () =>
+    act(async () => {
+      input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    });
+  const chatInput = () => root.querySelector<HTMLTextAreaElement>('.main .chat:not(.chat-new) .composer-input')!;
+
+  it('while it is being created the input sends nothing more: a second Enter keeps its text, send says "Starting…"', async () => {
+    let create!: (s: SessionInfo) => void;
+    const { app, api } = draftApp(() => new Promise((r) => (create = r)));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await typeMessage('Hello there');
+    await pressEnter();
+    expect(api.createSession).toHaveBeenCalledTimes(1);
+    expect(input().value).toBe('');
+    await typeMessage('and one more thing');
+    await pressEnter();
+    expect(input().value).toBe('and one more thing');
+    const sendBtn = win()!.querySelector<HTMLButtonElement>('.btn-send')!;
+    expect(sendBtn.disabled).toBe(true);
+    expect(sendBtn.getAttribute('title')).toBe('Starting…');
+    expect(win()!.querySelectorAll('.msg-pending')).toHaveLength(1);
+    await act(async () => create(created()));
+    await settle();
+    expect(api.createSession).toHaveBeenCalledTimes(1);
+    expect(api.input).toHaveBeenCalledTimes(1);
+    expect(api.input).toHaveBeenCalledWith('fresh', 'Hello there', expect.any(String), []);
+    expect(location.hash).toBe('#/s/fresh');
+  });
+
+  it('what is typed and attached while it is being created goes to the chat\'s input', async () => {
+    let create!: (s: SessionInfo) => void;
+    const { app, api } = draftApp(() => new Promise((r) => (create = r)));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await typeMessage('Hello there');
+    await sendMessage();
+    await typeMessage('and then this');
+    await attach('notes.txt');
+    await settle();
+    await act(async () => create(created()));
+    await settle();
+    expect(location.hash).toBe('#/s/fresh');
+    expect(chatInput().value).toBe('and then this');
+    expect(root.querySelector('.main .chat .composer-files')!.textContent).toContain('notes.txt');
+    expect(app.draft('fresh')).toBe('and then this');
+    expect(api.input).toHaveBeenCalledTimes(1);
+    expect(api.uploadArtifact).not.toHaveBeenCalled();
+  });
+
+  it("after the switch the caret is in the chat's input; the chat opened again later does not take it", async () => {
+    const { app } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await typeMessage('Hello there');
+    await sendMessage();
+    await settle();
+    expect(location.hash).toBe('#/s/fresh');
+    expect(document.activeElement).toBe(chatInput());
+    // Handed over once: another visit to the chat finds the focus where it is.
+    location.hash = '#/s/net';
+    await settle();
+    (document.activeElement as HTMLElement | null)?.blur();
+    location.hash = '#/s/fresh';
+    await settle();
+    expect(document.activeElement).not.toBe(chatInput());
+  });
+
+  it('the caret is handed once: the input shown again in the same chat (after a lock) does not take it', async () => {
+    const { app } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await typeMessage('Hello there');
+    await sendMessage();
+    await settle();
+    expect(document.activeElement).toBe(chatInput());
+    const flip = async (state: SessionInfo['state']) => {
+      app.sessions.set('fresh', { ...app.sessions.get('fresh')!, state });
+      await act(async () => (app as unknown as { changed(): void }).changed());
+      await settle();
+    };
+    await flip('locked_vscode');
+    expect(root.querySelector('.main .chat:not(.chat-new) .composer-input')).toBeNull();
+    (document.activeElement as HTMLElement | null)?.blur();
+    await flip('idle');
+    expect(chatInput()).not.toBeNull();
+    expect(document.activeElement).not.toBe(chatInput());
+  });
+
+  it('left while it is being created: no switch, the session in the list with the message sent and what was typed as its draft', async () => {
+    let create!: (s: SessionInfo) => void;
+    const { app, api } = draftApp(() => new Promise((r) => (create = r)));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await typeMessage('Hello there');
+    await sendMessage();
+    await typeMessage('half a thought');
+    location.hash = '#/s/net';
+    await settle();
+    expect(win()).toBeNull();
+    await act(async () => create(created()));
+    await settle();
+    expect(location.hash).toBe('#/s/net');
+    expect(api.input).toHaveBeenCalledWith('fresh', 'Hello there', expect.any(String), []);
+    expect(titles()).toContain('Session 6');
+    expect(app.draft('fresh')).toBe('half a thought');
+    expect(rowOf('Session 6').querySelector('.session-draft')!.textContent).toBe('Draft');
+    expect(root.querySelector('.sidebar .notice')).toBeNull();
+  });
+
+  it('left while it is being created and the hub refuses it: the list says so, the message was not sent', async () => {
+    let refuse!: (e: Error) => void;
+    const { app, api } = draftApp(() => new Promise((_, r) => (refuse = r)));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await typeMessage('Hello there');
+    await sendMessage();
+    location.hash = '#/s/net';
+    await settle();
+    await act(async () => refuse(new Error('no workspace')));
+    await settle();
+    expect(location.hash).toBe('#/s/net');
+    expect(root.querySelector('.sidebar .notice[role=alert]')!.textContent).toBe('Not started: no workspace — your message was not sent');
+    expect(api.input).not.toHaveBeenCalled();
+  });
+
+  it('files dropped on its window are attached, as on a chat', async () => {
+    const { app } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    const drag = (type: string, files: File[] = []) =>
+      act(async () => {
+        const ev = new Event(type, { bubbles: true, cancelable: true });
+        Object.defineProperty(ev, 'dataTransfer', { value: { types: ['Files'], files } });
+        win()!.querySelector('.timeline')!.dispatchEvent(ev);
+      });
+    await drag('dragover');
+    expect(win()!.classList.contains('chat-dragging')).toBe(true);
+    await drag('drop', [new File(['abc'], 'shot.txt', { type: 'text/plain' })]);
+    await settle();
+    expect(win()!.classList.contains('chat-dragging')).toBe(false);
+    expect(win()!.querySelector('.composer-files')!.textContent).toContain('shot.txt');
+  });
+
+  it('the workspace chip names itself with the whole path; a search that finds nothing says so under the draft', async () => {
+    const { app } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    const ws = root.querySelector('.btn-chip-workspace')!;
+    expect(ws.getAttribute('aria-label')).toBe('Workspace: phys-mp — home-mac:~/work/games/phys-mp');
+    expect(ws.getAttribute('title')).toBe('Workspace: phys-mp — home-mac:~/work/games/phys-mp');
+    await type('zzz nothing');
+    expect(root.querySelector('.is-draft')).not.toBeNull();
+    expect(root.querySelector('.session-scroll .empty')!.textContent).toBe('No sessions match');
+  });
+
+  it('a create the hub refuses keeps the draft: the reason said, the text back in the input, the file with it; the next send starts it', async () => {
+    let fail = true;
+    const { app, api } = draftApp(async () => {
+      if (fail) throw new Error('the worker is still making ~/work/games/phys-mp');
+      return created();
+    });
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await act(async () => {
+      const picker = root.querySelector<HTMLInputElement>('.chat-new input[type=file]')!;
+      Object.defineProperty(picker, 'files', { value: [new File(['abc'], 'notes.txt', { type: 'text/plain' })], configurable: true });
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await settle();
+    await typeMessage('Build it');
+    await sendMessage();
+    await settle();
+    expect(location.hash).toBe('#/p/p1/new');
+    expect(win()!.querySelector('.notice')!.textContent).toBe('Not started: the worker is still making ~/work/games/phys-mp');
+    expect(win()!.querySelector('.msg-pending')).toBeNull();
+    expect(input().value).toBe('Build it');
+    expect(document.activeElement).toBe(input());
+    expect(win()!.querySelector('.composer-files')!.textContent).toContain('notes.txt');
+    expect([...root.querySelectorAll<HTMLButtonElement>('.new-chip')].some((c) => c.disabled)).toBe(false);
+    expect(groups()[0]).toEqual(['Draft', undefined, ['New session']]);
+    expect(api.input).not.toHaveBeenCalled();
+    expect(api.uploadArtifact).not.toHaveBeenCalled();
+
+    fail = false;
+    await sendMessage();
+    await settle();
+    expect(api.createSession).toHaveBeenCalledTimes(2);
+    expect(api.uploadArtifact).toHaveBeenCalledWith(expect.any(Blob), 'notes.txt');
+    expect(api.input).toHaveBeenCalledWith('fresh', 'Build it', expect.any(String), ['art-notes.txt']);
+    expect(location.hash).toBe('#/s/fresh');
   });
 });

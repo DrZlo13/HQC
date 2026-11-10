@@ -22,7 +22,7 @@ Rust tests require that each file deserializes and serializes back to exactly th
   read by `client/public/sw.js`), `api.enroll*.json` (worker enrollment),
   `api.session.request.json` (creating a session in a workspace), `api.project*.json` and
   `api.projects.json` (projects, with `color` and `icon` since T49), `api.me.json` and
-  `api.me.patch.request.json` (`GET`/`PATCH /api/me`, the app `theme`), `api.workspace*.json` and `api.workspaces.json`
+  `api.me.patch.request.json` (`GET`/`PATCH /api/me`, the app `theme` and `look`), `api.workspace*.json` and `api.workspaces.json`
   (workspaces; `api.workspace.conflict.json` — the `409 workspace_conflict` body),
   `api.dirs.json` (`GET /api/workers/{id}/dirs`), `api.requests.json` (`GET /api/requests`,
   T37: a request two sessions wait on and a worker's own request), `api.artifact.json` (`POST /api/artifacts`,

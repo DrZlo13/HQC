@@ -3,7 +3,7 @@
 // recomputed when either changes. Status colors (waiting, online, danger, between sessions)
 // are the same in every project; light bases get darker ones.
 
-import { THEME_NAMES, type ProjectColor, type Theme } from './proto';
+import { LOOK_NAMES, THEME_NAMES, type LookName, type ProjectColor, type Theme } from './proto';
 
 export interface Base {
   /** A light base: darker status colors, the project color darkened as text. */
@@ -65,6 +65,7 @@ export function colorLabel(c: ProjectColor): string {
 export const STATUS = {
   waiting: '#F2B35B', // dot, "Waiting for…" text, rail badge
   waitingInk: '#1A1206', // text on amber
+  unread: '#5B8DEF', // the project bar's dot of unread events
   online: '#5CC98A', // worker dot, success checks
   allowedText: '#6FD49A',
   danger: '#F59486', // danger text
@@ -79,6 +80,7 @@ export const STATUS = {
 export const STATUS_LIGHT: typeof STATUS = {
   waiting: '#9C5B00',
   waitingInk: '#FFFFFF',
+  unread: '#2F6FDB',
   online: '#1A7F45',
   allowedText: '#1B7A43',
   danger: '#B83A2C',
@@ -139,31 +141,50 @@ export function statusVars(base: Theme = 'warm'): Record<string, string> {
   return out;
 }
 
-/** How text reads on this device ("Settings" → "Feed"): the feed across the whole chat column
- *  instead of at most 780 px, the platform's own font instead of Inter, a message's time in
- *  the gap below it instead of a line of its own; ("Settings" → "Project bar") a row with each
- *  project's full name instead of a tile; and ("Settings" → "Session list") a line per session
- *  with its state in the dot. */
-export interface Look {
-  wideFeed: boolean;
-  systemFont: boolean;
-  railNames: boolean;
-  timeInGap: boolean;
-  compactList: boolean;
+/** The looks as the Settings page offers them (SPEC §3 User), the same on every device. */
+export const LOOKS: { id: LookName; label: string }[] = [
+  { id: 'compact', label: 'Compact' },
+  { id: 'spacious', label: 'Spacious' },
+];
+
+/** The root classes of the Compact look, read by styles.css: the feed across the whole chat
+ *  column instead of at most 780 px; one column as in the VS Code tab (a mark in a gutter
+ *  before each item, the user's messages as plates from the left edge) instead of bubbles on
+ *  the right; the platform's own font instead of Inter; a row with each project's full name on
+ *  the project bar instead of a tile; a line per session with its state in the dot. Spacious
+ *  has none of them. */
+const COMPACT_CLASSES = ['feed-wide', 'feed-column', 'font-system', 'rail-names', 'list-compact'] as const;
+
+/** What stays on this device whatever the look. */
+export interface DeviceLayout {
   /** The session column's width in px, dragged by its right edge; absent: the default. */
   listWidth?: number;
 }
 
-/** Sets the look as classes on `el` (the document root), read by styles.css; the column's
- *  width as `--list-w`. */
-export function applyLook(el: HTMLElement, look: Look): void {
-  el.classList.toggle('feed-wide', look.wideFeed);
-  el.classList.toggle('font-system', look.systemFont);
-  el.classList.toggle('rail-names', look.railNames);
-  el.classList.toggle('time-in-gap', look.timeInGap);
-  el.classList.toggle('list-compact', look.compactList);
-  if (look.listWidth) el.style.setProperty('--list-w', `${look.listWidth}px`);
+const LOOK_NAME_KEY = 'hqc.lookName';
+
+/** The look last applied on this device: a convenience, so the first paint after a reload is
+ *  not the wrong look before `/api/me` answers; storage that fails or is empty means Spacious. */
+export function storedLook(): LookName {
+  try {
+    const v = localStorage.getItem(LOOK_NAME_KEY);
+    return (LOOK_NAMES as readonly string[]).includes(v ?? '') ? (v as LookName) : 'spacious';
+  } catch {
+    return 'spacious';
+  }
+}
+
+/** Sets the look `name` as classes on `el` (the document root) and the column's width as
+ *  `--list-w`, and remembers the look on this device. */
+export function applyLook(el: HTMLElement, name: LookName, device: DeviceLayout): void {
+  for (const c of COMPACT_CLASSES) el.classList.toggle(c, name === 'compact');
+  if (device.listWidth) el.style.setProperty('--list-w', `${device.listWidth}px`);
   else el.style.removeProperty('--list-w');
+  try {
+    localStorage.setItem(LOOK_NAME_KEY, name);
+  } catch {
+    // Not kept: the next load starts Spacious until `/api/me` answers.
+  }
 }
 
 const THEME_KEY = 'hqc.theme';

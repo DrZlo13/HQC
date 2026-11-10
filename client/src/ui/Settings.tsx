@@ -2,9 +2,9 @@ import { useEffect, useState } from 'preact/hooks';
 import { IconBack } from './icons';
 import type { AppState } from '../app';
 import { ApiError, type WorkerInfo } from '../api';
-import type { Theme } from '../proto';
+import type { LookName, Theme } from '../proto';
 import { pushStatus, subscribePush, type PushStatus } from '../push';
-import { BASES, THEMES } from '../theme';
+import { BASES, LOOKS, THEMES } from '../theme';
 
 const THEME_GROUPS = [
   { id: 'dark', label: 'Dark' },
@@ -34,6 +34,7 @@ export function Settings({ app }: { app: AppState }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [themeError, setThemeError] = useState<string | null>(null);
+  const [lookError, setLookError] = useState<string | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[] | null>(null);
 
   useEffect(() => {
@@ -86,6 +87,16 @@ export function Settings({ app }: { app: AppState }) {
     }
   };
 
+  /** The look for every device: applied as soon as the hub has it, no "Save". */
+  const pickLook = async (l: LookName) => {
+    setLookError(null);
+    try {
+      await app.setLookName(l);
+    } catch (e) {
+      setLookError((e as Error).message);
+    }
+  };
+
   const subscribe = async () => {
     setBusy(true);
     setError(null);
@@ -99,6 +110,7 @@ export function Settings({ app }: { app: AppState }) {
   };
 
   const theme = app.theme();
+  const look = app.lookName();
   return (
     <section class="page">
       <header class="bar">
@@ -135,57 +147,27 @@ export function Settings({ app }: { app: AppState }) {
         </div>
         {themeError && <div class="error-text">{themeError}</div>}
 
-        <h2>Feed</h2>
-        <p class="muted">Kept in this browser, on this device.</p>
-        <label class="setting-check">
-          <input
-            type="checkbox"
-            name="wide-feed"
-            checked={app.look.wideFeed}
-            onChange={(e) => app.setLook({ wideFeed: (e.currentTarget as HTMLInputElement).checked })}
-          />
-          Full width: the feed fills the chat column instead of stopping at 780 px
-        </label>
-        <label class="setting-check">
-          <input
-            type="checkbox"
-            name="system-font"
-            checked={app.look.systemFont}
-            onChange={(e) => app.setLook({ systemFont: (e.currentTarget as HTMLInputElement).checked })}
-          />
-          The system font instead of Inter
-        </label>
-        <label class="setting-check">
-          <input
-            type="checkbox"
-            name="time-in-gap"
-            checked={app.look.timeInGap}
-            onChange={(e) => app.setLook({ timeInGap: (e.currentTarget as HTMLInputElement).checked })}
-          />
-          A message's time in the space below it instead of a line of its own
-        </label>
-
-        <h2>Project bar</h2>
-        <label class="setting-check">
-          <input
-            type="checkbox"
-            name="rail-names"
-            checked={app.look.railNames}
-            onChange={(e) => app.setLook({ railNames: (e.currentTarget as HTMLInputElement).checked })}
-          />
-          Names: a row with each project's icon and full name instead of a tile, on this device
-        </label>
-
-        <h2>Session list</h2>
-        <label class="setting-check">
-          <input
-            type="checkbox"
-            name="compact-list"
-            checked={app.look.compactList}
-            onChange={(e) => app.setLook({ compactList: (e.currentTarget as HTMLInputElement).checked })}
-          />
-          Compact (on a computer): a line per session, its state in the dot (the rest in the row's card)
-        </label>
+        <h2>Look</h2>
+        <div class="seg-group settings-look" role="group" aria-label="Look">
+          {LOOKS.map((l) => (
+            <button
+              type="button"
+              key={l.id}
+              class={`seg ${look === l.id ? 'is-on' : ''}`}
+              aria-pressed={look === l.id}
+              onClick={() => void pickLook(l.id)}
+            >
+              {l.label}
+            </button>
+          ))}
+        </div>
+        <p class="muted">
+          Compact: the feed across the whole chat column, your messages as plates on the left, the
+          system font, a line per session on a computer and each project's full name on the project
+          bar. Spacious: the feed at most 780 px wide, your messages as bubbles on the right, Inter, two
+          lines per session and a tile per project. The same on every device.
+        </p>
+        {lookError && <div class="error-text">{lookError}</div>}
 
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>

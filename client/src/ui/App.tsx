@@ -4,6 +4,7 @@ import { applyLook, applyTheme } from '../theme';
 import { Chat } from './Chat';
 import { Enroll } from './Enroll';
 import { useIsPhone, useSubscription } from './hooks';
+import { NewSessionChat } from './NewSession';
 import { ProjectRail } from './ProjectRail';
 import { ProjectSettings } from './ProjectSettings';
 import { RequestsScreen } from './requests';
@@ -16,6 +17,7 @@ import { Settings } from './Settings';
 export type Route =
   | { name: 'list' }
   | { name: 'project'; id: string }
+  | { name: 'newSession'; projectId: string }
   | { name: 'projectSettings'; projectId: string }
   | { name: 'rules'; projectId: string; workspaceId: string; sessionId?: string }
   | { name: 'session'; id: string; seq?: number }
@@ -25,6 +27,7 @@ export type Route =
   | { name: 'enroll'; code: string };
 
 /** Hash routes, so the hub can serve the client as static files: `#/p/<project>`,
+ *  `#/p/<project>/new` (a new session, not on the hub until its first message),
  *  `#/p/<project>/settings` (the project's settings, T49), `#/p/<project>/rules/<workspace>`
  *  (`?session=<id>`: opened from that session; the folder's rules, T48), `#/s/<session>` (`?seq=<seq>`:
  *  scrolled to that event, a search hit), `#/search` (the phone's search screen),
@@ -45,6 +48,7 @@ export function parseRoute(hash: string): Route {
       const sessionId = new URLSearchParams(query).get('session') ?? undefined;
       return { name: 'rules', projectId: id, workspaceId: decodeURIComponent(parts[3]), sessionId };
     }
+    if (parts[2] === 'new') return { name: 'newSession', projectId: id };
     return parts[2] === 'settings' ? { name: 'projectSettings', projectId: id } : { name: 'project', id };
   }
   if (parts[0] === 'settings') return { name: 'settings' };
@@ -80,7 +84,7 @@ export function App({ app }: { app: AppState }) {
   const routeProject =
     route.name === 'project'
       ? route.id
-      : route.name === 'projectSettings' || route.name === 'rules'
+      : route.name === 'projectSettings' || route.name === 'rules' || route.name === 'newSession'
         ? route.projectId
         : sessionProject;
   // The first render already shows the route's project: effects run after the first paint,
@@ -106,12 +110,17 @@ export function App({ app }: { app: AppState }) {
   const color = app.currentProject()?.color ?? 'teal';
   const theme = app.theme();
   useLayoutEffect(() => applyTheme(document.documentElement, color, theme), [color, theme]);
-  useLayoutEffect(() => applyLook(document.documentElement, app.look), [app.look]);
+  // The look (SPEC §3 User): the user's, Compact or Spacious, with this device's column width.
+  const look = app.lookName();
+  useLayoutEffect(() => applyLook(document.documentElement, look, app.device), [look, app.device]);
 
   let main;
   switch (route.name) {
     case 'session':
       main = <Chat key={route.id} app={app} sessionId={route.id} phone={phone} focusSeq={route.seq} />;
+      break;
+    case 'newSession':
+      main = <NewSessionChat key={route.projectId} app={app} projectId={route.projectId} phone={phone} />;
       break;
     case 'search':
       // A phone screen; a desktop has the search in the left column.

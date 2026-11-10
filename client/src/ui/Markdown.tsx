@@ -11,7 +11,7 @@ import { Marked, type MarkedToken, type Token, type TokenizerExtension, type Tok
 import type { ComponentChildren } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { copyText } from '../clipboard';
-import { IconCopy } from './icons';
+import { IconCheck, IconCopy, IconCross } from './icons';
 
 interface MathToken {
   type: 'math';
@@ -404,20 +404,22 @@ function FilePath({ path, children }: { path: string; children: ComponentChildre
 }
 
 /** Puts `text` into the clipboard as is and says so for a moment. `withText`: the caption
- *  next to the icon (code blocks), otherwise the icon alone. */
-export function CopyButton({ text, label = 'Copy', withText }: { text: string; label?: string; withText?: boolean }) {
+ *  next to the icon (code blocks), otherwise the icon alone. `icon`: the result as an icon in
+ *  the same button, which keeps its size (a message's hover column), not as a caption. */
+export function CopyButton({ text, label = 'Copy', withText, icon }: { text: string; label?: string; withText?: boolean; icon?: boolean }) {
   const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle');
   useEffect(() => {
     if (state === 'idle') return;
     const t = setTimeout(() => setState('idle'), 1500);
     return () => clearTimeout(t);
   }, [state]);
+  const said = state === 'done' ? 'Copied' : state === 'failed' ? 'Copy failed' : label;
   return (
     <button
       type="button"
-      class={`btn-copy ${state === 'idle' && !withText ? 'btn-copy-idle' : ''}`}
-      aria-label={label}
-      title={label}
+      class={`btn-copy ${(state === 'idle' || icon) && !withText ? 'btn-copy-idle' : ''} ${icon && state !== 'idle' ? `btn-copy-${state}` : ''}`}
+      aria-label={icon ? said : label}
+      title={icon ? said : label}
       onClick={(e) =>
         copyText(text, (e.currentTarget as HTMLElement).ownerDocument).then(
           () => setState('done'),
@@ -425,7 +427,9 @@ export function CopyButton({ text, label = 'Copy', withText }: { text: string; l
         )
       }
     >
-      {state === 'done' ? (
+      {icon && state !== 'idle' ? (
+        state === 'done' ? <IconCheck /> : <IconCross />
+      ) : state === 'done' ? (
         'Copied'
       ) : state === 'failed' ? (
         'Copy failed'

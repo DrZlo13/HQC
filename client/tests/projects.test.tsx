@@ -177,26 +177,42 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   expect(err.querySelector('a')!.getAttribute('href')).toBe(`#/p/${app.me!.personal_project_id}/settings`);
   button('Cancel', '.add-workspace')!.click();
 
-  // A session in that workspace, in a subfolder.
+  // A session in that workspace, in a subfolder: "+" opens its window at once, the chips over
+  // the input choose, the first message creates it.
   location.hash = `#/p/${pid}`;
   await until('project route', () => !$('.workspaces'));
   $<HTMLButtonElement>('.side-head .btn-new-session')!.click();
-  await until('new session form', () => $('.new-session select[name=workspace]'));
-  await until('workspaces loaded', () => $$('.new-session select[name=workspace] option').length === 1);
-  expect($('.new-session select[name=workspace] option')!.textContent).toContain('(default)');
-  choose('.new-session select[name=workspace]', app.workspaces.get(pid)![0].id);
-  type('.new-session input[name=cwd]', 'pcb');
-  // T38: Auto in the form, confirmed (the globals answer every confirm with yes).
-  expect($('.new-session select[name=permission_mode]')!.textContent).toBe("The worker's defaultAskAuto");
-  choose('.new-session select[name=permission_mode]', 'auto');
+  await until('new session window', () => location.hash === `#/p/${pid}/new` && $('.chat-new .btn-chip-workspace'));
+  await until('workspaces loaded', () => $('.btn-chip-workspace')!.textContent!.startsWith('power-board'));
+  $<HTMLButtonElement>('.btn-chip-workspace')!.click();
+  await until('workspace menu', () => $('.ctx-menu .btn-pick-workspace'));
+  expect($$('.ctx-menu .btn-pick-workspace')).toHaveLength(1);
+  expect($('.ctx-menu .btn-pick-workspace')!.textContent).toContain('power-board (default)');
+  expect($('.ctx-menu .btn-pick-workspace')!.textContent).toContain('/kicad/power-board');
+  $<HTMLButtonElement>('.ctx-menu .btn-pick-workspace')!.click();
   await settle();
-  submit('.new-session');
-  await until('chat', () => $('.chat textarea'));
+  $<HTMLButtonElement>('.btn-chip-folder')!.click();
+  await until('folder field', () => $('.ctx-menu input[name=cwd]'));
+  type('.ctx-menu input[name=cwd]', 'pcb');
+  await settle();
+  expect($('.btn-chip-folder')!.textContent).toBe('Folder pcb');
+  // T38: Auto from its chip, confirmed (the globals answer every confirm with yes).
+  $<HTMLButtonElement>('.btn-chip-permissions')!.click();
+  await until('permissions menu', () => $('.ctx-menu .btn-permissions-auto'));
+  $<HTMLButtonElement>('.ctx-menu .btn-permissions-auto')!.click();
+  await settle();
+  expect($('.btn-chip-permissions')!.textContent).toBe('Permissions: Auto');
+  type('.chat-new .composer-input', 'Show the markdown sample');
+  await settle();
+  submit('.chat-new form.composer');
+  await until('chat', () => location.hash.startsWith('#/s/') && $('.chat:not(.chat-new) textarea'));
   const sid = location.hash.split('/')[2];
   const s = await app.api.session(sid);
   expect(s).toMatchObject({ project_id: pid, workspace_id: app.workspaces.get(pid)![0].id, cwd: 'pcb' });
   expect(s).toMatchObject({ permission_mode: 'auto', effective_permission_mode: 'auto' });
   expect($('.chat .perm-auto')!.textContent).toBe('Auto');
+  await until('the first message in its feed', () => $('.chat .feed')?.textContent?.includes('Show the markdown sample'));
+  await until('its turn ended', () => app.sessions.get(sid)?.state === 'idle');
   await until('listed in the project', () => $$('.session-row').find((r) => r.getAttribute('href') === `#/s/${sid}`));
   // The personal project's sessions are not shown here.
   expect($$('.session-row').some((r) => r.textContent?.includes('Empty session'))).toBe(false);
@@ -309,17 +325,17 @@ it('imports from Claude Code and takes a session over', async () => {
   );
   location.hash = link.getAttribute('href')!;
   await until('history', () => $('.chat')?.textContent?.includes('VSCODE-DONE'));
-  // Last driven by VS Code, nobody holds it now: the banner instead of the composer, with
-  // "Take over here".
-  const banner = await until('locked', () => $('.handover'));
-  expect(banner.classList.contains('handover-held')).toBe(false);
-  expect(banner.querySelector('.handover-title')!.textContent).toBe('VS Code was the last to run this session on home-mac.');
+  // Last driven by VS Code, nobody holds it now: the strip instead of the composer, with
+  // "Take over here"; where, the header's pill.
+  const banner = await until('locked', () => $('.lockbar'));
+  expect(banner.classList.contains('lockbar-held')).toBe(false);
+  expect(banner.querySelector('.lockbar-text')!.textContent).toBe('VS Code was the last to run this session.');
   expect(banner.textContent).not.toContain('read-only');
-  expect($('.chat .state')!.textContent).toBe('In VS Code');
+  expect($('.chat .state')!.textContent).toBe('In VS Code on home-mac');
   expect($('.chat textarea')).toBeNull();
 
   button('Take over here')!.click();
-  await until('taken over', () => !$('.handover'));
+  await until('taken over', () => !$('.lockbar'));
   await until('system line', () => $('.chat')?.textContent?.includes('Taken over from VS Code'));
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
@@ -334,9 +350,9 @@ it('does not take over a session open in VS Code', async () => {
   location.hash = link.getAttribute('href')!;
   const sid = location.hash.split('/').pop()!;
   // Open in VS Code right now: no button, close it there first.
-  const banner = await until('open banner', () => $('.handover.handover-held'));
-  expect(banner.querySelector('.handover-title')!.textContent).toBe('The session is open in VS Code on home-mac.');
-  expect(banner.querySelector('.handover-sub')!.textContent).toBe('Close it there to write from here.');
+  const banner = await until('open banner', () => $('.lockbar.lockbar-held'));
+  expect(banner.textContent).toBe('Close the session in VS Code to write from here.');
+  expect($('.chat .state')!.textContent).toBe('In VS Code on home-mac');
   expect(button('Take over here')).toBeUndefined();
   expect($('.chat textarea')).toBeNull();
   const fork = await until('fork line', () => $('.line-system-session_forked'));
@@ -346,15 +362,15 @@ it('does not take over a session open in VS Code', async () => {
   // The client has not heard of the holder yet (its summaries do not mention it): "Take over"
   // is offered and the hub refuses it with its text.
   mock.hideHolder(sid, true);
-  await until('plain banner', () => $('.handover') && !$('.handover-held'));
+  await until('plain banner', () => $('.lockbar') && !$('.lockbar-held'));
   button('Take over here')!.click();
   const notice = await until('notice', () => $('.notice'));
   expect(notice.textContent).toBe('the session is open in VS Code: close it there and take it over again');
   mock.hideHolder(sid, false);
-  await until('open banner again', () => $('.handover.handover-held'));
+  await until('open banner again', () => $('.lockbar.lockbar-held'));
 
   mock.closeVsCode(sid);
-  await until('free', () => !$('.handover'));
+  await until('free', () => !$('.lockbar'));
   expect($<HTMLTextAreaElement>('.chat textarea')!.disabled).toBe(false);
 });
 
@@ -374,10 +390,10 @@ it('archives from the row, restores and deletes from the archive', async () => {
   expect(await menuItem('.btn-delete')).toBeNull();
   $<HTMLButtonElement>('.btn-more')!.click();
   const item = () => $$('.session-item').find((r) => r.querySelector('.session-row')?.getAttribute('href') === href);
-  // From the row's menu (a right click): the round archive button past its edge.
+  // From the row's menu (a right click): its Archive.
   const archiveRow = async () => {
     item()!.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true, cancelable: true }) as unknown as Event);
-    (await until('row menu', () => $<HTMLButtonElement>('.ctx-menu .btn-menu-archive')))!.click();
+    (await until('row menu', () => $<HTMLButtonElement>('.ctx-menu .btn-archive')))!.click();
   };
 
   await archiveRow();

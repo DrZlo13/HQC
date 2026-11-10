@@ -1,5 +1,6 @@
-// A session's model, in the new-session form and the chat's "More" menu. The field reports a
-// value once it is chosen (a typed name on `change`); `undefined` is the runtime's default.
+// A session's model, in the chat's "More" menu (a new session chooses it on a chip). The field
+// reports a value once it is chosen (a typed name on `change`); `undefined` is the runtime's
+// default.
 
 import { useEffect, useState } from 'preact/hooks';
 

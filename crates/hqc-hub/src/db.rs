@@ -36,6 +36,8 @@ pub struct UserRow {
     /// `warm` | `graphite` | `contrast` | `warm_light` | `graphite_light` | `contrast_light`
     /// (T49).
     pub theme: String,
+    /// `compact` | `spacious` (SPEC §3 User).
+    pub look: String,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

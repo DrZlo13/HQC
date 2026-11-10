@@ -12,8 +12,11 @@ import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, typ
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
-import { IconArchive, IconAttach, IconBack, IconCode, IconMore, IconSend, IconShield, IconStop } from './icons';
+import { copyText } from '../clipboard';
+import { ContextMenu } from './ContextMenu';
+import { IconArchive, IconAttach, IconBack, IconCode, IconCopy, IconLock, IconMore, IconQuote, IconSend, IconShield, IconStop } from './icons';
 import { AUTO_CONFIRM, STATE_LABELS, agentsLabel, formatCost, homePath, modelName, shownModel } from './labels';
+import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
 import { MoveSession } from './ProjectSettings';
@@ -46,7 +49,13 @@ export function Chat({
   // The image or Markdown text shown in the viewer over the chat.
   const [viewing, setViewing] = useState<ViewedArtifact | null>(null);
   const peerMessage = useMemo(() => peerMessages(app.api), [app]);
-  const [files, setFiles] = useState<OutgoingFile[]>([]);
+  // A new session's window that just became this chat hands over, once, the files attached
+  // there and not sent, and the caret in the input.
+  const [handed] = useState(() => app.takeHandover(sessionId));
+  const [files, setFiles] = useState<OutgoingFile[]>(handed?.files ?? []);
+  // The caret goes to the first input shown; one shown again (after a sheet, a lock) keeps
+  // the focus where it is.
+  const caret = useRef(!!handed);
   const [dragging, setDragging] = useState(false);
   const addFiles = (list: FileList | File[] | null | undefined) => {
     const picked = [...(list ?? [])];
@@ -173,6 +182,8 @@ export function Chat({
   // recently but not held (or a worker without the registry): "Take over here", which the hub
   // may refuse until 30 s of silence (`409 vscode_active`).
   const held = locked && info?.held_by !== undefined;
+  // Where it is open, said once: in the header's pill.
+  const holder = info?.held_by && info.held_by.entrypoint !== 'claude-vscode' ? 'Claude Code' : 'VS Code';
   const takeover = () =>
     app.api.takeover(sessionId).then(
       () => {
@@ -224,13 +235,17 @@ export function Chat({
     o.observe(feed.current);
     return () => o.disconnect();
   }, []);
-  // "Quote": text selected in the feed, a button under its end that puts it into the
-  // composer. A press on the button may clear the selection (a phone's tap): the text is kept
-  // and the button stays until the click.
+  // "Quote": text selected in the feed goes into the composer. On a computer it is an item of
+  // the client's menu on a right click of the selection (with Copy); on a phone, a button under
+  // the selection's end. A press on the button may clear the selection (a phone's tap): the text
+  // is kept and the button stays until the click.
   const [quote, setQuote] = useState<FeedSelection | null>(null);
+  const [quoteMenu, setQuoteMenu] = useState<{ x: number; y: number; text: string } | null>(null);
   const quoting = useRef(false);
   const insertQuote = useRef<((text: string) => void) | null>(null);
   useEffect(() => {
+    // The button is a phone's: a computer quotes from the menu and needs no state per selection.
+    if (!phone) return;
     const update = () => {
       if (!quoting.current) setQuote(feedSelection(feed.current));
     };
@@ -243,7 +258,7 @@ export function Chat({
       document.removeEventListener('selectionchange', update);
       document.removeEventListener('pointerdown', away, true);
     };
-  }, []);
+  }, [phone]);
   // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
   // history (`olderFrom`) is loaded down to it. The block that holds it is the one that starts
   // at it, else the last one that starts at or before it (a hidden event's neighbour; an answer
@@ -287,7 +302,7 @@ export function Chat({
   const cost = usage.cost;
   // Running, as in the list, while a background subagent or task works after the turn.
   const shown = info && atWorkAfterTurn(info) ? 'running' : state;
-  const pill = <StatePill state={shown} timeline={t} />;
+  const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
 
@@ -295,6 +310,10 @@ export function Chat({
   const archived = info?.archived ?? false;
   const disabled = archived || locked;
   const sheet = sheetRequest && firstApproval?.type === 'approval.request' ? firstApproval : undefined;
+  const inputShown = !system && !disabled && !sheet;
+  useEffect(() => {
+    if (inputShown) caret.current = false;
+  }, [inputShown]);
   return (
     <section
       class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
@@ -339,13 +358,15 @@ export function Chat({
               </span>
             )}
             {phone ? (
-              <span class="chat-where mono">{[worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
+              // Held elsewhere, the machine is in the pill already.
+              <span class="chat-where mono">{[!locked && worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
             ) : (
               <>
-                {worker && !system && <span>{worker}</span>}
+                {worker && !system && !locked && <span>{worker}</span>}
                 {path && (
                   <>
-                    <span class="sep">/</span>
+                    {/* Held elsewhere, the worker is in the pill: nothing to part the path from. */}
+                    {!locked && <span class="sep">/</span>}
                     <span class="chat-path">
                       <span class="mono">{homePath(path)}</span>
                       <CopyButton text={path} label="Copy path" />
@@ -364,12 +385,6 @@ export function Chat({
                   <>
                     <span class="sep">/</span>
                     <span class="chat-cost">{formatCost(cost)} this session</span>
-                  </>
-                )}
-                {locked && (
-                  <>
-                    <span class="sep">/</span>
-                    <span>VS Code</span>
                   </>
                 )}
               </>
@@ -456,10 +471,22 @@ export function Chat({
           const el = e.currentTarget as HTMLDivElement;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
           if (el.scrollTop < 400 && start > 0) showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
-          if (quote) setQuote(feedSelection(feed.current));
+          if (quote && phone) setQuote(feedSelection(feed.current));
         }}
       >
-        <div class="feed" ref={feed}>
+        <div
+          class="feed"
+          ref={feed}
+          onContextMenu={(e) => {
+            // A right click on text selected in the feed: the client's menu; elsewhere the
+            // browser's.
+            if (phone || system || disabled || sheet) return;
+            const sel = feedSelection(feed.current);
+            if (!sel) return;
+            e.preventDefault();
+            setQuoteMenu({ x: e.clientX, y: e.clientY, text: sel.text });
+          }}
+        >
           {!loaded && <div class="empty">Loading…</div>}
           <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
@@ -474,27 +501,17 @@ export function Chat({
           {notice}
         </div>
       )}
+      {(info?.subagents ?? 0) > 0 && <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} />}
       {locked && (
         <div class="composer-wrap">
-          <div class={`handover ${held ? 'handover-held' : ''}`}>
-            <span class="handover-icon">
-              <IconCode />
+          {/* In place of the composer it says only what to do; where it is open, the pill. */}
+          <div class={`lockbar ${held ? 'lockbar-held' : ''}`}>
+            <IconLock />
+            <span class="lockbar-text">
+              {held ? `Close the session in ${holder} to write from here.` : `${holder} was the last to run this session.`}
             </span>
-            <div class="handover-text">
-              {held ? (
-                <>
-                  <div class="handover-title">
-                    The session is open in {info?.held_by?.entrypoint === 'claude-vscode' ? 'VS Code' : 'Claude Code'}
-                    {worker ? ` on ${worker}` : ''}.
-                  </div>
-                  <div class="handover-sub">Close it there to write from here.</div>
-                </>
-              ) : (
-                <div class="handover-title">VS Code was the last to run this session{worker ? ` on ${worker}` : ''}.</div>
-              )}
-            </div>
             {!held && (
-              <button type="button" class="btn btn-primary btn-takeover" onClick={() => void takeover()}>
+              <button type="button" class="btn btn-small btn-primary btn-takeover" onClick={() => void takeover()}>
                 Take over here
               </button>
             )}
@@ -506,14 +523,34 @@ export function Chat({
           <PermissionBlock event={sheet} call={approvalCall(items, t, sheet.payload.request_id)} actions={actions} sheet />
         </div>
       )}
-      {quote && !system && !disabled && !sheet && (
+      {quoteMenu && (
+        <ContextMenu
+          x={quoteMenu.x}
+          y={quoteMenu.y}
+          label="Selected text"
+          items={[
+            {
+              label: 'Quote',
+              icon: <IconQuote />,
+              cls: 'menu-quote',
+              onSelect: () => {
+                insertQuote.current?.(quoteMenu.text);
+                document.getSelection()?.removeAllRanges();
+              },
+            },
+            { label: 'Copy', icon: <IconCopy size={16} />, cls: 'btn-copy-selection', onSelect: () => void copyText(quoteMenu.text).catch(() => {}) },
+          ]}
+          onClose={() => setQuoteMenu(null)}
+        />
+      )}
+      {quote && phone && !system && !disabled && !sheet && (
         <button
           type="button"
           class="btn btn-small btn-quote"
           // Below the end, clear of a phone's selection handle; on screen when the end is not.
           style={{
             left: `${Math.min(Math.max(quote.x, 48), innerWidth - 48)}px`,
-            top: `${Math.min(quote.y + (phone ? 28 : 8), innerHeight - 56)}px`,
+            top: `${Math.min(quote.y + 28, innerHeight - 56)}px`,
           }}
           onPointerDown={(e) => {
             quoting.current = true;
@@ -530,10 +567,11 @@ export function Chat({
           Quote
         </button>
       )}
-      {!system && !disabled && !sheet && (
+      {inputShown && (
         <Composer
           initial={app.draft(sessionId)}
           onDraft={(text) => app.setDraft(sessionId, text)}
+          autoFocus={caret.current}
           insertQuote={insertQuote}
           phone={phone}
           commands={info?.commands}
@@ -598,16 +636,16 @@ function approvalCall(items: ReturnType<Timeline['items']>, t: Timeline, request
 }
 
 /** The state in the header: a pill, pulsing while the session works (a turn, or a background
- *  subagent after it). */
-function StatePill({ state, timeline }: { state: SessionState; timeline: Timeline }) {
-  let label = STATE_LABELS[state];
+ *  subagent after it). `where`: a session VS Code has ("In VS Code on <machine>"), marked `</>`. */
+function StatePill({ state, timeline, where }: { state: SessionState; timeline: Timeline; where?: string }) {
+  let label = where ?? STATE_LABELS[state];
   if (state === 'waiting') {
     const r = timeline.openRequests()[0];
     label = r?.type === 'approval.request' ? 'Waiting for permission' : 'Waiting for reply';
   }
   return (
     <span class={`state pill state-${state}`}>
-      <span class={`pill-dot ${state === 'running' ? 'pulse' : ''}`} aria-hidden="true" />
+      {where ? <IconCode size={12} /> : <span class={`pill-dot ${state === 'running' ? 'pulse' : ''}`} aria-hidden="true" />}
       {label}
     </span>
   );
@@ -865,6 +903,8 @@ export function Composer({
   insertQuote,
   initial = '',
   onDraft,
+  autoFocus = false,
+  wait,
 }: {
   onSend: (text: string) => void;
   placeholder?: string;
@@ -880,6 +920,11 @@ export function Composer({
   /** The text not sent last time (a draft), and where every change of it goes. */
   initial?: string;
   onDraft?: (text: string) => void;
+  /** The caret in the field once it is shown. */
+  autoFocus?: boolean;
+  /** Sending waits for this (a new session being created): send is disabled with it as its
+   *  title, Enter sends nothing, the text stays. */
+  wait?: string;
 }) {
   const [text, setText] = useState(initial);
   const typed = useRef(false);
@@ -889,6 +934,9 @@ export function Composer({
     typed.current = true;
   }, [text]);
   const area = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (autoFocus) area.current?.focus();
+  }, []);
   const caretToEnd = useRef(false);
   useEffect(() => {
     if (!insertQuote) return;
@@ -902,7 +950,7 @@ export function Composer({
     };
   }, [insertQuote]);
   const picker = useRef<HTMLInputElement>(null);
-  const canSend = text.trim() !== '' || files.length > 0;
+  const canSend = !wait && (text.trim() !== '' || files.length > 0);
   // The slash command popup (T27): the matches, the highlighted one, and the text Esc closed
   // it at (typing on reopens it).
   const [pick, setPick] = useState(0);
@@ -933,8 +981,10 @@ export function Composer({
   useLayoutEffect(() => {
     const el = area.current;
     if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    // One line keeps the stylesheet's height, which follows the look (applied after this first
+    // runs); more lines set it.
+    el.style.height = '';
+    if (el.scrollHeight > el.clientHeight) el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     if (caretToEnd.current) {
       caretToEnd.current = false;
       el.setSelectionRange(el.value.length, el.value.length);
@@ -953,7 +1003,7 @@ export function Composer({
     </button>
   );
   const send = (
-    <button type="submit" class="btn-send" aria-label="Send" title="Send" disabled={!canSend}>
+    <button type="submit" class="btn-send" aria-label="Send" title={wait ?? 'Send'} disabled={!canSend}>
       <IconSend />
     </button>
   );
@@ -966,8 +1016,8 @@ export function Composer({
       aria-expanded={commands?.length ? popup : undefined}
       aria-controls={popup ? 'composer-commands' : undefined}
       aria-activedescendant={popup ? `composer-command-${active}` : undefined}
-      rows={phone ? 1 : 2}
-      placeholder={placeholder ?? 'Message'}
+      rows={1}
+      placeholder={placeholder ?? (phone ? 'Message' : 'Message · Enter to send, Shift+Enter for a new line')}
       value={text}
       onInput={(e) => edit((e.currentTarget as HTMLTextAreaElement).value)}
       onPaste={(e) => {
@@ -1061,22 +1111,12 @@ export function Composer({
             el.value = '';
           }}
         />
-        {phone ? (
-          <div class="composer-row">
-            {attach}
-            {textarea}
-            {send}
-          </div>
-        ) : (
-          <>
-            {textarea}
-            <div class="composer-row">
-              {attach}
-              <span class="composer-hint">Enter to send, Shift+Enter for a new line</span>
-              {send}
-            </div>
-          </>
-        )}
+        {/* One row: attach, the field (growing with its lines), send. */}
+        <div class="composer-row">
+          {attach}
+          {textarea}
+          {send}
+        </div>
       </form>
     </div>
   );

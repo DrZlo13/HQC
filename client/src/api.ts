@@ -36,6 +36,7 @@ import {
   type EnrollConfirmed,
   type EnrollInfo,
   type HqcEvent,
+  type LookName,
   type Me,
   type PermissionMode,
   type Project,
@@ -176,6 +177,11 @@ export class Api {
     return parseMe(await this.req('PATCH', '/api/me', { theme }));
   }
 
+  /** The client's look, the same on every device. */
+  async setLook(look: LookName): Promise<Me> {
+    return parseMe(await this.req('PATCH', '/api/me', { look }));
+  }
+
   async schedules(sessionId: string): Promise<Schedule[]> {
     return parseScheduleList(await this.req('GET', `/api/schedules?session_id=${enc(sessionId)}`));
   }
@@ -225,6 +231,20 @@ export class Api {
 
   async projects(): Promise<Project[]> {
     return parseProjectList(await this.req('GET', '/api/projects'));
+  }
+
+  /** The archived projects, which `projects` leaves out: the project search finds them. */
+  async archivedProjects(): Promise<Project[]> {
+    return parseProjectList(await this.req('GET', '/api/projects?archived=1'));
+  }
+
+  /** Off the project bar; its sessions stay as they are. */
+  async archiveProject(id: string): Promise<Project> {
+    return parseProject(await this.req('POST', `/api/projects/${enc(id)}/archive`));
+  }
+
+  async unarchiveProject(id: string): Promise<Project> {
+    return parseProject(await this.req('POST', `/api/projects/${enc(id)}/unarchive`));
   }
 
   /** The order of the project bar (since SPEC 0.64): the reply is the list in it. */

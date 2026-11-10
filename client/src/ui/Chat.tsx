@@ -102,7 +102,7 @@ export function Chat({
     const mark = () => {
       if (document.visibilityState !== 'visible') return;
       chat.markRead();
-      app.markRead(sessionId);
+      app.markRead(sessionId, t.lastSeq);
     };
     mark();
     document.addEventListener('visibilitychange', mark);

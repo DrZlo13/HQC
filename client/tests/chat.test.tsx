@@ -797,6 +797,25 @@ describe('history', () => {
   });
 });
 
+describe('read cursor', () => {
+  it('an opened chat is read up to its last event, and the session asked for before stays read', async () => {
+    const { api, app } = setup('idle');
+    const unread = { ...app.sessions.get('s1')!, unread: 1, last_read_seq: 6 };
+    app.sessions.set('s1', unread);
+    // An idle session without commands is asked for again; the hub counted it before the read.
+    let answer!: () => void;
+    api.session.mockImplementationOnce(() => new Promise((r) => (answer = () => r({ ...unread, commands: undefined }))));
+    await mount(app);
+    expect(api.readCursor).toHaveBeenCalledWith('s1', 7);
+    expect(app.sessions.get('s1')).toMatchObject({ unread: 0, last_read_seq: 7 });
+    await act(async () => {
+      answer();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(app.sessions.get('s1')).toMatchObject({ unread: 0, last_read_seq: 7 });
+  });
+});
+
 describe('fork', () => {
   it('forks before a message of the user: the new session opens with the message as its draft', async () => {
     const { app, api } = setup('idle');

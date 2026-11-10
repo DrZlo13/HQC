@@ -1062,3 +1062,53 @@ describe('the list on a reload', () => {
     expect(app.listMode('p0')).toBe('state');
   });
 });
+
+describe('the read mark', () => {
+  /** A hub answer the test releases by hand. */
+  function later<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+  const unread = sess('prof', 'Collision profiling', 'idle', at(22), { unread: 1, last_seq: 5, last_read_seq: 4 });
+  const badge = () => root.querySelector('.session-row .badge');
+
+  it('a session asked for before the chat was read does not bring its badge back', async () => {
+    const answer = later<SessionInfo>();
+    const api = { ...hubApi(), session: vi.fn(() => answer.promise) };
+    const app = makeApp([unread], api);
+    await mount(<SessionList app={app} />);
+    expect(badge()!.textContent).toBe('1');
+    // Opening the chat asks for the session, then moves the read cursor; the hub's summary
+    // of the move comes first, the answer counted before it after.
+    const asked = app.refreshSession('prof');
+    await act(async () => app.markRead('prof', 5));
+    expect(badge()).toBeNull();
+    await act(async () =>
+      app.mergeSummary([
+        { session_id: 'prof', project_id: 'p1', title: 'Collision profiling', state: 'idle', queue_len: 0, unread: 0, last_seq: 5, last_read_seq: 5 },
+      ]),
+    );
+    await act(async () => {
+      answer.resolve(unread);
+      await asked;
+    });
+    expect(app.sessions.get('prof')!.unread).toBe(0);
+    expect(badge()).toBeNull();
+    // A newer answer stands: a message after the one read.
+    api.session.mockResolvedValueOnce({ ...unread, last_seq: 6, last_read_seq: 5 });
+    await act(() => app.refreshSession('prof'));
+    expect(badge()!.textContent).toBe('1');
+  });
+
+  it('a list asked for before the chat was read does not bring its badge back', async () => {
+    const answer = later<SessionInfo[]>();
+    const api = { ...hubApi(), projects: async () => [...makeApp().projects.values()], allSessions: () => answer.promise };
+    const app = makeApp([unread], api);
+    const asked = app.refreshSessions();
+    app.markRead('prof', 5);
+    answer.resolve([unread]);
+    await asked;
+    expect(app.sessions.get('prof')!.unread).toBe(0);
+  });
+});

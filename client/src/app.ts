@@ -213,8 +213,9 @@ export class AppState {
       const [projects, sessions] = await Promise.all([this.api.projects(), this.api.allSessions()]);
       this.projects.clear();
       for (const p of projects) this.projects.set(p.id, p);
+      const fresh = sessions.map((s) => this.keepRead(s));
       this.sessions.clear();
-      for (const s of sessions) this.sessions.set(s.id, s);
+      for (const s of fresh) this.sessions.set(s.id, s);
       if (!this.currentProjectId || !this.projects.has(this.currentProjectId)) {
         this.currentProjectId = this.me!.personal_project_id;
       }
@@ -231,7 +232,7 @@ export class AppState {
    *  dropped; the next refresh brings it. */
   async refreshSession(id: string): Promise<void> {
     try {
-      this.sessions.set(id, await this.api.session(id));
+      this.sessions.set(id, this.keepRead(await this.api.session(id)));
       this.changed();
     } catch {
       // Offline or gone: the list and the summary still have the session.
@@ -702,13 +703,23 @@ export class AppState {
     this.changed();
   }
 
-  /** Local echo of the read cursor, so the badge clears before the summary arrives. */
-  markRead(sessionId: string): void {
+  /** Local echo of the read cursor up to `seq`, so the badge clears before the summary
+   *  arrives; the cursor is kept for `keepRead`. */
+  markRead(sessionId: string, seq: number): void {
     const s = this.sessions.get(sessionId);
-    if (s && s.unread) {
-      this.sessions.set(sessionId, { ...s, unread: 0 });
-      this.changed();
-    }
+    if (!s || (!s.unread && s.last_read_seq >= seq)) return;
+    this.sessions.set(sessionId, { ...s, unread: 0, last_read_seq: Math.max(s.last_read_seq, seq) });
+    if (s.unread) this.changed();
+  }
+
+  /** A session as the hub sent it over HTTP, unless it was read here further than the hub
+   *  knew when it answered: a request sent just before the read cursor moved may arrive after
+   *  the summary that followed the move, and its unread count would stay. */
+  private keepRead(s: SessionInfo): SessionInfo {
+    const known = this.sessions.get(s.id);
+    return known && known.last_read_seq > s.last_read_seq
+      ? { ...s, unread: known.unread, last_read_seq: known.last_read_seq }
+      : s;
   }
 }
 

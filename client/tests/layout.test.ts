@@ -91,4 +91,11 @@ describe('layout widths', () => {
     expect(rule('.choice input')['flex']).toBe('none');
     expect(rule('.choice-other .input')['flex']).toBe('1');
   });
+
+  it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {
+    expect([rule('.dot')['flex'], rule('.dot')['width']]).toEqual(['0 0 8px', '8px']);
+    for (const sel of ['.sessions-phone .dot', '.preview-row .dot']) {
+      expect(rule(sel)['width']).toBe(rule(sel)['flex-basis']);
+    }
+  });
 });

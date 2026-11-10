@@ -3666,6 +3666,22 @@ describe('a phone (< 900 px)', () => {
     expect(viewTitle()).toBe('Projects');
   });
 
+  it('with no favorite and nothing waiting or running, every project is under "All projects"; a favorite makes the rest "Other projects"', async () => {
+    const api = {
+      ...hubApi(),
+      eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+      readCursor: vi.fn(async () => {}),
+    };
+    const app = makeApp([sess('quiet', 'Quiet', 'idle', at(2))], api as unknown as ReturnType<typeof hubApi>);
+    Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+    await open(app, '#/');
+    expect([...root.querySelectorAll('.phone-home .group-head')].map((h) => h.textContent)).toEqual(['All projects2']);
+    expect(phoneNames('all')).toEqual(['Personal', 'physics-mp']);
+    await act(async () => void (await app.setProjectFavorite('p1', true)));
+    expect([...root.querySelectorAll('.phone-home .group-head')].map((h) => h.textContent)).toEqual(['Favorites1', 'Other projects1']);
+    expect(phoneNames('all')).toEqual(['Personal']);
+  });
+
   it("the title's menu: Projects or Sessions — every project's live sessions by state, each with its project's tile; the pick lasts until the page is reloaded", async () => {
     const { app } = phoneApp();
     await open(app, '#/');

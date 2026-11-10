@@ -16,6 +16,10 @@
 //! An agent's `hqc_move` that needs the owner (kind `move`, SPEC §7, §10.1) lives in the
 //! calling session: `approval.request` with the options `once` / `deny`; the session owner
 //! answers it, the call gets the outcome as its `mcp.result` ([`crate::moves`]).
+//!
+//! A move after the transcript into another environment (kind `follow`, SPEC §9.2) is asked
+//! the same way and answered by the session owner; no call waits for it, so no frame goes
+//! anywhere, and an allowed one moves the session at once ([`crate::mirror::allowed`]).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -138,13 +142,13 @@ pub async fn answer(
                 event,
             )
         }
-        "move" => {
+        "move" | crate::mirror::FOLLOW => {
             if body.message.is_some() {
                 return Err(ApiError::BadRequest(
                     "a move request takes no message".into(),
                 ));
             }
-            // Only the session owner, whose session moves (SPEC §7, §10.1).
+            // Only the session owner, whose session moves (SPEC §7, §9.2, §10.1).
             if s.owner_id != user.id {
                 return Err(ApiError::Forbidden(
                     "only the session owner answers a move of it".into(),
@@ -158,9 +162,11 @@ pub async fn answer(
                     "unknown option `{option_id}`"
                 )));
             }
-            // Allowed, the result is known once the session moved: none here.
+            // Allowed, the result is known once the session moved: none here. A follow has no
+            // call to answer.
             (
-                (option_id != worker_approval::ONCE).then(|| crate::moves::denied(request_id)),
+                (p.kind == "move" && option_id != worker_approval::ONCE)
+                    .then(|| crate::moves::denied(request_id)),
                 "approval.response",
                 json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
             )
@@ -225,6 +231,7 @@ pub async fn answer(
             "the request is already closed".into(),
         ));
     }
+    let once = ev_payload["option_id"] == worker_approval::ONCE;
     let row = events::store_hub_event(
         app,
         s,
@@ -245,6 +252,12 @@ pub async fn answer(
                 },
             )
             .await
+        }
+        // A follow of the transcript: nobody's call waits; allowed, the session moves now.
+        None if p.kind == crate::mirror::FOLLOW => {
+            if once {
+                crate::mirror::allowed(app, p);
+            }
         }
         // An allowed move: the hub moves the session now and answers the call then.
         None => crate::moves::allowed(app, p),
@@ -664,8 +677,8 @@ struct OpenRow {
     event_id: Option<Uuid>,
 }
 
-/// Every open `approval`, `clarify`, `worker_approval` and `move` in the sessions of `owner`,
-/// oldest first, each with its event and the sessions waiting on it (SPEC §6 `GET
+/// Every open `approval`, `clarify`, `worker_approval`, `move` and `follow` in the sessions of
+/// `owner`, oldest first, each with its event and the sessions waiting on it (SPEC §6 `GET
 /// /api/requests`). Only the owner's sessions: another user's requests are never listed.
 pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequest>> {
     let rows: Vec<OpenRow> = sqlx::query_as(
@@ -680,7 +693,8 @@ pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequ
          JOIN sessions s ON s.id = p.session_id
          JOIN projects pr ON pr.id = s.project_id
          LEFT JOIN workers w ON w.id = s.worker_id
-         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move')
+         WHERE p.closed_at IS NULL
+           AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'follow')
            AND s.owner_id = $1 AND NOT s.archived
          ORDER BY p.created_at, p.id",
     )

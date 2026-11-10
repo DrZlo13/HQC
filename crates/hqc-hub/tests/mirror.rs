@@ -827,12 +827,12 @@ async fn only_session(hub: &TestHub, pid: &str) -> String {
     list[0]["id"].as_str().unwrap().to_string()
 }
 
-/// A chat continued in another project's folder from a copy of its transcript (SPEC §9.2):
-/// the copy's records come from that workspace, and the session follows them there, with
-/// `cwd` `.` as an import there would get, every record stored once and nothing in the feed
-/// about it. A record the session already has (the copy read from its start) or one older than
-/// its newest (the old window wrote it) leaves it where it is; a new newest one from the copy
-/// takes it there, and a newer one from the old file takes it back.
+/// A chat continued in another project's folder of the same environment from a copy of its
+/// transcript (SPEC §9.2): the copy's records come from that workspace, and the session follows
+/// them there at once, with `cwd` `.` as an import there would get, every record stored once and
+/// `system session_moved` in the feed. A record the session already has (the copy read from its
+/// start) or one older than its newest (the old window wrote it) leaves it where it is; a new
+/// newest one from the copy takes it there, and a newer one from the old file takes it back.
 #[tokio::test]
 async fn a_session_follows_its_transcript_into_another_workspace() {
     let hub = TestHub::start().await;
@@ -874,7 +874,14 @@ async fn a_session_follows_its_transcript_into_another_workspace() {
     assert_eq!(only_session(&hub, &pb).await, sid);
     assert_eq!(
         texts(&hub.events(&sid).await),
-        ["session_created", "one", "two", "zero", "three"]
+        [
+            "session_created",
+            "one",
+            "two",
+            "zero",
+            "three",
+            "session_moved"
+        ]
     );
 
     // The old window wrote one more record before the copy's newest: the session stays.
@@ -885,18 +892,411 @@ async fn a_session_follows_its_transcript_into_another_workspace() {
     let newer = answer_at("2026-11-09T10:03:00Z", "newer");
     mirror_event_in(&mut w, HOME, &home_sub, &runtime, &newer).await;
     assert_eq!(place(&hub.session(&sid).await), in_a);
+    let evs = hub.events(&sid).await;
     assert_eq!(
-        texts(&hub.events(&sid).await),
+        texts(&evs),
         [
             "session_created",
             "one",
             "two",
             "zero",
             "three",
+            "session_moved",
             "late",
-            "newer"
+            "newer",
+            "session_moved"
         ]
     );
+    assert_eq!(
+        moved_lines(&evs),
+        [
+            "The session moved from home to popcorn (/w/popcorn)",
+            "The session moved from popcorn to home (/w/home)"
+        ]
+    );
+    hub.finish().await;
+}
+
+/// The texts of the `system` lines with `code` in `evs`.
+fn lines(evs: &[Value], code: &str) -> Vec<String> {
+    evs.iter()
+        .filter(|e| e["type"] == "system" && e["payload"]["code"] == code)
+        .map(|e| e["payload"]["text"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The texts of the `system session_moved` lines in `evs`.
+fn moved_lines(evs: &[Value]) -> Vec<String> {
+    lines(evs, "session_moved")
+}
+
+/// The events of session `sid` once `f` holds for them: an allowed move runs off the
+/// answer's request.
+async fn events_once(
+    hub: &TestHub,
+    sid: &str,
+    what: &str,
+    f: impl Fn(&[Value]) -> bool,
+) -> Vec<Value> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let evs = hub.events(sid).await;
+        if f(&evs) {
+            return evs;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timeout waiting for {what}: {evs:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The owner answers request `rid` of session `sid` with `option`.
+async fn answer_card(hub: &TestHub, sid: &str, rid: &str, option: &str) {
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/{rid}"),
+            json!({"option_id": option}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+}
+
+/// The cards asking the owner to move a session after its transcript in `evs`.
+fn follow_cards(evs: &[Value]) -> Vec<&Value> {
+    evs.iter()
+        .filter(|e| e["type"] == "approval.request" && e["payload"]["tool"] == "session.follow")
+        .collect()
+}
+
+/// Workspace `id` in environment `env`, as the bindings of the worker's `hello` set it.
+async fn set_environment(hub: &TestHub, id: &str, env: &str) {
+    sqlx::query("UPDATE workspaces SET environment = $2 WHERE id = $1::uuid")
+        .bind(id)
+        .bind(env)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+}
+
+/// The answer `text` written `min` minutes from now: after the hub's own events (a card, an
+/// answer), which count to the session's newest with the hub's clock.
+fn answer_in(min: i64, text: &str) -> Value {
+    answer_at(
+        &(chrono::Utc::now() + chrono::Duration::minutes(min)).to_rfc3339(),
+        text,
+    )
+}
+
+/// A session in [`HOME`] whose transcript is continued in [`POPCORN`] of environment `work`:
+/// the card in its feed, the session where it was. Returns the session, the request id and
+/// the transcript.
+async fn asked_to_follow(
+    hub: &TestHub,
+    w: &mut FakeWorker,
+    pa: &str,
+    wb: &str,
+) -> (String, String, String) {
+    let runtime = Uuid::new_v4().to_string();
+    mirror_event_in(w, HOME, HOME, &runtime, &answer_in(-1, "one")).await;
+    let sid = only_session(hub, pa).await;
+    set_environment(hub, wb, "work").await;
+    mirror_event_in(w, POPCORN, POPCORN, &runtime, &answer_in(1, "two")).await;
+    assert_eq!(
+        place(&hub.session(&sid).await).0,
+        pa,
+        "stays until the owner allows it"
+    );
+    let evs = hub.events(&sid).await;
+    let cards = follow_cards(&evs);
+    assert_eq!(cards.len(), 1, "{evs:?}");
+    assert!(moved_lines(&evs).is_empty());
+    let rid = cards[0]["payload"]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (sid, rid, runtime)
+}
+
+/// A copy in a workspace of another environment (other keys, settings and rules): the session
+/// does not follow it at once; the owner gets a card in its feed naming the folder, the project
+/// and both environments, the session waits for the answer, and more records from there ask
+/// nothing. Allowed, the session moves there, with the line in the feed.
+#[tokio::test]
+async fn a_session_follows_into_another_environment_once_allowed() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, _), (pb, wb)) = home_and_popcorn(&hub).await;
+    let (sid, rid, runtime) = asked_to_follow(&hub, &mut w, &pa, &wb).await;
+    let evs = hub.events(&sid).await;
+    let card = follow_cards(&evs)[0];
+    assert_eq!(card["author"], json!({"kind": "system"}));
+    let d = card["payload"]["description"].as_str().unwrap();
+    for part in [
+        POPCORN,
+        "project popcorn",
+        "environment work",
+        HOME,
+        "environment default",
+    ] {
+        assert!(d.contains(part), "{part}: {d}");
+    }
+    let options: Vec<&str> = card["payload"]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(options, ["once", "deny"]);
+    let (s, list) = hub.get("/api/requests").await;
+    assert_eq!(s, 200, "{list}");
+    let r = &list["requests"].as_array().unwrap()[0];
+    assert_eq!(
+        (&r["kind"], &r["request_id"]),
+        (&json!("follow"), &json!(rid))
+    );
+    assert_eq!(hub.session(&sid).await["state"], "waiting");
+
+    // While the card is open, more records from there ask nothing.
+    mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &answer_in(2, "three")).await;
+    assert_eq!(place(&hub.session(&sid).await).0, pa);
+    assert_eq!(follow_cards(&hub.events(&sid).await).len(), 1);
+
+    answer_card(&hub, &sid, &rid, "once").await;
+    let evs = events_once(&hub, &sid, "the move", |e| !moved_lines(e).is_empty()).await;
+    assert_eq!(
+        moved_lines(&evs),
+        ["The session moved from home to popcorn (/w/popcorn)"]
+    );
+    assert_eq!(place(&hub.session(&sid).await), (pb, wb, ".".to_string()));
+    let (_, list) = hub.get("/api/requests").await;
+    assert_eq!(list["requests"], json!([]), "{list}");
+    hub.finish().await;
+}
+
+/// Allowed while a subagent of the session runs, the session does not move, and its feed
+/// says so and why: the owner pressed Allow.
+#[tokio::test]
+async fn an_allowed_follow_a_session_cannot_take_says_why() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (_, wb)) = home_and_popcorn(&hub).await;
+    let (sid, rid, _) = asked_to_follow(&hub, &mut w, &pa, &wb).await;
+    sqlx::query("UPDATE sessions SET subagents = 1 WHERE id = $1::uuid")
+        .bind(&sid)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    answer_card(&hub, &sid, &rid, "once").await;
+    let evs = events_once(&hub, &sid, "the line", |e| {
+        !lines(e, "session_not_moved").is_empty()
+    })
+    .await;
+    assert_eq!(
+        lines(&evs, "session_not_moved"),
+        [
+            "The session did not move to /w/popcorn: a subagent of the session is still running: \
+          move once it has ended. The answer is used up; move the session by hand"
+        ]
+    );
+    assert!(moved_lines(&evs).is_empty());
+    assert_eq!(place(&hub.session(&sid).await), (pa, wa, ".".to_string()));
+    hub.finish().await;
+}
+
+/// Allowed while the session is in that workspace already (moved there meanwhile), nothing
+/// moves and the feed gets no line.
+#[tokio::test]
+async fn an_allowed_follow_into_where_the_session_is_writes_nothing() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, _), (pb, wb)) = home_and_popcorn(&hub).await;
+    let (sid, rid, _) = asked_to_follow(&hub, &mut w, &pa, &wb).await;
+    sqlx::query(
+        "UPDATE sessions SET workspace_id = $2::uuid, project_id = $3::uuid WHERE id = $1::uuid",
+    )
+    .bind(&sid)
+    .bind(&wb)
+    .bind(&pb)
+    .execute(&hub.app.db)
+    .await
+    .unwrap();
+    answer_card(&hub, &sid, &rid, "once").await;
+    // The answer moves off its request: give it the time a move takes.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let evs = hub.events(&sid).await;
+    assert!(
+        moved_lines(&evs).is_empty() && lines(&evs, "session_not_moved").is_empty(),
+        "{evs:?}"
+    );
+    hub.finish().await;
+}
+
+/// The card names the folder the agent starts in: the workspace joined with the record's
+/// `cwd`.
+#[tokio::test]
+async fn a_follow_card_names_the_folder_the_agent_starts_in() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, _), (_, wb)) = home_and_popcorn(&hub).await;
+    let runtime = Uuid::new_v4().to_string();
+    mirror_event_in(&mut w, HOME, HOME, &runtime, &answer_in(-1, "one")).await;
+    let sid = only_session(&hub, &pa).await;
+    set_environment(&hub, &wb, "work").await;
+    let sub = format!("{POPCORN}/sub");
+    mirror_event_in(&mut w, POPCORN, &sub, &runtime, &answer_in(1, "two")).await;
+    let evs = hub.events(&sid).await;
+    let cards = follow_cards(&evs);
+    assert_eq!(cards.len(), 1, "{evs:?}");
+    let d = cards[0]["payload"]["description"].as_str().unwrap();
+    assert!(
+        d.contains("continued in /w/popcorn/sub, of project popcorn"),
+        "{d}"
+    );
+    hub.finish().await;
+}
+
+/// A record whose `cwd` has a bidirectional control (or a control character) would put the
+/// agent's own text on the card: across environments it asks nothing and moves nothing.
+#[tokio::test]
+async fn a_follow_into_an_unshowable_folder_asks_nothing() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (_, wb)) = home_and_popcorn(&hub).await;
+    let runtime = Uuid::new_v4().to_string();
+    mirror_event_in(&mut w, HOME, HOME, &runtime, &answer_in(-1, "one")).await;
+    let sid = only_session(&hub, &pa).await;
+    set_environment(&hub, &wb, "work").await;
+    let cwd = format!("{POPCORN}/a\u{202E}b");
+    assert!(
+        mirror_event_in(&mut w, POPCORN, &cwd, &runtime, &answer_in(1, "two"))
+            .await
+            .is_u64()
+    );
+    let evs = hub.events(&sid).await;
+    assert!(follow_cards(&evs).is_empty(), "{evs:?}");
+    assert_eq!(place(&hub.session(&sid).await), (pa, wa, ".".to_string()));
+    let (_, list) = hub.get("/api/requests").await;
+    assert_eq!(list["requests"], json!([]), "{list}");
+    hub.finish().await;
+}
+
+/// One card per session: while the owner has not answered the one for [`POPCORN`], a newer
+/// record from a third workspace of yet another environment opens no second card.
+#[tokio::test]
+async fn one_follow_card_per_session() {
+    const CORN: &str = "/w/corn";
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (_, wb)) = home_and_popcorn(&hub).await;
+    let pc = project(&hub, "corn").await;
+    let wc = import_workspace_at(&hub, &mut w, &pc, CORN).await;
+    set_environment(&hub, wc["id"].as_str().unwrap(), "lab").await;
+    let (sid, rid, runtime) = asked_to_follow(&hub, &mut w, &pa, &wb).await;
+    mirror_event_in(&mut w, CORN, CORN, &runtime, &answer_in(5, "corn")).await;
+    let evs = hub.events(&sid).await;
+    let cards = follow_cards(&evs);
+    assert_eq!(cards.len(), 1, "{evs:?}");
+    assert_eq!(cards[0]["payload"]["request_id"], rid);
+    assert_eq!(place(&hub.session(&sid).await), (pa, wa, ".".to_string()));
+    let (_, list) = hub.get("/api/requests").await;
+    assert_eq!(list["requests"].as_array().unwrap().len(), 1, "{list}");
+    hub.finish().await;
+}
+
+/// An answer is used once, for one move from here to there: allowed into [`POPCORN`], the
+/// session moves there; a newer record from [`HOME`] asks about the move back, which, allowed,
+/// takes it back; a still newer record from [`POPCORN`] then asks nothing and moves nothing.
+#[tokio::test]
+async fn an_answer_moves_a_session_once() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (pb, wb)) = home_and_popcorn(&hub).await;
+    let (sid, there, runtime) = asked_to_follow(&hub, &mut w, &pa, &wb).await;
+    answer_card(&hub, &sid, &there, "once").await;
+    events_once(&hub, &sid, "the move there", |e| moved_lines(e).len() == 1).await;
+    assert_eq!(place(&hub.session(&sid).await).0, pb);
+
+    mirror_event_in(&mut w, HOME, HOME, &runtime, &answer_in(5, "back")).await;
+    let evs = hub.events(&sid).await;
+    let cards = follow_cards(&evs);
+    assert_eq!(cards.len(), 2, "{evs:?}");
+    let back = cards[1]["payload"]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(back, there);
+    assert_eq!(place(&hub.session(&sid).await).0, pb, "waits for the owner");
+    answer_card(&hub, &sid, &back, "once").await;
+    events_once(&hub, &sid, "the move back", |e| moved_lines(e).len() == 2).await;
+    assert_eq!(
+        place(&hub.session(&sid).await),
+        (pa.clone(), wa.clone(), ".".to_string())
+    );
+
+    mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &answer_in(10, "again")).await;
+    let evs = hub.events(&sid).await;
+    assert_eq!(follow_cards(&evs).len(), 2, "{evs:?}");
+    assert_eq!(moved_lines(&evs).len(), 2);
+    assert_eq!(place(&hub.session(&sid).await), (pa, wa, ".".to_string()));
+    hub.finish().await;
+}
+
+/// Denied, the session stays, and a newer record from that workspace asks nothing again.
+#[tokio::test]
+async fn a_denied_follow_leaves_the_session_where_it_is() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (_, wb)) = home_and_popcorn(&hub).await;
+    let (sid, rid, runtime) = asked_to_follow(&hub, &mut w, &pa, &wb).await;
+    answer_card(&hub, &sid, &rid, "deny").await;
+    mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &answer_in(10, "three")).await;
+    assert_eq!(place(&hub.session(&sid).await), (pa, wa, ".".to_string()));
+    let evs = hub.events(&sid).await;
+    assert_eq!(follow_cards(&evs).len(), 1, "{evs:?}");
+    assert!(moved_lines(&evs).is_empty());
+    let (_, list) = hub.get("/api/requests").await;
+    assert_eq!(list["requests"], json!([]), "{list}");
+    hub.finish().await;
+}
+
+/// A session hqc runs (`locked_by: hqc`), an archived one and one with a subagent running do
+/// not follow a copy of their transcript, in the same environment too: the record is stored,
+/// the session stays, no card. Without any of these the next newer record moves it.
+#[tokio::test]
+async fn a_session_hqc_runs_or_no_move_takes_does_not_follow() {
+    let hub = TestHub::start().await;
+    let (mut w, (pa, wa), (pb, wb)) = home_and_popcorn(&hub).await;
+    let runtime = Uuid::new_v4().to_string();
+    mirror_event_in(&mut w, HOME, HOME, &runtime, &answer_in(-1, "one")).await;
+    let sid = only_session(&hub, &pa).await;
+    let cases = [
+        ("locked_by", "'hqc'", "'none'"),
+        ("archived", "true", "false"),
+        ("subagents", "1", "0"),
+    ];
+    for (i, (column, on, off)) in cases.into_iter().enumerate() {
+        let set = |v: &str| format!("UPDATE sessions SET {column} = {v} WHERE id = $1::uuid");
+        sqlx::query(&set(on))
+            .bind(&sid)
+            .execute(&hub.app.db)
+            .await
+            .unwrap();
+        let e = answer_in(i as i64 + 1, column);
+        assert!(mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &e)
+            .await
+            .is_u64());
+        assert_eq!(
+            place(&hub.session(&sid).await),
+            (pa.clone(), wa.clone(), ".".to_string()),
+            "{column}"
+        );
+        sqlx::query(&set(off))
+            .bind(&sid)
+            .execute(&hub.app.db)
+            .await
+            .unwrap();
+    }
+    let evs = hub.events(&sid).await;
+    assert!(
+        follow_cards(&evs).is_empty() && moved_lines(&evs).is_empty(),
+        "{evs:?}"
+    );
+    mirror_event_in(&mut w, POPCORN, POPCORN, &runtime, &answer_in(10, "free")).await;
+    assert_eq!(place(&hub.session(&sid).await), (pb, wb, ".".to_string()));
     hub.finish().await;
 }
 

@@ -256,11 +256,13 @@ enum Target {
     Ask { path: String, why: String },
 }
 
-/// What the card may not show of a path: control characters, and the bidirectional controls
-/// (U+061C, U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), which reorder the text around them.
-fn unshowable(path: &str) -> bool {
+/// What the card may not show of a path: control characters, the line and paragraph separators
+/// (U+2028, U+2029), which break the line shown, and the bidirectional controls (U+061C,
+/// U+200E, U+200F, U+202A–U+202E, U+2066–U+2069), which reorder the text around them.
+pub(crate) fn unshowable(path: &str) -> bool {
     path.chars().any(|c| {
         c.is_control()
+            || matches!(c, '\u{2028}' | '\u{2029}')
             || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}')
             || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
     })
@@ -703,9 +705,10 @@ fn ready(w: &db::WorkspaceRow) -> ApiResult<()> {
     }
 }
 
-/// The worker of session `s` when nothing refuses its move; otherwise `409` (`archived`,
-/// `unavailable`, `worker_offline`).
-async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
+/// What refuses any move of session `s`, a move of this module and one after its transcript
+/// alike (SPEC §7, §9.2): archived, not a Claude Code session, a subagent running; `409`
+/// (`archived`, `unavailable`).
+pub fn may_move(s: &SessionRow) -> ApiResult<()> {
     if s.archived {
         return Err(ApiError::Conflict(
             "archived",
@@ -715,19 +718,26 @@ async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
     if s.system || s.runtime != "claude_code" {
         return Err(unavailable("only a Claude Code session can move"));
     }
+    // A background subagent outlives the turn: the agent, and its input with it, would wait in
+    // its old folder for it. The hub sees only the count, so a foreground one refuses too.
+    if s.subagents > 0 {
+        return Err(unavailable(
+            "a subagent of the session is still running: move once it has ended",
+        ));
+    }
+    Ok(())
+}
+
+/// The worker of session `s` when nothing refuses its move; otherwise `409` (`archived`,
+/// `unavailable`, `worker_offline`).
+async fn movable(app: &AppState, s: &SessionRow) -> ApiResult<db::WorkerRow> {
+    may_move(s)?;
     if s.workspace_id.is_none() {
         return Err(unavailable("the session has no folder to move from"));
     }
     if s.locked_by == "vscode" || s.held_by.is_some() {
         return Err(unavailable(
             "the session is driven or open outside hqc (VS Code): close it there first",
-        ));
-    }
-    // A background subagent outlives the turn: the agent, and its input with it, would wait in
-    // its old folder for it. The hub sees only the count, so a foreground one refuses too.
-    if s.subagents > 0 {
-        return Err(unavailable(
-            "a subagent of the session is still running: move once it has ended",
         ));
     }
     let worker = match s.worker_id {

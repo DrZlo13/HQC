@@ -2,7 +2,8 @@
 //!
 //! - `mirror.event` ([`ingest`]): the event is stored in the session of its transcript
 //!   (`runtime_session_id` on that worker), which follows the transcript into the event's
-//!   workspace ([`follow`]); an unknown transcript becomes a session in the
+//!   workspace ([`follow`]), into another environment only once the owner allows it (a
+//!   PendingRequest of kind [`FOLLOW`]); an unknown transcript becomes a session in the
 //!   workspace's project with `cwd` from the record, the `ai-title` as title, and
 //!   `locked_by: vscode` if the worker saw the file written within 30 s, else `none`
 //!   (SPEC §9.1). A new event marked `recent` makes the session `locked_by: vscode`; if hqc
@@ -27,18 +28,36 @@ use std::path::Path;
 use chrono::Utc;
 use hqc_proto::{
     event::EventKind,
-    frame::{Ack, HeldBy, HubFrame, MirrorEvent, MirrorSet, MirrorSince, MIRROR_RECENT_S},
+    frame::{
+        worker_approval, Ack, HeldBy, HubFrame, MirrorEvent, MirrorSet, MirrorSince,
+        MIRROR_RECENT_S,
+    },
 };
 use serde_json::{json, Value};
 
 use crate::{
     app::AppState,
-    db::{self, Inserted, NewEvent, SessionRow},
+    db::{self, Inserted, NewEvent, PendingRow, SessionRow},
     delivery,
     error::{ApiError, ApiResult},
     events,
     worker_ws::{StartState, WorkerConn},
 };
+
+/// `kind` of the PendingRequest of a move after the transcript that waits for the owner
+/// (SPEC §3, §9.2, §10.1).
+pub const FOLLOW: &str = "follow";
+/// `tool` of its `approval.request` (SPEC §10.1).
+pub const FOLLOW_TOOL: &str = "session.follow";
+/// What [`crate::mcp::once_id`] derives a follow's `request_id` from, with the session, the
+/// workspace it is in now and the target: one request, and one answer, per move from here to
+/// there.
+const FOLLOW_ID: &str = "mirror follow";
+/// What stands for "no workspace" in a follow's `request_id`.
+const NO_WORKSPACE: &str = "none";
+/// `system.code` written when a move after the transcript the owner allowed is refused (SPEC
+/// §4, §9.2).
+pub const NOT_MOVED: &str = "session_not_moved";
 
 /// `system.code` written when hqc takes a session over from VS Code (SPEC §4, §9.3).
 pub const TAKEN_OVER: &str = "session_taken_over";
@@ -286,10 +305,13 @@ pub async fn ingest(
 
 /// The new record `m` of session `s`'s transcript, just stored, comes from workspace `ws`, not
 /// the session's (SPEC §9.2): a chat continued in another folder from a copy of its
-/// transcript. Unless the record is older than the session's newest one or `ws` is another
-/// owner's, the session follows it into `ws` and its project, with `cwd` as an import there
-/// would get it. Nothing goes into the feed: right after a copy both files get records, and
-/// the session may go back and forth a few times.
+/// transcript. Unless `ws` is another owner's, the session [`stays`] or the record is older
+/// than the session's newest one, the session follows it into `ws` and its project, with `cwd`
+/// as an import there would get it ([`moved`]). Into a workspace in another environment than
+/// the session's folder now (or from no folder) only once the owner allows it: the first such
+/// record asks ([`ask_owner`]) and an allowed move is made by the answer ([`allowed`]), never
+/// by a record. A request for that move, open or answered, means records ask nothing more: one
+/// answer per move from here to there.
 async fn follow(
     app: &AppState,
     conn: &WorkerConn,
@@ -299,7 +321,7 @@ async fn follow(
     m: &MirrorEvent,
 ) -> anyhow::Result<SessionRow> {
     // As a move (SPEC §3 Session): only into a workspace of the session's owner.
-    if ws.owner_id != s.owner_id {
+    if ws.owner_id != s.owner_id || stays(&s) {
         return Ok(s);
     }
     // The old window writes into the old file for a while, and both files may be read
@@ -327,12 +349,208 @@ async fn follow(
     if newest.is_some_and(|t| m.event.ts < t) {
         return Ok(s);
     }
-    db::move_session(&app.db, &s, ws.project_id, ws.id, cwd).await?;
-    // The next start runs the agent in the new folder.
-    conn.st.lock().await.sessions.entry(s.id).or_default().start = StartState::NotStarted;
-    tracing::info!(session_id = %s.id, runtime_session_id = %m.runtime_session_id, from = ?s.workspace_id, workspace = %ws.path, %cwd, "session follows its transcript into another workspace");
-    app.session_changed(s.id);
+    // As the hub has them from the worker's `hello`: a query to the worker would wait on this
+    // connection's own loop.
+    let here = match s.workspace_id {
+        Some(w) => db::workspace(&app.db, w).await?,
+        None => None,
+    };
+    if !here
+        .as_ref()
+        .is_some_and(|h| h.environment == ws.environment)
+    {
+        let from = s
+            .workspace_id
+            .map_or_else(|| NO_WORKSPACE.to_string(), |w| w.to_string());
+        let request_id =
+            crate::mcp::once_id(FOLLOW_ID, s.id, &format!("{from}\n{}", ws.id)).to_string();
+        // Open, it waits; answered, the answer is used up: only the answer moves the session.
+        if db::request_by_id(&app.db, s.id, FOLLOW, &request_id)
+            .await?
+            .is_none()
+        {
+            // The folder the agent starts in; `cwd` is the agent's text, and the card may not
+            // show it with its own lines or reordered (as for `hqc_move`, SPEC §7).
+            let folder = match cwd {
+                "." => ws.path.clone(),
+                c => Path::new(&ws.path).join(c).to_string_lossy().into_owned(),
+            };
+            if crate::moves::unshowable(&folder) {
+                tracing::warn!(session_id = %s.id, workspace = %ws.path, folder = ?folder, "a follow of the transcript into a folder with control characters or bidirectional controls, not asked");
+                return Ok(s);
+            }
+            ask_owner(app, &s, ws, here.as_ref(), &folder, cwd, &request_id).await?;
+        }
+        return Ok(s);
+    }
+    moved(app, &s, ws, cwd).await?;
     Ok(db::session(&app.db, s.id).await?.unwrap_or(s))
+}
+
+/// Why session `s` does not follow its transcript (SPEC §9.2): hqc runs it (`locked_by: hqc`),
+/// or any move refuses it ([`crate::moves::may_move`]); `None` when it may follow.
+fn refusal(s: &SessionRow) -> Option<String> {
+    if s.locked_by == "hqc" {
+        return Some("hqc runs the session".into());
+    }
+    crate::moves::may_move(s).err().map(|e| e.to_string())
+}
+
+/// A session that does not follow its transcript ([`refusal`]). The record stays stored.
+fn stays(s: &SessionRow) -> bool {
+    refusal(s).is_some()
+}
+
+/// Session `s` moves into `ws` after its transcript, `cwd` as the record's (SPEC §9.2), and
+/// its feed gets `system session_moved` as after a move; the connection's start state goes
+/// back to "not started", so the next start runs the agent in the new folder.
+async fn moved(
+    app: &AppState,
+    s: &SessionRow,
+    ws: &db::WorkspaceRow,
+    cwd: &str,
+) -> anyhow::Result<()> {
+    let name = |p: Option<db::ProjectRow>| p.map_or_else(|| "?".to_string(), |p| p.name);
+    let from = name(db::project(&app.db, s.project_id).await?);
+    let to = name(db::project(&app.db, ws.project_id).await?);
+    db::move_session(&app.db, s, ws.project_id, ws.id, cwd).await?;
+    if let Some(conn) = s.worker_id.and_then(|w| app.workers.get(w)) {
+        conn.st.lock().await.sessions.entry(s.id).or_default().start = StartState::NotStarted;
+    }
+    let moved = db::session(&app.db, s.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("session {} vanished", s.id))?;
+    events::system(
+        app,
+        &moved,
+        crate::moves::MOVED,
+        &format!("The session moved from {from} to {to} ({})", ws.path),
+    )
+    .await?;
+    tracing::info!(session_id = %s.id, runtime_session_id = ?s.runtime_session_id, from = ?s.workspace_id, workspace = %ws.path, %cwd, "session follows its transcript into another workspace");
+    app.session_changed(s.id);
+    Ok(())
+}
+
+/// The owner is asked whether session `s` follows its transcript into `ws`, from its folder
+/// `here` now (SPEC §9.2, §10.1): an `approval.request` of the hub in the session's feed naming
+/// the folder the agent starts in (`folder`, showable), the project it lands in and both
+/// environments, with the options `once` / `deny`, and an open request of kind [`FOLLOW`] keyed
+/// by `request_id`, which keeps what the move needs (`follow`: the workspace, the record's
+/// `cwd`). No expiry and no worker: nobody's call waits on it, so neither the agent's process
+/// stopping nor a worker restart cancels it. One card per session: while one waits, a record
+/// from anywhere else asks nothing.
+async fn ask_owner(
+    app: &AppState,
+    s: &SessionRow,
+    ws: &db::WorkspaceRow,
+    here: Option<&db::WorkspaceRow>,
+    folder: &str,
+    cwd: &str,
+    request_id: &str,
+) -> anyhow::Result<()> {
+    let project = db::project(&app.db, ws.project_id)
+        .await?
+        .map_or_else(|| "?".to_string(), |p| p.name);
+    let now = match here {
+        Some(h) => format!(
+            "its folder now, {}, is in environment {}",
+            h.path, h.environment
+        ),
+        None => "it has no folder now".to_string(),
+    };
+    let description = format!(
+        "The transcript of this session is continued in {folder}, of project {project}, in \
+         environment {} ({now}). Allowed, the session moves there, and its next start runs \
+         the agent there.",
+        ws.environment
+    );
+    let payload = json!({
+        "request_id": request_id,
+        "tool": FOLLOW_TOOL,
+        "description": description,
+        "options": [
+            {"id": worker_approval::ONCE, "label": "Allow", "canonical": "once"},
+            {"id": worker_approval::DENY, "label": "Deny", "canonical": "deny"},
+        ],
+    });
+    let mut stored = payload.clone();
+    stored["follow"] = json!({"workspace_id": ws.id, "cwd": cwd});
+    hqc_proto::replace_nul_json(&mut stored);
+    {
+        // Held until the request is stored, as for an `hqc_move` that asks.
+        let _lock = app.owner_lock("follow request", s.owner_id).await;
+        if db::has_open_request(&app.db, s.id, FOLLOW).await?
+            || !db::open_request(&app.db, FOLLOW, s.id, request_id, &stored, None, None).await?
+        {
+            return Ok(());
+        }
+    }
+    tracing::info!(session_id = %s.id, %request_id, workspace = %ws.path, from = ?here.map(|h| &h.environment), to = %ws.environment, "a follow of the transcript asks the owner");
+    events::store_hub_event(
+        app,
+        s,
+        json!({"kind": "system"}),
+        "approval.request",
+        payload,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The owner allowed request `p` of kind [`FOLLOW`] (closed already): the session moves as
+/// [`follow_allowed`] says. Off the answer's HTTP request, so that a client that goes away does
+/// not cut the move short; an error is logged.
+pub fn allowed(app: &AppState, p: PendingRow) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        if let Err(e) = follow_allowed(&app, &p).await {
+            tracing::error!(session_id = %p.session_id, request_id = %p.request_id, error = %e, "an allowed follow of the transcript failed");
+        }
+    });
+}
+
+/// The session of the allowed request `p`, read anew, moves into the workspace the request
+/// names, as [`follow`] moves it. Already there, or the workspace gone, nothing moves; one that
+/// does not follow now ([`refusal`]) stays, and its feed says why.
+async fn follow_allowed(app: &AppState, p: &PendingRow) -> anyhow::Result<()> {
+    let f = &p.payload["follow"];
+    let (Some(ws), Some(cwd)) = (
+        f["workspace_id"]
+            .as_str()
+            .and_then(|w| w.parse::<uuid::Uuid>().ok()),
+        f["cwd"].as_str(),
+    ) else {
+        anyhow::bail!("a follow request without its workspace or cwd");
+    };
+    let (Some(s), Some(ws)) = (
+        db::session(&app.db, p.session_id).await?,
+        db::workspace(&app.db, ws).await?,
+    ) else {
+        return Ok(());
+    };
+    if s.workspace_id == Some(ws.id) {
+        return Ok(());
+    }
+    if let Some(why) = refusal(&s) {
+        tracing::info!(session_id = %s.id, request_id = %p.request_id, %why, "an allowed follow of the transcript refused");
+        events::system(
+            app,
+            &s,
+            NOT_MOVED,
+            // The answer is used up: no record moves the session later.
+            &format!(
+                "The session did not move to {}: {why}. The answer is used up; move the session \
+                 by hand",
+                ws.path
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+    moved(app, &s, &ws, cwd).await
 }
 
 /// The new `locked_by` when the worker reports `reported` for a session that has `prev`

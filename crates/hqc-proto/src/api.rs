@@ -692,7 +692,8 @@ pub struct PushKeys {
 pub struct OpenRequest {
     pub session_id: Uuid,
     pub request_id: String,
-    /// `approval` | `clarify` | `worker_approval` | `move` (an agent's `hqc_move`, SPEC §7).
+    /// `approval` | `clarify` | `worker_approval` | `move` (an agent's `hqc_move`, SPEC §7) |
+    /// `follow` (a move after the transcript, SPEC §9.2).
     pub kind: String,
     /// `<project-slug>/<session-slug>` of the request's session.
     pub address: String,

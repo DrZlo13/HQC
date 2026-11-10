@@ -315,11 +315,14 @@ function PermissionCard({
     return () => doc.removeEventListener('keydown', onKey);
   }, [hotkeys, p.request_id]);
 
-  // The hub's card of an agent's `hqc_move` (SPEC §7, §10.1) has a worker request's form.
+  // The hub's card of an agent's `hqc_move` (SPEC §7, §10.1) and of a move after the transcript
+  // (SPEC §9.2) has a worker request's form.
   const title = v.worker
     ? p.tool === 'hqc_move' && !actions.system
       ? 'The agent asks to move this session'
-      : 'The worker asks for permission'
+      : p.tool === 'session.follow' && !actions.system
+        ? 'Move this session after its transcript?'
+        : 'The worker asks for permission'
     : sheet && p.tool === 'Bash'
       ? 'Run the command?'
       : TITLES[p.tool] ?? `The agent wants to use ${p.tool}`;

@@ -69,11 +69,13 @@ export const LOG_LEVEL_LABELS: Record<string, string> = {
 };
 
 /** `tool` of an `approval.request` in a worker's service session: the kind of
- *  `worker.approval.request` (SPEC §10.2). Other values are shown as they are. */
+ *  `worker.approval.request` (SPEC §10.2); and of the hub's card of a move after the
+ *  transcript (SPEC §9.2). Other values are shown as they are. */
 export const WORKER_REQUEST_LABELS: Record<string, string> = {
   'workspace.use': 'sessions in a new folder',
   'workspace.create': 'create a workspace',
   'workspace.delete': 'delete a workspace',
+  'session.follow': 'move after the transcript',
 };
 
 export const CANCEL_LABELS: Record<CancelReason, string> = {

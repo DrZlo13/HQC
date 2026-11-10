@@ -393,7 +393,7 @@ the last upload of the same file or the last input with it.
 
 ### PendingRequest
 Open requests that survive a hub restart: `kind`
-(approval/clarify/ask/worker_approval/move/mcp_call), `session_id`, `request_id`,
+(approval/clarify/ask/worker_approval/move/follow/mcp_call), `session_id`, `request_id`,
 `payload`, `expires_at`, `from_session_id`, `from_event_id`, `worker_id`
 (for ask and mcp_call: whom to give the result to), `result` (filled in when the answer has
 been received but not yet delivered to the worker).
@@ -424,6 +424,15 @@ carries each out once that worker sends `hello`, when the move can be done; rows
 process are never among them. A hub that failed to store the result carries the move out again
 at once. Either way a move already done answers as a repeat, and the input after it is stored
 once (§7).
+
+A `follow` (since 0.95) is a row of the session whose transcript is continued in a workspace of
+another environment, waiting for the owner's answer (§9.2, §10.1): `request_id` — derived from
+the session, the workspace it is in now (a fixed marker for none) and the target workspace, so
+one per move from here to there, no `worker_id`, `payload` — the hub's `approval.request` in the
+session's feed plus `follow: {workspace_id, cwd}` (the target, the record's `cwd` relative to
+it), no `expires_at`, no `result`: no call waits for it. At most one is open per session. Only
+the owner's answer closes it, and is used once: an allowed move is made by the answer, and a
+closed row means records ask nothing more about that move.
 
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
@@ -481,7 +490,8 @@ the client renders only them. The "source" column is the component that produces
 | `peer_evicted` | hub | in the target session: the send buffer was over its limit and its oldest messages were dropped unread (§7.1), since 0.35 |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
 | `forked_from` | hub | since 0.80: the end of a forked session's copied history (§6 `POST /api/sessions/{id}/fork`); `text` "Forked from <address> before the message of <time>" |
-| `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6, or `hqc_move`, §7); `text` names the old project, the new one and the folder |
+| `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6, or `hqc_move`, §7; since 0.95 also after its transcript, §9.2); `text` names the old project, the new one and the folder |
+| `session_not_moved` | hub | since 0.95: the owner allowed a move after the transcript (§9.2), and the session could not move then; `text` names the folder and why |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
@@ -1457,7 +1467,7 @@ the rest is marked "later"):
   unknown_artifact`; more than 32: `400`. Download by link: `GET /artifacts/{id}?exp=&sig=`
   (outside `/api`, §12); for the worker: `GET /worker/artifacts/{id}` (§5.3)
 - `GET /api/requests` → `{requests[]}` (`api.requests.json`, since 0.41, T37): every open
-  request (`approval`, `clarify`, `worker_approval`, since 0.76 `move`) in the user's sessions that are not
+  request (`approval`, `clarify`, `worker_approval`, since 0.76 `move`, since 0.95 `follow`) in the user's sessions that are not
   archived, oldest first, the workers' service sessions included. An item is `{session_id,
   request_id, kind, address, title, worker_id?, worker_name?, system?, event, waiting[]}`:
   `address` (`<project-slug>/<session-slug>`), `title` and the worker of the request's session,
@@ -1895,8 +1905,9 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   list nor delete schedules; the owner does that in the client (§6).
 - `hqc_move(path, project?)` (since 0.76) — the calling session moves to folder `path` of its
   worker, by the core of `POST /api/sessions/{id}/move` (§6). The path is the agent's text the
-  owner may be shown: one with a control character or a bidirectional control (U+061C, U+200E,
-  U+200F, U+202A–U+202E, U+2066–U+2069, which reorder the path shown) is `invalid_args` before
+  owner may be shown: one with a control character, a line or paragraph separator (U+2028,
+  U+2029, which break the line shown) or a bidirectional control (U+061C, U+200E, U+200F,
+  U+202A–U+202E, U+2066–U+2069, which reorder the path shown) is `invalid_args` before
   anything else, and so is a missing folder's path with a `.` or `..` component. The hub first
   looks at the folder with the worker's `fs.stat` without `create`, on the connection the call
   came by, as a spawn with a worktree does; a folder the worker refuses is the call's error at
@@ -3026,15 +3037,35 @@ pass go out with it. The hub keeps one session per transcript and finds it by wo
 another workspace of the session's owner than the session's, the session moves there once the
 record is stored: into that workspace's project, `cwd` the transcript's folder (the frame's
 `cwd`) relative to the workspace, as an import there would get it, the connection's start state
-back to "not started" as after a move (§6). A record the session already has does not move it:
+back to "not started" and `system session_moved` (§4) in its feed, as after a move (§6). A
+session hqc runs (`locked_by: hqc`) does not move: a copied transcript is written from outside
+(VS Code, by hand); nor does one any move refuses (§7): archived, a service session, a runtime
+other than Claude Code, a subagent running. The record is stored either way. A record the
+session already has does not move it:
 a copy read from its start brings all of the old file's records again. Nor does one older than
 the session's newest event that is not `system` (most `system` events are the hub's own, with
 its clock): right after a copy the old window still writes a few records into the old file, and
 both files may be read again from the start, so the session ends where the newest record was
 written. The hub keeps the newest time it read per session for the connection: it only grows,
 so an older record needs no query (a copy out of a folder that is not mirrored has no `since`
-and comes whole). No event goes into the feed: right after a copy both files get records for a
-while, and the session may switch a few times.
+and comes whole). Right after a copy both files get records for a while, and the session may
+switch a few times, with a line each time. Into a workspace whose `environment` (§3 Workspace,
+as the worker's `hello` set it: the record comes on the connection's own loop, so the hub asks
+the worker nothing) is not that of the session's folder now, or for a session without one, the
+session moves only once the owner allows it: an agent in one environment could write a copy of
+its own transcript into another's folder, and the owner's next input would start it there with
+that environment's keys, settings and rules. The first such record asks (§10.1): a
+PendingRequest `follow` (§3) whose `request_id` is derived from the session, the workspace it is
+in now and the target, and the hub's `approval.request` in the session's feed naming the folder
+the agent starts in (the workspace joined with the record's `cwd`). A folder with a control
+character or a bidirectional control, which the card may not show (as for `hqc_move`, §7), gets
+no card, and the record moves nothing; the hub logs a warning. One card per session: while
+it is open, records from there and from anywhere else ask nothing. The answer is used once, for
+that move from here to there: allowed, the hub moves the session off the answer's request (read
+anew, the conditions above checked again: one already in that workspace moves nothing and gets
+no line; one refused then stays, and `system session_not_moved` (§4) says why); denied, nothing
+moves. Either way a later record for the same move asks nothing and moves nothing; a move back
+from there is another move and asks again.
 
 The worker recognises its own records by `uuid`: the Claude Code adapter puts into a shared
 in-memory registry (by `runtime_session_id`) the uuid of every `user`/`assistant` message of the
@@ -3344,6 +3375,19 @@ only the event, and so does `mcp.cancel` of the call (§5.2), with `approval.can
 The client draws it with the card of a worker's request (§10.2): the description, "Allow" and
 "Deny", no "Reply with text"; outside a service session its header is "The agent asks to move
 this session".
+
+**A move after the transcript** (since 0.95). A session whose transcript is continued in a
+workspace of another environment than its folder's (§9.2) gets an `approval.request` the hub
+writes in it, `author {kind: system}`, `tool: session.follow`, a description naming the folder
+the agent starts in, the project the session lands in and both environments; options `once` /
+`deny`, no `expires_at`, with a PendingRequest `follow` (§3), at most one open per session; the
+answer is used once (§9.2). Only the session owner answers it (`403` for
+anyone else); it takes no `message` (`400`); `auto_approve` never answers it. It counts as any
+open request: the session is `waiting` (§17.1), it is in the Requests list, it pushes (§16), the
+turn watchdog (§17.3) leaves the session alone. No frame goes to the worker for its answer.
+Nothing holds it but the owner: neither `POST /stop`, the turn watchdog, the agent's process
+stopping, a worker restart nor archiving cancels it. The client draws it with the card of a
+worker's request, header "Move this session after its transcript?".
 
 With `auto_approve` the hub answers with the first option with `canonical: once`, `by: auto`
 (calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14);
@@ -4372,7 +4416,15 @@ the session by `runtime_session_id` alone, showed the new dialog in the session 
 (53 sessions on one laptop). §9.2: a row whose `cwd` is not its folder is searched for one that is
 (the whole file once per worker process, then what is appended); the hub moves a session whose
 new record comes from another workspace of its owner into it and its project, unless the record
-is older than the session's newest non-system event, without a line in the feed.
+is older than the session's newest non-system event, with `system session_moved` in the feed.
+A session hqc runs (`locked_by: hqc`) and one any move refuses (archived, a service session, a
+runtime other than Claude Code, a subagent running) stay. Into a workspace of another
+environment than the session's folder now the session moves only once the owner allows it, as
+`hqc_move` asks for one, and the answer moves it. §3 PendingRequest, §6 `GET /api/requests`,
+§10.1: the request kind `follow`, one per move from the session's workspace to the target, at
+most one open per session; only the owner's answer closes it, and it is used once. §4: `system
+session_not_moved` when an allowed move is refused. §7: a path with a line or paragraph
+separator (U+2028, U+2029) is not shown on a card either.
 
 ### 0.88 → 0.89 (the list at once on a reload)
 §6: `GET /api/sessions` gives every session of every project of the user in one list; the

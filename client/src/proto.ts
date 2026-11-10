@@ -812,7 +812,8 @@ export interface WaitingSession {
 export interface OpenRequest {
   session_id: Uuid;
   request_id: string;
-  /** `approval` | `clarify` | `worker_approval` | `move` (an agent's `hqc_move`, SPEC §7); open. */
+  /** `approval` | `clarify` | `worker_approval` | `move` (an agent's `hqc_move`, SPEC §7) |
+   *  `follow` (a move after the transcript, SPEC §9.2); open. */
   kind: string;
   address: string;
   title: string;

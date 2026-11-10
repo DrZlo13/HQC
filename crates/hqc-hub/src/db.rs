@@ -2072,13 +2072,15 @@ pub async fn clear_turn_error(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
 /// Sessions whose computed state is `running` apart from worker presence (SPEC §17.1): a
 /// turn is open and nothing ranks above it. The caller checks that the worker is online.
 /// A session waiting for the answer to its `hqc_ask` or for the owner's answer to its
-/// `hqc_move` is not silent but waiting, and is left out too (SPEC §7, §7.1, §17.3).
+/// `hqc_move` or to a move after its transcript is not silent but waiting, and is left out
+/// too (SPEC §7, §7.1, §9.2, §17.3).
 pub async fn running_turns(db: &PgPool) -> sqlx::Result<Vec<(Uuid, Option<Uuid>)>> {
     sqlx::query_as(
         "SELECT s.id, s.worker_id FROM sessions s
          WHERE s.turn_open AND NOT s.archived AND NOT s.last_turn_error AND s.locked_by <> 'vscode'
            AND NOT EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
-                           AND p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'ask', 'move'))
+                           AND p.closed_at IS NULL
+                           AND p.kind IN ('approval', 'clarify', 'ask', 'move', 'follow'))
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed')",
     )
     .fetch_all(db)
@@ -2744,7 +2746,7 @@ pub async fn find_open_request(
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
          WHERE session_id = $1 AND request_id = $2 AND closed_at IS NULL
-           AND kind IN ('approval', 'clarify', 'worker_approval', 'move')"
+           AND kind IN ('approval', 'clarify', 'worker_approval', 'move', 'follow')"
     ))
     .bind(session_id)
     .bind(request_id)
@@ -2850,6 +2852,19 @@ pub async fn allowed_moves_without_result(db: &PgPool) -> sqlx::Result<Vec<Pendi
     ))
     .bind(hqc_proto::frame::worker_approval::ONCE)
     .fetch_all(db)
+    .await
+}
+
+/// The session has an open request of `kind` (one card of a move after the transcript per
+/// session, SPEC §9.2).
+pub async fn has_open_request(db: &PgPool, session_id: Uuid, kind: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pending_requests
+             WHERE session_id = $1 AND kind = $2 AND closed_at IS NULL)",
+    )
+    .bind(session_id)
+    .bind(kind)
+    .fetch_one(db)
     .await
 }
 

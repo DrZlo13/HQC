@@ -982,6 +982,33 @@ describe("worker's service session (T17, SPEC §10.2)", () => {
     );
   });
 
+  it("asks whether the session moves after its transcript (SPEC §9.2)", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.approval.request", (e) => {
+        e.seq = 1;
+        e.author = { kind: "system" };
+        e.payload = {
+          request_id: "follow-1",
+          tool: "session.follow",
+          description:
+            "The transcript of this session is continued in /w/popcorn, of project popcorn, in environment work (its folder now, /w/home, is in environment default). Allowed, the session moves there, and its next start runs the agent there.",
+          options: [
+            { id: "once", label: "Allow", canonical: "once" },
+            { id: "deny", label: "Deny", canonical: "deny" },
+          ],
+        };
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "Move this session after its transcript?",
+    );
+    expect(root.querySelector(".perm-sub")!.textContent).toBe(
+      "move after the transcript",
+    );
+  });
+
   it('"requests only" keeps the request cards only', () => {
     const t = new Timeline();
     t.apply(log(1, "warn", "a"));

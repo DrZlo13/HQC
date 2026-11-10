@@ -1229,9 +1229,10 @@ the rest is marked "later"):
   since 0.51)
 - `PUT /api/projects/{id}/icon` (since 0.51, T49; multipart: field `file`, like an attachment)
   → the project object with `icon: {kind: image, url}`: the image is checked as in §12
-  ("Project icons"), anything else is `422 invalid_icon` with the reason in `message`. `GET
-  /api/projects/{id}/icon` → the image (§12). Another user's or a nonexistent project, or no
-  image: `404`
+  ("Project icons"), anything else is `422 invalid_icon` with the reason in `message`; a body
+  the multipart parser refuses: `400` with the parser's reason, `multipart: …` (since 0.109).
+  `GET /api/projects/{id}/icon` → the image (§12). Another user's or a nonexistent project, or
+  no image: `404`
 - `GET /api/workspaces?project_id=` → `{workspaces[]}` (without `project_id`: all of the
   user's workspaces); `POST /api/workspaces` {project_id, worker_id, path, label?,
   mirror_enabled?, create?} → `201` and the workspace (`kind: dir`, §13.1): the hub sends the worker
@@ -1461,8 +1462,9 @@ the rest is marked "later"):
 - `POST /api/artifacts` (multipart: field `file`, optional `kind`) → `201` and the artifact
   object `{id, kind, name, mime, size, sha256, created_at}` (`api.artifact.json`); the same
   file under the same name again → `200` and the earlier object; over 100 MB: `413
-  too_large`; unknown `kind` or no `file`: `400`. Without the field, `kind` is derived from the
-  type and extension (§12). `GET /api/artifacts/{id}` → the artifact object; `GET
+  too_large`; unknown `kind` or no `file`: `400`; a body the multipart parser refuses: `400`
+  with the parser's reason, `multipart: …` (since 0.109). Without the field, `kind` is derived
+  from the type and extension (§12). `GET /api/artifacts/{id}` → the artifact object; `GET
   /api/artifacts/{id}/url` → `{url, expires_at}` (`api.artifact.url.json`), a signed link
   valid for 10 minutes (§12). Someone else's or a nonexistent artifact: `404`. An input (`POST
   .../input`) with `artifact_ids` of someone else's or nonexistent artifacts: `400
@@ -4378,6 +4380,10 @@ sent as a JPEG named `.jpg` where the browser decodes it (Safari, any browser on
 scaled down to 16 million pixels, iOS's canvas limit, since Claude Code does not read HEIC; a
 browser that does not decode it (Chrome on a computer) sends it as it is. A photo picked from
 the iPhone's library came as a JPEG already: iOS converts it.
+§6 `POST /api/artifacts` and `PUT /api/projects/{id}/icon`: a body the multipart parser refuses
+is answered with the parser's reason (`multipart: incomplete multipart stream`, `multipart: field
+"file" received with incomplete data`), not with axum's "Error parsing `multipart/form-data`
+request", which named no reason.
 
 ### 0.107 → 0.108 (an input written during the agent's text stands under it)
 §4, §6: a message the user wrote while the agent's text was being written stood above that

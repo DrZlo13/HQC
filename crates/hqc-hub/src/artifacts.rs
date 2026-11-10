@@ -417,7 +417,12 @@ async fn store_field(
             Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
                 return Err(too_large(cfg.max_bytes))
             }
-            Err(e) => return Err(ApiError::BadRequest(format!("multipart: {e}"))),
+            Err(e) => {
+                return Err(ApiError::BadRequest(format!(
+                    "multipart: {}",
+                    e.body_text()
+                )))
+            }
         }
     }
     w.finish().await
@@ -703,7 +708,12 @@ pub async fn upload(
             Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
                 return Err(too_large(cfg.max_bytes))
             }
-            Err(e) => return Err(ApiError::BadRequest(format!("multipart: {e}"))),
+            Err(e) => {
+                return Err(ApiError::BadRequest(format!(
+                    "multipart: {}",
+                    e.body_text()
+                )))
+            }
         };
         let mut field = field;
         match field.name().unwrap_or("") {
@@ -717,7 +727,7 @@ pub async fn upload(
                 let v = field
                     .text()
                     .await
-                    .map_err(|e| ApiError::BadRequest(format!("multipart: {e}")))?;
+                    .map_err(|e| ApiError::BadRequest(format!("multipart: {}", e.body_text())))?;
                 kind = Some(parse_kind(&v)?);
             }
             // Unknown fields are ignored (SPEC §6).

@@ -158,7 +158,7 @@ pub async fn put(
         if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
             invalid(format!("the image is over {} KB", ICON_MAX / 1024))
         } else {
-            ApiError::BadRequest(format!("multipart: {e}"))
+            ApiError::BadRequest(format!("multipart: {}", e.body_text()))
         }
     };
     while let Some(mut field) = mp.next_field().await.map_err(multipart)? {

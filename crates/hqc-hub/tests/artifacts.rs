@@ -99,6 +99,35 @@ async fn upload_kinds_and_dedup() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 400);
 
+    // A broken body is answered with the parser's reason, not axum's generic "Error parsing
+    // `multipart/form-data` request": one that ends before its first part (an iPhone's upload
+    // failed so), then one cut off in the middle of the file.
+    let r = hub
+        .http
+        .post(format!("{}/api/artifacts", hub.base))
+        .header("content-type", "multipart/form-data; boundary=XYZ")
+        .body("abc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["message"], "multipart: incomplete multipart stream");
+    let r = hub
+        .http
+        .post(format!("{}/api/artifacts", hub.base))
+        .header("content-type", "multipart/form-data; boundary=XYZ")
+        .body("--XYZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.heic\"\r\nContent-Type: image/heic\r\n\r\nabc")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(
+        v["message"],
+        "multipart: field \"file\" received with incomplete data"
+    );
+
     let (s, m) = hub
         .get(&format!("/api/artifacts/{}", a["id"].as_str().unwrap()))
         .await;

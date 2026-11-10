@@ -139,6 +139,22 @@ export function statusVars(base: Theme = 'warm'): Record<string, string> {
   return out;
 }
 
+/** How text reads on this device ("Settings" → "Feed"): the feed across the whole chat column
+ *  instead of at most 780 px, the platform's own font instead of Inter; and ("Settings" →
+ *  "Project bar") a row with each project's full name instead of a tile. */
+export interface Look {
+  wideFeed: boolean;
+  systemFont: boolean;
+  railNames: boolean;
+}
+
+/** Sets the look as classes on `el` (the document root), read by styles.css. */
+export function applyLook(el: HTMLElement, look: Look): void {
+  el.classList.toggle('feed-wide', look.wideFeed);
+  el.classList.toggle('font-system', look.systemFont);
+  el.classList.toggle('rail-names', look.railNames);
+}
+
 const THEME_KEY = 'hqc.theme';
 
 /** The base last applied on this device: a convenience, so a light theme does not start dark

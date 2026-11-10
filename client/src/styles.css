@@ -118,6 +118,11 @@
   -webkit-text-size-adjust: 100%;
 }
 
+/* "The system font" in Settings, on this device (applyLook): the platform's own UI font. */
+:root.font-system {
+  --sans: -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', sans-serif;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -563,6 +568,88 @@ select.input {
   border-radius: 50%;
   background: var(--text);
   border: 2px solid var(--rail);
+}
+
+/* "Settings" → "Project bar" → names (`Look.railNames`): the bar widens to 260 px, and each
+   project is a 36 px row with its icon on its color and its full name; the badge or dot sits
+   at the row's right end, inside the row, so clicks go through it to the row. The buttons
+   under the projects keep to the left edge. At the 900 px breakpoint the chat keeps 360 px. */
+:root.rail-names .layout {
+  grid-template-columns: 260px clamp(280px, 25vw, 310px) minmax(0, 1fr);
+}
+:root.rail-names .rail {
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 10px;
+}
+:root.rail-names .rail-sep {
+  margin: 6px 0 8px 5px;
+}
+:root.rail-names .rail-new,
+:root.rail-names .rail-done {
+  margin-top: 6px;
+}
+:root.rail-names .rail-item {
+  align-self: stretch;
+}
+:root.rail-names .rail-pill {
+  left: -10px;
+  top: 6px;
+  height: 24px;
+}
+:root.rail-names .rail-project {
+  width: 100%;
+  height: 36px;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 8px 0 6px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+:root.rail-names .rail-project:not(.is-current):hover {
+  background: var(--row-hover);
+  filter: none;
+}
+:root.rail-names .rail-item.has-mark .rail-project {
+  padding-right: 36px;
+}
+:root.rail-names .rail-item.has-mark:has(.rail-unread) .rail-project {
+  padding-right: 26px;
+}
+:root.rail-names .rail-project .glyph-emoji {
+  font-size: 15px;
+}
+:root.rail-names .rail-badge,
+:root.rail-names .rail-unread {
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  border-color: transparent;
+  pointer-events: none;
+}
+.rail-glyph {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.rail-glyph .glyph-img {
+  padding: 2px;
+}
+.rail-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 14px var(--sans);
+  color: var(--text2);
+}
+.rail-project.is-current .rail-name {
+  color: var(--text);
 }
 
 /* A project's icon: its emoji, 1-2 letters or image (T49). */
@@ -1964,6 +2051,11 @@ select.input {
   display: flex;
   flex-direction: column;
   gap: 24px;
+}
+
+/* "Full width" in Settings, on this device (applyLook). */
+:root.feed-wide .feed {
+  max-width: none;
 }
 
 /* ---- messages ---- */
@@ -3439,6 +3531,12 @@ a.relay-peer {
 
 .page-body p {
   margin: 0;
+}
+
+.setting-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .layout-phone .input {

@@ -237,7 +237,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Notifications', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Feed', 'Project bar', 'Notifications', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();
@@ -321,6 +321,23 @@ it('does not fetch the lists again for what the hub pushes or a read while they 
   }
   await refresh;
   expect(projectLists).toBe(1);
+});
+
+it('sets the full-width feed and the system font from "Settings" on the document root', async () => {
+  const classes = () => document.documentElement.classList;
+  expect(classes().contains('feed-wide')).toBe(false);
+  location.hash = '#/settings';
+  const wide = await until('feed switches', () => $<HTMLInputElement>('input[name=wide-feed]'));
+  wide.click();
+  await until('full width', () => classes().contains('feed-wide'));
+  expect($<HTMLInputElement>('input[name=wide-feed]')!.checked).toBe(true);
+  $<HTMLInputElement>('input[name=system-font]')!.click();
+  await until('system font', () => classes().contains('font-system'));
+  $<HTMLInputElement>('input[name=wide-feed]')!.click();
+  await until('narrow again', () => !classes().contains('feed-wide'));
+  expect(classes().contains('font-system')).toBe(true);
+  $<HTMLInputElement>('input[name=system-font]')!.click();
+  await until('Inter again', () => !classes().contains('font-system'));
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

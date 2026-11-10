@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from 'preact/hooks';
 import type { AppState } from '../app';
-import { applyTheme } from '../theme';
+import { applyLook, applyTheme } from '../theme';
 import { Chat } from './Chat';
 import { Enroll } from './Enroll';
 import { useIsPhone, useSubscription } from './hooks';
@@ -124,6 +124,7 @@ export function App({ app }: { app: AppState }) {
   const color = app.currentProject()?.color ?? 'teal';
   const theme = app.theme();
   useLayoutEffect(() => applyTheme(document.documentElement, color, theme), [color, theme]);
+  useLayoutEffect(() => applyLook(document.documentElement, app.look), [app.look]);
 
   let main;
   switch (route.name) {

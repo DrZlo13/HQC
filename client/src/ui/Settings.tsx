@@ -135,6 +135,38 @@ export function Settings({ app }: { app: AppState }) {
         </div>
         {themeError && <div class="error-text">{themeError}</div>}
 
+        <h2>Feed</h2>
+        <p class="muted">Kept in this browser, on this device.</p>
+        <label class="setting-check">
+          <input
+            type="checkbox"
+            name="wide-feed"
+            checked={app.look.wideFeed}
+            onChange={(e) => app.setLook({ wideFeed: (e.currentTarget as HTMLInputElement).checked })}
+          />
+          Full width: the feed fills the chat column instead of stopping at 780 px
+        </label>
+        <label class="setting-check">
+          <input
+            type="checkbox"
+            name="system-font"
+            checked={app.look.systemFont}
+            onChange={(e) => app.setLook({ systemFont: (e.currentTarget as HTMLInputElement).checked })}
+          />
+          The system font instead of Inter
+        </label>
+
+        <h2>Project bar</h2>
+        <label class="setting-check">
+          <input
+            type="checkbox"
+            name="rail-names"
+            checked={app.look.railNames}
+            onChange={(e) => app.setLook({ railNames: (e.currentTarget as HTMLInputElement).checked })}
+          />
+          Names: a row with each project's icon and full name instead of a tile, on this device
+        </label>
+
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>
         {(push === 'available' || push === 'subscribed') && (

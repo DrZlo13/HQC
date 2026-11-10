@@ -8,16 +8,21 @@ import { moveTo } from './sessions';
 
 /** A tile and the gap under it: how far a drag moves a project by one place. */
 const TILE_STEP = 54;
+/** The same for a row with the project's name (`Look.railNames`). */
+const ROW_STEP = 40;
 
 /** The project bar of a desktop (T49, README "Project bar"): a tile per project with its
  *  icon on its color at ~24 %; the current one more saturated (`--mark-bg`) with a pill of
  *  the project color at the left edge; an amber "needs you" badge, else a dot when a
  *  session has unread events; "+ project", Reorder
  *  (drag the tiles or move a focused one with ↑/↓, then Done or Cancel), settings and who is
- *  signed in. A tile's context menu adds the project to the favorites, which go first. */
+ *  signed in. A tile's context menu adds the project to the favorites, which go first.
+ *  With "Settings" → "Project bar" → names on, a row per project: its icon and full name. */
 export function ProjectRail({ app }: { app: AppState }) {
   useSubscription((fn) => app.onChange(fn), [app]);
   const [error, setError] = useState<string | null>(null);
+  const names = app.look.railNames;
+  const step = names ? ROW_STEP : TILE_STEP;
   const current = app.currentProjectId;
   const email = app.me?.email ?? '';
   // Reorder mode: the order being arranged; Done stores it, Cancel drops it.
@@ -68,7 +73,7 @@ export function ProjectRail({ app }: { app: AppState }) {
     onPointerMove: (e: PointerEvent) => {
       const d = drag.current;
       if (!d) return;
-      setOrder(moveTo(d.base, d.id, d.base.indexOf(d.id) + Math.round((e.clientY - d.y) / TILE_STEP)));
+      setOrder(moveTo(d.base, d.id, d.base.indexOf(d.id) + Math.round((e.clientY - d.y) / step)));
     },
     onPointerUp: endDrag,
     onPointerCancel: endDrag,
@@ -97,9 +102,25 @@ export function ProjectRail({ app }: { app: AppState }) {
       {projects.map((p) => {
         const name = projectName(p);
         const waiting = app.projectWaiting(p.id);
+        const unread = waiting === 0 && app.projectUnread(p.id);
         const on = p.id === current;
+        // A row keeps the icon on its color and puts the name after it; a tile is the icon.
+        const face = names ? (
+          <>
+            <span class="rail-glyph" style={{ background: tileBackground(p) }}>
+              <ProjectGlyph p={p} />
+            </span>
+            <span class="rail-name">{name}</span>
+          </>
+        ) : (
+          <ProjectGlyph p={p} />
+        );
+        const background = on || names ? undefined : { background: tileBackground(p) };
         return (
-          <div key={p.id} class={`rail-item ${dragId === p.id ? 'is-dragging' : ''}`}>
+          <div
+            key={p.id}
+            class={`rail-item ${dragId === p.id ? 'is-dragging' : ''} ${waiting > 0 || unread ? 'has-mark' : ''}`}
+          >
             {on && <span class="rail-pill" aria-hidden="true" />}
             {order ? (
               <span
@@ -107,10 +128,10 @@ export function ProjectRail({ app }: { app: AppState }) {
                 role="button"
                 aria-label={`Drag to reorder «${name}», or use arrow keys`}
                 title={name}
-                style={on ? undefined : { background: tileBackground(p) }}
+                style={background}
                 {...tile(p.id)}
               >
-                <ProjectGlyph p={p} />
+                {face}
               </span>
             ) : (
             <a
@@ -119,7 +140,7 @@ export function ProjectRail({ app }: { app: AppState }) {
               aria-label={name}
               aria-current={on ? 'true' : undefined}
               title={name}
-              style={on ? undefined : { background: tileBackground(p) }}
+              style={background}
               onContextMenu={(e) => {
                 e.preventDefault();
                 // From the keyboard (the menu key) there is no pointer: next to the tile.
@@ -127,7 +148,7 @@ export function ProjectRail({ app }: { app: AppState }) {
                 setMenu({ id: p.id, x: e.clientX || r.right, y: e.clientY || r.top });
               }}
             >
-              <ProjectGlyph p={p} />
+              {face}
             </a>
             )}
             {waiting > 0 ? (
@@ -135,7 +156,7 @@ export function ProjectRail({ app }: { app: AppState }) {
                 {waiting > 99 ? '99+' : waiting}
               </span>
             ) : (
-              app.projectUnread(p.id) && <span class="rail-unread" aria-label="unread" />
+              unread && <span class="rail-unread" aria-label="unread" />
             )}
           </div>
         );

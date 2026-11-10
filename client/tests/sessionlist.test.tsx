@@ -646,6 +646,40 @@ describe('ProjectRail', () => {
     expect(root.querySelector('.avatar')!.getAttribute('title')).toBe('who@example.com');
   });
 
+  it('with names on, a row per project: its icon on its color and its full name (SPEC 0.91)', async () => {
+    const app = makeApp();
+    // Not setLook: it would keep the names in localStorage for the tests below.
+    app.look = { ...app.look, railNames: true };
+    app.projects.set('p2', { id: 'p2', name: 'ukuetis_controller_backend', slug: 'ukuetis', description: '', is_personal: false, color: 'moss', created_at: at(80) });
+    await mount(<ProjectRail app={app} />);
+    const rows = () => [...root.querySelectorAll<HTMLElement>('.rail-project')];
+    expect(rows().map((r) => [r.querySelector('.rail-glyph')!.textContent, r.querySelector('.rail-name')!.textContent])).toEqual([
+      ['P', 'Personal'],
+      ['⚛️', 'physics-mp'],
+      ['UC', 'ukuetis_controller_backend'],
+    ]);
+    // The color is on the icon, not on the row; the current row is --mark-bg from CSS.
+    expect(rows()[0].style.background).toBe('');
+    expect(rows()[0].querySelector<HTMLElement>('.rail-glyph')!.style.background).toBe('rgba(138, 147, 166, 0.24)');
+    // The badge stays, and its row keeps room for it at the right end.
+    const marked = [...root.querySelectorAll('.rail-item')].map((i) => i.classList.contains('has-mark'));
+    expect(marked).toEqual([false, true, false]);
+    expect(root.querySelector('.rail-item.has-mark .rail-badge')!.textContent).toBe('1');
+
+    // Reorder: a row is 40 px with its gap, so a drag of 80 px moves a project by two places.
+    await act(async () => root.querySelector<HTMLButtonElement>('.rail-reorder')!.click());
+    const grip = root.querySelector<HTMLElement>('.rail-drag[data-tile="p0"]')!;
+    expect(grip.querySelector('.rail-name')!.textContent).toBe('Personal');
+    const ev = (type: string, y: number) =>
+      act(async () => {
+        grip.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, clientY: y }));
+      });
+    await ev('pointerdown', 100);
+    await ev('pointermove', 180);
+    await ev('pointerup', 180);
+    expect(rows().map((r) => r.getAttribute('title'))).toEqual(['physics-mp', 'ukuetis_controller_backend', 'Personal']);
+  });
+
   it('marks a project with unread events by a dot, unless someone waits there', async () => {
     const app = makeApp([
       ...LIST.map((s) => ({ ...s, unread: 2 })),

@@ -63,13 +63,15 @@ only push.
   T26 ones of `redesign-2026-10-24` for what round 2 did not redraw):
   - `App.tsx` — layout: on desktop the project bar (`ProjectRail`), the sidebar
     (`SessionList`) and the screen; on a phone (narrower than 900px, `useIsPhone`) one screen at a time;
-    widths (T49, narrowing as in T27): the bar is 72px, the sidebar `clamp(280px, 25vw, 310px)`, the
+    widths (T49, narrowing as in T27): the bar is 72px (260px with "Settings" → "Project bar" →
+    "Names", `:root.rail-names`), the sidebar `clamp(280px, 25vw, 310px)`, the
     main column `minmax(0, 1fr)` with no minimum, its feed and input at most 780px; nothing may set a width, a
     minimum width or a flex basis of 300px or more (`tests/layout.test.ts`); long code
     (`.md-code pre`) and wide tables (`.md-table`) scroll inside themselves, everything else
     wraps;
   - `ProjectRail.tsx` — project tiles with their icon on their color, the current one with the
-    pill and `--mark-bg`, the "needs you" badge;
+    pill and `--mark-bg`, the "needs you" badge; with "Names" on, a row per project with its icon
+    and full name;
   - `SessionList.tsx` + `sessions.ts` — the sidebar: the header (the project's tile, name, counters, the gear to
     the project settings, "New"), "State"/"Recent" modes (the choice is in
     `localStorage`, key `hqc.sessionOrder`), search by title and path, rows with `worker · path`

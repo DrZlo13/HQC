@@ -18,7 +18,7 @@ import type {
   Theme,
   Workspace,
 } from './proto';
-import { storedTheme } from './theme';
+import { storedTheme, type Look } from './theme';
 import { arrange } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
@@ -37,6 +37,18 @@ function loadDrafts(): Map<string, string> {
   }
 }
 
+/** The look on this device (`Look`): a convenience, so storage that fails or is empty only
+ *  means the default look. */
+const LOOK_KEY = 'hqc.look';
+function loadLook(): Look {
+  try {
+    const v = JSON.parse(localStorage.getItem(LOOK_KEY) ?? '{}') ?? {};
+    return { wideFeed: v.wideFeed === true, systemFont: v.systemFont === true, railNames: v.railNames === true };
+  } catch {
+    return { wideFeed: false, systemFont: false, railNames: false };
+  }
+}
+
 /** The projects, sessions and list orders as last shown, on this device: shown at once on a
  *  reload, replaced when the hub answers. Storage that fails or holds something else: none. */
 const LIST_KEY = 'hqc.list';
@@ -51,6 +63,9 @@ function loadList(): { home: string; projects: Project[]; sessions: SessionInfo[
 
 export class AppState {
   me: Me | null = null;
+  /** The full-width feed and the system font ("Settings" → "Feed"), the project names in the
+   *  project bar ("Settings" → "Project bar"), on this device. */
+  look: Look = loadLook();
   error: string | null = null;
   readonly projects = new Map<string, Project>();
   readonly sessions = new Map<string, SessionInfo>();
@@ -135,6 +150,16 @@ export class AppState {
       // Not kept past a reload.
     }
     if (had !== this.drafts.has(id)) this.changed();
+  }
+
+  setLook(patch: Partial<Look>): void {
+    this.look = { ...this.look, ...patch };
+    try {
+      localStorage.setItem(LOOK_KEY, JSON.stringify(this.look));
+    } catch {
+      // Kept until a reload.
+    }
+    this.changed();
   }
 
   private changed(): void {

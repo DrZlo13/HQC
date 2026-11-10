@@ -4456,33 +4456,11 @@ a.relay-peer {
   cursor: pointer;
 }
 
-.composer-phone {
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-.composer-phone .composer-row {
-  align-items: flex-end;
-}
+/* A phone: the computer's composer, its text at 16 px, which iOS does not zoom into on focus;
+   one line still as tall as the buttons. */
 .composer-phone .composer-input {
-  flex: 1;
-  min-height: 44px;
-  border-radius: 22px;
-  border: 1px solid var(--border);
-  background: var(--surface);
   font-size: 16px;
-  line-height: 1.4;
-  padding: 11px 16px;
-}
-.composer-phone .btn-attach {
-  width: 44px;
-  height: 44px;
-  border-radius: 22px;
-}
-.composer-phone .btn-send {
-  width: 44px;
-  height: 44px;
-  border-radius: 22px;
+  padding: 6px 4px;
 }
 
 /* One column on a computer: the composer of the VS Code tab's size, no line above it. */

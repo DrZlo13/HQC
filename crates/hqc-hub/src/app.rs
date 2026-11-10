@@ -65,6 +65,9 @@ pub struct Inner {
     owner_locks: Mutex<HashMap<(&'static str, Uuid), OwnerLock>>,
     /// The text of the answer being written ([`AppState::live_text`]).
     live: Mutex<LiveText>,
+    /// Session -> its latest `subagents.live`, unless that list was empty, and when it came
+    /// ([`AppState::live_agents`]).
+    live_agents: Mutex<HashMap<Uuid, (Value, Instant)>>,
 }
 
 /// A session's `agent.delta` text since its last `agent.message` or `status` other than
@@ -110,6 +113,8 @@ pub enum Notice {
         at: u64,
         event: Value,
     },
+    /// A `subagents.live` ([`AppState::live_agents`]).
+    LiveAgents { session_id: Uuid, event: Value },
     /// `delivery` of an input changed (SPEC §3 Event).
     Delivery {
         session_id: Uuid,
@@ -150,6 +155,7 @@ impl AppState {
             limits: Mutex::new(HashMap::new()),
             owner_locks: Mutex::new(HashMap::new()),
             live: Mutex::default(),
+            live_agents: Mutex::default(),
             config,
         }))
     }
@@ -229,6 +235,26 @@ impl AppState {
         (copy, live.next)
     }
 
+    /// Fan a `subagents.live` out to clients and keep it as the session's list, or drop the
+    /// list when it is `empty`. Under the lock of the lists, so the last one on the bus is the
+    /// one kept.
+    pub fn live_agents_changed(&self, session_id: Uuid, event: Value, empty: bool) {
+        let mut lists = self.live_agents.lock().unwrap();
+        if empty {
+            lists.remove(&session_id);
+        } else {
+            lists.insert(session_id, (event.clone(), Instant::now()));
+        }
+        self.notify(Notice::LiveAgents { session_id, event });
+    }
+
+    /// The session's latest `subagents.live`, unless it was empty, its run times counted now.
+    pub fn live_agents(&self, session_id: Uuid) -> Option<Value> {
+        let lists = self.live_agents.lock().unwrap();
+        let (event, at) = lists.get(&session_id)?;
+        Some(aged(event.clone(), at.elapsed()))
+    }
+
     /// The worker sent something for the session (any event, `agent.delta` included).
     pub fn worker_activity(&self, session_id: Uuid) {
         self.turn_activity
@@ -267,6 +293,21 @@ impl AppState {
     }
 }
 
+/// `event`, a `subagents.live`, with `age` added to the `duration_ms` of each subagent.
+fn aged(mut event: Value, age: std::time::Duration) -> Value {
+    let age = u64::try_from(age.as_millis()).unwrap_or(u64::MAX);
+    let agents = event
+        .get_mut("payload")
+        .and_then(|p| p.get_mut("agents"))
+        .and_then(Value::as_array_mut);
+    for a in agents.into_iter().flatten() {
+        if let Some(d) = a.get("duration_ms").and_then(Value::as_u64) {
+            a["duration_ms"] = d.saturating_add(age).into();
+        }
+    }
+    event
+}
+
 /// Connected workers by id; at most one live connection per worker.
 #[derive(Default)]
 pub struct WorkerRegistry {
@@ -296,5 +337,25 @@ impl WorkerRegistry {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The copy a subscription gets counts the time since the list came; a run time at the
+    /// top of the range stays there.
+    #[test]
+    fn a_kept_list_ages() {
+        let event = json!({"type": "subagents.live", "payload": {"agents": [
+            {"task_id": "a", "description": "A", "duration_ms": 120_000},
+            {"task_id": "b", "description": "B", "duration_ms": u64::MAX},
+        ]}});
+        let got = aged(event, std::time::Duration::from_secs(480));
+        assert_eq!(got["payload"]["agents"][0]["duration_ms"], 600_000);
+        assert_eq!(got["payload"]["agents"][1]["duration_ms"], u64::MAX);
+        assert_eq!(got["payload"]["agents"][0]["description"], "A");
     }
 }

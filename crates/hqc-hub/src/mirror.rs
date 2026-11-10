@@ -155,7 +155,10 @@ pub async fn ingest(
         tracing::warn!(worker_id = %conn.worker_id, cwd = %m.cwd, workspace = %ws.path, "mirror.event outside its workspace, dropped");
         return Ok(dropped.into());
     };
-    if matches!(m.event.kind, EventKind::AgentDelta { .. }) {
+    if matches!(
+        m.event.kind,
+        EventKind::AgentDelta { .. } | EventKind::SubagentsLive { .. }
+    ) {
         return Ok(dropped.into());
     }
     let title = m.title.as_deref().and_then(crate::worker_ws::runtime_title);

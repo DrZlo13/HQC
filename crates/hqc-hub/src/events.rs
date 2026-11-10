@@ -128,6 +128,13 @@ pub async fn ingest_worker_event(
             "the service session takes only `system worker_log` from the worker".into(),
         ));
     }
+    if let EventKind::SubagentsLive { agents } = &ev.kind {
+        // Transport only, like `agent.delta` (SPEC §4). An archived session's too: the empty
+        // list its stopped agent sends drops the one kept.
+        app.worker_activity(s.id);
+        app.live_agents_changed(s.id, raw, agents.is_empty());
+        return Ok(dropped);
+    }
     if s.archived && !ends_turn(&ev.kind) {
         tracing::debug!(session_id = %s.id, kind = kind_name, "event for an archived session dropped");
         return Ok(dropped);

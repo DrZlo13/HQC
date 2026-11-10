@@ -271,6 +271,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::PermissionMode(_) => continue,
             // Every turn's `rate_limit_event`; `limits_of_a_rate_limit_event` looks at it.
             AdapterEvent::Limits(_) => continue,
+            // With every count and progress; `live_subagents_are_listed` looks at it.
+            AdapterEvent::LiveSubagents(_) => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -4032,15 +4034,7 @@ fn no_message_goes_into_a_turn_that_asks() {
 #[test]
 fn running_subagents_are_counted() {
     let mut core = Core::new(Uuid::now_v7(), false);
-    let stream = r#"{"type":"system","subtype":"task_started","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","description":"Reply with number","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","prompt":"Reply with the number 4.","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e01"}
-{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e02"}
-{"type":"system","subtype":"task_started","task_id":"b6yusn86f","run_id":"0mw3mxvyu-6c7dc659","owned_by_subagent":true,"tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","description":"Sleep for 6 seconds","is_backgrounded":false,"parent_task_id":"a52af2b436ded4cea","task_type":"local_bash","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e03"}
-{"type":"system","subtype":"task_progress","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Running Sleep for 6 seconds","subagent_type":"general-purpose","usage":{"total_tokens":23176,"tool_uses":1,"duration_ms":1310},"last_tool_name":"Bash","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e04"}
-{"type":"system","subtype":"task_notification","task_id":"b6yusn86f","run_id":"0mw3mxvyu-6c7dc659","tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","status":"completed","output_file":"","summary":"Sleep for 6 seconds","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e05"}
-{"type":"system","subtype":"task_updated","task_id":"a52af2b436ded4cea","patch":{"is_backgrounded":true},"uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e06"}
-{"type":"system","subtype":"task_updated","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","patch":{"status":"completed","end_time":1793888262670},"uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e07"}
-{"type":"system","subtype":"task_notification","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","status":"completed","output_file":"/tmp/tasks/a55949578b136436b.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e08"}
-{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"completed","output_file":"/tmp/tasks/a52af2b436ded4cea.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e09"}"#;
+    let stream = TWO_SUBAGENTS;
     // The count reported by each line, in order.
     let counts: Vec<Vec<u32>> = stream
         .lines()
@@ -4069,6 +4063,88 @@ fn running_subagents_are_counted() {
         ]
     );
 }
+
+/// The subagents shown above the input, those of `running_subagents_are_counted`: in the
+/// order they started, each with the title of its `task_started` and what its latest
+/// `task_progress` said; the list goes when it changes and on each progress, empty at the end.
+#[test]
+fn live_subagents_are_listed() {
+    let fg = live_row("a55949578b136436b", "Reply with number", None);
+    let bg = live_row("a52af2b436ded4cea", "Sleep and reply with number", None);
+    let bg_running = live_row(
+        "a52af2b436ded4cea",
+        "Sleep and reply with number",
+        Some(("Running Sleep for 6 seconds", 23176, 1)),
+    );
+    assert_eq!(
+        live_lists(TWO_SUBAGENTS.lines()),
+        [
+            vec![vec![fg.clone()]],
+            vec![vec![fg.clone(), bg]],
+            vec![],
+            vec![vec![fg, bg_running.clone()]],
+            vec![],
+            vec![],
+            vec![vec![bg_running]],
+            vec![],
+            vec![vec![]]
+        ]
+    );
+}
+
+/// (task_id, title, activity, total_tokens, tool_uses) of a subagent shown above the input.
+type LiveRow = (String, String, Option<String>, Option<u64>, Option<u64>);
+
+/// The row of subagent `id`; `progress`: (activity, total_tokens, tool_uses).
+fn live_row(id: &str, title: &str, progress: Option<(&str, u64, u64)>) -> LiveRow {
+    (
+        id.into(),
+        title.into(),
+        progress.map(|p| p.0.into()),
+        progress.map(|p| p.1),
+        progress.map(|p| p.2),
+    )
+}
+
+/// The lists of subagents each line sends, in order.
+fn live_lists<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Vec<Vec<LiveRow>>> {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    lines
+        .map(|l| {
+            core.on_line(l)
+                .into_iter()
+                .filter_map(|a| match a {
+                    Action::Emit(AdapterEvent::LiveSubagents(list)) => Some(
+                        list.into_iter()
+                            .map(|s| {
+                                (
+                                    s.task_id,
+                                    s.description,
+                                    s.activity,
+                                    s.total_tokens,
+                                    s.tool_uses,
+                                )
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A foreground and a background subagent (lines of live runs on 2.1.312), a Bash call of the
+/// background one and its progress, then their ends.
+const TWO_SUBAGENTS: &str = r#"{"type":"system","subtype":"task_started","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","description":"Reply with number","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","prompt":"Reply with the number 4.","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e01"}
+{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e02"}
+{"type":"system","subtype":"task_started","task_id":"b6yusn86f","run_id":"0mw3mxvyu-6c7dc659","owned_by_subagent":true,"tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","description":"Sleep for 6 seconds","is_backgrounded":false,"parent_task_id":"a52af2b436ded4cea","task_type":"local_bash","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e03"}
+{"type":"system","subtype":"task_progress","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Running Sleep for 6 seconds","subagent_type":"general-purpose","usage":{"total_tokens":23176,"tool_uses":1,"duration_ms":1310},"last_tool_name":"Bash","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e04"}
+{"type":"system","subtype":"task_notification","task_id":"b6yusn86f","run_id":"0mw3mxvyu-6c7dc659","tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","status":"completed","output_file":"","summary":"Sleep for 6 seconds","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e05"}
+{"type":"system","subtype":"task_updated","task_id":"a52af2b436ded4cea","patch":{"is_backgrounded":true},"uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e06"}
+{"type":"system","subtype":"task_updated","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","patch":{"status":"completed","end_time":1793888262670},"uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e07"}
+{"type":"system","subtype":"task_notification","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","status":"completed","output_file":"/tmp/tasks/a55949578b136436b.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e08"}
+{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"completed","output_file":"/tmp/tasks/a52af2b436ded4cea.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e09"}"#;
 
 /// A foreground subagent the CLI sent no end for (an interrupt, a denied call,
 /// `error_max_turns`) stops counting at the `result` of the main turn; a background one goes
@@ -4120,7 +4196,7 @@ fn a_foreground_subagent_stops_counting_at_the_result() {
 /// of the capture, in order, with the fields the adapter reads; the lines between them change
 /// no count).
 const MOVED_SUBAGENT: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"}]}
-{"type":"system","subtype":"task_started","task_id":"a739e2460001cfdc1","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"task_started","task_id":"a739e2460001cfdc1","description":"Run ping and report done","is_backgrounded":true,"task_type":"local_agent"}
 {"type":"result","subtype":"success","num_turns":2}
 {"type":"system","subtype":"task_started","task_id":"b0h1rmks3","owned_by_subagent":true,"is_backgrounded":false,"parent_task_id":"a739e2460001cfdc1","task_type":"local_bash"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"},{"task_id":"b0h1rmks3","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
@@ -4135,7 +4211,7 @@ const MOVED_SUBAGENT: &str = r#"{"type":"system","subtype":"background_tasks_cha
 {"type":"system","subtype":"task_notification","task_id":"b0h1rmks3","status":"completed","summary":"Background command \"Ping localhost 240 times quietly\" completed (exit code 0)"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"blm1ph76i","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"},{"task_id":"blm1ph76i","task_type":"local_bash","parent_task_id":"a739e2460001cfdc1"}]}
-{"type":"system","subtype":"task_started","task_id":"a739e2460001cfdc1","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"task_started","task_id":"a739e2460001cfdc1","description":"Run ping and report done","is_backgrounded":true,"task_type":"local_agent"}
 {"type":"system","subtype":"task_updated","task_id":"blm1ph76i","patch":{"status":"completed"}}
 {"type":"system","subtype":"task_notification","task_id":"blm1ph76i","status":"completed","summary":"Monitor \"wait for background ping to finish\" stream ended"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a739e2460001cfdc1","task_type":"local_agent"}]}
@@ -4202,6 +4278,44 @@ fn a_subagent_waiting_on_its_background_command_still_counts() {
         &["turn_ended"],
     ];
     assert_eq!(task_counts(MOVED_SUBAGENT.lines()), want);
+}
+
+/// [`MOVED_SUBAGENT`]: the CLI lists the subagent before its `task_started`, so it is shown
+/// with no title until that start gives it one; its start again when the `ping` ends sends
+/// nothing; it goes when it stops counting. That start keeps its run time from the first one
+/// and its place before a subagent that started after it.
+#[test]
+fn a_subagent_waiting_on_its_background_command_stays_listed() {
+    let id = "a739e2460001cfdc1";
+    let mut want: Vec<Vec<Vec<LiveRow>>> = vec![vec![]; 25];
+    want[0] = vec![vec![live_row(id, "", None)]];
+    want[1] = vec![vec![live_row(id, "Run ping and report done", None)]];
+    want[23] = vec![vec![]];
+    assert_eq!(live_lists(MOVED_SUBAGENT.lines()), want);
+
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let lines: Vec<&str> = MOVED_SUBAGENT.lines().collect();
+    for l in &lines[..2] {
+        core.on_line(l);
+    }
+    core.on_line(r#"{"type":"system","subtype":"task_started","task_id":"b","description":"Other","is_backgrounded":true,"task_type":"local_agent"}"#);
+    for l in &lines[2..16] {
+        core.on_line(l);
+    }
+    std::thread::sleep(Duration::from_millis(30));
+    core.on_line(lines[16]);
+    let list = core
+        .on_line(r#"{"type":"system","subtype":"task_progress","task_id":"a739e2460001cfdc1","description":"Running Ping localhost","usage":{"total_tokens":100,"tool_uses":2}}"#)
+        .into_iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::LiveSubagents(list)) => Some(list),
+            _ => None,
+        })
+        .unwrap();
+    let ids: Vec<&str> = list.iter().map(|s| s.task_id.as_str()).collect();
+    assert_eq!(ids, [id, "b"]);
+    assert_eq!(list[0].description, "Run ping and report done");
+    assert!(list[0].duration_ms >= 30, "{list:?}");
 }
 
 /// [`MOVED_SUBAGENT`] without the Monitor `blm1ph76i`, one long command only (a list that comes
@@ -4380,7 +4494,7 @@ fn a_held_subagent_listed_again_with_another_keeps_its_end() {
 /// and `result` of the capture, in order, with the fields the adapter reads).
 const REPORTED_SUBAGENT: &str = r#"{"type":"system","subtype":"init"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"}]}
-{"type":"system","subtype":"task_started","task_id":"a7b736ac9a06b8816","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"task_started","task_id":"a7b736ac9a06b8816","description":"Run ping command once","is_backgrounded":true,"task_type":"local_agent"}
 {"type":"result","subtype":"success","num_turns":2}
 {"type":"system","subtype":"task_started","task_id":"baydyre83","owned_by_subagent":true,"is_backgrounded":false,"parent_task_id":"a7b736ac9a06b8816","task_type":"local_bash"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"},{"task_id":"baydyre83","task_type":"local_bash","parent_task_id":"a7b736ac9a06b8816"}]}
@@ -4396,7 +4510,7 @@ const REPORTED_SUBAGENT: &str = r#"{"type":"system","subtype":"init"}
 {"type":"system","subtype":"task_notification","task_id":"baydyre83","status":"completed","summary":"Background command \"Ping localhost 200 times quietly\" completed (exit code 0)"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[]}
 {"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"}]}
-{"type":"system","subtype":"task_started","task_id":"a7b736ac9a06b8816","is_backgrounded":true,"task_type":"local_agent"}
+{"type":"system","subtype":"task_started","task_id":"a7b736ac9a06b8816","description":"Run ping command once","is_backgrounded":true,"task_type":"local_agent"}
 {"type":"system","subtype":"task_updated","task_id":"a7b736ac9a06b8816","patch":{"status":"completed"}}
 {"type":"system","subtype":"task_notification","task_id":"a7b736ac9a06b8816","status":"completed","handback":"send","summary":"This agent's report was delivered to you as a message from \"a7b736ac9a06b8816\" (its SubagentHandback call). Read it there; it is not repeated here.\n"}
 {"type":"system","subtype":"background_tasks_changed","tasks":[]}
@@ -4426,6 +4540,24 @@ fn a_subagent_that_reports_twice_gives_one_line() {
         .map(|(i, n)| (i, format!("subagents:{n}")))
         .collect();
     assert_eq!(subagents, want);
+}
+
+/// [`REPORTED_SUBAGENT`]: shown with no title from the CLI's list until its `task_started`,
+/// gone once it reported with only its `ping` left, then shown again the same way when the CLI
+/// lists and starts it again, and gone at the end.
+#[test]
+fn a_subagent_that_reports_twice_is_listed_twice() {
+    let id = "a7b736ac9a06b8816";
+    let untitled = vec![vec![live_row(id, "", None)]];
+    let titled = vec![vec![live_row(id, "Run ping command once", None)]];
+    let mut want: Vec<Vec<Vec<LiveRow>>> = vec![vec![]; 24];
+    want[1] = untitled.clone();
+    want[2] = titled.clone();
+    want[10] = vec![vec![]];
+    want[17] = untitled;
+    want[18] = titled;
+    want[22] = vec![vec![]];
+    assert_eq!(live_lists(REPORTED_SUBAGENT.lines()), want);
 }
 
 /// [`MOVED_SUBAGENT`] up to the subagent's first `task_notification`, then the process exits:

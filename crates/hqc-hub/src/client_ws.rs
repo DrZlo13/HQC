@@ -2,9 +2,10 @@
 //! [`hqc_proto::client_frame`].
 //!
 //! - `subscribe {session_id, after_seq?}` — stored events with `seq > after_seq` (default 0),
-//!   the answer being written as one `agent.delta` ([`AppState::live_text`]), then
-//!   `subscribed {session_id, last_seq}`, then the live stream: stored events,
-//!   `agent.delta` (no `seq`), `delivery` changes of inputs;
+//!   the answer being written as one `agent.delta` ([`AppState::live_text`]), the latest
+//!   `subagents.live` ([`AppState::live_agents`]), then `subscribed {session_id, last_seq}`,
+//!   then the live stream: stored events, `agent.delta` and `subagents.live` (no `seq`),
+//!   `delivery` changes of inputs;
 //! - `unsubscribe {session_id}`;
 //! - `subscribe_summary` — `summary {sessions}` for every session of the user, then
 //!   `session.summary {session}` whenever one of them changes; with it `requests {requests}`,
@@ -163,6 +164,11 @@ impl Client {
                         return false;
                     }
                 }
+                if let Some(event) = self.app.live_agents(session_id) {
+                    if !self.send(ServerFrame::Event { event }).await {
+                        return false;
+                    }
+                }
                 let last_seq = self.subs[&session_id].max(0) as u64;
                 self.send(ServerFrame::Subscribed {
                     session_id,
@@ -256,6 +262,15 @@ impl Client {
                 }
                 _ => true,
             },
+            Notice::LiveAgents { session_id, event } => {
+                if !self.subs.contains_key(session_id) {
+                    return true;
+                }
+                self.send(ServerFrame::Event {
+                    event: event.clone(),
+                })
+                .await
+            }
             Notice::Resent {
                 session_id,
                 seq,
@@ -340,6 +355,12 @@ impl Client {
         for id in ids {
             if !self.backfill(id).await {
                 return false;
+            }
+            // A `subagents.live` lost with the overflow.
+            if let Some(event) = self.app.live_agents(id) {
+                if !self.send(ServerFrame::Event { event }).await {
+                    return false;
+                }
             }
         }
         !self.summary || self.send_summary().await

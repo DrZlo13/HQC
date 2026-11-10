@@ -167,6 +167,24 @@ pub struct ClarifyQuestion {
     pub multi: Option<bool>,
 }
 
+/// One subagent of `subagents.live` (SPEC §4, since 0.101).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSubagent {
+    pub task_id: String,
+    /// Its task (Claude Code: `description` of its `task_started`).
+    pub description: String,
+    /// What it does now (Claude Code: `description` of its latest `task_progress`); absent
+    /// before any progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<u64>,
+    /// How long it has run when the list was sent, by the worker's clock.
+    pub duration_ms: u64,
+}
+
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -200,6 +218,10 @@ pub enum EventKind {
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
     AgentDelta { text: String },
+    /// The subagents the agent runs now, the whole list in the order they started; empty:
+    /// none (since SPEC 0.101). Transport only, never stored (SPEC §4, §5.2).
+    #[serde(rename = "subagents.live")]
+    SubagentsLive { agents: Vec<LiveSubagent> },
     #[serde(rename = "agent.message")]
     AgentMessage {
         text: String,
@@ -362,6 +384,7 @@ impl EventKind {
     pub const TYPES: &'static [&'static str] = &[
         "user.message",
         "agent.delta",
+        "subagents.live",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -484,6 +507,7 @@ mod tests {
     const SPEC_EVENT_TYPES: &[&str] = &[
         "user.message",
         "agent.delta",
+        "subagents.live",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -510,6 +534,10 @@ mod tests {
         (
             "agent.delta",
             include_str!("../examples/wire/event.agent.delta.json"),
+        ),
+        (
+            "subagents.live",
+            include_str!("../examples/wire/event.subagents.live.json"),
         ),
         (
             "agent.message",
@@ -571,6 +599,7 @@ mod tests {
         Some(match k {
             EventKind::UserMessage { .. } => "user.message",
             EventKind::AgentDelta { .. } => "agent.delta",
+            EventKind::SubagentsLive { .. } => "subagents.live",
             EventKind::AgentMessage { .. } => "agent.message",
             EventKind::AgentThinking { .. } => "agent.thinking",
             EventKind::ToolCall { .. } => "tool.call",

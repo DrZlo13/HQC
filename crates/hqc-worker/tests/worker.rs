@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use hqc_proto::event::EventKind;
+use hqc_proto::event::{EventKind, LiveSubagent};
 use hqc_worker::adapter::fake::{agent_event, agent_message, FakeAdapters, FakeCall};
 use hqc_worker::adapter::AdapterEvent;
 use hqc_worker::connection::Status;
@@ -2989,6 +2989,75 @@ async fn subagents_go_in_session_state() {
     assert!(st["payload"].get("subagents").is_none(), "{st}");
     ack_of(&mut c, &fk).await;
     w.stop().await;
+}
+
+// The runtime's list of subagents goes as `subagents.live`; the last one sent is sent again on
+// the next connect unless it was empty, its run times counted then; an empty list, the
+// runtime's or the one sent when the agent is stopped, leaves nothing to send again.
+#[tokio::test]
+async fn live_subagents_are_sent_again_on_connect() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let agent = LiveSubagent {
+        task_id: "a1".into(),
+        description: "Fix the build".into(),
+        activity: None,
+        total_tokens: None,
+        tool_uses: None,
+        duration_ms: 1000,
+    };
+    adapters
+        .emit(sid, AdapterEvent::LiveSubagents(vec![agent.clone()]))
+        .await;
+    assert_eq!(live_agents(&mut c).await[0]["duration_ms"], 1000);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    c.close().await;
+    c = hub.accept().await;
+    c.handshake().await;
+    let again = live_agents(&mut c).await;
+    assert_eq!(again[0]["task_id"], "a1", "{again}");
+    assert!(again[0]["duration_ms"].as_u64().unwrap() >= 1050, "{again}");
+    // Its subagents ended, the agent runs on: nothing is sent again.
+    adapters
+        .emit(sid, AdapterEvent::LiveSubagents(vec![]))
+        .await;
+    assert_eq!(live_agents(&mut c).await, json!([]));
+    c.close().await;
+    c = hub.accept().await;
+    c.handshake().await;
+    while let Some(f) = c.maybe("event", Duration::from_millis(300)).await {
+        assert_ne!(f["payload"]["event"]["type"], "subagents.live", "{f}");
+    }
+    adapters
+        .emit(sid, AdapterEvent::LiveSubagents(vec![agent]))
+        .await;
+    assert_eq!(live_agents(&mut c).await[0]["task_id"], "a1");
+    let fk = c.frame("session.kill", json!({"session_id": sid})).await;
+    assert_eq!(live_agents(&mut c).await, json!([]));
+    ack_of(&mut c, &fk).await;
+    c.close().await;
+    c = hub.accept().await;
+    c.handshake().await;
+    while let Some(f) = c.maybe("event", Duration::from_millis(300)).await {
+        assert_ne!(f["payload"]["event"]["type"], "subagents.live", "{f}");
+    }
+    w.stop().await;
+}
+
+/// The `agents` of the next `subagents.live`; other events read meanwhile are dropped.
+async fn live_agents(c: &mut HubConn) -> Value {
+    loop {
+        let f = c.expect("event").await;
+        if f["payload"]["event"]["type"] == "subagents.live" {
+            return f["payload"]["event"]["payload"]["agents"].clone();
+        }
+    }
 }
 
 /// The reply (`ack` or `error`) to frame `id`, skipped or next; other replies read meanwhile

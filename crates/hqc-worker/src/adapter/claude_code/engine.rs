@@ -28,6 +28,10 @@
 //!   a `background_tasks_changed` brings at the next line of another kind: the CLI reports a
 //!   subagent ended while it waits for a command moved to the background, and lists and
 //!   starts its `task_id` again when the command ends (2.1.312);
+//! - the same subagents one by one → [`AdapterEvent::LiveSubagents`] when they or a title
+//!   change, and on every `system` `task_progress` of one of them: the title from its
+//!   `task_started`, what it does now (`description`), `total_tokens` and `tool_uses` from its
+//!   latest `task_progress` (2.1.312);
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
@@ -70,11 +74,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, bail};
 use hqc_proto::event::{
     ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event,
-    EventKind, SessionState,
+    EventKind, LiveSubagent, SessionState,
 };
 use hqc_proto::frame::{PermissionMode, SessionInput};
 use serde_json::{json, Value};
@@ -163,6 +168,33 @@ struct Written {
     carried: bool,
 }
 
+/// A subagent of [`Core::live`].
+#[derive(Debug)]
+struct LiveAgent {
+    task_id: String,
+    /// `description` of its `task_started`; empty while the CLI's list counts it before that.
+    title: String,
+    /// Its first `task_started`, or the line that counted it first when that came earlier.
+    since: Instant,
+    /// `description` of its latest `task_progress`: what it does now.
+    activity: Option<String>,
+    total_tokens: Option<u64>,
+    tool_uses: Option<u64>,
+}
+
+impl LiveAgent {
+    fn new(task_id: &str, title: &str) -> Self {
+        Self {
+            task_id: task_id.to_owned(),
+            title: text(title),
+            since: Instant::now(),
+            activity: None,
+            total_tokens: None,
+            tool_uses: None,
+        }
+    }
+}
+
 impl Pending {
     fn agent_id(&self) -> Option<&str> {
         match self {
@@ -195,6 +227,11 @@ pub struct Core {
     subagents: HashSet<String>,
     /// The subagent count last reported ([`Core::running_subagents`]).
     subagents_reported: usize,
+    /// The subagents of the count last reported, in the order they started, with what the CLI
+    /// said of each ([`AdapterEvent::LiveSubagents`]).
+    live: Vec<LiveAgent>,
+    /// [`Core::live`] got a subagent or a title since it was last reported.
+    live_changed: bool,
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
     /// reported: the next line of another kind reports it.
     recount: bool,
@@ -267,6 +304,8 @@ impl Core {
             lifecycle: false,
             subagents: HashSet::new(),
             subagents_reported: 0,
+            live: Vec::new(),
+            live_changed: false,
             recount: false,
             background: Vec::new(),
             in_turn: false,
@@ -641,9 +680,11 @@ impl Core {
                     let agent = v["task_type"] == "local_agent";
                     if let Some(id) = v["task_id"].as_str().filter(|_| agent) {
                         self.reported.remove(id);
+                        self.live_started(id, v["description"].as_str().unwrap_or(""));
                     }
                     self.count_subagent(v["task_id"].as_str().filter(|_| agent), true)
                 }
+                Some("task_progress") => self.on_task_progress(&v),
                 // Its end comes before the task's `task_notification` (2.1.312).
                 Some("task_updated") => {
                     if let Some(id) = v["task_id"]
@@ -959,6 +1000,11 @@ impl Core {
     /// same `task_id` again. A task of a subagent in [`Core::reported`] does not count it: the
     /// subagent handed its report over and left the task running.
     fn running_subagents(&self) -> usize {
+        self.running_subagent_ids().len()
+    }
+
+    /// The `task_id`s of [`Core::running_subagents`].
+    fn running_subagent_ids(&self) -> HashSet<&str> {
         let mut ids: HashSet<&str> = self.subagents.iter().map(String::as_str).collect();
         for t in &self.background {
             if t["task_type"] == "local_agent" {
@@ -966,7 +1012,7 @@ impl Core {
             }
             ids.extend(self.parent(t));
         }
-        ids.len()
+        ids
     }
 
     /// The subagent listed task `t` belongs to, unless that subagent has reported.
@@ -989,8 +1035,9 @@ impl Core {
     }
 
     /// [`AdapterEvent::Subagents`] when [`Core::running_subagents`] differs from the count
-    /// last reported, then the end of each subagent in [`Core::held_ends`] that no longer
-    /// counts; `task_id`: the subagent whose start or end the CLI reported, for the log.
+    /// last reported, their list ([`Core::report_live`]), then the end of each subagent in
+    /// [`Core::held_ends`] that no longer counts; `task_id`: the subagent whose start or end
+    /// the CLI reported, for the log.
     fn report_subagents(&mut self, task_id: Option<&str>) -> Vec<Action> {
         self.recount = false;
         let n = self.running_subagents();
@@ -1001,6 +1048,7 @@ impl Core {
             tracing::info!(session_id = %self.session_id, task_id, subagents = n, "subagents");
             out.push(Action::Emit(AdapterEvent::Subagents(n)));
         }
+        out.extend(self.report_live());
         let (ended, held): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut self.held_ends)
             .into_iter()
             .partition(|(id, _)| !self.counts(id));
@@ -1009,6 +1057,81 @@ impl Core {
             out.extend(self.on_task_ended(&v));
         }
         out
+    }
+
+    /// [`AdapterEvent::LiveSubagents`] when the subagents of [`Core::running_subagents`] or a
+    /// title differ from those last reported. [`Core::live`] keeps exactly them; one the CLI's
+    /// list counts before its `task_started` has no title until that comes.
+    fn report_live(&mut self) -> Option<Action> {
+        let ids: HashSet<String> = self
+            .running_subagent_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let before = self.live.len();
+        self.live.retain(|a| ids.contains(&a.task_id));
+        let mut changed = std::mem::take(&mut self.live_changed) || self.live.len() != before;
+        let mut new: Vec<&String> = ids
+            .iter()
+            .filter(|id| !self.live.iter().any(|a| &a.task_id == *id))
+            .collect();
+        new.sort();
+        for id in new {
+            self.live.push(LiveAgent::new(id, ""));
+            changed = true;
+        }
+        changed.then(|| self.live_list())
+    }
+
+    /// Subagent `id`'s `task_started` with `title` (its `description`): a repeated one keeps
+    /// the first start; one the CLI's list counted before gets its title.
+    fn live_started(&mut self, id: &str, title: &str) {
+        match self.live.iter_mut().find(|a| a.task_id == id) {
+            Some(a) => {
+                if a.title.is_empty() && !title.is_empty() {
+                    a.title = text(title);
+                    self.live_changed = true;
+                }
+            }
+            None => {
+                self.live.push(LiveAgent::new(id, title));
+                self.live_changed = true;
+            }
+        }
+    }
+
+    /// `system/task_progress` (2.1.312: `description` is what the subagent does now, `usage`
+    /// its `total_tokens` and `tool_uses` so far) of a subagent of [`Core::live`]: the list
+    /// again.
+    fn on_task_progress(&mut self, v: &Value) -> Vec<Action> {
+        let Some(a) = self
+            .live
+            .iter_mut()
+            .find(|a| v["task_id"] == a.task_id.as_str())
+        else {
+            return vec![];
+        };
+        a.activity = v["description"].as_str().map(text);
+        a.total_tokens = v["usage"]["total_tokens"].as_u64();
+        a.tool_uses = v["usage"]["tool_uses"].as_u64();
+        vec![self.live_list()]
+    }
+
+    /// [`Core::live`] as sent: the run time of each subagent counted now.
+    fn live_list(&self) -> Action {
+        Action::Emit(AdapterEvent::LiveSubagents(
+            self.live
+                .iter()
+                .map(|a| LiveSubagent {
+                    task_id: a.task_id.clone(),
+                    description: a.title.clone(),
+                    activity: a.activity.clone(),
+                    total_tokens: a.total_tokens,
+                    tool_uses: a.tool_uses,
+                    duration_ms: u64::try_from(a.since.elapsed().as_millis()).unwrap_or(u64::MAX),
+                })
+                .collect(),
+        ))
     }
 
     fn on_user(&mut self, v: &Value) -> Vec<Action> {

@@ -47,6 +47,11 @@ pub enum AdapterEvent {
     /// `task_type: local_agent` until the task ends, and while a background task the CLI
     /// lists belongs to it); sent as `session.state.subagents`. Reported when it changes.
     Subagents(u32),
+    /// The subagents of [`AdapterEvent::Subagents`] one by one, in the order they started
+    /// (Claude Code: the title of each from its `system/task_started`, what it does now from
+    /// its latest `system/task_progress`); sent as `subagents.live`, transport only (SPEC §4).
+    /// Reported when the list or a title changes and on every progress of one of them.
+    LiveSubagents(Vec<hqc_proto::event::LiveSubagent>),
     /// How many background tasks the runtime lists now, its subagents' included (Claude Code:
     /// the `tasks` of `system/background_tasks_changed`, SPEC §8.1). Not sent to the hub: the
     /// agent is not idle while it is above 0 (SPEC §17.3), and a move tells the agent how many

@@ -35,7 +35,10 @@
 //!   input the turn carries to the next one becomes that turn, one the runtime will not take
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
 //! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) is repeated in every
-//!   `session.state` like `title`, 0 when the agent is stopped.
+//!   `session.state` like `title`, 0 when the agent is stopped. Their list
+//!   ([`AdapterEvent::LiveSubagents`]) goes as `subagents.live`, empty when the agent is
+//!   stopped; the last one sent is sent again on every connect unless it was empty, its run
+//!   times counted then.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -884,6 +887,7 @@ impl Supervisor {
             turn: None,
             injected: Vec::new(),
             subagents: 0,
+            live: None,
             background_tasks: 0,
             stop_asked: false,
             stopped_by_move: 0,
@@ -991,6 +995,9 @@ struct Session {
     injected: Vec<Queued>,
     /// The runtime's count of running subagents, repeated in every `session.state`.
     subagents: u32,
+    /// The last `subagents.live` list sent, unless it was empty, and when: sent again on every
+    /// connect, its run times counted then.
+    live: Option<(Vec<hqc_proto::event::LiveSubagent>, Instant)>,
     /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]); not sent.
     background_tasks: u32,
     /// A `session.stop` came since the last end of a turn: an input the runtime drops then
@@ -1158,7 +1165,19 @@ impl Session {
                 self.reply_result(&id, r);
                 self.pump().await;
             }
-            Cmd::Resync => self.send_state(),
+            Cmd::Resync => {
+                self.send_state();
+                // A list sent while disconnected was lost; the next one may come only with
+                // the subagent's next step.
+                if let Some((agents, at)) = &self.live {
+                    let age = u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let mut agents = agents.clone();
+                    for a in &mut agents {
+                        a.duration_ms = a.duration_ms.saturating_add(age);
+                    }
+                    self.live_subagents(agents);
+                }
+            }
             Cmd::Release => self.release().await,
             Cmd::Held { runtime_session_id } => {
                 let rid = runtime_session_id.to_string();
@@ -1677,6 +1696,13 @@ impl Session {
                     self.send_state();
                 }
             }
+            // As the count: a list read from a process already stopped would outlive it.
+            AdapterEvent::LiveSubagents(agents) => {
+                if self.state != ProcessState::Stopped {
+                    self.live = (!agents.is_empty()).then(|| (agents.clone(), Instant::now()));
+                    self.live_subagents(agents);
+                }
+            }
             AdapterEvent::BackgroundTasks(n) => {
                 if self.state != ProcessState::Stopped {
                     self.background_tasks = n;
@@ -1935,6 +1961,8 @@ impl Session {
             self.link.mcp().unbind(self.id);
             // And its subagents and background tasks; the next process counts its own.
             self.subagents = 0;
+            self.live = None;
+            self.live_subagents(vec![]);
             self.background_tasks = 0;
         }
         if self.state != s {
@@ -1974,6 +2002,18 @@ impl Session {
             .as_ref()
             .filter(|t| t.capped && self.spec.permission_mode == PermissionMode::Auto)
             .map(|t| t.input.event_id)
+    }
+
+    /// `subagents.live` with `agents`: sent directly, never stored (SPEC §4).
+    fn live_subagents(&self, agents: Vec<hqc_proto::event::LiveSubagent>) {
+        let ev = crate::adapter::new_event(
+            self.id,
+            hqc_proto::event::Author::Agent { id: self.id },
+            EventKind::SubagentsLive { agents },
+        );
+        if let Err(e) = self.link.event(ev) {
+            tracing::error!(session_id = %self.id, "subagents.live not sent: {e:#}");
+        }
     }
 
     fn system_event(&self, text: &str, code: &str) {

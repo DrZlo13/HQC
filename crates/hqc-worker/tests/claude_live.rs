@@ -50,6 +50,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::PermissionMode(m) => format!("permission_mode:{}", m.as_str()),
         AdapterEvent::Limits(_) => "limits".into(),
         AdapterEvent::Subagents(n) => format!("subagents:{n}"),
+        AdapterEvent::LiveSubagents(l) => format!("live_subagents:{}", l.len()),
         AdapterEvent::BackgroundTasks(n) => format!("background_tasks:{n}"),
     }
 }

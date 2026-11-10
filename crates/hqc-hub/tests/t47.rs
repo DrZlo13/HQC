@@ -55,7 +55,8 @@ enum Outcome {
 
 /// `hqc_spawn` with `request_id` `rid` while the worker answers the `fs.stat`s, the worktree
 /// (`outcome`) and the new session's `session.start`: the `mcp.result` payload and the
-/// `workspace.create` frame, if one came.
+/// `workspace.create` frame, if one came. A spawn that made a session returns once its prompt
+/// came too, which may follow the `mcp.result`.
 async fn spawn_with(
     w: &mut FakeWorker,
     token: &str,
@@ -63,16 +64,21 @@ async fn spawn_with(
     args: Value,
     outcome: Outcome,
 ) -> (Value, Option<Value>) {
+    let prompt = args["prompt"].clone();
     let id = w.send("mcp.call", call(token, rid, args)).await;
-    let mut create = None;
+    let (mut create, mut result, mut prompted) = (None, None, false);
     loop {
+        if let Some(r) = result.take_if(|r: &mut Value| prompted || r.get("error").is_some()) {
+            return (r, create);
+        }
         let f = w.recv().await;
         match f["type"].as_str().unwrap() {
             "mcp.result" => {
                 assert_eq!(f["id"], id.as_str(), "{f}");
                 assert_eq!(f["payload"]["request_id"], rid);
-                return (f["payload"].clone(), create);
+                result = Some(f["payload"].clone());
             }
+            "session.input" if f["payload"]["text"] == prompt => prompted = true,
             "fs.stat" => {
                 let (ty, payload) = w.fs_reply(&f);
                 w.reply(&f["id"], ty, payload).await;

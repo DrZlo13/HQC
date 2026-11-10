@@ -893,7 +893,12 @@ async fn boot_id_tells_restart_from_reconnect() {
         .wait_session(&sid, "idle after restart", |v| v["state"] == "idle")
         .await;
     assert_eq!(v["agent"]["process_state"], "stopped");
-    let events = hub.events(&sid).await;
+    let events = hub
+        .wait_events(&sid, "turn_lost", |es| {
+            es.iter()
+                .any(|e| e["type"] == "system" && e["payload"]["code"] == "turn_lost")
+        })
+        .await;
     let cancel = events
         .iter()
         .find(|e| e["type"] == "approval.cancel")
@@ -902,9 +907,6 @@ async fn boot_id_tells_restart_from_reconnect() {
         cancel["payload"],
         json!({"request_id": "req-b", "reason": "worker_restart"})
     );
-    assert!(events
-        .iter()
-        .any(|e| e["type"] == "system" && e["payload"]["code"] == "turn_lost"));
     let (s, _) = hub
         .post(
             &format!("/api/sessions/{sid}/requests/req-b"),
@@ -1333,10 +1335,9 @@ async fn turn_watchdog_closes_a_silent_turn() {
         hub.wait_session(sid, "running", |v| v["state"] == "running")
             .await;
     }
-    async fn lost(hub: &TestHub, sid: &str) -> Vec<Value> {
-        hub.events(sid)
-            .await
-            .into_iter()
+    fn lost(events: &[Value]) -> Vec<&Value> {
+        events
+            .iter()
             .filter(|e| e["payload"]["code"] == "turn_lost")
             .collect()
     }
@@ -1348,22 +1349,16 @@ async fn turn_watchdog_closes_a_silent_turn() {
         .await;
     tokio::time::sleep(limit * 2 / 3).await;
     assert_eq!(hub.session(&sid).await["state"], "running");
-    assert!(lost(&hub, &sid).await.is_empty());
+    assert!(lost(&hub.events(&sid).await).is_empty());
 
     let v = hub
         .wait_session(&sid, "error", |v| v["state"] == "error")
         .await;
     assert_eq!(v["queue_len"], 0);
-    // The hub marks the turn failed, then writes its `system turn_lost`: a read between the
-    // two finds no event yet (it raced on CI), so wait for it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let l = loop {
-        let l = lost(&hub, &sid).await;
-        if !l.is_empty() || tokio::time::Instant::now() > deadline {
-            break l;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+    let events = hub
+        .wait_events(&sid, "turn_lost", |es| !lost(es).is_empty())
+        .await;
+    let l = lost(&events);
     assert_eq!(l.len(), 1, "{l:?}");
     assert!(
         l[0]["payload"]["text"]
@@ -1397,7 +1392,8 @@ async fn turn_watchdog_closes_a_silent_turn() {
         .await;
     hub.wait_session(&sid, "error", |v| v["state"] == "error")
         .await;
-    assert_eq!(lost(&hub, &sid).await.len(), 2);
+    hub.wait_events(&sid, "the second turn_lost", |es| lost(es).len() == 2)
+        .await;
     hub.finish().await;
 }
 

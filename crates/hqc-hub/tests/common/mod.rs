@@ -501,6 +501,28 @@ impl TestHub {
         v["events"].as_array().unwrap().clone()
     }
 
+    /// Poll until `f` holds for the session's events. The hub ends a turn, then writes its
+    /// `system` line: a read right after the state changed may come between the two.
+    pub async fn wait_events(
+        &self,
+        id: &str,
+        what: &str,
+        f: impl Fn(&[Value]) -> bool,
+    ) -> Vec<Value> {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let events = self.events(id).await;
+            if f(&events) {
+                return events;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timeout waiting for {what}: {events:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Sends to session `id` wait in its send buffer instead of waking it (`wake_on_send`
     /// off; on by default since T52), for the tests of the buffer.
     pub async fn buffer_sends(&self, id: &str) {

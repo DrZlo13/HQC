@@ -73,6 +73,11 @@ const button = (text: string, scope = '') =>
 /** A project in the rail, by its name (the rail shows initials, the name is the label). */
 const projectRow = (name: string) => $$('.project-row').find((r) => r.getAttribute('aria-label')?.includes(name));
 
+/** The settings screen of the project named `name`. A new project is current in the rail
+ *  before the route opens its settings, so the previous project's screen may still be shown. */
+const settingsOf = (name: string) =>
+  $('.workspaces') && $('.project-settings .bar-title .state')?.textContent === name;
+
 /** An item of the chat's "More" menu, opening the menu first. */
 async function menuItem(cls: string): Promise<HTMLButtonElement | null> {
   if (!$('.menu')) {
@@ -407,7 +412,7 @@ it('archives from the row, restores and deletes from the archive', async () => {
 it('clones a repository into a folder of the tree, follows it on the row and deletes it with its folder (T45)', async () => {
   promptAnswer = 'Clones';
   $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
-  await until('new project settings', () => $('.workspaces') && $('.project-row.is-current')?.getAttribute('aria-label') === 'Clones');
+  await until('new project settings', () => settingsOf('Clones'));
   await until('no workspaces yet', () => $('.workspaces .empty-inline'));
 
   button('Clone a repository')!.click();
@@ -467,8 +472,7 @@ it('clones a repository into a folder of the tree, follows it on the row and del
 it('makes a worktree of a workspace, shows it under its origin and deletes it through the dialog (T46)', async () => {
   promptAnswer = 'Worktrees';
   $<HTMLButtonElement>('button[aria-label="New project"]')!.click();
-  await until('new project settings', () => $('.workspaces') && $('.project-row.is-current')?.getAttribute('aria-label') === 'Worktrees');
-  // As in the clone test: the settings of the new project, not the previous one's, before a click.
+  await until('new project settings', () => settingsOf('Worktrees'));
   await until('no workspaces yet', () => $('.workspaces .empty-inline'));
   const row = (end: string) => $$('.workspace-row').find((r) => r.querySelector('.workspace-path')?.textContent?.endsWith(end));
   // The origin: a clone, ready.

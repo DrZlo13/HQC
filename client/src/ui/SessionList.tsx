@@ -334,7 +334,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   phone={phone}
                   when={mode === 'recent' ? formatWhen(s.updated_at, now) : undefined}
                   where={whereOf(s)}
-                  compact={app.look.compactList}
+                  compact={app.look.compactList && !phone}
                   dragging={false}
                   onArchive={() => app.archiveLater(s)}
                   onFavorite={() => toggleFavorite(app, s)}
@@ -362,7 +362,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   phone={phone}
                   when={mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
                   where={whereOf(s)}
-                  compact={app.look.compactList}
+                  compact={app.look.compactList && !phone}
                   grip={reorder ? grip(s.id) : undefined}
                   dragging={dragId === s.id}
                   onArchive={() => app.archiveLater(s)}

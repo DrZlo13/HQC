@@ -765,6 +765,15 @@ describe('SessionList (phone)', () => {
     expect(root.querySelector('.list-hint')!.textContent).toBe('Press and hold a session to archive, rename or delete it.');
   });
 
+  it('keeps its rows as they are with "Compact" on: their state and place stay visible, no tooltip', async () => {
+    const app = makeApp();
+    app.look = { ...app.look, compactList: true };
+    await mount(<SessionList app={app} phone />);
+    const rows = [...root.querySelectorAll('.session-row')];
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.filter((r) => r.hasAttribute('title'))).toEqual([]);
+  });
+
   it('a long press opens the actions sheet: Archive with Undo, Delete in a second step (T50)', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     const api = hubApi();

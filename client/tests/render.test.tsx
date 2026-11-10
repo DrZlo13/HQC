@@ -740,6 +740,52 @@ describe("messages", () => {
     expect(root.querySelector(".line-usage")).toBeNull();
   });
 
+  it("draws no line for a usage with the session's total only, and counts that total", () => {
+    const t = new Timeline();
+    t.apply(agentText(1, "All tests passed.", true));
+    t.apply(ev("event.usage", withSeq(2)));
+    // What a background subagent spent after the turn: no tokens, no cost of a turn.
+    t.apply(
+      ev(
+        "event.usage",
+        (e) => (
+          (e.seq = 3),
+          (e.payload = {
+            input_tokens: 0,
+            output_tokens: 0,
+            session_cost_usd: 2.5,
+          })
+        ),
+      ),
+    );
+    show(t);
+    expect(root.querySelectorAll(".usage")).toHaveLength(1);
+    expect(root.querySelector(".line-usage")).toBeNull();
+    expect(t.usageTotals().cost).toBe(2.5);
+  });
+
+  it("draws the line of a usage with no tokens but a cost, as /compact's", () => {
+    const t = new Timeline();
+    t.apply(agentText(1, "All tests passed.", true));
+    t.apply(ev("event.usage", withSeq(2)));
+    t.apply(
+      ev(
+        "event.usage",
+        (e) => (
+          (e.seq = 3),
+          (e.payload = {
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0014,
+            session_cost_usd: 2.6,
+          })
+        ),
+      ),
+    );
+    show(t);
+    expect(root.querySelector(".line-usage")!.textContent).toContain("$0.001");
+  });
+
   it("updates delivery from a delivery frame and from a copy the hub sent again", () => {
     const t = new Timeline();
     t.apply(

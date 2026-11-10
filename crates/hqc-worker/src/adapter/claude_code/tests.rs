@@ -2822,6 +2822,26 @@ fn a_result_with_no_model_turn_and_no_tokens_has_no_usage() {
     }
 }
 
+/// A `result` with no model turn and no tokens whose total grew (the CLI closes such a turn on a
+/// background subagent's notification, and the growth is what the subagent spent): a `usage`
+/// with the session's total only, no tokens and no `cost_usd`, which the client draws no line
+/// for; the next turn's cost carries the growth.
+#[test]
+fn a_result_with_no_model_turn_leaves_the_background_cost_to_the_next_turn() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false).with_cost_baseline(Some(1.0));
+    started(&mut core, sid);
+    let usage = usages(core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":3,"result":"","total_cost_usd":2.5,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    ));
+    assert_eq!(usage, vec![(0, 0, None, Some(2.5))]);
+    started(&mut core, sid);
+    let (costs, _) = costs_and_commands(&core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"duration_ms":900,"result":"ok","total_cost_usd":2.75,"usage":{"input_tokens":4,"output_tokens":20}}"#,
+    ));
+    assert_eq!(costs, vec![(1.75, 2.75)]);
+}
+
 /// `/compact` (fixture `stream-resume-compact`, 2.1.308): `num_turns: 0` and no tokens, but the
 /// session's total grew from the transcript's last `cost-state` (0.0032966), so it keeps its
 /// `usage` with what the compaction cost, and the next turn's cost does not include it.
@@ -2835,6 +2855,13 @@ fn compact_keeps_its_usage() {
     assert_eq!(costs.len(), 1, "{costs:?}");
     assert!((costs[0].0 - 0.00138282).abs() < 1e-9, "{costs:?}");
     assert_eq!(costs[0].1, 0.00467942);
+    // The compaction counts for its own `result` only: a later one with no model turn whose
+    // total grew gets the total-only `usage`, with no `cost_usd`.
+    started(&mut core, sid);
+    let usage = usages(core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_ms":3,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    ));
+    assert_eq!(usage, vec![(0, 0, None, Some(0.01))]);
 }
 
 /// A subagent that ends asks nothing any more: its request still open when its
@@ -2872,6 +2899,23 @@ fn a_subagents_request_is_cancelled_when_it_ends() {
         assert_eq!(cancels, [(request_id.to_string(), CancelReason::Stopped)]);
         assert!(core.answer_approval(request_id, "once", None).is_err());
     }
+}
+
+/// The `usage` events among `actions`: tokens in, tokens out, `cost_usd`, `session_cost_usd`.
+fn usages(actions: Vec<Action>) -> Vec<(u64, u64, Option<f64>, Option<f64>)> {
+    events(&emitted(actions))
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            EventKind::Usage {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                session_cost_usd,
+                ..
+            } => Some((input_tokens, output_tokens, cost_usd, session_cost_usd)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `(cost_usd, session_cost_usd)` of every `usage` and every command list, in order.

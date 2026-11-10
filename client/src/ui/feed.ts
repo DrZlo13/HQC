@@ -166,6 +166,10 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         continue;
       }
       case 'usage': {
+        // The session's total only (what background subagents spent between turns, SPEC
+        // §8.1): the header counts it, the feed draws no `0 → 0 tokens` line for it.
+        const u = e.payload;
+        if (!u.input_tokens && !u.output_tokens && u.cost_usd === undefined) continue;
         const prev = out.at(-1);
         if (((prev?.kind === 'agent' && prev.event.payload.final) || prev?.kind === 'reply-to') && !prev.usage) {
           prev.usage = e;

@@ -470,7 +470,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
-| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
+| `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
 
@@ -2494,7 +2494,15 @@ next stream item: `tool_use` → `final: false`, `result` → `final: true`;
 `status idle`. Since 0.69 a `result` with `num_turns: 0`, no tokens and no cost (a local slash
 command, the empty second `result` the CLI sends after a turn it started by itself) gives no
 `usage`, which the feed would show as an empty `0 → 0 tokens` line; `/compact` has no tokens
-either but costs, and keeps its `usage`. Since 0.69: an `assistant` text whose `message.model` is `<synthetic>` — a reply the
+either but costs, and keeps its `usage`. Since 0.115 a `result` with `num_turns: 0` and no tokens
+whose total grew, with no `compact_boundary` in it, gives a `usage` with no tokens, no `cost_usd`
+and the total as `session_cost_usd`: the CLI closes such a turn on a background subagent's
+notification without calling the model, and the growth is what the subagent spent meanwhile. The
+client's header counts that total and the feed draws no line for it; the baseline of `cost_usd`
+stays, so the next `usage` of the same process with a `cost_usd` carries the growth (a process
+that ends first leaves it out of every `cost_usd`: the next one starts from the `cost-state` that
+has it).
+Since 0.69: an `assistant` text whose `message.model` is `<synthetic>` — a reply the
 CLI wrote itself (an API error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message`
 and the same `uuid` as the transcript record) — → `agent.message` with `runtime: true`, held
 and ended like any other text: the turn it ends has it as the final `agent.message`; `system`
@@ -2586,8 +2594,9 @@ in one process it grows from turn to turn (0.00216749, then 0.00398629), and aft
 it starts from `totalCostUSD` of the transcript's last `cost-state` record (written when a
 process ends) — the resumed turn reported 0.0043361 = 0.00398629 + its own cost. `modelUsage`
 is cumulative the same way; the token counts in `result.usage` are the turn's. The adapter emits
-`usage.cost_usd` = this `total_cost_usd` minus the previous total of the same session: the
-previous `result` of the process or, for the first turn after `--resume`, the last `cost-state`
+`usage.cost_usd` = this `total_cost_usd` minus the previous total of the same session: that of
+the previous `usage` with a `cost_usd` of the process (since 0.115; a total-only one leaves it) or,
+for the first turn after `--resume`, the last `cost-state`
 of the transcript read when the process starts (none — 0). The difference is never negative,
 and a total below that baseline does not lower it. `usage.session_cost_usd` is
 `total_cost_usd` itself.
@@ -4387,6 +4396,16 @@ after a later input reached the agent and its turn ended well. A spawned session
 input failed on the worker's `max_sessions` showed Error under "Needs you" while it answered the
 next message. Such an input now keeps `error` only while no later input was delivered after it;
 it stays `failed`, and Retry still sends it again. 0.109–0.116 are taken by other pull requests.
+
+### 0.108 → 0.115 (no `0 → 0 tokens` line for a background subagent's spending)
+§4 `usage`, §8.1: the CLI closes a turn without calling the model on a background subagent's
+notification, for example when the subagent stops while its own background command runs. The
+session's total had grown by what the subagent spent, so each such turn got a feed line of `0 → 0
+tokens` with that cost. Now a `result` with `num_turns: 0` and no tokens, unless a
+`compact_boundary` came in it (`/compact`), gives a `usage` with no tokens, no `cost_usd` and the
+grown total as `session_cost_usd`: the client's header counts it and the feed draws no line for
+it. The baseline of `cost_usd` stays, so the next turn's line carries what the subagent spent.
+0.109–0.114 are taken by open pull requests.
 
 ### 0.108 → 0.109 (a HEIC attached on an iPhone is sent as a JPEG)
 §12 Client: the composer reads an attached file into memory when it is attached and uploads

@@ -36,10 +36,12 @@
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
-//! - `result` → `usage` (none with `num_turns: 0`, no tokens and no cost), `status idle`, end
-//!   of turn; `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the
-//!   previous `result` of the session (or since the transcript's last `cost-state` after
-//!   `--resume`), `session_cost_usd` the total itself;
+//! - `result` → `usage` (one with `num_turns: 0`, no tokens and no `compact_boundary` in it
+//!   gives none, or, when the total grew, one with no tokens, no `cost_usd` and the total),
+//!   `status idle`, end of turn;
+//!   `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the previous
+//!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`),
+//!   `session_cost_usd` the total itself;
 //!   a request of the main agent or of a foreground subagent still open then gets
 //!   `approval.cancel` / `clarify.cancel` `stopped`, any other subagent's stays open until its
 //!   `task_notification`, which cancels it; an input written during the turn and not echoed
@@ -211,9 +213,12 @@ pub struct Core {
     /// hqc's allow rules of the session's workspace and its path (T48); `None` without one.
     folder: Option<(FolderRules, std::path::PathBuf)>,
     model: Option<String>,
-    /// The session's cumulative cost as of the last `result` (or the transcript's last
-    /// `cost-state` when resumed): the baseline of the next turn's cost.
+    /// The session's cumulative cost as of the last `usage` with a `cost_usd` (or the
+    /// transcript's last `cost-state` when resumed): the baseline of the next turn's cost.
     cost_total: Option<f64>,
+    /// A `compact_boundary` came since the last `result`: a `result` with no model turn costs
+    /// for the compaction itself.
+    compacted: bool,
     /// The slash commands last reported by this process.
     commands: Option<Vec<String>>,
     /// The permission mode last reported by this process.
@@ -273,6 +278,7 @@ impl Core {
             folder: None,
             model: None,
             cost_total: None,
+            compacted: false,
             commands: None,
             permission_mode: None,
             seen: Vec::new(),
@@ -663,6 +669,7 @@ impl Core {
                 // (fixture `resume-compact`): the event id is derived from it as from a
                 // record's. The event waits for the summary ([`Core::compaction`]).
                 Some("compact_boundary") => {
+                    self.compacted = true;
                     tracing::info!(session_id = %self.session_id, trigger = ?v["compact_metadata"]["trigger"].as_str(), "context compacted");
                     self.compaction = Some(
                         record_uuid(&v).map_or_else(Uuid::now_v7, |u| record_event_id(&u, 0)),
@@ -1070,11 +1077,21 @@ impl Core {
             .as_f64()
             .filter(|c| c.is_finite() && *c >= 0.0);
         let spent = total.is_some_and(|t| t > self.cost_total.unwrap_or(0.0));
-        // No `usage` for a result with no model turn, no tokens and no cost (a local slash
-        // command, the empty second `result` after a turn the CLI started by itself): the feed
-        // would show an empty `0 → 0 tokens` line. `/compact` has `num_turns: 0` and no tokens
-        // but costs, so it keeps its `usage`.
-        if v["num_turns"].as_u64() != Some(0) || input_tokens + output_tokens > 0 || spent {
+        let compacted = std::mem::take(&mut self.compacted);
+        let model = self.model.clone().or_else(|| {
+            v["modelUsage"]
+                .as_object()
+                .and_then(|m| m.keys().next().cloned())
+        });
+        // A result with no model turn and no tokens (a local slash command, the empty second
+        // `result` after a turn the CLI started by itself, one the CLI closes on a background
+        // subagent's notification) is not a turn's `usage`: the feed would show an empty `0 → 0
+        // tokens` line. `/compact` has `num_turns: 0` and no tokens but costs, so it keeps its
+        // `usage`.
+        if v["num_turns"].as_u64() != Some(0)
+            || input_tokens + output_tokens > 0
+            || (spent && compacted)
+        {
             let cost_usd = total.map(|t| self.turn_cost(t));
             out.push(self.emit_new(EventKind::Usage {
                 input_tokens,
@@ -1083,11 +1100,20 @@ impl Core {
                 cache_write: num("cache_creation_input_tokens"),
                 cost_usd,
                 session_cost_usd: total,
-                model: self.model.clone().or_else(|| {
-                    v["modelUsage"]
-                        .as_object()
-                        .and_then(|m| m.keys().next().cloned())
-                }),
+                model,
+            }));
+        } else if spent {
+            // The total grew by what background subagents spent meanwhile: a `usage` with the
+            // total only, which the client counts for the session and draws no line for. The
+            // baseline stays, so the next turn's `cost_usd` carries it.
+            out.push(self.emit_new(EventKind::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read: None,
+                cache_write: None,
+                cost_usd: None,
+                session_cost_usd: total,
+                model,
             }));
         }
         let subtype = v["subtype"].as_str().unwrap_or("");

@@ -1,0 +1,16 @@
+{
+  "projects": [
+    {
+      "id": "0199f3a2-7c10-7000-8000-0000000000d3",
+      "owner_id": "0199f3a2-7c10-7000-8000-0000000000aa",
+      "name": "99bot_ng",
+      "slug": "99bot-ng",
+      "description": "",
+      "is_personal": false,
+      "color": "moss",
+      "created_at": "2026-09-02T10:00:00Z",
+      "updated_at": "2026-11-09T18:20:00Z",
+      "archived_at": "2026-11-09T18:20:00Z"
+    }
+  ]
+}

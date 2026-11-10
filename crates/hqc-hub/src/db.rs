@@ -53,6 +53,8 @@ pub struct ProjectRow {
     pub color: Option<String>,
     /// `{kind: emoji|letters, value}` or `{kind: image, v}` (T49).
     pub icon: Option<Value>,
+    /// Since when it is archived: off the project bar, its sessions untouched.
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 /// Find the user by the verified email, creating it and its personal project on first login
@@ -187,6 +189,7 @@ impl ProjectRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
             favorite_at,
+            archived_at: self.archived_at,
         }
     }
 
@@ -287,6 +290,23 @@ pub async fn update_project(
     .await?;
     tx.commit().await?;
     Ok(row)
+}
+
+/// Archives the project (since now, or since the time it already has) or takes it back out.
+pub async fn set_project_archived(
+    db: &PgPool,
+    id: Uuid,
+    archived: bool,
+) -> sqlx::Result<ProjectRow> {
+    sqlx::query_as(
+        "UPDATE projects SET archived_at = CASE WHEN $2 THEN coalesce(archived_at, now()) END,
+            updated_at = now()
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(archived)
+    .fetch_one(db)
+    .await
 }
 
 /// A project's icon image (T49): its checked type and bytes.

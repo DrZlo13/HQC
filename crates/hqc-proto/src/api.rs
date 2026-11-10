@@ -245,6 +245,9 @@ pub struct Project {
     /// As in the session object: when the requesting user made the project a favorite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorite_at: Option<DateTime<Utc>>,
+    /// Since when the project is archived: not in `GET /api/projects`, only with `?archived=1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 /// A project's color (SPEC §3 Project, T49): the names of the client's `theme.ts`. No
@@ -1068,6 +1071,10 @@ mod tests {
         assert!(matches!(p.icon, Some(ProjectIcon::Image { .. })));
         assert!(l.projects[0].icon.is_none(), "absent: the first letters");
         assert!(p.favorite_at.is_some() && l.projects[0].favorite_at.is_none());
+        assert!(l.projects.iter().all(|x| x.archived_at.is_none()));
+        let archived: ProjectList =
+            roundtrip(include_str!("../examples/wire/api.projects.archived.json"));
+        assert!(archived.projects[0].archived_at.is_some());
         let letters: PatchProject =
             serde_json::from_str(r#"{"icon":{"kind":"letters","value":"PM"}}"#).unwrap();
         assert_eq!(

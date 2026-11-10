@@ -141,11 +141,33 @@ pub(crate) async fn project_view(
     Ok(p.to_api(fav.first().map(|(_, at)| *at)))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ProjectsQuery {
+    /// `1`: the archived projects instead of the others (the client's project search).
+    #[serde(default)]
+    pub archived: Option<String>,
+}
+
+/// `GET /api/projects`: the projects that are not archived; `?archived=1` the archived ones.
 pub async fn projects(
     State(app): State<AppState>,
     user: CurrentUser,
+    Query(q): Query<ProjectsQuery>,
 ) -> ApiResult<Json<ProjectList>> {
-    let rows = db::projects_of(&app.db, user.id).await?;
+    project_list(&app, &user, q.archived.as_deref() == Some("1")).await
+}
+
+/// The user's projects, archived or not, in the user's order, each with its `favorite_at`.
+async fn project_list(
+    app: &AppState,
+    user: &CurrentUser,
+    archived: bool,
+) -> ApiResult<Json<ProjectList>> {
+    let rows: Vec<db::ProjectRow> = db::projects_of(&app.db, user.id)
+        .await?
+        .into_iter()
+        .filter(|p| p.archived_at.is_some() == archived)
+        .collect();
     let ids: Vec<Uuid> = rows.iter().map(|p| p.id).collect();
     let fav = db::project_favorites(&app.db, user.id, &ids).await?;
     let at = |id: Uuid| fav.iter().find(|(p, _)| *p == id).map(|(_, at)| *at);
@@ -155,14 +177,43 @@ pub async fn projects(
 }
 
 /// `PUT /api/me/project_order` {project_ids} (SPEC §6, since 0.64): the order of the project
-/// bar; the reply is the list in it.
+/// bar; the reply is the list in it. The bar has no archived projects, so the archived ones
+/// `project_ids` leaves out keep the place they had in the order the bar had (`keep_archived`;
+/// the stored order, the projects missing from it after it): restored, a project comes back
+/// where it was.
 pub async fn put_project_order(
     State(app): State<AppState>,
     user: CurrentUser,
     Json(b): Json<api::PutProjectOrder>,
 ) -> ApiResult<Json<ProjectList>> {
-    db::put_project_order(&app.db, user.id, &b.project_ids).await?;
-    projects(State(app), user).await
+    let all = db::projects_of(&app.db, user.id).await?;
+    let old: Vec<Uuid> = all.iter().map(|p| p.id).collect();
+    let archived: Vec<Uuid> = all
+        .iter()
+        .filter(|p| p.archived_at.is_some())
+        .map(|p| p.id)
+        .collect();
+    let ids = keep_archived(&old, &b.project_ids, &archived);
+    db::put_project_order(&app.db, user.id, &ids).await?;
+    project_list(&app, &user, false).await
+}
+
+/// `new` with the `archived` projects of `old` it leaves out put back, in the order of `old`:
+/// each right after the project before it in `old` when that one is in the list, else at its
+/// index in `old` (at most the end).
+fn keep_archived(old: &[Uuid], new: &[Uuid], archived: &[Uuid]) -> Vec<Uuid> {
+    let mut out = new.to_vec();
+    for (i, id) in old.iter().enumerate() {
+        if !archived.contains(id) || out.contains(id) {
+            continue;
+        }
+        let after = i
+            .checked_sub(1)
+            .and_then(|j| out.iter().position(|x| *x == old[j]));
+        let at = after.map_or(i.min(out.len()), |k| k + 1);
+        out.insert(at, *id);
+    }
+    out
 }
 
 pub async fn project(
@@ -294,6 +345,35 @@ pub async fn delete_project(
     }
     tracing::info!(project_id = %id, sessions = killed.len(), "project deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/projects/{id}/archive` (SPEC §3 Project): off the project list, its sessions as
+/// they are; again keeps the first time. The personal project is not archived.
+pub async fn archive_project(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<api::Project>> {
+    let p = project_for(&app, &user, id).await?;
+    if p.is_personal {
+        return Err(ApiError::Conflict(
+            "personal_project",
+            "the personal project cannot be archived".into(),
+        ));
+    }
+    let p = db::set_project_archived(&app.db, id, true).await?;
+    Ok(Json(project_view(&app, &user, &p).await?))
+}
+
+/// `POST /api/projects/{id}/unarchive`: back in the project list, in its place of the order.
+pub async fn unarchive_project(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<api::Project>> {
+    project_for(&app, &user, id).await?;
+    let p = db::set_project_archived(&app.db, id, false).await?;
+    Ok(Json(project_view(&app, &user, &p).await?))
 }
 
 // ---------------------------------------------------------------- workspaces

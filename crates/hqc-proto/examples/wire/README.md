@@ -91,3 +91,6 @@ project of `api.projects.json` carry `favorite_at`, the time the requesting user
 `hub.session.model.default.json` (`model: null`) goes back to the runtime's default;
 `api.session.json` shows `model` in `agent`, and `api.session.request.json` creates a session
 with one.
+
+Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
+projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.

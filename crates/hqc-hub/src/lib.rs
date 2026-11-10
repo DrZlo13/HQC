@@ -65,6 +65,8 @@ pub fn router(app: AppState) -> Router {
             "/api/projects/{id}/favorite",
             put(api::favorite_project).delete(api::unfavorite_project),
         )
+        .route("/api/projects/{id}/archive", post(api::archive_project))
+        .route("/api/projects/{id}/unarchive", post(api::unarchive_project))
         .route(
             "/api/projects/{id}/icon",
             get(icons::get)

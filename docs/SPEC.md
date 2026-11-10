@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.105, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
+Version 0.107, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1655,7 +1655,9 @@ the answer being written comes right after those events, before `subscribed`, as
 `agent.delta` with its text so far, and the stream carries only the deltas after it. On open
 the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
 older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
-each time the user scrolls to the top. An event
+each time the user scrolls to the top, and while the feed is shorter than its window (which
+cannot be scrolled); "Requests only" of a worker's service session, on or off, starts it again at
+the last 60 blocks of the new view. An event
 stored from a client input carries its `client_op_id`, so the client shows the message at
 once and matches it with the echo (a technique from Agent Host Protocol, §22). A separate
 subscription, `subscribe_summary`, gives `state`, `queue_len` and unread counts per session,
@@ -4275,6 +4277,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.105 → 0.107 (the older history of a short feed)
+§6 WebSocket: while the rendered feed is shorter than its window, the chat renders 60 more
+blocks without a scroll, and "Requests only", on or off, starts the window again at the last 60
+blocks of the new view. Before, a chat whose newest 100 events made a few blocks (a long run of
+tool calls) opened on those few, with no scroll bar and no way to the older history. 0.104 and
+0.106 are taken by other pull requests.
 
 ### 0.103 → 0.105 (a prompt record of inputs the CLI took together is the worker's own)
 §9.2: a prompt record whose text is several of the worker's unmatched inputs in a row joined by a

@@ -183,6 +183,7 @@ fn user_message(t: &str) -> EventKind {
         artifact_ids: vec![],
         schedule_id: None,
         during_text: false,
+        joined: false,
     }
 }
 

@@ -1670,6 +1670,52 @@ async fn joined_input_ack_opens_no_turn() {
     hub.finish().await;
 }
 
+/// SPEC §17.2, §6: a `joined` ack is kept on the message (`payload.joined`, what the chat's
+/// "joined the turn" reads) and told to the chat in the `delivery` frame; a plain ack keeps
+/// and tells neither.
+#[tokio::test]
+async fn a_joined_ack_is_kept_on_the_message_and_sent_to_the_chat() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("joined flag").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "A"}))
+        .await;
+    let a = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": a})).await;
+    let d = c.until("delivery").await;
+    assert_eq!((&d["event_id"], &d["delivery"]), (&a, &json!("delivered")));
+    assert!(d.get("joined").is_none(), "{d}");
+
+    let (_, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "B"}))
+        .await;
+    let b = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    assert_eq!(si["payload"]["event_id"], b);
+    w.reply(&si["id"], "ack", json!({"event_id": b, "joined": true}))
+        .await;
+    let d = c.until("delivery").await;
+    assert_eq!((&d["event_id"], &d["joined"]), (&b, &json!(true)), "{d}");
+
+    let events = hub.events(&sid).await;
+    let payload =
+        |id: &Value| events.iter().find(|e| e["event_id"] == *id).unwrap()["payload"].clone();
+    assert!(payload(&a).get("joined").is_none(), "{}", payload(&a));
+    assert_eq!(payload(&b)["joined"], true);
+    // The subscription's backlog is the same stored event.
+    let mut c2 = FakeClient::connect(&hub).await;
+    let backlog = c2.subscribe(&sid, 0).await;
+    let again = backlog.iter().find(|e| e["event_id"] == b).unwrap();
+    assert_eq!(again["payload"]["joined"], true);
+    hub.finish().await;
+}
+
 /// SPEC §5.4, §6: `session.state.subagents` is kept on the session, in the session object and
 /// its summary; a report without it is 0 (absent), and so is every session of a restarted
 /// worker.

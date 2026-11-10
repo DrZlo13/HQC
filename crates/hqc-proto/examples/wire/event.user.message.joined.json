@@ -1,0 +1,11 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000103",
+  "seq": 44,
+  "ts": "2026-10-22T10:00:05Z",
+  "author": { "kind": "user", "id": "0199f3a2-7c10-7000-8000-0000000000aa" },
+  "type": "user.message",
+  "payload": { "text": "and keep it fast", "artifact_ids": [], "joined": true },
+  "delivery": "delivered",
+  "delivered_at": "2026-10-22T10:00:06Z"
+}

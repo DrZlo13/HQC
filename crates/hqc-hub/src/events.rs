@@ -2,7 +2,8 @@
 //!
 //! The stored `author` and `payload` are the JSON exactly as received, except U+0000, which
 //! Postgres refuses and which becomes U+FFFD (worker frames in `worker_ws`, hub events in
-//! [`store_hub_event`]; SPEC §5.2); the typed
+//! [`store_hub_event`]; SPEC §5.2), and `joined`, which the hub sets on a person's
+//! `user.message` when it is delivered into the running turn (SPEC §4, §17.2); the typed
 //! [`EventKind`] drives only the hub's own logic (open requests, turn bookkeeping, push).
 
 use chrono::Utc;

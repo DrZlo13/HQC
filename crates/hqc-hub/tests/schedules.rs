@@ -454,5 +454,10 @@ async fn a_scheduled_run_acked_as_joined_opens_its_turn() {
     .await;
     hub.wait_session(&a, "running", |v| v["state"] == "running")
         .await;
+    // Nor is it kept on the message: the chat shows no "joined the turn".
+    let events = hub.events(&a).await;
+    let run = events.iter().find(|e| e["event_id"] == event_id).unwrap();
+    assert_eq!(run["delivery"], "delivered");
+    assert!(run["payload"].get("joined").is_none(), "{run}");
     hub.finish().await;
 }

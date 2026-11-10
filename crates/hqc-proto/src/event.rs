@@ -192,6 +192,10 @@ pub enum EventKind {
         /// show it under that text (since SPEC 0.108); absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         during_text: bool,
+        /// The runtime took it into the turn already running (SPEC §17.2): the hub sets it
+        /// when the worker acks the input `joined`. Absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        joined: bool,
     },
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
@@ -636,6 +640,29 @@ mod tests {
             }
         ));
         assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+    }
+
+    /// SPEC §17.2: a message the runtime took into the turn already running carries
+    /// `joined: true`; any other leaves it out.
+    #[test]
+    fn a_joined_user_message_roundtrips() {
+        let src = include_str!("../examples/wire/event.user.message.joined.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(
+            e.kind,
+            EventKind::UserMessage { joined: true, .. }
+        ));
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.user.message.json")).unwrap();
+        assert!(matches!(
+            plain.kind,
+            EventKind::UserMessage { joined: false, .. }
+        ));
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("joined")
+            .is_none());
     }
 
     #[test]

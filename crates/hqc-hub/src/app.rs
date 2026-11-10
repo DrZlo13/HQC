@@ -117,6 +117,8 @@ pub enum Notice {
         seq: i64,
         delivery: String,
         delivered_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// The input went into the turn already running (SPEC §17.2).
+        joined: bool,
     },
     /// Something that feeds `state`, `queue_len` or unread changed (SPEC §6 `subscribe_summary`).
     SessionChanged { session_id: Uuid },

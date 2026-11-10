@@ -53,6 +53,10 @@ pub enum ServerFrame {
         delivery: Delivery,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delivered_at: Option<DateTime<Utc>>,
+        /// The input went into the turn already running (SPEC §17.2): the stored message got
+        /// `payload.joined` with this change. Sent only when true.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        joined: bool,
     },
     /// Reply to `subscribe_summary`: every session of the user.
     #[serde(rename = "summary")]
@@ -146,6 +150,10 @@ mod tests {
         (
             "delivery",
             include_str!("../examples/wire/client.delivery.json"),
+        ),
+        (
+            "delivery",
+            include_str!("../examples/wire/client.delivery.joined.json"),
         ),
         (
             "summary",

@@ -336,3 +336,31 @@ async fn an_ask_that_gets_no_reply_buffers_its_joined_sends() {
     s.w1.reply(&r["id"], "ack", json!({})).await;
     assert_eq!(a_buffer(&hub, &mut s).await, ["partial answer"]);
 }
+
+/// A `joined` ack on another session's message is the worker's mistake (SPEC §17.2): the
+/// message is not marked as joined and its turn opens.
+#[tokio::test]
+async fn a_peer_message_acked_as_joined_opens_its_turn() {
+    let hub = TestHub::start().await;
+    let mut s = setup(&hub).await;
+    let b = s.b.0.clone();
+    let (_, input) = ask(
+        &mut s,
+        json!({"text": "Fix the file", "session": "personal/helper"}),
+    )
+    .await;
+    let event_id = input["payload"]["event_id"].clone();
+    s.w2.reply(
+        &input["id"],
+        "ack",
+        json!({"event_id": event_id, "joined": true}),
+    )
+    .await;
+    hub.wait_session(&b, "running", |v| v["state"] == "running")
+        .await;
+    let events = hub.events(&b).await;
+    let m = events.iter().find(|e| e["event_id"] == event_id).unwrap();
+    assert_eq!(m["type"], "peer.message", "{m}");
+    assert_eq!(m["delivery"], "delivered");
+    assert!(m["payload"].get("joined").is_none(), "{m}");
+}

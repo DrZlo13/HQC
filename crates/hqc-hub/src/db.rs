@@ -2684,12 +2684,22 @@ pub async fn pending_inputs(db: &PgPool, session_id: Uuid) -> sqlx::Result<Vec<I
 }
 
 /// Mark delivered; `None` if it was not pending (already delivered, failed, unknown).
-pub async fn mark_delivered(db: &PgPool, event_id: Uuid) -> sqlx::Result<Option<EventRow>> {
+/// `joined`: the worker took the input into the turn already running (SPEC §17.2). Kept on
+/// the message as `payload.joined`, only on a person's message (a `user.message` that is not
+/// a run of a schedule): no other input joins a turn.
+pub async fn mark_delivered(
+    db: &PgPool,
+    event_id: Uuid,
+    joined: bool,
+) -> sqlx::Result<Option<EventRow>> {
     sqlx::query_as(&format!(
-        "UPDATE events SET delivery = 'delivered', delivered_at = now()
+        "UPDATE events SET delivery = 'delivered', delivered_at = now(),
+           payload = CASE WHEN $2 AND type = 'user.message' AND payload->'schedule_id' IS NULL
+                          THEN jsonb_set(payload, '{{joined}}', 'true') ELSE payload END
          WHERE event_id = $1 AND delivery = 'pending' RETURNING {EVENT_COLS}"
     ))
     .bind(event_id)
+    .bind(joined)
     .fetch_optional(db)
     .await
 }

@@ -252,22 +252,22 @@ pub async fn on_input_ack(
             sc.inflight.remove(&event_id);
         }
     }
-    if let Some(row) = db::mark_delivered(&app.db, event_id).await? {
+    if let Some(row) = db::mark_delivered(&app.db, event_id, joined).await? {
         notify_delivery(app, &row);
         // The send buffer it carried reached the agent (SPEC §7.1).
         crate::peers::delivered(app, event_id).await?;
         // A delivered input starts its turn (SPEC §17.2), unless it went into the turn
-        // already running (`joined`). The ack bypasses the worker's outbox and may come
-        // after the turn's own events (SPEC §5.2): a turn that already has its final answer
-        // stays closed, and a joined input's ack after that answer must not open it again.
-        // Only a person's message joins (§17.2): a `joined` on another input (a
-        // `peer.message`, a run of a schedule) is the worker's mistake, and its turn opens.
-        let joinable = row.kind == "user.message" && row.payload.get("schedule_id").is_none();
-        if joined && !joinable {
+        // already running (`joined`, kept on the message). The ack bypasses the worker's
+        // outbox and may come after the turn's own events (SPEC §5.2): a turn that already
+        // has its final answer stays closed, and a joined input's ack after that answer must
+        // not open it again. Only a person's message joins (§17.2): a `joined` on another
+        // input (a `peer.message`, a run of a schedule) is the worker's mistake, it is not
+        // kept, and its turn opens.
+        let kept = is_joined(&row);
+        if joined && !kept {
             tracing::warn!(%session_id, %event_id, kind = %row.kind, "a worker joined an input that cannot join a turn; its turn opens");
         }
-        let joined = joined && joinable;
-        if !joined && !db::turn_answered(&app.db, session_id, event_id).await? {
+        if !kept && !db::turn_answered(&app.db, session_id, event_id).await? {
             db::set_turn(&app.db, session_id, true, false).await?;
         }
     }
@@ -349,7 +349,13 @@ pub fn notify_delivery(app: &AppState, row: &EventRow) {
         seq: row.seq,
         delivery: row.delivery.clone().unwrap_or_default(),
         delivered_at: row.delivered_at,
+        joined: is_joined(row),
     });
+}
+
+/// `payload.joined` of a stored input: [`db::mark_delivered`] sets it (SPEC §17.2).
+fn is_joined(row: &EventRow) -> bool {
+    row.payload.get("joined") == Some(&Value::Bool(true))
 }
 
 /// Client frame for a delivery change (SPEC §6).
@@ -361,12 +367,14 @@ pub fn delivery_frame(n: &Notice) -> Option<ServerFrame> {
             seq,
             delivery,
             delivered_at,
+            joined,
         } => Some(ServerFrame::Delivery {
             session_id: *session_id,
             event_id: *event_id,
             seq: (*seq).max(0) as u64,
             delivery: serde_json::from_value(Value::String(delivery.clone())).ok()?,
             delivered_at: *delivered_at,
+            joined: *joined,
         }),
         _ => None,
     }

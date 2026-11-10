@@ -56,7 +56,12 @@ export function Chat({
   const addFiles = (list: FileList | File[] | null | undefined) => {
     const picked = [...(list ?? [])];
     if (!picked.length) return;
-    void Promise.all(picked.map(toOutgoing)).then((add) => setFiles((cur) => [...cur, ...add]));
+    // One at a time: each is read into memory, and a HEIC drawn on a canvas.
+    void (async () => {
+      const add: OutgoingFile[] = [];
+      for (const p of picked) add.push(await toOutgoing(p));
+      setFiles((cur) => [...cur, ...add]);
+    })();
   };
   // The feed shows once the newest page is in; the older history loads behind it.
   const [loaded, setLoaded] = useState(false);
@@ -783,17 +788,63 @@ const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)
 /** Images up to this size get a preview before sending. */
 const PREVIEW_MAX = 10 * 1024 * 1024;
 
-/** A picked file with a `data:` preview for images (the CSP has no `blob:`). */
-export function toOutgoing(file: File): Promise<OutgoingFile> {
-  const f: OutgoingFile = { file, name: file.name || 'file' };
-  if (!file.type.startsWith('image/') || file.size > PREVIEW_MAX || typeof FileReader === 'undefined') {
-    return Promise.resolve(f);
+/** A file the hub takes at most (SPEC §12, `MAX_ARTIFACT_BYTES`): a larger one is not read
+ *  into memory. */
+const HELD_MAX = 100 * 1000 * 1000;
+/** iOS draws a canvas of at most this many pixels; a larger photo is scaled down to it. */
+const CANVAS_MAX = 16_000_000;
+const HEIC_NAME = /\.hei[cf]$/i;
+
+/** A picked file, read into memory at once, with a `data:` preview for images (the CSP has
+ *  no `blob:`). On an iPhone a HEIC file whose preview was read in full still went out cut
+ *  off when the upload read it again ("incomplete multipart stream"), so the upload sends
+ *  what was read here.
+ *  A HEIC or HEIF image becomes a JPEG where the browser decodes it (Safari, any browser on an
+ *  iPhone): the agent does not read HEIC. */
+export async function toOutgoing(file: File): Promise<OutgoingFile> {
+  let f: OutgoingFile = { file, name: file.name || 'file' };
+  if (file.size <= HELD_MAX) {
+    try {
+      f.file = new Blob([await file.arrayBuffer()], { type: file.type });
+    } catch {
+      // Not readable: the upload fails and says so.
+      return f;
+    }
+    if (/^image\/hei[cf]/i.test(file.type) || HEIC_NAME.test(f.name)) f = (await toJpeg(f)) ?? f;
   }
+  if (!f.file.type.startsWith('image/') || f.file.size > PREVIEW_MAX || typeof FileReader === 'undefined') return f;
+  return { ...f, preview: await dataUrl(f.file) };
+}
+
+/** `f` drawn as a JPEG, or null where the browser does not decode it. */
+async function toJpeg(f: OutgoingFile): Promise<OutgoingFile | null> {
+  try {
+    const src = await dataUrl(f.file);
+    if (!src) return null;
+    const img = new Image();
+    img.src = src;
+    await img.decode();
+    const scale = Math.min(1, Math.sqrt(CANVAS_MAX / (img.naturalWidth * img.naturalHeight)));
+    const c = document.createElement('canvas');
+    c.width = Math.floor(img.naturalWidth * scale);
+    c.height = Math.floor(img.naturalHeight * scale);
+    c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+    const jpeg = await new Promise<Blob | null>((resolve) => c.toBlob(resolve, 'image/jpeg', 0.9));
+    // iOS frees a canvas's memory only when it is collected.
+    c.width = c.height = 0;
+    return jpeg ? { file: jpeg, name: `${f.name.replace(HEIC_NAME, '')}.jpg` } : null;
+  } catch {
+    return null;
+  }
+}
+
+function dataUrl(b: Blob): Promise<string | undefined> {
+  if (typeof FileReader === 'undefined') return Promise.resolve(undefined);
   return new Promise((resolve) => {
     const r = new FileReader();
-    r.onload = () => resolve({ ...f, preview: typeof r.result === 'string' ? r.result : undefined });
-    r.onerror = () => resolve(f);
-    r.readAsDataURL(file);
+    r.onload = () => resolve(typeof r.result === 'string' ? r.result : undefined);
+    r.onerror = () => resolve(undefined);
+    r.readAsDataURL(b);
   });
 }
 

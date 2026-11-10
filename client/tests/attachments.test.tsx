@@ -183,6 +183,46 @@ describe('sending files', () => {
   });
 });
 
+describe('a picked file', () => {
+  it('is read into memory when picked: the upload sends those bytes, not the picked file again', async () => {
+    const txt = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+    const f = await toOutgoing(txt);
+    expect(f.file).not.toBe(txt);
+    expect([f.name, f.file.type, await f.file.text()]).toEqual(['notes.txt', 'text/plain', 'hello']);
+  });
+
+  it('a HEIC becomes a JPEG where the browser decodes it, and stays HEIC where it does not', async () => {
+    const heic = new File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])], 'HQC.heic', { type: 'image/heic' });
+    // Chrome on a computer does not decode HEIC: the file is sent as it is.
+    const reject = vi.spyOn(HTMLImageElement.prototype, 'decode').mockRejectedValue(new DOMException('', 'EncodingError'));
+    try {
+      expect((await toOutgoing(heic)).name).toBe('HQC.heic');
+    } finally {
+      reject.mockRestore();
+    }
+    const jpeg = new Blob(['jpeg'], { type: 'image/jpeg' });
+    const draw = vi.fn();
+    const spies = [
+      vi.spyOn(HTMLImageElement.prototype, 'decode').mockResolvedValue(undefined),
+      vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(8000),
+      vi.spyOn(HTMLImageElement.prototype, 'naturalHeight', 'get').mockReturnValue(6000),
+      vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: draw } as unknown as CanvasRenderingContext2D),
+      vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((cb) => cb(jpeg)),
+    ];
+    try {
+      const f = await toOutgoing(heic);
+      expect([f.name, f.file]).toEqual(['HQC.jpg', jpeg]);
+      expect(f.preview).toMatch(/^data:image\/jpeg;base64,/);
+      // A 48-megapixel photo is drawn within the 16 million pixels iOS draws.
+      const [, , , w, h] = draw.mock.calls[0] as number[];
+      expect(w * h).toBeLessThanOrEqual(16_000_000);
+      expect(w / h).toBeCloseTo(8000 / 6000, 2);
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
+  });
+});
+
 describe('composer', () => {
   it('picks several files, previews images, removes one and sends files without text', async () => {
     const png = new File([new Uint8Array([137, 80, 78, 71])], 'shot.png', { type: 'image/png' });

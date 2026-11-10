@@ -3600,7 +3600,11 @@ The rule is the link in `artifact_sessions` to a session of this worker; since 0
 session (§7.1), so the target's and the asker's workers may download them.
 
 Client. User → agent: files are attached to a message (paperclip, drag and drop, paste;
-several; image previews as `data:` URLs); first each goes through `POST /api/artifacts`, then
+several; image previews as `data:` URLs). Since 0.109 a file of at most 100 MB is read into
+memory when it is attached and those bytes are uploaded, and a HEIC or HEIF image is sent as a
+JPEG where the browser decodes it (Safari, any browser on an iPhone), drawn within 16 million
+pixels, iOS's canvas limit: Claude Code does not read HEIC. A browser that does not decode it
+(Chrome on a computer) sends it as it is. First each goes through `POST /api/artifacts`, then
 the input with `artifact_ids` (the text may be empty); retrying a failed send does not upload
 what is already uploaded. The worker puts them into `.hqc/inbox/` and substitutes the paths
 (§8.1); for runtimes with vision, images are also passed as images. In the feed, attachments
@@ -4365,6 +4369,15 @@ after a later input reached the agent and its turn ended well. A spawned session
 input failed on the worker's `max_sessions` showed Error under "Needs you" while it answered the
 next message. Such an input now keeps `error` only while no later input was delivered after it;
 it stays `failed`, and Retry still sends it again. 0.109–0.116 are taken by other pull requests.
+
+### 0.108 → 0.109 (a HEIC attached on an iPhone is sent as a JPEG)
+§12 Client: the composer reads an attached file into memory when it is attached and uploads
+those bytes. On an iPhone a HEIC file whose preview had been read in full went out cut off when
+the upload read it again: the hub answered `incomplete multipart stream`. A HEIC or HEIF image is
+sent as a JPEG named `.jpg` where the browser decodes it (Safari, any browser on an iPhone),
+scaled down to 16 million pixels, iOS's canvas limit, since Claude Code does not read HEIC; a
+browser that does not decode it (Chrome on a computer) sends it as it is. A photo picked from
+the iPhone's library came as a JPEG already: iOS converts it.
 
 ### 0.107 → 0.108 (an input written during the agent's text stands under it)
 §4, §6: a message the user wrote while the agent's text was being written stood above that

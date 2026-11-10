@@ -149,7 +149,8 @@ it has `author`.
 OIDC sign-in, §6; hub migration `0031_oidc_subject`), `display_name`, `api_keys`
 (OpenRouter, Anthropic API; encrypted with the hub's master key, which lives in the hub's
 env/file, not in the database), `timezone`, `personal_project_id` (the implicit personal
-project, created on first sign-in; the personal assistant session lives in it), `theme`.
+project, created on first sign-in; the personal assistant session lives in it), `theme`,
+`look`, `project_sort`.
 
 `theme` (since 0.51, T49) — the client's base palette: three dark ones, `warm` (default) |
 `graphite` | `contrast`, and since 0.88 their light counterparts `warm_light` |
@@ -157,6 +158,22 @@ project, created on first sign-in; the personal assistant session lives in it), 
 user (`PATCH /api/me`, §6). The client applies it at start (until `/api/me` answers, the one
 last applied on this device, kept in the browser's storage as `hqc.theme`; without it `warm`)
 and after a change.
+
+`look` (since 0.114, hub migration `0039_user_look`) — how dense the client draws everything:
+`compact` | `spacious` (default), the same on every device of the user (`PATCH /api/me`, §6).
+Compact is the feed across the whole chat column in one column, as the VS Code tab draws it,
+the platform's UI font instead of Inter, each project's full name on the project bar and a line
+per session in the session list; Spacious has none of that (§6 client layout). The client
+applies it as `theme`: until `/api/me` answers, the look last applied on this device
+(`hqc.lookName`), without it `spacious`.
+
+`project_sort` (since 0.114, hub migration `0040_project_sort`) — the order of the project
+bar: `custom` (default; the user's own, `PUT /api/me/project_order`, §6) | `name` (by the shown
+name) | `recent` (by the latest activity of the project's sessions), the favorite projects
+first in each; the same on every device of the user (`PATCH /api/me`). The hub stores it and
+keeps `GET /api/projects` in the user's own order; the client sorts by it, and until
+`/api/me` answers uses the one last shown on this device (`hqc.projectSort`), without it
+`custom`.
 
 `timezone` (since 0.38, T35) — an IANA name, `UTC` until set; the default zone of new
 schedules (§16). The client sets it to the browser's zone (`PATCH /api/me`, §6) when it starts
@@ -468,7 +485,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
@@ -1246,13 +1263,14 @@ read them. Unknown fields are ignored in both directions.
 HTTP API (iteration 1 and projects with workspaces from iteration 2; the list is not complete,
 the rest is marked "later"):
 
-- `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme}`
-  (`api.me.json`); `PATCH /api/me` {timezone?, theme?} (since 0.38, `api.me.patch.request.json`;
-  an unknown zone: `400`; `theme` since 0.51, §3 User, another value: `422`) → the same object;
+- `GET /api/me` → `{id, email, display_name, timezone, personal_project_id, theme, look,
+  project_sort}` (`api.me.json`); `PATCH /api/me` {timezone?, theme?, look?, project_sort?}
+  (since 0.38, `api.me.patch.request.json`; an unknown zone: `400`; `theme` since 0.51, `look`
+  and `project_sort` since 0.114, §3 User, another value: `422`) → the same object;
   later keys; `PUT /api/me/project_order` {project_ids} (since 0.64,
-  `api.project_order.request.json`) → `{projects[]}` in that order: the order of the project
-  bar, kept per user (`users.project_order`); ids that are not the user's projects and repeats
-  are dropped. The bar has no archived projects (§3 Project), so since 0.110 an archived
+  `api.project_order.request.json`) → `{projects[]}` in that order: the user's own order of the
+  project bar, kept per user (`users.project_order`); ids that are not the user's projects and
+  repeats are dropped. The bar has no archived projects (§3 Project), so since 0.110 an archived
   project the list leaves out keeps its place: right after the project before it in the order
   stored so far (the projects missing from it after it), when that one is in the list, else at
   its old index; restored, it comes back where it was. The reply has the projects that are not
@@ -1396,7 +1414,7 @@ the rest is marked "later"):
 - `GET /api/sessions` (since 0.89) → `{sessions: [<session>]}`: every session of every project
   of the user in one list, the objects of `GET /api/projects/{id}/sessions` (archived and
   service sessions included), the newest `updated_at` first. The client fetches its list with
-  it and `GET /api/projects`, not one request per project
+  it and `GET /api/projects` (since 0.114 also `?archived=1`), not one request per project
 - `GET/POST /api/projects/{id}/sessions` (list: `{sessions: [<session>]}`; create:
   {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?} → `201` and
   the session object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4).
@@ -1534,9 +1552,13 @@ the rest is marked "later"):
   0.74, §3 Favorite): for whoever may read the session or the project, as `read_cursor`;
   `PUT` → `200 {favorite_at}` (again: the same time), `DELETE` → `204` (also when there was
   none). A session's change reaches the user's clients as `session.summary`; a project's has no
-  frame, another device sees it at the next `GET /api/projects`. The client shows a Favorites
-  block of the starred sessions of every project above the session groups, newest first, and the
-  starred projects first on the rail, each part in the hub's project order.
+  frame, another device sees it at the next `GET /api/projects`. The client shows the open
+  project's starred sessions in a Favorites block pinned above its session groups, newest first,
+  without the project's name in the row (since 0.114; before, the starred sessions of every
+  project began every project's list); a starred session is listed there only, not again in its
+  group (Reorder still lists every session), so a project whose sessions are all starred shows
+  the block, not "No sessions yet". The starred projects come first on the project bar in each
+  of its orders (§3 User `project_sort`), with a star on the tile's corner.
 - `GET /api/workers` → `{workers[]}`: workers that are not revoked; `?include_revoked=1` adds
   the revoked ones (the "Settings" screen). The worker object is `{id, name, os, status: online
   | offline | revoked, revoked_at?, last_seen?, system_session_id, limits, ...}` (§3 Worker);
@@ -1608,63 +1630,141 @@ the rest is marked "later"):
   and deletes a session's schedules from the session's "More" menu ("Schedules")
 - later: `/api/projects/{id}/template`
 
-Client layout (since 0.51, T49, `docs/design/redesign-2026-11-01`): on a desktop the project
-bar (72 px: a tile per project with its icon on its color at ~24 %, the current one more
-saturated with a pill of its color at the left edge, an amber "needs you" badge, else, since
-0.67, a dot when a session of the project has unread events), the sidebar
-(280–310 px: the project's tile, name and counters, a gear to the project settings, "New";
-rows with a status dot — amber waiting, the project color pulsing while running, an empty ring
-idle — title, time, status and `worker · path` without `~/work/`) and the main column, whose
-feed and input are at most 780 px wide; on a phone one screen at a time, the projects as chips
-with their icons, the same badge or dot. Since 0.73 the tab's icon marks the same across all
-projects: an amber dot while a session waits, else a light one while one has unread events. Since 0.64 the project bar has "Reorder projects" (⇅ under "+"): the tiles
-are dragged (or moved with ↑/↓ when focused) instead of opened, ✓ stores the order with `PUT
-/api/me/project_order`, ✕ drops it; a phone's chips follow the same order. Since 0.64 a project opened on a desktop opens the session last open in it
-on this device (kept in the browser's storage; none, archived or deleted: the empty main
-column); a phone's project screen stays its session list. Since 0.78 a message typed into a
-session and not sent stays its draft on this device (the browser's storage, `hqc.drafts`): the
-input shows it again when the session is opened, and the session's row, unless it is the one
-open, says "Draft"; sending the message or clearing the input drops it. Since 0.89 the
-projects, the sessions and the list orders the hub gave on this page load are kept on this
-device as well (the
-browser's storage, `hqc.list`, with the id of the personal project), written after each fetch
-of the list and when the page is hidden or left, dropped when a write fails: on a reload the
-project bar and the list (of the project of the open session or project, else the personal
-one) show them at once, and the hub's answer replaces them; a kept list order is asked from
-the hub again once per page load. Before any list (nothing kept, no answer yet) the list's head has no counts, and
-"offline" (the list's head, the chat's header) appears only once the socket's first connect has
-ended. The theme is the user's `theme` plus the current project's `color`, as CSS
+Client layout (since 0.51, T49, `docs/design/redesign-2026-11-01`; since 0.114 the new screen):
+a window 1080 px wide or more has the project bar, the session column and the main column; from
+900 to 1079 px the bar and the main column, the session column sliding out over the chat
+(below); below 900 px the phone layout, one screen at a time (below). The look (§3 User `look`,
+"Settings" → "Look": Compact or Spacious, applied once the hub has stored it) sets how dense all
+of it is, as classes on the document root: Spacious — the feed and the input at most 780 px
+wide, the user's messages as bubbles on the right, Inter, a 72 px bar with a tile per project,
+two lines per session; Compact — the feed, the input and the live subagents across the whole
+chat column, in one column as the VS Code tab draws it (a mark in a gutter before each item: a
+grey dot for the agent's text, the state of a run of tools, an arrow for a message between
+sessions, a shield for a permission request, a question for the agent's questions, a clip for a
+file, a chevron for what folds; the user's messages as plates from the feed's left edge, the
+service lines across the feed), the platform's UI font (SF on a Mac) instead of Inter, a row
+with each project's full name on the bar, a line per session. Since 0.73 the tab's icon keeps
+two of the project bar's marks across all projects: an amber dot while a session waits, else a
+light one while one has unread events. Since 0.64 a project opened on a desktop opens the
+session last open in it on this device (kept in the browser's storage; none, archived or
+deleted: the empty main column); a phone's project screen stays its session list. Since 0.78 a
+message typed into a session and not sent stays its draft on this device (the browser's storage,
+`hqc.drafts`): the input shows it again when the session is opened, and the session's row,
+unless it is the one open, says "Draft"; sending the message or clearing the input drops it.
+Since 0.89 the projects (since 0.114 the archived ones too), the sessions and the list orders
+the hub gave on this page load are kept on this device as well (the browser's storage,
+`hqc.list`, with the id of the personal project), written after each fetch of the list and when
+the page is hidden or left, dropped when a write fails: on a reload the project bar and the list
+(of the project of the open session or project, else the personal one) show them at once, and
+the hub's answer replaces them; a kept list order is asked from the hub again once per page
+load. The client fetches the list with `GET /api/projects`, `GET /api/projects?archived=1` and
+`GET /api/sessions`; the archived projects stay as kept when their request fails. "offline" (the
+workers line, a phone's list head, the chat's header) appears only once the socket's first
+connect has ended. The theme is the user's `theme` plus the current project's `color`, as CSS
 variables on the document root recomputed when either changes; status colors do not depend on
-the project (amber waiting, green online, red danger, violet between sessions); since 0.88 the
-light themes have darker variants of them, and there the project's color is darkened where it
-is text. Since 0.88 the app theme is picked on the Settings page (`#/settings`, the first
-section "Theme": a row of dark and a row of light tiles, a click applies it at once). On a
-light theme the client switches `apple-mobile-web-app-status-bar-style` from
-`black-translucent` (white status text) to `default` (dark text) **[verify]**: whether an
-iPhone's Home Screen app picks the change up at once, at its next start or only when added
-again. The project settings (`#/p/<id>/settings`, the gear) have Appearance (the "Project appearance"
-dialog: the name, icon as an emoji, letters or an image, the color, a live preview in the app
-theme; before 0.88 it also had the app theme; on a phone a
-full-screen sheet; "Delete project" next to the button that opens it; since 0.64, before it a
-section "Project" had "Rename" and "Delete project"; the personal project has neither the name
-field nor the delete) and Workspaces (the workspace records with "VS Code
-sessions", "Make default", "Remove"; "Add a workspace", "Import from Claude Code"; they are no
-longer in the sidebar).
+the project (amber waiting, green online, red danger, violet between sessions, since 0.114 blue
+for the project bar's unread dot); since 0.88 the light themes have darker variants of them, and
+there the project's color is darkened where it is text; since 0.114 the user's message bubble is
+the theme's surface in every project, not tinted by the project's color. Since 0.88 the app
+theme is picked on the Settings page (`#/settings`, the first section "Theme": a row of dark and
+a row of light tiles, a click applies it at once). On a light theme the client switches
+`apple-mobile-web-app-status-bar-style` from `black-translucent` (white status text) to
+`default` (dark text) **[verify]**: whether an iPhone's Home Screen app picks the change up at
+once, at its next start or only when added again. The Settings page (since 0.114) has a back
+arrow to the address it was opened from (on a computer, from `#/`, the current project), and
+"Workers" lists a line per worker: its online dot, name, system (macOS, Linux, Windows), status
+and "Revoke", or "Delete" for a revoked one. The project settings (`#/p/<id>/settings`, "Project
+settings…" in the project's menu, below) have Appearance (the "Project appearance" dialog: the
+name, icon as an emoji, letters or an image, the color, a live preview in the app theme; before
+0.88 it also had the app theme; on a phone a full-screen sheet; "Delete project" next to the
+button that opens it; since 0.64, before it a section "Project" had "Rename" and "Delete
+project"; the personal project has neither the name field nor the delete) and Workspaces (the
+workspace records with "VS Code sessions", "Make default", "Remove"; "Add a workspace", "Import
+from Claude Code"; they are no longer in the sidebar).
 
-The session list (since 0.53, T50): a State / Recent / Custom switch (State groups Needs you /
-Running / Idle, Recent Today / Yesterday / Earlier, Custom is one list in the saved order;
-since 0.102 an `idle` session whose subagents still work after its turn ended, `subagents` > 0,
-and since 0.104 one whose background tasks still run, `background_tasks` > 0, is under Running,
-and its row and the chat header say "Running") and a Reorder button; Reorder
-replaces the switch with "Reorder · Cancel · Done" and gives each row a handle (on the left
-on a desktop, on the right on a phone), dragged with pointer events (mouse and finger) or moved
-with ↑/↓ while focused; Done stores the order with `mode: custom`, Cancel
-restores the previous one. Both are `session_order` above. A row shows, on hover or focus, an
-archive button and "⋯" (Rename, Delete with a confirmation in the row); on a phone a long press
-(or a right click) opens a bottom sheet with Archive, Rename and Delete (confirmed in a second
-step). Archiving from a row hides it at once and shows "Archived «title» · Undo" for 5 s; the
-`/archive` call goes only when the toast ends, when another row is archived (the previous one is
-sent first), before Reorder or archive mode opens, or when the page is hidden or left (`fetch` with
+The project bar (since 0.51; since 0.114 its marks, search, menu and orders): Spacious, 72 px, a
+tile per project with its icon on its color at ~24 %, the current one more saturated with a pill
+of its color at the left edge; Compact, a row per project with its icon on its color and its
+full name, the bar as wide as the longest name, 200–320 px (a longer one ends in "…"), the hub's
+name "HQC" by its mark, "+", the order menu, the settings and the avatar in one row at the
+bottom, and the session column narrower so the chat keeps at least 300 px. A project's mark, on
+the tile or on the row's icon: an amber count of its sessions that wait for the user ("needs
+you"), else a stripe that runs slowly around the icon while one of them works (the rule of a
+session row's pulsing dot: `running`, `queued`, a subagent or a background task at work after
+its turn, a busy VS Code; archived and service sessions do not count), under `prefers-reduced-motion` too, since a
+still arc does not read as work, else (since 0.67) a blue dot while one has
+unread events, the name bold in Compact; an idle project has none; a starred project also has a
+star on the icon's bottom right corner. "+" asks for a name, makes the project and opens its
+settings. The order menu (⇅, with more than one project) has Custom, Name and Recent (§3 User
+`project_sort`, `PATCH /api/me`, applied at once and put back if the hub refuses): Custom is the
+hub's order (`PUT /api/me/project_order`), Name the shown names, Recent the newest `updated_at`
+among the project's listed sessions (not archived, not a service session) first, the projects
+without one after them, the newest project first; the starred projects first in each. Its
+"Reorder…" (since 0.64) arranges the user's own order whichever is shown: the tiles are dragged
+(or moved with ↑/↓ when focused) instead of opened, ✓ stores the order with `PUT
+/api/me/project_order` and switches the bar to Custom, ✕ drops it. A right click on a project
+(or the menu key) opens the project's menu, the same as "⋯" in the session column's head: Open
+in new tab, Add to (Remove from) favorites, Project settings…, Archive project (Restore for an
+archived one) and Delete project…, neither of the last two for the personal project. Archive
+project takes it off the bar at once, without a question, the open one giving its place to the
+personal project (on a phone, back to the projects screen), and shows "Archived «name» · find it
+with the search on the bar · Undo" for 5 s at the bottom of the bar (on a phone "Archived «name»
+· Undo" at the bottom of the projects screen); Undo and Restore send `/unarchive`, and the
+project comes back in its place; a refusal of the hub puts it back on the bar in the hub's order
+and says why. The project search — its magnifier in the bar's head, or ⌘K on a Mac (Ctrl+K
+elsewhere) from anywhere — finds projects by their shown name, the archived ones too (marked
+"archived") once something is typed: in Compact the field takes the place of "HQC" and the bar's
+list shrinks to the matches, with tiles a 290 px panel with the names opens over the session
+column; ↑/↓ select, Enter opens the match, Esc (the focus back on the magnifier) or a press
+outside the bar closes it, "N of M" counts the matches, and a match's right click opens its
+project's menu. An archived project opened from the search, an address or one of its sessions
+shows its session list like any other; the bar has no tile for it.
+
+The session column (since 0.114): 280–310 px by default, narrowing with the window; its right
+edge is dragged (or moved with ←/→ in 16 px steps when focused) between 240 and 560 px, the
+width kept on this device (`hqc.look`), never so wide that the chat gets less than 300 px. Its
+head is one row: the project's name, the magnifier (the search page, §15), the order menu
+("State ▾": State, Recent, Custom and "Reorder…"), "⋯" (the project's menu above) and "+" (a new
+session, below). Under it the project's favorites (§3 Favorite) pinned over the scrolling list,
+then the groups (below). A row is a dot — amber waiting, red error, the project color pulsing
+while it works, an empty ring idle, `</>` while it is open in VS Code and not working there —
+then the title, "Draft", the unread count, and in Spacious the state line under the title (the
+state, "N queued", "N agents"); Compact puts the row on one line, "N agents" after the title and
+the state in the dot alone (faded while the worker is offline). A desktop row has no time (its
+group says how old it is) and no `worker · path` (its card says where it runs); a phone row
+shows its time in Recent. On a desktop the mouse on a row shows a round archive button past the
+column's right edge (it stays 300 ms after the mouse leaves the row or the button, for the way
+between them), and resting on it for 500 ms its card right of the column, in place of a tooltip:
+the full title, the state, "N agents" and how long ago it was active ("4 min ago"), the worker
+and the folder, and once its chat is loaded the last line of the turn (the agent's text or
+thought, the call, or the user's message; resting on the row loads the chat, below). A right
+click on a row (the menu key; on a phone a long press or a right click) opens its menu: Open in
+new tab, Add to (Remove from) favorites, Rename, Move to project…, Folder rules (with a
+workspace), Archive, and Delete…, which asks in a second step of the menu with the focus on
+Cancel. At the bottom of a desktop column: "Requests" while one is open (§10.1), then the
+workers line — "N workers online", the open session's worker with "N running" (its sessions in
+every project, by the rule of the list's Running group), "offline" while the socket is down —
+whose click opens the "Workers" list above it (§10.2). A phone's project screen (`#/p/<id>`) has
+the same column with one head row after "‹" back to the projects, no card and no archive button;
+"Requests" and the workers line are on the phone's first screen (below). The client's menus (a
+row's, a project's, the head's, a new session's chips, the feed's) close on Esc or a press
+outside, move with ↑/↓ and give the focus back to what had it; while one, the workers list or
+the slid-out column is open, a permission card does not take Enter and Esc (§10.1).
+
+The session list (since 0.53, T50): the order menu's State / Recent / Custom (State groups Needs
+you / Running and then the idle sessions by how long ago they were active, "Idle · Today", "Idle
+· Yesterday", "Idle · Last 7 days", "Idle · This month", "Idle · Earlier"; Recent Today /
+Yesterday / Last 7 days / This month / Earlier; Custom is one list in the saved order; empty
+groups are left out, none is collapsed; since 0.102 an `idle` session whose subagents still work
+after its turn ended, `subagents` > 0, and since 0.104 one whose background tasks still run,
+`background_tasks` > 0, is under Running, and its row and the chat header say "Running") and its
+"Reorder…"; Reorder shows "Reorder · Cancel · Done" under the head and gives each row a handle
+(on the left on a desktop, on the right on a phone), dragged with pointer events (mouse and
+finger) or moved with ↑/↓ while focused; Done stores the order with `mode: custom`, Cancel
+restores the previous one. Both are `session_order` above. Archiving from a row (its menu or its
+archive button) hides it at once and shows "Archived «title» · Undo" for 5 s; the `/archive`
+call goes only when the toast ends, when another row is archived (the previous one is sent
+first), before Reorder or archive mode opens, or when the page is hidden or left (`fetch` with
 `keepalive`); Undo cancels it, so nothing reaches the hub and the row is back in its place. The
 session header has no archive, restore or delete. "Archive N" under the list opens archive mode:
 the sidebar without the project tint, a hatched header with a back arrow, "Archive", "<project>
@@ -1672,6 +1772,73 @@ the sidebar without the project tint, a hatched header with a back arrow, "Archi
 "Delete" always shown (delete confirmed in the row). An open archived session has an "Archived"
 chip in the header, a hatched band "Archived <when> · read-only. Restore or delete it from the
 list on the left." (the time from `archived_at`, none without it), the feed dimmed and no input.
+
+A window 900–1079 px wide (since 0.114) has no session column in its layout: "Sessions" at the
+left of the chat's header (with the amber count of the project's sessions that wait for the
+user), or ⌘\ (Ctrl+\ off a Mac), slides the column out over the chat from the bar's edge, as
+wide as on a desktop, with a scrim over the rest; a session, a new one, a project or a page
+opened (from the column or elsewhere), Esc, a click on the scrim or leaving that width puts it
+away. With no session open the main column says "Open Sessions to pick a session or start a new
+one".
+
+The phone (since 0.114): the first screen, `#/`, lists the projects — Needs you (a session waits
+for the user), Running (one works, none waits), Favorites, and All projects in the bar's order
+with "New project" last; a project may be in several — or, picked from its title's menu,
+"Sessions": every live session of the projects on the bar in the groups of State, each row with
+its project's name before the state line and its tile at the end, without a menu. Its head is
+one row: the title with that menu (kept while the page is open), "Requests" with the count, the
+search, the settings and the avatar; the workers line is at the bottom, and a project archived
+from there shows its "Archived «name» · Undo" there. A project's row has its tile, its name
+(bold with unread events; in Spacious "N waiting · N running" under it), then a running mark
+with how many work, the amber count of those that wait and the count of those with unread
+events. A project opens its own screen, `#/p/<id>`, the session list; everything else replaces
+the screen as before. Both looks apply on a phone too: in Compact its list heads, groups and
+rows are denser and a row is one line with the state in the dot.
+
+A new session (since 0.114) opens at once as a chat window, `#/p/<project>/new`, with nothing on
+the hub yet: the header says "New session", "Draft" and where it will run; the list shows it as
+the group "Draft" on top, the current row "New session" with "Draft · <worker> · <path>"; the
+feed says to write the first message (or, for a project without workspaces, that a session needs
+one, with "Add a workspace"). Chips over the input choose the workspace (each of the project's
+with its worker and path, the default marked, "Add a workspace…" under them), the folder inside
+it (typed, `.` by default), the permissions (the worker's default, Ask, Auto, Auto after the
+one-line confirmation below) and the model (Claude Code's default, an alias, or another name
+typed), the defaults already chosen: the project's `default_workspace_id`, else its first
+workspace (§13.4). The first message creates the session with those choices (`POST
+/api/projects/{id}/sessions`, no title) and goes in as its first input; until the chat is there
+the input sends nothing more ("Starting…") and the chips are off, while what is typed and
+attached meanwhile stays; the draft row stands for the new session in the list. Once the chat's
+first page is in, the address becomes `#/s/<session>` and the session's chat replaces the
+window: the message in its feed, the text and files not sent in its input, the caret there. A
+create the hub refuses keeps the window, the message back in the input with its files and the
+reason above it. Left unsent, the draft is gone; left while the session is being created, the
+session stays in the list with what was typed meanwhile as its draft, or, refused, the list says
+"Not started: <reason> — your message was not sent".
+
+The chat (since 0.114): its header has "‹" on a phone, "Sessions" in a 900–1079 px window, then
+the title, the state pill and the meta line. A session VS Code has (`locked_vscode`) says "In VS
+Code on <worker>" in the pill, marked `</>` ("In Claude Code…" when another program holds it, by
+`held_by.entrypoint`), and in place of the input a bar: "Close the session in VS Code to write
+from here." while it is held, else "VS Code was the last to run this session." with "Take over
+here" (§9.3). "Retry" of a failed session is a filled button. In the feed a message's time
+stands at the right end of its first line, inside the bubble or plate for the user's, after a
+note on that line ("joined the turn", §17.2; "instead of the request", §10.1) and before "·
+scheduled", "· awaiting delivery" or "· not delivered"; its buttons show on hover: the user's
+copy and "Fork from here" inside the bubble left of the time, an agent message's copy in the
+margin left of the feed, on a phone under the message. A run of tool calls is "N tool calls ·
+time" and the call's line when it is one, else the tools it called, each once, in the order
+first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
+`<server>/<tool>`); a Skill call's line names its skill; thinking and tool lines are fainter
+than the text, and an open thinking block is prose in the feed's font. Quote (since 0.74): on a
+computer a right click on text selected in the feed opens the client's menu with "Quote" (into
+the input as `> ` lines) and "Copy"; on a phone a "Quote" button under the selection's end. The
+input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
+computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the
+input takes the caret when the chat opens, once its newest page is in, unless a request waits
+for an answer (an open approval in the feed, or the session `waiting`), another field has the
+focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
+session's window. An open chat stays at its bottom while its images load: only a scroll up lets
+go of the bottom.
 
 Messages between sessions in the feed (since 0.54, T51; mockups `Session`, `AskingSession`,
 `MSession2`): violet blocks (`--relay`) with an arrow, ↗ for what left this session and ↙
@@ -1701,7 +1868,14 @@ permission_capped_by?, subagents?, background_tasks?, output_per_s?}`.
 `subagents` (since 0.70): the subagents the agent runs now, from `session.state` (§5.4);
 absent — 0. The client shows "N agents" ("1 agent") next to the state in the chat header and in
 the session's row of the list while it is above 0; a background subagent keeps it up after the
-turn that started it has ended.
+turn that started it has ended. Since 0.114, while it is above 0, the chat also shows the
+subagents of the latest `subagents.live` (§4) above the input, outside the feed's scroll, so they
+stay in view while the feed scrolls (the VS Code tab writes such lines into the chat, where they
+scroll away): a line each, `<task>: <what it does now>` (the task alone before any progress) and
+at its right `<tokens> tokens · <n> tools · <run time>` (`155.3k tokens · 188 tools · 4m 13s`),
+what was not reported yet left out, the run time ticking every second from `duration_ms`; a long
+line is cut with an ellipsis. A subagent's line goes when it ends; a dropped socket, and a chat
+closed, clear the lines until the next subscribe brings the hub's list.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
 keeps it up after the turn has ended.
@@ -1712,7 +1886,7 @@ the session asked for `auto` but its worker runs `ask` (not restarted yet, or `a
 false`), nothing while both are absent; since 0.43 (T39), while `permission_capped_by` is set,
 "Ask (asked by <address>) · Auto after this turn": the turn runs in Ask under the cap, the
 session's own Auto comes back when it ends. The session's "More" menu has "Switch to Auto" /
-"Switch to Ask"; the new-session form has "Permissions": the worker's default, Ask or Auto.
+"Switch to Ask"; a new session's "Permissions" chip has the worker's default, Ask and Auto.
 Going to Ask asks nothing; going to Auto asks one line: "Switch to Auto? Claude Code then runs
 tool calls without asking; the worker's deny list is the only limit." `spawned_by` (since 0.37, T34) — `{session_id, address}`
 of the session whose agent started this one with `hqc_spawn` (§7), absent otherwise or once
@@ -1747,7 +1921,17 @@ the chat loads the newest 100 events (`before_seq`), shows them and subscribes, 
 older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
 each time the user scrolls to the top, and while the feed is shorter than its window (which
 cannot be scrolled); "Requests only" of a worker's service session, on or off, starts it again at
-the last 60 blocks of the new view. An event
+the last 60 blocks of the new view. Since 0.114 the client keeps the 12 most recently used
+chats in memory with what they have loaded (an open one is never dropped): one of them opens
+again at once, with no wait for its newest page, and subscribes after its last `seq`, so the hub
+sends what came while it was closed (a half-written answer and the live subagents are dropped
+on closing: the subscribe brings them whole); behind that it fetches its newest page again and
+takes from it only the fields of the events it has that change (`delivery`, `delivered_at`,
+`reply_delivered_at`, `payload.joined`, which the hub sends to subscriptions only), not new
+events and not its last `seq`. A mouse resting 60 ms on a session row or a project tile, or a
+press with it, loads the newest page of the chat it opens (for a project, the session the
+project reopens) before the click; that load does not subscribe and does not move the read
+cursor. A touch loads nothing ahead: on a phone it may start a scroll. An event
 stored from a client input carries its `client_op_id`, so the client shows the message at
 once and matches it with the echo (a technique from Agent Host Protocol, §22). A separate
 subscription, `subscribe_summary`, gives `state`, `queue_len` and unread counts per session,
@@ -1771,7 +1955,7 @@ newer copy).
   delivered_at?, joined?}`: the delivery of an input changed; the event itself is not resent, the
   client updates `delivery`/`delivered_at` of its event with this `seq`; `joined: true` (since
   0.112, `client.delivery.joined.json`, absent when false) says the input went into the turn
-  already running;
+  already running, and the client sets the message's `payload.joined` with it;
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
@@ -3438,8 +3622,9 @@ own feed:
   on it are named under the header.
 - In the "Requests" list: every open request of the user (`GET /api/requests`, the `requests`
   frame, §6), the workers' own requests (§10.2) included; on a desktop an entry with the count
-  in the left column (shown while something is open), on a phone a "Requests" button with the
-  count in the session list's header; both open `#/requests`. Each item is the same card with
+  at the bottom of the left column (shown while something is open), on a phone a "Requests"
+  button with the count in the header of its first screen (since 0.114; before, of the session
+  list); both open `#/requests`. Each item is the same card with
   the same header and the sessions waiting on it, answers in place and links to its session.
 
 An answer from any of these places is the ordinary answer of the request's own session (`POST
@@ -3548,8 +3733,10 @@ field `system: true` (only `true` is ever sent); service sessions are not counte
 `worker_offline` while the worker is not connected, `waiting` while a worker request is open,
 otherwise `idle`. Input, `POST /stop`, `/retry`, `/takeover`, `/archive` and `DELETE` for it
 give `409 system_session`; `PATCH auto_approve: true` gives `403`. The client shows service
-sessions not in the session list of the personal project but as a separate "Workers" group in
-the left column (worker name, "waiting for reply", "offline", unread); the feed is ordinary,
+sessions not in the session list of the personal project but as a separate "Workers" list,
+since 0.114 opened from the workers line at the bottom of the left column and of a phone's first
+screen (§6; worker name with its online dot, "waiting for reply", "offline" or "N running",
+unread); the feed is ordinary,
 without the input field and the "Stop"/"Retry" buttons, with a "requests only" filter
 (`approval.request` and `clarify.request` cards).
 
@@ -3557,7 +3744,7 @@ without the input field and the "Stop"/"Retry" buttons, with a "requests only" f
 (`DELETE /api/workers/{id}`, §5.1) writes `system worker_revoked` into its service session, and
 the hub archives the session itself (the `/archive` ban applies only to users); its open
 requests are closed with `approval.cancel {archived}` without a frame to the worker: the
-process that asked is cut off. The "Workers" group shows only non-archived service sessions,
+process that asked is cut off. The "Workers" list shows only non-archived service sessions,
 that is, workers that are not revoked; service sessions of workers revoked before 0.21 are
 archived by hub migration `0009`. Enrollment with replacement (§5.1) unarchives the service
 session, renames it to the new name and writes `system worker_replaced`; deleting a revoked
@@ -3701,7 +3888,11 @@ outside Cloudflare Access); if unset, the link is relative, on the hub's domain 
 Key: `HQC_ARTIFACT_KEY`, or a random one per start. `GET /artifacts/{id}` without a signature
 or with a wrong one gives `403`, an expired one `410`; on `403`/`410` the client requests the
 link again (for `<img>`, once, on `onerror`). Only the artifact's owner gets a link (`404` for
-everyone else); the link itself is the access right, no cookies needed.
+everyone else); the link itself is the access right, no cookies needed. Since 0.114 the chats of
+a page share one cache of links by artifact id, each used until 30 s before it expires: a chat
+opened again has its images' addresses in its first render, and the browser shows them from its
+cache instead of loading them anew; the cache is emptied whenever the client's socket to the hub
+opens, as a hub restarted without `HQC_ARTIFACT_KEY` signs with a new key.
 
 Response headers (both via the link and to the worker): `Content-Security-Policy: sandbox;
 default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'`,
@@ -3832,8 +4023,9 @@ starting prompt. The workspace in the template is required. Meant for projects l
 KiCad, where a session corresponds to a part or a board.
 
 ### 13.4 Choosing a workspace
-When a session is created from the UI, the workspace is chosen explicitly (the form preselects
-the project's `default_workspace_id`, `cwd` is an optional subfolder); `hqc_spawn` and cron require
+When a session is created from the UI, the workspace is chosen explicitly (since 0.114 a new
+session's workspace chip starts on the project's `default_workspace_id`, else its first
+workspace, and its folder chip is an optional subfolder, `cwd`, §6); `hqc_spawn` and cron require
 `workspace` or use the project's `default_workspace_id`; with neither, it is
 an error (`409 no_workspace` in REST, §6; `invalid_args` from `hqc_spawn`, since 0.37).
 
@@ -4019,7 +4211,7 @@ only `env` and `permissions`, no `ssh_keys`.
 ## 15. Search
 
 Postgres full-text search over what a session said and did, and session titles. Results are
-filtered by grants. One index, two consumers: the search bar in the client and
+filtered by grants. One index, two consumers: the search page in the client and
 `hqc_search_history` (which has no filters but the project).
 
 Since 0.36 (T33; `crates/hqc-hub/src/search.rs`, its measurements in
@@ -4085,11 +4277,26 @@ it finds commands, their output and word forms and puts the best match first:
   (`GET /api/search` and `hqc_search_history` together; `429 search_limit` /
   `limit_exceeded`), and at most 4 searches run at once on the hub (`503 busy` /
   `unavailable`), so one owner's agent cannot keep the database busy with fuzzy queries.
-- **Client.** Desktop: the left column's search field filters the project's sessions by title
-  and path at once (as before) and, from 2 characters and 300 ms after typing, shows the hub's
-  hits below them ("In messages", "Similar words" for fuzzy, "More" for the next page). Phone:
-  the list's search button opens `#/search`, a screen with the field, the sessions of all
-  projects matching by title or path, and the hub's hits. A hit opens `#/s/<session>?seq=<seq>`:
+- **Client** (since 0.114). The search is a page, `#/search`, in the place of the session column
+  and the chat on a desktop (the project bar stays) and the whole screen on a phone, opened by
+  the magnifier in the head of the session column (on a phone, of the first screen and of a
+  project's screen); the session list has no search field of its own, archive mode keeps its
+  filter by title and path (§6). Its head: "‹ <project>" back to the address it was opened from
+  (Esc too, unless a menu or the slid-out session column takes it), the field, "N results in M
+  sessions". Filters: the kind — All, Messages, Commands, Tool output, Answers, each with its
+  count —, the project (all of them or one on the bar), the time (any, the past day, week or
+  month, sent as `since`), "Also typos" (fuzzy, from 3 characters), and Best match or Newest.
+  From 2 characters, 300 ms after typing (a changed filter at once), the page asks for 50 hits,
+  at most 4 of each session, and shows a card per session in the order of its first hit: the
+  project's tile, the title (opening the session), "archived", the project, "N results" and how
+  long ago the session was active, then its hits — the kind (Message, Command, Tool output,
+  Answer, Title), the snippet with the query's words and the other forms marked, the time — and
+  "N more in this session ›", which loads that session's hits a page at a time (`session=`);
+  "Also finds: …" lists the other forms, "More results" loads the next page. The page keeps its
+  query and filters in its address
+  (`#/search?q=…&kind=…&project=…&time=…&order=newest&fuzzy=1`, replaced, not pushed), so
+  Back from an opened hit brings the same search back; the Compact look puts all the filters on
+  one row. A hit opens `#/s/<session>?seq=<seq>`:
   the chat loads its history as always (the newest page, then the older ones, §6) and, once the
   event is there, renders the feed from the block that holds it if it did not and scrolls the block that holds it (the last block starting at or before `seq`) to the middle
   and marks it.
@@ -4217,10 +4424,11 @@ whenever one of them comes from a session in `ask`, and a capped input never joi
 honours `joined` only for a `user.message` without `schedule_id`; a `joined` on any other input
 is the worker's mistake, logged, not kept, and the input's turn opens (since 0.71). Since 0.112
 the hub keeps an honoured one on the message, `payload.joined: true` (§4), and sends it with the
-`delivery` frame (§6). Otherwise it waits for the end of the turn as before (scheduled runs and
-slash commands always do), and so does everything behind it, so `seq` order holds. Since 0.75
-nothing is written into the turn either while a move of the session waits (§5.3): the input is
-for the agent in the new folder. The CLI takes the input at its next step, after the result of the
+`delivery` frame (§6); the client says "joined the turn" on the message's first line. Otherwise
+it waits for the end of the turn as before (scheduled runs and slash commands always do), and so
+does everything behind it, so `seq` order holds. Since 0.75 nothing is written into the turn
+either while a move of the session waits (§5.3): the input is for the agent in the new folder.
+The CLI takes the input at its next step, after the result of the
 tool call running then, and the worker answers `ack {event_id, joined: true}` on its echo; the
 turn's final `agent.message` stays `in_reply_to` the turn's own input. When the turn ends
 before that (the input came during the final answer, or before an interrupt), the CLI runs it
@@ -4583,6 +4791,31 @@ tokens` with that cost. Now a `result` with `num_turns: 0` and no tokens, unless
 grown total as `session_cost_usd`: the client's header counts it and the feed draws no line for
 it. The baseline of `cost_usd` stays, so the next turn's line carries what the subagent spent.
 0.109–0.114 are taken by open pull requests.
+
+### 0.113 → 0.114 (the new screen)
+§6 client layout: one look for the whole client, Compact or Spacious, kept on the user (§3 User
+`look`, migration `0039_user_look`, `PATCH /api/me`): Compact is the feed across the chat
+column in one column, as the VS Code tab draws it, the system font, each project's full name on
+the project bar and a line per session; Spacious is the layout as it was. The project bar marks
+a project whose session waits, works (a stripe running around its icon) or has unread events,
+stars a favorite, finds projects by name with ⌘K / Ctrl+K, has one project menu (also "⋯" in
+the session column's head) and an order menu, Custom, Name or Recent (§3 User `project_sort`,
+migration `0040_project_sort`). A project is archived off the bar (§3 Project `archived_at`,
+0.110) and found again by that search. The session column has a head of one row, the project's
+own favorites pinned over the list and a favorite listed only there, the idle sessions grouped
+by how long ago they were active, one menu per row on a right click, an archive button past the
+column's edge and a card in place of the tooltip, the workers in one line at the bottom, and a
+width dragged by its edge. A new session opens at once as a window and is created by its first
+message. A 900–1079 px window slides the session column over the chat; a phone opens on its
+projects. In the feed a message's time ends its first line and its buttons are in the bubble or
+the margin, a run of calls is "N tool calls (…)", a right click quotes a selection. The client
+keeps the 12 chats used last in memory and loads the next one when the mouse rests on its row
+or project, so a switch shows the chat at once, and the chats share their images' signed links
+(§12). §15, §6: the search is a page with filters — the kind of hit with the count of each, the
+project, the time, best match or newest, a few hits per session — over the filters and counts
+of `GET /api/search` (0.111). §6: the chat shows a line per subagent of `subagents.live` (0.113)
+above the input, outside the feed's scroll, and a message that joined the running turn
+(`payload.joined`, 0.112) says "joined the turn".
 
 ### 0.112 → 0.113 (the subagents the agent runs now)
 §4, §5.2, §6, §8.1, §18: a new event `subagents.live`, transport only like `agent.delta`,

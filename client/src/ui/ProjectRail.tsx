@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
-import type { Project } from '../proto';
+import type { Project, ProjectSort } from '../proto';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
-import { ContextMenu } from './ContextMenu';
+import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
 import { IconArchive, IconCheck, IconCross, IconPlus, IconReorder, IconSearch, IconSettings, IconStar } from './icons';
 import { newProject, prefetchOn, projectMenu } from './SessionList';
@@ -12,6 +12,13 @@ import { moveTo, reopenedSession } from './sessions';
 const TILE_STEP = 54;
 /** The same for a row with the project's name (the Compact look). */
 const ROW_STEP = 40;
+
+/** The bar's orders (SPEC §3 User), as the order menu lists them. */
+const PROJECT_SORTS: { id: ProjectSort; label: string }[] = [
+  { id: 'custom', label: 'Custom' },
+  { id: 'name', label: 'Name' },
+  { id: 'recent', label: 'Recent' },
+];
 
 /** Where `query` first stands in `name`, ignoring case: the part before it, it, and the part
  *  after it; null when it is not there. */
@@ -32,9 +39,10 @@ function onMac(): boolean {
  *  count of the sessions that wait for the user, else a stripe running around the tile while one
  *  works, else a blue dot (and, with the names on, a bold name) while one has unread events;
  *  an idle project has none. A favorite project also has a star on the tile's bottom right
- *  corner. "+ project", Reorder (drag the tiles or move a focused one with
- *  ↑/↓, then Done or Cancel), settings and who is signed in. A project's right click opens its
- *  menu (`projectMenu`); archiving one shows "Archived «…» · Undo" at the bottom. The search
+ *  corner. "+ project", the order menu (Custom, Name, Recent, and Reorder…: drag the tiles or
+ *  move a focused one with ↑/↓, then Done, which makes the order Custom, or Cancel), settings
+ *  and who is signed in. A project's right click opens its menu (`projectMenu`); archiving one
+ *  shows "Archived «…» · Undo" at the bottom. The search
  *  (its magnifier, or ⌘K / Ctrl+K) finds projects by name, archived ones too: with the names
  *  on (the Compact look) the field takes the place of "HQC" and the list shrinks to
  *  the matches; with tiles the bar opens 290 px wide over the column, with the names. */
@@ -54,6 +62,10 @@ export function ProjectRail({ app }: { app: AppState }) {
   // A project's context menu, where it was opened.
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const menuProject = menu && app.project(menu.id);
+  // The order menu, where it opens: right of its button.
+  const [sortAt, setSortAt] = useState<{ x: number; y: number } | null>(null);
+  const sortBtn = useRef<HTMLButtonElement>(null);
+  const sort = app.projectSort();
   // The project search: open or not, what is typed, the match ↑/↓ stand on; with the names on,
   // the bar's width when it opened, kept while the list shrinks.
   const [searching, setSearching] = useState(false);
@@ -141,10 +153,30 @@ export function ProjectRail({ app }: { app: AppState }) {
       setOrder(moveTo(order, id, order.indexOf(id) + dir));
     },
   });
+  // The order arranged is the user's own: the bar shows it from now on.
   const done = () => {
-    if (order) app.saveProjectOrder(order).catch((e: Error) => setError(e.message));
+    if (order) {
+      app.saveProjectOrder(order).catch((e: Error) => setError(e.message));
+      app.setProjectSort('custom').catch((e: Error) => setError(e.message));
+    }
     setOrder(null);
   };
+  const sortItems: MenuEntry[] = [
+    ...PROJECT_SORTS.map((m) => ({
+      label: m.label,
+      cls: `btn-sort-${m.id}`,
+      checked: sort === m.id,
+      onSelect: () => void app.setProjectSort(m.id).catch((e: Error) => setError(e.message)),
+    })),
+    'sep',
+    {
+      label: 'Reorder…',
+      icon: <IconReorder />,
+      cls: 'btn-reorder-projects',
+      // The user's own order is what gets arranged, whichever the bar shows.
+      onSelect: () => setOrder(app.sortedProjects('custom').map((p) => p.id)),
+    },
+  ];
   // A right click on a project (on the bar or among the matches); from the keyboard (the menu
   // key) there is no pointer: next to the project.
   const menuOn = (id: string) => (e: MouseEvent) => {
@@ -245,8 +277,8 @@ export function ProjectRail({ app }: { app: AppState }) {
   );
   const logo = <img src="/hqc-mark-small.svg" alt={names ? '' : 'HQC'} width="38" height="38" />;
 
-  // "+ project" and Reorder, or Done and Cancel: under the tiles; with the project names on, in
-  // the bottom row with the settings and the avatar.
+  // "+ project" and the order menu, or Done and Cancel: under the tiles; with the project names
+  // on, in the bottom row with the settings and the avatar.
   const actions = order ? (
     <>
       <button type="button" class="rail-btn rail-done" aria-label="Done" title="Save the order" onClick={done}>
@@ -273,14 +305,19 @@ export function ProjectRail({ app }: { app: AppState }) {
       </button>
       {app.projects.size > 1 && (
         <button
+          ref={sortBtn}
           type="button"
-          class="rail-btn rail-reorder"
-          aria-label="Reorder projects"
-          title="Reorder projects"
+          class="rail-btn rail-order"
+          disabled={!app.me}
+          aria-label={`Project order: ${PROJECT_SORTS.find((m) => m.id === sort)?.label}`}
+          aria-haspopup="menu"
+          aria-expanded={!!sortAt}
+          title="Project order"
           onClick={() => {
-            // The search gives the bar back first: Reorder arranges the whole list.
+            // The search gives the bar back first: an order and Reorder are for the whole list.
             closeSearch();
-            setOrder(app.sortedProjects().map((p) => p.id));
+            const r = sortBtn.current?.getBoundingClientRect();
+            setSortAt(sortAt ? null : { x: (r?.right ?? 0) + 4, y: r?.top ?? 0 });
           }}
         >
           <IconReorder size={16} />
@@ -398,6 +435,9 @@ export function ProjectRail({ app }: { app: AppState }) {
           items={projectMenu(app, menuProject)}
           onClose={() => setMenu(null)}
         />
+      )}
+      {sortAt && (
+        <ContextMenu x={sortAt.x} y={sortAt.y} label="Project order" items={sortItems} anchor={sortBtn.current} onClose={() => setSortAt(null)} />
       )}
       <div class="spacer" />
       {inPlace && hint}

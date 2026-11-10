@@ -280,7 +280,7 @@ export function relativePaths(text: string, root: string | undefined): string {
   return text.replace(new RegExp(`(^|[\\s"'\`=(])${escaped}/`, 'g'), '$1');
 }
 
-/** A call as one line of text, as a tool group's header shows its last call: `$ command`
+/** A call as one line of text, as the header of a group of one call shows it: `$ command`
  *  for Bash, else the tool and its main argument; paths under `root` relative to it. */
 export function callPeek(tool: string, argsPreview: string, root: string | undefined): string {
   const line = callLine(tool, argsPreview);

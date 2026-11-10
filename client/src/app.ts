@@ -13,14 +13,17 @@ import type {
   PermissionMode,
   Project,
   ProjectColor,
+  ProjectSort,
   SessionInfo,
   SessionOrder,
   SessionSummary,
   Theme,
   Workspace,
 } from './proto';
+import { PROJECT_SORT_NAMES } from './proto';
 import { ChatSession, type OutgoingFile } from './session';
 import { storedLook, storedTheme, type DeviceLayout } from './theme';
+import { projectName } from './ui/Appearance';
 import { arrange, bucketOf } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
@@ -64,6 +67,18 @@ function loadDevice(): DeviceLayout {
     return { listWidth: typeof v.listWidth === 'number' ? v.listWidth : undefined };
   } catch {
     return {};
+  }
+}
+
+/** The project bar's order last shown on this device: storage that fails or holds something
+ *  else means Custom. */
+const PROJECT_SORT_KEY = 'hqc.projectSort';
+function storedProjectSort(): ProjectSort {
+  try {
+    const v = localStorage.getItem(PROJECT_SORT_KEY);
+    return (PROJECT_SORT_NAMES as readonly string[]).includes(v ?? '') ? (v as ProjectSort) : 'custom';
+  } catch {
+    return 'custom';
   }
 }
 
@@ -258,6 +273,7 @@ export class AppState {
   async init(): Promise<void> {
     try {
       this.me = await this.api.me();
+      this.keepProjectSort(this.me.project_sort);
       this.currentProjectId ??= this.me.personal_project_id;
       this.syncTimezone();
       await this.refreshSessions();
@@ -456,11 +472,65 @@ export class AppState {
     if (left.length !== this.requests.length) this.setRequests(left);
   }
 
-  /** The user's favorite projects first, then the others, each in the hub's order (the
-   *  person's own order from Reorder, else the personal one first, it is the oldest). */
-  sortedProjects(): Project[] {
+  /** The user's favorite projects first, then the others, each in the bar's order (`sort`, the
+   *  user's by default, SPEC §3 User): Custom — the hub's (the person's own order from Reorder,
+   *  else the personal one first, it is the oldest); Name — by the shown name; Recent — the
+   *  newest activity of the project's sessions as the session list counts them
+   *  (`sortedSessions`) first, the projects without one after them, the newest project first. */
+  sortedProjects(sort: ProjectSort = this.projectSort()): Project[] {
     const all = [...this.projects.values()];
+    if (sort === 'name') {
+      all.sort((a, b) => projectName(a).localeCompare(projectName(b), undefined, { numeric: true, sensitivity: 'accent' }));
+    } else if (sort === 'recent') {
+      const last = new Map<string, string>();
+      for (const s of this.sessions.values()) {
+        const t = last.get(s.project_id);
+        if (this.listed(s) && (t === undefined || s.updated_at.localeCompare(t) > 0)) last.set(s.project_id, s.updated_at);
+      }
+      all.sort((a, b) => {
+        // '' (no session) goes after any time.
+        const x = last.get(a.id) ?? '';
+        const y = last.get(b.id) ?? '';
+        return y.localeCompare(x) || (x || y ? 0 : b.created_at.localeCompare(a.created_at));
+      });
+    }
     return [...all.filter((p) => p.favorite_at), ...all.filter((p) => !p.favorite_at)];
+  }
+
+  /** The project bar's order (SPEC §3 User): the user's; until `/api/me` answers, the one
+   *  last shown on this device. */
+  projectSort(): ProjectSort {
+    return this.me?.project_sort ?? this.projectSortCopy;
+  }
+
+  /** Applied at once, so the bar does not show the old order until the hub answers (Reorder's
+   *  Done would jump back for a moment); what it was comes back if the hub refuses. */
+  async setProjectSort(sort: ProjectSort): Promise<void> {
+    const before = this.me?.project_sort;
+    if (!this.me || before === undefined || sort === before) return;
+    this.me = { ...this.me, project_sort: sort };
+    this.keepProjectSort(sort);
+    this.changed();
+    try {
+      this.me = await this.api.setProjectSort(sort);
+    } catch (e) {
+      if (this.me) this.me = { ...this.me, project_sort: before };
+      this.keepProjectSort(before);
+      throw e;
+    } finally {
+      this.changed();
+    }
+  }
+
+  /** A copy of the bar's order on this device, for the first paint after a reload. */
+  private projectSortCopy: ProjectSort = storedProjectSort();
+  private keepProjectSort(sort: ProjectSort): void {
+    this.projectSortCopy = sort;
+    try {
+      localStorage.setItem(PROJECT_SORT_KEY, sort);
+    } catch {
+      // Not kept: the next load starts Custom until `/api/me` answers.
+    }
   }
 
   /** Marks the project a favorite or not; another device of the user sees it after a reload. */
@@ -627,8 +697,13 @@ export class AppState {
    *  (listed apart, SPEC §10.2). */
   sortedSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
-      .filter((s) => !s.archived && !s.system && s.project_id === projectId && s.id !== this.pendingArchive?.id)
+      .filter((s) => s.project_id === projectId && this.listed(s))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
+  }
+
+  /** A session the list shows: not archived, not waiting to be archived, not a service one. */
+  private listed(s: SessionInfo): boolean {
+    return !s.archived && !s.system && s.id !== this.pendingArchive?.id;
   }
 
   /** The user's favorite sessions of the project (the current one by default), the newest

@@ -90,11 +90,13 @@ pub async fn me(user: CurrentUser) -> Json<api::Me> {
         personal_project_id: user.personal_project_id,
         theme: user.theme,
         look: user.look,
+        project_sort: user.project_sort,
     })
 }
 
-/// `PATCH /api/me` {timezone?, theme?, look?}: an IANA name, the default zone of new schedules
-/// (SPEC §16); the app's base palette (T49); the client's look (SPEC §3 User).
+/// `PATCH /api/me` {timezone?, theme?, look?, project_sort?}: an IANA name, the default zone of
+/// new schedules (SPEC §16); the app's base palette (T49); the client's look and the project
+/// bar's order (SPEC §3 User).
 pub async fn patch_me(
     State(app): State<AppState>,
     mut user: CurrentUser,
@@ -124,6 +126,14 @@ pub async fn patch_me(
             .execute(&app.db)
             .await?;
         user.look = look;
+    }
+    if let Some(sort) = b.project_sort {
+        sqlx::query("UPDATE users SET project_sort = $2, updated_at = now() WHERE id = $1")
+            .bind(user.id)
+            .bind(sort.as_str())
+            .execute(&app.db)
+            .await?;
+        user.project_sort = sort;
     }
     Ok(me(user).await)
 }

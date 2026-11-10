@@ -40,6 +40,7 @@ import {
   type Me,
   type PermissionMode,
   type Project,
+  type ProjectSort,
   type ProjectColor,
   type SearchKind,
   type SearchPage,
@@ -195,6 +196,11 @@ export class Api {
   /** The client's look, the same on every device. */
   async setLook(look: LookName): Promise<Me> {
     return parseMe(await this.req('PATCH', '/api/me', { look }));
+  }
+
+  /** The project bar's order, the same on every device. */
+  async setProjectSort(project_sort: ProjectSort): Promise<Me> {
+    return parseMe(await this.req('PATCH', '/api/me', { project_sort }));
   }
 
   async schedules(sessionId: string): Promise<Schedule[]> {

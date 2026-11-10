@@ -100,6 +100,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     personal_project_id: '0199f3a2-7c10-7000-8000-0000000000d1',
     theme: 'warm',
     look: 'spacious',
+    project_sort: 'custom',
   };
   const workerId = ex['hub.hello.ack'].payload.worker_id;
   const now = () => new Date().toISOString();
@@ -543,8 +544,9 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   };
 
   route('GET', '/api/me', () => me);
-  // T49: the app theme; the look (SPEC §3 User); the project's color and icon, the icon image
-  // (checked loosely: the hub checks the magic bytes and the size in pixels).
+  // T49: the app theme; the look and the project bar's order (SPEC §3 User); the project's color
+  // and icon, the icon image (checked loosely: the hub checks the magic bytes and the size in
+  // pixels).
   route('PATCH', '/api/me', (_, body) => {
     if (body?.theme !== undefined) {
       if (!['warm', 'graphite', 'contrast', 'warm_light', 'graphite_light', 'contrast_light'].includes(body.theme)) {
@@ -555,6 +557,10 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (body?.look !== undefined) {
       if (!['compact', 'spacious'].includes(body.look)) throw fail(422, 'unprocessable', 'unknown look');
       me.look = body.look;
+    }
+    if (body?.project_sort !== undefined) {
+      if (!['custom', 'name', 'recent'].includes(body.project_sort)) throw fail(422, 'unprocessable', 'unknown project order');
+      me.project_sort = body.project_sort;
     }
     if (body?.timezone !== undefined) me.timezone = body.timezone;
     return me;

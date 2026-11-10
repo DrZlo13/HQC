@@ -1,7 +1,7 @@
-//! T49 (SPEC §3 User, §3 Project, §6, §12): the app theme and the look on the user, a
-//! project's color and icon, and the icon image: PNG, JPEG or WebP by the content, square,
-//! 128–1024 px, at most 256 KB, owner only, served with its checked type and a cache key in
-//! its URL, gone with the project.
+//! T49 (SPEC §3 User, §3 Project, §6, §12): the app theme, the look and the project bar's
+//! order on the user, a project's color and icon, and the icon image: PNG, JPEG or WebP by
+//! the content, square, 128–1024 px, at most 256 KB, owner only, served with its checked type
+//! and a cache key in its URL, gone with the project.
 
 mod common;
 
@@ -102,6 +102,49 @@ async fn the_look_round_trips_on_the_user() {
     }
     let (_, me) = hub.get("/api/me").await;
     assert_eq!(me["look"], "spacious", "an unknown look changes nothing");
+    hub.finish().await;
+}
+
+/// The project bar's order (SPEC §3 User): kept on the user like the look.
+#[tokio::test]
+async fn the_project_sort_round_trips_on_the_user() {
+    let hub = TestHub::start().await;
+    let (s, me) = hub.get("/api/me").await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["project_sort"], "custom", "the default");
+
+    let (s, me) = hub.patch("/api/me", json!({"project_sort": "name"})).await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["project_sort"], "name");
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(
+        me["project_sort"], "name",
+        "stored, the same on every device"
+    );
+
+    // The theme and the look alone leave the order, and the order them.
+    let (s, me) = hub
+        .patch("/api/me", json!({"theme": "graphite", "look": "compact"}))
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["project_sort"], "name");
+    let (s, me) = hub
+        .patch("/api/me", json!({"project_sort": "recent"}))
+        .await;
+    assert_eq!(s, 200, "{me}");
+    assert_eq!(me["project_sort"], "recent");
+    assert_eq!(me["theme"], "graphite");
+    assert_eq!(me["look"], "compact");
+
+    for odd in ["activity", "Name"] {
+        let (s, _) = hub.patch("/api/me", json!({"project_sort": odd})).await;
+        assert_eq!(s, 422, "not an order: {odd}");
+    }
+    let (_, me) = hub.get("/api/me").await;
+    assert_eq!(
+        me["project_sort"], "recent",
+        "an unknown order changes nothing"
+    );
     hub.finish().await;
 }
 

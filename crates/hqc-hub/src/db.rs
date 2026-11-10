@@ -38,6 +38,8 @@ pub struct UserRow {
     pub theme: String,
     /// `compact` | `spacious` (SPEC §3 User).
     pub look: String,
+    /// `custom` | `name` | `recent`: the project bar's order (SPEC §3 User).
+    pub project_sort: String,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

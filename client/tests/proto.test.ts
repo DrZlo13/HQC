@@ -226,6 +226,11 @@ describe('examples/wire', () => {
     expect(parseMe(load('api.me.json')).look).toBe('compact');
     expect(parseMe({ ...(load('api.me.json') as object), look: undefined }).look).toBe('spacious');
     expect(parseMe({ ...(load('api.me.json') as object), look: 'dense' }).look).toBe('spacious');
+    // The project bar's order: Custom from a hub before it and for a value this build does not
+    // know.
+    expect(parseMe(load('api.me.json')).project_sort).toBe('recent');
+    expect(parseMe({ ...(load('api.me.json') as object), project_sort: undefined }).project_sort).toBe('custom');
+    expect(parseMe({ ...(load('api.me.json') as object), project_sort: 'Name' }).project_sort).toBe('custom');
     const w = parseWorkspace(load('api.workspace.json'));
     expect(p.default_workspace_id).toBe(w.id);
     expect(w).toMatchObject({ project_id: p.id, kind: 'dir', label: 'home-mac' });

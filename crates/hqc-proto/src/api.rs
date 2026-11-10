@@ -401,6 +401,34 @@ impl Look {
     }
 }
 
+/// The order of the project bar (SPEC §3 User), the same on every device of the user, the
+/// favorite projects first in each: `custom` — the user's own (`PUT /api/me/project_order`);
+/// `name` — by the shown name; `recent` — by the latest activity of the project's sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSort {
+    #[default]
+    Custom,
+    Name,
+    Recent,
+}
+
+impl ProjectSort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectSort::Custom => "custom",
+            ProjectSort::Name => "name",
+            ProjectSort::Recent => "recent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [ProjectSort::Custom, ProjectSort::Name, ProjectSort::Recent]
+            .into_iter()
+            .find(|o| o.as_str() == s)
+    }
+}
+
 /// `GET /api/projects`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectList {
@@ -887,6 +915,9 @@ pub struct Me {
     /// The client's look; `spacious` from hubs before it.
     #[serde(default)]
     pub look: Look,
+    /// The project bar's order; `custom` from hubs before it.
+    #[serde(default)]
+    pub project_sort: ProjectSort,
 }
 
 /// `PATCH /api/me`.
@@ -902,6 +933,9 @@ pub struct PatchMe {
     /// `compact` | `spacious`; anything else `422`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<Look>,
+    /// `custom` | `name` | `recent`; anything else `422`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_sort: Option<ProjectSort>,
 }
 
 /// `POST /api/workers/enroll/confirm`; case and the dash of `code` do not matter.
@@ -1323,6 +1357,13 @@ mod tests {
         for l in [Look::Compact, Look::Spacious] {
             assert_eq!(Look::parse(l.as_str()), Some(l));
             assert_eq!(serde_json::to_value(l).unwrap(), l.as_str());
+        }
+        assert_eq!(m.project_sort, Some(ProjectSort::Name));
+        assert_eq!(me.project_sort, ProjectSort::Recent);
+        assert!(serde_json::from_str::<PatchMe>(r#"{"project_sort":"Name"}"#).is_err());
+        for o in [ProjectSort::Custom, ProjectSort::Name, ProjectSort::Recent] {
+            assert_eq!(ProjectSort::parse(o.as_str()), Some(o));
+            assert_eq!(serde_json::to_value(o).unwrap(), o.as_str());
         }
     }
 

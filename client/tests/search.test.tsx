@@ -88,7 +88,7 @@ function makeApp(search: (q: string, opts: SearchOptions) => Promise<SearchPage>
   };
   const socket = { onState: () => () => {}, subscribe: () => () => {} } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p1', theme: 'warm', look: 'spacious' };
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p1', theme: 'warm', look: 'spacious', project_sort: 'custom' };
   app.projects.set('p1', { id: 'p1', name: 'hqc', slug: 'hqc', description: '', is_personal: false, color: 'teal', created_at: '2026-10-01T00:00:00Z' });
   app.projects.set('p2', { id: 'p2', name: 'home-network', slug: 'home', description: '', is_personal: false, color: 'blue', created_at: '2026-10-02T00:00:00Z' });
   app.currentProjectId = 'p1';

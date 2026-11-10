@@ -1,5 +1,6 @@
 {
   "timezone": "Europe/Berlin",
   "theme": "graphite",
-  "look": "compact"
+  "look": "compact",
+  "project_sort": "name"
 }

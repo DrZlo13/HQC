@@ -418,7 +418,8 @@ select.input {
 
 @media (prefers-reduced-motion: reduce) {
   .pulse,
-  .pulse-dot {
+  .pulse-dot,
+  .rail-run {
     animation: none;
   }
 }
@@ -573,8 +574,9 @@ select.input {
   color: var(--accent-text);
 }
 
-/* A mark only when something goes on in the project: the sessions that wait for you, an arc
-   while one works, a blue dot while one has unread events; none when it is idle. */
+/* A mark only when something goes on in the project: the sessions that wait for you, a
+   stripe running around the tile while one works, a blue dot while one has unread events;
+   none when it is idle. */
 .rail-badge {
   position: absolute;
   top: -6px;
@@ -2811,10 +2813,6 @@ select.input {
   content: '\A';
   white-space: pre;
 }
-.msg-noted > .msg-time {
-  line-height: 18px;
-}
-
 /* A message's copy and fork buttons, on hover, at the edge opposite its time: a column in the
    margin left of the feed, from the message's top, its right edge on the block's left edge so
    the block's hover holds on the way to it. Narrow enough for the timeline's padding, it
@@ -2991,7 +2989,6 @@ select.input {
 }
 :root.feed-column .msg-noted > .msg-time {
   margin: 0 0 0 8px;
-  line-height: var(--feed-line);
 }
 
 .msg-pending .msg-bubble {

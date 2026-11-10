@@ -249,7 +249,6 @@ describe('joined the turn', () => {
 
   it('styles.css: the first line of a bubble with the time, left of the time on a plate', () => {
     expect(rule('.msg-note')).toMatch(/display: inline;/);
-    expect(rule('.msg-noted > .msg-time')).toMatch(/line-height: 18px;/);
     expect(rule(':root.feed-column .msg-note')).toMatch(/float: right;/);
     expect(rule(':root.feed-column .msg-noted > .msg-time')).toMatch(/margin: 0 0 0 8px;/);
   });

@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Api } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
-import { parseEvent, type ListMode, type Project, type SessionInfo, type SessionState } from '../src/proto';
+import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState } from '../src/proto';
 import { applyLook } from '../src/theme';
 import { Timeline } from '../src/timeline';
 import type { ConnState, HubSocket } from '../src/ws';
@@ -233,7 +233,7 @@ function hubApi(order: { mode: ListMode; session_ids: string[] } = { mode: 'stat
 function makeApp(list = LIST, api = hubApi()) {
   const socket = { onState: () => () => {} } as unknown as HubSocket;
   const app = new AppState(api as unknown as Api, socket);
-  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious' };
+  app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom' };
   app.projects.set('p0', { id: 'p0', name: 'Personal', slug: 'personal', description: '', is_personal: true, color: 'slate', created_at: at(100) });
   app.projects.set('p1', { id: 'p1', name: 'physics-mp', slug: 'physics-mp', description: '', is_personal: false, color: 'blue', icon: { kind: 'emoji', value: '⚛️' }, created_at: at(90) });
   app.currentProjectId = 'p1';
@@ -1042,13 +1042,13 @@ describe('ProjectRail', () => {
       ['⚛️', 'physics-mp'],
       ['UC', 'ukuetis_controller_backend'],
     ]);
-    // The hub's name next to its mark; "+ project", Reorder, the settings and the avatar in one
-    // row at the bottom.
+    // The hub's name next to its mark; "+ project", the order menu, the settings and the avatar
+    // in one row at the bottom.
     expect(root.querySelector('.rail-logo')!.textContent).toBe('HQC');
     expect(root.querySelector('.rail-actions')).toBeNull();
     expect([...root.querySelectorAll('.rail-foot > *')].map((b) => b.getAttribute('aria-label'))).toEqual([
       'New project',
-      'Reorder projects',
+      'Project order: Custom',
       'Settings',
       'who@example.com',
     ]);
@@ -1060,7 +1060,8 @@ describe('ProjectRail', () => {
     expect(badges).toEqual([null, '1', null]);
 
     // Reorder: a row is 40 px with its gap, so a drag of 80 px moves a project by two places.
-    await act(async () => root.querySelector<HTMLButtonElement>('.rail-reorder')!.click());
+    await act(async () => root.querySelector<HTMLButtonElement>('.rail-order')!.click());
+    await act(async () => root.querySelector<HTMLButtonElement>('.menu .btn-reorder-projects')!.click());
     const grip = root.querySelector<HTMLElement>('.rail-drag[data-tile="p0"]')!;
     expect(grip.querySelector('.rail-name')!.textContent).toBe('Personal');
     const ev = (type: string, y: number) =>
@@ -1168,6 +1169,157 @@ describe('ProjectRail', () => {
       ['Personal', null, 'rail-run'],
       ['physics-mp', null, null],
     ]);
+  });
+});
+
+describe("the project bar's order", () => {
+  const project = (id: string, name: string, created: number, more: Partial<Project> = {}): Project => ({
+    id,
+    name,
+    slug: name,
+    description: '',
+    is_personal: false,
+    color: 'moss',
+    created_at: at(created),
+    ...more,
+  });
+  /** The hub's order: Personal, physics-mp, kiln, Boards (a favorite), board10, board9, Arduino
+   *  (a favorite). Listed sessions: physics-mp's newest 0.01 h ago, kiln's 5 h, Personal's
+   *  10 h, Arduino's 30 h; board10 has only an archived one, board9 only a service one, Boards
+   *  none. */
+  function sortApp(sort: ProjectSort) {
+    const api = {
+      ...hubApi(),
+      setProjectSort: vi.fn(async (project_sort: ProjectSort) => ({ ...app.me!, project_sort })),
+      putProjectOrder: vi.fn(async (ids: string[]) => ids.map((id) => app.projects.get(id)!)),
+    };
+    const app = makeApp(
+      [
+        ...LIST,
+        sess('notes', 'Notes', 'idle', at(10), { project_id: 'p0' }),
+        sess('glaze', 'Glaze', 'idle', at(5), { project_id: 'p2' }),
+        sess('old', 'Old', 'archived', at(0), { project_id: 'p4' }),
+        sess('svc9', 'wk9', 'idle', at(0), { project_id: 'p5', system: true }),
+        sess('blink', 'Blink', 'idle', at(30), { project_id: 'p6' }),
+      ],
+      api as unknown as ReturnType<typeof hubApi>,
+    );
+    app.me = { ...app.me!, project_sort: sort };
+    for (const p of [
+      project('p2', 'kiln', 80),
+      project('p3', 'Boards', 70, { favorite_at: at(1) }),
+      project('p4', 'board10', 60),
+      project('p5', 'board9', 50),
+      project('p6', 'Arduino', 40, { favorite_at: at(2) }),
+    ])
+      app.projects.set(p.id, p);
+    return { app, api };
+  }
+  const bar = () => [...root.querySelectorAll('.rail-project')].map((r) => r.getAttribute('aria-label'));
+  const settle = () =>
+    act(async () => {
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+
+  it('Custom, Name, Recent: the favorites first in each, on the bar and in the phone chips', async () => {
+    await mount(<ProjectRail app={sortApp('custom').app} />);
+    expect(bar()).toEqual(['Boards', 'Arduino', 'Personal', 'physics-mp', 'kiln', 'board10', 'board9']);
+    // By the shown name, whatever its case, a number in it by its value.
+    await mount(<ProjectRail app={sortApp('name').app} />);
+    expect(bar()).toEqual(['Arduino', 'Boards', 'board9', 'board10', 'kiln', 'Personal', 'physics-mp']);
+    // The newest listed session first; archived and service ones do not count; a project without
+    // one after those with one, the newest project first.
+    const { app } = sortApp('recent');
+    await mount(<ProjectRail app={app} />);
+    expect(bar()).toEqual(['Arduino', 'Boards', 'physics-mp', 'kiln', 'Personal', 'board9', 'board10']);
+    await mount(<SessionList app={app} phone />);
+    expect([...root.querySelectorAll('.chips .chip.project-row')].map((c) => c.getAttribute('aria-label'))).toEqual([
+      'Arduino',
+      'Boards',
+      'physics-mp',
+      'kiln',
+      'Personal',
+      'board9',
+      'board10',
+    ]);
+  });
+
+  it('the order menu: a pick goes to the hub, the bar follows its answer', async () => {
+    const { app, api } = sortApp('custom');
+    await mount(<ProjectRail app={app} />);
+    const btn = root.querySelector('.rail-order')!;
+    expect(btn.getAttribute('aria-label')).toBe('Project order: Custom');
+    await click(btn);
+    const items = () =>
+      [...root.querySelectorAll('.menu .menu-item')].map((b) => [b.textContent, b.getAttribute('aria-checked')]);
+    expect(items()).toEqual([
+      ['Custom', 'true'],
+      ['Name', 'false'],
+      ['Recent', 'false'],
+      ['Reorder…', null],
+    ]);
+    await click(root.querySelector('.menu .btn-sort-name'));
+    await settle();
+    expect(api.setProjectSort).toHaveBeenCalledWith('name');
+    expect(app.me!.project_sort).toBe('name');
+    expect(bar()).toEqual(['Arduino', 'Boards', 'board9', 'board10', 'kiln', 'Personal', 'physics-mp']);
+    expect(root.querySelector('.rail-order')!.getAttribute('aria-label')).toBe('Project order: Name');
+    await click(root.querySelector('.rail-order'));
+    await click(root.querySelector('.menu .btn-sort-recent'));
+    await settle();
+    expect(api.setProjectSort).toHaveBeenLastCalledWith('recent');
+    expect(bar()).toEqual(['Arduino', 'Boards', 'physics-mp', 'kiln', 'Personal', 'board9', 'board10']);
+  });
+
+  it("Reorder… arranges the user's own order, and Done makes the bar Custom", async () => {
+    const { app, api } = sortApp('name');
+    await mount(<ProjectRail app={app} />);
+    await click(root.querySelector('.rail-order'));
+    await click(root.querySelector('.menu .btn-reorder-projects'));
+    const grips = () => [...root.querySelectorAll<HTMLElement>('.rail-drag')];
+    // Not the names' order: the one Reorder stores.
+    expect(grips().map((g) => g.getAttribute('title'))).toEqual(['Boards', 'Arduino', 'Personal', 'physics-mp', 'kiln', 'board10', 'board9']);
+    await act(async () => {
+      grips().at(-1)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    });
+    await click(root.querySelector('.rail-done'));
+    await settle();
+    expect(api.putProjectOrder).toHaveBeenCalledWith(['p3', 'p6', 'p0', 'p1', 'p2', 'p5', 'p4']);
+    expect(api.setProjectSort).toHaveBeenCalledWith('custom');
+    expect(app.projectSort()).toBe('custom');
+    expect(bar()).toEqual(['Boards', 'Arduino', 'Personal', 'physics-mp', 'kiln', 'board9', 'board10']);
+  });
+
+  it('a reload shows the order last shown on this device before the hub answers; a pick is kept there', async () => {
+    localStorage.setItem('hqc.projectSort', 'name');
+    const { app } = sortApp('name');
+    app.me = null;
+    await mount(<ProjectRail app={app} />);
+    expect(bar()).toEqual(['Arduino', 'Boards', 'board9', 'board10', 'kiln', 'Personal', 'physics-mp']);
+    // Nothing to pick until the hub says who it is.
+    expect(root.querySelector<HTMLButtonElement>('.rail-order')!.disabled).toBe(true);
+    const { app: other } = sortApp('custom');
+    await mount(<ProjectRail app={other} />);
+    await click(root.querySelector('.rail-order'));
+    await click(root.querySelector('.menu .btn-sort-recent'));
+    await settle();
+    expect(localStorage.getItem('hqc.projectSort')).toBe('recent');
+  });
+
+  it('a pick shows at once, before the hub answers, and goes back when the hub refuses it', async () => {
+    const { app, api } = sortApp('custom');
+    let refuse!: (e: Error) => void;
+    api.setProjectSort.mockImplementationOnce(() => new Promise((_, rej) => (refuse = rej)));
+    await mount(<ProjectRail app={app} />);
+    await click(root.querySelector('.rail-order'));
+    await click(root.querySelector('.menu .btn-sort-name'));
+    // The hub has not answered: the bar is by name already.
+    expect(bar()).toEqual(['Arduino', 'Boards', 'board9', 'board10', 'kiln', 'Personal', 'physics-mp']);
+    await act(async () => refuse(new Error('hub down')));
+    await settle();
+    expect(app.projectSort()).toBe('custom');
+    expect(localStorage.getItem('hqc.projectSort')).toBe('custom');
+    expect(bar()).toEqual(['Boards', 'Arduino', 'Personal', 'physics-mp', 'kiln', 'board10', 'board9']);
   });
 });
 
@@ -1348,7 +1500,7 @@ describe('the project bar: search, menu, archive', () => {
     }
   });
 
-  it('"+" and Reorder pressed while the search is open: the search closes first', async () => {
+  it('"+" and the order menu pressed while the search is open: the search closes first', async () => {
     const { app } = railApp(true);
     await mount(<ProjectRail app={app} />);
     // "+" asks for the name; no answer, no project.
@@ -1366,8 +1518,9 @@ describe('the project bar: search, menu, archive', () => {
     }
     await click(root.querySelector('.rail-search'));
     await typeQuery('bot');
-    await click(root.querySelector('.rail-reorder'));
+    await click(root.querySelector('.rail-order'));
     expect(field()).toBeNull();
+    await click(root.querySelector('.menu .btn-reorder-projects'));
     expect(root.querySelector('.rail-done')).not.toBeNull();
     expect(bar()).toHaveLength(5);
   });
@@ -1542,7 +1695,7 @@ describe('the project bar: search, menu, archive', () => {
     };
     const socket = { onState: () => () => {} } as unknown as HubSocket;
     const app = new AppState(api as unknown as Api, socket);
-    app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious' };
+    app.me = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm', look: 'spacious', project_sort: 'custom' };
     // The lists bring it, the search never opened.
     await act(async () => app.refreshSessions());
     expect(api.archivedProjects).toHaveBeenCalledTimes(1);
@@ -2105,7 +2258,7 @@ describe('favorites', () => {
 });
 
 describe('the list on a reload', () => {
-  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const, look: 'spacious' as const };
+  const ME = { id: 'u', email: 'who@example.com', personal_project_id: 'p0', theme: 'warm' as const, look: 'spacious' as const, project_sort: 'custom' as const };
   /** A hub that has not answered yet. */
   const pending = () => new Promise<never>(() => {});
   /** A socket that has not connected; `state` plays its connect. */

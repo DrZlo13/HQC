@@ -630,28 +630,45 @@ it('opens the session last open in a project', async () => {
   await until('reopened', () => location.hash === `#/s/${s.id}`);
 });
 
-it('reorders the project bar and keeps the order in the hub', async () => {
+it('orders the project bar by name or by hand, and keeps the order in the hub', async () => {
   const names = () => $$('.rail .project-row').map((r) => r.getAttribute('title'));
   const before = names();
   expect(before.length).toBeGreaterThan(1);
-  $<HTMLButtonElement>('.rail-reorder')!.click();
+  /** An item of the bar's order menu, opening the menu first. */
+  const pick = async (cls: string) => {
+    $<HTMLButtonElement>('.rail-order')!.click();
+    (await until('order menu', () => $<HTMLButtonElement>(`.menu ${cls}`)))!.click();
+  };
+  // Name: kept on the user in the hub.
+  await pick('.btn-sort-name');
+  await until('by name', () => app.projectSort() === 'name');
+  expect((await app.api.me()).project_sort).toBe('name');
+  expect(names()).toEqual(app.sortedProjects('name').map((p) => p.name));
+
+  await pick('.btn-reorder-projects');
   const last = await until('reorder mode', () => $$('.rail .rail-drag').at(-1));
+  // Reorder arranges the user's own order, not the names'.
+  expect($$('.rail .rail-drag').map((r) => r.getAttribute('title'))).toEqual(before);
   expect($('.rail a.project-row')).toBeNull();
   last.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }) as unknown as Event);
   const moved = [...before];
   moved.splice(-2, 2, before.at(-1)!, before.at(-2)!);
   await until('moved', () => names().join() === moved.join());
-  // Cancel drops it.
+  // Cancel drops it, and the bar stays by name.
   $<HTMLButtonElement>('.rail button[aria-label=Cancel]')!.click();
-  await until('cancelled', () => names().join() === before.join() && $('.rail a.project-row'));
+  await until('cancelled', () => $('.rail a.project-row'));
+  expect(app.projectSort()).toBe('name');
+  expect(names()).toEqual(app.sortedProjects('name').map((p) => p.name));
 
-  $<HTMLButtonElement>('.rail-reorder')!.click();
+  await pick('.btn-reorder-projects');
   const first = await until('reorder again', () => $$('.rail .rail-drag').at(-1));
   first.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }) as unknown as Event);
   await until('moved again', () => names().join() === moved.join());
+  // Done keeps the order and makes the bar Custom.
   $<HTMLButtonElement>('.rail-done')!.click();
-  await until('saved', () => $('.rail a.project-row') && names().join() === moved.join());
+  await until('saved', () => $('.rail a.project-row') && app.projectSort() === 'custom' && names().join() === moved.join());
   expect((await app.api.projects()).map((p) => p.name)).toEqual(moved);
+  expect((await app.api.me()).project_sort).toBe('custom');
 });
 
 it('makes a missing folder for a workspace when asked', async () => {

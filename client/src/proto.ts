@@ -65,6 +65,9 @@ export type Theme = (typeof THEME_NAMES)[number];
 /** The client's look (SPEC §3 User): everything dense, or the roomy default. */
 export const LOOK_NAMES = ['compact', 'spacious'] as const;
 export type LookName = (typeof LOOK_NAMES)[number];
+/** The project bar's order (SPEC §3 User): the user's own, by name, or by the latest activity. */
+export const PROJECT_SORT_NAMES = ['custom', 'name', 'recent'] as const;
+export type ProjectSort = (typeof PROJECT_SORT_NAMES)[number];
 /** A project's color (T49); `theme.ts` maps it to its hex value. */
 export const PROJECT_COLOR_NAMES = ['teal', 'plum', 'blue', 'rose', 'moss', 'coral', 'cyan', 'slate'] as const;
 export type ProjectColor = (typeof PROJECT_COLOR_NAMES)[number];
@@ -1029,6 +1032,8 @@ export interface Me {
   theme: Theme;
   /** The client's look, the same on every device. */
   look: LookName;
+  /** The project bar's order, the same on every device. */
+  project_sort: ProjectSort;
 }
 
 /** The fields of the hub's session object (SPEC §6) the client uses. */
@@ -1098,6 +1103,7 @@ export function parseMe(v: unknown): Me {
     timezone: optStr(o, 'timezone'),
     theme: oneOf(o, 'theme', THEME_NAMES) ?? 'warm',
     look: oneOf(o, 'look', LOOK_NAMES) ?? 'spacious',
+    project_sort: oneOf(o, 'project_sort', PROJECT_SORT_NAMES) ?? 'custom',
   };
 }
 

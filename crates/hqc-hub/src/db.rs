@@ -3077,15 +3077,37 @@ pub async fn agent_messages_before(
     .await
 }
 
-/// The events of session `from` before `seq` whose type is in `types`, copied in order into
-/// the empty session `to` under new ids, at `seq` 1.. (SPEC §6 fork): what its feed shows of
-/// the conversation it forks. Each keeps its origin: a copy's, else its own id in `runtime`,
-/// the transcript of `from`. Copied inputs are no inputs to deliver. The number copied.
+/// The first event of session `id` after `seq` that is not an input stored while the agent's
+/// text was being written (`payload.during_text`, SPEC §6).
+pub async fn first_after_inputs_during_text(
+    db: &PgPool,
+    id: Uuid,
+    seq: i64,
+) -> sqlx::Result<Option<EventRow>> {
+    sqlx::query_as(&format!(
+        r#"SELECT {EVENT_COLS} FROM events
+         WHERE session_id = $1 AND seq > $2
+           AND NOT (type IN ('user.message', 'peer.message')
+                    AND payload @> '{{"during_text": true}}')
+         ORDER BY seq LIMIT 1"#
+    ))
+    .bind(id)
+    .bind(seq)
+    .fetch_optional(db)
+    .await
+}
+
+/// The events of session `from` before `seq` (and the one at `also`) whose type is in `types`,
+/// copied in order into the empty session `to` under new ids, at `seq` 1.. (SPEC §6 fork): what
+/// its feed shows of the conversation it forks. Each keeps its origin: a copy's, else its own id
+/// in `runtime`, the transcript of `from`. Copied inputs are no inputs to deliver. The number
+/// copied.
 pub async fn copy_events(
     db: &PgPool,
     from: Uuid,
     to: Uuid,
     seq: i64,
+    also: Option<i64>,
     types: &[&str],
     runtime: &str,
 ) -> sqlx::Result<i64> {
@@ -3095,13 +3117,14 @@ pub async fn copy_events(
            (event_id, session_id, seq, ts, author, type, payload, origin_id, origin_runtime)
          SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type,
                 payload, COALESCE(origin_id, event_id), COALESCE(origin_runtime, $5)
-         FROM events WHERE session_id = $1 AND seq < $3 AND type = ANY($4)",
+         FROM events WHERE session_id = $1 AND (seq < $3 OR seq = $6) AND type = ANY($4)",
     )
     .bind(from)
     .bind(to)
     .bind(seq)
     .bind(types)
     .bind(runtime)
+    .bind(also)
     .execute(&mut *tx)
     .await?
     .rows_affected() as i64;

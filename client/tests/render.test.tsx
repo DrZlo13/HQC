@@ -16,7 +16,7 @@ import {
   type ChatActions,
 } from "../src/ui/cards";
 import { CANONICAL_LABELS } from "../src/ui/labels";
-import { cutJson, relativePaths } from "../src/ui/feed";
+import { buildFeed, cutJson, relativePaths } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
 const raw = (name: string): any =>
@@ -189,6 +189,56 @@ describe("delivery after a dropped socket", () => {
     } as HqcEvent);
     expect(t.lastSeq).toBe(9);
     expect(t.resumeSeq()).toBe(6);
+  });
+});
+
+describe("an input that came while the agent's text was being written (SPEC §6)", () => {
+  const input = (seq: number, during: boolean) =>
+    ev("event.user.message", (e) => {
+      e.seq = seq;
+      e.event_id = `0199f3a2-7c10-7000-8000-00000000020${seq}`;
+      if (during) e.payload.during_text = true;
+    });
+  const answer = (seq: number, inReplyTo?: string) =>
+    ev("event.agent.message", (e) => {
+      e.seq = seq;
+      e.payload = { text: "Done", final: true };
+      if (inReplyTo) e.payload.in_reply_to = inReplyTo;
+    });
+  const order = (t: Timeline) => t.items().map((i) => i.key);
+
+  it("stands under the answer stored after it", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, true), answer(2)]);
+    expect(order(t)).toEqual(["e2", "e1"]);
+  });
+
+  it("only the marked inputs right before the answer go under it", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, false), input(2, true), answer(3)]);
+    expect(order(t)).toEqual(["e1", "e3", "e2"]);
+  });
+
+  it("the answer never goes above the input it answers", () => {
+    const t = new Timeline();
+    const u = input(1, true);
+    t.applyAll([u, answer(2, u.event_id)]);
+    expect(order(t)).toEqual(["e1", "e2"]);
+  });
+
+  it("an answer goes only above the inputs after the answer before it", () => {
+    const t = new Timeline();
+    t.applyAll([answer(1), input(2, true), answer(3), answer(4)]);
+    expect(order(t)).toEqual(["e1", "e3", "e2", "e4"]);
+  });
+
+  it("a final answer keeps its usage line in its block", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, true), answer(2), ev("event.usage", withSeq(3))]);
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["agent", "item"]);
+    const [first] = blocks;
+    expect(first.kind === "agent" ? first.usage?.seq : undefined).toBe(3);
   });
 });
 

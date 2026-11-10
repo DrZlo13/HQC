@@ -525,6 +525,28 @@ async fn a_send_wakes_its_target() {
     assert_eq!(n, 1);
 }
 
+/// SPEC §6: a message sent while the target's text is being written has `payload.during_text`.
+#[tokio::test]
+async fn a_send_during_the_targets_text_is_marked() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (_, ta) = started(&hub, &mut w, "Asker", None).await;
+    let (b, _) = started(&hub, &mut w, "Helper", None).await;
+    w.event(agent_event(&b, "agent.delta", json!({"text": "Writ"})))
+        .await;
+
+    let rid = Uuid::now_v7().to_string();
+    let args = json!({"text": "meanwhile", "session": "personal/helper"});
+    call_with(&mut w, &ta, "hqc_send", args, &rid).await;
+    let f = frames(&mut w, 2).await;
+    pick(&f, "mcp.result");
+    let events = hub.events(&b).await;
+    let sent = events.iter().find(|e| e["type"] == "peer.message").unwrap();
+    assert_eq!(sent["payload"]["during_text"], true, "{sent}");
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn an_ask_times_out_and_a_cancelled_one_is_closed() {
     let hub = TestHub::start().await;

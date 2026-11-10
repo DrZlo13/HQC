@@ -147,6 +147,115 @@ async fn fork(hub: &TestHub, sid: &str, at: &Value) -> String {
     f["id"].as_str().unwrap().to_string()
 }
 
+/// SPEC §6: a fork before a message that came while the agent's text was being written keeps
+/// the answer the client shows above it: the newest cut and the last copied event.
+#[tokio::test]
+async fn a_fork_before_a_message_written_during_the_answer_keeps_the_answer() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let m1 = input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "OK"})))
+        .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "And BANANA."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let m2 = r["event"].clone();
+    assert_eq!(m2["payload"]["during_text"], true);
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": m2["event_id"], "joined": true}),
+    )
+    .await;
+    let a1 = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "OK, APPLE.", "final": true, "in_reply_to": m1["event_id"]}),
+    );
+    w.event(a1.clone()).await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"]["at_event_ids"],
+        json!([a1["event_id"]])
+    );
+    let texts: Vec<Value> = hub
+        .events(&f)
+        .await
+        .iter()
+        .map(|e| e["payload"]["text"].clone())
+        .collect();
+    assert_eq!(
+        &texts[1..3],
+        [json!("Remember APPLE."), json!("OK, APPLE.")]
+    );
+    assert!(!texts.contains(&json!("And BANANA.")), "{texts:?}");
+    hub.finish().await;
+}
+
+/// SPEC §6: an answer to the message itself is no answer shown above it, so a fork before the
+/// message neither cuts at it nor copies it.
+#[tokio::test]
+async fn a_fork_before_a_message_written_during_the_answer_leaves_out_its_own_answer() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    let a0 = reply(&mut w, &sid, "OK, APPLE.").await;
+    input(&hub, &mut w, &sid, "Remember BANANA.").await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "OK"})))
+        .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "And CHERRY."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let m2 = r["event"].clone();
+    assert_eq!(m2["payload"]["during_text"], true);
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": m2["event_id"], "joined": true}),
+    )
+    .await;
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "OK, CHERRY.", "final": true, "in_reply_to": m2["event_id"]}),
+    ))
+    .await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    let fs = ack_start(&mut w, &f).await;
+    assert_eq!(
+        fs["payload"]["fork"]["at_event_ids"],
+        json!([a0["event_id"]])
+    );
+    let texts: Vec<Value> = hub
+        .events(&f)
+        .await
+        .iter()
+        .map(|e| e["payload"]["text"].clone())
+        .collect();
+    assert!(texts.contains(&json!("Remember BANANA.")), "{texts:?}");
+    assert!(!texts.contains(&json!("OK, CHERRY.")), "{texts:?}");
+    hub.finish().await;
+}
+
 /// A fork of a fork: before a message of its copied history it cuts in the transcript that
 /// history was first written in, by the ids the runtime gave it, even with the fork between
 /// never run and the first session deleted; before a message after its own turns, in its own

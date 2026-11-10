@@ -1069,6 +1069,53 @@ async fn subscribe_mid_answer_gets_the_text_so_far() {
     hub.finish().await;
 }
 
+/// SPEC §6: an input stored while the agent's text is being written has
+/// `payload.during_text`, so clients show it under that text; once the text is stored, the next
+/// input has none.
+#[tokio::test]
+async fn an_input_during_the_answer_text_is_marked() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("during").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "Writ"})))
+        .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "meanwhile"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let during = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": during})).await;
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "Writing", "final": false}),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "after"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let after = r["event"]["event_id"].clone();
+    let events = hub.events(&sid).await;
+    let stored = |id: &Value| events.iter().find(|e| &e["event_id"] == id).unwrap();
+    assert_eq!(stored(&during)["payload"]["during_text"], true);
+    assert!(
+        stored(&after)["payload"].get("during_text").is_none(),
+        "{}",
+        stored(&after)
+    );
+    hub.finish().await;
+}
+
 /// Web Push on approval.request when nobody watches; no push while a client is subscribed.
 #[tokio::test]
 async fn push_only_without_live_subscription() {

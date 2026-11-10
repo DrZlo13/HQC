@@ -329,6 +329,27 @@ export class Timeline {
       if (at < 0) out.push(item);
       else out.splice(at, 0, item);
     }
+    // An input that came while the agent's text was being written stands under that text
+    // (SPEC §6): the `agent.message` goes above the inputs with `during_text` right before it
+    // in `seq` order, never above the input it answers. A final one takes the `usage` right
+    // after it along, which the feed draws in its block.
+    let floor = 0;
+    for (let i = 0; i < out.length; i++) {
+      const a = out[i];
+      if (a.kind !== "event" || a.event.type !== "agent.message") continue;
+      const next = out[i + 1];
+      const n = a.event.payload.final && next?.kind === "event" && next.event.type === "usage" ? 2 : 1;
+      const answers = a.event.payload.in_reply_to;
+      let at = i;
+      while (at > floor) {
+        const prev = out[at - 1];
+        if (prev.kind !== "event" || !duringText(prev) || prev.event.event_id === answers) break;
+        at--;
+      }
+      if (at < i) out.splice(at, 0, ...out.splice(i, n));
+      floor = i + n;
+      i += n - 1;
+    }
     for (const p of this.pending.values()) {
       out.push({ kind: "pending", key: `p-${p.client_op_id}`, pending: p });
     }
@@ -341,6 +362,15 @@ export class Timeline {
       (e) => e.type === "user.message" && e.delivery === "failed",
     );
   }
+}
+
+/** A stored input the hub marked as come while the agent's text was being written (SPEC §6). */
+export function duringText(it: Item): boolean {
+  return (
+    it.kind === "event" &&
+    (it.event.type === "user.message" || it.event.type === "peer.message") &&
+    it.event.payload.during_text === true
+  );
 }
 
 function seqOf(i: Item): number {

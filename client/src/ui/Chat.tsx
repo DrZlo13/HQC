@@ -4,7 +4,7 @@ import type { AppState } from '../app';
 import { ArtifactStore, formatSize } from '../artifacts';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
-import type { Timeline } from '../timeline';
+import { duringText, type Timeline } from '../timeline';
 import { ModelField } from './agentSettings';
 import { Limits } from './limits';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
@@ -160,6 +160,9 @@ export function Chat({
   const showRetry = !system && (state === 'error' || t.hasFailedDelivery());
   const items = !loaded ? [] : requestsOnly ? onlyRequests(t.items()) : t.items();
   const blocks = buildFeed(items, t);
+  // While the agent's text is being written, the inputs that came meanwhile and the messages
+  // not stored yet stand under it (SPEC §6).
+  const under = t.streaming ? blocks.splice(underText(blocks, t)) : [];
   if (from.current === undefined && blocks.length) from.current = blockSeq(blocks[Math.max(0, blocks.length - SHOWN)]) ?? 0;
   const start = firstShown(blocks, from.current ?? 0);
   const locked = state === 'locked_vscode';
@@ -240,9 +243,9 @@ export function Chat({
     };
   }, []);
   // The jump to a search hit: the event is there once `lastSeq` reaches it and the older
-  // history (`olderFrom`) is loaded down to it. The block that holds it is the last one that
-  // starts at or before it (a hidden event's neighbour); the feed renders from there if it
-  // did not.
+  // history (`olderFrom`) is loaded down to it. The block that holds it is the one that starts
+  // at it, else the last one that starts at or before it (a hidden event's neighbour; an answer
+  // may stand above an earlier input, SPEC §6); the feed renders from there if it did not.
   const focused = useRef<number | undefined>(undefined);
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -256,9 +259,11 @@ export function Chat({
       grow((n) => n + 1);
       return;
     }
-    let target: HTMLElement | undefined;
-    for (const b of el.querySelectorAll<HTMLElement>('.feed-block[data-seq]')) {
-      if (Number(b.dataset.seq) <= focusSeq) target = b;
+    let target = el.querySelector<HTMLElement>(`.feed-block[data-seq="${focusSeq}"]`) ?? undefined;
+    if (!target) {
+      for (const b of el.querySelectorAll<HTMLElement>('.feed-block[data-seq]')) {
+        if (Number(b.dataset.seq) <= focusSeq) target = b;
+      }
     }
     if (!target) return;
     focused.current = focusSeq;
@@ -457,6 +462,7 @@ export function Chat({
           <FeedBlocks blocks={start ? blocks.slice(start) : blocks} actions={actions} />
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
+          <FeedBlocks blocks={under} actions={actions} />
           {!system && <ActivityLine state={state} timeline={t} />}
           {!system && <WaitedRequests app={app} sessionId={sessionId} />}
         </div>
@@ -1024,4 +1030,28 @@ export function Composer({
 function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number {
   const i = blocks.findIndex((b) => (blockSeq(b) ?? Infinity) >= from);
   return i < 0 ? blocks.length : i;
+}
+
+/** Index of the first of the last blocks that are inputs come while the text being written now
+ *  was (`during_text`, stored after the last event that ended a text) or messages not stored
+ *  yet. */
+function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
+  const evs = t.events();
+  let ended = 0;
+  for (let i = evs.length - 1; i >= 0; i--) {
+    const e = evs[i];
+    if (e.type === 'agent.message' || (e.type === 'status' && e.payload.state !== 'running')) {
+      ended = e.seq!;
+      break;
+    }
+  }
+  let i = blocks.length;
+  while (i > 0) {
+    const b = blocks[i - 1];
+    if (b.kind !== 'item') break;
+    const it = b.item;
+    if (!(it.kind === 'pending' || (it.kind === 'event' && duringText(it) && it.event.seq! > ended))) break;
+    i--;
+  }
+  return i;
 }

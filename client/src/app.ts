@@ -19,7 +19,7 @@ import type {
   Workspace,
 } from './proto';
 import { storedTheme, type Look } from './theme';
-import { arrange } from './ui/sessions';
+import { arrange, bucketOf } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
 /** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
@@ -427,11 +427,11 @@ export class AppState {
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.last_seq - a.last_seq);
   }
 
-  /** The user's favorite sessions of every project, the newest favorite first, without
-   *  archived ones and the one waiting to be archived. */
-  favoriteSessions(): SessionInfo[] {
+  /** The user's favorite sessions of the project (the current one by default), the newest
+   *  favorite first, without archived ones and the one waiting to be archived. */
+  favoriteSessions(projectId = this.currentProjectId): SessionInfo[] {
     return [...this.sessions.values()]
-      .filter((s) => s.favorite_at && !s.archived && s.id !== this.pendingArchive?.id)
+      .filter((s) => s.favorite_at && !s.archived && s.project_id === projectId && s.id !== this.pendingArchive?.id)
       .sort((a, b) => Date.parse(b.favorite_at!) - Date.parse(a.favorite_at!));
   }
 
@@ -594,6 +594,16 @@ export class AppState {
   projectUnread(projectId: string): boolean {
     for (const s of this.sessions.values()) {
       if (s.project_id === projectId && !s.archived && !s.system && s.unread > 0) return true;
+    }
+    return false;
+  }
+
+  /** Whether one of the project's sessions works: the same rule as a session row's pulsing
+   *  dot ([`bucketOf`] "run"), among the ones [`projectWaiting`] counts (no archived or
+   *  service sessions). */
+  projectRunning(projectId: string): boolean {
+    for (const s of this.sessions.values()) {
+      if (s.project_id === projectId && !s.archived && !s.system && bucketOf(s) === 'run') return true;
     }
     return false;
   }

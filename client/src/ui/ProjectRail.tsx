@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { colorHex } from '../theme';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { useSubscription } from './hooks';
 import { IconCheck, IconCross, IconPlus, IconReorder, IconSettings } from './icons';
@@ -13,8 +14,9 @@ const ROW_STEP = 40;
 
 /** The project bar of a desktop (T49, README "Project bar"): a tile per project with its
  *  icon on its color at ~24 %; the current one more saturated (`--mark-bg`) with a pill of
- *  the project color at the left edge; an amber "needs you" badge, else a dot when a
- *  session has unread events; "+ project", Reorder
+ *  the project color at the left edge; its state, as a session row's dot: an amber "needs
+ *  you" badge, else a pulsing dot of its color while a session works, else a dot when a
+ *  session has unread events, else an empty ring; "+ project", Reorder
  *  (drag the tiles or move a focused one with ↑/↓, then Done or Cancel), settings and who is
  *  signed in. A tile's context menu adds the project to the favorites, which go first.
  *  With "Settings" → "Project bar" → names on, a row per project: its icon and full name. */
@@ -93,10 +95,47 @@ export function ProjectRail({ app }: { app: AppState }) {
   const projects = order
     ? order.map((id) => app.projects.get(id)).filter((p) => !!p)
     : app.sortedProjects();
+  // "+ project" and Reorder, or Done and Cancel: under the tiles; with the project names on, in
+  // the bottom row with the settings and the avatar.
+  const actions = order ? (
+    <>
+      <button type="button" class="rail-btn rail-done" aria-label="Done" title="Save the order" onClick={done}>
+        <IconCheck size={16} />
+      </button>
+      <button type="button" class="rail-btn" aria-label="Cancel" title="Keep the old order" onClick={() => setOrder(null)}>
+        <IconCross size={14} />
+      </button>
+    </>
+  ) : (
+    <>
+      <button
+        type="button"
+        class="rail-btn rail-new"
+        aria-label="New project"
+        title={error ?? 'New project'}
+        disabled={!app.me}
+        onClick={() => void newProject(app, setError)}
+      >
+        <IconPlus size={15} />
+      </button>
+      {app.projects.size > 1 && (
+        <button
+          type="button"
+          class="rail-btn rail-reorder"
+          aria-label="Reorder projects"
+          title="Reorder projects"
+          onClick={() => setOrder(app.sortedProjects().map((p) => p.id))}
+        >
+          <IconReorder size={16} />
+        </button>
+      )}
+    </>
+  );
   return (
     <nav ref={nav} class={`rail ${order ? 'is-reordering' : ''}`} aria-label="Projects">
       <a class="rail-logo" href="#/" title="HQC">
-        <img src="/hqc-mark-small.svg" alt="HQC" width="38" height="38" />
+        <img src="/hqc-mark-small.svg" alt={names ? '' : 'HQC'} width="38" height="38" />
+        {names && <span class="rail-title">HQC</span>}
       </a>
       <div class="rail-sep" />
       {projects.map((p) => {
@@ -117,10 +156,7 @@ export function ProjectRail({ app }: { app: AppState }) {
         );
         const background = on || names ? undefined : { background: tileBackground(p) };
         return (
-          <div
-            key={p.id}
-            class={`rail-item ${dragId === p.id ? 'is-dragging' : ''} ${waiting > 0 || unread ? 'has-mark' : ''}`}
-          >
+          <div key={p.id} class={`rail-item ${dragId === p.id ? 'is-dragging' : ''}`}>
             {on && <span class="rail-pill" aria-hidden="true" />}
             {order ? (
               <span
@@ -155,46 +191,17 @@ export function ProjectRail({ app }: { app: AppState }) {
               <span class="rail-badge" aria-label={`needs you: ${waiting}`}>
                 {waiting > 99 ? '99+' : waiting}
               </span>
+            ) : app.projectRunning(p.id) ? (
+              <span class="rail-run pulse" style={{ background: colorHex(p.color) }} aria-label="working" />
+            ) : unread ? (
+              <span class="rail-unread" aria-label="unread" />
             ) : (
-              unread && <span class="rail-unread" aria-label="unread" />
+              <span class="rail-idle" aria-label="idle" />
             )}
           </div>
         );
       })}
-      {order ? (
-        <>
-          <button type="button" class="rail-btn rail-done" aria-label="Done" title="Save the order" onClick={done}>
-            <IconCheck size={16} />
-          </button>
-          <button type="button" class="rail-btn" aria-label="Cancel" title="Keep the old order" onClick={() => setOrder(null)}>
-            <IconCross size={14} />
-          </button>
-        </>
-      ) : (
-        <>
-          <button
-            type="button"
-            class="rail-btn rail-new"
-            aria-label="New project"
-            title={error ?? 'New project'}
-            disabled={!app.me}
-            onClick={() => void newProject(app, setError)}
-          >
-            <IconPlus size={15} />
-          </button>
-          {app.projects.size > 1 && (
-            <button
-              type="button"
-              class="rail-btn rail-reorder"
-              aria-label="Reorder projects"
-              title="Reorder projects"
-              onClick={() => setOrder(app.sortedProjects().map((p) => p.id))}
-            >
-              <IconReorder size={16} />
-            </button>
-          )}
-        </>
-      )}
+      {!names && <div class="rail-actions">{actions}</div>}
       {menu && menuProject && (
         <div class="menu rail-menu" role="menu" ref={menuBox} style={{ left: `${menu.x}px`, top: `${menu.y}px` }}>
           <button
@@ -213,6 +220,8 @@ export function ProjectRail({ app }: { app: AppState }) {
         </div>
       )}
       <div class="spacer" />
+      <div class="rail-foot">
+      {names && actions}
       <a class="rail-btn" href="#/settings" aria-label="Settings" title="Settings">
         <IconSettings size={18} />
       </a>
@@ -221,6 +230,7 @@ export function ProjectRail({ app }: { app: AppState }) {
           {email.slice(0, 1).toUpperCase()}
         </div>
       )}
+      </div>
     </nav>
   );
 }

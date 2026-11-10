@@ -103,12 +103,8 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const pathOf = (s: SessionInfo) => shortPath(app.sessionPath(s) ?? '');
   const whereOf = (s: SessionInfo) => [app.workerName(s.worker_id), pathOf(s)].filter(Boolean).join(' · ');
   const now = Date.now();
-  // Favorites of every project above the groups, with the project in the row.
-  const favorites = reorder ? [] : app.favoriteSessions().filter((s) => matchesQuery(s, pathOf(s), query));
-  const projectOf = (s: SessionInfo) => {
-    const p = app.projects.get(s.project_id);
-    return p && projectName(p);
-  };
+  // The project's favorites above its groups.
+  const favorites = reorder ? [] : app.favoriteSessions(pid).filter((s) => matchesQuery(s, pathOf(s), query));
   let groups: SessionGroup[];
   if (reorder) {
     const items = reorder.map((id) => app.sessions.get(id)).filter((s): s is SessionInfo => !!s && !s.archived);
@@ -336,7 +332,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   draft={app.draft(s.id) !== ''}
                   phone={phone}
                   when={mode === 'recent' ? formatWhen(s.updated_at, now) : undefined}
-                  where={[projectOf(s), whereOf(s)].filter(Boolean).join(' · ')}
+                  where={whereOf(s)}
                   dragging={false}
                   onArchive={() => app.archiveLater(s)}
                   onFavorite={() => toggleFavorite(app, s)}
@@ -760,7 +756,8 @@ function ActionSheet({
   );
 }
 
-/** Projects as chips on a phone (the rail's job on a desktop), with "needs you" counts. */
+/** Projects as chips on a phone (the rail's job on a desktop), each with its state as on the
+ *  rail: a "needs you" count, working, unread or idle. */
 function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) => void }) {
   const current = app.currentProjectId;
   return (
@@ -784,8 +781,12 @@ function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) =>
               <span class="chip-badge" aria-label={`needs you: ${waiting}`}>
                 {waiting}
               </span>
+            ) : app.projectRunning(p.id) ? (
+              <span class="chip-run pulse" style={{ background: colorHex(p.color) }} aria-label="working" />
+            ) : app.projectUnread(p.id) ? (
+              <span class="chip-unread" aria-label="unread" />
             ) : (
-              app.projectUnread(p.id) && <span class="chip-unread" aria-label="unread" />
+              <span class="chip-idle" aria-label="idle" />
             )}
           </a>
         );

@@ -451,6 +451,25 @@ select.input {
 
 .rail-logo {
   display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+}
+/* The hub's name next to its mark, with the project names on. */
+.rail-title {
+  font: 700 19px var(--sans);
+  letter-spacing: 0.06em;
+  color: var(--text);
+}
+
+/* The buttons under the projects and at the bottom: a column on the tiles' axis; with the
+   project names on, all of them in one row at the bottom. */
+.rail-actions,
+.rail-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
 }
 
 .rail-sep {
@@ -569,25 +588,69 @@ select.input {
   background: var(--text);
   border: 2px solid var(--rail);
 }
+/* No one waits, but a session works: the project's color (inline), pulsing. */
+.rail-run {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--rail);
+  pointer-events: none;
+}
+/* Nothing waits, works or is unread: an empty ring, as an idle session's dot. */
+.rail-idle {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--rail);
+  box-shadow:
+    inset 0 0 0 2px var(--rail),
+    inset 0 0 0 3.5px var(--muted);
+  pointer-events: none;
+}
 
-/* "Settings" → "Project bar" → names (`Look.railNames`): the bar widens to 260 px, and each
-   project is a 36 px row with its icon on its color and its full name; the badge or dot sits
-   at the row's right end, inside the row, so clicks go through it to the row. The buttons
-   under the projects keep to the left edge. At the 900 px breakpoint the chat keeps 360 px. */
+/* "Settings" → "Project bar" → names (`Look.railNames`): each project is a 36 px row with its
+   icon on its color and its full name, and the bar is as wide as the longest name, from 200 to
+   320 px (a longer name ends in "…"). The badge or dot sits on the icon's corner, as on a tile,
+   so the bar's width does not change with them; clicks go through it to the row. "+ project",
+   Reorder, the settings and the avatar stand in one row at the bottom, the first on the icons'
+   axis. At the 900 px breakpoint the chat keeps at least 300 px. */
 :root.rail-names .layout {
-  grid-template-columns: 260px clamp(280px, 25vw, 310px) minmax(0, 1fr);
+  grid-template-columns: auto clamp(280px, 25vw, 310px) minmax(0, 1fr);
 }
 :root.rail-names .rail {
+  width: max-content;
+  min-width: 200px;
+  max-width: 320px;
   align-items: flex-start;
   gap: 4px;
   padding: 14px 10px;
 }
 :root.rail-names .rail-sep {
-  margin: 6px 0 8px 5px;
+  align-self: stretch;
+  width: auto;
+  margin: 6px 0 8px;
 }
-:root.rail-names .rail-new,
-:root.rail-names .rail-done {
-  margin-top: 6px;
+:root.rail-names .rail-foot {
+  flex-direction: row;
+  gap: 8px;
+  margin-top: 8px;
+  padding-left: 1px;
+}
+:root.rail-names .rail-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+:root.rail-names .avatar {
+  width: 30px;
+  height: 30px;
+  margin-left: 2px;
 }
 :root.rail-names .rail-item {
   align-self: stretch;
@@ -601,8 +664,8 @@ select.input {
   width: 100%;
   height: 36px;
   justify-content: flex-start;
-  gap: 10px;
-  padding: 0 8px 0 6px;
+  gap: 12px;
+  padding: 0 10px 0 6px;
   border-radius: 10px;
   font-size: 12px;
 }
@@ -610,21 +673,21 @@ select.input {
   background: var(--row-hover);
   filter: none;
 }
-:root.rail-names .rail-item.has-mark .rail-project {
-  padding-right: 36px;
-}
-:root.rail-names .rail-item.has-mark:has(.rail-unread) .rail-project {
-  padding-right: 26px;
-}
 :root.rail-names .rail-project .glyph-emoji {
   font-size: 15px;
 }
-:root.rail-names .rail-badge,
-:root.rail-names .rail-unread {
-  top: 50%;
-  right: 8px;
-  transform: translateY(-50%);
-  border-color: transparent;
+:root.rail-names .rail-badge {
+  top: -2px;
+  left: 20px;
+  right: auto;
+  pointer-events: none;
+}
+:root.rail-names .rail-unread,
+:root.rail-names .rail-run,
+:root.rail-names .rail-idle {
+  top: 1px;
+  left: 24px;
+  right: auto;
   pointer-events: none;
 }
 .rail-glyph {
@@ -1544,6 +1607,17 @@ select.input {
   border-radius: 50%;
   background: var(--text);
 }
+.chip-run {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.chip-idle {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--muted);
+}
 
 .sessions-phone .seg {
   height: 36px;
@@ -2074,6 +2148,12 @@ select.input {
   position: absolute;
   top: 100%;
   right: 0;
+}
+/* The buttons, hidden until hover, go before the time: after it they would push the time off
+   the right edge, where the bubble and the text end. */
+:root.time-in-gap .msg-agent > .meta .btn-copy,
+:root.time-in-gap .msg-user:not(.msg-pending) > .meta .btn-copy {
+  order: -1;
 }
 :root.time-in-gap .chat-phone .feed {
   gap: 24px;

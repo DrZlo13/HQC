@@ -658,13 +658,22 @@ describe('ProjectRail', () => {
       ['⚛️', 'physics-mp'],
       ['UC', 'ukuetis_controller_backend'],
     ]);
+    // The hub's name next to its mark; "+ project", Reorder, the settings and the avatar in one
+    // row at the bottom.
+    expect(root.querySelector('.rail-logo')!.textContent).toBe('HQC');
+    expect(root.querySelector('.rail-actions')).toBeNull();
+    expect([...root.querySelectorAll('.rail-foot > *')].map((b) => b.getAttribute('aria-label'))).toEqual([
+      'New project',
+      'Reorder projects',
+      'Settings',
+      'who@example.com',
+    ]);
     // The color is on the icon, not on the row; the current row is --mark-bg from CSS.
     expect(rows()[0].style.background).toBe('');
     expect(rows()[0].querySelector<HTMLElement>('.rail-glyph')!.style.background).toBe('rgba(138, 147, 166, 0.24)');
-    // The badge stays, and its row keeps room for it at the right end.
-    const marked = [...root.querySelectorAll('.rail-item')].map((i) => i.classList.contains('has-mark'));
-    expect(marked).toEqual([false, true, false]);
-    expect(root.querySelector('.rail-item.has-mark .rail-badge')!.textContent).toBe('1');
+    // The badge stays, on physics-mp's row.
+    const badges = [...root.querySelectorAll('.rail-item')].map((i) => i.querySelector('.rail-badge')?.textContent ?? null);
+    expect(badges).toEqual([null, '1', null]);
 
     // Reorder: a row is 40 px with its gap, so a drag of 80 px moves a project by two places.
     await act(async () => root.querySelector<HTMLButtonElement>('.rail-reorder')!.click());
@@ -699,6 +708,33 @@ describe('ProjectRail', () => {
     await mount(<ProjectRail app={app} />);
     // Archived and service sessions do not count.
     expect(dots()[0]).toEqual([false, false]);
+  });
+
+  it('marks a project whose session works by a pulsing dot of its color, else an idle one by a ring', async () => {
+    const app = makeApp([
+      sess('notes', 'Notes', 'running', at(0.5), { project_id: 'p0', unread: 1 }),
+      sess('det', 'Step determinism', 'idle', at(0.1)),
+      sess('svc', 'wk1', 'running', at(0.1), { system: true }),
+      sess('gone', 'Gone', 'archived', at(0.5), { state: 'running' }),
+    ]);
+    const marks = () =>
+      [...root.querySelectorAll('.rail-item')].map((i) => i.querySelector('.rail-badge, .rail-run, .rail-unread, .rail-idle')?.className);
+    await mount(<ProjectRail app={app} />);
+    // Personal works, over its unread; physics-mp: a service and an archived session do not count.
+    expect(marks()).toEqual(['rail-run pulse', 'rail-idle']);
+    expect(root.querySelector<HTMLElement>('.rail-run')!.style.background).toBe('#8A93A6');
+    await mount(<SessionList app={app} phone />);
+    const chips = () =>
+      [...root.querySelectorAll('.chips .chip.project-row')].map((c) => c.querySelector('.chip-badge, .chip-run, .chip-unread, .chip-idle')?.className);
+    expect(chips()).toEqual(['chip-run pulse', 'chip-idle']);
+    expect(root.querySelector<HTMLElement>('.chip-run')!.style.background).toBe('#8A93A6');
+    // Queued input works too; a session waiting for you wins over a working one.
+    app.sessions.set('det', { ...app.sessions.get('det')!, state: 'queued' });
+    await mount(<ProjectRail app={app} />);
+    expect(marks()).toEqual(['rail-run pulse', 'rail-run pulse']);
+    app.sessions.set('net', sess('net', 'Network sync', 'waiting', at(0.2)));
+    await mount(<ProjectRail app={app} />);
+    expect(marks()).toEqual(['rail-run pulse', 'rail-badge']);
   });
 });
 
@@ -789,20 +825,23 @@ describe('favorites', () => {
     )!;
   const menuItems = () => [...root.querySelectorAll('.menu .menu-item')].map((b) => b.textContent);
 
-  it('lists the favorites of every project above the groups, the newest first; a click opens one', async () => {
+  it("lists the project's favorites above the groups, the newest first; a click opens one", async () => {
     const app = makeApp([
-      ...LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)),
-      sess('plan', 'Migration plan', 'idle', at(50), { project_id: 'p0', favorite_at: at(1) }),
+      ...LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s.id === 'prof' ? { ...s, favorite_at: at(1) } : s)),
+      sess('plan', 'Migration plan', 'idle', at(50), { project_id: 'p0', favorite_at: at(0.1) }),
       sess('old', 'Old SPI experiment', 'archived', at(70), { favorite_at: at(0.5) }),
     ]);
-    await mount(<SessionList app={app} current="plan" />);
-    // Archived favorites stay in the archive.
-    expect(groups()[0]).toEqual(['Favorites', '2', ['Migration plan', 'Cave scene port']]);
+    await mount(<SessionList app={app} current="prof" />);
+    // Archived favorites stay in the archive; another project's stay in that project.
+    expect(groups()[0]).toEqual(['Favorites', '2', ['Collision profiling', 'Cave scene port']]);
     const rows = [...root.querySelectorAll<HTMLElement>('.group-favorites .session-item')];
-    expect(rows[0].querySelector('.session-where')!.textContent).toBe('Personal · home-mac');
-    expect(rows[0].querySelector('.session-row')!.getAttribute('href')).toBe('#/s/plan');
+    expect(rows[0].querySelector('.session-row')!.getAttribute('href')).toBe('#/s/prof');
     expect(rows[0].querySelector('.session-row')!.classList.contains('is-current')).toBe(true);
-    expect(rows[1].querySelector('.session-where')!.textContent).toBe('physics-mp · home-mac · games/phys-mp');
+    expect(rows[1].querySelector('.session-where')!.textContent).toBe('home-mac · games/phys-mp');
+    // In its own project the other one is listed.
+    await act(() => app.selectProject('p0'));
+    expect(favoriteTitles()).toEqual(['Migration plan']);
+    await act(() => app.selectProject('p1'));
     // The project's own groups still hold it.
     expect(listed('Cave scene port')).toBeTruthy();
     // The search narrows them too; Reorder hides them.

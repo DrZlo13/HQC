@@ -35,10 +35,11 @@ describe('layout widths', () => {
     const breakpoint = Number(/max-width: (\d+)px/.exec(HOOKS)![1]) + 1;
     expect(breakpoint).toBe(900);
     expect(72 + Math.max(280, breakpoint / 4)).toBeLessThan(breakpoint / 2);
-    // With the project names on (SPEC 0.91) the bar is 260px: a choice of the user, which
-    // leaves the chat 360px at the breakpoint.
-    expect(rule(':root.rail-names .layout')['grid-template-columns']).toBe('260px clamp(280px, 25vw, 310px) minmax(0, 1fr)');
-    expect(breakpoint - 260 - Math.max(280, breakpoint / 4)).toBe(360);
+    // With the project names on (SPEC 0.91) the bar is as wide as the longest name, at most
+    // 320px: a choice of the user, which leaves the chat at least 300px at the breakpoint.
+    expect(rule(':root.rail-names .layout')['grid-template-columns']).toBe('auto clamp(280px, 25vw, 310px) minmax(0, 1fr)');
+    expect(rule(':root.rail-names .rail')['max-width']).toBe('320px');
+    expect(breakpoint - 320 - Math.max(280, breakpoint / 4)).toBe(300);
   });
 
   it('no fixed width, minimum width or flex basis of 300px or more anywhere', () => {

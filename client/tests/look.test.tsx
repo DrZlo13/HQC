@@ -82,6 +82,9 @@ it('the classes lift the feed width, swap the font and move the time into the ga
     /:root\.time-in-gap \.msg-agent > \.meta,\s*:root\.time-in-gap \.msg-user:not\(\.msg-pending\) > \.meta \{\s*position: absolute;\s*top: 100%;/,
   );
   expect(css).toMatch(/:root\.time-in-gap \.feed \{\s*padding-bottom: 24px;/);
+  expect(css).toMatch(
+    /:root\.time-in-gap \.msg-agent > \.meta \.btn-copy,\s*:root\.time-in-gap \.msg-user:not\(\.msg-pending\) > \.meta \.btn-copy \{\s*order: -1;/,
+  );
   expect(css).toMatch(/:root\.time-in-gap \.chat-phone \.feed \{\s*gap: 24px;/);
 });
 
@@ -100,5 +103,5 @@ it('keeps the project names in the project bar on this device (SPEC 0.91)', asyn
   applyLook(document.documentElement, again.look);
   expect(document.documentElement.classList.contains('rail-names')).toBe(true);
   const css = readFileSync(join(import.meta.dirname, '../src/styles.css'), 'utf8');
-  expect(css).toMatch(/:root\.rail-names \.layout \{\s*grid-template-columns: 260px /);
+  expect(css).toMatch(/:root\.rail-names \.layout \{\s*grid-template-columns: auto /);
 });

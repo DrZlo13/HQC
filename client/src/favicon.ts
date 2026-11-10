@@ -1,5 +1,5 @@
-// The tab's icon marks what the session list marks on the projects: an amber dot when a
-// session waits for the user (a request or an error), a light one when nothing waits but
+// The tab's icon keeps two of the marks the projects get, across all of them: an amber dot
+// when a session waits for the user (a request or an error), a light one when nothing waits but
 // something is unread (archived and service sessions aside).
 
 import type { AppState } from './app';

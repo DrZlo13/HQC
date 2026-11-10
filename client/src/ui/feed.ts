@@ -237,7 +237,8 @@ export function callArgs(argsPreview: string): Record<string, unknown> {
   return {};
 }
 
-const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt'];
+// `skill`: the Skill tool's skill name ("Skill worktree").
+const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt', 'skill'];
 
 /** One line for a call: `$ command` for Bash, else the tool and its main argument. */
 export function callLine(tool: string, argsPreview: string): { shell: boolean; text: string; more?: number } {

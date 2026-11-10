@@ -660,14 +660,16 @@ describe("tool groups (T26)", () => {
     t.apply(agentText(1, "Done.", true));
     t.apply(call(2, "a", "Read", { file_path: "Cargo.toml" }));
     t.apply(result(3, "a"));
-    t.apply(call(4, "b", "Grep", { pattern: "TODO" }));
-    t.apply(result(5, "b", true));
+    t.apply(call(4, "c", "Skill", { skill: "worktree", args: "cut one" }));
+    t.apply(result(5, "c"));
+    t.apply(call(6, "b", "Grep", { pattern: "TODO" }));
+    t.apply(result(7, "b", true));
     show(t);
     const g = root.querySelector(".tool-group")!;
     expect(g.querySelector(".tool-stats")!.textContent).toBe(
-      "2 tool calls · 3 s",
+      "3 tool calls · 5 s",
     );
-    expect(g.querySelector(".tool-kinds")!.textContent).toBe("(Read, Grep)");
+    expect(g.querySelector(".tool-kinds")!.textContent).toBe("(Read, Skill, Grep)");
     expect(g.classList.contains("tool-error")).toBe(true);
     await act(async () =>
       g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
@@ -675,7 +677,10 @@ describe("tool groups (T26)", () => {
     const rows = [...g.querySelectorAll(".tool-row summary")];
     expect(rows[0].querySelector(".tool-name")!.textContent).toBe("Read");
     expect(rows[0].querySelector(".tool-line")!.textContent).toBe("Cargo.toml");
-    expect(rows[1].querySelector(".mark-error")).not.toBeNull();
+    // The Skill tool says which skill.
+    expect(rows[1].querySelector(".tool-name")!.textContent).toBe("Skill");
+    expect(rows[1].querySelector(".tool-line")!.textContent).toBe("worktree");
+    expect(rows[2].querySelector(".mark-error")).not.toBeNull();
   });
 
   it("a group lists each tool once, in the order first called, an MCP tool as server/tool; one call shows its line", async () => {

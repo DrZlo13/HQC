@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiError, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
-import { ArtifactStore, formatSize } from '../artifacts';
+import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
@@ -28,6 +28,21 @@ const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
 const SHOWN = 60;
 
+/** The signed links of all chats of the page, one map: a chat opened again gets the same links
+ *  while they live, and the browser shows its images from its cache. Emptied whenever the
+ *  hub's socket opens: a hub restarted without `HQC_ARTIFACT_KEY` signs with a new key. The
+ *  metadata stays per chat opened. */
+const linkCaches = new WeakMap<AppState, LinkCache>();
+function sharedLinks(app: AppState): LinkCache {
+  let links = linkCaches.get(app);
+  if (!links) {
+    const fresh: LinkCache = new Map();
+    app.socket.onState((s) => s === 'open' && fresh.clear());
+    linkCaches.set(app, (links = fresh));
+  }
+  return links;
+}
+
 /** `focusSeq`: scroll to that event once it is loaded and mark it (a search hit, SPEC §15).
  *  `sessions`: a window 900–1079 px wide, "Sessions" at the left of the header. */
 export function Chat({
@@ -48,7 +63,7 @@ export function Chat({
   const [requestsOnly, setRequestsOnly] = useState(false);
   const [schedules, setSchedules] = useState(false);
   const [moving, setMoving] = useState(false);
-  const artifacts = useMemo(() => new ArtifactStore(app.api), [app]);
+  const artifacts = useMemo(() => new ArtifactStore(app.api, undefined, undefined, undefined, sharedLinks(app)), [app]);
   // The image or Markdown text shown in the viewer over the chat.
   const [viewing, setViewing] = useState<ViewedArtifact | null>(null);
   const peerMessage = useMemo(() => peerMessages(app.api), [app]);
@@ -209,6 +224,10 @@ export function Chat({
     );
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // The last scroll position: only a move up lets go of the bottom. A scroll event can come
+  // after the feed grew (an image loaded) and before it is followed: far from the bottom then,
+  // but the user did not leave it.
+  const lastTop = useRef(0);
   // Blocks added above keep what is on screen in place: the distance to the bottom stays.
   const keep = useRef<number | undefined>(undefined);
   const showMore = (seq: number | undefined) => {
@@ -430,7 +449,7 @@ export function Chat({
             </a>
           ))}
         {showRetry && !phone && (
-          <button type="button" class="btn btn-small btn-outline btn-retry" onClick={() => act(() => chat.retry(), 'Retry failed')}>
+          <button type="button" class="btn btn-small btn-primary btn-retry" onClick={() => act(() => chat.retry(), 'Retry failed')}>
             Retry
           </button>
         )}
@@ -480,7 +499,9 @@ export function Chat({
         ref={scroller}
         onScroll={(e) => {
           const el = e.currentTarget as HTMLDivElement;
-          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          if (near || el.scrollTop < lastTop.current) stick.current = near;
+          lastTop.current = el.scrollTop;
           if (el.scrollTop < 400 && start > 0) showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
           if (quote && phone) setQuote(feedSelection(feed.current));
         }}

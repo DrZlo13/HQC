@@ -380,6 +380,19 @@ describe('rendering attachments', () => {
     await expect(store.text('d')).rejects.toThrow('too large');
   });
 
+  it('an image shown again has its link in the first render, without asking the hub', async () => {
+    const src = fakeSource([meta('img', 'image', 'screen.png')]);
+    const store = new ArtifactStore(src as never);
+    const first = chatWith([ev('event.attachment', (e) => (e.payload.artifact_id = 'img'))], store);
+    await flush();
+    expect(first.el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
+    // The chat opened again: the same link at once, so the browser has the image in its cache.
+    const again = chatWith([ev('event.attachment', (e) => (e.payload.artifact_id = 'img'))], store);
+    expect(again.el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
+    await flush();
+    expect(src.artifactLink).toHaveBeenCalledTimes(1);
+  });
+
   it('a broken image link is renewed once, then the image becomes a card', async () => {
     const src = fakeSource([meta('img', 'image', 'screen.png')]);
     const store = new ArtifactStore(src as never);

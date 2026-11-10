@@ -4032,6 +4032,13 @@ a.relay-peer {
   font-weight: 400;
 }
 
+/* One line: a long command gives way, not the button (it wrapped word by word and pushed the
+   row off the feed's mark). */
+.perm-done-row .btn-link {
+  flex: none;
+  white-space: nowrap;
+}
+
 /* The bottom sheet of a phone (Mobile-Session): in place of the composer. */
 .sheet-wrap {
   flex: none;

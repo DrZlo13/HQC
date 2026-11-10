@@ -860,6 +860,43 @@ describe('slash command completion (T27)', () => {
   });
 });
 
+describe('an image in the feed', () => {
+  it('a chat opened again shows it by the link it had; after the hub reconnects, by a new one', async () => {
+    const pic = ev('event.attachment', 4, (e) => (e.payload.artifact_id = 'img'));
+    const { api, app } = setup('idle', { history: [...HISTORY.slice(0, 3), pic] });
+    const artifactLink = vi.fn(async (id: string) => ({
+      url: `/artifacts/${id}?sig=${artifactLink.mock.calls.length}`,
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    }));
+    const artifact = vi.fn(async (id: string) => ({ id, kind: 'image', name: 'screen.png', mime: 'image/png', size: 10, sha256: '', created_at: '' }));
+    Object.assign(api, { artifact, artifactLink });
+    let opened!: (s: 'open') => void;
+    Object.assign(app.socket, {
+      onState: (fn: (s: 'open') => void) => {
+        opened = fn;
+        return () => {};
+      },
+    });
+    const src = () => $('.attachment-image img')?.getAttribute('src');
+    /** The chat, its history and its image link in. */
+    const open = async () => {
+      await mount(app);
+      for (let i = 0; i < 20 && !src(); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    };
+    await open();
+    expect(src()).toBe('/artifacts/img?sig=1');
+    render(null, root);
+    await open();
+    expect(src()).toBe('/artifacts/img?sig=1');
+    expect(artifactLink).toHaveBeenCalledTimes(1);
+    render(null, root);
+    // A restarted hub may sign with another key: the links are asked for again.
+    opened('open');
+    await open();
+    expect(src()).toBe('/artifacts/img?sig=2');
+  });
+});
+
 describe('history', () => {
   const long = Array.from({ length: 450 }, (_, i) =>
     ev('event.agent.message', i + 1, (e) => (e.payload.text = `answer ${i + 1}`)),
@@ -947,6 +984,36 @@ describe('history', () => {
     await settle();
     expect(blocks().length).toBe(120);
     expect(blocks().at(-1)!.textContent).toContain('answer 450');
+  });
+
+  it('a scroll that lands after the feed grew does not let go of the bottom; a scroll up does', async () => {
+    let height = 5000;
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? height : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 600 : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    const scroll = (top: number) =>
+      act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    const next = (seq: number) => act(async () => subscriber!.onEvent(ev('event.agent.message', seq, (e) => (e.payload.text = `more ${seq}`))));
+    await scroll(4400);
+    // An image loaded: the feed is 400 px taller, and the event of a small shift comes first.
+    height = 5400;
+    await scroll(4418);
+    await next(451);
+    expect(scroller.scrollTop).toBe(5400);
+    // The user scrolls up: the feed stays where they are.
+    await scroll(4000);
+    height = 5600;
+    await next(452);
+    expect(scroller.scrollTop).toBe(4000);
   });
 });
 

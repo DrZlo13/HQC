@@ -128,11 +128,13 @@ function isMarkdown(kind: ArtifactKind, name: string, meta: Artifact | null): bo
 
 /** A signed link for `id`, renewed by `renew()` (an expired link on `<img>` or `<iframe>`). */
 function useArtifactUrl(store: ArtifactStore, id: string) {
-  const [url, setUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null>(() => store.cachedUrl(id) ?? null);
   const [failed, setFailed] = useState(false);
   const [renewed, setRenewed] = useState(false);
   useEffect(() => {
     let live = true;
+    const cached = store.cachedUrl(id);
+    if (cached) return setUrl(cached);
     store.url(id).then(
       (u) => live && setUrl(u),
       () => live && setFailed(true),

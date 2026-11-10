@@ -14,9 +14,11 @@ export const MAX_INLINE_TEXT = 512 * 1024;
 /** Larger text and diffs are only offered for download, not opened (T22). */
 export const MAX_OPEN_TEXT = 2 * 1024 * 1024;
 
+/** Signed links by artifact id; one map can serve several stores (the chats of a page). */
+export type LinkCache = Map<string, { url: string; expires: number }>;
+
 export class ArtifactStore {
   private readonly metas = new Map<string, Promise<Artifact>>();
-  private readonly links = new Map<string, { url: string; expires: number }>();
 
   constructor(
     private readonly api: Source,
@@ -24,6 +26,7 @@ export class ArtifactStore {
     private readonly now: () => number = Date.now,
     /** Where relative links point: the hub's own origin. */
     private readonly origin: string = typeof location !== 'undefined' ? location.origin : 'http://localhost',
+    private readonly links: LinkCache = new Map(),
   ) {}
 
   meta(id: string): Promise<Artifact> {
@@ -35,6 +38,13 @@ export class ArtifactStore {
       p.catch(() => this.metas.delete(id));
     }
     return p;
+  }
+
+  /** The cached signed link if it still lives, without asking the hub: an image shown again
+   *  has its address in the first render. */
+  cachedUrl(id: string): string | undefined {
+    const cached = this.links.get(id);
+    return cached && cached.expires - this.now() > MARGIN_MS ? cached.url : undefined;
   }
 
   /** A signed link; `fresh` drops the cached one (it was refused). */

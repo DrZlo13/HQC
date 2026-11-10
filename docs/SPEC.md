@@ -371,7 +371,9 @@ session), `ts`, `author` (`{kind: user|agent, id}` or `{kind: system}` without `
 agent `id` = its `session_id`), `type`, `payload`, `chain` (`{chain_id, depth, hops,
 permission_cap?, capped_by?}` for agent→agent chains, otherwise null; the cap since 0.43, §7.1), `client_op_id` (echoed back to the client), `delivery` and
 `delivered_at` — two flat event fields, only on `user.message` and `peer.message`:
-`delivery` ∈ `pending | delivered | failed`, `delivered_at` — the delivery time.
+`delivery` ∈ `pending | delivered | failed`, `delivered_at` — the delivery time. Since 0.112
+the hub also sets `payload.joined: true` on a person's `user.message` when it is delivered into
+the turn already running (§17.2), with `delivery`; no other field of a stored payload changes.
 
 ### ReadCursor
 `user_id`, `session_id`, `last_read_seq`. The source of "unread" (the rule is in §6).
@@ -463,7 +465,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -528,8 +530,9 @@ Rules:
   hub keeps the text of a session's deltas in memory until its `agent.message` or a `status`
   other than `running` (up to 512 KiB, and not past the worker's disconnect), so a client that
   subscribes mid-answer gets all of it (§6, since 0.72).
-- History is never rewritten. Protection against forged peer-message headers is applied
-  on delivery to the runtime (§7.1).
+- History is never rewritten: besides an input's `delivery` and `delivered_at` (§3 Event), the
+  one change of a stored event is `joined` of a person's `user.message` (since 0.112, §17.2).
+  Protection against forged peer-message headers is applied on delivery to the runtime (§7.1).
 
 ## 5. Worker ↔ Hub protocol
 
@@ -701,7 +704,8 @@ Hub → worker:
   (Claude Code — after the `--replay-user-messages` echo; ACP — after sending `session/prompt`).
   Since 0.70 `ack {event_id, joined: true}` says the input went into the turn already running
   (§17.2): the hub marks it `delivered` and does not open a turn for it (the `ack` goes past the
-  worker's outbox and may come after that turn's final answer).
+  worker's outbox and may come after that turn's final answer); since 0.112 it keeps that on the
+  message as `payload.joined: true` and sends it to clients with the `delivery` frame (§6).
   After `hello` the hub sends `session.start` with `mode: resume` to every session of this worker
   that has a `pending` input, an open `approval`/`clarify` or an answer to a request not yet
   acknowledged by the worker; after the `ack` to it — the unacknowledged answers, then the
@@ -1730,8 +1734,10 @@ newer copy).
   reply, to the subscriptions that already had it (the client takes the field over its copy);
   `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
   sent, the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
-  delivered_at?}`: the delivery of an input changed; the event itself is not resent, the
-  client updates `delivery`/`delivered_at` of its event with this `seq`;
+  delivered_at?, joined?}`: the delivery of an input changed; the event itself is not resent, the
+  client updates `delivery`/`delivered_at` of its event with this `seq`; `joined: true` (since
+  0.112, `client.delivery.joined.json`, absent when false) says the input went into the turn
+  already running;
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
@@ -4130,11 +4136,12 @@ turn the CLI runs by itself, take it), neither the input nor the turn is capped 
 buffered sends of other sessions (`peer_prefix`, §7.1) may join: the cap of §7.1 makes it `ask`
 whenever one of them comes from a session in `ask`, and a capped input never joins. The hub
 honours `joined` only for a `user.message` without `schedule_id`; a `joined` on any other input
-is the worker's mistake, logged, and the input's turn opens (since 0.71). Otherwise it waits for the end of
-the turn as before (scheduled runs and slash commands always do), and so does everything behind
-it, so `seq` order holds. Since 0.75 nothing is written into the turn either while a move of
-the session waits (§5.3): the input is for the agent in the new folder. The CLI takes the input
-at its next step, after the result of the
+is the worker's mistake, logged, not kept, and the input's turn opens (since 0.71). Since 0.112
+the hub keeps an honoured one on the message, `payload.joined: true` (§4), and sends it with the
+`delivery` frame (§6). Otherwise it waits for the end of the turn as before (scheduled runs and
+slash commands always do), and so does everything behind it, so `seq` order holds. Since 0.75
+nothing is written into the turn either while a move of the session waits (§5.3): the input is
+for the agent in the new folder. The CLI takes the input at its next step, after the result of the
 tool call running then, and the worker answers `ack {event_id, joined: true}` on its echo; the
 turn's final `agent.message` stays `in_reply_to` the turn's own input. When the turn ends
 before that (the input came during the final answer, or before an interrupt), the CLI runs it
@@ -4461,6 +4468,12 @@ tokens` with that cost. Now a `result` with `num_turns: 0` and no tokens, unless
 grown total as `session_cost_usd`: the client's header counts it and the feed draws no line for
 it. The baseline of `cost_usd` stays, so the next turn's line carries what the subagent spent.
 0.109–0.114 are taken by open pull requests.
+
+### 0.111 → 0.112 (an input that joined the running turn is kept on it)
+§3 Event, §4, §5.2, §6, §17.2: the hub keeps an input that joined the running turn, a person's
+`user.message` the worker acked `joined`, as `payload.joined: true` on the stored message, the
+one change of a stored payload, and sends it to clients with the `delivery` frame (`joined`). A
+`joined` on another input stays the worker's mistake and is not kept.
 
 ### 0.110 → 0.111 (search filters, counts and other word forms)
 §6, §15: `GET /api/search` takes `session`, `kind` (message, command, output, answer), `since`,

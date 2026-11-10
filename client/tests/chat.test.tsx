@@ -21,7 +21,7 @@ import {
   type SpawnedBy,
 } from '../src/proto';
 import { AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
-import type { HubSocket } from '../src/ws';
+import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -877,6 +877,119 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
     const idle = ev('event.status', 4, (e) => (e.payload = { state: 'idle' }));
     await writing([first, meanwhile(2), answer, idle]);
     expect(under(block('written meanwhile'))).toBe(false);
+  });
+});
+
+// SPEC §6: the client keeps the chats used most recently in memory.
+describe('switching chats', () => {
+  /** The socket's subscriptions, each as it was made. */
+  function subscriptions(app: AppState) {
+    const subs: SessionSubscriber[] = [];
+    const subscribe = vi.fn((_id: string, sub: SessionSubscriber) => {
+      subs.push(sub);
+      return () => {};
+    });
+    Object.assign(app.socket, { subscribe });
+    return { subs, subscribe };
+  }
+  /** `mount`, then what the chat's opening causes: run alone, these tests saw the mount's
+   *  effects run only as its `act` ended, before the chat had subscribed. */
+  async function mountChat(app: AppState) {
+    await mount(app);
+    await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
+  }
+
+  it('a chat opened before shows its feed in the first frame, resubscribes after its last seq, then fetches its newest page again', async () => {
+    const { api, app } = setup('idle');
+    const { subs, subscribe } = subscriptions(app);
+    await mountChat(app);
+    expect(subs.map((s) => s.afterSeq())).toEqual([7]);
+    await act(async () => render(null, root));
+
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    // No act: the frame before any effect has run.
+    render(<Chat app={app} sessionId="s1" />, root);
+    expect(root.textContent).not.toContain('Loading…');
+    expect(root.querySelector('.feed')!.textContent).toContain('All tests pass.');
+    await act(async () => void (await new Promise((r) => setTimeout(r, 100))));
+    expect(subs.map((s) => s.afterSeq())).toEqual([7, 7]);
+    expect(api.eventsBefore).toHaveBeenCalledTimes(2);
+    expect(subscribe.mock.invocationCallOrder[1]).toBeLessThan(api.eventsBefore.mock.invocationCallOrder[1]);
+  });
+
+  it('a kept chat takes the delivery the hub changed while it was closed from its newest page, not new events or lastSeq', async () => {
+    const input = (delivery?: 'failed') =>
+      ev('event.user.message', 1, (e) => {
+        e.payload.artifact_ids = [];
+        if (delivery) {
+          e.delivery = delivery;
+          delete e.delivered_at;
+        }
+      });
+    const { api, app } = setup('idle', { history: [input('failed'), ev('event.agent.message', 2)] });
+    await mountChat(app);
+    expect($('.btn-retry')).not.toBeNull();
+    await act(async () => render(null, root));
+    // Retried from another device and delivered there, which the hub told no subscription
+    // here; and a newer event, which the subscription brings.
+    api.eventsBefore.mockImplementation(async () => ({
+      events: [input(), ev('event.agent.message', 2), ev('event.agent.message', 3)],
+      invalid: [],
+      maxSeq: 3,
+      minSeq: 1,
+      count: 3,
+    }));
+    await mountChat(app);
+    expect($('.btn-retry')).toBeNull();
+    const t = app.chat('s1').timeline;
+    expect(t.lastSeq).toBe(2);
+    expect(t.events().map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it('a half-written answer does not carry over to the next open: the hub sends it whole', async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    const { subs } = subscriptions(app);
+    const delta = (text: string) =>
+      ev('event.agent.delta', 0, (e) => {
+        delete e.seq;
+        e.payload.text = text;
+      });
+    await mountChat(app);
+    await act(async () => subs[0].onEvent(delta('Hel')));
+    expect($('.msg-streaming')!.textContent).toBe('Hel');
+    await act(async () => render(null, root));
+    await mountChat(app);
+    await act(async () => subs[1].onEvent(delta('Hello')));
+    expect($('.msg-streaming')!.textContent).toBe('Hello');
+  });
+
+  it('a chat closed and opened again while its page loads subscribes once', async () => {
+    const { api, app } = setup('idle');
+    const { subscribe } = subscriptions(app);
+    let page!: () => void;
+    const tail = api.eventsBefore.getMockImplementation()!;
+    api.eventsBefore.mockImplementationOnce(
+      (id, before, limit) => new Promise((r) => (page = () => r(tail(id, before, limit)))),
+    );
+    const chat = app.chat('s1');
+    const first = chat.open();
+    chat.close();
+    const second = chat.open();
+    page();
+    await Promise.all([first, second]);
+    expect(subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the 12 most recently used chats, and never drops an open one', async () => {
+    const { app } = setup('idle');
+    const open = app.chat('s1');
+    await open.open();
+    const others = Array.from({ length: 12 }, (_, i) => app.chat(`o${i}`));
+    expect(app.chat('s1')).toBe(open);
+    expect(open.isOpen).toBe(true);
+    expect(app.chat('o11')).toBe(others[11]);
+    expect(app.chat('o0')).not.toBe(others[0]);
   });
 });
 

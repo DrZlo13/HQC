@@ -30,6 +30,31 @@ export async function newProject(app: AppState, onError: (m: string) => void): P
 /** A press this long on a phone row opens its actions (MList2). */
 const LONG_PRESS_MS = 450;
 
+/** The pointer resting this long on a link starts loading what it opens (SPEC §6). */
+const PREFETCH_MS = 60;
+let prefetchTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Handlers for a link to a chat: `load` runs once the mouse has rested on it for
+ *  `PREFETCH_MS`, or at once on a press. One mouse rests on one link: one timer. A touch
+ *  loads nothing: on a phone it may start a scroll. */
+export function prefetchOn(load: () => void) {
+  return {
+    onPointerEnter: (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse') return;
+      clearTimeout(prefetchTimer);
+      prefetchTimer = setTimeout(load, PREFETCH_MS);
+    },
+    onPointerLeave: (e: PointerEvent) => {
+      if (e.pointerType === 'mouse') clearTimeout(prefetchTimer);
+    },
+    onPointerDown: (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse') return;
+      clearTimeout(prefetchTimer);
+      load();
+    },
+  };
+}
+
 /** The rules screen of the session's folder (T48), if it has one. */
 function rulesHref(s: SessionInfo): string | undefined {
   return s.workspace_id && `#/p/${s.project_id}/rules/${s.workspace_id}?session=${encodeURIComponent(s.id)}`;
@@ -336,6 +361,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   where={whereOf(s)}
                   compact={app.look.compactList && !phone}
                   dragging={false}
+                  onPrefetch={() => app.prefetchChat(s.id)}
                   onArchive={() => app.archiveLater(s)}
                   onFavorite={() => toggleFavorite(app, s)}
                   onRename={() => rename(app, s)}
@@ -365,6 +391,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   compact={app.look.compactList && !phone}
                   grip={reorder ? grip(s.id) : undefined}
                   dragging={dragId === s.id}
+                  onPrefetch={() => app.prefetchChat(s.id)}
                   onArchive={() => app.archiveLater(s)}
                   onFavorite={() => toggleFavorite(app, s)}
                   onRename={() => rename(app, s)}
@@ -464,6 +491,7 @@ function SessionRow({
   compact,
   grip,
   dragging,
+  onPrefetch,
   onArchive,
   onFavorite,
   onRename,
@@ -481,6 +509,8 @@ function SessionRow({
   compact?: boolean;
   grip?: GripHandlers;
   dragging: boolean;
+  /** Loads the newest page of the chat before it is opened. */
+  onPrefetch: () => void;
   onArchive: () => void;
   onFavorite: () => void;
   onRename: () => void;
@@ -574,6 +604,7 @@ function SessionRow({
           href={`#/s/${s.id}`}
           title={tip}
           aria-current={current ? 'page' : undefined}
+          {...prefetchOn(onPrefetch)}
           onClick={(e) => {
             // The press opened the sheet: no navigation on release.
             if (fired.current) {

@@ -4,8 +4,8 @@ import { colorHex } from '../theme';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { useSubscription } from './hooks';
 import { IconCheck, IconCross, IconPlus, IconReorder, IconSettings } from './icons';
-import { newProject } from './SessionList';
-import { moveTo } from './sessions';
+import { newProject, prefetchOn } from './SessionList';
+import { moveTo, reopenedSession } from './sessions';
 
 /** A tile and the gap under it: how far a drag moves a project by one place. */
 const TILE_STEP = 54;
@@ -177,6 +177,11 @@ export function ProjectRail({ app }: { app: AppState }) {
               aria-current={on ? 'true' : undefined}
               title={name}
               style={background}
+              {...prefetchOn(() => {
+                // The chat the project opens with.
+                const id = reopenedSession(app, p.id);
+                if (id) app.prefetchChat(id);
+              })}
               onContextMenu={(e) => {
                 e.preventDefault();
                 // From the keyboard (the menu key) there is no pointer: next to the tile.

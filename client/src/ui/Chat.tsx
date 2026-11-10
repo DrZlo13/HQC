@@ -3,7 +3,7 @@ import { ApiError, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize } from '../artifacts';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
-import { ChatSession, type OutgoingFile } from '../session';
+import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelField } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
@@ -37,15 +37,7 @@ export function Chat({
   phone?: boolean;
   focusSeq?: number;
 }) {
-  const chat = useMemo(() => {
-    const c = new ChatSession(app.api, app.socket, sessionId);
-    // A typed `/model` switches the session's model on the hub, which the summary does not
-    // carry: the session object is fetched again.
-    c.onStored = (text) => {
-      if (/^\/model\s+\S/.test(text.trim())) void app.refreshSession(sessionId);
-    };
-    return c;
-  }, [app, sessionId]);
+  const chat = useMemo(() => app.chat(sessionId), [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
   const [requestsOnly, setRequestsOnly] = useState(false);
   const [schedules, setSchedules] = useState(false);
@@ -66,15 +58,16 @@ export function Chat({
       setFiles((cur) => [...cur, ...add]);
     })();
   };
-  // The feed shows once the newest page is in; the older history loads behind it.
-  const [loaded, setLoaded] = useState(false);
+  // The feed shows once the newest page is in, in the first frame for a chat kept in memory or
+  // loaded ahead; the older history loads behind it.
+  const [loaded, setLoaded] = useState(chat.loaded);
   // The feed renders from the block that starts at `from.current` (a `seq`): the last `SHOWN`
   // blocks on open, more as the user scrolls up. Set once, so blocks that come in at either
   // end do not shift what is on screen.
   const from = useRef<number | undefined>(undefined);
   const [, grow] = useState(0);
   useEffect(() => {
-    setLoaded(false);
+    setLoaded(chat.loaded);
     from.current = undefined;
     void chat.open().then(() => setLoaded(true));
     return () => chat.close();

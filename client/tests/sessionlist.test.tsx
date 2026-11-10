@@ -9,9 +9,10 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import type { Api } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
-import type { ListMode, SessionInfo, SessionState } from '../src/proto';
+import { parseEvent, type ListMode, type SessionInfo, type SessionState } from '../src/proto';
 import type { ConnState, HubSocket } from '../src/ws';
 import { App } from '../src/ui/App';
+import { Chat } from '../src/ui/Chat';
 import { ProjectRail } from '../src/ui/ProjectRail';
 import { SessionList } from '../src/ui/SessionList';
 import { activeLabel, arrange, bucketOf, groupSessions, headCounts, matchesQuery, moveTo, projectInitials, subLabel } from '../src/ui/sessions';
@@ -744,6 +745,100 @@ describe('ProjectRail', () => {
     app.sessions.set('net', sess('net', 'Network sync', 'waiting', at(0.2)));
     await mount(<ProjectRail app={app} />);
     expect(marks()).toEqual(['rail-run', 'rail-badge']);
+  });
+});
+
+// SPEC §6: a session row or a project tile loads the newest page of its chat before the click.
+describe('loading a chat ahead', () => {
+  const answer = parseEvent({
+    session_id: 'net',
+    event_id: '0199f3a2-7c10-7000-8000-000000000103',
+    seq: 1,
+    ts: at(0.2),
+    author: { kind: 'agent', id: 'net' },
+    type: 'agent.message',
+    payload: { text: 'Synced.', final: true },
+  });
+  function chatApp() {
+    const api = {
+      ...hubApi(),
+      eventsBefore: vi.fn(async (_id: string, _before?: number, _limit?: number) => ({ events: [answer], invalid: [], maxSeq: 1, minSeq: 1, count: 1 })),
+      readCursor: vi.fn(async () => {}),
+    };
+    const app = makeApp(
+      LIST.map((s) => (s.id === 'net' ? { ...s, unread: 1 } : s)),
+      api,
+    );
+    const subscribe = vi.fn(() => () => {});
+    Object.assign(app.socket, { subscribe });
+    return { app, api, subscribe };
+  }
+  const link = (title: string) => rowOf(title).querySelector<HTMLElement>('a.session-row')!;
+  const wait = (ms: number) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
+  const pointer = (type: string, pointerType = 'mouse') => new PointerEvent(type, { bubbles: type === 'pointerdown', pointerType });
+
+  it('a row the mouse rests on, or pressed, loads the newest page once; its chat then opens without "Loading…"', async () => {
+    const { app, api } = chatApp();
+    await mount(<SessionList app={app} />);
+    // Passing over a row loads nothing.
+    link('Stone textures').dispatchEvent(pointer('pointerenter'));
+    await wait(20);
+    link('Stone textures').dispatchEvent(pointer('pointerleave'));
+    await wait(80);
+    expect(api.eventsBefore).not.toHaveBeenCalled();
+
+    link('Network sync').dispatchEvent(pointer('pointerenter'));
+    await wait(80);
+    expect(api.eventsBefore.mock.calls).toEqual([['net', undefined, 100]]);
+    link('Network sync').dispatchEvent(pointer('pointerdown'));
+    await wait(10);
+    expect(api.eventsBefore).toHaveBeenCalledTimes(1);
+    // A press loads at once.
+    link('Cave scene port').dispatchEvent(pointer('pointerdown'));
+    expect(api.eventsBefore).toHaveBeenLastCalledWith('cave', undefined, 100);
+
+    render(null, root);
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    // No act: the frame before any effect has run.
+    render(<Chat app={app} sessionId="net" />, root);
+    expect(root.textContent).not.toContain('Loading…');
+    expect(root.querySelector('.feed')!.textContent).toContain('Synced.');
+    await wait(100);
+    // Fetched once more behind the open, for the fields changed since (`Timeline.refresh`).
+    expect(api.eventsBefore.mock.calls.map((c) => c[0])).toEqual(['net', 'cave', 'net']);
+  });
+
+  it('loading ahead neither subscribes nor moves the read cursor', async () => {
+    const { app, api, subscribe } = chatApp();
+    await mount(<SessionList app={app} />);
+    link('Network sync').dispatchEvent(pointer('pointerdown'));
+    await wait(80);
+    expect(api.eventsBefore).toHaveBeenCalledTimes(1);
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(api.readCursor).not.toHaveBeenCalled();
+    expect(rowOf('Network sync').querySelector('.badge')!.textContent).toBe('1');
+  });
+
+  it('a touch loads nothing ahead: on a phone it may start a scroll', async () => {
+    const { app, api } = chatApp();
+    await mount(<SessionList app={app} phone />);
+    link('Network sync').dispatchEvent(pointer('pointerenter', 'touch'));
+    link('Network sync').dispatchEvent(pointer('pointerdown', 'touch'));
+    await wait(80);
+    expect(api.eventsBefore).not.toHaveBeenCalled();
+  });
+
+  it('a project tile loads the session the project reopens', async () => {
+    const { app, api } = chatApp();
+    localStorage.setItem('hqc.lastSession', JSON.stringify({ p1: 'net' }));
+    await mount(<ProjectRail app={app} />);
+    const tile = (name: string) => root.querySelector<HTMLElement>(`a.project-row[aria-label="${name}"]`)!;
+    // Nothing remembered for the personal project: nothing to load.
+    tile('Personal').dispatchEvent(pointer('pointerdown'));
+    tile('physics-mp').dispatchEvent(pointer('pointerenter'));
+    await wait(80);
+    expect(api.eventsBefore.mock.calls).toEqual([['net', undefined, 100]]);
   });
 });
 

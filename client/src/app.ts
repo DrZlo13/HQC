@@ -18,12 +18,16 @@ import type {
   Theme,
   Workspace,
 } from './proto';
+import { ChatSession } from './session';
 import { storedTheme, type Look } from './theme';
 import { arrange, bucketOf } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
 
 /** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
 export const ARCHIVE_UNDO_MS = 5000;
+
+/** Chats kept in memory, the most recently used: one of them opens again at once (SPEC §6). */
+const CHATS = 12;
 
 /** Unsent messages by session id, on this device: a convenience, so storage that fails or is
  *  empty only loses them on a reload. */
@@ -105,6 +109,8 @@ export class AppState {
   private pushedWhileRefreshing = new Set<string>();
   /** Counts the user's changes to projects and sessions (`edited`), for `refreshSessions`. */
   private edits = 0;
+  /** By session id, the least recently used first. */
+  private readonly chats = new Map<string, ChatSession>();
 
   constructor(
     readonly api: Api,
@@ -178,6 +184,35 @@ export class AppState {
   private edited(): void {
     this.edits++;
     this.changed();
+  }
+
+  /** The chat of session `id`, kept with what it has loaded for the `CHATS` most recently
+   *  used; past that the least recently used one that is not open is dropped. */
+  chat(id: string): ChatSession {
+    let c = this.chats.get(id);
+    if (c) {
+      this.chats.delete(id);
+    } else {
+      c = new ChatSession(this.api, this.socket, id);
+      // A typed `/model` switches the session's model on the hub, which the summary does not
+      // carry: the session object is fetched again.
+      c.onStored = (text) => {
+        if (/^\/model\s+\S/.test(text.trim())) void this.refreshSession(id);
+      };
+    }
+    this.chats.set(id, c);
+    for (const [old, o] of this.chats) {
+      if (this.chats.size <= CHATS) break;
+      if (!o.isOpen) this.chats.delete(old);
+    }
+    return c;
+  }
+
+  /** Loads the newest page of session `id` before it is opened: no subscription, and the
+   *  read cursor stays where it is. */
+  prefetchChat(id: string): void {
+    // A failed load is tried again when the chat opens.
+    this.chat(id).load().catch(() => {});
   }
 
   async init(): Promise<void> {

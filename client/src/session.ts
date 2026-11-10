@@ -30,7 +30,13 @@ export class ChatSession {
   private unsubscribe: (() => void) | null = null;
   private readonly outgoing = new Map<string, Outgoing>();
   private reportedRead = 0;
-  private closed = false;
+  /** Counts `open` and `close`: what an earlier one started stops at its next step. */
+  private run = 0;
+  private loading: Promise<void> | null = null;
+  /** The newest page of history is in. */
+  loaded = false;
+  /** Between `open` and `close`. */
+  isOpen = false;
 
   /** Called with the text of each message once the hub stored it. */
   onStored?: (text: string) => void;
@@ -41,20 +47,37 @@ export class ChatSession {
     readonly id: string,
   ) {}
 
-  /** Loads the newest page of history and subscribes from it; resolves then, so a long chat
-   *  shows at once. The older pages load after that, newest first (`Timeline.olderFrom`). */
-  async open(): Promise<void> {
-    const t = this.timeline;
-    try {
+  /** Loads the newest page of history, once: a later call waits for the same load, one after
+   *  a failed load tries again. */
+  load(): Promise<void> {
+    this.loading ??= (async () => {
       const page = await this.api.eventsBefore(this.id, undefined, TAIL);
-      if (this.closed) return;
       this.applyPage(page);
-      t.olderFrom = page.count < TAIL ? 0 : (page.minSeq ?? 0);
+      this.timeline.olderFrom = page.count < TAIL ? 0 : (page.minSeq ?? 0);
+      this.loaded = true;
+    })().catch((e) => {
+      this.loading = null;
+      throw e;
+    });
+    return this.loading;
+  }
+
+  /** Loads the newest page of history (unless it is in) and subscribes after what is loaded;
+   *  resolves then, so a long chat shows at once. A chat whose page was in fetches it again
+   *  for the fields changed meanwhile (`Timeline.refresh`). The older pages load after that,
+   *  newest first (`Timeline.olderFrom`). */
+  async open(): Promise<void> {
+    const run = ++this.run;
+    this.isOpen = true;
+    const t = this.timeline;
+    const kept = this.loaded;
+    try {
+      await this.load();
     } catch (e) {
       // History over REST is an optimisation: subscribe replays everything after lastSeq.
       console.warn('history load failed, relying on subscribe', e);
     }
-    if (this.closed) return;
+    if (run !== this.run) return;
     this.unsubscribe = this.socket.subscribe(this.id, {
       afterSeq: () => t.resumeSeq(),
       onEvent: (ev) => t.apply(ev),
@@ -62,15 +85,25 @@ export class ChatSession {
       onInvalid: (raw, err) => t.addInvalid(raw, err),
       onReset: () => t.reset(),
     });
-    void this.loadOlder();
+    if (kept) void this.refresh(run);
+    void this.loadOlder(run);
   }
 
-  private async loadOlder(): Promise<void> {
+  private async refresh(run: number): Promise<void> {
+    try {
+      const page = await this.api.eventsBefore(this.id, undefined, TAIL);
+      if (run === this.run) this.timeline.refresh(page.events);
+    } catch (e) {
+      console.warn('history refresh failed', e);
+    }
+  }
+
+  private async loadOlder(run: number): Promise<void> {
     const t = this.timeline;
     try {
-      while (t.olderFrom > 1 && !this.closed) {
+      while (t.olderFrom > 1) {
         const page = await this.api.eventsBefore(this.id, t.olderFrom, PAGE);
-        if (this.closed) return;
+        if (run !== this.run) return;
         t.olderFrom = page.count < PAGE ? 0 : (page.minSeq ?? 0);
         this.applyPage(page);
       }
@@ -87,10 +120,14 @@ export class ChatSession {
     t.lastSeq = Math.max(t.lastSeq, page.maxSeq);
   }
 
+  /** Unsubscribes and stops loading the older history; what is loaded stays for the next
+   *  `open`, but not a half-written answer: the hub sends it whole on the next subscribe. */
   close(): void {
-    this.closed = true;
+    this.run++;
+    this.isOpen = false;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.timeline.reset();
   }
 
   /** Shows the message at once and reconciles it with the hub echo by `client_op_id`.

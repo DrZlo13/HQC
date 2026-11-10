@@ -1,8 +1,9 @@
 // The session list of a project (T26, T50): three orders — by state ("Needs you",
 // "Running", "Idle"), by recency ("Today", "Yesterday", "Earlier") and the user's own
 // ("Custom"), the choice and the custom order kept on the hub per user and project — a search
-// over title and path, the counters of the header. Pure logic, no DOM.
+// over title and path, the counters of the header, the session a project reopens. No DOM.
 
+import type { AppState } from '../app';
 import type { ListMode, SessionInfo } from '../proto';
 import { daysAgo, formatDay } from './labels';
 
@@ -29,6 +30,31 @@ export function moveTo(order: string[], id: string, to: number): string[] {
   const out = order.filter((x) => x !== id);
   out.splice(j, 0, id);
   return out;
+}
+
+/** The session last open in each project, on this device: a convenience, so storage that
+ *  fails or is empty only means the project opens without one. */
+const LAST_KEY = 'hqc.lastSession';
+function lastSessions(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_KEY) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+export function rememberSession(projectId: string, sessionId: string) {
+  try {
+    localStorage.setItem(LAST_KEY, JSON.stringify({ ...lastSessions(), [projectId]: sessionId }));
+  } catch {
+    // Not kept: the project opens without it.
+  }
+}
+
+/** The session a project opens on a desktop: the one last open in it, while it is still in
+ *  the project and not archived. */
+export function reopenedSession(app: AppState, projectId: string): string | undefined {
+  const last = app.sessions.get(lastSessions()[projectId] ?? '');
+  return last && last.project_id === projectId && !last.archived ? last.id : undefined;
 }
 
 /** Which group of "State" a session is in: it waits for the user (a request or an

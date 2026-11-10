@@ -195,6 +195,35 @@ export class Timeline {
     this.changed();
   }
 
+  /** The hub's copies of events already loaded (the newest page fetched again when a kept
+   *  chat opens): `delivery`, `delivered_at` and `reply_delivered_at` may have changed while
+   *  nothing was subscribed, and the hub tells only subscriptions. Events not loaded,
+   *  `lastSeq` and `olderFrom` stay: the subscription brings what came after `lastSeq`. */
+  refresh(evs: HqcEvent[]): void {
+    let changed = false;
+    for (const ev of evs) {
+      const seen = ev.seq === undefined ? undefined : this.bySeq.get(ev.seq);
+      if (!seen || seen.event_id !== ev.event_id) continue;
+      const replyAt = ev.reply_delivered_at ?? seen.reply_delivered_at;
+      if (
+        seen.delivery === ev.delivery &&
+        seen.delivered_at === ev.delivered_at &&
+        seen.reply_delivered_at === replyAt
+      )
+        continue;
+      this.bySeq.set(ev.seq!, {
+        ...seen,
+        delivery: ev.delivery,
+        delivered_at: ev.delivered_at,
+        reply_delivered_at: replyAt,
+      });
+      changed = true;
+    }
+    if (!changed) return;
+    this.sorted = null;
+    this.changed();
+  }
+
   addInvalid(raw: unknown, error: string): void {
     const seq = (raw as { seq?: unknown })?.seq;
     const s = typeof seq === "number" ? seq : undefined;

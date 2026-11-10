@@ -192,7 +192,7 @@ export function ProjectRail({ app }: { app: AppState }) {
                 {waiting > 99 ? '99+' : waiting}
               </span>
             ) : app.projectRunning(p.id) ? (
-              <span class="rail-run pulse" style={{ background: colorHex(p.color) }} aria-label="working" />
+              <span class="rail-run" style={{ background: colorHex(p.color) }} aria-label="working" />
             ) : unread ? (
               <span class="rail-unread" aria-label="unread" />
             ) : (

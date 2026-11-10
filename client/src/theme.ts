@@ -71,6 +71,7 @@ export const STATUS = {
   dangerFill: '#C8483A', // destructive confirm button
   relay: '#A99BFF', // messages between sessions (bg 8%, border 32%)
   relayText: '#C4BAFF',
+  vscode: '#3B8EEA', // the compact list's dot of a session idle in VS Code
   permissionBg: '#1F1A12',
   permissionBorder: '#5A4520',
 };
@@ -85,6 +86,7 @@ export const STATUS_LIGHT: typeof STATUS = {
   dangerFill: '#C8483A',
   relay: '#6E5BD8',
   relayText: '#5642B8',
+  vscode: '#2470C8',
   permissionBg: '#FFF5E3',
   permissionBorder: '#E3C48A',
 };
@@ -141,13 +143,15 @@ export function statusVars(base: Theme = 'warm'): Record<string, string> {
 
 /** How text reads on this device ("Settings" → "Feed"): the feed across the whole chat column
  *  instead of at most 780 px, the platform's own font instead of Inter, a message's time in
- *  the gap below it instead of a line of its own; and ("Settings" → "Project bar") a row with
- *  each project's full name instead of a tile. */
+ *  the gap below it instead of a line of its own; ("Settings" → "Project bar") a row with each
+ *  project's full name instead of a tile; and ("Settings" → "Session list") a line per session
+ *  with its state in the dot. */
 export interface Look {
   wideFeed: boolean;
   systemFont: boolean;
   railNames: boolean;
   timeInGap: boolean;
+  compactList: boolean;
 }
 
 /** Sets the look as classes on `el` (the document root), read by styles.css. */
@@ -156,6 +160,7 @@ export function applyLook(el: HTMLElement, look: Look): void {
   el.classList.toggle('font-system', look.systemFont);
   el.classList.toggle('rail-names', look.railNames);
   el.classList.toggle('time-in-gap', look.timeInGap);
+  el.classList.toggle('list-compact', look.compactList);
 }
 
 const THEME_KEY = 'hqc.theme';

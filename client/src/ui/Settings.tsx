@@ -176,6 +176,17 @@ export function Settings({ app }: { app: AppState }) {
           Names: a row with each project's icon and full name instead of a tile, on this device
         </label>
 
+        <h2>Session list</h2>
+        <label class="setting-check">
+          <input
+            type="checkbox"
+            name="compact-list"
+            checked={app.look.compactList}
+            onChange={(e) => app.setLook({ compactList: (e.currentTarget as HTMLInputElement).checked })}
+          />
+          Compact (on a computer): a line per session, its state in the dot (the rest in the row's tooltip)
+        </label>
+
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>
         {(push === 'available' || push === 'subscribed') && (

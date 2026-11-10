@@ -244,6 +244,15 @@ describe('SessionList (desktop column)', () => {
     expect(net.querySelector('.session-where')!.textContent).toBe('home-mac · games/phys-mp/net');
     expect(net.querySelector('.dot-wait')).not.toBeNull();
     expect(root.querySelector('.session-when')).toBeNull();
+    expect(net.getAttribute('title')).toBeNull();
+  });
+
+  it('in the compact list a row keeps its state and place in its tooltip (Settings → Session list)', async () => {
+    const app = makeApp();
+    app.look = { ...app.look, compactList: true };
+    await mount(<SessionList app={app} current="net" />);
+    const net = root.querySelector('.session-row.is-current')!;
+    expect(net.getAttribute('title')).toBe('Waiting for reply\nhome-mac · games/phys-mp/net');
   });
 
   it('shows the subagents running in the row, next to the state', async () => {
@@ -721,20 +730,20 @@ describe('ProjectRail', () => {
       [...root.querySelectorAll('.rail-item')].map((i) => i.querySelector('.rail-badge, .rail-run, .rail-unread, .rail-idle')?.className);
     await mount(<ProjectRail app={app} />);
     // Personal works, over its unread; physics-mp: a service and an archived session do not count.
-    expect(marks()).toEqual(['rail-run pulse', 'rail-idle']);
+    expect(marks()).toEqual(['rail-run', 'rail-idle']);
     expect(root.querySelector<HTMLElement>('.rail-run')!.style.background).toBe('#8A93A6');
     await mount(<SessionList app={app} phone />);
     const chips = () =>
       [...root.querySelectorAll('.chips .chip.project-row')].map((c) => c.querySelector('.chip-badge, .chip-run, .chip-unread, .chip-idle')?.className);
-    expect(chips()).toEqual(['chip-run pulse', 'chip-idle']);
+    expect(chips()).toEqual(['chip-run', 'chip-idle']);
     expect(root.querySelector<HTMLElement>('.chip-run')!.style.background).toBe('#8A93A6');
     // Queued input works too; a session waiting for you wins over a working one.
     app.sessions.set('det', { ...app.sessions.get('det')!, state: 'queued' });
     await mount(<ProjectRail app={app} />);
-    expect(marks()).toEqual(['rail-run pulse', 'rail-run pulse']);
+    expect(marks()).toEqual(['rail-run', 'rail-run']);
     app.sessions.set('net', sess('net', 'Network sync', 'waiting', at(0.2)));
     await mount(<ProjectRail app={app} />);
-    expect(marks()).toEqual(['rail-run pulse', 'rail-badge']);
+    expect(marks()).toEqual(['rail-run', 'rail-badge']);
   });
 });
 
@@ -819,10 +828,10 @@ describe('SessionList (phone)', () => {
 
 describe('favorites', () => {
   const favoriteTitles = () => [...root.querySelectorAll('.group-favorites .session-title')].map((t) => t.textContent);
-  const listed = (title: string) =>
-    [...root.querySelectorAll<HTMLElement>('.session-group:not(.group-favorites) .session-item')].find(
-      (r) => r.querySelector('.session-title')!.textContent === title,
-    )!;
+  const rowIn = (sel: string, title: string) =>
+    [...root.querySelectorAll<HTMLElement>(`${sel} .session-item`)].find((r) => r.querySelector('.session-title')!.textContent === title)!;
+  const listed = (title: string) => rowIn('.session-group:not(.group-favorites)', title);
+  const starred = (title: string) => rowIn('.group-favorites', title);
   const menuItems = () => [...root.querySelectorAll('.menu .menu-item')].map((b) => b.textContent);
 
   it("lists the project's favorites above the groups, the newest first; a click opens one", async () => {
@@ -842,8 +851,8 @@ describe('favorites', () => {
     await act(() => app.selectProject('p0'));
     expect(favoriteTitles()).toEqual(['Migration plan']);
     await act(() => app.selectProject('p1'));
-    // The project's own groups still hold it.
-    expect(listed('Cave scene port')).toBeTruthy();
+    // Listed once: the project's own groups no longer hold it.
+    expect(groups().slice(1).flatMap((g) => g[2])).toEqual(['Network sync', 'Stone textures', 'Step determinism']);
     // The search narrows them too; Reorder hides them.
     await type('cave');
     expect(favoriteTitles()).toEqual(['Cave scene port']);
@@ -862,12 +871,14 @@ describe('favorites', () => {
     await click(root.querySelector('.menu .btn-favorite'));
     expect(api.setSessionFavorite).toHaveBeenCalledWith('cave', true);
     expect(favoriteTitles()).toEqual(['Cave scene port']);
+    expect(listed('Cave scene port')).toBeUndefined();
 
-    await click(listed('Cave scene port').querySelector('.btn-row-more'));
+    await click(starred('Cave scene port').querySelector('.btn-row-more'));
     expect(menuItems()[0]).toBe('Remove from favorites');
     await click(root.querySelector('.menu .btn-favorite'));
     expect(api.setSessionFavorite).toHaveBeenLastCalledWith('cave', false);
     expect(root.querySelector('.group-favorites')).toBeNull();
+    expect(listed('Cave scene port')).toBeTruthy();
 
     // Made a favorite on another device: the hub's summary brings it.
     const net = app.sessions.get('net')!;
@@ -900,6 +911,12 @@ describe('favorites', () => {
     expect(root.querySelector('.group-favorites')).toBeNull();
   });
 
+  it('a project whose sessions are all favorites is not "No sessions yet"', async () => {
+    await mount(<SessionList app={makeApp(LIST.map((s) => ({ ...s, favorite_at: at(1) })))} />);
+    expect(groups().map((g) => g[0])).toEqual(['Favorites']);
+    expect(root.querySelector('.empty')).toBeNull();
+  });
+
   it('the phone sheet has it too', async () => {
     const api = hubApi();
     await mount(<SessionList app={makeApp(LIST, api)} phone />);
@@ -911,7 +928,7 @@ describe('favorites', () => {
     expect(root.querySelector('.action-sheet')).toBeNull();
     expect(favoriteTitles()).toEqual(['Network sync']);
     await act(async () => {
-      listed('Network sync').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      starred('Network sync').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
     });
     expect(root.querySelector('.btn-sheet-favorite')!.textContent).toBe('Remove from favorites');
   });

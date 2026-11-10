@@ -48,9 +48,10 @@ function loadLook(): Look {
       systemFont: v.systemFont === true,
       railNames: v.railNames === true,
       timeInGap: v.timeInGap === true,
+      compactList: v.compactList === true,
     };
   } catch {
-    return { wideFeed: false, systemFont: false, railNames: false, timeInGap: false };
+    return { wideFeed: false, systemFont: false, railNames: false, timeInGap: false, compactList: false };
   }
 }
 
@@ -69,7 +70,8 @@ function loadList(): { home: string; projects: Project[]; sessions: SessionInfo[
 export class AppState {
   me: Me | null = null;
   /** The full-width feed, the system font and the time in the gap ("Settings" → "Feed"), the
-   *  project names in the project bar ("Settings" → "Project bar"), on this device. */
+   *  project names in the project bar ("Settings" → "Project bar"), the compact session list
+   *  ("Settings" → "Session list"), on this device. */
   look: Look = loadLook();
   error: string | null = null;
   readonly projects = new Map<string, Project>();

@@ -110,7 +110,8 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     const items = reorder.map((id) => app.sessions.get(id)).filter((s): s is SessionInfo => !!s && !s.archived);
     groups = items.length ? [{ id: 'reorder', label: 'Drag to reorder', plain: true, items }] : [];
   } else {
-    const list = app.sortedSessions().filter((s) => matchesQuery(s, pathOf(s), query));
+    // A favorite is listed once, in the Favorites block; Reorder still holds every session.
+    const list = app.sortedSessions().filter((s) => !s.favorite_at && matchesQuery(s, pathOf(s), query));
     groups = groupSessions(list, mode, now, (pid && app.orders.get(pid)?.session_ids) || []);
   }
   // Nothing before the first list and the socket's first connect: not "No sessions yet · offline".
@@ -333,6 +334,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   phone={phone}
                   when={mode === 'recent' ? formatWhen(s.updated_at, now) : undefined}
                   where={whereOf(s)}
+                  compact={app.look.compactList}
                   dragging={false}
                   onArchive={() => app.archiveLater(s)}
                   onFavorite={() => toggleFavorite(app, s)}
@@ -360,6 +362,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
                   phone={phone}
                   when={mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
                   where={whereOf(s)}
+                  compact={app.look.compactList}
                   grip={reorder ? grip(s.id) : undefined}
                   dragging={dragId === s.id}
                   onArchive={() => app.archiveLater(s)}
@@ -372,8 +375,10 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             </ul>
           </div>
         ))}
-        {app.me && groups.length === 0 && <div class="empty">{query ? 'No sessions match' : 'No sessions yet'}</div>}
-        {phone && groups.length > 0 && (
+        {app.me && groups.length === 0 && !favorites.some((s) => s.project_id === pid) && (
+          <div class="empty">{query ? 'No sessions match' : 'No sessions yet'}</div>
+        )}
+        {phone && (groups.length > 0 || favorites.length > 0) && (
           <p class="list-hint">
             {reorder
               ? 'Drag the handle on the right. Done saves the order and switches to Custom.'
@@ -456,6 +461,7 @@ function SessionRow({
   phone,
   when,
   where,
+  compact,
   grip,
   dragging,
   onArchive,
@@ -471,6 +477,8 @@ function SessionRow({
   phone?: boolean;
   when?: string;
   where: string;
+  /** "Compact" in Settings: one line, the state and the place only in the row's tooltip. */
+  compact?: boolean;
   grip?: GripHandlers;
   dragging: boolean;
   onArchive: () => void;
@@ -485,6 +493,7 @@ function SessionRow({
   const bucket = bucketOf(s);
   const title = s.title || s.slug || s.id.slice(-8);
   const agents = agentsLabel(s.subagents);
+  const tip = compact ? [subLabel(s) + (agents ? ` · ${agents}` : ''), where].filter(Boolean).join('\n') : undefined;
   const handle = grip && (
     <button type="button" class="grip" data-grip={s.id} aria-label={`Drag to reorder «${title}», or use arrow keys`} {...grip}>
       <IconGrip />
@@ -556,11 +565,14 @@ function SessionRow({
     <li class={`session-item ${dragging ? 'is-dragging' : ''} ${confirm ? 'is-confirming' : ''}`} {...phoneHandlers}>
       {!phone && handle}
       {grip ? (
-        <div class={`session-row ${current ? 'is-current' : ''}`}>{body}</div>
+        <div class={`session-row ${current ? 'is-current' : ''}`} title={tip}>
+          {body}
+        </div>
       ) : (
         <a
           class={`session-row ${current ? 'is-current' : ''}`}
           href={`#/s/${s.id}`}
+          title={tip}
           aria-current={current ? 'page' : undefined}
           onClick={(e) => {
             // The press opened the sheet: no navigation on release.
@@ -782,7 +794,7 @@ function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) =>
                 {waiting}
               </span>
             ) : app.projectRunning(p.id) ? (
-              <span class="chip-run pulse" style={{ background: colorHex(p.color) }} aria-label="working" />
+              <span class="chip-run" style={{ background: colorHex(p.color) }} aria-label="working" />
             ) : app.projectUnread(p.id) ? (
               <span class="chip-unread" aria-label="unread" />
             ) : (

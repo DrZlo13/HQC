@@ -237,7 +237,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Feed', 'Project bar', 'Notifications', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Feed', 'Project bar', 'Session list', 'Notifications', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();
@@ -342,6 +342,10 @@ it('sets the full-width feed, the system font and the time in the gap from "Sett
   await until('time in the gap', () => classes().contains('time-in-gap'));
   $<HTMLInputElement>('input[name=time-in-gap]')!.click();
   await until('time on its line again', () => !classes().contains('time-in-gap'));
+  $<HTMLInputElement>('input[name=compact-list]')!.click();
+  await until('compact list', () => classes().contains('list-compact'));
+  $<HTMLInputElement>('input[name=compact-list]')!.click();
+  await until('roomy list again', () => !classes().contains('list-compact'));
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

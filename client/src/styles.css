@@ -588,7 +588,8 @@ select.input {
   background: var(--text);
   border: 2px solid var(--rail);
 }
-/* No one waits, but a session works: the project's color (inline), pulsing. */
+/* No one waits, but a session works: the project's color (inline), pulsing as a running
+   session's dot does (`.dot-run`, also under reduced motion). */
 .rail-run {
   position: absolute;
   top: -3px;
@@ -598,6 +599,7 @@ select.input {
   border-radius: 50%;
   border: 2px solid var(--rail);
   pointer-events: none;
+  animation: pulse 1.4s ease-in-out infinite;
 }
 /* Nothing waits, works or is unread: an empty ring, as an idle session's dot. */
 .rail-idle {
@@ -1021,6 +1023,47 @@ select.input {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* "Compact" session list in Settings, on this device (applyLook), in the desktop column only:
+   a line per session, tighter gaps; the state is the dot (blue while idle in VS Code, faded while
+   its worker is offline), the state line and the worker and path are in the row's tooltip. Scoped
+   to the live list's groups and rows: the archive and the search hits keep their lines. */
+:root.list-compact .sessions:not(.sessions-phone):not(.sessions-archive) > .session-scroll {
+  gap: 8px;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-group {
+  gap: 0;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-group > .group-head {
+  padding: 2px 8px;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item > .session-row {
+  align-items: center;
+  padding: 4px 8px 4px 10px;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .dot {
+  margin-top: 0;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .session-sub,
+:root.list-compact .sessions:not(.sessions-phone) .session-item .session-where {
+  display: none;
+}
+/* Centered by top alone: a transform would make a stacking context and put the "⋯" menu under
+   the rows below. */
+:root.list-compact .sessions:not(.sessions-phone) .session-item .row-acts {
+  top: calc(50% - 12px);
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .row-acts .icon-btn {
+  width: 24px;
+  height: 24px;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .dot-idle.state-locked_vscode {
+  background: var(--vscode);
+  box-shadow: none;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .dot-idle.state-worker_offline {
+  opacity: 0.4;
 }
 
 .list-foot {
@@ -1611,6 +1654,7 @@ select.input {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  animation: pulse 1.4s ease-in-out infinite;
 }
 .chip-idle {
   width: 8px;

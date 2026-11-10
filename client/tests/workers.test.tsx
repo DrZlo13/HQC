@@ -32,7 +32,7 @@ function settingsApp(api: Partial<Api>) {
   return {
     api,
     me: { email: 'me@example.com' },
-    look: { wideFeed: false, systemFont: false, railNames: false, timeInGap: false },
+    look: { wideFeed: false, systemFont: false, railNames: false, timeInGap: false, compactList: false },
     theme: () => 'warm',
     reloadSessions: vi.fn(async () => {}),
   } as unknown as AppState;

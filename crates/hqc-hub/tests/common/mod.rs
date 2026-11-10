@@ -460,6 +460,7 @@ impl TestHub {
             tokio::select! {
                 r = &mut req => return r,
                 Some(f) = recv_json(&mut w.ws, WAIT) => {
+                    w.saw(&f);
                     if f["type"] == "mirror.set"
                         || f["type"] == "workspace.rules"
                         || f["type"] == "workspace.create"
@@ -595,7 +596,13 @@ pub struct FakeWorker {
     pub env_bindings: Option<Vec<hqc_proto::frame::EnvBinding>>,
     /// From `hello.ack`.
     pub worker_id: String,
+    /// The last [`SEEN`] frames from the hub, set-aside ones too, for the message of a
+    /// [`FakeWorker::recv`] that times out.
+    seen: VecDeque<Value>,
 }
+
+/// Frames a timed-out [`FakeWorker::recv`] lists.
+const SEEN: usize = 20;
 
 impl FakeWorker {
     pub async fn connect(hub: &TestHub, token: &str) -> Result<Self, String> {
@@ -620,6 +627,7 @@ impl FakeWorker {
                 roots: vec![],
                 env_bindings: Some(vec![]),
                 worker_id: String::new(),
+                seen: VecDeque::new(),
             }),
             Err(e) => Err(e.to_string()),
         }
@@ -795,9 +803,28 @@ impl FakeWorker {
     }
 
     pub async fn recv(&mut self) -> Value {
-        self.recv_within(WAIT)
-            .await
-            .expect("worker: no frame from hub")
+        match self.recv_within(WAIT).await {
+            Some(f) => f,
+            None => {
+                let seen: Vec<String> = self
+                    .seen
+                    .iter()
+                    .map(|f| f.to_string().chars().take(300).collect())
+                    .collect();
+                panic!(
+                    "worker: no frame from hub; the last {} it got:\n{}",
+                    seen.len(),
+                    seen.join("\n")
+                )
+            }
+        }
+    }
+
+    fn saw(&mut self, f: &Value) {
+        if self.seen.len() == SEEN {
+            self.seen.pop_front();
+        }
+        self.seen.push_back(f.clone());
     }
 
     async fn recv_within(&mut self, d: Duration) -> Option<Value> {
@@ -807,7 +834,9 @@ impl FakeWorker {
                 Some(f) => f,
                 None => {
                     let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    recv_json(&mut self.ws, left).await?
+                    let f = recv_json(&mut self.ws, left).await?;
+                    self.saw(&f);
+                    f
                 }
             };
             if f["type"] == "mirror.set" && !self.see_mirror_set {

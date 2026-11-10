@@ -1533,13 +1533,28 @@ the rest is marked "later"):
   (`api.candidates.json`): a `workspace.list_candidates` frame to the worker (§5.3, §9.1); offline:
   `409 worker_offline`; no reply within 10 s: `504 worker_timeout`; a worker without a mirror
   refused: `400 invalid_path`
-- `GET /api/search?q=&project=&fuzzy=&cursor=&limit=` → `{results[{session_id, address,
-  title, archived, seq?, type?, ts, snippet}], next_cursor?}` (`api.search.json`, since 0.36,
-  T33; §15): `q` 1–200 characters after trimming; `project` an id or slug of the user's
-  project (another user's or an unknown one: `404`); `fuzzy=1` (or `true`) needs at least 3
-  characters; `limit` 1–50, 20 by default; `next_cursor` is opaque, passed back as `cursor`
-  for the next page, absent on the last one. A hit without `seq` is a title hit. Refused
-  queries (empty, too long, too short for fuzzy, a foreign cursor, over the time limit): `400
+- `GET /api/search?q=&project=&session=&kind=&since=&order=&per_session=&fuzzy=&cursor=&limit=`
+  → `{results[{session_id, address, title, archived, seq?, type?, ts, snippet, session_hits}],
+  next_cursor?, also?, counts?}` (`api.search.json`, since 0.36, T33; §15): `q` 1–200
+  characters after trimming; `project` an id or slug of the user's project (another user's or
+  an unknown one: `404`); `fuzzy=1` (or `true`) needs at least 3 characters; `limit` 1–50, 20
+  by default; `next_cursor` is opaque, passed back as `cursor` for the next page, absent on the
+  last one. A hit without `seq` is a title hit. Since 0.111: `session` — a session id: only its
+  hits (another user's or an unknown session has none); `kind` — `message` (`user.message`,
+  `agent.message`, `peer.message`, `system`), `command` (`tool.call`), `output`
+  (`tool.result`) or `answer` (`clarify.response`): only hits of that kind, so no title hit;
+  `since` — an RFC 3339 time: only hits at or after it, a title hit counted at its session's
+  creation; `order` — `best` (the default) or `newest`: newest first instead of best match
+  first; `per_session` — at most that many hits of each session (held to 1–50), its first ones
+  in the order. `session_hits` is the number of hits of the query with the same filters in
+  the hit's session, before `per_session`; `also` — at most 8 words of this page's hits that the query
+  found besides the words typed (their other forms, the similar words of a fuzzy query),
+  lowercased, the word in the most hits first, absent when none; `counts` — on the first page
+  only (no `cursor`) of a query without `session`: `{all, message, command, output, answer}`,
+  each `{hits, sessions}`, the hits of the whole query in its project and since its `since`,
+  whatever its `kind` and `per_session`, and how many sessions they are in; `all` counts title
+  hits too. Refused queries (empty, too long, too short for fuzzy, a foreign cursor, a
+  `session`, `kind`, `since` or `order` that cannot be read, over the time limit): `400
   bad_request` with the reason in `message`. The client opens a hit at
   `#/s/<session>?seq=<seq>` (a title hit at `#/s/<session>`)
 - `GET/POST/DELETE /api/grants`
@@ -3924,7 +3939,7 @@ only `env` and `permissions`, no `ssh_keys`.
 
 Postgres full-text search over what a session said and did, and session titles. Results are
 filtered by grants. One index, two consumers: the search bar in the client and
-`hqc_search_history`.
+`hqc_search_history` (which has no filters but the project).
 
 Since 0.36 (T33; `crates/hqc-hub/src/search.rs`, its measurements in
 `docs/notes/t33-questions.md`), reworked in 0.97 (migration `0037`) so that
@@ -3964,12 +3979,23 @@ it finds commands, their output and word forms and puts the best match first:
   extension, created by migration `0016`). Titles are matched with the same query; a title hit
   has no `seq`.
 - **Order and pages.** Best match first: `ts_rank(search_words, q, 1)` (the query without its
-  `-word`s), then newest; a title is ranked as text of weight A. The cursor is the number of
-  hits already shown, so a page after new events may repeat or skip a hit.
+  `-word`s), then newest; a title is ranked as text of weight A; since 0.111 `order=newest`
+  puts the newest first instead. The cursor is the number of hits already shown, so a page
+  after new events may repeat or skip a hit.
+- **Filters and counts** (since 0.111, for the client's search page; `GET /api/search`, §6). A
+  query may keep to one session, one kind of hit (`message`, `command`, `output`, `answer`, by
+  the event's type; a title hit is of none) and the hits since a time, and hold at most so many
+  hits of each session, its first ones in the order. Each hit carries the number of hits its
+  session has under the same filters; the first page of a query over all sessions carries the
+  hits and sessions of the whole query, all and by kind, whatever kind it asked for; a page
+  carries the words of its hits that the query found besides the words typed (other forms of a
+  word, the similar words of a fuzzy query), those of the most hits first.
 - **Snippet.** About 160 characters on one line around the first query word (or fuzzy
-  alternative) found in the text (ignoring case), else its beginning; `…` marks a cut. The
-  text of a call is the tool and its arguments, of an answer its strings joined with "; ".
-- **Cost.** Each statement of a search (reading the query, then finding the hits) runs with
+  alternative, or since 0.111 such another form) found in the text (ignoring case), else its
+  beginning; `…` marks a cut. The text of a call is the tool and its arguments, of an answer its
+  strings joined with "; ".
+- **Cost.** Each statement of a search (reading the query, then finding the hits, since 0.111
+  counting them and finding the other forms) runs with
   `statement_timeout` 5 s; over it the search is refused. Over our hub's 916k events (720k
   indexed): a rare or ordinary word or phrase 14–80 ms, a word in 11–36k events 0.2–0.6 s,
   "the" (229k events) about 2 s; fuzzy 40–560 ms, with a word in most events 2–3 s (SPEC
@@ -4435,6 +4461,14 @@ tokens` with that cost. Now a `result` with `num_turns: 0` and no tokens, unless
 grown total as `session_cost_usd`: the client's header counts it and the feed draws no line for
 it. The baseline of `cost_usd` stays, so the next turn's line carries what the subagent spent.
 0.109–0.114 are taken by open pull requests.
+
+### 0.110 → 0.111 (search filters, counts and other word forms)
+§6, §15: `GET /api/search` takes `session`, `kind` (message, command, output, answer), `since`,
+`order` (best match or newest) and `per_session`; each hit carries `session_hits`, the hits of
+its session under the same filters, the first page of a query over all sessions `counts`, the
+hits and sessions of the whole query by kind, and a page `also`, the other forms of the query's
+words and the similar words of a fuzzy query that its hits have, which the snippet starts at
+too. `hqc_search_history` keeps only the project filter.
 
 ### 0.108 → 0.110 (a project is archived off the project bar)
 §3 Project, §6: a project can be archived, `archived_at` (hub migration `0038_project_archive`),

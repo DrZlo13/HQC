@@ -608,8 +608,8 @@ select.input {
 }
 /* No one waits, but a session works: a stripe that runs around the tile. The ring is the
    padding left by the mask; the stripe is a conic gradient whose start angle turns. It turns
-   under prefers-reduced-motion too: the motion is the mark, and the owner's system has that
-   setting on. */
+   under prefers-reduced-motion too: the motion is the mark, and a still arc does not read as
+   work. */
 @property --rail-run-turn {
   syntax: '<angle>';
   inherits: false;
@@ -624,7 +624,7 @@ select.input {
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  /* Slow on purpose: the owner wants it to creep. */
+  /* Slow on purpose: a mark that creeps, not one that calls for attention. */
   animation: rail-run 8s linear infinite;
   pointer-events: none;
 }
@@ -2070,7 +2070,7 @@ select.input {
   line-height: 1.45;
 }
 
-/* A phone's list screens (the new screen, stage 6, `phone-d` / `phone-s`): one header row — on
+/* A phone's list screens: one header row — on
    the first screen the view's title with its menu, Requests, the search, the settings and the
    avatar; on a project's screen "‹", its name, the search, the order, "⋯" and "+" — then the
    groups with rows from edge to edge. Spacious: a 52 px header, two-line rows, 42 px project
@@ -3526,7 +3526,7 @@ select.input {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  /* A little brighter than the call groups (the owner). */
+  /* A little brighter than the call groups. */
   color: color-mix(in srgb, var(--muted) 60%, transparent);
   font-style: italic;
   cursor: pointer;

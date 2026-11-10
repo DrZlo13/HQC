@@ -70,9 +70,9 @@ it("the hub's look wins over the copy on this device, which then follows it", as
   expect(classes()).toEqual([]);
   // The next reload starts Spacious.
   expect(new AppState(hubApi(ME), socket).lookName()).toBe('spacious');
-  // Broken storage is Spacious too; the old switches of this device are not read any more.
+  // Broken storage is Spacious too; the column's width on this device stays.
   localStorage.setItem('hqc.lookName', 'dense');
-  localStorage.setItem('hqc.look', '{"wideFeed":true,"oneColumn":true,"railNames":true,"compactList":true,"listWidth":300}');
+  localStorage.setItem('hqc.look', '{"listWidth":300}');
   const again = new AppState(hubApi(ME), socket);
   expect(again.lookName()).toBe('spacious');
   expect(again.device).toEqual({ listWidth: 300 });

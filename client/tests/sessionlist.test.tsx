@@ -3203,7 +3203,7 @@ describe('a new session', () => {
   });
 });
 
-// The new screen, stage 5: a window 900–1079 px wide has no session column in the grid;
+// A window 900–1079 px wide has no session column in the grid;
 // "Sessions" at the left of the chat's header (or ⌘\, Ctrl+\ off a Mac) slides the same column
 // out over the chat, and it goes away by itself.
 describe('a window 900–1079 px wide', () => {
@@ -3478,7 +3478,7 @@ describe('a window 900–1079 px wide', () => {
   });
 });
 
-// The new screen, stage 6: a phone (< 900 px). `#/` lists the projects — Needs you, Running,
+// A phone (< 900 px). `#/` lists the projects — Needs you, Running,
 // Favorites, All projects — or, from the title's menu, every project's sessions by state;
 // `#/p/<id>` is one project's sessions under one header row. The look is the account's.
 describe('a phone (< 900 px)', () => {

@@ -167,9 +167,9 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
         </div>
         <p class="muted">
           Compact: the feed across the whole chat column, your messages as plates on the left, the
-          system font, a line per session on a computer and each project's full name on the project
-          bar. Spacious: the feed at most 780 px wide, your messages as bubbles on the right, Inter, two
-          lines per session and a tile per project. The same on every device.
+          system font, a line per session and each project's full name on the project bar. Spacious:
+          the feed at most 780 px wide, your messages as bubbles on the right, Inter, two lines per
+          session and a tile per project. The same on every device.
         </p>
         {lookError && <div class="error-text">{lookError}</div>}
 

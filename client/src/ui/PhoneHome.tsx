@@ -1,4 +1,4 @@
-// A phone's first screen, `#/` (the new screen, stage 6): the projects — those with a session
+// A phone's first screen, `#/`: the projects — those with a session
 // that waits for the user, those with one at work, the favorites, then every project in the
 // bar's order — or, picked from the title's menu, every project's live sessions by state, each
 // with its project's tile. One header row: the title with that menu, Requests, the search, the

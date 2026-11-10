@@ -128,7 +128,7 @@ export function themeVars(projectColor: string, base: Theme = 'warm'): Record<st
     '--accent-soft': mix(c, B.bg, 0.2), // project tile, soft chips
     '--accent-line': mix(c, B.bg, 0.5), // hover borders
     // User message bubble: the base's surface (white on a light theme's gray background) in
-    // every project, not the project's tint ("а то глаз путается", "белыми, фон-то серый").
+    // every project, not the project's tint, so the tint does not compete with the text.
     '--bubble': B.surface,
     '--mark-bg': mix(c, B.rail, 0.42), // current project tile in the rail, with an accent pill
     '--shade': B.shade, // overlays and shadows

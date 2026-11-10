@@ -64,20 +64,23 @@ only push.
   - `App.tsx` — layout: on desktop the project bar (`ProjectRail`), the sidebar
     (`SessionList`) and the screen; on a phone (narrower than 900px, `useIsPhone`) one screen at a time;
     widths (T49, narrowing as in T27): the bar is 72px (in the Compact look,
-    `:root.rail-names`, as wide as the longest name, 200–320px), the sidebar `clamp(280px, 25vw, 310px)`, the
+    `:root.rail-names`, as wide as the longest name, 200–320px), the sidebar 280–310px by default
+    and dragged by its edge between 240 and 560px (a 900–1079px window slides it over the chat), the
     main column `minmax(0, 1fr)` with no minimum, its feed and input at most 780px; nothing may set a width, a
     minimum width or a flex basis of 300px or more (`tests/layout.test.ts`); long code
     (`.md-code pre`) and wide tables (`.md-table`) scroll inside themselves, everything else
     wraps;
   - `ProjectRail.tsx` — project tiles with their icon on their color, the current one with the
-    pill and `--mark-bg`, its state as a session row's dot: the "needs you" badge, a pulsing
-    dot of its color while a session runs, the unread dot or an empty ring; in the Compact look, a
-    row per project with its icon and full name;
-  - `SessionList.tsx` + `sessions.ts` — the sidebar: the header (the project's tile, name, counters, the gear to
-    the project settings, "New"), "State"/"Recent" modes (the choice is in
-    `localStorage`, key `hqc.sessionOrder`), search by title and path, rows with `worker · path`
-    (without `~/work/`), workers with the number of active sessions (a click opens the service session), the new session form; on a phone
-    projects as chips with their icons and a "New" button at the bottom;
+    pill and `--mark-bg`, a project's mark: the "needs you" count, else a stripe running around the
+    icon while a session works, else the unread dot; a star on a favorite; the project search
+    (⌘K / Ctrl+K), the order menu (Custom, Name, Recent), the project's menu and archived
+    projects; in the Compact look, a row per project with its icon and full name;
+  - `SessionList.tsx` + `sessions.ts` — the session column: a head of one row (name, search, the
+    order menu, "⋯", "+"), the project's favorites pinned over the list, the groups (Needs you,
+    Running, idle by age), one menu per row on a right click, the archive button past the column's
+    edge and the card in place of a tooltip, the workers line at the bottom; `PhoneHome.tsx` — a
+    phone's first screen, the projects; `NewSession.tsx` — a new session as a chat window with
+    its chips; `ContextMenu.tsx` — the client's menus;
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the
     project's workspaces (add from the worker's folder tree, import from Claude Code, "VS Code
     sessions", make default, remove), rename and delete; `Appearance.tsx` — the project's tile
@@ -86,7 +89,8 @@ only push.
   - `Chat.tsx` — the composer completes `/` from the session's `commands` (T27: arrows, Tab or
     Enter, Esc, a tap);
   - `Chat.tsx` — the header (state pill, worker, path, model and cost from `usage`,
-    "Stop", the "More" menu), the feed, VS Code takeover banners in place of the input field, the input field; on a
+    "Stop", the "More" menu), the feed, a bar in place of the input field while VS Code holds the
+    session, the live subagents over the input (`LiveSubagents.tsx`), the input field; on a
     phone an open request is a bottom sheet in place of the input field;
   - `feed.ts` — pure feed logic: tool call groups captioned by the intermediate
     reply, `usage` under the final answer, `tool.call` inside the card of its request;

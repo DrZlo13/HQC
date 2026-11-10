@@ -204,6 +204,9 @@ export function Chat({
       keep.current = undefined;
     }
     if (el && stick.current) el.scrollTop = el.scrollHeight;
+    // A feed shorter than its window cannot be scrolled to the top, so the scroll below never
+    // asks for the older blocks: render them until it fills the window or none is left.
+    if (el && start > 0 && el.scrollHeight <= el.clientHeight) showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
   });
   // Images and code blocks grow after the render: stay at the bottom while stuck to it.
   const feed = useRef<HTMLDivElement>(null);
@@ -372,7 +375,12 @@ export function Chat({
             type="button"
             class={`btn btn-small btn-outline btn-filter ${requestsOnly ? 'is-on' : ''}`}
             aria-pressed={requestsOnly}
-            onClick={() => setRequestsOnly(!requestsOnly)}
+            onClick={() => {
+              // The other view has blocks of its own: its window starts again at its newest ones.
+              from.current = undefined;
+              stick.current = true;
+              setRequestsOnly(!requestsOnly);
+            }}
           >
             Requests only
           </button>

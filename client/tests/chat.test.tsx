@@ -712,7 +712,19 @@ describe('history', () => {
     ev('event.agent.message', i + 1, (e) => (e.payload.text = `answer ${i + 1}`)),
   );
 
+  // happy-dom lays nothing out: every element is 0 px high. The feed below is taller than its window.
+  const tall = () => {
+    const h = (px: number) =>
+      function (this: HTMLElement) {
+        return this.classList.contains('timeline') ? px : 0;
+      };
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(h(5000));
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(h(600));
+  };
+  afterEach(() => vi.restoreAllMocks());
+
   it('shows the newest page at once and loads the older history behind it', async () => {
+    tall();
     const { api, app } = setup('idle', { history: long });
     let older!: () => void;
     const tail = api.eventsBefore.getMockImplementation()!;
@@ -741,6 +753,47 @@ describe('history', () => {
     });
     expect(blocks().length).toBe(120);
     expect(blocks()[0].textContent).toContain('answer 331');
+  });
+
+  // Every block 10 px high, the window 1000 px: 60 blocks do not fill it, 120 do.
+  const blockHigh = () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? this.querySelectorAll('.feed-block').length * 10 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 1000 : 0;
+    });
+  };
+  const settle = () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+  const blocks = () => [...root.querySelectorAll<HTMLElement>('.feed-block')];
+
+  it('a feed shorter than its window renders the older history until the window is full', async () => {
+    blockHigh();
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    await settle();
+    expect(blocks().length).toBe(120);
+    expect(blocks()[0].textContent).toContain('answer 331');
+  });
+
+  it('"Requests only" there and back renders the last blocks of the log, not all of it', async () => {
+    blockHigh();
+    const log = [ev('event.approval.request', 1, (e) => delete e.payload.expires_at), ...long.map((e) => ({ ...e, seq: e.seq! + 1 }))];
+    const { app } = setup('idle', { history: log });
+    app.sessions.get('s1')!.system = true;
+    await mount(app);
+    await settle();
+    expect(blocks().length).toBe(120);
+    await act(async () => button('Requests only')!.click());
+    await settle();
+    expect(root.querySelector('.perm')).not.toBeNull();
+    await act(async () => button('Requests only')!.click());
+    await settle();
+    expect(blocks().length).toBe(120);
+    expect(blocks().at(-1)!.textContent).toContain('answer 450');
   });
 });
 

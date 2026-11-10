@@ -210,6 +210,17 @@ describe('a hit opens the session at its event', () => {
     );
   }
 
+  // happy-dom lays nothing out: every element is 0 px high. The feed is taller than its window.
+  beforeEach(() => {
+    const h = (px: number) =>
+      function (this: HTMLElement) {
+        return this.classList.contains('timeline') ? px : 0;
+      };
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(h(5000));
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(h(600));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
   async function open(focusSeq: number) {
     const { app } = makeApp(async () => ({ results: [] }), history);
     const scrolled: string[] = [];

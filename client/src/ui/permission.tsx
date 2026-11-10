@@ -238,9 +238,10 @@ function FolderForm({
   );
 }
 
-/** An open menu (the session column's, the project bar's, the chat's "More") or the workers'
- *  list above the column's bottom line. */
-const OPEN_POPUP = '[role="menu"], .wline-pop';
+/** An open menu (the session column's, the project bar's, the chat's "More"), the workers'
+ *  list above the column's bottom line, or the session column slid out over the chat (a
+ *  narrow window: its Esc puts the column away). */
+const OPEN_POPUP = '[role="menu"], .wline-pop, .sidebar-slide';
 
 function isTyping(el: Element | null): boolean {
   if (!el) return false;

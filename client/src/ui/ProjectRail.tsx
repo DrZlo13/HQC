@@ -29,7 +29,7 @@ export function matchName(name: string, query: string): [string, string, string]
 }
 
 /** A Mac (or an iPad with a keyboard): ⌘ is the shortcuts' key there, Ctrl elsewhere. */
-function onMac(): boolean {
+export function onMac(): boolean {
   return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 }
 
@@ -325,7 +325,6 @@ export function ProjectRail({ app }: { app: AppState }) {
       )}
     </>
   );
-  const undone = app.projectUndo ? app.archivedProjects.get(app.projectUndo) : undefined;
   const inPlace = names && searching;
   return (
     <nav
@@ -464,21 +463,31 @@ export function ProjectRail({ app }: { app: AppState }) {
           {hint}
         </div>
       )}
-      {undone && (
-        <div class="toast toast-archive toast-project" role="status">
-          <IconArchive />
-          <span class="toast-text">Archived «{projectName(undone)}» · find it with the search on the bar</span>
-          <button
-            type="button"
-            class="btn-link btn-undo"
-            onClick={() =>
-              void app.restoreProject(undone.id).catch((e: Error) => app.setListNotice(`Not restored «${projectName(undone)}»: ${e.message}`))
-            }
-          >
-            Undo
-          </button>
-        </div>
-      )}
+      <ProjectUndo app={app} hint=" · find it with the search on the bar" />
     </nav>
+  );
+}
+
+/** "Archived «…» · Undo" for a project archived here a moment ago: at the bottom of the bar on
+ *  a desktop, of the projects screen on a phone (which has no bar, so no `hint`). */
+export function ProjectUndo({ app, hint = '' }: { app: AppState; hint?: string }) {
+  const undone = app.projectUndo ? app.archivedProjects.get(app.projectUndo) : undefined;
+  if (!undone) return null;
+  return (
+    <div class="toast toast-archive toast-project" role="status">
+      <IconArchive />
+      <span class="toast-text">
+        Archived «{projectName(undone)}»{hint}
+      </span>
+      <button
+        type="button"
+        class="btn-link btn-undo"
+        onClick={() =>
+          void app.restoreProject(undone.id).catch((e: Error) => app.setListNotice(`Not restored «${projectName(undone)}»: ${e.message}`))
+        }
+      >
+        Undo
+      </button>
+    </div>
   );
 }

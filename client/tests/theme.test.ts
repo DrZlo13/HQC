@@ -27,7 +27,10 @@ describe('theme tokens', () => {
     expect(PROJECT_COLORS.map((c) => [c.label, c.hex])).toEqual(Object.entries(mockup.PROJECT_COLORS));
     for (const base of Object.keys(mockup.BASES) as Theme[]) {
       for (const c of PROJECT_COLORS) {
-        expect(themeVars(c.hex, base), `${base} ${c.id}`).toMatchObject(mockup.themeVars(c.hex, base));
+        // All but the user's bubble: the base's surface in every project, not the mockup's tint.
+        const { '--bubble': _bubble, ...want } = mockup.themeVars(c.hex, base);
+        expect(themeVars(c.hex, base), `${base} ${c.id}`).toMatchObject(want);
+        expect(themeVars(c.hex, base)['--bubble']).toBe(BASES[base].surface);
       }
     }
     expect(STATUS).toMatchObject(mockup.STATUS);
@@ -44,8 +47,9 @@ describe('theme tokens', () => {
     const teal = themeVars(colorHex('teal'), 'warm');
     const plum = themeVars(colorHex('plum'), 'warm');
     const graphite = themeVars(colorHex('teal'), 'graphite');
-    for (const k of ['--side', '--rail', '--row-on', '--accent', '--bubble', '--mark-bg']) expect(teal[k]).not.toBe(plum[k]);
-    for (const k of ['--bg', '--surface', '--text', '--muted', '--side-plain']) expect(teal[k]).toBe(plum[k]);
+    for (const k of ['--side', '--rail', '--row-on', '--accent', '--mark-bg']) expect(teal[k]).not.toBe(plum[k]);
+    // The user's messages are gray in every project.
+    for (const k of ['--bg', '--surface', '--text', '--muted', '--side-plain', '--bubble']) expect(teal[k]).toBe(plum[k]);
     expect(graphite['--bg']).toBe('#1A1C1F');
     expect(teal['--mark-bg']).toBe(mix('#3FB8A8', BASES.warm.rail, 0.42));
   });

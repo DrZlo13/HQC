@@ -12,7 +12,7 @@ import type { OutgoingFile } from '../session';
 import { Timeline, type Item } from '../timeline';
 import { MODEL_ALIASES } from './agentSettings';
 import { ChatItems, type ChatActions } from './cards';
-import { Composer, toOutgoing } from './Chat';
+import { Composer, SessionsButton, toOutgoing, type SessionsToggle } from './Chat';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
 import { IconBack, IconChevronUp, IconFolder, IconModel, IconPlus, IconShield, IconWorkspace } from './icons';
@@ -40,8 +40,19 @@ export function newSessionWhere(app: AppState, d: NewSessionDraft): { worker?: s
  *  Once the chat's first page is in, the address becomes the session's and its chat replaces
  *  this window: the message in its feed, the text and files not sent in its input, the caret
  *  there. A create the hub refuses keeps the draft, the text back in the input and the files
- *  with it. Files dropped on the window are attached, as on a chat. */
-export function NewSessionChat({ app, projectId, phone = false }: { app: AppState; projectId: string; phone?: boolean }) {
+ *  with it. Files dropped on the window are attached, as on a chat. `sessions`: a window
+ *  900–1079 px wide, "Sessions" at the left of the header. */
+export function NewSessionChat({
+  app,
+  projectId,
+  phone = false,
+  sessions,
+}: {
+  app: AppState;
+  projectId: string;
+  phone?: boolean;
+  sessions?: SessionsToggle;
+}) {
   useSubscription((fn) => app.onChange(fn), [app]);
   // The draft lives while its window does: one at a time, gone when the window is left.
   useLayoutEffect(() => {
@@ -167,6 +178,7 @@ export function NewSessionChat({ app, projectId, phone = false }: { app: AppStat
             <IconBack />
           </a>
         )}
+        {sessions && <SessionsButton sessions={sessions} />}
         <div class="chat-head-main">
           <h1 class="chat-title">New session</h1>
           <div class="chat-meta">

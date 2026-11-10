@@ -316,3 +316,11 @@ export const IconModel = ({ size = 14 }: { size?: number }) => (
     <path d="M10 6.5v3.5l2.5 1.5" />
   </Svg>
 );
+
+/** A window with its left panel: "Sessions" of a chat's header slides the session column out. */
+export const IconPanel = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <rect x="3" y="4" width="14" height="12" rx="2" />
+    <path d="M8 4v12" />
+  </Svg>
+);

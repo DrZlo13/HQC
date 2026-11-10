@@ -2,16 +2,15 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import type { ListMode, Project, SessionInfo } from '../proto';
 import { useSubscription } from './hooks';
-import { colorHex } from '../theme';
-import { ProjectGlyph, projectName } from './Appearance';
+import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { ArchiveList } from './Archive';
 import { ContextMenu, fitInView, type MenuEntry } from './ContextMenu';
 import {
   IconArchive,
+  IconBack,
   IconChevronDown,
   IconChevronUp,
   IconCode,
-  IconGear,
   IconGrip,
   IconMore,
   IconMove,
@@ -28,7 +27,7 @@ import {
   IconStarOff,
   IconTrash,
 } from './icons';
-import { agentsLabel, formatAge, formatWhen, homePath, shortPath } from './labels';
+import { agentsLabel, formatAge, formatWhen, homePath } from './labels';
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
@@ -124,13 +123,13 @@ function remove(app: AppState, s: SessionInfo, current?: string): void {
 }
 
 /** The sessions of the current project (SPEC §1: projects, in projects sessions), T26: a
- *  column next to the project rail on a desktop, the whole first screen on a phone, with
- *  the projects as chips above. T50: the delayed archive with Undo, State / Recent / Custom
+ *  column next to the project rail on a desktop, a phone's project screen (`#/p/<id>`; its
+ *  first screen is `PhoneHome`). T50: the delayed archive with Undo, State / Recent / Custom
  *  and Reorder, archive mode. A row's actions are its menu (a right click; a long press on a
- *  phone); on a desktop the header is one row, the favorites are pinned over the list, the
- *  row under the mouse has a round archive button past the column's edge and its card shows
- *  where it runs, the workers are one line at the bottom and the column's right edge sets its
- *  width. */
+ *  phone); the header is one row (on a phone after "‹" back to the projects) and the favorites
+ *  are pinned over the list; on a desktop the row under the mouse has a round archive button
+ *  past the column's edge and its card shows where it runs, the workers are one line at the
+ *  bottom and the column's right edge sets its width. */
 export function SessionList({
   app,
   current,
@@ -156,7 +155,6 @@ export function SessionList({
 function LiveList({ app, current, phone, requests }: { app: AppState; current?: string; phone?: boolean; requests?: boolean }) {
   // The session whose "Move to project…" form is open.
   const [moving, setMoving] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   // Reorder mode: the order being arranged; Done stores it, Cancel drops it.
   const [reorder, setReorder] = useState<string[] | null>(null);
   // A row's menu (a right click; a long press on a phone): the session, where it was opened,
@@ -189,8 +187,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     },
     [],
   );
-  const pathOf = (s: SessionInfo) => shortPath(app.sessionPath(s) ?? '');
-  const whereOf = (s: SessionInfo) => [app.workerName(s.worker_id), pathOf(s)].filter(Boolean).join(' · ');
   const now = Date.now();
   // The project's favorites above its groups.
   const favorites = reorder ? [] : app.favoriteSessions(pid);
@@ -330,7 +326,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     },
   });
 
-  const order = reorder ? (
+  const order = reorder && (
     <div class="reorder-bar" role="group" aria-label="Reorder">
       <span class="reorder-icon">
         <IconReorder />
@@ -341,33 +337,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       </button>
       <button type="button" class="btn btn-small btn-primary btn-reorder-done" onClick={doneReorder}>
         Done
-      </button>
-    </div>
-  ) : (
-    <div class="order-row">
-      <div class="seg-group seg-3" role="group" aria-label="Session order">
-        {LIST_MODES.map((m) => (
-          <button
-            type="button"
-            key={m.id}
-            class={`seg ${mode === m.id ? 'is-on' : ''}`}
-            aria-pressed={mode === m.id}
-            disabled={!pid}
-            onClick={() => pid && mode !== m.id && void app.setListMode(pid, m.id)}
-          >
-            {m.label}
-          </button>
-        ))}
-      </div>
-      <button
-        type="button"
-        class="icon-btn icon-btn-round btn-reorder"
-        aria-label="Reorder sessions"
-        title="Reorder"
-        disabled={!pid || app.sortedSessions().length < 2}
-        onClick={startReorder}
-      >
-        <IconReorder />
       </button>
     </div>
   );
@@ -390,8 +359,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       phone={phone}
       // A desktop row has no time: its group says how old it is, its card says exactly.
       when={phone && mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
-      where={phone ? whereOf(s) : ''}
-      compact={app.lookName() === 'compact' && !phone}
+      compact={app.lookName() === 'compact'}
       grip={reorder ? grip(s.id) : undefined}
       dragging={dragId === s.id}
       menuOpen={menu?.id === s.id}
@@ -400,17 +368,15 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       onMenu={(x, y) => openMenu(s.id, x, y)}
     />
   );
-  // Pinned over the scrolling list on a desktop; on a phone the first group of the list.
+  // Pinned over the scrolling list.
   const favoriteGroup = favorites.length > 0 && (
-    <div class={`session-group group-favorites ${phone ? '' : 'fav-pinned'}`}>
+    <div class="session-group group-favorites fav-pinned">
       <div class="group-head">
         <span class="group-label">Favorites</span>
         <span class="group-count">{favorites.length}</span>
-        {!phone && (
-          <span class="group-pin" aria-hidden="true">
-            <IconPin />
-          </span>
-        )}
+        <span class="group-pin" aria-hidden="true">
+          <IconPin />
+        </span>
       </div>
       <ul class="session-list">{favorites.map(row)}</ul>
     </div>
@@ -426,56 +392,36 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
 
   return (
     <section class={`sessions ${phone ? 'sessions-phone' : ''} ${reorder ? 'is-reordering' : ''}`}>
-      {phone ? (
-        <header class="m-head">
-          <div class="m-head-row">
-            <h1>Sessions</h1>
-            <RequestsLink app={app} phone />
-            <a class="icon-btn icon-btn-round" href="#/search" aria-label="Search sessions and messages">
-              <IconSearch size={20} />
-            </a>
-            {project && (
-              <a class="icon-btn icon-btn-round btn-project-settings" href={`#/p/${project.id}/settings`} aria-label="Project settings">
-                <IconGear size={20} />
-              </a>
-            )}
-            <a class="icon-btn icon-btn-round" href="#/settings" aria-label="Account and settings">
-              <span class="avatar">{(app.me?.email ?? '?').slice(0, 1).toUpperCase()}</span>
-            </a>
-          </div>
-          {(app.error || conn) && <div class="m-head-state">{app.error ? 'Hub unavailable' : 'offline'}</div>}
-          <ProjectChips app={app} onError={setError} />
-          {order}
-        </header>
-      ) : (
-        <>
-          {/* One row: the project's name, the search (its own page), the order, the project's
-              menu and a new session. */}
-          <header class="side-head">
-            <h2 class="project-title" title={project ? projectName(project) : undefined}>
-              {project ? projectName(project) : 'HQC'}
-            </h2>
-            <a class="icon-btn btn-search" href="#/search" aria-label="Search sessions and messages" title="Search">
-              <IconSearch />
-            </a>
-            <ModeMenu app={app} pid={pid} mode={mode} disabled={!!reorder} onReorder={startReorder} />
-            {project && <ProjectMenu app={app} project={project} />}
-            <button
-              type="button"
-              class="btn btn-primary btn-new-session"
-              aria-label="New session"
-              title="New session"
-              disabled={!pid || !app.me}
-              onClick={newSession}
-            >
-              <IconPlus size={14} />
-            </button>
-          </header>
-          {reorder && <div class="side-tools">{order}</div>}
-        </>
-      )}
+      {/* One row: on a phone "‹" back to the projects, then the project's name, the search (its
+          own page), the order, the project's menu and a new session. */}
+      <header class="side-head">
+        {phone && (
+          <a class="icon-btn btn-back" href="#/" aria-label="Back to projects">
+            <IconBack size={20} />
+          </a>
+        )}
+        <h2 class="project-title" title={project ? projectName(project) : undefined}>
+          {project ? projectName(project) : 'HQC'}
+        </h2>
+        <a class="icon-btn btn-search" href="#/search" aria-label="Search sessions and messages" title="Search">
+          <IconSearch />
+        </a>
+        <ModeMenu app={app} pid={pid} mode={mode} disabled={!!reorder} phone={phone} onReorder={startReorder} />
+        {project && <ProjectMenu app={app} project={project} phone={phone} />}
+        <button
+          type="button"
+          class="btn btn-primary btn-new-session"
+          aria-label="New session"
+          title="New session"
+          disabled={!pid || !app.me}
+          onClick={newSession}
+        >
+          <IconPlus size={14} />
+        </button>
+      </header>
+      {phone && (app.error || conn) && <div class="m-head-state">{app.error ? 'Hub unavailable' : 'offline'}</div>}
+      {reorder && <div class="side-tools">{order}</div>}
       {app.error && <div class="notice">Hub unavailable: {app.error}</div>}
-      {error && <div class="notice">{error}</div>}
       {app.listNotice && (
         <div class="notice" role="alert" onClick={() => app.setListNotice(null)}>
           {app.listNotice}
@@ -486,7 +432,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           <MoveSession key={moveFor.id} app={app} session={moveFor} onDone={() => setMoving(null)} />
         </div>
       )}
-      {!phone && favoriteGroup}
+      {favoriteGroup}
       <div
         class="session-scroll"
         ref={scroll}
@@ -499,7 +445,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             : undefined
         }
       >
-        {phone && favoriteGroup}
         {draft && !reorder && <DraftRow app={app} />}
         {groups.map((g) => (
           <div key={g.id} class={`session-group group-${g.id}`}>
@@ -530,23 +475,10 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             </button>
           </div>
         )}
-        {phone && <WorkerList app={app} current={current} />}
       </div>
       {!phone && <RequestsLink app={app} current={requests} />}
       {!phone && <WorkersLine app={app} current={current} />}
       {phone && toast}
-      {phone && !reorder && (
-        <button
-          type="button"
-          class="fab btn-new-session"
-          aria-label="New session"
-          disabled={!pid || !app.me}
-          onClick={newSession}
-        >
-          <IconPlus size={20} />
-          New
-        </button>
-      )}
       {menu && menuFor && (
         <ContextMenu
           x={menu.x}
@@ -643,12 +575,15 @@ function ModeMenu({
   pid,
   mode,
   disabled,
+  phone,
   onReorder,
 }: {
   app: AppState;
   pid?: string;
   mode: ListMode;
   disabled: boolean;
+  /** A tap beside the menu only closes it. */
+  phone?: boolean;
   onReorder: () => void;
 }) {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
@@ -687,7 +622,9 @@ function ModeMenu({
         {label}
         <IconChevronDown />
       </button>
-      {at && <ContextMenu x={at.x} y={at.y} label="Session order" items={items} anchor={btn.current} onClose={() => setAt(null)} />}
+      {at && (
+        <ContextMenu x={at.x} y={at.y} label="Session order" items={items} anchor={btn.current} backdrop={phone} onClose={() => setAt(null)} />
+      )}
     </>
   );
 }
@@ -695,8 +632,8 @@ function ModeMenu({
 /** A project's menu, the same on the project bar (a right click) and in the column's header
  *  ("⋯"): Open in new tab, favorites; Project settings…; Archive project (Restore for an
  *  archived one) and Delete project…, neither for the personal project (SPEC §3). Archiving the
- *  open project opens the personal one. */
-export function projectMenu(app: AppState, project: Project): MenuEntry[] {
+ *  open project opens the personal one; on a phone, the projects screen with its Undo. */
+export function projectMenu(app: AppState, project: Project, phone?: boolean): MenuEntry[] {
   const name = projectName(project);
   const items: MenuEntry[] = [
     { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/p/${project.id}`, newTab: true },
@@ -727,7 +664,8 @@ export function projectMenu(app: AppState, project: Project): MenuEntry[] {
       onSelect: () => {
         const open = app.currentProjectId === project.id;
         app.archiveProject(project.id);
-        if (open && app.me) location.hash = `#/p/${app.me.personal_project_id}`;
+        if (phone) location.hash = '#/';
+        else if (open && app.me) location.hash = `#/p/${app.me.personal_project_id}`;
       },
     });
   }
@@ -743,11 +681,11 @@ export function projectMenu(app: AppState, project: Project): MenuEntry[] {
   return items;
 }
 
-/** "⋯" of the column's header: the project's menu. */
-function ProjectMenu({ app, project }: { app: AppState; project: Project }) {
+/** "⋯" of the column's header: the project's menu; on a phone a tap beside it only closes it. */
+function ProjectMenu({ app, project, phone }: { app: AppState; project: Project; phone?: boolean }) {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const btn = useRef<HTMLButtonElement>(null);
-  const items = projectMenu(app, project);
+  const items = projectMenu(app, project, phone);
   return (
     <>
       <button
@@ -762,7 +700,17 @@ function ProjectMenu({ app, project }: { app: AppState; project: Project }) {
       >
         <IconMore />
       </button>
-      {at && <ContextMenu x={at.x} y={at.y} label={`Project «${projectName(project)}»`} items={items} anchor={btn.current} onClose={() => setAt(null)} />}
+      {at && (
+        <ContextMenu
+          x={at.x}
+          y={at.y}
+          label={`Project «${projectName(project)}»`}
+          items={items}
+          anchor={btn.current}
+          backdrop={phone}
+          onClose={() => setAt(null)}
+        />
+      )}
     </>
   );
 }
@@ -796,17 +744,35 @@ function StateMark({ s }: { s: SessionInfo }) {
   return <span class={`dot dot-${bucket} state-${s.state}`} aria-hidden="true" />;
 }
 
+/** A project's tile on a phone: its icon on its color at ~24 %; `named` where nothing else on
+ *  the row names the project for a screen reader. */
+export function PhoneTile({ p, named }: { p: Project; named?: boolean }) {
+  return (
+    <span
+      class="phone-tile"
+      style={{ background: tileBackground(p) }}
+      role={named ? 'img' : undefined}
+      aria-label={named ? projectName(p) : undefined}
+      aria-hidden={named ? undefined : true}
+    >
+      <ProjectGlyph p={p} />
+    </span>
+  );
+}
+
 /** A row of the live list, without buttons of its own. Desktop: a right click opens its menu,
  *  the mouse resting on it its card. Phone: a long press or a right click opens the same menu.
- *  In Reorder: a handle (left on a desktop, right on a phone), no menu, no link. */
-function SessionRow({
+ *  In Reorder: a handle (left on a desktop, right on a phone), no menu, no link. Without
+ *  `onMenu` (a phone's "Sessions" view) it has no menu; with `project` its project's name
+ *  starts the state line and its tile ends the row. */
+export function SessionRow({
   s,
   current,
   draft,
   phone,
   when,
-  where,
   compact,
+  project,
   grip,
   dragging,
   menuOpen,
@@ -820,10 +786,9 @@ function SessionRow({
   draft?: boolean;
   phone?: boolean;
   when?: string;
-  /** The worker and the folder, a line of the row on a phone; empty on a desktop (its card). */
-  where: string;
   /** The Compact look: one line, the state in the dot, the subagents after the title. */
   compact?: boolean;
+  project?: Project;
   grip?: GripHandlers;
   dragging: boolean;
   /** Its menu is open: the row stays lit under it. */
@@ -831,7 +796,7 @@ function SessionRow({
   card?: CardHandlers;
   /** Loads the newest page of the chat before it is opened. */
   onPrefetch: () => void;
-  onMenu: (x: number, y: number) => void;
+  onMenu?: (x: number, y: number) => void;
 }) {
   const press = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
   const fired = useRef(false);
@@ -858,22 +823,20 @@ function SessionRow({
           )}
         </span>
         <span class={`session-sub state-${s.state}`}>
+          {project && `${projectName(project)} · `}
           {subLabel(s)}
           {agents && <span class="session-agents"> · {agents}</span>}
         </span>
-        {where && (
-          <span class="session-where mono" title={where}>
-            {where}
-          </span>
-        )}
       </span>
+      {/* In the Compact look the state line with the project's name is hidden. */}
+      {project && <PhoneTile p={project} named />}
     </>
   );
   const cancelPress = () => {
     if (press.current) clearTimeout(press.current.timer);
     press.current = null;
   };
-  const handlers = grip
+  const handlers = grip || !onMenu
     ? {}
     : phone
       ? {
@@ -999,10 +962,11 @@ function SessionCard({ app, s, x, y }: { app: AppState; s: SessionInfo; x: numbe
   );
 }
 
-/** The bottom line of a desktop column: how many workers are online and, for the machine of
- *  the open session, how many of its sessions run (the list's Running rule); "offline" while
- *  the socket is down. A click opens the workers' list above it. */
-function WorkersLine({ app, current }: { app: AppState; current?: string }) {
+/** The bottom line of a desktop column and of a phone's first screen: how many workers are
+ *  online and, for the machine of the open session, how many of its sessions run (the list's
+ *  Running rule); "offline" while the socket is down. A click opens the workers' list above
+ *  it. */
+export function WorkersLine({ app, current }: { app: AppState; current?: string }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1124,52 +1088,10 @@ export function WidthGrip({ app }: { app: AppState }) {
   );
 }
 
-/** Projects as chips on a phone (the rail's job on a desktop), each with its state as on the
- *  rail: a "needs you" count, working, unread or idle. */
-function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) => void }) {
-  const current = app.currentProjectId;
-  return (
-    <nav class="chips" aria-label="Projects">
-      {app.sortedProjects().map((p) => {
-        const waiting = app.projectWaiting(p.id);
-        return (
-          <a
-            key={p.id}
-            class={`chip project-row ${p.id === current ? 'is-current' : ''}`}
-            href={`#/p/${p.id}`}
-            aria-label={projectName(p)}
-            aria-current={p.id === current ? 'true' : undefined}
-          >
-            {/* Without an icon a dot of the project's color: the name is right after it. */}
-            <span class="chip-icon" aria-hidden="true">
-              {p.icon ? <ProjectGlyph p={p} /> : <span class="chip-dot" style={{ background: colorHex(p.color) }} />}
-            </span>
-            {projectName(p)}
-            {waiting > 0 ? (
-              <span class="chip-badge" aria-label={`needs you: ${waiting}`}>
-                {waiting}
-              </span>
-            ) : app.projectRunning(p.id) ? (
-              <span class="chip-run" style={{ background: colorHex(p.color) }} aria-label="working" />
-            ) : app.projectUnread(p.id) ? (
-              <span class="chip-unread" aria-label="unread" />
-            ) : (
-              <span class="chip-idle" aria-label="idle" />
-            )}
-          </a>
-        );
-      })}
-      <button type="button" class="chip chip-new" aria-label="New project" disabled={!app.me} onClick={() => void newProject(app, onError)}>
-        <IconPlus />
-      </button>
-    </nav>
-  );
-}
-
 /** "Workers": each worker with its online dot and how many of its sessions run (the list's
  *  Running rule); a click opens its service session (SPEC §10.2). Listed by their service
- *  sessions: revoking a worker archives it, so revoked workers are not here. On a desktop it
- *  opens from the workers line; `onPick` closes it there. */
+ *  sessions: revoking a worker archives it, so revoked workers are not here. It opens from the
+ *  workers line; `onPick` closes it there. */
 function WorkerList({ app, current, onPick }: { app: AppState; current?: string; onPick?: () => void }) {
   const list = app.workerSessions();
   if (list.length === 0) return null;

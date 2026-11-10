@@ -14,6 +14,7 @@ import { AppState } from '../src/app';
 import { parseEvent, parseRequestList, parseServerFrame, type OpenRequest, type SessionInfo } from '../src/proto';
 import { HubSocket } from '../src/ws';
 import { Chat } from '../src/ui/Chat';
+import { PhoneHome } from '../src/ui/PhoneHome';
 import { RequestsScreen } from '../src/ui/requests';
 import { SessionList } from '../src/ui/SessionList';
 
@@ -240,7 +241,7 @@ describe('the "Requests" list', () => {
     expect($('.empty')!.textContent).toBe('No open requests');
   });
 
-  it('has an entry with the count in the left column, a button on the phone', async () => {
+  it("has an entry with the count in the left column, a button in the header of a phone's first screen", async () => {
     const { app } = setup();
     app.me = { id: 'u1', email: 'me@example.com', display_name: '', personal_project_id: 'p1' } as never;
     app.currentProjectId = 'p1';
@@ -252,8 +253,12 @@ describe('the "Requests" list', () => {
     expect($('.requests-link')).toBeNull();
     await act(async () => app.setRequests(REQUESTS));
     render(null, root);
+    await mount(<PhoneHome app={app} />);
+    expect($('.side-head .requests-link-phone')!.getAttribute('aria-label')).toBe('Requests: 2');
+    // Not on a project's screen.
+    render(null, root);
     await mount(<SessionList app={app} phone />);
-    expect($('.m-head .requests-link-phone')!.getAttribute('aria-label')).toBe('Requests: 2');
+    expect($('.requests-link')).toBeNull();
   });
 });
 

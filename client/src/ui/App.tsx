@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import { applyLook, applyTheme } from '../theme';
-import { Chat } from './Chat';
+import { Chat, SessionsButton, type SessionsToggle } from './Chat';
 import { Enroll } from './Enroll';
-import { useIsPhone, useSubscription } from './hooks';
+import { useIsNarrow, useIsPhone, useSubscription } from './hooks';
 import { NewSessionChat } from './NewSession';
-import { ProjectRail } from './ProjectRail';
+import { PhoneHome } from './PhoneHome';
+import { ProjectRail, onMac } from './ProjectRail';
 import { ProjectSettings } from './ProjectSettings';
 import { RequestsScreen } from './requests';
 import { RulesScreen } from './Rules';
@@ -57,15 +58,22 @@ export function parseRoute(hash: string): Route {
   return { name: 'list' };
 }
 
-/** Routes whose screen is the session list (on a phone, one screen at a time). */
-const SIDEBAR_ROUTES = new Set<Route['name']>(['list', 'project']);
-
 export function App({ app }: { app: AppState }) {
   const [route, setRoute] = useState(() => parseRoute(location.hash));
   const phone = useIsPhone();
+  const narrow = useIsNarrow();
   useSubscription((fn) => app.onChange(fn), [app]);
+  // Where Settings goes back to: the address it was opened from, as it was then (the search
+  // page keeps its query in the address without a hash change), not its worker-code page.
+  const beforeSettings = useRef<string | null>(null);
   useEffect(() => {
-    const on = () => setRoute(parseRoute(location.hash));
+    const on = (e: HashChangeEvent) => {
+      const next = parseRoute(location.hash);
+      const from = e.oldURL ? new URL(e.oldURL).hash || '#/' : null;
+      const prev = from === null ? null : parseRoute(from).name;
+      if (next.name === 'settings' && prev && prev !== 'settings' && prev !== 'enroll') beforeSettings.current = from;
+      setRoute(next);
+    };
     addEventListener('hashchange', on);
     return () => removeEventListener('hashchange', on);
   }, []);
@@ -97,10 +105,11 @@ export function App({ app }: { app: AppState }) {
     if (routeProject) app.selectProject(routeProject);
   }, [app, routeProject]);
 
-  // Where the search page goes back to: the last address before it, else the project.
+  // Where the search page goes back to: the last address before it, else the project; not
+  // Settings, whose arrow may lead back to the search.
   const beforeSearch = useRef<string | null>(null);
   useEffect(() => {
-    if (route.name !== 'search') beforeSearch.current = location.hash || '#/';
+    if (route.name !== 'search' && route.name !== 'settings' && route.name !== 'enroll') beforeSearch.current = location.hash || '#/';
   }, [route]);
 
   // A project opens its last session (on a desktop; a phone's project screen is its list).
@@ -121,13 +130,45 @@ export function App({ app }: { app: AppState }) {
   const look = app.lookName();
   useLayoutEffect(() => applyLook(document.documentElement, look, app.device), [look, app.device]);
 
+  // A window 900–1079 px wide: the session column is out of the layout; "Sessions" in the
+  // header, or ⌘\ (Ctrl+\ off a Mac), slides it out over the chat. Any route change (a session
+  // picked, a new one, a project, a page), Esc, a click beside it or leaving that width puts it
+  // away.
+  const [slid, setSlid] = useState(false);
+  useLayoutEffect(() => setSlid(false), [route, narrow]);
+  useEffect(() => {
+    if (!narrow) return;
+    // On the window, after the document's handlers: an Esc a menu of the list has taken
+    // (prevented, or stopped on its way) closes that menu only.
+    const key = (e: KeyboardEvent) => {
+      const mod = onMac() ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+      if (mod && !e.altKey && !e.shiftKey && (e.key === '\\' || e.code === 'Backslash')) {
+        e.preventDefault();
+        setSlid((s) => !s);
+      } else if (e.key === 'Escape' && !e.defaultPrevented && document.querySelector('.sidebar-slide')) {
+        // Taken: the browser would also clear a search field the focus is in.
+        e.preventDefault();
+        setSlid(false);
+      }
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  }, [narrow]);
+  const sessions: SessionsToggle | undefined = narrow
+    ? {
+        open: slid,
+        waiting: app.currentProjectId ? app.projectWaiting(app.currentProjectId) : 0,
+        toggle: () => setSlid(!slid),
+      }
+    : undefined;
+
   let main;
   switch (route.name) {
     case 'session':
-      main = <Chat key={route.id} app={app} sessionId={route.id} phone={phone} focusSeq={route.seq} />;
+      main = <Chat key={route.id} app={app} sessionId={route.id} phone={phone} focusSeq={route.seq} sessions={sessions} />;
       break;
     case 'newSession':
-      main = <NewSessionChat key={route.projectId} app={app} projectId={route.projectId} phone={phone} />;
+      main = <NewSessionChat key={route.projectId} app={app} projectId={route.projectId} phone={phone} sessions={sessions} />;
       break;
     case 'search': {
       const pid = app.currentProjectId;
@@ -153,20 +194,40 @@ export function App({ app }: { app: AppState }) {
       );
       break;
     case 'settings':
-      main = <Settings app={app} />;
+      {
+        // On a computer "#/" is an empty placeholder, and its arrow is hidden: the project then.
+        const from = beforeSettings.current;
+        const back = from && (phone || from !== '#/') ? from : app.currentProjectId ? `#/p/${app.currentProjectId}` : '#/';
+        main = <Settings app={app} back={back} />;
+      }
       break;
     case 'enroll':
       main = <Enroll app={app} initialCode={route.code} />;
       break;
     default:
-      main = <div class="placeholder">Pick a session on the left or start a new one</div>;
+      main = (
+        <>
+          {/* No list on the left in a narrow window: the column slides out from here. */}
+          {sessions && (
+            <header class="chat-head">
+              <SessionsButton sessions={sessions} />
+            </header>
+          )}
+          <div class="placeholder">
+            {sessions ? 'Open Sessions to pick a session or start a new one' : 'Pick a session on the left or start a new one'}
+          </div>
+        </>
+      );
   }
   const current = route.name === 'session' ? route.id : undefined;
-  // Phone: the list is the first screen, everything else replaces it (T26, Mobile-List).
+  // Phone: one screen at a time (T26, Mobile-List). The projects (or every project's sessions)
+  // first, a project's sessions, then whatever opens from there.
   if (phone) {
     return (
       <div class={`layout layout-phone route-${route.name}`}>
-        {SIDEBAR_ROUTES.has(route.name) ? (
+        {route.name === 'list' ? (
+          <PhoneHome app={app} />
+        ) : route.name === 'project' ? (
           <SessionList app={app} current={current} phone />
         ) : (
           <main class="main">{main}</main>
@@ -174,19 +235,40 @@ export function App({ app }: { app: AppState }) {
       </div>
     );
   }
-  // The search page takes the session column's place and the chat's.
-  const page = route.name === 'search';
+  // The search page takes the session column's place and the chat's; a narrow window has no
+  // column in the grid, only the one slid out over the chat.
+  const column = !(route.name === 'search' || narrow);
   return (
-    <div class={`layout route-${route.name}`}>
+    <div class={`layout${narrow ? ' layout-narrow' : ''} route-${route.name}`}>
       <ProjectRail app={app} />
-      {!page && (
+      {column && (
         <aside class="sidebar" aria-label="Project sessions">
           <SessionList app={app} current={current} requests={route.name === 'requests'} />
         </aside>
       )}
       {/* Out of the grid's flow, on the border between the session column and the chat. */}
-      {!page && <WidthGrip app={app} />}
+      {column && <WidthGrip app={app} />}
       <main class="main">{main}</main>
+      {narrow && slid && (
+        <>
+          <div class="sessions-scrim" onClick={() => setSlid(false)} />
+          {/* A session picked puts it away, the open one too (its address does not change). */}
+          <aside
+            class="sidebar sidebar-slide"
+            aria-label="Project sessions"
+            onClick={(e) => {
+              // A link of the list in this tab (a row, the draft, a worker) or "+", even to the
+              // address already open. Not a click whose navigation another handler prevented, a
+              // click inside a menu ("Open in new tab") or ⌘/Ctrl/Shift+click.
+              const t = e.target as Element;
+              if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || t.closest?.('[role="menu"]')) return;
+              if (t.closest?.('a[href^="#/"], .btn-new-session')) setSlid(false);
+            }}
+          >
+            <SessionList app={app} current={current} requests={route.name === 'requests'} />
+          </aside>
+        </>
+      )}
     </div>
   );
 }

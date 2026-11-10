@@ -14,7 +14,7 @@ import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { copyText } from '../clipboard';
 import { ContextMenu } from './ContextMenu';
-import { IconArchive, IconAttach, IconBack, IconCode, IconCopy, IconLock, IconMore, IconQuote, IconSend, IconShield, IconStop } from './icons';
+import { IconArchive, IconAttach, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSend, IconShield, IconStop } from './icons';
 import { AUTO_CONFIRM, STATE_LABELS, agentsLabel, formatCost, homePath, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
@@ -28,17 +28,20 @@ const STOPPABLE = new Set(['running', 'waiting', 'queued']);
 /** Blocks of the feed rendered on open; scrolling to the top adds `SHOWN` more. */
 const SHOWN = 60;
 
-/** `focusSeq`: scroll to that event once it is loaded and mark it (a search hit, SPEC §15). */
+/** `focusSeq`: scroll to that event once it is loaded and mark it (a search hit, SPEC §15).
+ *  `sessions`: a window 900–1079 px wide, "Sessions" at the left of the header. */
 export function Chat({
   app,
   sessionId,
   phone = false,
   focusSeq,
+  sessions,
 }: {
   app: AppState;
   sessionId: string;
   phone?: boolean;
   focusSeq?: number;
+  sessions?: SessionsToggle;
 }) {
   const chat = useMemo(() => app.chat(sessionId), [app, sessionId]);
   const [notice, setNotice] = useState<string | null>(null);
@@ -53,9 +56,11 @@ export function Chat({
   // there and not sent, and the caret in the input.
   const [handed] = useState(() => app.takeHandover(sessionId));
   const [files, setFiles] = useState<OutgoingFile[]>(handed?.files ?? []);
-  // The caret goes to the first input shown; one shown again (after a sheet, a lock) keeps
-  // the focus where it is.
-  const caret = useRef(!!handed);
+  // The caret goes to the input once, as the chat opens: on a computer, as in the VS Code tab,
+  // unless a request waits for an answer; on a phone only from a new session's window (the
+  // keyboard would cover the chat). An input shown later (after a sheet, a lock) leaves the
+  // focus where it is.
+  const caret = useRef(!!handed || !phone);
   const [dragging, setDragging] = useState(false);
   const addFiles = (list: FileList | File[] | null | undefined) => {
     const picked = [...(list ?? [])];
@@ -311,9 +316,14 @@ export function Chat({
   const disabled = archived || locked;
   const sheet = sheetRequest && firstApproval?.type === 'approval.request' ? firstApproval : undefined;
   const inputShown = !system && !disabled && !sheet;
+  // From a new session's window at once; otherwise with the newest page in, so that an open
+  // request keeps Enter and Esc for its card (they are a field's while it has the focus). A chat
+  // kept in memory may not have the request that came while it was closed: the session's
+  // state, live from the hub, says it waits.
+  const focusInput = caret.current && (!!handed || (loaded && !firstApproval && state !== 'waiting'));
   useEffect(() => {
-    if (inputShown) caret.current = false;
-  }, [inputShown]);
+    if (loaded) caret.current = false;
+  }, [loaded]);
   return (
     <section
       class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
@@ -338,6 +348,7 @@ export function Chat({
             <IconBack />
           </a>
         )}
+        {sessions && <SessionsButton sessions={sessions} />}
         <div class="chat-head-main">
           <h1 class="chat-title">{info?.title || 'Session'}</h1>
           <div class="chat-meta">
@@ -571,7 +582,7 @@ export function Chat({
         <Composer
           initial={app.draft(sessionId)}
           onDraft={(text) => app.setDraft(sessionId, text)}
-          autoFocus={caret.current}
+          autoFocus={focusInput}
           insertQuote={insertQuote}
           phone={phone}
           commands={info?.commands}
@@ -595,6 +606,31 @@ export function Chat({
         />
       )}
     </section>
+  );
+}
+
+/** The session column of a window 900–1079 px wide (App): out over the chat or not, what
+ *  slides it out or back, and how many of the project's sessions wait for the user. */
+export interface SessionsToggle {
+  open: boolean;
+  waiting: number;
+  toggle: () => void;
+}
+
+/** "Sessions" at the left of a header in a window 900–1079 px wide: slides the session column
+ *  out over the chat, pressed while it is out; the amber count is the rail badge's. */
+export function SessionsButton({ sessions }: { sessions: SessionsToggle }) {
+  return (
+    <button
+      type="button"
+      class={`btn btn-small btn-sessions ${sessions.open ? 'is-on' : ''}`}
+      aria-expanded={sessions.open}
+      onClick={sessions.toggle}
+    >
+      <IconPanel />
+      Sessions
+      {sessions.waiting > 0 && <span class="sessions-waiting">{sessions.waiting}</span>}
+    </button>
   );
 }
 
@@ -920,7 +956,7 @@ export function Composer({
   /** The text not sent last time (a draft), and where every change of it goes. */
   initial?: string;
   onDraft?: (text: string) => void;
-  /** The caret in the field once it is shown. */
+  /** The caret in the field when it is shown with this set, or when this turns on. */
   autoFocus?: boolean;
   /** Sending waits for this (a new session being created): send is disabled with it as its
    *  title, Enter sends nothing, the text stays. */
@@ -935,8 +971,15 @@ export function Composer({
   }, [text]);
   const area = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
-    if (autoFocus) area.current?.focus();
-  }, []);
+    if (!autoFocus) return;
+    // Not away from where the user went while the chat loaded: another field (the project
+    // search), a menu, the session column slid out over the chat.
+    const doc = area.current?.ownerDocument;
+    const at = doc?.activeElement as HTMLElement | null | undefined;
+    const field = at && at !== area.current && (at.tagName === 'INPUT' || at.tagName === 'TEXTAREA' || at.tagName === 'SELECT' || at.isContentEditable);
+    if (field || doc?.querySelector('[role="menu"], .sidebar-slide')) return;
+    area.current?.focus();
+  }, [autoFocus]);
   const caretToEnd = useRef(false);
   useEffect(() => {
     if (!insertQuote) return;

@@ -178,7 +178,8 @@ button {
    the window as in T27) unless its right edge was dragged (`--list-w`, `DeviceLayout.listWidth`), and
    never so wide that the chat gets less than 300px; the main column without a minimum: its
    content wraps or scrolls inside itself. Below 900px the phone layout takes over
-   (useIsPhone). The column's grip (`.col-grip`) is placed on the grid, out of its flow. */
+   (useIsPhone), from 900 to 1079px the column slides out over the chat (`.layout-narrow`,
+   useIsNarrow). The column's grip (`.col-grip`) is placed on the grid, out of its flow. */
 .layout {
   position: relative;
   height: 100%;
@@ -418,8 +419,7 @@ select.input {
 
 @media (prefers-reduced-motion: reduce) {
   .pulse,
-  .pulse-dot,
-  .rail-run {
+  .pulse-dot {
     animation: none;
   }
 }
@@ -607,7 +607,9 @@ select.input {
   pointer-events: none;
 }
 /* No one waits, but a session works: a stripe that runs around the tile. The ring is the
-   padding left by the mask; the stripe is a conic gradient whose start angle turns. */
+   padding left by the mask; the stripe is a conic gradient whose start angle turns. It turns
+   under prefers-reduced-motion too: the motion is the mark, and the owner's system has that
+   setting on. */
 @property --rail-run-turn {
   syntax: '<angle>';
   inherits: false;
@@ -622,7 +624,8 @@ select.input {
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  animation: rail-run 1.4s linear infinite;
+  /* Slow on purpose: the owner wants it to creep. */
+  animation: rail-run 8s linear infinite;
   pointer-events: none;
 }
 @keyframes rail-run {
@@ -926,6 +929,20 @@ select.input {
 :root.rail-names .toast-project {
   left: 16px;
   bottom: 58px;
+}
+/* A project's count of sessions with unread events in the phone's list: blue, as the bar's
+   unread dot, apart from the amber of those that wait. */
+.phone-project .badge {
+  background: var(--unread);
+  color: #fff;
+}
+/* A phone has no bar: over the projects screen's workers line, edge to edge (as specific as
+   the rule above, and after it). */
+.sessions-phone.phone-home .toast-project {
+  left: 12px;
+  right: 12px;
+  bottom: calc(56px + env(safe-area-inset-bottom));
+  max-width: none;
 }
 
 /* A project's icon: its emoji, 1-2 letters or image (T49). */
@@ -1656,6 +1673,66 @@ select.input {
   outline: none;
 }
 
+/* A window 900–1079 px wide (`.layout-narrow`): the grid is the project bar, in either form,
+   and the chat. "Sessions" in the chat's header (or ⌘\) slides the session column out over the
+   chat from the bar's edge, as wide as on a desktop but never wider than the chat, with a
+   scrim over the rest. Both stand in the grid's second column, out of its flow, as the grip;
+   the slide-in leaves no transform behind, so the column's fixed menus and cards stay placed
+   by the window. */
+.layout-narrow {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+:root.rail-names .layout-narrow {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.sessions-scrim,
+.sidebar-slide {
+  position: absolute;
+  grid-column: 2 / 3;
+  top: 0;
+  bottom: 0;
+  left: 0;
+}
+.sessions-scrim {
+  right: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--shade) 28%, transparent);
+}
+.sidebar-slide {
+  z-index: 35;
+  width: 100%;
+  max-width: var(--list-w, clamp(280px, 25vw, 310px));
+  box-shadow: 12px 0 32px color-mix(in srgb, var(--shade) 30%, transparent);
+  animation: sidebar-slide 150ms ease-out;
+}
+@keyframes sidebar-slide {
+  from {
+    transform: translateX(-24px);
+    opacity: 0;
+  }
+}
+/* "Sessions" at the left of the chat's header, pressed while the column is out; the amber
+   count is the rail badge's, the project's sessions that wait for the user. */
+.btn-sessions {
+  flex: none;
+}
+.btn-sessions.is-on {
+  background: var(--row-on);
+  border-color: transparent;
+}
+.sessions-waiting {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--waiting);
+  color: var(--waiting-ink);
+  font: 700 10.5px/1 var(--sans);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .list-foot {
   display: flex;
   flex-wrap: wrap;
@@ -1675,20 +1752,6 @@ select.input {
   border-color: #c8483a;
   color: #fff5f2;
   font-weight: 600;
-}
-
-.order-row {
-  display: flex;
-  gap: 6px;
-}
-.order-row .seg-group {
-  flex: 1;
-}
-.btn-reorder {
-  width: 38px;
-  height: 38px;
-  border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--shade) 22%, transparent);
 }
 
 .reorder-bar {
@@ -2007,42 +2070,244 @@ select.input {
   line-height: 1.45;
 }
 
-.m-head {
-  flex: none;
-  background: var(--side);
-  padding: 14px 16px 10px;
-  padding-top: calc(14px + env(safe-area-inset-top));
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+/* A phone's list screens (the new screen, stage 6, `phone-d` / `phone-s`): one header row — on
+   the first screen the view's title with its menu, Requests, the search, the settings and the
+   avatar; on a project's screen "‹", its name, the search, the order, "⋯" and "+" — then the
+   groups with rows from edge to edge. Spacious: a 52 px header, two-line rows, 42 px project
+   tiles with "N waiting · N running"; Compact (`list-compact`): a 36 px header, 22 px group
+   lines and 30 px one-line rows. */
+.sessions-phone .side-head {
+  min-height: calc(52px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 6px 0 2px;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
 }
-
-.m-head-row {
+.sessions-phone .side-head .project-title {
+  font-size: 18px;
+}
+.sessions-phone .side-head .icon-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  color: var(--text2);
+}
+.sessions-phone .side-head .btn-new-session {
+  width: 36px;
+  height: 36px;
+  margin: 0 2px 0 4px;
+  border-radius: 18px;
+}
+.sessions-phone .btn-mode {
+  height: 40px;
+  font-size: 14px;
+}
+.sessions-phone .side-head .avatar {
+  margin: 0 6px 0 4px;
+}
+/* The first screen's title: "Projects ▾" or "Sessions ▾", its view menu. */
+.phone-view {
+  flex: 0 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 4px;
-}
-
-.m-head h1 {
-  flex: 1;
-  margin: 0;
-  font-size: 26px;
-  font-weight: 700;
+  height: 44px;
+  padding: 0 4px 0 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 700 24px var(--sans);
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.phone-view .icon {
+  color: var(--muted);
+}
+.btn-view-sessions .menu-detail {
+  font-family: var(--sans);
+}
+:root.list-compact .sessions-phone .side-head {
+  min-height: calc(36px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 4px 0 0;
+  gap: 0;
+}
+:root.list-compact .sessions-phone .side-head .project-title,
+:root.list-compact .phone-view {
+  font-size: 17px;
+}
+:root.list-compact .phone-view {
+  height: 36px;
+  padding-left: 12px;
+}
+:root.list-compact .sessions-phone .side-head .icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+:root.list-compact .sessions-phone .side-head .icon-btn .icon {
+  width: 18px;
+  height: 18px;
+}
+:root.list-compact .sessions-phone .side-head .btn-new-session {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+:root.list-compact .sessions-phone .btn-mode {
+  height: 30px;
+  font-size: 13px;
+}
+:root.list-compact .sessions-phone .side-head .avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
 }
 
+/* "Hub unavailable" or "offline" under a project's header. */
 .m-head-state {
+  padding: 4px 16px;
   font-size: 13px;
   color: var(--danger);
 }
 
-.chips {
+/* A project on the first screen: its tile, its name, the running mark with how many run, the
+   amber count of those that wait, the count of those with unread events. */
+.phone-project {
   display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  margin: 0 -16px;
-  padding: 0 16px 2px;
-  scrollbar-width: none;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 16px var(--sans);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.phone-project:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.phone-project:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.phone-project-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.phone-project-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.phone-project.has-unread .phone-project-name {
+  font-weight: 700;
+}
+.phone-project-sub {
+  font-size: 13.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.phone-project-sub.is-wait {
+  color: var(--waiting);
+  font-weight: 600;
+}
+.btn-new-project {
+  color: var(--text2);
+}
+.phone-run {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.phone-tile {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--text);
+  font: 700 14px var(--sans);
+}
+.phone-tile .glyph-emoji {
+  font-size: 22px;
+  font-weight: 400;
+}
+.phone-tile .glyph-img {
+  padding: 3px;
+}
+.phone-tile-new {
+  background: var(--row-hover);
+  color: var(--text2);
+}
+/* A session's project in the "Sessions" view, at the row's right. */
+.session-row .phone-tile {
+  align-self: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 9.5px;
+}
+.session-row .phone-tile .glyph-emoji {
+  font-size: 13px;
+}
+:root.list-compact .phone-project {
+  height: 30px;
+  min-height: 0;
+  gap: 9px;
+  padding: 0 12px;
+  font-size: 14.5px;
+}
+:root.list-compact .phone-project-name {
+  font-weight: 450;
+}
+:root.list-compact .phone-project.has-unread .phone-project-name {
+  font-weight: 700;
+}
+:root.list-compact .phone-tile {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 8.5px;
+}
+:root.list-compact .phone-tile .glyph-emoji {
+  font-size: 11px;
+}
+:root.list-compact .phone-tile .glyph-img {
+  padding: 1px;
+}
+:root.list-compact .phone-run {
+  font-size: 12px;
+}
+
+/* The workers line at the bottom of the first screen, over the home indicator. */
+.sessions-phone .wline {
+  height: calc(46px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+}
+:root.list-compact .sessions-phone .wline {
+  height: calc(32px + env(safe-area-inset-bottom));
+  font-size: 12px;
+}
+.sessions-phone.phone-home .session-scroll {
+  padding-bottom: 12px;
 }
 
 .chip {
@@ -2060,77 +2325,6 @@ select.input {
   text-decoration: none;
   cursor: pointer;
 }
-.chip.is-current {
-  background: var(--accent-soft);
-  color: var(--text);
-  border-color: var(--accent);
-  font-weight: 600;
-}
-
-/* The project's icon on its chip (T49): the emoji as is, letters and images small. */
-.chip-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 20px;
-  height: 20px;
-  font-size: 17px;
-}
-.chip-icon .glyph-letters {
-  font-size: 11px;
-  font-weight: 700;
-}
-.chip-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 5px;
-}
-.chip-icon .glyph-img {
-  width: 20px;
-  padding: 0;
-  border-radius: 5px;
-}
-.chip-new {
-  padding: 0 12px;
-  border-style: dashed;
-}
-
-.chip-badge {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--waiting);
-  color: var(--waiting-ink);
-  font-size: 11px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.chip-unread {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text);
-}
-.chip-run {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  animation: pulse 1.4s ease-in-out infinite;
-}
-.chip-idle {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1.5px var(--muted);
-}
-
-.sessions-phone .seg {
-  height: 36px;
-  font-size: 13.5px;
-}
 
 .sessions-phone .search {
   height: 44px;
@@ -2141,7 +2335,7 @@ select.input {
 }
 
 .sessions-phone .session-scroll {
-  padding: 0 0 96px;
+  padding: 0 0 calc(16px + env(safe-area-inset-bottom));
   gap: 0;
 }
 
@@ -2184,22 +2378,11 @@ select.input {
   padding: 12px 16px 0;
 }
 
-.sessions-phone .worker-list {
-  margin: 18px 16px 0;
-  padding: 14px 0 0;
-  font-size: 14px;
-}
-
 .sessions-phone .worker-row {
   font-size: 14px;
   padding: 8px 6px;
 }
 
-.sessions-phone .btn-reorder {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-}
 .sessions-phone .reorder-bar {
   padding: 4px 4px 4px 14px;
   border-radius: 10px;
@@ -2226,7 +2409,7 @@ select.input {
   position: absolute;
   left: 12px;
   right: 12px;
-  bottom: calc(92px + env(safe-area-inset-bottom));
+  bottom: calc(16px + env(safe-area-inset-bottom));
   z-index: 5;
   margin: 0;
   padding: 6px 6px 6px 14px;
@@ -2287,23 +2470,44 @@ select.input {
   background: var(--surface);
   border-color: var(--border);
 }
-
-.fab {
-  position: absolute;
-  right: 16px;
-  bottom: calc(24px + env(safe-area-inset-bottom));
-  height: 56px;
-  padding: 0 20px 0 16px;
-  border-radius: 28px;
-  border: 0;
-  background: var(--accent);
-  color: var(--accent-ink);
-  font: 600 15px var(--sans);
-  display: flex;
+/* The favorites pinned over a project's list, its rows from edge to edge. */
+.sessions-phone .fav-pinned {
+  padding: 0 0 6px;
+}
+/* The dots out of a row keep their line: the workers line's, a project's running mark. */
+.sessions-phone .wline .dot,
+.sessions-phone .phone-run .dot {
+  margin-top: 0;
+}
+/* Compact on a phone: 22 px group lines, a 30 px line per session, the state in the dot. */
+:root.list-compact .sessions-phone .session-group {
+  padding-top: 0;
+}
+:root.list-compact .sessions-phone .group-head {
+  padding: 6px 12px 2px;
+  font-size: 10.5px;
+  line-height: 14px;
+}
+:root.list-compact .sessions-phone .session-item > .session-row {
   align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--shade) 45%, transparent);
+  gap: 9px;
+  height: 30px;
+  min-height: 0;
+  padding: 0 12px;
+  font-size: 14.5px;
+}
+:root.list-compact .sessions-phone .session-item .session-title {
+  font-weight: 450;
+}
+:root.list-compact .sessions-phone .session-item .has-unread .session-title {
+  font-weight: 700;
+}
+:root.list-compact .sessions-phone .session-item .dot,
+:root.list-compact .sessions-phone .session-item .dot-vs {
+  margin-top: 0;
+}
+:root.list-compact .sessions-phone .session-item .session-sub {
+  display: none;
 }
 
 /* ---- chat ---- */
@@ -3181,7 +3385,7 @@ select.input {
   border: 0;
   background: transparent;
   /* Fainter than the text around: the calls are a trace, not the answer. */
-  color: color-mix(in srgb, var(--muted) 70%, transparent);
+  color: color-mix(in srgb, var(--muted) 45%, transparent);
   font: 13px var(--sans);
   padding: 6px 10px 6px 6px;
   margin-left: -6px;
@@ -3322,12 +3526,23 @@ select.input {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: color-mix(in srgb, var(--muted) 70%, transparent);
+  /* A little brighter than the call groups (the owner). */
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
   font-style: italic;
   cursor: pointer;
 }
 .thinking summary::-webkit-details-marker {
   display: none;
+}
+.thinking-text {
+  margin: 4px 0 2px;
+  padding-left: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+:root.feed-column .thinking-text {
+  padding-left: 0;
 }
 .thinking[open] summary .icon {
   transform: rotate(90deg);
@@ -3847,18 +4062,19 @@ a.relay-peer {
 .perm-sheet .perm-note {
   font-size: 13px;
 }
+/* The sheet's answers two to a row, Allow first (the new screen's phone). */
 .perm-sheet .perm-actions {
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: stretch;
 }
 .perm-sheet .btn-allow {
-  height: 50px;
+  height: 46px;
   border-radius: 12px;
   font-size: 16px;
 }
 .perm-sheet .perm-more {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: contents;
 }
 .perm-sheet .perm-more .btn {
   height: 46px;
@@ -4533,6 +4749,29 @@ a.relay-peer {
   color: var(--muted);
 }
 
+/* The Compact look on a phone (the new screen): a 42 px header, the feed 14/1.4. */
+:root.list-compact .chat-phone {
+  --feed-line: 19.6px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+:root.list-compact .chat-phone .chat-head {
+  padding: 3px 4px;
+  padding-top: calc(3px + env(safe-area-inset-top));
+}
+:root.list-compact .chat-phone .chat-head .icon-btn {
+  width: 36px;
+  height: 36px;
+}
+:root.list-compact .chat-phone .chat-title {
+  font-size: 15px;
+  line-height: 19px;
+}
+:root.list-compact .chat-phone .chat-meta {
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
 /* ---- pages: project settings, settings, enroll ---- */
 
 .page {
@@ -4618,6 +4857,11 @@ a.relay-peer {
   gap: 12px;
   align-items: flex-start;
   max-width: 780px;
+}
+/* The body scrolls; its parts keep their height ("Confirm a worker code" was squeezed to
+   its text when Settings ran longer than the window). */
+.page-body > * {
+  flex-shrink: 0;
 }
 
 .page-scroll .page-body {
@@ -5784,7 +6028,46 @@ button.ps-look {
   border-bottom: 0;
 }
 
-.worker-revoked b {
+/* Settings → Workers: a line per worker, its dot, name, system and state on the left, the
+   action quiet at the end until hovered. On a computer the system and state are a column. */
+.plain-list.worker-table li {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 6px 8px 6px 14px;
+}
+.layout:not(.layout-phone) .plain-list.worker-table li {
+  display: grid;
+  grid-template-columns: 8px 13em minmax(0, 1fr) auto;
+}
+.worker-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.worker-item-meta {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.worker-table .btn-revoke {
+  flex: none;
+  margin-left: auto;
+  height: 28px;
+  padding: 0 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.worker-table .btn-revoke:hover {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+.worker-revoked .worker-item-name {
   color: var(--muted);
 }
 
@@ -6634,6 +6917,10 @@ button.ps-look {
   flex-basis: 100%;
   margin-left: 36px;
 }
+/* Compact: under the title past its smaller tile (22 px and the gap). */
+.layout-phone .search-page.is-dense .sp-meta {
+  margin-left: 32px;
+}
 .layout-phone .sp-body {
   padding-top: 14px;
   gap: 12px;
@@ -6674,6 +6961,10 @@ button.ps-look {
   .feed-block.is-found {
     animation: none;
     box-shadow: 0 0 0 2px var(--accent);
+  }
+  /* Here, after the column's own rule, so that it wins. */
+  .sidebar-slide {
+    animation: none;
   }
 }
 

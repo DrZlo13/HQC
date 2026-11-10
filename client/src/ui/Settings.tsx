@@ -29,7 +29,11 @@ const PUSH_TEXT: Record<PushStatus, string> = {
   available: 'Notifications about permission requests and agent replies.',
 };
 
-export function Settings({ app }: { app: AppState }) {
+/** The system as people write it; anything else as the worker reports it. */
+const OS_LABELS: Record<string, string> = { macos: 'macOS', linux: 'Linux', windows: 'Windows' };
+
+/** `back`: where the arrow goes, the address before Settings (the list when there was none). */
+export function Settings({ app, back = '#/' }: { app: AppState; back?: string }) {
   const [push, setPush] = useState<PushStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,7 +118,7 @@ export function Settings({ app }: { app: AppState }) {
   return (
     <section class="page">
       <header class="bar">
-        <a class="back icon-btn" href="#/" aria-label="Back to the list">
+        <a class="back icon-btn" href={back} aria-label="Back" title="Back">
           <IconBack />
         </a>
         <div class="bar-title">
@@ -180,19 +184,20 @@ export function Settings({ app }: { app: AppState }) {
 
         <h2>Workers</h2>
         {workers && workers.length > 0 && (
-          <ul class="plain-list">
+          <ul class="plain-list worker-table">
             {workers.map((w) => (
               <li key={w.id} class={w.status === 'revoked' ? 'worker-revoked' : undefined}>
-                <b>{w.name}</b>{' '}
-                <span class="muted">
-                  {[w.os, w.status === 'revoked' ? 'revoked' : w.status].filter(Boolean).join(' · ')}
-                </span>{' '}
+                <span class={`dot ${w.status === 'online' ? 'dot-online' : 'dot-offline'}`} aria-hidden="true" />
+                <span class="worker-item-name">{w.name}</span>
+                <span class="worker-item-meta">
+                  {[w.os && (OS_LABELS[w.os] ?? w.os), w.status].filter(Boolean).join(' · ')}
+                </span>
                 {w.status === 'revoked' ? (
-                  <button type="button" class="btn btn-revoke btn-purge" onClick={() => purge(w)}>
+                  <button type="button" class="btn btn-small btn-revoke btn-purge" onClick={() => purge(w)}>
                     Delete
                   </button>
                 ) : (
-                  <button type="button" class="btn btn-revoke" onClick={() => revoke(w)}>
+                  <button type="button" class="btn btn-small btn-revoke" onClick={() => revoke(w)}>
                     Revoke
                   </button>
                 )}

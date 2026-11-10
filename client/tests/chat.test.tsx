@@ -677,6 +677,40 @@ describe('composer', () => {
     expect(area.style.height).toBe('');
   });
 
+  it('has the caret when the chat opens on a computer; not on a phone, nor over an open request', async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app);
+    expect(document.activeElement).toBe($('.composer textarea'));
+    render(null, root);
+    const { app: phone } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(phone, true);
+    expect(document.activeElement!.tagName).not.toBe('TEXTAREA');
+    render(null, root);
+    // Enter and Esc stay the card's.
+    const { app: asked } = setup('waiting');
+    await mount(asked);
+    expect($('.perm')).not.toBeNull();
+    expect(document.activeElement!.tagName).not.toBe('TEXTAREA');
+    render(null, root);
+    // A chat kept in memory without the request that came while it was closed: the session
+    // waits all the same.
+    const { app: stale } = setup('waiting', { history: HISTORY.slice(0, 3) });
+    await mount(stale);
+    expect($('.perm')).toBeNull();
+    expect(document.activeElement!.tagName).not.toBe('TEXTAREA');
+    render(null, root);
+  });
+
+  it('leaves the caret in a field the user went to while the chat loaded', async () => {
+    const search = document.createElement('input');
+    document.body.appendChild(search);
+    search.focus();
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app);
+    expect(document.activeElement).toBe(search);
+    search.remove();
+  });
+
   it('on a phone the same row says only "Message"', async () => {
     const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
     await mount(app, true);

@@ -159,10 +159,11 @@ export function SearchPage({ app, phone, back }: { app: AppState; phone?: boolea
   useEffect(() => {
     history.replaceState(history.state, '', searchHash(state));
   }, [state]);
-  // Esc goes back, unless something else took it (the project bar's search, a menu).
+  // Esc goes back, unless something else took it (the project bar's search, a menu) or the
+  // session column is slid out over the page (a narrow window: its Esc puts the column away).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (e.key !== 'Escape' || e.defaultPrevented || document.querySelector('.sidebar-slide')) return;
       const t = e.target as Node | null;
       if (t && t !== document.body && !root.current?.contains(t)) return;
       e.preventDefault();
@@ -261,7 +262,9 @@ export function SearchPage({ app, phone, back }: { app: AppState; phone?: boolea
   for (const h of hits) cards.set(h.session_id, [...(cards.get(h.session_id) ?? []), h]);
   const projects = [...app.projects.values(), ...app.archivedProjects.values()];
   const projectOf = (h: SearchHit): Project | undefined => projects.find((p) => p.slug === h.address.split('/')[0]);
-  const dense = app.lookName() === 'compact' && !phone;
+  // The account's look, on a phone too; a phone keeps the project in the line under the title.
+  const dense = app.lookName() === 'compact';
+  const apart = dense && !phone;
   const now = Date.now();
   const current = app.currentProject();
   const total = counts?.[state.kind ?? 'all'];
@@ -391,8 +394,8 @@ export function SearchPage({ app, phone, back }: { app: AppState; phone?: boolea
                     {h0.title || h0.address}
                   </a>
                   {h0.archived && <span class="sp-archived">archived</span>}
-                  {dense && <span class="sp-proj">{name}</span>}
-                  <span class="sp-meta">{dense ? meta : `${name} · ${meta}`}</span>
+                  {apart && <span class="sp-proj">{name}</span>}
+                  <span class="sp-meta">{apart ? meta : `${name} · ${meta}`}</span>
                 </div>
                 {shown.map((h) => {
                   const k = kindOf(h.type);

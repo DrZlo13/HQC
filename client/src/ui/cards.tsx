@@ -657,7 +657,8 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
         <IconChevron size={12} />
         Thinking · {oneLine(event.payload.text, 60)}
       </summary>
-      <pre class="pre">{event.payload.text}</pre>
+      {/* The feed's own font, no box: prose, as in the VS Code tab. */}
+      <div class="thinking-text">{event.payload.text}</div>
     </details>
   );
 }

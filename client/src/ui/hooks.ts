@@ -39,6 +39,22 @@ export function useIsPhone(): boolean {
   return phone;
 }
 
+const NARROW = '(min-width: 900px) and (max-width: 1079px)';
+
+/** A window 900–1079 px wide: no session column in the layout, it slides out over the chat.
+ *  Without `matchMedia` (tests) it is the desktop. */
+export function useIsNarrow(): boolean {
+  const mq = typeof matchMedia === 'function' ? matchMedia(NARROW) : null;
+  const [narrow, setNarrow] = useState(mq?.matches ?? false);
+  useEffect(() => {
+    if (!mq) return;
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener?.('change', on);
+    return () => mq.removeEventListener?.('change', on);
+  }, []);
+  return narrow;
+}
+
 /** A button's request: busy while it runs, its error after. */
 export function useAction() {
   const [busy, setBusy] = useState(false);

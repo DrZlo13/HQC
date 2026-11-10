@@ -461,9 +461,28 @@ describe('the search page', () => {
     expect(root.querySelectorAll('.sp-fl')).toHaveLength(2);
     expect(root.querySelector('.sp-proj')).toBeNull();
   });
+
+  it('on a phone too: Compact is dense, the project in the line under the title', async () => {
+    const { app } = makeApp(async () => first());
+    app.me = { ...app.me!, look: 'compact' };
+    await mountPage(app, '#/s/s2', true);
+    await type('deploy');
+    await settle();
+    expect(root.querySelector('.search-page')!.classList.contains('is-dense')).toBe(true);
+    expect(root.querySelectorAll('.sp-fl')).toHaveLength(1);
+    expect(root.querySelector('.sp-proj')).toBeNull();
+    expect(cards()[0].meta).toBe('hqc · 6 results · 2 d ago');
+  });
 });
 
 describe('the page in the app', () => {
+  // A desktop window: happy-dom's own 1024 px is the narrow layout (900–1079 px), without the
+  // session column.
+  const windowWidth = (width: number) =>
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width });
+  beforeEach(() => windowWidth(1280));
+  afterEach(() => windowWidth(1024));
+
   it('takes the place of the session column and the chat; back goes where it was opened from', async () => {
     const { app } = makeApp(async () => ({ results: [], also: [] }));
     location.hash = '#/s/s2';

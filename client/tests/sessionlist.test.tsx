@@ -20,7 +20,8 @@ import type { ConnState, HubSocket } from '../src/ws';
 import { App } from '../src/ui/App';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
-import { ProjectRail } from '../src/ui/ProjectRail';
+import { PhoneHome } from '../src/ui/PhoneHome';
+import { ProjectRail, onMac } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SessionList, WidthGrip } from '../src/ui/SessionList';
 import {
@@ -267,6 +268,11 @@ async function mount(node: preact.ComponentChild) {
   await act(async () => render(node, root));
 }
 
+/** The window's width for the app's media queries: happy-dom's own 1024 px is the narrow
+ *  layout (900–1079 px), a desktop is wider. */
+const windowWidth = (width: number) =>
+  (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width });
+
 const groups = () =>
   [...root.querySelectorAll('.session-group')].map((g) => [
     g.querySelector('.group-label')!.textContent,
@@ -274,6 +280,17 @@ const groups = () =>
     g.querySelector('.group-count')?.textContent,
     [...g.querySelectorAll('.session-title')].map((t) => t.textContent),
   ]);
+
+/** A phone's first screen, the Projects view: the names in a group (`wait`, `run`,
+ *  `favorites`, `all`), a project's row in "All projects" and its marks — how many of its
+ *  sessions run, wait for the user and have unread events. */
+const phoneNames = (group: string) =>
+  [...root.querySelectorAll(`.phone-home .group-${group} a.phone-project .phone-project-name`)].map((n) => n.textContent);
+const phoneRow = (name: string) =>
+  [...root.querySelectorAll<HTMLElement>('.phone-home .group-all a.phone-project')].find(
+    (r) => r.querySelector('.phone-project-name')!.textContent === name,
+  )!;
+const phoneMarks = (name: string) => [...phoneRow(name).querySelectorAll('[aria-label]')].map((m) => m.getAttribute('aria-label'));
 
 /** A right click on a row (a long press on a phone does the same): its menu. */
 const menuOf = (title: string, x = 40, y = 120) =>
@@ -1087,8 +1104,13 @@ describe('ProjectRail', () => {
       [true, false],
       [false, true],
     ]);
-    await mount(<SessionList app={app} phone />);
-    expect([...root.querySelectorAll('.chips .chip.project-row')].map((c) => !!c.querySelector('.chip-unread'))).toEqual([true, false]);
+    // A phone's first screen: a bold name and how many sessions have unread events, beside the
+    // other marks.
+    await mount(<PhoneHome app={app} />);
+    expect(['Personal', 'physics-mp'].map((n) => [phoneMarks(n), phoneRow(n).classList.contains('has-unread')])).toEqual([
+      [['unread: 1'], true],
+      [['running: 2', 'needs you: 1', 'unread: 5'], true],
+    ]);
     app.sessions.set('notes', { ...app.sessions.get('notes')!, unread: 0 });
     await mount(<ProjectRail app={app} />);
     // Archived and service sessions do not count.
@@ -1110,11 +1132,10 @@ describe('ProjectRail', () => {
     expect(marks()).toEqual(['rail-run', null]);
     expect(root.querySelector('.rail-run')!.getAttribute('aria-label')).toBe('working');
     expect(root.querySelectorAll('.rail-item')[1].querySelectorAll('[aria-label]')).toHaveLength(1);
-    await mount(<SessionList app={app} phone />);
-    const chips = () =>
-      [...root.querySelectorAll('.chips .chip.project-row')].map((c) => c.querySelector('.chip-badge, .chip-run, .chip-unread, .chip-idle')?.className);
-    expect(chips()).toEqual(['chip-run', 'chip-idle']);
-    expect(root.querySelector<HTMLElement>('.chip-run')!.style.background).toBe('#8A93A6');
+    // A phone's first screen: Personal runs one (and has one unread), physics-mp has no mark.
+    await mount(<PhoneHome app={app} />);
+    expect(['Personal', 'physics-mp'].map(phoneMarks)).toEqual([['running: 1', 'unread: 1'], []]);
+    expect(phoneNames('run')).toEqual(['Personal']);
     // Queued input works too; a session waiting for you wins over a working one.
     app.sessions.set('det', { ...app.sessions.get('det')!, state: 'queued' });
     await mount(<ProjectRail app={app} />);
@@ -1221,7 +1242,7 @@ describe("the project bar's order", () => {
       for (let i = 0; i < 20; i++) await Promise.resolve();
     });
 
-  it('Custom, Name, Recent: the favorites first in each, on the bar and in the phone chips', async () => {
+  it("Custom, Name, Recent: the favorites first in each, on the bar and on a phone's first screen", async () => {
     await mount(<ProjectRail app={sortApp('custom').app} />);
     expect(bar()).toEqual(['Boards', 'Arduino', 'Personal', 'physics-mp', 'kiln', 'board10', 'board9']);
     // By the shown name, whatever its case, a number in it by its value.
@@ -1232,16 +1253,9 @@ describe("the project bar's order", () => {
     const { app } = sortApp('recent');
     await mount(<ProjectRail app={app} />);
     expect(bar()).toEqual(['Arduino', 'Boards', 'physics-mp', 'kiln', 'Personal', 'board9', 'board10']);
-    await mount(<SessionList app={app} phone />);
-    expect([...root.querySelectorAll('.chips .chip.project-row')].map((c) => c.getAttribute('aria-label'))).toEqual([
-      'Arduino',
-      'Boards',
-      'physics-mp',
-      'kiln',
-      'Personal',
-      'board9',
-      'board10',
-    ]);
+    await mount(<PhoneHome app={app} />);
+    expect(phoneNames('all')).toEqual(['Arduino', 'Boards', 'physics-mp', 'kiln', 'Personal', 'board9', 'board10']);
+    expect(phoneNames('favorites')).toEqual(['Arduino', 'Boards']);
   });
 
   it('the order menu: a pick goes to the hub, the bar follows its answer', async () => {
@@ -1985,32 +1999,70 @@ describe('loading a chat ahead', () => {
 });
 
 describe('SessionList (phone)', () => {
-  it('one screen: projects as chips, the same groups, a floating "New"', async () => {
+  it('a project\'s screen: one header row — "‹", the name, search, State, "⋯", "+" — then the groups; no chips, gear or floating "New"', async () => {
     await mount(<SessionList app={makeApp()} phone />);
-    expect(root.querySelector('.m-head h1')!.textContent).toBe('Sessions');
-    const chips = [...root.querySelectorAll('.chips .chip.project-row')];
-    // T49: the icon before the name; without one a dot of the project's color.
-    expect(chips.map((c) => c.textContent)).toEqual(['Personal', '⚛️physics-mp1']);
-    expect(chips[0].querySelector<HTMLElement>('.chip-dot')!.style.background).toBe('#8A93A6');
-    expect(root.querySelector('.chip.is-current .chip-badge')!.textContent).toBe('1');
-    expect(groups().map((g) => g[0])).toEqual(['Needs you', 'Running', 'Idle · Yesterday', 'Idle · Last 7 days']);
-    expect(root.querySelector('.fab')!.textContent).toBe('New');
-    // The desktop's header, workers line, pinned favorites and width handle are not here.
-    expect(root.querySelector('.side-head, .wline, .fav-pinned, .col-grip')).toBeNull();
+    const head = root.querySelector('.sessions-phone > .side-head')!;
+    expect([...head.children].map((c) => c.getAttribute('aria-label') ?? c.textContent)).toEqual([
+      'Back to projects',
+      'physics-mp',
+      'Search sessions and messages',
+      'Session order: State',
+      'Project: settings, favorites, archive',
+      'New session',
+    ]);
+    expect(head.querySelector('.btn-back')!.getAttribute('href')).toBe('#/');
     // The search is a screen of its own (T33, tests/search.test.tsx).
-    expect(root.querySelector('input[aria-label="Search sessions"]')).toBeNull();
-    expect(root.querySelector('a[aria-label="Search sessions and messages"]')!.getAttribute('href')).toBe('#/search');
+    expect(head.querySelector('.btn-search')!.getAttribute('href')).toBe('#/search');
+    expect(groups().map((g) => g[0])).toEqual(['Needs you', 'Running', 'Idle · Yesterday', 'Idle · Last 7 days']);
+    // Gone: the project chips, the gear, the order switch, the floating "New" and the workers
+    // (on the first screen now); the desktop's workers line and width handle are not here.
+    expect(root.querySelector('.chips, .m-head, a.btn-project-settings, .seg-group, .fab, .worker-list, .wline, .col-grip')).toBeNull();
+    // Two lines a row, as in the desktop's Spacious column: the title and the state.
+    expect(rowOf('Network sync').querySelector('.session-sub')!.textContent).toBe('Waiting for reply');
+    expect(root.querySelector('.session-where')).toBeNull();
     expect(root.querySelector('.session-item button')).toBeNull();
     expect(root.querySelector('.list-hint')!.textContent).toBe('Press and hold a session to archive, rename or delete it.');
   });
 
-  it('keeps its rows as they are in the Compact look: their state and place stay visible, no tooltip', async () => {
-    const app = makeApp();
+  it('"⋯" is the project\'s menu — settings, favorites, archive — and a tap beside it only closes it; "+" opens a new session', async () => {
+    const api = {
+      ...hubApi(),
+      archiveProject: vi.fn(async (id: string) => app.archivedProjects.get(id)!),
+    };
+    const app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+    await mount(<SessionList app={app} phone />);
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    expect(menuItems()).toEqual(['Open in new tab', 'Add to favorites', 'Project settings…', 'Archive project', 'Delete project…']);
+    expect(root.querySelector('.menu .btn-project-settings')!.getAttribute('href')).toBe('#/p/p1/settings');
+    expect(root.querySelector('.menu-scrim')).not.toBeNull();
+    await click(root.querySelector('.menu .btn-favorite'));
+    expect(api.setProjectFavorite).toHaveBeenCalledWith('p1', true);
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    await click(root.querySelector('.menu .btn-archive-project'));
+    expect(api.archiveProject).toHaveBeenCalledWith('p1');
+    // A phone goes to the projects screen, where its Undo is.
+    expect(location.hash).toBe('#/');
+    // The order menu too has the layer.
+    await click(root.querySelector('.side-head .btn-mode'));
+    expect(root.querySelector('.menu-scrim')).not.toBeNull();
+    await pressKey('Escape');
+    await click(root.querySelector('.side-head .btn-new-session'));
+    expect(location.hash).toBe('#/p/p0/new');
+    location.hash = '';
+  });
+
+  it('in the Compact look its rows are one line, the subagents after the title, no tooltip', async () => {
+    const app = makeApp(LIST.map((s) => (s.id === 'stones' ? { ...s, subagents: 2 } : s)));
     app.me = { ...app.me!, look: 'compact' };
     await mount(<SessionList app={app} phone />);
     const rows = [...root.querySelectorAll('.session-row')];
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.filter((r) => r.hasAttribute('title'))).toEqual([]);
+    expect(rowOf('Stone textures').querySelector('.session-top .session-ag')!.textContent).toBe('2 agents');
+    // Spacious keeps it on the state line.
+    app.me = { ...app.me!, look: 'spacious' };
+    await mount(<SessionList app={app} phone />);
+    expect(rowOf('Stone textures').querySelector('.session-ag')).toBeNull();
   });
 
   it('a long press opens the same menu at the press point: Archive with Undo, Delete in a second step (T50)', async () => {
@@ -2095,12 +2147,12 @@ describe('SessionList (phone)', () => {
     expect(root.querySelector('.menu-scrim')).toBeNull();
   });
 
-  it('Reorder puts the handle on the right of the row', async () => {
+  it('Reorder, from the order menu, puts the handle on the right of the row', async () => {
     await mount(<SessionList app={makeApp()} phone />);
-    await click(root.querySelector('.btn-reorder'));
+    await startReorder();
     const item = rowOf('Network sync');
     expect(item.lastElementChild!.classList.contains('grip')).toBe(true);
-    expect(root.querySelector('.fab')).toBeNull();
+    expect(root.querySelector('.side-head + .side-tools .reorder-bar')).not.toBeNull();
     expect(root.querySelector('.list-hint')!.textContent).toBe('Drag the handle on the right. Done saves the order and switches to Custom.');
   });
 });
@@ -2144,10 +2196,11 @@ describe('favorites', () => {
     expect(root.querySelector('.group-favorites')).toBeNull();
   });
 
-  it('on a phone the favorites are the first group of the scrolling list', async () => {
+  it("on a phone's project screen too they are pinned over the scrolling list", async () => {
     await mount(<SessionList app={makeApp(LIST.map((s) => (s.id === 'cave' ? { ...s, favorite_at: at(30) } : s)))} phone />);
-    expect(root.querySelector('.session-scroll > .group-favorites')).not.toBeNull();
-    expect(root.querySelector('.fav-pinned')).toBeNull();
+    expect(root.querySelector('.sessions-phone > .fav-pinned.group-favorites')).not.toBeNull();
+    expect(root.querySelector('.session-scroll .group-favorites')).toBeNull();
+    expect(root.querySelector('.fav-pinned .group-pin svg')).not.toBeNull();
   });
 
   it("the row's menu adds a session to the favorites and takes it out; the summary of another device too", async () => {
@@ -2821,8 +2874,11 @@ describe('a new session', () => {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     });
 
+  // A desktop window: the column with its "+" beside the chat.
+  beforeEach(() => windowWidth(1280));
   afterEach(() => {
     location.hash = '';
+    windowWidth(1024);
   });
 
   it('one press of "+" opens its window: nothing on the hub, the caret in its input, the defaults on its chips, "Draft" on top of the list', async () => {
@@ -2999,7 +3055,7 @@ describe('a new session', () => {
     expect(api.uploadArtifact).not.toHaveBeenCalled();
   });
 
-  it("after the switch the caret is in the chat's input; the chat opened again later does not take it", async () => {
+  it("after the switch the caret is in the chat's input, and again when the chat is opened later", async () => {
     const { app } = draftApp();
     location.hash = '#/p/p1/new';
     await mount(<App app={app} />);
@@ -3009,13 +3065,13 @@ describe('a new session', () => {
     await settle();
     expect(location.hash).toBe('#/s/fresh');
     expect(document.activeElement).toBe(chatInput());
-    // Handed over once: another visit to the chat finds the focus where it is.
+    // On a computer every chat opened has the caret in its input, as in the VS Code tab.
     location.hash = '#/s/net';
     await settle();
     (document.activeElement as HTMLElement | null)?.blur();
     location.hash = '#/s/fresh';
     await settle();
-    expect(document.activeElement).not.toBe(chatInput());
+    expect(document.activeElement).toBe(chatInput());
   });
 
   it('the caret is handed once: the input shown again in the same chat (after a lock) does not take it', async () => {
@@ -3144,5 +3200,519 @@ describe('a new session', () => {
     expect(api.uploadArtifact).toHaveBeenCalledWith(expect.any(Blob), 'notes.txt');
     expect(api.input).toHaveBeenCalledWith('fresh', 'Build it', expect.any(String), ['art-notes.txt']);
     expect(location.hash).toBe('#/s/fresh');
+  });
+});
+
+// The new screen, stage 5: a window 900–1079 px wide has no session column in the grid;
+// "Sessions" at the left of the chat's header (or ⌘\, Ctrl+\ off a Mac) slides the same column
+// out over the chat, and it goes away by itself.
+describe('a window 900–1079 px wide', () => {
+  /** "Network sync" waits on a Bash request whose card has Enter and Esc. */
+  const wire = JSON.parse(readFileSync(join(import.meta.dirname, '../../crates/hqc-proto/examples/wire/event.approval.request.json'), 'utf8'));
+  const request = parseEvent({ ...wire, session_id: 'net', seq: 1, payload: { ...wire.payload, expires_at: '2026-12-01T00:00:00Z' } });
+  function narrowApp() {
+    const api = {
+      ...hubApi(),
+      eventsBefore: vi.fn(async (id: string) =>
+        id === 'net' ? { events: [request], invalid: [], maxSeq: 1, minSeq: 1, count: 1 } : { events: [], invalid: [], maxSeq: 0, count: 0 },
+      ),
+      readCursor: vi.fn(async () => {}),
+      approve: vi.fn(async () => {}),
+    };
+    const app = makeApp(LIST, api);
+    Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+    return { app, api };
+  }
+  /** The app on `hash`, the chat's first page in. */
+  async function open(app: AppState, hash: string) {
+    location.hash = hash;
+    await mount(<App app={app} />);
+    await settle();
+  }
+  /** The hash change and the hub's (mocked) replies. */
+  const settle = () =>
+    act(async () => {
+      for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+    });
+  const go = async (hash: string) => {
+    await act(async () => void (location.hash = hash));
+    await settle();
+  };
+  const sessionsButton = () => root.querySelector<HTMLButtonElement>('.main .chat-head .btn-sessions');
+  const slid = () => root.querySelector<HTMLElement>('.layout > .sidebar-slide');
+  const scrim = () => root.querySelector<HTMLElement>('.layout > .sessions-scrim');
+  /** ⌘\ on a Mac, Ctrl+\ elsewhere, pressed where the focus is. */
+  const toggleKey = () =>
+    act(async () => {
+      const mac = onMac();
+      (document.activeElement ?? document).dispatchEvent(
+        new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: mac, ctrlKey: !mac, bubbles: true, cancelable: true }),
+      );
+    });
+
+  beforeEach(() => windowWidth(1000));
+  afterEach(() => {
+    location.hash = '';
+    windowWidth(1024);
+  });
+
+  it('no column in the grid: "Sessions" at the left of the header, with the count of the sessions that wait for you', async () => {
+    const { app } = narrowApp();
+    await open(app, '#/s/stones');
+    const layout = root.querySelector('.layout')!;
+    expect(layout.classList.contains('layout-narrow')).toBe(true);
+    expect(root.querySelector('.sidebar, .col-grip, .session-row')).toBeNull();
+    const button = sessionsButton()!;
+    expect(button.nextElementSibling!.classList.contains('chat-head-main')).toBe(true);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    // "Network sync" waits: the rail badge's count.
+    expect(button.textContent).toBe('Sessions1');
+    expect(button.querySelector('.sessions-waiting')!.textContent).toBe('1');
+    expect(root.querySelector('.rail-badge')!.textContent).toBe('1');
+    // No one waits: no count.
+    await act(async () => {
+      app.sessions.set('net', { ...app.sessions.get('net')!, state: 'idle' });
+      (app as unknown as { changed(): void }).changed();
+    });
+    expect(sessionsButton()!.textContent).toBe('Sessions');
+    expect(sessionsButton()!.querySelector('.sessions-waiting')).toBeNull();
+    // A new session's window has it too, and a project with nothing to reopen.
+    await go('#/p/p1/new');
+    expect(root.querySelector('.main .chat-new .chat-head .btn-sessions')).not.toBeNull();
+    await go('#/p/p0');
+    expect(root.querySelector('.main > .chat-head .btn-sessions')).not.toBeNull();
+    expect(root.querySelector('.main > .placeholder')).not.toBeNull();
+  });
+
+  it('"Sessions" slides the column out over the chat, pressed while it is out; a click beside it puts it away', async () => {
+    const { app } = narrowApp();
+    await open(app, '#/s/stones');
+    await click(sessionsButton());
+    expect(sessionsButton()!.getAttribute('aria-expanded')).toBe('true');
+    expect(sessionsButton()!.classList.contains('is-on')).toBe(true);
+    expect(scrim()).not.toBeNull();
+    // The desktop column's list, the open chat its current row.
+    expect(slid()!.classList.contains('sidebar')).toBe(true);
+    expect(slid()!.querySelector('.session-row.is-current .session-title')!.textContent).toBe('Stone textures');
+    expect(slid()!.querySelector('.side-head .btn-new-session')).not.toBeNull();
+    await click(scrim());
+    expect(slid()).toBeNull();
+    expect(scrim()).toBeNull();
+    expect(sessionsButton()!.getAttribute('aria-expanded')).toBe('false');
+    // The button slides it out and back.
+    await click(sessionsButton());
+    expect(slid()).not.toBeNull();
+    await click(sessionsButton());
+    expect(slid()).toBeNull();
+  });
+
+  it('picking a session puts it away, and so does any other address', async () => {
+    const { app } = narrowApp();
+    await open(app, '#/s/stones');
+    // The open session's own row: the address stays, the column goes away all the same.
+    await click(sessionsButton());
+    await click(slid()!.querySelector('a.session-row.is-current'));
+    await settle();
+    expect(location.hash).toBe('#/s/stones');
+    expect(slid()).toBeNull();
+    await click(sessionsButton());
+    await click(rowOf('Cave scene port').querySelector('a.session-row'));
+    await settle();
+    expect(location.hash).toBe('#/s/cave');
+    expect(root.querySelector('.chat-title')!.textContent).toBe('Cave scene port');
+    expect(slid()).toBeNull();
+    expect(scrim()).toBeNull();
+    // "+" of the column: the new session's window, the column away.
+    await click(sessionsButton());
+    await click(slid()!.querySelector('.side-head .btn-new-session'));
+    await settle();
+    expect(location.hash).toBe('#/p/p1/new');
+    expect(slid()).toBeNull();
+    // On the new session's window, its own Draft row and "+" (the same address) too.
+    await click(sessionsButton());
+    await click(slid()!.querySelector('a.session-row.is-draft'));
+    await settle();
+    expect(location.hash).toBe('#/p/p1/new');
+    expect(slid()).toBeNull();
+    await click(sessionsButton());
+    await click(slid()!.querySelector('.side-head .btn-new-session'));
+    await settle();
+    expect(location.hash).toBe('#/p/p1/new');
+    expect(slid()).toBeNull();
+  });
+
+  it('Esc on the search page puts the column away and stays on the page', async () => {
+    const { app } = narrowApp();
+    await open(app, '#/search');
+    // The focus is in the page's field, which takes Esc to go back.
+    expect(root.querySelector('.main')!.contains(document.activeElement)).toBe(true);
+    await toggleKey();
+    expect(slid()).not.toBeNull();
+    // Esc is taken, else the browser would clear the field it is pressed in.
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    await act(async () => void document.activeElement!.dispatchEvent(esc));
+    expect(slid()).toBeNull();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(location.hash.startsWith('#/search')).toBe(true);
+  });
+
+  it('⌘\\ (Ctrl+\\ off a Mac) slides it out and back, from anywhere', async () => {
+    const { app } = narrowApp();
+    await open(app, '#/s/stones');
+    await toggleKey();
+    expect(slid()).not.toBeNull();
+    expect(sessionsButton()!.getAttribute('aria-expanded')).toBe('true');
+    await toggleKey();
+    expect(slid()).toBeNull();
+    // With the column away Esc is left to the page.
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    await act(async () => void document.body.dispatchEvent(esc));
+    expect(esc.defaultPrevented).toBe(false);
+    // From the chat's input too.
+    await act(async () => root.querySelector<HTMLTextAreaElement>('.composer-input')!.focus());
+    await toggleKey();
+    expect(slid()).not.toBeNull();
+  });
+
+  it('Esc puts it away; an Esc a menu of the list takes closes that menu only', async () => {
+    const { app } = narrowApp();
+    await open(app, '#/s/stones');
+    await click(sessionsButton());
+    // A row's menu, its first item focused.
+    await menuOf('Cave scene port');
+    expect(root.querySelector('.ctx-menu')).not.toBeNull();
+    await pressKey('Escape');
+    expect(root.querySelector('.ctx-menu')).toBeNull();
+    expect(slid()).not.toBeNull();
+    // The workers' list at the column's foot.
+    await click(slid()!.querySelector('.wline'));
+    expect(root.querySelector('.wline-pop')).not.toBeNull();
+    await pressKey('Escape');
+    expect(root.querySelector('.wline-pop')).toBeNull();
+    expect(slid()).not.toBeNull();
+    (document.activeElement as HTMLElement).blur();
+    await pressKey('Escape');
+    expect(slid()).toBeNull();
+    expect(scrim()).toBeNull();
+  });
+
+  it("Esc over a chat with a pending request puts the column away and does not answer the request", async () => {
+    const { app, api } = narrowApp();
+    await open(app, '#/s/net');
+    expect(root.querySelector('.perm.is-open')).not.toBeNull();
+    await click(sessionsButton());
+    (document.activeElement as HTMLElement).blur();
+    await pressKey('Escape');
+    expect(slid()).toBeNull();
+    expect(api.approve).not.toHaveBeenCalled();
+    // The column away, the card has its keys again.
+    await pressKey('Escape');
+    expect(api.approve.mock.calls[0].slice(0, 3)).toEqual(['net', 'req-1', 'deny']);
+  });
+
+  it('only from 900 to 1079 px: narrower the phone, wider the desktop as it was', async () => {
+    const { app } = narrowApp();
+    location.hash = '#/s/stones';
+    for (const [width, kind] of [
+      [899, 'phone'],
+      [900, 'narrow'],
+      [1079, 'narrow'],
+      [1080, 'desktop'],
+    ] as const) {
+      windowWidth(width);
+      await mount(<App app={app} />);
+      await settle();
+      const cls = root.querySelector('.layout')!.classList;
+      expect([cls.contains('layout-phone'), cls.contains('layout-narrow')], `${width}`).toEqual([kind === 'phone', kind === 'narrow']);
+      expect(!!root.querySelector('.btn-sessions'), `${width}`).toBe(kind === 'narrow');
+      expect(!!root.querySelector('.layout > .sidebar'), `${width}`).toBe(kind === 'desktop');
+      render(null, root);
+    }
+    // The desktop, here without `matchMedia`: the column and its grip in the grid, no
+    // "Sessions", and ⌘\ slides nothing out.
+    vi.stubGlobal('matchMedia', undefined);
+    try {
+      await mount(<App app={app} />);
+      await settle();
+      expect(root.querySelector('.layout')!.className).toBe('layout route-session');
+      expect(root.querySelector('.layout > .sidebar')).not.toBeNull();
+      expect(root.querySelector('.layout > .col-grip')).not.toBeNull();
+      expect(root.querySelector('.btn-sessions')).toBeNull();
+      // ⌘\ is not taken: the key stays the page's.
+      const press = new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', metaKey: onMac(), ctrlKey: !onMac(), bubbles: true, cancelable: true });
+      await act(async () => void document.dispatchEvent(press));
+      expect(press.defaultPrevented).toBe(false);
+      await toggleKey();
+      expect(root.querySelector('.sidebar-slide, .sessions-scrim')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("Settings' arrow goes back to the address before it, past its worker-code page", async () => {
+    const { app, api } = narrowApp();
+    Object.assign(api, {
+      workers: vi.fn(async () => []),
+      enrollInfo: vi.fn(async () => ({})),
+      search: vi.fn(async () => ({ results: [], also: [] })),
+    });
+    await open(app, '#/s/stones');
+    await go('#/settings');
+    const back = () => root.querySelector('.page .bar .back')!.getAttribute('href');
+    expect(back()).toBe('#/s/stones');
+    await go('#/enroll');
+    await go('#/settings');
+    expect(back()).toBe('#/s/stones');
+    // From the search, with the query it keeps in the address without a hash change; the
+    // search's own arrow then skips Settings.
+    await go('#/search');
+    history.replaceState(null, '', '#/search?q=kiln');
+    await go('#/settings');
+    expect(back()).toBe('#/search?q=kiln');
+    await go('#/search?q=kiln');
+    expect(root.querySelector('.sp-back')!.getAttribute('href')).toBe('#/s/stones');
+    // From "#/", an empty placeholder on a computer: the current project.
+    await go('#/');
+    await go('#/settings');
+    expect(back()).toBe('#/p/p1');
+  });
+});
+
+// The new screen, stage 6: a phone (< 900 px). `#/` lists the projects — Needs you, Running,
+// Favorites, All projects — or, from the title's menu, every project's sessions by state;
+// `#/p/<id>` is one project's sessions under one header row. The look is the account's.
+describe('a phone (< 900 px)', () => {
+  const project = (id: string, name: string, more: Partial<Project> = {}): Project => ({
+    id,
+    name,
+    slug: name,
+    description: '',
+    is_personal: false,
+    color: 'moss',
+    created_at: at(80),
+    ...more,
+  });
+  /** physics-mp (LIST) has one session waiting and two running; boards, a favorite, an idle one
+   *  with unread events; kiln two at work (one by a subagent after its turn) and an archived
+   *  one; Personal only the workers' service sessions. */
+  function phoneApp(look: 'compact' | 'spacious' = 'spacious') {
+    const api = {
+      ...hubApi(),
+      eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+      readCursor: vi.fn(async () => {}),
+    };
+    const app = makeApp(
+      [
+        ...LIST,
+        sess('etch', 'Etching', 'idle', at(3), { project_id: 'p2', unread: 4 }),
+        sess('fire', 'Firing curve', 'running', at(0.5), { project_id: 'p3', subagents: 1 }),
+        sess('glaze', 'Glaze test', 'idle', at(0.3), { project_id: 'p3', subagents: 2 }),
+        sess('old', 'Old kiln log', 'archived', at(0.4), { project_id: 'p3' }),
+      ],
+      api as unknown as ReturnType<typeof hubApi>,
+    );
+    app.me = { ...app.me!, look };
+    app.projects.set('p2', project('p2', 'boards', { favorite_at: at(5) }));
+    app.projects.set('p3', project('p3', 'kiln', { color: 'coral' }));
+    Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+    return { app, api };
+  }
+  /** The hash change and the hub's (mocked) replies. */
+  const settle = () =>
+    act(async () => {
+      for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+    });
+  async function open(app: AppState, hash: string) {
+    location.hash = hash;
+    await mount(<App app={app} />);
+    await settle();
+  }
+  const go = async (hash: string) => {
+    await act(async () => void (location.hash = hash));
+    await settle();
+  };
+  const viewTitle = () => root.querySelector('.phone-home > .side-head .phone-view')!.textContent;
+
+  beforeEach(() => windowWidth(390));
+  afterEach(() => {
+    location.hash = '';
+    windowWidth(1024);
+    // The look App put on the root.
+    document.documentElement.className = '';
+  });
+
+  it("`#/` is the projects: Needs you, Running, Favorites, then all of them in the bar's order and \"New project\"; a tap opens one", async () => {
+    const { app } = phoneApp();
+    await open(app, '#/');
+    expect(root.querySelector('.layout')!.classList.contains('layout-phone')).toBe(true);
+    // One header row: the view's title, the search, the settings and who is signed in.
+    const head = root.querySelector('.phone-home > .side-head')!;
+    expect(viewTitle()).toBe('Projects');
+    expect(head.querySelector('.btn-search')!.getAttribute('href')).toBe('#/search');
+    expect(head.querySelector('.btn-settings')!.getAttribute('href')).toBe('#/settings');
+    expect(head.querySelector('.avatar')!.getAttribute('title')).toBe('who@example.com');
+    expect([...root.querySelectorAll('.phone-home .group-head')].map((h) => h.textContent)).toEqual([
+      'Needs you1',
+      'Running1',
+      'Favorites1',
+      'All projects4',
+    ]);
+    expect(phoneNames('wait')).toEqual(['physics-mp']);
+    // physics-mp runs too, but it is under Needs you already.
+    expect(phoneNames('run')).toEqual(['kiln']);
+    expect(phoneNames('favorites')).toEqual(['boards']);
+    expect(phoneNames('all')).toEqual(['boards', 'Personal', 'physics-mp', 'kiln']);
+    // A row: how many run, how many wait, how many have unread events (bold then); archived and
+    // service sessions do not count.
+    expect(['boards', 'Personal', 'physics-mp', 'kiln'].map(phoneMarks)).toEqual([['unread: 1'], [], ['running: 2', 'needs you: 1'], ['running: 2']]);
+    expect(['boards', 'kiln'].map((n) => phoneRow(n).classList.contains('has-unread'))).toEqual([true, false]);
+    expect(root.querySelector('.group-all li:last-child .btn-new-project')!.textContent).toBe('New project');
+    // The workers: one line at the bottom, their list above it on a press.
+    expect(root.querySelector('.phone-home > .wline-box .wline-count')!.textContent).toBe('1 worker online');
+    expect(root.querySelector('.worker-list')).toBeNull();
+    expect(root.querySelector('.session-row, .chips, .fab')).toBeNull();
+
+    await click(phoneRow('physics-mp'));
+    await settle();
+    expect(location.hash).toBe('#/p/p1');
+    expect(root.querySelector('.phone-home')).toBeNull();
+    expect(root.querySelector('.sessions-phone > .side-head .project-title')!.textContent).toBe('physics-mp');
+    await click(root.querySelector('.side-head .btn-back'));
+    await settle();
+    expect(location.hash).toBe('#/');
+    expect(viewTitle()).toBe('Projects');
+  });
+
+  it("the title's menu: Projects or Sessions — every project's live sessions by state, each with its project's tile; the pick lasts until the page is reloaded", async () => {
+    const { app } = phoneApp();
+    await open(app, '#/');
+    await click(root.querySelector('.phone-view'));
+    expect([...root.querySelectorAll('.menu .menu-item')].map((b) => [b.textContent, b.getAttribute('aria-checked')])).toEqual([
+      ['Projects', 'true'],
+      ['Sessionsevery project, by state', 'false'],
+    ]);
+    expect(root.querySelector('.menu-scrim')).not.toBeNull();
+    await click(root.querySelector('.menu .btn-view-sessions'));
+    expect(viewTitle()).toBe('Sessions');
+    expect(root.querySelector('.phone-project')).toBeNull();
+    // As State groups a project's list: the archived and the service sessions left out.
+    expect(groups()).toEqual([
+      ['Needs you', '1', ['Network sync']],
+      ['Running', '4', ['Stone textures', 'Step determinism', 'Glaze test', 'Firing curve']],
+      ['Idle · Today', '1', ['Etching']],
+      ['Idle · Yesterday', '1', ['Collision profiling']],
+      ['Idle · Last 7 days', '1', ['Cave scene port']],
+    ]);
+    const tile = (title: string) => rowOf(title).querySelector('.session-row > .phone-tile')!.getAttribute('aria-label');
+    expect(['Network sync', 'Glaze test', 'Etching'].map(tile)).toEqual(['physics-mp', 'kiln', 'boards']);
+    expect(rowOf('Etching').querySelector('a.session-row')!.getAttribute('href')).toBe('#/s/etch');
+
+    // A project and back: still Sessions; nothing of it is stored.
+    await go('#/p/p3');
+    expect(root.querySelector('.phone-home')).toBeNull();
+    await go('#/');
+    expect(viewTitle()).toBe('Sessions');
+    const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+    expect(keys.filter((k) => /view|phone/i.test(k ?? ''))).toEqual([]);
+    expect(phoneApp().app.phoneView).toBe('projects');
+    // A tap opens the session; its "‹" leads to its project.
+    await click(rowOf('Network sync').querySelector('a.session-row'));
+    await settle();
+    expect(location.hash).toBe('#/s/net');
+    expect(root.querySelector('.chat-title')!.textContent).toBe('Network sync');
+    expect(root.querySelector('.chat-head .back')!.getAttribute('href')).toBe('#/p/p1');
+    await go('#/');
+    await click(root.querySelector('.phone-view'));
+    await click(root.querySelector('.menu .btn-view-projects'));
+    expect(viewTitle()).toBe('Projects');
+    expect(phoneNames('all')).toHaveLength(4);
+  });
+
+  it('`#/p/<id>` is the project: its favorites pinned over the groups; "+" opens its new session', async () => {
+    const { app } = phoneApp();
+    app.sessions.set('cave', { ...app.sessions.get('cave')!, favorite_at: at(1) });
+    await open(app, '#/p/p1');
+    expect(root.querySelector('.layout > .sessions-phone > .side-head .project-title')!.textContent).toBe('physics-mp');
+    expect(root.querySelector('.sessions-phone > .fav-pinned .session-title')!.textContent).toBe('Cave scene port');
+    expect(groups().map((g) => g[0])).toEqual(['Favorites', 'Needs you', 'Running', 'Idle · Yesterday']);
+    expect(root.querySelector('.phone-home, .chips, .fab, .wline')).toBeNull();
+    await click(root.querySelector('.side-head .btn-new-session'));
+    await settle();
+    expect(location.hash).toBe('#/p/p1/new');
+    expect(app.newSession?.projectId).toBe('p1');
+    expect(root.querySelector('.layout-phone > .main .chat-new')).not.toBeNull();
+  });
+
+  it('archiving the open project from its "⋯" goes to the projects, with Undo there', async () => {
+    const { app, api } = phoneApp();
+    const bar = [...app.projects.values()];
+    const unarchiveProject = vi.fn(async (_id: string) => {});
+    Object.assign(api, {
+      archiveProject: vi.fn(async (id: string) => ({ ...app.archivedProjects.get(id)! })),
+      unarchiveProject,
+      projects: vi.fn(async () => bar),
+    });
+    await open(app, '#/p/p3');
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    await click(root.querySelector('.menu .btn-archive-project'));
+    await settle();
+    expect(location.hash).toBe('#/');
+    expect(phoneNames('all')).toEqual(['boards', 'Personal', 'physics-mp']);
+    const toast = root.querySelector('.phone-home .toast-project')!;
+    expect(toast.querySelector('.toast-text')!.textContent).toBe('Archived «kiln»');
+    await click(toast.querySelector('.btn-undo'));
+    await settle();
+    expect(root.querySelector('.toast-project')).toBeNull();
+    expect(unarchiveProject).toHaveBeenCalledWith('p3');
+    expect(phoneNames('all')).toEqual(['boards', 'Personal', 'physics-mp', 'kiln']);
+    // The hub refuses an archive: the project is back, and why is said where the phone is.
+    Object.assign(api, { archiveProject: vi.fn(async () => Promise.reject(new Error('offline'))) });
+    await go('#/p/p3');
+    await click(root.querySelector('.side-head .btn-project-menu'));
+    await click(root.querySelector('.menu .btn-archive-project'));
+    await settle();
+    expect(location.hash).toBe('#/');
+    expect(root.querySelector('.phone-home .notice')!.textContent).toBe('Not archived «kiln»: offline');
+    expect(phoneNames('all')).toContain('kiln');
+  });
+
+  it("follows the account's look: Spacious, the counts under a project's name and the project and state under a session's title; Compact, one line", async () => {
+    const subs = () => [...root.querySelectorAll('.group-all a.phone-project')].map((r) => r.querySelector('.phone-project-sub')?.textContent ?? null);
+    await open(phoneApp('spacious').app, '#/');
+    expect(document.documentElement.classList.contains('list-compact')).toBe(false);
+    expect(subs()).toEqual([null, null, '1 waiting · 2 running', '2 running']);
+    expect(phoneRow('physics-mp').querySelector('.phone-project-sub')!.classList.contains('is-wait')).toBe(true);
+    await click(root.querySelector('.phone-view'));
+    await click(root.querySelector('.menu .btn-view-sessions'));
+    expect(rowOf('Network sync').querySelector('.session-sub')!.textContent).toBe('physics-mp · Waiting for reply');
+    expect(rowOf('Firing curve').querySelector('.session-sub')!.textContent).toBe('kiln · Running · 1 agent');
+    expect(root.querySelector('.session-ag')).toBeNull();
+
+    render(null, root);
+    const compact = phoneApp('compact').app;
+    await open(compact, '#/');
+    // The system font and the one-line list (styles.css below).
+    expect(['list-compact', 'font-system'].map((c) => document.documentElement.classList.contains(c))).toEqual([true, true]);
+    expect(subs()).toEqual([null, null, null, null]);
+    await click(root.querySelector('.phone-view'));
+    await click(root.querySelector('.menu .btn-view-sessions'));
+    expect(rowOf('Glaze test').querySelector('.session-top .session-ag')!.textContent).toBe('2 agents');
+    await go('#/p/p1');
+    expect(root.querySelector('.sessions-phone .session-row')).not.toBeNull();
+    expect(root.querySelectorAll('.sessions-phone .session-top .session-ag')).toHaveLength(0);
+    compact.sessions.set('stones', { ...compact.sessions.get('stones')!, subagents: 1 });
+    await act(async () => (compact as unknown as { changed(): void }).changed());
+    expect(rowOf('Stone textures').querySelector('.session-top .session-ag')!.textContent).toBe('1 agent');
+
+    const css = readFileSync(join(import.meta.dirname, '../src/styles.css'), 'utf8');
+    // Compact: a 36 px header, 22 px group lines (6 + 14 + 2), 30 px rows of one line, 18 px tiles.
+    expect(css).toMatch(/:root\.list-compact \.sessions-phone \.side-head \{\s*min-height: calc\(36px /);
+    expect(css).toMatch(/:root\.list-compact \.sessions-phone \.group-head \{\s*padding: 6px 12px 2px;[^}]*line-height: 14px;/);
+    expect(css).toMatch(/:root\.list-compact \.sessions-phone \.session-item > \.session-row \{[^}]*height: 30px;/);
+    expect(css).toMatch(/:root\.list-compact \.sessions-phone \.session-item \.session-sub \{\s*display: none;/);
+    expect(css).toMatch(/:root\.list-compact \.phone-project \{\s*height: 30px;/);
+    expect(css).toMatch(/:root\.list-compact \.phone-tile \{\s*width: 18px;/);
+    // Spacious: 42 px project tiles.
+    expect(css).toMatch(/\n\.phone-tile \{[^}]*width: 42px;/);
   });
 });

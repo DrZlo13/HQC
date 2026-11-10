@@ -43,6 +43,9 @@ export interface NewSessionDraft {
   started?: string;
 }
 
+/** What a phone's first screen lists: the projects, or every project's sessions by state. */
+export type PhoneView = 'projects' | 'sessions';
+
 /** Chats kept in memory, the most recently used: one of them opens again at once (SPEC §6). */
 const CHATS = 12;
 
@@ -158,6 +161,9 @@ export class AppState {
   listNotice: string | null = null;
   /** The new session open in the main column, one at a time; gone when it is left unsent. */
   newSession: NewSessionDraft | null = null;
+  /** The view a phone's first screen shows, picked from its title's menu; kept while the page
+   *  is open (a reload is back to Projects), not stored. */
+  phoneView: PhoneView = 'projects';
   /** What a new session's window hands to the chat that replaces it, taken once
    *  (`takeHandover`). */
   private handover: { id: string; files: OutgoingFile[] } | null = null;
@@ -692,6 +698,12 @@ export class AppState {
     this.changed();
   }
 
+  setPhoneView(view: PhoneView): void {
+    if (this.phoneView === view) return;
+    this.phoneView = view;
+    this.changed();
+  }
+
   /** Sessions of the project (the current one by default), newest activity first, without
    *  archived ones, the one waiting to be archived and the workers' service sessions
    *  (listed apart, SPEC §10.2). */
@@ -850,8 +862,8 @@ export class AppState {
     if (this.sessions.delete(id)) this.edited();
   }
 
-  /** The workers' service sessions (SPEC §10.2), by worker name: the "Workers" list (above a
-   *  desktop column's workers line, under a phone's sessions).
+  /** The workers' service sessions (SPEC §10.2), by worker name: the "Workers" list (above the
+   *  workers line at the bottom of a desktop column and of a phone's first screen).
    *  Revoking a worker archives its service session, so revoked workers are not listed. */
   workerSessions(): SessionInfo[] {
     return [...this.sessions.values()]

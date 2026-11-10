@@ -1902,6 +1902,54 @@ describe('the project bar: search, menu, archive', () => {
     expect(app.projects.has('p3')).toBe(false);
     expect(app.archivedProjects.has('p3')).toBe(true);
   });
+
+  it('a list read before the hub stored an archive or a restore is read again', async () => {
+    const { app, api } = railApp(true);
+    // The sessions' list of the next refresh waits for `land`.
+    const holdLists = () => {
+      let land!: () => void;
+      const gate = new Promise<void>((r) => (land = r));
+      api.allSessions.mockImplementationOnce(async () => {
+        await gate;
+        return LIST;
+      });
+      return land;
+    };
+    const lists = () => api.projects.mock.calls.length;
+    let answer!: () => void;
+    const stored = new Promise<void>((r) => (answer = r));
+    const archive = api.archiveProject.getMockImplementation()!;
+    api.archiveProject.mockImplementationOnce(async (id: string) => {
+      await stored;
+      return archive(id);
+    });
+    app.archiveProject('p4');
+    let land = holdLists();
+    const before = lists();
+    let refresh = app.refreshSessions();
+    // kiln is still among the projects the hub listed.
+    expect(lists()).toBe(before + 1);
+    answer();
+    await settle();
+    land();
+    await act(async () => {
+      await refresh;
+    });
+    expect(lists()).toBe(before + 2);
+    expect(app.projects.has('p4')).toBe(false);
+    expect(app.archivedProjects.has('p4')).toBe(true);
+
+    // A restore the hub stores while a list read before it is on its way.
+    land = holdLists();
+    refresh = app.refreshSessions();
+    await act(() => app.restoreProject('p9'));
+    land();
+    await act(async () => {
+      await refresh;
+    });
+    expect(app.projects.has('p9')).toBe(true);
+    expect(app.archivedProjects.has('p9')).toBe(false);
+  });
 });
 
 // SPEC §6: a session row or a project tile loads the newest page of its chat before the click.
@@ -3200,6 +3248,31 @@ describe('a new session', () => {
     expect(api.uploadArtifact).toHaveBeenCalledWith(expect.any(Blob), 'notes.txt');
     expect(api.input).toHaveBeenCalledWith('fresh', 'Build it', expect.any(String), ['art-notes.txt']);
     expect(location.hash).toBe('#/s/fresh');
+  });
+
+  it('a session made by its first message while the lists load is not dropped by them', async () => {
+    const { app, api } = draftApp();
+    let land!: () => void;
+    const gate = new Promise<void>((r) => (land = r));
+    // The first list is read before the hub made the session; the next one has it.
+    const lists = {
+      projects: vi.fn(async () => [...app.projects.values()]),
+      allSessions: vi.fn(async () => {
+        if (lists.allSessions.mock.calls.length > 1) return [...LIST, created()];
+        await gate;
+        return LIST;
+      }),
+    };
+    Object.assign(api, lists);
+    const refresh = app.refreshSessions();
+    app.openNewSession('p1');
+    const s = await app.startNewSession();
+    land();
+    await act(async () => {
+      await refresh;
+    });
+    expect(lists.allSessions).toHaveBeenCalledTimes(2);
+    expect(app.sessions.has(s.id)).toBe(true);
   });
 });
 

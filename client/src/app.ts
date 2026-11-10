@@ -618,7 +618,7 @@ export class AppState {
             this.archivedProjects.set(id, v);
           }
           // A list on its way was read before the hub stored it: it is read again.
-          this.changed();
+          this.edited();
         },
         (e: Error) => {
           this.archiving.delete(id);
@@ -657,9 +657,10 @@ export class AppState {
         const list = await this.api.projects();
         this.restoring.delete(id);
         this.archivedProjects.delete(id);
-        // Another one archived meanwhile is still on its way: it stays off the bar.
+        // Another one archived meanwhile is still on its way: it stays off the bar. A list on
+        // its way was read before the hub restored it: it is read again.
         this.putProjects(list);
-        this.changed();
+        this.edited();
       } finally {
         this.restoring.delete(id);
       }
@@ -1011,7 +1012,7 @@ export class AppState {
     this.sessions.set(s.id, s);
     // In the same change: the list never shows both the draft and its session.
     if (this.newSession === d) this.newSession = { ...d, started: s.id };
-    this.changed();
+    this.edited();
     return s;
   }
 

@@ -896,6 +896,37 @@ describe('the list on a reload', () => {
     expect([...app.sessions.keys()]).toEqual(LIST.map((s) => s.id));
   });
 
+  it('a summary pushed while the lists load is not undone by them', async () => {
+    // The lists left the hub with the session held in VS Code; it was closed there meanwhile.
+    const held = { ...LIST[0], held_by: { entrypoint: 'claude-vscode', status: 'idle' as const } };
+    let land!: () => void;
+    const api = {
+      ...hubApi(),
+      projects: vi.fn(async () => [...makeApp().projects.values()]),
+      allSessions: vi.fn(() => new Promise<SessionInfo[]>((r) => (land = () => r([held, ...LIST.slice(1)])))),
+      session: vi.fn(async (id: string) => ({ ...LIST.find((s) => s.id === id)!, held_by: undefined })),
+    };
+    const app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+    const refresh = app.refreshSessions();
+    await vi.waitFor(() => expect(api.allSessions).toHaveBeenCalled());
+    app.mergeSummary([
+      {
+        session_id: held.id,
+        project_id: held.project_id,
+        title: held.title,
+        state: held.state,
+        queue_len: 0,
+        unread: 0,
+        last_seq: 1,
+        last_read_seq: 1,
+      },
+    ]);
+    land();
+    await refresh;
+    expect(api.session).toHaveBeenCalledWith(held.id);
+    await vi.waitFor(() => expect(app.sessions.get(held.id)!.held_by).toBeUndefined());
+  });
+
   it('shows the remembered projects, sessions, order and current project before the hub answers', async () => {
     const mine = LIST.map((s) => ({ ...s, project_id: 'p0' }));
     const before = new AppState(

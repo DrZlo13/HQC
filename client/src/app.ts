@@ -79,6 +79,8 @@ export class AppState {
   private readonly listeners = new Set<() => void>();
   private readonly drafts = loadDrafts();
   private refreshing: Promise<void> | null = null;
+  /** The sessions the hub pushed a summary of while the lists were on their way. */
+  private pushedWhileRefreshing = new Set<string>();
 
   constructor(
     readonly api: Api,
@@ -207,6 +209,7 @@ export class AppState {
   async refreshSessions(): Promise<void> {
     if (!this.me) return;
     this.refreshing ??= (async () => {
+      this.pushedWhileRefreshing.clear();
       const [projects, sessions] = await Promise.all([this.api.projects(), this.api.allSessions()]);
       this.projects.clear();
       for (const p of projects) this.projects.set(p.id, p);
@@ -215,6 +218,9 @@ export class AppState {
       if (!this.currentProjectId || !this.projects.has(this.currentProjectId)) {
         this.currentProjectId = this.me!.personal_project_id;
       }
+      // A summary pushed meanwhile may be newer than the lists or older: the session itself,
+      // asked now, is newer than both ("closed in VS Code" would otherwise come back open).
+      for (const id of this.pushedWhileRefreshing) void this.refreshSession(id);
       this.rememberList();
       this.changed();
     })().finally(() => (this.refreshing = null));
@@ -235,6 +241,7 @@ export class AppState {
   mergeSummary(list: SessionSummary[]): void {
     let unknown = false;
     for (const s of list) {
+      if (this.refreshing) this.pushedWhileRefreshing.add(s.session_id);
       const known = this.sessions.get(s.session_id);
       if (!known) {
         unknown = true;

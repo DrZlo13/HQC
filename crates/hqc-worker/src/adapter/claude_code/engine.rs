@@ -15,7 +15,10 @@
 //!   subagent's report (`handback`) while the latest `background_tasks_changed` still holds the
 //!   subagent, or a task of it, is no end: the latest one is handled when the subagent stops
 //!   counting (below); a task gives one line, a later notification of it none;
-//!   `system` `compact_boundary` → `system context_compacted`;
+//!   `system` `compact_boundary` → `system context_compacted`, held until the summary the CLI
+//!   writes after it, the main agent's `user` line with `isSynthetic: true`, which gives its
+//!   text; another main agent's `user`, `assistant`, `stream_event` or `result` line first, or
+//!   the process's end, gives it "Context compacted";
 //! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
 //!   than `running` of the same `task_id`, a foreground one at the latest until the `result`,
@@ -174,6 +177,9 @@ pub struct Core {
     restricted: bool,
     /// The last assistant text: event id, text, and whether the CLI wrote it itself.
     held: Option<(Uuid, String, bool)>,
+    /// Event id of the `context_compacted` of a `compact_boundary`, held for the summary that
+    /// follows it ([`Core::release_compaction`]).
+    compaction: Option<Uuid>,
     /// `event_id` of the input of the turn: `in_reply_to` of agent messages once its echo has
     /// come ([`Core::reply_to`]).
     last_input: Option<Uuid>,
@@ -249,6 +255,7 @@ impl Core {
             session_id,
             restricted,
             held: None,
+            compaction: None,
             last_input: None,
             awaiting_echo: VecDeque::new(),
             wrote: false,
@@ -534,13 +541,15 @@ impl Core {
         Ok(vec![Action::Write(allow(request_id, &updated, None))])
     }
 
-    /// The process is gone: a held text is sent as is, open requests are dropped.
+    /// The process is gone: a held compaction and a held text are sent as they are, open
+    /// requests are dropped.
     pub fn on_exit(&mut self) -> Vec<Action> {
         self.pending.clear();
         self.awaiting_echo.clear();
         self.in_turn = false;
         self.self_turn = false;
-        let mut out: Vec<Action> = self.flush(false).into_iter().collect();
+        let mut out: Vec<Action> = self.release_compaction(None).into_iter().collect();
+        out.extend(self.flush(false));
         // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
         // last word now: the process that ran it is gone.
         for (_, v) in std::mem::take(&mut self.held_ends) {
@@ -573,7 +582,21 @@ impl Core {
                 self.seen.push(u);
             }
         }
-        let mut out = match ty {
+        // A held compaction gets the summary from the main agent's synthetic `user` line;
+        // another line of the main conversation comes without one. `system` lines and a
+        // subagent's lines keep it held.
+        let mut out: Vec<Action> = match ty {
+            "user" if !sub && v["isSynthetic"] == true => {
+                self.release_compaction(Some(&v["message"]["content"]))
+            }
+            "user" | "assistant" | "stream_event" | "result" if !sub => {
+                self.release_compaction(None)
+            }
+            _ => None,
+        }
+        .into_iter()
+        .collect();
+        out.extend(match ty {
             "stream_event" if !sub => self.on_stream_event(&v),
             "assistant" if !sub => self.on_assistant(&v),
             "user" if v["isReplay"] == true => self.on_echo(&v),
@@ -638,19 +661,18 @@ impl Core {
                 Some("background_tasks_changed") => self.on_background_tasks(&v),
                 // Its uuid is that of the transcript's `system compact_boundary` record
                 // (fixture `resume-compact`): the event id is derived from it as from a
-                // record's.
+                // record's. The event waits for the summary ([`Core::compaction`]).
                 Some("compact_boundary") => {
                     tracing::info!(session_id = %self.session_id, trigger = ?v["compact_metadata"]["trigger"].as_str(), "context compacted");
-                    vec![self.emit_system_as(
-                        record_uuid(&v).map(|u| record_event_id(&u, 0)),
-                        CONTEXT_COMPACTED,
-                        CONTEXT_COMPACTED_TEXT.into(),
-                    )]
+                    self.compaction = Some(
+                        record_uuid(&v).map_or_else(Uuid::now_v7, |u| record_event_id(&u, 0)),
+                    );
+                    vec![]
                 }
                 _ => vec![],
             },
             _ => vec![],
-        };
+        });
         // A drop a `background_tasks_changed` left for a line of another kind (this one).
         if self.recount && !(ty == "system" && v["subtype"] == "background_tasks_changed") {
             out.extend(self.report_subagents(None));
@@ -1366,6 +1388,27 @@ impl Core {
                 runtime,
             },
         ))
+    }
+
+    /// The held `context_compacted` ([`Core::compaction`]): its text is the summary's
+    /// `message.content` (a string, or the text blocks of an array), "Context compacted"
+    /// without one.
+    fn release_compaction(&mut self, summary: Option<&Value>) -> Option<Action> {
+        let id = self.compaction.take()?;
+        let t = match summary {
+            Some(Value::String(s)) => text(s),
+            Some(c) => text(
+                &c.as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|b| b["type"] == "text")
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            None => CONTEXT_COMPACTED_TEXT.into(),
+        };
+        Some(self.emit_system_as(Some(id), CONTEXT_COMPACTED, t))
     }
 
     /// The input the running turn answers ([`Core::last_input`]), once its echo has come. Until

@@ -3134,8 +3134,8 @@ fn only_a_background_task_is_a_notification() {
 }
 
 /// `/compact` (lines of fixture `stream-resume-compact`, 2.1.308; the same `compact_boundary`
-/// came on 2.1.312): `system context_compacted`, its id derived from the line's uuid, which is
-/// the transcript record's.
+/// came on 2.1.312): `system context_compacted` with the summary of the synthetic `user` line
+/// after it as its text, its id derived from the line's uuid, which is the transcript record's.
 #[test]
 fn compact_boundary_is_a_system_event() {
     let fx = fixture!("resume-compact", "2.1.308");
@@ -3143,10 +3143,15 @@ fn compact_boundary_is_a_system_event() {
     let mut core = Core::new(sid, false);
     started(&mut core, sid);
     let a = play(&mut core, fx.stream);
-    assert_eq!(
-        system_events(&a),
-        [("context_compacted".into(), "Context compacted".into())]
-    );
+    let summary = lines(fx.stream)
+        .into_iter()
+        .find(|v| v["isSynthetic"] == true)
+        .unwrap()["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(summary.contains("TWO"), "{summary}");
+    assert_eq!(system_events(&a), [("context_compacted".into(), summary)]);
     let id = a
         .iter()
         .find_map(|a| match a {
@@ -3161,6 +3166,72 @@ fn compact_boundary_is_a_system_event() {
     assert!(fx
         .transcript
         .contains("31c3d952-eaeb-4d10-9930-8b35ca152b4b"));
+}
+
+/// A compaction whose next line of the conversation is no synthetic `user` line (the lines of
+/// fixture `stream-resume-compact` without the summary): "Context compacted".
+#[test]
+fn compact_boundary_without_a_summary_has_the_fixed_text() {
+    let fx = fixture!("resume-compact", "2.1.308");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a: Vec<Action> = lines(fx.stream)
+        .into_iter()
+        .filter(|v| v["isSynthetic"] != true)
+        .flat_map(|v| core.on_line(&v.to_string()))
+        .collect();
+    assert_eq!(
+        system_events(&a),
+        [("context_compacted".into(), "Context compacted".into())]
+    );
+}
+
+/// A process that ends between the boundary and the summary (the lines of fixture
+/// `stream-resume-compact` up to the summary, then the exit): the held compaction comes out
+/// with "Context compacted".
+#[test]
+fn a_compaction_held_at_the_process_end_has_the_fixed_text() {
+    let fx = fixture!("resume-compact", "2.1.308");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let mut a: Vec<Action> = lines(fx.stream)
+        .into_iter()
+        .take_while(|v| v["isSynthetic"] != true)
+        .flat_map(|v| core.on_line(&v.to_string()))
+        .collect();
+    assert!(system_events(&a).is_empty());
+    a.extend(core.on_exit());
+    assert_eq!(
+        system_events(&a),
+        [("context_compacted".into(), "Context compacted".into())]
+    );
+}
+
+/// A subagent's `user` line and a `system` line between the boundary and the summary keep the
+/// compaction held: its text is still the summary.
+#[test]
+fn a_subagent_line_does_not_release_a_held_compaction() {
+    let fx = fixture!("resume-compact", "2.1.308");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let all = lines(fx.stream);
+    let at = all.iter().position(|v| v["isSynthetic"] == true).unwrap();
+    let between = [
+        json!({"type": "user", "parent_tool_use_id": "toolu_x",
+            "message": {"role": "user", "content": "x"}, "uuid": Uuid::new_v4().to_string()}),
+        json!({"type": "system", "subtype": "status", "status": null}),
+    ];
+    let a: Vec<Action> = all[..at]
+        .iter()
+        .chain(&between)
+        .chain(&all[at..])
+        .flat_map(|v| core.on_line(&v.to_string()))
+        .collect();
+    let summary = all[at]["message"]["content"].as_str().unwrap().to_owned();
+    assert_eq!(system_events(&a), [("context_compacted".into(), summary)]);
 }
 
 /// The CLI's own reply (`model` `<synthetic>`; the lines of a live run on 2.1.312 with a model

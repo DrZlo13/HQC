@@ -176,7 +176,7 @@ it('revokes a worker from the settings screen', async () => {
     $$('.plain-list li').find((li) => li.textContent?.includes('home-mac') && li.textContent.includes('revoked')),
   );
   expect((await app.api.workers()).some((w) => w.name === 'home-mac')).toBe(false);
-  await until('workers group gone', () => !$('.worker-list'));
+  await until('workers line gone', () => !$('.wline'));
   // Its sessions are still there: the hub refuses and the screen says what to do.
   revoked.querySelector<HTMLButtonElement>('.btn-purge')!.click();
   const err = await until('has sessions', () => $('.page-body .error-text'));

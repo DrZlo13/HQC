@@ -97,9 +97,14 @@ it('the classes lift the feed width, swap the font and move the time into the ga
     /:root\.list-compact \.sessions:not\(\.sessions-phone\) \.session-item \.session-sub,\s*:root\.list-compact \.sessions:not\(\.sessions-phone\) \.session-item \.session-where \{\s*display: none;/,
   );
   expect(css).not.toMatch(/:root\.list-compact \.session-(sub|where)\b/);
-  expect(css).toMatch(/\.session-item \.dot-idle\.state-locked_vscode \{\s*background: var\(--vscode\);/);
-  // The "⋯" menu stays above the rows below: no transform on the row's buttons.
-  expect(css).not.toMatch(/:root\.list-compact [^{]*\.row-acts \{[^}]*transform/);
+  // A compact row is one 26 px line; open in VS Code is `</>`, not a blue dot.
+  expect(css).toMatch(/:root\.list-compact \.sessions:not\(\.sessions-phone\) \.session-item > \.session-row \{[^}]*height: 26px;/);
+  expect(css).not.toMatch(/state-locked_vscode/);
+  expect(css).toMatch(/\.dot-vs \{[^}]*flex: 0 0 12px;/);
+  // The context menu stands where it was opened: the plain `.menu` rule (absolute, right: 0)
+  // comes later in the file, so the menu's own rule needs both classes to win.
+  expect(css).toMatch(/\.menu\.ctx-menu \{\s*position: fixed;\s*right: auto;/);
+  expect(css.indexOf('.menu.ctx-menu {')).toBeLessThan(css.indexOf('\n.menu {'));
 });
 
 it('keeps the project names in the project bar on this device (SPEC 0.91)', async () => {

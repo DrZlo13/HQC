@@ -47,7 +47,7 @@ export function Settings({ app }: { app: AppState }) {
     try {
       await app.api.revokeWorker(w.id);
       setWorkers(await app.api.workers({ includeRevoked: true }));
-      // Its service session is archived now: the "Workers" group drops it.
+      // Its service session is archived now: the "Workers" list drops it.
       await app.reloadSessions().catch(() => {});
     } catch (e) {
       setError((e as Error).message);
@@ -184,7 +184,7 @@ export function Settings({ app }: { app: AppState }) {
             checked={app.look.compactList}
             onChange={(e) => app.setLook({ compactList: (e.currentTarget as HTMLInputElement).checked })}
           />
-          Compact (on a computer): a line per session, its state in the dot (the rest in the row's tooltip)
+          Compact (on a computer): a line per session, its state in the dot (the rest in the row's card)
         </label>
 
         <h2>Notifications</h2>

@@ -157,10 +157,10 @@ export const IconTrash = ({ size = 15 }: { size?: number }) => (
   </Svg>
 );
 
+/** Rename: a pencil. */
 export const IconRename = ({ size = 15 }: { size?: number }) => (
   <Svg size={size}>
-    <path d="M6 3h5l4 4v10H6z" />
-    <path d="M11 3v4h4" />
+    <path d="M4 16l1-4 8-8 3 3-8 8zM11 6l3 3" />
   </Svg>
 );
 
@@ -168,6 +168,49 @@ export const IconRename = ({ size = 15 }: { size?: number }) => (
 export const IconStar = ({ size = 16 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M10 2.8l1.8 5.1 5.4.2-4.2 3.3 1.5 5.2-4.5-3.1-4.5 3.1 1.5-5.2-4.2-3.3 5.4-.2z" />
+  </Svg>
+);
+
+/** "Remove from favorites": the star struck through. */
+export const IconStarOff = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M10 3l2.2 4.5 4.8.7-3.5 3.4.8 4.9L10 14.2 5.7 16.5l.8-4.9L3 8.2l4.8-.7z" />
+    <path d="M3 17L17 3" />
+  </Svg>
+);
+
+/** "Open in new tab": a box with an arrow out of its corner. */
+export const IconOpenNew = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M11 4h5v5M16 4l-7 7M14 12v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3" />
+  </Svg>
+);
+
+/** "Move to project…": a folder with an arrow. */
+export const IconMove = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M3 6a1 1 0 0 1 1-1h4l2 2h6a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />
+    <path d="M9 11h5M12 9l2 2-2 2" />
+  </Svg>
+);
+
+/** A pinned block (the favorites over the session list). */
+export const IconPin = ({ size = 12 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M7 3h6M8 3v6l-3 3h10l-3-3V3M10 12v5" />
+  </Svg>
+);
+
+/** ▾ of a dropdown, ▴ of a line that opens upwards. */
+export const IconChevronDown = ({ size = 12 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M5 8l5 5 5-5" />
+  </Svg>
+);
+
+export const IconChevronUp = ({ size = 12 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M5 12l5-5 5 5" />
   </Svg>
 );
 

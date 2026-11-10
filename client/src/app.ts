@@ -53,6 +53,7 @@ function loadLook(): Look {
       railNames: v.railNames === true,
       timeInGap: v.timeInGap === true,
       compactList: v.compactList === true,
+      listWidth: typeof v.listWidth === 'number' ? v.listWidth : undefined,
     };
   } catch {
     return { wideFeed: false, systemFont: false, railNames: false, timeInGap: false, compactList: false };
@@ -75,7 +76,7 @@ export class AppState {
   me: Me | null = null;
   /** The full-width feed, the system font and the time in the gap ("Settings" → "Feed"), the
    *  project names in the project bar ("Settings" → "Project bar"), the compact session list
-   *  ("Settings" → "Session list"), on this device. */
+   *  ("Settings" → "Session list") and the session column's dragged width, on this device. */
   look: Look = loadLook();
   error: string | null = null;
   readonly projects = new Map<string, Project>();
@@ -128,12 +129,6 @@ export class AppState {
       for (const [id, o] of list.orders) this.orders.set(id, o);
       this.currentProjectId = list.home;
     }
-  }
-
-  /** There is a list to show, remembered or from the hub (the personal project is always in
-   *  it); before it the list's head has no counts. */
-  get listed(): boolean {
-    return this.projects.size > 0;
   }
 
   /** The socket is down: not while its first connect at page load is still pending. */
@@ -608,7 +603,8 @@ export class AppState {
     if (this.sessions.delete(id)) this.edited();
   }
 
-  /** The workers' service sessions (SPEC §10.2), by worker name: the "Workers" group.
+  /** The workers' service sessions (SPEC §10.2), by worker name: the "Workers" list (above a
+   *  desktop column's workers line, under a phone's sessions).
    *  Revoking a worker archives its service session, so revoked workers are not listed. */
   workerSessions(): SessionInfo[] {
     return [...this.sessions.values()]
@@ -652,13 +648,14 @@ export class AppState {
     return undefined;
   }
 
-  /** Sessions on the worker with a turn on, input queued or a request open. */
-  workerActive(workerId: string | undefined): number {
+  /** Sessions on the worker that work, by the same rule as the list's Running group
+   *  ([`bucketOf`] "run"). It counts the worker's sessions in every project, favorites too, so
+   *  it can be more than the open project's Running group shows. */
+  workerRunning(workerId: string | undefined): number {
     let n = 0;
     for (const s of this.sessions.values()) {
       if (s.system || s.archived || s.worker_id !== workerId) continue;
-      // An idle session whose background subagents or tasks still run works too.
-      if (s.state === 'running' || s.state === 'waiting' || s.state === 'queued' || (s.subagents ?? 0) > 0 || (s.background_tasks ?? 0) > 0) n++;
+      if (bucketOf(s) === 'run') n++;
     }
     return n;
   }

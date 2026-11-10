@@ -180,7 +180,7 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   // A session in that workspace, in a subfolder.
   location.hash = `#/p/${pid}`;
   await until('project route', () => !$('.workspaces'));
-  button('New')!.click();
+  $<HTMLButtonElement>('.side-head .btn-new-session')!.click();
   await until('new session form', () => $('.new-session select[name=workspace]'));
   await until('workspaces loaded', () => $$('.new-session select[name=workspace] option').length === 1);
   expect($('.new-session select[name=workspace] option')!.textContent).toContain('(default)');
@@ -246,6 +246,8 @@ it('switches projects from the left column and deletes a project', async () => {
 it(`lists the worker's service session apart: no input, request cards, "requests only" (T17)`, async () => {
   const personal = projectRow('Personal')!;
   location.hash = personal.getAttribute('href')!;
+  // The workers are one line at the bottom of the column; their list opens above it.
+  (await until('workers line', () => $<HTMLButtonElement>('.wline')))!.click();
   const row = await until('workers group', () =>
     $$('.worker-list .worker-row').find((r) => r.textContent?.includes('home-mac')),
   );
@@ -372,15 +374,19 @@ it('archives from the row, restores and deletes from the archive', async () => {
   expect(await menuItem('.btn-delete')).toBeNull();
   $<HTMLButtonElement>('.btn-more')!.click();
   const item = () => $$('.session-item').find((r) => r.querySelector('.session-row')?.getAttribute('href') === href);
-  const archiveRow = () => item()!.querySelector<HTMLButtonElement>('.btn-row-archive')!.click();
+  // From the row's menu (a right click): the round archive button past its edge.
+  const archiveRow = async () => {
+    item()!.dispatchEvent(new win.MouseEvent('contextmenu', { bubbles: true, cancelable: true }) as unknown as Event);
+    (await until('row menu', () => $<HTMLButtonElement>('.ctx-menu .btn-menu-archive')))!.click();
+  };
 
-  archiveRow();
+  await archiveRow();
   await until('hidden with Undo', () => !item() && $('.toast-archive'));
   button('Undo')!.click();
   await until('back', () => item() && !$('.toast-archive'));
   expect(app.sessions.get(sid)!.archived).toBe(false);
 
-  archiveRow();
+  await archiveRow();
   await until('hidden', () => !item());
   win.dispatchEvent(new win.Event('pagehide'));
   await until('archived on the hub', () => app.sessions.get(sid)!.archived_at);
@@ -396,7 +402,7 @@ it('archives from the row, restores and deletes from the archive', async () => {
   $<HTMLButtonElement>('.btn-archive-back')!.click();
   await until('back in the list', () => item());
 
-  archiveRow();
+  await archiveRow();
   win.dispatchEvent(new win.Event('pagehide'));
   await until('archived again', () => app.sessions.get(sid)!.archived_at);
   $<HTMLButtonElement>('.btn-archive-open')!.click();

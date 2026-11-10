@@ -5,6 +5,7 @@ import {
   parseWorkspaceConflict,
   type Candidate,
   type DirEntry,
+  type Project,
   type SessionInfo,
   type Workspace,
   type WorkspaceInspection,
@@ -83,8 +84,17 @@ function making(w: Workspace): { tag: string; failed: string; note: string } {
       };
 }
 
-/** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened with the
- *  gear of the sidebar header: Appearance (the dialog for name, icon and color, and deleting
+/** "Delete project": asks once, then deletes the project with its sessions and goes home; a
+ *  refusal of the hub rejects. From the project settings and the session column's "⋯". */
+export async function confirmDeleteProject(app: AppState, project: Project): Promise<void> {
+  const n = [...app.sessions.values()].filter((s) => s.project_id === project.id).length;
+  if (!confirm(`Delete project “${project.name}” and its sessions (${n})? The folders on the workers stay.`)) return;
+  await app.deleteProject(project.id);
+  location.hash = '#/';
+}
+
+/** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened from the
+ *  session column's "⋯" ("Project settings…"): Appearance (the dialog for name, icon and color, and deleting
  *  the project; no rename or delete for the personal project, SPEC §3) and
  *  Workspaces (SPEC §3, §13: list, add, import, make default, "VS Code sessions", remove the
  *  record). */
@@ -154,11 +164,8 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
 
   const deleteProject = async () => {
     if (!project) return;
-    const n = [...app.sessions.values()].filter((s) => s.project_id === projectId).length;
-    if (!confirm(`Delete project “${project.name}” and its sessions (${n})? The folders on the workers stay.`)) return;
     try {
-      await app.deleteProject(projectId);
-      location.hash = '#/';
+      await confirmDeleteProject(app, project);
     } catch (e) {
       setError((e as Error).message);
     }

@@ -71,7 +71,6 @@ export const STATUS = {
   dangerFill: '#C8483A', // destructive confirm button
   relay: '#A99BFF', // messages between sessions (bg 8%, border 32%)
   relayText: '#C4BAFF',
-  vscode: '#3B8EEA', // the compact list's dot of a session idle in VS Code
   permissionBg: '#1F1A12',
   permissionBorder: '#5A4520',
 };
@@ -86,7 +85,6 @@ export const STATUS_LIGHT: typeof STATUS = {
   dangerFill: '#C8483A',
   relay: '#6E5BD8',
   relayText: '#5642B8',
-  vscode: '#2470C8',
   permissionBg: '#FFF5E3',
   permissionBorder: '#E3C48A',
 };
@@ -152,15 +150,20 @@ export interface Look {
   railNames: boolean;
   timeInGap: boolean;
   compactList: boolean;
+  /** The session column's width in px, dragged by its right edge; absent: the default. */
+  listWidth?: number;
 }
 
-/** Sets the look as classes on `el` (the document root), read by styles.css. */
+/** Sets the look as classes on `el` (the document root), read by styles.css; the column's
+ *  width as `--list-w`. */
 export function applyLook(el: HTMLElement, look: Look): void {
   el.classList.toggle('feed-wide', look.wideFeed);
   el.classList.toggle('font-system', look.systemFont);
   el.classList.toggle('rail-names', look.railNames);
   el.classList.toggle('time-in-gap', look.timeInGap);
   el.classList.toggle('list-compact', look.compactList);
+  if (look.listWidth) el.style.setProperty('--list-w', `${look.listWidth}px`);
+  else el.style.removeProperty('--list-w');
 }
 
 const THEME_KEY = 'hqc.theme';

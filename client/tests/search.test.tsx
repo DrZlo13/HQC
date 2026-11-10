@@ -84,6 +84,9 @@ function makeApp(search: (q: string, opts: { fuzzy?: boolean; cursor?: string })
 }
 
 async function type(label: string, value: string) {
+  // The desktop column's field opens from the header's magnifier.
+  const open = root.querySelector<HTMLButtonElement>('.side-head .btn-search');
+  if (!root.querySelector(`input[aria-label="${label}"]`) && open) await act(async () => open.click());
   const input = root.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
   await act(async () => {
     input.value = value;

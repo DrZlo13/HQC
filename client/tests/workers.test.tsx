@@ -129,6 +129,9 @@ it('leaves revoked workers out of the "Workers" group', async () => {
 
   mountRoot();
   await act(async () => render(<SessionList app={app} />, root));
+  expect(root.querySelector('.wline .wline-count')!.textContent).toBe('1 worker online');
+  // The list opens from the workers line.
+  await act(async () => root.querySelector<HTMLButtonElement>('.wline')!.click());
   const rows = [...root.querySelectorAll('.worker-list .worker-row')];
   expect(rows.map((r) => r.textContent)).toEqual([expect.stringContaining('home-mac')]);
   expect(root.querySelector('.worker-list')!.textContent).not.toContain('old-mac');

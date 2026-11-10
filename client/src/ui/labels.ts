@@ -155,6 +155,19 @@ export function formatWhen(ts: string, now: number): string {
   return shortDate(ts);
 }
 
+/** How long ago, for a session's card: "just now", "4 min ago", "2 h ago", "3 d ago", then
+ *  the date ("Oct 21"). */
+export function formatAge(ts: string, now: number): string {
+  const t = Date.parse(ts);
+  if (Number.isNaN(t)) return '';
+  const min = Math.floor((now - t) / 60_000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  if (min < 24 * 60) return `${Math.floor(min / 60)} h ago`;
+  if (min < 30 * 24 * 60) return `${Math.floor(min / (24 * 60))} d ago`;
+  return shortDate(ts);
+}
+
 /** Token counts: `555`, `14.4k`, `1.2M`. */
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);

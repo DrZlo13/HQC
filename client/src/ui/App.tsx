@@ -9,7 +9,7 @@ import { ProjectSettings } from './ProjectSettings';
 import { RequestsScreen } from './requests';
 import { RulesScreen } from './Rules';
 import { SearchScreen } from './Search';
-import { SessionList } from './SessionList';
+import { SessionList, WidthGrip } from './SessionList';
 import { rememberSession, reopenedSession } from './sessions';
 import { Settings } from './Settings';
 
@@ -163,6 +163,8 @@ export function App({ app }: { app: AppState }) {
       <aside class="sidebar" aria-label="Project sessions">
         <SessionList app={app} current={current} requests={route.name === 'requests'} />
       </aside>
+      {/* Out of the grid's flow, on the border between the session column and the chat. */}
+      <WidthGrip app={app} />
       <main class="main">{main}</main>
     </div>
   );

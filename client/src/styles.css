@@ -175,12 +175,15 @@ button {
 /* ---- layout ---- */
 
 /* T49 (README of redesign-2026-11-01): project bar 72px, sidebar 280-310px (narrowing with
-   the window as in T27), the main column without a minimum: its content wraps or scrolls
-   inside itself. Below 900px the phone layout takes over (useIsPhone). */
+   the window as in T27) unless its right edge was dragged (`--list-w`, `Look.listWidth`), and
+   never so wide that the chat gets less than 300px; the main column without a minimum: its
+   content wraps or scrolls inside itself. Below 900px the phone layout takes over
+   (useIsPhone). The column's grip (`.col-grip`) is placed on the grid, out of its flow. */
 .layout {
+  position: relative;
   height: 100%;
   display: grid;
-  grid-template-columns: 72px clamp(280px, 25vw, 310px) minmax(0, 1fr);
+  grid-template-columns: 72px min(var(--list-w, clamp(280px, 25vw, 310px)), calc(100vw - 372px)) minmax(0, 1fr);
 }
 
 .layout-phone {
@@ -621,9 +624,10 @@ select.input {
    320 px (a longer name ends in "…"). The badge or dot sits on the icon's corner, as on a tile,
    so the bar's width does not change with them; clicks go through it to the row. "+ project",
    Reorder, the settings and the avatar stand in one row at the bottom, the first on the icons'
-   axis. At the 900 px breakpoint the chat keeps at least 300 px. */
+   axis. The session column gives way to the widest bar, so at any window width, the 900 px
+   breakpoint included, the chat keeps at least 300 px, a dragged column too. */
 :root.rail-names .layout {
-  grid-template-columns: auto clamp(280px, 25vw, 310px) minmax(0, 1fr);
+  grid-template-columns: auto min(var(--list-w, clamp(280px, 25vw, 310px)), calc(100vw - 620px)) minmax(0, 1fr);
 }
 :root.rail-names .rail {
   width: max-content;
@@ -755,30 +759,85 @@ select.input {
   position: relative;
 }
 
+/* The column's header in one row: the project's name (or the search field in its place), the
+   search, the order "State ▾", the project's "⋯" and a new session. */
 .side-head {
   flex: none;
-  padding: 16px 14px 12px 16px;
+  min-height: 66px;
+  padding: 16px 10px 12px 16px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 2px;
 }
-
-/* The project's tile in the sidebar header (T49). */
-.side-tile {
-  flex: 0 0 32px;
-  height: 32px;
-  border-radius: 9px;
-  background: var(--accent-soft);
-  display: flex;
+.side-head .project-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  line-height: 1.25;
+}
+.side-head .icon-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+}
+.side-head .search {
+  flex: 1;
+  min-width: 0;
+  margin-right: 4px;
+}
+.side-head .btn-new-session {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  margin-left: 4px;
+  border-radius: 7px;
+}
+.btn-mode {
+  flex: none;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  font-size: 17px;
-  font-weight: 700;
-  overflow: hidden;
+  gap: 2px;
+  height: 34px;
+  padding: 0 6px 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text2);
+  font: 500 13px var(--sans);
+  cursor: pointer;
 }
-
-.side-tile .glyph-letters {
-  font-size: 13px;
+.btn-mode:hover,
+.btn-mode[aria-expanded='true'] {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.btn-mode:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* The compact look: a 50 px header of 26 px buttons, as the rail's rows. */
+:root.list-compact .side-head {
+  min-height: 50px;
+  padding: 0 8px 0 14px;
+}
+:root.list-compact .side-head .project-title {
+  font-size: 14px;
+}
+:root.list-compact .side-head .icon-btn,
+:root.list-compact .side-head .btn-new-session {
+  width: 26px;
+  height: 26px;
+}
+:root.list-compact .side-head .icon {
+  width: 14px;
+  height: 14px;
+}
+:root.list-compact .side-head .search {
+  height: 28px;
+}
+:root.list-compact .btn-mode {
+  height: 26px;
+  font-size: 12.5px;
 }
 
 .side-title {
@@ -800,14 +859,6 @@ select.input {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.btn-new-session.btn-small {
-  gap: 6px;
-}
-
-.side-head .btn-new-session {
-  height: 34px;
 }
 
 .side-tools {
@@ -926,12 +977,33 @@ select.input {
   color: inherit;
   text-decoration: none;
 }
-.session-row:hover {
+.session-row:hover,
+.session-row.is-menu {
   background: var(--row-hover);
   color: inherit;
 }
 .session-row.is-current {
   background: var(--row-on);
+}
+
+/* The favorites pinned over the scrolling list on a desktop, a shadow under them; in the
+   default look at most half the column, scrolling inside. */
+.fav-pinned {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 50%;
+  padding: 0 8px 10px;
+  position: relative;
+  z-index: 1;
+  box-shadow: 0 6px 8px -7px color-mix(in srgb, var(--shade) 55%, transparent);
+}
+.fav-pinned .session-list {
+  min-height: 0;
+  overflow-y: auto;
+}
+.group-pin {
+  margin-left: auto;
+  display: flex;
 }
 
 .dot {
@@ -960,6 +1032,17 @@ select.input {
 .dot-offline {
   box-shadow: inset 0 0 0 1.5px var(--muted);
   margin-top: 0;
+}
+/* Open in VS Code and not working there: `</>` in the dot's place, in either look. */
+.dot-vs {
+  flex: 0 0 12px;
+  height: 12px;
+  margin-top: 6px;
+  display: flex;
+  color: var(--text2);
+}
+.dot-vs .icon {
+  stroke-width: 2.2;
 }
 
 .session-main {
@@ -1026,44 +1109,331 @@ select.input {
 }
 
 /* "Compact" session list in Settings, on this device (applyLook), in the desktop column only:
-   a line per session, tighter gaps; the state is the dot (blue while idle in VS Code, faded while
-   its worker is offline), the state line and the worker and path are in the row's tooltip. Scoped
-   to the live list's groups and rows: the archive and the search hits keep their lines. */
+   a 26 px line per session, tighter gaps; the state is the dot (`</>` while open in VS Code,
+   faded while its worker is offline), the subagents after the title, the state line and the
+   worker and path in the row's card. Scoped to the live list's groups and rows: the archive and
+   the search hits keep their lines. */
 :root.list-compact .sessions:not(.sessions-phone):not(.sessions-archive) > .session-scroll {
   gap: 8px;
+  padding-top: 8px;
 }
 :root.list-compact .sessions:not(.sessions-phone) .session-group {
   gap: 0;
 }
 :root.list-compact .sessions:not(.sessions-phone) .session-group > .group-head {
-  padding: 2px 8px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+}
+:root.list-compact .sessions:not(.sessions-phone) .fav-pinned {
+  max-height: none;
+  padding: 2px 8px 8px;
 }
 :root.list-compact .sessions:not(.sessions-phone) .session-item > .session-row {
   align-items: center;
-  padding: 4px 8px 4px 10px;
+  gap: 9px;
+  height: 26px;
+  padding: 0 8px 0 10px;
+  border-radius: 7px;
+  font-size: 13px;
 }
-:root.list-compact .sessions:not(.sessions-phone) .session-item .dot {
+:root.list-compact .sessions:not(.sessions-phone) .session-item .session-title {
+  font-weight: 500;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .is-current .session-title {
+  font-weight: 600;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .has-unread .session-title {
+  font-weight: 700;
+}
+:root.list-compact .sessions:not(.sessions-phone) .session-item .dot,
+:root.list-compact .sessions:not(.sessions-phone) .session-item .dot-vs {
   margin-top: 0;
 }
 :root.list-compact .sessions:not(.sessions-phone) .session-item .session-sub,
 :root.list-compact .sessions:not(.sessions-phone) .session-item .session-where {
   display: none;
 }
-/* Centered by top alone: a transform would make a stacking context and put the "⋯" menu under
-   the rows below. */
-:root.list-compact .sessions:not(.sessions-phone) .session-item .row-acts {
-  top: calc(50% - 12px);
-}
-:root.list-compact .sessions:not(.sessions-phone) .session-item .row-acts .icon-btn {
-  width: 24px;
-  height: 24px;
-}
-:root.list-compact .sessions:not(.sessions-phone) .session-item .dot-idle.state-locked_vscode {
-  background: var(--vscode);
-  box-shadow: none;
-}
 :root.list-compact .sessions:not(.sessions-phone) .session-item .dot-idle.state-worker_offline {
   opacity: 0.4;
+}
+.session-ag {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text2);
+}
+
+/* One context menu (ContextMenu.tsx): fixed at the point it was opened from, an icon per item,
+   a round archive button past its right edge. Items 34 px, 26 px in the compact look, 44 px on a
+   phone. Two classes: the plain .menu rule further down must not win. */
+.menu.ctx-menu {
+  position: fixed;
+  right: auto;
+  z-index: 40;
+  min-width: 220px;
+  padding: 5px;
+}
+.ctx-menu .menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  color: var(--text);
+  white-space: nowrap;
+  text-decoration: none;
+}
+.ctx-menu a.menu-item:hover {
+  color: var(--text);
+}
+.ctx-menu .menu-item:focus-visible {
+  outline: none;
+  background: var(--row-hover);
+}
+.ctx-menu .menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+  background: transparent;
+}
+.ctx-menu .menu-item .icon {
+  color: var(--muted);
+}
+.ctx-menu .menu-danger,
+.ctx-menu .menu-danger .icon {
+  color: var(--danger);
+}
+/* Project settings' sliders: the line runs through the knobs, as drawn. */
+.ctx-menu .btn-project-settings .icon circle {
+  fill: none;
+}
+.menu-check {
+  flex: 0 0 16px;
+  display: flex;
+  color: var(--accent-text);
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+.menu-note {
+  margin: 0;
+  padding: 6px 10px 8px;
+  max-width: 260px;
+  font-size: 13px;
+  color: var(--text2);
+}
+.menu-out {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 0;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text2);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--shade) 35%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.menu-out:hover,
+.menu-out:focus-visible {
+  outline: none;
+  background: var(--row-hover);
+  color: var(--text);
+}
+:root.list-compact .layout:not(.layout-phone) .ctx-menu .menu-item {
+  height: 26px;
+  font-size: 13px;
+}
+:root.list-compact .layout:not(.layout-phone) .ctx-menu .menu-item .icon {
+  width: 14px;
+  height: 14px;
+}
+:root.list-compact .layout:not(.layout-phone) .menu-out {
+  width: 34px;
+  height: 34px;
+}
+.layout-phone .ctx-menu .menu-item {
+  height: 44px;
+  font-size: 16px;
+}
+.layout-phone .menu-out {
+  width: 48px;
+  height: 48px;
+}
+/* A phone's menu: a clear layer over the screen under it takes the tap that closes it. */
+.menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+}
+
+/* A desktop row's card in the place of a tooltip: right of the column over the feed, once the
+   mouse has rested on the row. */
+.session-card {
+  position: fixed;
+  z-index: 40;
+  width: max-content;
+  min-width: 240px;
+  max-width: 310px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--shade) 35%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text2);
+  pointer-events: none;
+}
+.session-card-title {
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--text);
+}
+.session-card-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.session-card-state .dot,
+.session-card-state .dot-vs {
+  margin-top: 0;
+}
+.session-card-where {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.session-card-last {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-style: italic;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+:root.list-compact .session-card {
+  font-size: 12.5px;
+}
+:root.list-compact .session-card-title {
+  font-size: 13px;
+}
+
+/* The workers as one line at the bottom of a desktop column: how many are online, the open
+   session's machine and how many run there; their list opens above it. */
+.wline-box {
+  flex: none;
+  position: relative;
+}
+.wline {
+  width: 100%;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 0 16px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  font: 13px var(--sans);
+  white-space: nowrap;
+  text-align: left;
+  cursor: pointer;
+}
+.wline:hover,
+.wline.is-open {
+  background: var(--row-hover);
+  color: var(--text);
+}
+.wline .dot {
+  margin-top: 0;
+}
+.wline > .icon {
+  margin-left: auto;
+  color: var(--muted);
+}
+.wline-here {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--muted);
+}
+.wline-here + .icon {
+  margin-left: 0;
+}
+:root.list-compact .wline {
+  height: 42px;
+  font-size: 12.5px;
+}
+:root.list-compact .wline-here {
+  font-size: 11.5px;
+}
+.wline-pop {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 4px);
+  z-index: 20;
+  max-height: 60vh;
+  overflow-y: auto;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--shade) 45%, transparent);
+}
+.wline-pop .worker-list {
+  border-top: 0;
+  padding: 10px 14px 12px;
+}
+
+/* The session column's right edge: a handle dragged, or moved with ←/→, to set the column's
+   width (`Look.listWidth`), so cut titles can be read whole. It stands in the grid's second
+   column, out of the flow, from the column's border into the chat: off the list's scrollbar,
+   so dragging the scrollbar never resizes, and outside the column's clipped box. */
+.col-grip {
+  position: absolute;
+  /* Both lines: an absolutely positioned item's `auto` end would be the grid's right edge. */
+  grid-column: 2 / 3;
+  z-index: 5;
+  right: -9px;
+  top: 50%;
+  width: 10px;
+  height: 48px;
+  margin-top: -24px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.col-grip::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 5px;
+  height: 36px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+}
+.col-grip:hover::after,
+.col-grip:focus-visible::after {
+  background: var(--accent);
+}
+.col-grip:focus-visible {
+  outline: none;
 }
 
 .list-foot {
@@ -1145,35 +1515,6 @@ select.input {
     0 0 0 1px var(--accent-line),
     0 10px 24px color-mix(in srgb, var(--shade) 45%, transparent);
   z-index: 2;
-}
-.session-item.is-confirming {
-  background: rgba(200, 72, 58, 0.12);
-  box-shadow: inset 0 0 0 1px rgba(245, 148, 134, 0.35);
-}
-
-/* On hover or focus the time gives way to the archive button and "⋯". */
-.row-acts {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  display: flex;
-  gap: 2px;
-  padding-left: 6px;
-  border-radius: 8px;
-  background: var(--row-hover);
-  opacity: 0;
-}
-.session-row.is-current ~ .row-acts {
-  background: var(--row-on);
-}
-.session-item:hover .row-acts,
-.session-item:focus-within .row-acts {
-  opacity: 1;
-}
-.row-acts .icon-btn {
-  width: 30px;
-  height: 30px;
-  color: var(--text2);
 }
 
 .row-confirm {
@@ -1269,87 +1610,6 @@ select.input {
   margin: 8px 16px 0;
   font-size: 12.5px;
   color: var(--muted);
-}
-
-/* The phone's bottom sheet of a row (MList2). */
-.sheet-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: rgba(6, 5, 4, 0.6);
-}
-.action-sheet {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 41;
-  border-radius: 20px 20px 0 0;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  padding: 8px 12px calc(24px + env(safe-area-inset-bottom));
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  box-shadow: 0 -16px 40px color-mix(in srgb, var(--shade) 45%, transparent);
-}
-.action-sheet-grab {
-  align-self: center;
-  width: 40px;
-  height: 5px;
-  border-radius: 3px;
-  background: var(--border);
-  margin-bottom: 10px;
-}
-.action-sheet-head {
-  padding: 0 16px 12px;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.action-sheet-title {
-  font-weight: 700;
-  font-size: 16px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.action-sheet-where {
-  font-size: 12.5px;
-  color: var(--muted);
-}
-.action-sheet-note {
-  margin: 0;
-  padding: 0 16px 12px;
-  font-size: 14px;
-  color: var(--text2);
-}
-.sheet-btn {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  width: 100%;
-  height: 52px;
-  padding: 0 16px;
-  border: 0;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--text);
-  font: 500 16px var(--sans);
-  text-align: left;
-  cursor: pointer;
-}
-.sheet-btn:hover {
-  background: var(--row-hover);
-}
-.sheet-danger {
-  color: var(--danger);
-}
-.btn-large {
-  height: 48px;
-  margin-top: 8px;
-  border-radius: 12px;
-  font-size: 15px;
 }
 
 /* Archive mode (`Archive`, `MArchive2`): no project tint, hatching on top. */

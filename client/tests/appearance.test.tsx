@@ -114,10 +114,13 @@ afterAll(async () => {
   restoreGlobals();
 });
 
-it('opens the project settings from the sidebar gear: appearance, workspaces, project', async () => {
+it('opens the project settings from the column\'s "⋯": appearance, workspaces, project', async () => {
   const personal = app.me!.personal_project_id;
-  const gear = await until('gear', () => $<HTMLAnchorElement>('.side-head .btn-project-settings'));
+  (await until('project menu', () => $<HTMLButtonElement>('.side-head .btn-project-menu')))!.click();
+  const gear = await until('settings item', () => $<HTMLAnchorElement>('.ctx-menu .btn-project-settings'));
   expect(gear.getAttribute('href')).toBe(`#/p/${personal}/settings`);
+  gear.click();
+  await until('menu closed', () => !$('.ctx-menu'));
   // The workspaces left the sidebar.
   expect($$('.sessions a').some((a) => a.textContent === 'Project workspaces')).toBe(false);
   location.hash = gear.getAttribute('href')!;

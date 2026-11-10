@@ -238,6 +238,10 @@ function FolderForm({
   );
 }
 
+/** An open menu (the session column's, the project bar's, the chat's "More") or the workers'
+ *  list above the column's bottom line. */
+const OPEN_POPUP = '[role="menu"], .wline-pop';
+
 function isTyping(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
@@ -306,6 +310,10 @@ function PermissionCard({
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       if (isTyping(doc.activeElement) || !card.current || !onScreen(card.current)) return;
+      // A menu or the workers' list is open: Esc and Enter are its (Esc closes it), wherever
+      // the focus is — inside it, or on the page when a click did not move the focus. The key
+      // came from a menu another handler has just closed: its too.
+      if (doc.querySelector(OPEN_POPUP) || (e.target instanceof Element && e.target.closest(OPEN_POPUP))) return;
       const o = e.key === 'Enter' ? once : e.key === 'Escape' ? deny : undefined;
       if (!o) return;
       e.preventDefault();

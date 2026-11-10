@@ -1,18 +1,39 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { WorkerInfo } from '../api';
 import type { AppState } from '../app';
-import type { PermissionMode, SessionInfo, Workspace } from '../proto';
+import type { ListMode, PermissionMode, Project, SessionInfo, Workspace } from '../proto';
 import { useSubscription } from './hooks';
 import { colorHex } from '../theme';
 import { ProjectGlyph, projectName } from './Appearance';
 import { ModelField } from './agentSettings';
 import { ArchiveList } from './Archive';
-import { IconArchive, IconGear, IconGrip, IconMore, IconPlus, IconRename, IconReorder, IconSearch, IconShield, IconStar, IconTrash } from './icons';
-import { AUTO_CONFIRM, agentsLabel, formatWhen, shortPath } from './labels';
-import { workspaceTitle } from './ProjectSettings';
+import { ContextMenu, fitInView, type MenuEntry } from './ContextMenu';
+import {
+  IconArchive,
+  IconChevronDown,
+  IconChevronUp,
+  IconCode,
+  IconGear,
+  IconGrip,
+  IconMore,
+  IconMove,
+  IconOpenNew,
+  IconPin,
+  IconPlus,
+  IconRename,
+  IconReorder,
+  IconSearch,
+  IconSettings,
+  IconShield,
+  IconStar,
+  IconStarOff,
+  IconTrash,
+} from './icons';
+import { AUTO_CONFIRM, agentsLabel, formatAge, formatWhen, homePath, shortPath } from './labels';
+import { MoveSession, confirmDeleteProject, workspaceTitle } from './ProjectSettings';
 import { RequestsLink } from './requests';
 import { SearchHits } from './Search';
-import { LIST_MODES, activeLabel, bucketOf, groupSessions, headCounts, matchesQuery, moveTo, subLabel, type SessionGroup } from './sessions';
+import { LIST_MODES, bucketOf, groupSessions, lastLine, matchesQuery, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
 
 /** "+ project": asks for the name, then opens the new project's settings — a new project
  *  has no workspaces yet, and that is the first thing to add. */
@@ -27,8 +48,20 @@ export async function newProject(app: AppState, onError: (m: string) => void): P
   }
 }
 
-/** A press this long on a phone row opens its actions (MList2). */
+/** A press this long on a phone row opens its menu (MList2). */
 const LONG_PRESS_MS = 450;
+
+/** The mouse resting this long on a row shows its card; passing over it shows nothing. */
+const CARD_MS = 500;
+
+/** The session column's width when dragged by its right edge, px; ←/→ on the edge step it. */
+export const LIST_WIDTH_MIN = 240;
+export const LIST_WIDTH_MAX = 560;
+export const LIST_WIDTH_STEP = 16;
+
+export function clampListWidth(w: number): number {
+  return Math.round(Math.min(LIST_WIDTH_MAX, Math.max(LIST_WIDTH_MIN, w)));
+}
 
 /** The pointer resting this long on a link starts loading what it opens (SPEC §6). */
 const PREFETCH_MS = 60;
@@ -85,8 +118,11 @@ function remove(app: AppState, s: SessionInfo, current?: string): void {
 
 /** The sessions of the current project (SPEC §1: projects, in projects sessions), T26: a
  *  column next to the project rail on a desktop, the whole first screen on a phone, with
- *  the projects as chips above. T50: row actions (on hover on a desktop, a long press on a
- *  phone), the delayed archive with Undo, State / Recent / Custom and Reorder, archive mode. */
+ *  the projects as chips above. T50: the delayed archive with Undo, State / Recent / Custom
+ *  and Reorder, archive mode. A row's actions are its menu (a right click; a long press on a
+ *  phone); on a desktop the header is one row, the favorites are pinned over the list, a
+ *  row's card shows where it runs, the workers are one line at the bottom and the column's
+ *  right edge sets its width. */
 export function SessionList({
   app,
   current,
@@ -111,19 +147,37 @@ export function SessionList({
 
 function LiveList({ app, current, phone, requests }: { app: AppState; current?: string; phone?: boolean; requests?: boolean }) {
   const [creating, setCreating] = useState(false);
+  // The session whose "Move to project…" form is open.
+  const [moving, setMoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // The phone searches on its own screen (`#/search`).
+  // The phone searches on its own screen (`#/search`); a desktop opens the field from the
+  // header's magnifier, in the place of the project's name.
   const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchBtn = useRef<HTMLButtonElement>(null);
+  // Esc closed the search: the focus goes back to the magnifier, not to the page.
+  const toSearchBtn = useRef(false);
   // Reorder mode: the order being arranged; Done stores it, Cancel drops it.
   const [reorder, setReorder] = useState<string[] | null>(null);
-  // The phone's bottom sheet of a row (MList2), and its delete step.
-  const [sheet, setSheet] = useState<{ id: string; confirm: boolean } | null>(null);
+  // A row's menu (a right click; a long press on a phone): the session, where it was opened,
+  // and whether it shows the delete step.
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number; confirm: boolean } | null>(null);
+  // The card of the row the mouse rests on (desktop), right of the column.
+  const [card, setCard] = useState<{ id: string; x: number; y: number } | null>(null);
+  const cardTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const project = app.currentProject();
   const pid = project?.id;
   const archivedCount = app.archivedSessions().length;
   const mode = app.listMode();
 
   useEffect(() => setReorder(null), [pid]);
+  useEffect(() => () => clearTimeout(cardTimer.current), []);
+  useEffect(() => {
+    if (searching) searchInput.current?.focus();
+    else if (toSearchBtn.current) searchBtn.current?.focus();
+    toSearchBtn.current = false;
+  }, [searching]);
 
   const pathOf = (s: SessionInfo) => shortPath(app.sessionPath(s) ?? '');
   const whereOf = (s: SessionInfo) => [app.workerName(s.worker_id), pathOf(s)].filter(Boolean).join(' · ');
@@ -139,14 +193,15 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     const list = app.sortedSessions().filter((s) => !s.favorite_at && matchesQuery(s, pathOf(s), query));
     groups = groupSessions(list, mode, now, (pid && app.orders.get(pid)?.session_ids) || []);
   }
-  // Nothing before the first list and the socket's first connect: not "No sessions yet · offline".
-  const counts = app.listed ? headCounts(app.sortedSessions()) : '';
-  const conn = app.offline ? (counts ? ' · offline' : 'offline') : '';
+  // The phone's head says "offline" (a desktop's workers line does); not before the first list
+  // and the socket's first connect.
+  const conn = app.offline ? 'offline' : '';
 
   const startReorder = () => {
     // The order sent must hold every live session: the waiting archive goes first.
     app.commitArchive();
     setQuery('');
+    setSearching(false);
     setReorder(app.orderedSessions().map((s) => s.id));
   };
   // The archive should list the session archived a moment ago: it goes to the hub now.
@@ -157,6 +212,38 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const doneReorder = () => {
     if (pid && reorder) void app.saveOrder(pid, reorder);
     setReorder(null);
+  };
+  const closeSearch = () => {
+    setQuery('');
+    setSearching(false);
+  };
+
+  const hideCard = () => {
+    clearTimeout(cardTimer.current);
+    setCard(null);
+  };
+  // A desktop row's card: shown once the mouse has rested on the row for CARD_MS.
+  const cardOn = (id: string) => ({
+    onPointerEnter: (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse') return;
+      const row = e.currentTarget as HTMLElement;
+      clearTimeout(cardTimer.current);
+      // Another row's card goes at once, not when this one's comes.
+      setCard((c) => (c && c.id !== id ? null : c));
+      cardTimer.current = setTimeout(() => {
+        // The row moved to another group meanwhile (Running → Idle): its element is gone.
+        if (!row.isConnected) return;
+        const r = row.getBoundingClientRect();
+        const col = row.closest('.sessions')?.getBoundingClientRect() ?? r;
+        setCard({ id, x: col.right + 12, y: r.top - 6 });
+      }, CARD_MS);
+    },
+    onPointerLeave: hideCard,
+    onPointerDown: hideCard,
+  });
+  const openMenu = (id: string, x: number, y: number) => {
+    hideCard();
+    setMenu({ id, x, y, confirm: false });
   };
 
   // Dragging by the handle (pointer events: mouse and finger alike), ↑/↓ on a focused one.
@@ -208,11 +295,21 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     <label class="search">
       <IconSearch size={14} />
       <input
+        ref={searchInput}
         type="search"
         aria-label="Search sessions"
         placeholder="Search sessions and messages"
         value={query}
         onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
+        onKeyDown={(e) => {
+          if (e.key !== 'Escape') return;
+          // The field goes before the document hears the key: a permission card would take it
+          // for its own Esc (deny) with the focus no longer in a field.
+          e.stopPropagation();
+          toSearchBtn.current = true;
+          closeSearch();
+        }}
+        onBlur={() => !query && setSearching(false)}
       />
     </label>
   );
@@ -247,7 +344,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       </div>
       <button
         type="button"
-        class={`icon-btn ${phone ? 'icon-btn-round' : ''} btn-reorder`}
+        class="icon-btn icon-btn-round btn-reorder"
         aria-label="Reorder sessions"
         title="Reorder"
         disabled={!pid || app.sortedSessions().length < 2}
@@ -267,7 +364,45 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       </button>
     </div>
   );
-  const sheetFor = sheet && app.sessions.get(sheet.id);
+  const row = (s: SessionInfo) => (
+    <SessionRow
+      key={s.id}
+      s={s}
+      current={s.id === current}
+      draft={app.draft(s.id) !== ''}
+      phone={phone}
+      // A desktop row has no time: its group says how old it is, its card says exactly.
+      when={phone && mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
+      where={phone ? whereOf(s) : ''}
+      compact={app.look.compactList && !phone}
+      grip={reorder ? grip(s.id) : undefined}
+      dragging={dragId === s.id}
+      menuOpen={menu?.id === s.id}
+      card={phone || reorder ? undefined : cardOn(s.id)}
+      onPrefetch={() => app.prefetchChat(s.id)}
+      onMenu={(x, y) => openMenu(s.id, x, y)}
+    />
+  );
+  // Pinned over the scrolling list on a desktop; on a phone the first group of the list.
+  const favoriteGroup = favorites.length > 0 && (
+    <div class={`session-group group-favorites ${phone ? '' : 'fav-pinned'}`}>
+      <div class="group-head">
+        <span class="group-label">Favorites</span>
+        <span class="group-count">{favorites.length}</span>
+        {!phone && (
+          <span class="group-pin" aria-hidden="true">
+            <IconPin />
+          </span>
+        )}
+      </div>
+      <ul class="session-list">{favorites.map(row)}</ul>
+    </div>
+  );
+  const menuFor = menu && app.sessions.get(menu.id);
+  // No card while a menu is open; a menu whose session was deleted elsewhere is not shown and
+  // does not keep the cards away.
+  const cardFor = card && !menuFor && app.sessions.get(card.id);
+  const moveFor = moving && app.sessions.get(moving);
 
   return (
     <section class={`sessions ${phone ? 'sessions-phone' : ''} ${reorder ? 'is-reordering' : ''}`}>
@@ -294,44 +429,42 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         </header>
       ) : (
         <>
+          {/* One row: the project's name (or the search field), the search, the order, the
+              project's menu and a new session. */}
           <header class="side-head">
-            {project && (
-              <span class="side-tile" aria-hidden="true">
-                <ProjectGlyph p={project} />
-              </span>
+            {searching ? (
+              search
+            ) : (
+              <>
+                <h2 class="project-title" title={project ? projectName(project) : undefined}>
+                  {project ? projectName(project) : 'HQC'}
+                </h2>
+                <button
+                  ref={searchBtn}
+                  type="button"
+                  class="icon-btn btn-search"
+                  aria-label="Search sessions and messages"
+                  title="Search"
+                  onClick={() => setSearching(true)}
+                >
+                  <IconSearch />
+                </button>
+              </>
             )}
-            <div class="side-title">
-              <div class="project-title">{project ? projectName(project) : 'HQC'}</div>
-              <div class="side-counts">
-                {counts}
-                {conn}
-              </div>
-            </div>
-            {project && (
-              <a
-                class="icon-btn btn-project-settings"
-                href={`#/p/${project.id}/settings`}
-                aria-label="Project settings: appearance, workspaces"
-                title="Project settings"
-              >
-                <IconGear />
-              </a>
-            )}
+            <ModeMenu app={app} pid={pid} mode={mode} disabled={!!reorder} onReorder={startReorder} />
+            {project && <ProjectMenu app={app} project={project} />}
             <button
               type="button"
-              class="btn btn-primary btn-small btn-new-session"
+              class="btn btn-primary btn-new-session"
               aria-label="New session"
+              title="New session"
               disabled={creating || !app.me}
               onClick={() => setCreating(true)}
             >
               <IconPlus size={14} />
-              New
             </button>
           </header>
-          <div class="side-tools">
-            {search}
-            {order}
-          </div>
+          {reorder && <div class="side-tools">{order}</div>}
         </>
       )}
       {app.error && <div class="notice">Hub unavailable: {app.error}</div>}
@@ -342,64 +475,21 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         </div>
       )}
       {creating && project && <NewSession key={project.id} app={app} projectId={project.id} onDone={() => setCreating(false)} />}
-      <div class="session-scroll" ref={scroll}>
-        {favorites.length > 0 && (
-          <div class="session-group group-favorites">
-            <div class="group-head">
-              <span class="group-label">Favorites</span>
-              <span class="group-count">{favorites.length}</span>
-            </div>
-            <ul class="session-list">
-              {favorites.map((s) => (
-                <SessionRow
-                  key={s.id}
-                  s={s}
-                  current={s.id === current}
-                  draft={app.draft(s.id) !== ''}
-                  phone={phone}
-                  when={mode === 'recent' ? formatWhen(s.updated_at, now) : undefined}
-                  where={whereOf(s)}
-                  compact={app.look.compactList && !phone}
-                  dragging={false}
-                  onPrefetch={() => app.prefetchChat(s.id)}
-                  onArchive={() => app.archiveLater(s)}
-                  onFavorite={() => toggleFavorite(app, s)}
-                  onRename={() => rename(app, s)}
-                  onDelete={() => remove(app, s, current)}
-                  onSheet={() => setSheet({ id: s.id, confirm: false })}
-                />
-              ))}
-            </ul>
-          </div>
-        )}
+      {moveFor && (
+        <div class="move-panel" role="region" aria-label="Move to project">
+          <MoveSession key={moveFor.id} app={app} session={moveFor} onDone={() => setMoving(null)} />
+        </div>
+      )}
+      {!phone && favoriteGroup}
+      <div class="session-scroll" ref={scroll} onScroll={card ? hideCard : undefined}>
+        {phone && favoriteGroup}
         {groups.map((g) => (
           <div key={g.id} class={`session-group group-${g.id}`}>
             <div class="group-head">
               <span class="group-label">{g.label}</span>
               {!g.plain && <span class="group-count">{g.items.length}</span>}
             </div>
-            <ul class="session-list">
-              {g.items.map((s) => (
-                <SessionRow
-                  key={s.id}
-                  s={s}
-                  current={s.id === current}
-                  draft={app.draft(s.id) !== ''}
-                  phone={phone}
-                  when={mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
-                  where={whereOf(s)}
-                  compact={app.look.compactList && !phone}
-                  grip={reorder ? grip(s.id) : undefined}
-                  dragging={dragId === s.id}
-                  onPrefetch={() => app.prefetchChat(s.id)}
-                  onArchive={() => app.archiveLater(s)}
-                  onFavorite={() => toggleFavorite(app, s)}
-                  onRename={() => rename(app, s)}
-                  onDelete={() => remove(app, s, current)}
-                  onSheet={() => setSheet({ id: s.id, confirm: false })}
-                />
-              ))}
-            </ul>
+            <ul class="session-list">{g.items.map(row)}</ul>
           </div>
         ))}
         {app.me && groups.length === 0 && !favorites.some((s) => s.project_id === pid) && (
@@ -426,7 +516,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         {phone && <WorkerList app={app} current={current} />}
       </div>
       {!phone && <RequestsLink app={app} current={requests} />}
-      {!phone && <WorkerList app={app} current={current} />}
+      {!phone && <WorkersLine app={app} current={current} />}
       {phone && toast}
       {phone && !reorder && (
         <button
@@ -440,32 +530,183 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           New
         </button>
       )}
-      {sheet && sheetFor && (
-        <ActionSheet
-          s={sheetFor}
-          where={whereOf(sheetFor)}
-          confirm={sheet.confirm}
-          onClose={() => setSheet(null)}
-          onArchive={() => {
-            setSheet(null);
-            app.archiveLater(sheetFor);
+      {menu && menuFor && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          label={`Session «${titleOf(menuFor)}»`}
+          items={sessionMenu(app, menuFor, {
+            onMove: () => setMoving(menuFor.id),
+            onAskDelete: () => setMenu({ ...menu, confirm: true }),
+          })}
+          outside={{
+            label: `Archive «${titleOf(menuFor)}»`,
+            icon: <IconArchive />,
+            cls: 'btn-menu-archive',
+            onSelect: () => app.archiveLater(menuFor),
           }}
-          onFavorite={() => {
-            setSheet(null);
-            toggleFavorite(app, sheetFor);
-          }}
-          onRename={() => {
-            setSheet(null);
-            rename(app, sheetFor);
-          }}
-          onAskDelete={() => setSheet({ id: sheetFor.id, confirm: true })}
-          onDelete={() => {
-            setSheet(null);
-            remove(app, sheetFor, current);
-          }}
-        />
+          backdrop={phone}
+          onClose={() => setMenu(null)}
+        >
+          {menu.confirm && (
+            <>
+              <p class="menu-note">Delete this session forever? Messages and history go too. Files on disk stay.</p>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item menu-danger btn-confirm-delete"
+                onClick={() => {
+                  setMenu(null);
+                  remove(app, menuFor, current);
+                }}
+              >
+                <IconTrash />
+                <span class="menu-label">Delete forever</span>
+              </button>
+              {/* The focus is on Cancel: Enter right after "Delete…" deletes nothing. */}
+              <button type="button" role="menuitem" class="menu-item btn-cancel-delete" data-focus onClick={() => setMenu(null)}>
+                <span class="menu-label">Cancel</span>
+              </button>
+            </>
+          )}
+        </ContextMenu>
       )}
+      {cardFor && <SessionCard key={cardFor.id} app={app} s={cardFor} x={card!.x} y={card!.y} />}
     </section>
+  );
+}
+
+function titleOf(s: SessionInfo): string {
+  return s.title || s.slug || s.id.slice(-8);
+}
+
+/** A session's menu, the same on a desktop row and a phone row: Open in new tab, favorites,
+ *  then Rename, Move to project…, Folder rules, then Archive and Delete… (a step of its own). */
+function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; onAskDelete: () => void }): MenuEntry[] {
+  const rules = rulesHref(s);
+  return [
+    { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/s/${s.id}`, newTab: true },
+    {
+      label: s.favorite_at ? 'Remove from favorites' : 'Add to favorites',
+      icon: s.favorite_at ? <IconStarOff /> : <IconStar />,
+      cls: 'btn-favorite',
+      onSelect: () => toggleFavorite(app, s),
+    },
+    'sep',
+    { label: 'Rename', icon: <IconRename />, cls: 'btn-rename', onSelect: () => rename(app, s) },
+    { label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove },
+    ...(rules ? [{ label: 'Folder rules', icon: <IconShield />, cls: 'btn-rules', href: rules }] : []),
+    'sep',
+    { label: 'Archive', icon: <IconArchive />, cls: 'btn-archive', onSelect: () => app.archiveLater(s) },
+    { label: 'Delete…', icon: <IconTrash />, cls: 'btn-delete', danger: true, keepOpen: true, onSelect: on.onAskDelete },
+  ];
+}
+
+/** Where a header menu opens: under its button. */
+function below(el: HTMLElement | null): { x: number; y: number } {
+  const r = el?.getBoundingClientRect();
+  return { x: r?.left ?? 0, y: (r?.bottom ?? 0) + 4 };
+}
+
+/** "State ▾" of the column's header: the list's order — State, Recent, Custom — and Reorder. */
+function ModeMenu({
+  app,
+  pid,
+  mode,
+  disabled,
+  onReorder,
+}: {
+  app: AppState;
+  pid?: string;
+  mode: ListMode;
+  disabled: boolean;
+  onReorder: () => void;
+}) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const label = LIST_MODES.find((m) => m.id === mode)?.label ?? 'State';
+  const items: MenuEntry[] = [
+    ...LIST_MODES.map((m) => ({
+      label: m.label,
+      cls: `btn-mode-${m.id}`,
+      checked: mode === m.id,
+      onSelect: () => {
+        if (pid && mode !== m.id) void app.setListMode(pid, m.id);
+      },
+    })),
+    'sep',
+    {
+      label: 'Reorder…',
+      icon: <IconReorder />,
+      cls: 'btn-reorder',
+      disabled: !pid || app.sortedSessions().length < 2,
+      onSelect: onReorder,
+    },
+  ];
+  return (
+    <>
+      <button
+        ref={btn}
+        type="button"
+        class="btn-mode"
+        aria-label={`Session order: ${label}`}
+        aria-haspopup="menu"
+        aria-expanded={!!at}
+        disabled={!pid || disabled}
+        onClick={() => setAt(at ? null : below(btn.current))}
+      >
+        {label}
+        <IconChevronDown />
+      </button>
+      {at && <ContextMenu x={at.x} y={at.y} label="Session order" items={items} anchor={btn.current} onClose={() => setAt(null)} />}
+    </>
+  );
+}
+
+/** "⋯" of the column's header: the project's menu — Open in new tab, favorites, Project
+ *  settings…, Delete project… (not the personal project, SPEC §3). */
+function ProjectMenu({ app, project }: { app: AppState; project: Project }) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const items: MenuEntry[] = [
+    { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/p/${project.id}`, newTab: true },
+    {
+      label: project.favorite_at ? 'Remove from favorites' : 'Add to favorites',
+      icon: project.favorite_at ? <IconStarOff /> : <IconStar />,
+      cls: 'btn-favorite',
+      onSelect: () =>
+        void app
+          .setProjectFavorite(project.id, !project.favorite_at)
+          .catch((e: Error) => app.setListNotice(`Favorites not saved: ${e.message}`)),
+    },
+    'sep',
+    { label: 'Project settings…', icon: <IconSettings />, cls: 'btn-project-settings', href: `#/p/${project.id}/settings` },
+  ];
+  if (!project.is_personal) {
+    items.push('sep', {
+      label: 'Delete project…',
+      icon: <IconTrash />,
+      cls: 'btn-delete-project',
+      danger: true,
+      onSelect: () => void confirmDeleteProject(app, project).catch((e: Error) => app.setListNotice(`Not deleted: ${e.message}`)),
+    });
+  }
+  return (
+    <>
+      <button
+        ref={btn}
+        type="button"
+        class="icon-btn btn-project-menu"
+        aria-label="Project: settings, favorites"
+        title="Project"
+        aria-haspopup="menu"
+        aria-expanded={!!at}
+        onClick={() => setAt(at ? null : below(btn.current))}
+      >
+        <IconMore />
+      </button>
+      {at && <ContextMenu x={at.x} y={at.y} label={`Project «${projectName(project)}»`} items={items} anchor={btn.current} onClose={() => setAt(null)} />}
+    </>
   );
 }
 
@@ -478,9 +719,29 @@ type GripHandlers = {
   onKeyDown: (e: KeyboardEvent) => void;
 };
 
-/** A row of the live list. Desktop: the archive button and "⋯" on hover or focus, delete
- *  confirmed in the row. Phone: a long press or a right click opens the bottom sheet. In
- *  Reorder: a handle (left on a desktop, right on a phone), no actions, no link. */
+type CardHandlers = {
+  onPointerEnter: (e: PointerEvent) => void;
+  onPointerLeave: () => void;
+  onPointerDown: () => void;
+};
+
+/** A session's state mark: a dot of its group (amber waits, the accent works, a ring is
+ *  idle), `</>` while it is open in VS Code and not working there. */
+function StateMark({ s }: { s: SessionInfo }) {
+  const bucket = bucketOf(s);
+  if (s.state === 'locked_vscode' && bucket !== 'run') {
+    return (
+      <span class="dot-vs" aria-hidden="true">
+        <IconCode size={12} />
+      </span>
+    );
+  }
+  return <span class={`dot dot-${bucket} state-${s.state}`} aria-hidden="true" />;
+}
+
+/** A row of the live list, without buttons of its own. Desktop: a right click opens its menu,
+ *  the mouse resting on it its card. Phone: a long press or a right click opens the same menu.
+ *  In Reorder: a handle (left on a desktop, right on a phone), no menu, no link. */
 function SessionRow({
   s,
   current,
@@ -491,12 +752,10 @@ function SessionRow({
   compact,
   grip,
   dragging,
+  menuOpen,
+  card,
   onPrefetch,
-  onArchive,
-  onFavorite,
-  onRename,
-  onDelete,
-  onSheet,
+  onMenu,
 }: {
   s: SessionInfo;
   current: boolean;
@@ -504,26 +763,23 @@ function SessionRow({
   draft?: boolean;
   phone?: boolean;
   when?: string;
+  /** The worker and the folder, a line of the row on a phone; empty on a desktop (its card). */
   where: string;
-  /** "Compact" in Settings: one line, the state and the place only in the row's tooltip. */
+  /** "Compact" in Settings: one line, the state in the dot, the subagents after the title. */
   compact?: boolean;
   grip?: GripHandlers;
   dragging: boolean;
+  /** Its menu is open: the row stays lit under it. */
+  menuOpen?: boolean;
+  card?: CardHandlers;
   /** Loads the newest page of the chat before it is opened. */
   onPrefetch: () => void;
-  onArchive: () => void;
-  onFavorite: () => void;
-  onRename: () => void;
-  onDelete: () => void;
-  onSheet: () => void;
+  onMenu: (x: number, y: number) => void;
 }) {
-  const [confirm, setConfirm] = useState(false);
   const press = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
   const fired = useRef(false);
-  const bucket = bucketOf(s);
-  const title = s.title || s.slug || s.id.slice(-8);
+  const title = titleOf(s);
   const agents = agentsLabel(s.subagents);
-  const tip = compact ? [subLabel(s) + (agents ? ` · ${agents}` : ''), where].filter(Boolean).join('\n') : undefined;
   const handle = grip && (
     <button type="button" class="grip" data-grip={s.id} aria-label={`Drag to reorder «${title}», or use arrow keys`} {...grip}>
       <IconGrip />
@@ -531,11 +787,12 @@ function SessionRow({
   );
   const body = (
     <>
-      <span class={`dot dot-${bucket} state-${s.state}`} aria-hidden="true" />
+      <StateMark s={s} />
       <span class="session-main">
         <span class="session-top">
           <span class="session-title">{title}</span>
           {draft && !current && <span class="session-draft">Draft</span>}
+          {compact && agents && <span class="session-ag">{agents}</span>}
           {when && <span class="session-when">{when}</span>}
           {s.unread > 0 && (
             <span class="badge" aria-label={`unread: ${s.unread}`}>
@@ -559,19 +816,22 @@ function SessionRow({
     if (press.current) clearTimeout(press.current.timer);
     press.current = null;
   };
-  const phoneHandlers =
-    phone && !grip
+  const handlers = grip
+    ? {}
+    : phone
       ? {
           onPointerDown: (e: PointerEvent) => {
             fired.current = false;
             cancelPress();
+            const x = e.clientX;
+            const y = e.clientY;
             press.current = {
-              x: e.clientX,
-              y: e.clientY,
+              x,
+              y,
               timer: setTimeout(() => {
                 fired.current = true;
                 press.current = null;
-                onSheet();
+                onMenu(x, y);
               }, LONG_PRESS_MS),
             };
           },
@@ -586,27 +846,33 @@ function SessionRow({
           onContextMenu: (e: MouseEvent) => {
             e.preventDefault();
             cancelPress();
-            onSheet();
+            onMenu(e.clientX, e.clientY);
           },
         }
-      : {};
+      : {
+          ...card,
+          onContextMenu: (e: MouseEvent) => {
+            e.preventDefault();
+            // From the keyboard (the menu key) there is no pointer: next to the row.
+            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            onMenu(e.clientX || r.right, e.clientY || r.top);
+          },
+        };
   useEffect(() => cancelPress, []);
+  const cls = `session-row ${current ? 'is-current' : ''} ${menuOpen ? 'is-menu' : ''} ${s.unread > 0 ? 'has-unread' : ''}`;
   return (
-    <li class={`session-item ${dragging ? 'is-dragging' : ''} ${confirm ? 'is-confirming' : ''}`} {...phoneHandlers}>
+    <li class={`session-item ${dragging ? 'is-dragging' : ''}`} {...handlers}>
       {!phone && handle}
       {grip ? (
-        <div class={`session-row ${current ? 'is-current' : ''}`} title={tip}>
-          {body}
-        </div>
+        <div class={cls}>{body}</div>
       ) : (
         <a
-          class={`session-row ${current ? 'is-current' : ''}`}
+          class={cls}
           href={`#/s/${s.id}`}
-          title={tip}
           aria-current={current ? 'page' : undefined}
           {...prefetchOn(onPrefetch)}
           onClick={(e) => {
-            // The press opened the sheet: no navigation on release.
+            // The press opened the menu: no navigation on release.
             if (fired.current) {
               e.preventDefault();
               fired.current = false;
@@ -617,67 +883,56 @@ function SessionRow({
         </a>
       )}
       {phone && handle}
-      {!phone && !grip && !confirm && (
-        <div class="row-acts">
-          <button type="button" class="icon-btn btn-row-archive" aria-label={`Archive «${title}»`} title="Archive" onClick={onArchive}>
-            <IconArchive />
-          </button>
-          <RowMenu
-            rules={rulesHref(s)}
-            favorite={!!s.favorite_at}
-            onFavorite={onFavorite}
-            onRename={onRename}
-            onDelete={() => setConfirm(true)}
-          />
-        </div>
-      )}
-      {confirm && (
-        <div class="row-confirm" role="group" aria-label="Confirm deletion">
-          <span class="row-confirm-text">Delete forever?</span>
-          <button
-            type="button"
-            class="btn btn-small btn-danger-fill btn-confirm-delete"
-            onClick={() => {
-              setConfirm(false);
-              onDelete();
-            }}
-          >
-            Delete
-          </button>
-          <button type="button" class="btn btn-small btn-ghost" onClick={() => setConfirm(false)}>
-            Cancel
-          </button>
-        </div>
-      )}
     </li>
   );
 }
 
-/** "⋯" of a desktop row: Add to / Remove from favorites, Rename, Folder rules, Delete…
- *  (confirmed in the row). */
-function RowMenu({
-  rules,
-  favorite,
-  onFavorite,
-  onRename,
-  onDelete,
-}: {
-  rules?: string;
-  favorite: boolean;
-  onFavorite: () => void;
-  onRename: () => void;
-  onDelete: () => void;
-}) {
+/** A desktop row's card in the place of a tooltip, right of the column over the feed: the full
+ *  title, the state and how long ago, the worker and the folder, the last line of the turn
+ *  once its chat is loaded (resting on the row loads it, `prefetchOn`). */
+function SessionCard({ app, s, x, y }: { app: AppState; s: SessionInfo; x: number; y: number }) {
+  const [chat] = useState(() => app.chat(s.id));
+  useSubscription((fn) => chat.timeline.onChange(fn), [chat]);
+  const box = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (box.current) fitInView(box.current, x, y);
+  }, [x, y]);
+  const path = app.sessionPath(s);
+  const where = [app.workerName(s.worker_id), path && homePath(path)].filter(Boolean).join(' · ');
+  const state = [subLabel(s), agentsLabel(s.subagents), formatAge(s.updated_at, Date.now())].filter(Boolean).join(' · ');
+  const last = lastLine(chat.timeline.events());
+  return (
+    <div class="session-card" role="tooltip" ref={box} style={{ left: `${x}px`, top: `${y}px` }}>
+      <div class="session-card-title">{titleOf(s)}</div>
+      <div class="session-card-state">
+        <StateMark s={s} />
+        {state}
+      </div>
+      {where && <div class="session-card-where mono">{where}</div>}
+      {last && <div class="session-card-last">{last}</div>}
+    </div>
+  );
+}
+
+/** The bottom line of a desktop column: how many workers are online and, for the machine of
+ *  the open session, how many of its sessions run (the list's Running rule); "offline" while
+ *  the socket is down. A click opens the workers' list above it. */
+function WorkersLine({ app, current }: { app: AppState; current?: string }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!open) return;
-    const doc = box.current?.ownerDocument;
-    if (!doc) return;
+    const el = box.current;
+    const doc = el?.ownerDocument;
+    if (!open || !el || !doc) return;
     const away = (e: Event) => {
-      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+      if (!el.contains(e.target as Node)) setOpen(false);
     };
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // Marked handled: a permission card in the open chat skips a prevented Esc.
+      e.preventDefault();
+      setOpen(false);
+    };
     doc.addEventListener('pointerdown', away);
     doc.addEventListener('keydown', esc);
     return () => {
@@ -685,117 +940,102 @@ function RowMenu({
       doc.removeEventListener('keydown', esc);
     };
   }, [open]);
-  const item = (cls: string, label: string, fn: () => void) => (
-    <button
-      type="button"
-      role="menuitem"
-      class={`menu-item ${cls}`}
-      onClick={() => {
+  const list = app.workerSessions();
+  if (list.length === 0 && !app.offline) return null;
+  const online = list.filter((s) => s.state !== 'worker_offline').length;
+  const worker = app.sessions.get(current ?? '')?.worker_id;
+  const here = app.workerName(worker);
+  const live = online > 0 && !app.offline;
+  return (
+    <div
+      class="wline-box"
+      ref={box}
+      onKeyDown={(e) => {
+        // Esc on the line or in the list closes the list and only that (a permission card
+        // answers Esc on the document).
+        if (!open || e.key !== 'Escape') return;
+        e.stopPropagation();
         setOpen(false);
-        fn();
       }}
     >
-      {label}
-    </button>
-  );
-  return (
-    <div class={`menu-box ${open ? 'is-open' : ''}`} ref={box}>
-      <button
-        type="button"
-        class="icon-btn btn-row-more"
-        aria-label="More: favorites, rename, folder rules, delete"
-        title="More"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        <IconMore />
-      </button>
-      {open && (
-        <div class="menu" role="menu">
-          {item('btn-favorite', favorite ? 'Remove from favorites' : 'Add to favorites', onFavorite)}
-          {item('btn-rename', 'Rename', onRename)}
-          {rules && item('btn-rules', 'Folder rules', () => (location.hash = rules))}
-          {item('btn-delete menu-danger', 'Delete…', onDelete)}
+      {open && list.length > 0 && (
+        <div class="wline-pop">
+          <WorkerList app={app} current={current} onPick={() => setOpen(false)} />
         </div>
       )}
+      <button type="button" class={`wline ${open ? 'is-open' : ''}`} aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span class={`dot ${live ? 'dot-online' : 'dot-offline'}`} aria-hidden="true" />
+        <span class="wline-count">{app.offline ? 'offline' : `${online} ${online === 1 ? 'worker' : 'workers'} online`}</span>
+        {here && !app.offline && (
+          <span class="wline-here">
+            {here} · {runningLabel(app.workerRunning(worker))}
+          </span>
+        )}
+        <IconChevronUp />
+      </button>
     </div>
   );
 }
 
-/** The phone's actions of a row (MList2): Archive, Add to / Remove from favorites, Rename,
- *  Delete… with a second step. */
-function ActionSheet({
-  s,
-  where,
-  confirm,
-  onClose,
-  onArchive,
-  onFavorite,
-  onRename,
-  onAskDelete,
-  onDelete,
-}: {
-  s: SessionInfo;
-  where: string;
-  confirm: boolean;
-  onClose: () => void;
-  onArchive: () => void;
-  onFavorite: () => void;
-  onRename: () => void;
-  onAskDelete: () => void;
-  onDelete: () => void;
-}) {
+/** The session column's right edge (a desktop's layout puts it between the column and the
+ *  chat, off the list's scrollbar): dragged (or ←/→ while focused) to make the column wider or
+ *  narrower; the width stays on this device with the look (`Look.listWidth`). */
+export function WidthGrip({ app }: { app: AppState }) {
+  const self = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ x: number; w: number; to: number; moved: boolean } | null>(null);
+  // The column as it stands: its whole box, the border with it, as the layout's track.
+  const widthOf = (el: HTMLElement) => el.parentElement?.querySelector('.sidebar')?.getBoundingClientRect().width ?? 0;
+  const announce = (el: HTMLElement) => el.setAttribute('aria-valuenow', String(Math.round(widthOf(el))));
+  // The width read out is the one on screen: the default, the dragged one, or less in a
+  // narrow window. Measured when the look that sets it changes, after the app has put the look
+  // on the root (its layout effect runs after this child's), and again when the grip gets the
+  // focus (the window may have been resized since).
+  useEffect(() => {
+    if (self.current) announce(self.current);
+  }, [app.look.listWidth, app.look.railNames]);
+  const end = () => {
+    const d = drag.current;
+    drag.current = null;
+    if (d?.moved) app.setLook({ listWidth: d.to });
+  };
   return (
-    <>
-      <div class="sheet-scrim" onClick={onClose} />
-      <section class="action-sheet" role="dialog" aria-label="Session actions">
-        <span class="action-sheet-grab" aria-hidden="true" />
-        <div class="action-sheet-head">
-          <span class="action-sheet-title">{s.title || s.slug}</span>
-          {where && <span class="action-sheet-where mono">{where}</span>}
-        </div>
-        {confirm ? (
-          <>
-            <p class="action-sheet-note">Delete this session forever? Messages and history go too. Files on disk stay.</p>
-            <button type="button" class="btn btn-large btn-danger-fill btn-sheet-delete-forever" onClick={onDelete}>
-              Delete forever
-            </button>
-            <button type="button" class="btn btn-large btn-sheet-cancel" onClick={onClose}>
-              Cancel
-            </button>
-          </>
-        ) : (
-          <>
-            <button type="button" class="sheet-btn btn-sheet-archive" onClick={onArchive}>
-              <IconArchive />
-              Archive
-            </button>
-            <button type="button" class="sheet-btn btn-sheet-favorite" onClick={onFavorite}>
-              <IconStar />
-              {s.favorite_at ? 'Remove from favorites' : 'Add to favorites'}
-            </button>
-            <button type="button" class="sheet-btn btn-sheet-rename" onClick={onRename}>
-              <IconRename />
-              Rename
-            </button>
-            {rulesHref(s) && (
-              <a class="sheet-btn btn-sheet-rules" href={rulesHref(s)} onClick={onClose}>
-                <IconShield size={20} />
-                Folder rules
-              </a>
-            )}
-            <button type="button" class="sheet-btn sheet-danger btn-sheet-delete" onClick={onAskDelete}>
-              <IconTrash />
-              Delete…
-            </button>
-            <button type="button" class="btn btn-large btn-sheet-cancel" onClick={onClose}>
-              Cancel
-            </button>
-          </>
-        )}
-      </section>
-    </>
+    <div
+      ref={self}
+      class="col-grip"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Session list width"
+      aria-valuemin={LIST_WIDTH_MIN}
+      aria-valuemax={LIST_WIDTH_MAX}
+      tabIndex={0}
+      onFocus={(e) => announce(e.currentTarget as HTMLElement)}
+      onPointerDown={(e) => {
+        const el = e.currentTarget as HTMLElement;
+        el.setPointerCapture?.(e.pointerId);
+        const w = widthOf(el);
+        drag.current = { x: e.clientX, w, to: clampListWidth(w), moved: false };
+        e.preventDefault();
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        d.to = clampListWidth(d.w + e.clientX - d.x);
+        d.moved = true;
+        // Live while dragging; stored once on release.
+        const el = e.currentTarget as HTMLElement;
+        el.ownerDocument.documentElement.style.setProperty('--list-w', `${d.to}px`);
+        announce(el);
+      }}
+      onPointerUp={end}
+      onPointerCancel={end}
+      onLostPointerCapture={end}
+      onKeyDown={(e) => {
+        const dir = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+        if (!dir) return;
+        e.preventDefault();
+        app.setLook({ listWidth: clampListWidth(widthOf(e.currentTarget as HTMLElement) + dir * LIST_WIDTH_STEP) });
+      }}
+    />
   );
 }
 
@@ -841,10 +1081,11 @@ function ProjectChips({ app, onError }: { app: AppState; onError: (m: string) =>
   );
 }
 
-/** "Workers": each worker with its online dot and how many sessions are active on it; a
- *  click opens its service session (SPEC §10.2). Listed by their service sessions:
- *  revoking a worker archives it, so revoked workers are not here. */
-function WorkerList({ app, current }: { app: AppState; current?: string }) {
+/** "Workers": each worker with its online dot and how many of its sessions run (the list's
+ *  Running rule); a click opens its service session (SPEC §10.2). Listed by their service
+ *  sessions: revoking a worker archives it, so revoked workers are not here. On a desktop it
+ *  opens from the workers line; `onPick` closes it there. */
+function WorkerList({ app, current, onPick }: { app: AppState; current?: string; onPick?: () => void }) {
   const list = app.workerSessions();
   if (list.length === 0) return null;
   return (
@@ -854,13 +1095,19 @@ function WorkerList({ app, current }: { app: AppState; current?: string }) {
         const offline = s.state === 'worker_offline';
         const asks = s.state === 'waiting';
         return (
-          <a key={s.id} class={`worker-row ${s.id === current ? 'is-current' : ''}`} href={`#/s/${s.id}`} title="The worker's service session">
+          <a
+            key={s.id}
+            class={`worker-row ${s.id === current ? 'is-current' : ''}`}
+            href={`#/s/${s.id}`}
+            title="The worker's service session"
+            onClick={onPick}
+          >
             <span class={`dot ${offline ? 'dot-offline' : 'dot-online'}`} aria-hidden="true" />
             <span class="worker-name">{s.title}</span>
             {asks ? (
               <span class="worker-asks">waiting for reply</span>
             ) : (
-              <span class="worker-state">{offline ? 'offline' : activeLabel(app.workerActive(s.worker_id))}</span>
+              <span class="worker-state">{offline ? 'offline' : runningLabel(app.workerRunning(s.worker_id))}</span>
             )}
             {s.unread > 0 && (
               <span class="badge" aria-label={`unread: ${s.unread}`}>

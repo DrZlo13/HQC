@@ -248,6 +248,20 @@ impl AppState {
         self.notify(Notice::LiveAgents { session_id, event });
     }
 
+    /// The session's agent runs no subagent any more, though no empty list from the worker
+    /// may say so (SPEC §4): its worker restarted, its `session.state` counts none, or it was
+    /// deleted. A kept list is dropped and the session's subscribers get an empty
+    /// `subagents.live`, as from the worker.
+    pub fn drop_live_agents(&self, session_id: Uuid) {
+        let mut lists = self.live_agents.lock().unwrap();
+        if lists.remove(&session_id).is_some() {
+            self.notify(Notice::LiveAgents {
+                session_id,
+                event: no_live_agents(session_id),
+            });
+        }
+    }
+
     /// The session's latest `subagents.live`, unless it was empty, its run times counted now.
     pub fn live_agents(&self, session_id: Uuid) -> Option<Value> {
         let lists = self.live_agents.lock().unwrap();
@@ -291,6 +305,18 @@ impl AppState {
             }
         }
     }
+}
+
+/// An empty `subagents.live` of the session, as its worker sends one when the agent stops.
+pub fn no_live_agents(session_id: Uuid) -> Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "event_id": crate::db::new_id(),
+        "ts": chrono::Utc::now(),
+        "author": {"kind": "agent", "id": session_id},
+        "type": "subagents.live",
+        "payload": {"agents": []},
+    })
 }
 
 /// `event`, a `subagents.live`, with `age` added to the `duration_ms` of each subagent.

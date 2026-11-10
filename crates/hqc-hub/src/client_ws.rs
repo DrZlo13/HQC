@@ -356,11 +356,14 @@ impl Client {
             if !self.backfill(id).await {
                 return false;
             }
-            // A `subagents.live` lost with the overflow.
-            if let Some(event) = self.app.live_agents(id) {
-                if !self.send(ServerFrame::Event { event }).await {
-                    return false;
-                }
+            // A `subagents.live` lost with the overflow; an empty one when none is kept, as
+            // the one that dropped it may have been lost.
+            let event = self
+                .app
+                .live_agents(id)
+                .unwrap_or_else(|| crate::app::no_live_agents(id));
+            if !self.send(ServerFrame::Event { event }).await {
+                return false;
             }
         }
         !self.summary || self.send_summary().await

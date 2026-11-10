@@ -1767,6 +1767,111 @@ async fn subagents_are_kept_on_the_session() {
     hub.finish().await;
 }
 
+/// SPEC §4, §6: `subagents.live` is not stored, and a client that subscribes gets the latest
+/// list before `subscribed`. A worker that restarts while a subagent runs never sends the
+/// empty list: the hub drops the kept one itself, its subscribers get an empty list, a new
+/// subscriber none.
+#[tokio::test]
+async fn a_worker_restart_drops_the_kept_subagents() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Subagents").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+
+    let agents = json!([{"task_id": "a1", "description": "Fix the build", "duration_ms": 1000}]);
+    let live = agent_event(&sid, "subagents.live", json!({ "agents": agents }));
+    let a = w.event(live.clone()).await;
+    assert_eq!(a, json!({"event_id": live["event_id"]}), "no seq");
+    assert_eq!(c.until("event").await["event"], live);
+    let events = hub.events(&sid).await;
+    assert!(
+        events.iter().all(|e| e["type"] != "subagents.live"),
+        "{events:?}"
+    );
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    let kept = backlog.last().unwrap();
+    assert_eq!(kept["type"], "subagents.live", "{backlog:?}");
+    assert_eq!(kept["payload"]["agents"][0]["task_id"], "a1");
+    assert!(kept["payload"]["agents"][0]["duration_ms"].as_u64() >= Some(1000));
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (_w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    let gone = loop {
+        let e = c.until("event").await["event"].clone();
+        if e["type"] == "subagents.live" {
+            break e;
+        }
+    };
+    assert_eq!(gone["session_id"], sid.as_str());
+    assert_eq!(gone["payload"]["agents"], json!([]), "{gone}");
+    let mut fresh = FakeClient::connect(&hub).await;
+    let backlog = fresh.subscribe(&sid, 0).await;
+    assert!(
+        backlog.iter().all(|e| e["type"] != "subagents.live"),
+        "{backlog:?}"
+    );
+    hub.finish().await;
+}
+
+/// SPEC §4: the empty list goes directly and is lost with a broken link, and a worker that
+/// reconnects without a restart repeats only a list that is not empty. A `session.state` that
+/// counts no subagent drops the kept list, and so does deleting the session; the subscribers
+/// get an empty list, a new subscriber none.
+#[tokio::test]
+async fn a_count_of_none_drops_the_kept_subagents() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Subagents").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+    let agents = json!([{"task_id": "a1", "description": "Fix the build", "duration_ms": 1000}]);
+    let live = || agent_event(&sid, "subagents.live", json!({ "agents": agents }));
+    async fn next_live(c: &mut FakeClient) -> Value {
+        loop {
+            let e = c.until("event").await["event"].clone();
+            if e["type"] == "subagents.live" {
+                break e;
+            }
+        }
+    }
+
+    w.event(live()).await;
+    assert_eq!(
+        next_live(&mut c).await["payload"]["agents"][0]["task_id"],
+        "a1"
+    );
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc", "subagents": 0}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert_eq!(next_live(&mut c).await["payload"]["agents"], json!([]));
+    let mut fresh = FakeClient::connect(&hub).await;
+    let backlog = fresh.subscribe(&sid, 0).await;
+    assert!(
+        backlog.iter().all(|e| e["type"] != "subagents.live"),
+        "{backlog:?}"
+    );
+
+    w.event(live()).await;
+    assert_eq!(
+        next_live(&mut c).await["payload"]["agents"][0]["task_id"],
+        "a1"
+    );
+    assert_eq!(hub.delete(&format!("/api/sessions/{sid}")).await, 204);
+    assert_eq!(next_live(&mut c).await["payload"]["agents"], json!([]));
+    hub.finish().await;
+}
+
 /// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
 /// service sessions included, the newest `updated_at` first; another user's sessions are not in
 /// it.

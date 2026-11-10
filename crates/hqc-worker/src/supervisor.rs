@@ -34,11 +34,11 @@
 //!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; the first
 //!   input the turn carries to the next one becomes that turn, one the runtime will not take
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
-//! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) is repeated in every
-//!   `session.state` like `title`, 0 when the agent is stopped. Their list
-//!   ([`AdapterEvent::LiveSubagents`]) goes as `subagents.live`, empty when the agent is
-//!   stopped; the last one sent is sent again on every connect unless it was empty, its run
-//!   times counted then.
+//! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) and `background_tasks`
+//!   ([`AdapterEvent::BackgroundTasks`]) are repeated in every `session.state` like `title`,
+//!   0 when the agent is stopped. The subagents' list ([`AdapterEvent::LiveSubagents`]) goes
+//!   as `subagents.live`, empty when the agent is stopped; the last one sent is sent again on
+//!   every connect unless it was empty, its run times counted then.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -60,9 +60,9 @@
 //!   as any model reaches a stopped one. A `session.start` for a running agent with another
 //!   model does the same.
 //! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
-//!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`], kept here and not
-//!   sent to the hub) is killed, the next input resumes it. A reconnect and a holder report
-//!   (`Cmd::Resync`, `Cmd::Held`) are no activity of the agent.
+//!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`]) is killed, the
+//!   next input resumes it. A reconnect and a holder report (`Cmd::Resync`, `Cmd::Held`) are
+//!   no activity of the agent.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
 //! - Workspaces hqc makes and deletes (T45): `workspace.create` is acked at once and runs in
@@ -998,7 +998,8 @@ struct Session {
     /// The last `subagents.live` list sent, unless it was empty, and when: sent again on every
     /// connect, its run times counted then.
     live: Option<(Vec<hqc_proto::event::LiveSubagent>, Instant)>,
-    /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]); not sent.
+    /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]), repeated
+    /// in every `session.state`.
     background_tasks: u32,
     /// A `session.stop` came since the last end of a turn: an input the runtime drops then
     /// was cancelled by the person, not lost ([`Session::end_turn`]).
@@ -1704,8 +1705,9 @@ impl Session {
                 }
             }
             AdapterEvent::BackgroundTasks(n) => {
-                if self.state != ProcessState::Stopped {
+                if self.state != ProcessState::Stopped && self.background_tasks != n {
                     self.background_tasks = n;
+                    self.send_state();
                 }
             }
             AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
@@ -1992,6 +1994,7 @@ impl Session {
             permission_mode: self.permission_mode,
             capped_input: self.capped_input(),
             subagents: self.subagents,
+            background_tasks: self.background_tasks,
         });
     }
 

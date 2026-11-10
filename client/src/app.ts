@@ -297,6 +297,7 @@ export class AppState {
         effective_permission_mode: s.effective_permission_mode,
         permission_capped_by: s.permission_capped_by,
         subagents: s.subagents,
+        background_tasks: s.background_tasks,
         favorite_at: s.favorite_at,
       });
     }
@@ -579,8 +580,8 @@ export class AppState {
     let n = 0;
     for (const s of this.sessions.values()) {
       if (s.system || s.archived || s.worker_id !== workerId) continue;
-      // An idle session whose background subagents still run works too.
-      if (s.state === 'running' || s.state === 'waiting' || s.state === 'queued' || (s.subagents ?? 0) > 0) n++;
+      // An idle session whose background subagents or tasks still run works too.
+      if (s.state === 'running' || s.state === 'waiting' || s.state === 'queued' || (s.subagents ?? 0) > 0 || (s.background_tasks ?? 0) > 0) n++;
     }
     return n;
   }

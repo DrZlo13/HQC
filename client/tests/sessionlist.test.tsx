@@ -83,6 +83,16 @@ describe('list logic', () => {
     expect(subLabel(free)).toBe('Idle');
   });
 
+  it('an idle session whose background task still runs, with no subagent, is in Running and says so', () => {
+    const busy = sess('make', 'Two conversion runs', 'idle', at(1), { background_tasks: 1 });
+    const free = sess('free', 'Nothing left', 'idle', at(2));
+    expect(groupSessions([busy, free], 'state', NOW).map((g) => [g.label, g.items.map((s) => s.id)])).toEqual([
+      ['Running', ['make']],
+      ['Idle', ['free']],
+    ]);
+    expect(subLabel(busy)).toBe('Running');
+  });
+
   it('groups by state and by recency, newest first, empty groups left out', () => {
     expect(groupSessions(LIST, 'state', NOW).map((g) => [g.label, g.items.map((s) => s.id)])).toEqual([
       ['Needs you', ['net']],
@@ -327,6 +337,14 @@ describe('SessionList (desktop column)', () => {
   it('counts an idle session whose subagents still run as active on its worker', async () => {
     const idle = LIST.find((s) => s.worker_id === 'wk1' && s.state === 'idle')!;
     const list = LIST.map((s) => (s.id === idle.id ? { ...s, subagents: 2 } : s));
+    await mount(<SessionList app={makeApp(list)} />);
+    const home = [...root.querySelectorAll('.worker-list .worker-row')].find((r) => r.querySelector('.worker-name')!.textContent === 'home-mac')!;
+    expect(home.querySelector('.worker-state')!.textContent).toBe('3 active');
+  });
+
+  it('counts an idle session whose background tasks still run as active on its worker', async () => {
+    const idle = LIST.find((s) => s.worker_id === 'wk1' && s.state === 'idle')!;
+    const list = LIST.map((s) => (s.id === idle.id ? { ...s, background_tasks: 1 } : s));
     await mount(<SessionList app={makeApp(list)} />);
     const home = [...root.querySelectorAll('.worker-list .worker-row')].find((r) => r.querySelector('.worker-name')!.textContent === 'home-mac')!;
     expect(home.querySelector('.worker-state')!.textContent).toBe('3 active');

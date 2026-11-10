@@ -67,6 +67,7 @@ function setup(
     effective_permission_mode?: PermissionMode;
     permission_capped_by?: string;
     subagents?: number;
+    background_tasks?: number;
     model?: string;
   } = {},
 ) {
@@ -137,6 +138,7 @@ function setup(
     effective_permission_mode: opts.effective_permission_mode,
     permission_capped_by: opts.permission_capped_by,
     subagents: opts.subagents,
+    background_tasks: opts.background_tasks,
     model: opts.model,
   };
   app.sessions.set('s1', info);
@@ -434,6 +436,20 @@ describe('header', () => {
     await mount(app);
     expect($('.pill')!.textContent).toBe('Idle');
     expect($('.pill .pulse')).toBeNull();
+  });
+
+  it('says Running while a background task runs after the turn ended, Idle once it ends', async () => {
+    const { app } = setup('idle', { background_tasks: 1 });
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Running');
+    expect($('.chat-agents')).toBeNull();
+    const s = app.sessions.get('s1')!;
+    await act(async () =>
+      app.mergeSummary([
+        { session_id: 's1', project_id: 'p1', title: s.title, state: 'idle', queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 },
+      ]),
+    );
+    expect($('.pill')!.textContent).toBe('Idle');
   });
 
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {

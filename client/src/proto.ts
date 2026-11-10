@@ -834,6 +834,8 @@ export interface SessionSummary {
   permission_capped_by?: string;
   /** Subagents the agent runs now; absent is 0. */
   subagents?: number;
+  /** Background tasks the runtime lists for the agent now; absent is 0. */
+  background_tasks?: number;
   /** When the user made it a favorite; absent: not one. */
   favorite_at?: string;
 }
@@ -931,6 +933,7 @@ export function parseSummary(v: unknown): SessionSummary {
     effective_permission_mode: optPermissionMode(s, 'effective_permission_mode'),
     permission_capped_by: optStr(s, 'permission_capped_by'),
     subagents: optNum(s, 'subagents'),
+    background_tasks: optNum(s, 'background_tasks'),
     favorite_at: optStr(s, 'favorite_at'),
   };
 }
@@ -1045,6 +1048,9 @@ export interface SessionInfo {
   permission_capped_by?: string;
   /** Subagents the agent runs now, as its worker last reported; absent is 0. */
   subagents?: number;
+  /** Background tasks the runtime lists for the agent now (its own and its subagents'
+   *  commands, monitors, background subagents), as its worker last reported; absent is 0. */
+  background_tasks?: number;
   /** When the user made it a favorite (favorites are per user); absent: not one. */
   favorite_at?: string;
   /** The model hqc starts the agent with (`agent.model`); absent: the runtime's default. */
@@ -1137,6 +1143,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     effective_permission_mode: optPermissionMode(o, 'effective_permission_mode'),
     permission_capped_by: optStr(o, 'permission_capped_by'),
     subagents: optNum(o, 'subagents'),
+    background_tasks: optNum(o, 'background_tasks'),
     favorite_at: optStr(o, 'favorite_at'),
     model: optStr(agent, 'model'),
   };

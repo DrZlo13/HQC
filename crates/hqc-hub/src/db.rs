@@ -535,6 +535,7 @@ pub async fn ensure_system_session(db: &PgPool, worker_id: Uuid) -> sqlx::Result
 pub async fn worker_restarted(db: &PgPool, worker_id: Uuid) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE sessions SET process_state = 'stopped', permission_capped_by = NULL, subagents = 0,
+            background_tasks = 0,
             locked_by = CASE WHEN locked_by = 'hqc' THEN 'none' ELSE locked_by END
          WHERE worker_id = $1",
     )
@@ -1522,6 +1523,9 @@ pub struct SessionRow {
     pub permission_capped_by: Option<String>,
     /// The subagents the agent runs now (`session.state.subagents`).
     pub subagents: i32,
+    /// The background tasks the runtime lists for the agent now
+    /// (`session.state.background_tasks`).
+    pub background_tasks: i32,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1530,7 +1534,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
     s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode, \
-    s.permission_capped_by, s.subagents";
+    s.permission_capped_by, s.subagents, s.background_tasks";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1828,6 +1832,19 @@ pub async fn set_subagents(db: &PgPool, id: Uuid, n: u32) -> sqlx::Result<()> {
         .bind(i32::try_from(n).unwrap_or(i32::MAX))
         .execute(db)
         .await?;
+    Ok(())
+}
+
+/// The background tasks the worker reports the runtime lists for the session's agent now;
+/// written only when the count changed.
+pub async fn set_background_tasks(db: &PgPool, id: Uuid, n: u32) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sessions SET background_tasks = $2 WHERE id = $1 AND background_tasks <> $2",
+    )
+    .bind(id)
+    .bind(i32::try_from(n).unwrap_or(i32::MAX))
+    .execute(db)
+    .await?;
     Ok(())
 }
 

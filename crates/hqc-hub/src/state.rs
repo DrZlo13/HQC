@@ -171,6 +171,7 @@ pub async fn views(
                     .and_then(PermissionMode::parse),
                 permission_capped_by: s.permission_capped_by,
                 subagents: s.subagents.max(0) as u32,
+                background_tasks: s.background_tasks.max(0) as u32,
                 spawned_by: s.spawned_by.zip(a.spawned_by_address.clone()).map(
                     |(session_id, address)| SpawnedBy {
                         session_id,

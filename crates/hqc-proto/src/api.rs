@@ -80,6 +80,11 @@ pub struct Session {
     /// (`session.state.subagents`, since SPEC 0.68). Absent — 0.
     #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
     pub subagents: u32,
+    /// How many background tasks the runtime lists for the session's agent now, as its
+    /// worker last reported it (`session.state.background_tasks`, since SPEC 0.104). Absent
+    /// — 0.
+    #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
+    pub background_tasks: u32,
     /// When the requesting user made the session a favorite (`PUT .../favorite`); favorites
     /// are per user. Absent — not a favorite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,6 +116,7 @@ impl Session {
             effective_permission_mode: self.effective_permission_mode,
             permission_capped_by: self.permission_capped_by.clone(),
             subagents: self.subagents,
+            background_tasks: self.background_tasks,
             favorite_at: self.favorite_at,
         }
     }

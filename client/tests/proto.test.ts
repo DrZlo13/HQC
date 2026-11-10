@@ -151,6 +151,10 @@ describe('examples/wire', () => {
     expect(s.subagents).toBe(2);
     expect(sys.subagents).toBeUndefined();
     expect(one.type === 'session.summary' && one.session.subagents).toBe(2);
+    // SPEC 0.104: the background tasks the runtime lists, in the session and its summary.
+    expect(s.background_tasks).toBe(1);
+    expect(sys.background_tasks).toBeUndefined();
+    expect(one.type === 'session.summary' && one.session.background_tasks).toBe(1);
     // Favorites: the user's, in the session and its summary; absent is not a favorite.
     expect(s.favorite_at).toBe('2026-10-22T09:30:00Z');
     expect(sys.favorite_at).toBeUndefined();

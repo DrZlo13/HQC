@@ -34,5 +34,6 @@
   "effective_permission_mode": "ask",
   "permission_capped_by": "hqc/build-bot",
   "subagents": 2,
+  "background_tasks": 1,
   "favorite_at": "2026-10-22T09:30:00Z"
 }

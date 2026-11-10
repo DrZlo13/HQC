@@ -110,6 +110,10 @@ pub struct SessionSummary {
     /// As in the session object (SPEC 0.68): the subagents the agent runs now; absent — 0.
     #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
     pub subagents: u32,
+    /// As in the session object (SPEC 0.104): the background tasks the runtime lists for the
+    /// agent now; absent — 0.
+    #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
+    pub background_tasks: u32,
     /// As in the session object: the user's, so the list of favorites follows other devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorite_at: Option<DateTime<Utc>>,

@@ -892,6 +892,7 @@ async fn the_answer_goes_before_the_stop_at_shutdown() {
             permission_mode: None,
             capped_input: None,
             subagents: 0,
+            background_tasks: 0,
         });
         stop.cancel();
         let mut answered = false;

@@ -14,7 +14,7 @@ import { AppearanceDialog, ProjectGlyph, projectName } from './Appearance';
 import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconPlus, IconShield } from './icons';
 import { homePath } from './labels';
-import { subagentsAtWork } from './sessions';
+import { atWorkAfterTurn } from './sessions';
 
 /** How often the list is read again while a clone runs (T45). */
 const CLONE_POLL_MS = 1000;
@@ -1139,7 +1139,7 @@ function DeleteFolderDialog({
                 {sessions.map((s) => (
                   <li key={s.id}>
                     {s.title || s.slug}
-                    {(s.state === 'running' || s.state === 'waiting' || s.state === 'queued' || subagentsAtWork(s)) && (
+                    {(s.state === 'running' || s.state === 'waiting' || s.state === 'queued' || atWorkAfterTurn(s)) && (
                       <span class="muted"> — running, will be stopped</span>
                     )}
                   </li>

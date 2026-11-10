@@ -264,3 +264,46 @@ async fn deny_with_message_reaches_control_response() {
     assert_eq!(resp["interrupt"], false);
     w.stop().await;
 }
+
+/// SPEC §5.4: the CLI's list of background tasks goes to the hub in `session.state`: a command
+/// the agent runs in the background (`task_type: local_bash`) makes `background_tasks: 1`, the
+/// empty list makes it 0 (absent).
+#[tokio::test]
+async fn background_tasks_go_in_session_state() {
+    let env = Env::new();
+    let claude = ScriptedClaude::new(concat!(
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bq3k1x9wd","task_type":"local_bash"}]}"#,
+        "\n",
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+    ));
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": Uuid::now_v7(), "text": "make all",
+               "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["background_tasks"] == 1 {
+            break;
+        }
+    }
+    let st = c.expect("session.state").await;
+    assert_eq!(st["payload"]["process_state"], "running", "{st}");
+    assert!(st["payload"].get("background_tasks").is_none(), "{st}");
+    w.stop().await;
+}

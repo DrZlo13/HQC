@@ -142,6 +142,12 @@ pub enum WorkerFrame {
         /// 0 when the agent is stopped. Absent — 0.
         #[serde(default, skip_serializing_if = "is_zero")]
         subagents: u32,
+        /// How many background tasks the runtime lists for the session's agent now (since
+        /// SPEC 0.104; Claude Code: the `tasks` of `system/background_tasks_changed`, its own
+        /// background commands and subagents and theirs, SPEC §8.1). Repeated in every
+        /// following `session.state`, 0 when the agent is stopped. Absent — 0.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        background_tasks: u32,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -2050,6 +2056,15 @@ mod tests {
         };
         assert_eq!(subagents(&old), 2);
         assert_eq!(subagents(&held), 0);
+        // `background_tasks` (SPEC 0.104): absent is 0.
+        let background_tasks = |f: &Envelope<WorkerFrame>| match &f.body {
+            WorkerFrame::SessionState {
+                background_tasks, ..
+            } => *background_tasks,
+            other => panic!("not session.state: {other:?}"),
+        };
+        assert_eq!(background_tasks(&old), 1);
+        assert_eq!(background_tasks(&held), 0);
         assert_eq!(
             of(&held),
             Some(Some(HeldBy {

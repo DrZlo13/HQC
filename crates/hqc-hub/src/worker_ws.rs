@@ -450,6 +450,7 @@ async fn handle_text(
             permission_mode,
             capped_input,
             subagents,
+            background_tasks,
         } => {
             let st = StateFrame {
                 session_id,
@@ -462,6 +463,7 @@ async fn handle_text(
                 permission_mode,
                 capped_input,
                 subagents,
+                background_tasks,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -695,6 +697,7 @@ struct StateFrame {
     permission_mode: Option<hqc_proto::frame::PermissionMode>,
     capped_input: Option<Uuid>,
     subagents: u32,
+    background_tasks: u32,
 }
 
 async fn on_session_state(
@@ -714,6 +717,7 @@ async fn on_session_state(
         permission_mode,
         capped_input,
         subagents,
+        background_tasks,
     } = st;
     if session_id.is_nil() {
         // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
@@ -771,6 +775,7 @@ async fn on_session_state(
         // the link (SPEC §4).
         app.drop_live_agents(session_id);
     }
+    db::set_background_tasks(&app.db, session_id, background_tasks).await?;
     conn.reply(id, HubFrame::Ack(Ack::default()));
 
     if process_state == ProcessState::Stopped {

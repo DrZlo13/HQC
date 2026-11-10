@@ -1872,6 +1872,56 @@ async fn a_count_of_none_drops_the_kept_subagents() {
     hub.finish().await;
 }
 
+/// SPEC §5.4, §6: `session.state.background_tasks` is kept on the session, in the session object
+/// and its summary; the report of a stopped agent is 0 (absent), and so is every session of a
+/// restarted worker.
+#[tokio::test]
+async fn background_tasks_are_kept_on_the_session() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Background tasks").await;
+    ack_start(&mut w, &sid).await;
+    assert!(hub.session(&sid).await.get("background_tasks").is_none());
+    let mut c = FakeClient::connect(&hub).await;
+    c.send(json!({"type": "subscribe_summary"})).await;
+    c.until("summary").await;
+
+    let running = json!({"session_id": sid, "process_state": "running", "locked_by": "hqc",
+        "background_tasks": 1});
+    w.send("session.state", running.clone()).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["background_tasks"], 1);
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"]["background_tasks"] == 1 {
+            break;
+        }
+    }
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert!(hub.session(&sid).await.get("background_tasks").is_none());
+
+    w.send("session.state", running).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["background_tasks"], 1);
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (_w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    let v = hub
+        .wait_session(&sid, "stopped", |v| {
+            v["agent"]["process_state"] == "stopped"
+        })
+        .await;
+    assert!(v.get("background_tasks").is_none(), "{v}");
+    hub.finish().await;
+}
+
 /// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
 /// service sessions included, the newest `updated_at` first; another user's sessions are not in
 /// it.

@@ -32,19 +32,20 @@ export function moveTo(order: string[], id: string, to: number): string[] {
 }
 
 /** Which group of "State" a session is in: it waits for the user (a request or an
- *  error to retry), works (a turn, queued input, a subagent still at work after the turn
- *  ended, VS Code busy with it) or is free. */
+ *  error to retry), works (a turn, queued input, a subagent or a background task still at
+ *  work after the turn ended, VS Code busy with it) or is free. */
 export type Bucket = 'wait' | 'run' | 'idle';
 
-/** The turn ended and a background subagent still works: the session counts as working. */
-export function subagentsAtWork(s: Pick<SessionInfo, 'state' | 'subagents'>): boolean {
-  return s.state === 'idle' && (s.subagents ?? 0) > 0;
+/** The turn ended and a background subagent or task still works: the session counts as
+ *  working. */
+export function atWorkAfterTurn(s: Pick<SessionInfo, 'state' | 'subagents' | 'background_tasks'>): boolean {
+  return s.state === 'idle' && ((s.subagents ?? 0) > 0 || (s.background_tasks ?? 0) > 0);
 }
 
 export function bucketOf(s: SessionInfo): Bucket {
   if (s.state === 'waiting' || s.state === 'error') return 'wait';
   if (s.state === 'running' || s.state === 'queued') return 'run';
-  if (subagentsAtWork(s)) return 'run';
+  if (atWorkAfterTurn(s)) return 'run';
   if (s.state === 'locked_vscode' && s.held_by?.status === 'busy') return 'run';
   return 'idle';
 }
@@ -81,8 +82,8 @@ export function subLabel(s: SessionInfo): string {
       t = 'Archived';
       break;
     case 'idle':
-      // Running, as its group, while a background subagent works.
-      t = subagentsAtWork(s) ? 'Running' : 'Idle';
+      // Running, as its group, while a background subagent or task works.
+      t = atWorkAfterTurn(s) ? 'Running' : 'Idle';
       break;
     default:
       t = 'Unknown';

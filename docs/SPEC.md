@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.103, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
+Version 0.105, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3014,7 +3014,11 @@ yet matched (the input is consumed; the last 32 are kept). The typed text is the
 block, and for a slash command, which the CLI writes as
 `<command-name>/compact</command-name>…<command-args>…</command-args>`, the command with its
 arguments. This makes own records of the `/compact` command record (it is not in stream-json,
-2.1.308) and of the prompt if its echo comes with a different `uuid` (see §9.3). Since 0.69 a
+2.1.308) and of the prompt if its echo comes with a different `uuid` (see §9.3). Since 0.105 a
+prompt record whose typed text is several unmatched inputs in a row joined by `\n` is own too,
+and consumes them: the CLI writes inputs it takes from its queue together, such as a message
+typed while a fresh process starts, as one prompt record with a new `uuid` (2.1.312); before, the
+mirror took that record for another writer's and the chat showed it as a third message. Since 0.69 a
 background task's notification record (§9.1) is own while the session's hqc process is alive:
 the adapter reported its stream-json `system task_notification` line, which has another `uuid`
 (2.1.312), so the record is neither emitted nor held nor taken for another writer. Since 0.98 a
@@ -4271,6 +4275,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.103 → 0.105 (a prompt record of inputs the CLI took together is the worker's own)
+§9.2: a prompt record whose text is several of the worker's unmatched inputs in a row joined by a
+newline is the worker's own and consumes them. Claude Code 2.1.312 writes the messages it takes
+from its queue together (one sent to start a fresh process, one typed while it started) as one
+prompt record with a uuid stream-json did not name; the mirror took it for another writer's, and
+the chat showed the joined text as a third message after the two. 0.104 is taken by a pull request
+in preparation.
 
 ### 0.102 → 0.103 (an agent renames a session)
 §7: the tool `hqc_rename(title, session?)` renames the calling session, or another session of

@@ -1222,8 +1222,11 @@ select.input {
   display: flex;
 }
 
+/* The width repeats the flex basis: Safari sizes an inline-flex box (a project's running mark)
+   by its items' widths, so a dot without one let the count beside it overflow. */
 .dot {
   flex: 0 0 8px;
+  width: 8px;
   height: 8px;
   margin-top: 8px;
   border-radius: 4px;
@@ -2357,6 +2360,7 @@ select.input {
 
 .sessions-phone .dot {
   flex-basis: 10px;
+  width: 10px;
   height: 10px;
   margin-top: 7px;
   border-radius: 5px;
@@ -5743,6 +5747,7 @@ button.ps-look {
 
 .preview-row .dot {
   flex-basis: 7px;
+  width: 7px;
   height: 7px;
   margin-top: 5px;
 }

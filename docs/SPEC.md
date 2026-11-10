@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.107, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
+Version 0.108, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -456,7 +456,7 @@ the client renders only them. The "source" column is the component that produces
 
 | type | payload | source |
 |---|---|---|
-| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
+| `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -469,7 +469,7 @@ the client renders only them. The "source" column is the component that produces
 | `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
-| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
+| `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn only; `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
@@ -1412,7 +1412,9 @@ the rest is marked "later"):
   the transcript of the newest one with only the events in it: a fork of a fork before a
   message of its copied history cuts in the transcript that history came from, which stays on
   the worker when the sessions between never ran (the CLI writes a fork's transcript at its
-  first message) or were deleted (§17.4). The agent starts at once. The client puts the message's text into the new
+  first message) or were deleted (§17.4). Since 0.108 a fork before a message with
+  `during_text` keeps the `agent.message` the client shows above it (below, the WebSocket
+  paragraph) as the newest cut and the last copied event. The agent starts at once. The client puts the message's text into the new
   session's input as its draft and opens it.
 - `POST /api/sessions/{id}/move` {path, project?, create?} → the session object (since 0.75;
   `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
@@ -1663,7 +1665,12 @@ Esc closes, a click or tap inserts. No list — no popup; only commands from the
 WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
-`agent.delta` with its text so far, and the stream carries only the deltas after it. On open
+`agent.delta` with its text so far, and the stream carries only the deltas after it. Since
+0.108 a `user.message` or `peer.message` that came while that text was being written stands
+under it in the feed, live (after the text, before the activity line, with the messages not
+stored yet) and once the text is stored: the `agent.message` goes above the inputs with
+`during_text` right before it in `seq` order, never above the input it answers (`in_reply_to`).
+The client takes this from the hub's `payload.during_text`, never guesses it from times. On open
 the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
 older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
 each time the user scrolls to the top, and while the feed is shorter than its window (which
@@ -4351,6 +4358,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.107 → 0.108 (an input written during the agent's text stands under it)
+§4, §6: a message the user wrote while the agent's text was being written stood above that
+text: the text gets its `seq` only once it is stored, after the input. The hub now marks a
+`user.message` or `peer.message` it stores while the session's text is open with
+`payload.during_text`, and the client shows such an input under the text, live and once it is
+stored, also after a reload; a fork before such an input keeps the answer shown above it.
 
 ### 0.105 → 0.107 (the older history of a short feed)
 §6 WebSocket: while the rendered feed is shorter than its window, the chat renders 60 more

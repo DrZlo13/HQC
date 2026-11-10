@@ -816,6 +816,54 @@ describe('read cursor', () => {
   });
 });
 
+describe('an input that came while the agent writes (SPEC §6)', () => {
+  const first = ev('event.user.message', 1, (e) => (e.payload.artifact_ids = []));
+  const meanwhile = (seq: number) =>
+    ev('event.user.message', seq, (e) => {
+      e.event_id = `0199f3a2-7c10-7000-8000-0000000003${seq}0`;
+      e.payload = { text: 'written meanwhile', artifact_ids: [], during_text: true };
+    });
+  /** The chat of `history`, mounted, with the agent writing a text; `push` brings live events. */
+  async function writing(history: HqcEvent[]) {
+    const { app, api } = setup('running', { history });
+    let push!: (e: HqcEvent) => void;
+    (app.socket as unknown as { subscribe: unknown }).subscribe = (_id: string, s: { onEvent: (e: HqcEvent) => void }) => {
+      push = s.onEvent;
+      return () => {};
+    };
+    await mount(app);
+    await act(async () => push(ev('event.agent.delta', 0, (e) => delete e.seq)));
+    return { api, push };
+  }
+  const under = (el: Element) => !!($('.msg-streaming')!.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const block = (text: string) => [...root.querySelectorAll('.feed-block')].find((b) => b.textContent?.includes(text))!;
+
+  it('stands under the text being written', async () => {
+    const { push } = await writing([first]);
+    await act(async () => push(meanwhile(2)));
+    expect(under(block('written meanwhile'))).toBe(true);
+  });
+
+  it('a message not stored yet stands under it too', async () => {
+    const { api } = await writing([first]);
+    Object.assign(api, { input: vi.fn(() => new Promise(() => {})) });
+    const area = $('.composer-input') as HTMLTextAreaElement;
+    await act(() => {
+      area.value = 'not stored yet';
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => $('.composer button[type=submit]')!.click());
+    expect(under($('.msg-pending')!)).toBe(true);
+  });
+
+  it('one that came during an earlier text stays above it', async () => {
+    const answer = ev('event.agent.message', 3, (e) => (e.payload = { text: 'the earlier answer', final: true }));
+    const idle = ev('event.status', 4, (e) => (e.payload = { state: 'idle' }));
+    await writing([first, meanwhile(2), answer, idle]);
+    expect(under(block('written meanwhile'))).toBe(false);
+  });
+});
+
 describe('fork', () => {
   it('forks before a message of the user: the new session opens with the message as its draft', async () => {
     const { app, api } = setup('idle');

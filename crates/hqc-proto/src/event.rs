@@ -188,6 +188,10 @@ pub enum EventKind {
         /// owner.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schedule_id: Option<Uuid>,
+        /// Set by the hub: the agent's text was being written when the input came, so clients
+        /// show it under that text (since SPEC 0.108); absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        during_text: bool,
     },
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
@@ -297,6 +301,10 @@ pub enum EventKind {
         /// downloaded into the target's inbox like a user's attachments (SPEC §12).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         artifact_ids: Vec<Uuid>,
+        /// Set by the hub: the agent's text was being written when the message came, so
+        /// clients show it under that text (since SPEC 0.108); absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        during_text: bool,
     },
     #[serde(rename = "usage")]
     Usage {

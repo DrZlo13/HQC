@@ -248,4 +248,29 @@ describe('a hit opens the session at its event', () => {
     await open(321);
     expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('320');
   });
+
+  it('an answer drawn above an input that came while it was written (SPEC §6): its own block', async () => {
+    const event = (seq: number, type: 'user.message' | 'agent.message', payload: object) =>
+      parseEvent({
+        session_id: 's1',
+        event_id: `0199f3a2-7c10-7000-8000-${String(seq).padStart(12, '0')}`,
+        seq,
+        ts: '2026-10-24T18:00:00Z',
+        author: type === 'user.message' ? { kind: 'user', id: 'u' } : { kind: 'agent', id: 's1' },
+        type,
+        payload,
+      });
+    const { app } = makeApp(async () => ({ results: [] }), [
+      event(1, 'user.message', { text: 'question', artifact_ids: [] }),
+      event(2, 'user.message', { text: 'meanwhile', artifact_ids: [], during_text: true }),
+      event(3, 'agent.message', { text: 'answer', final: true }),
+    ]);
+    Element.prototype.scrollIntoView = () => {};
+    await act(async () => render(<Chat app={app} sessionId="s1" focusSeq={3} />, root));
+    // The first chat of a run takes longer to load.
+    for (let i = 0; i < 50 && !root.querySelector('.feed-block.is-found'); i++) {
+      await act(async () => void (await new Promise((r) => setTimeout(r, 20))));
+    }
+    expect(root.querySelector<HTMLElement>('.feed-block.is-found')!.dataset.seq).toBe('3');
+  });
 });

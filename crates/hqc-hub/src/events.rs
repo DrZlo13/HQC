@@ -274,6 +274,11 @@ async fn store_hub_event_as(
     hqc_proto::replace_nul_json(&mut author);
     hqc_proto::replace_nul_json(&mut payload);
     let client_op_id = client_op_id.map(|c| hqc_proto::replace_nul(&c).into_owned());
+    // Clients put an input that came while the agent's text was being written under that text
+    // (SPEC §6).
+    if kind == "user.message" && app.text_open(s.id) {
+        payload["during_text"] = json!(true);
+    }
     let typed: EventKind = serde_json::from_value(json!({"type": kind, "payload": payload}))?;
     if ends_live_text(&typed) {
         app.end_live_text(s.id);
@@ -313,6 +318,9 @@ pub async fn store_peer_message(
     delivery: Option<&str>,
 ) -> anyhow::Result<EventRow> {
     hqc_proto::replace_nul_json(&mut payload);
+    if app.text_open(s.id) {
+        payload["during_text"] = json!(true);
+    }
     let typed: EventKind =
         serde_json::from_value(json!({"type": "peer.message", "payload": payload}))?;
     let new = NewEvent {

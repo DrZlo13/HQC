@@ -107,6 +107,9 @@ export interface UserMessage {
   artifact_ids: Uuid[];
   /** The hub cron sent it for this schedule, on the owner's behalf (SPEC §16). */
   schedule_id?: Uuid;
+  /** Set by the hub: the agent's text was being written when it came, so it stands under that
+   *  text (SPEC §6, since 0.108). Absent = false. */
+  during_text?: boolean;
 }
 export interface AgentDelta {
   text: string;
@@ -202,6 +205,8 @@ export interface PeerMessage {
   request_id?: string;
   /** The files the sender handed over (since SPEC 0.46, T41); empty when it had none. */
   artifact_ids: Uuid[];
+  /** As `UserMessage.during_text`. */
+  during_text?: boolean;
 }
 export interface Usage {
   input_tokens: number;
@@ -349,6 +354,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     text: str(p, 'text'),
     artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
     schedule_id: optStr(p, 'schedule_id'),
+    during_text: optBool(p, 'during_text'),
   }),
   'agent.delta': (p) => ({ text: str(p, 'text') }),
   'agent.message': (p) => ({
@@ -426,6 +432,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     mode: tolerantEnum(p, 'mode', PEER_MODES),
     request_id: optStr(p, 'request_id'),
     artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
+    during_text: optBool(p, 'during_text'),
   }),
   usage: (p) => ({
     input_tokens: num(p, 'input_tokens'),

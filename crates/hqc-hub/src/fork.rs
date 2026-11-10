@@ -4,13 +4,15 @@
 //!
 //! - Only a Claude Code session with a workspace and a worker of its owner; the message is a
 //!   `user.message` of a person in it (`404` otherwise).
-//! - The cut is the source's last `agent.message` before the message: `session.start.fork`
+//! - The cut is the source's last `agent.message` before the message, or, for a message with
+//!   `during_text`, the answer the client shows above it (SPEC §6): `session.start.fork`
 //!   names the source transcript and those events, newest first, and the worker forks the
 //!   conversation at the record of the first one it finds (SPEC §5.3, §8.1). With none (the
 //!   message was the first), the new session starts with no conversation and no fork.
-//! - The new session's feed gets the source's events before the message ([`COPIED`]) under
-//!   new ids, read already, and a `system forked_from`. A copy keeps its origin: the id the
-//!   runtime's record gave the event and the transcript the record was written in. A fork of
+//! - The new session's feed gets the source's events before the message (and that answer,
+//!   last) ([`COPIED`]) under new ids, read already, and a `system forked_from`. A copy keeps
+//!   its origin: the id the runtime's record gave the event and the transcript the record was
+//!   written in. A fork of
 //!   a fork cuts by them in that transcript when the cut is in the copied history, since the
 //!   copies' ids are in no transcript and the source fork's own transcript may not exist (the
 //!   CLI writes it at its first message) or its session may be gone. The worker's history is the CLI's:
@@ -69,10 +71,18 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
         .filter(|e| e.session_id == s.id && e.kind == "user.message" && e.author["kind"] == "user")
         .ok_or(ApiError::NotFound)?;
     let runtime = s.runtime_session_id.clone().unwrap_or(s.id.to_string());
+    // The client shows the answer whose text was being written when the message came above it
+    // (SPEC §6): the fork keeps that answer. Only inputs like the message lie between them.
+    let above = if at.payload["during_text"] == true {
+        answer_above(app, s, &at).await?
+    } else {
+        None
+    };
     // The records the cut may be at, in the transcript of the newest: a fork's own turns are in
     // its transcript, its copied history in the one it was first written in (a fork that never
     // ran, or that was deleted, has none of it).
-    let records = db::agent_messages_before(&app.db, s.id, at.seq, CUTS, &runtime).await?;
+    let bound = above.as_ref().map_or(at.seq, |a| a.seq + 1);
+    let records = db::agent_messages_before(&app.db, s.id, bound, CUTS, &runtime).await?;
     let source = records.first().map(|(_, r)| r.clone());
     let cuts: Vec<Uuid> = records
         .iter()
@@ -104,7 +114,8 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     if let Some(source) = source {
         let f = json!({"runtime_session_id": source, "at_event_ids": cuts});
         db::set_session_fork(&app.db, id, &f).await?;
-        db::copy_events(&app.db, s.id, id, at.seq, COPIED, &runtime).await?;
+        let also = above.map(|a| a.seq);
+        db::copy_events(&app.db, s.id, id, at.seq, also, COPIED, &runtime).await?;
     }
     let new = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     let from = crate::peers::address(app, s).await?;
@@ -122,4 +133,30 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     tracing::info!(session_id = %id, from = %s.id, cuts = cuts.len(), "session forked");
     delivery::kick(app, id, true).await;
     db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
+}
+
+/// The agent's `agent.message` the client shows above `at`, an input that came while the
+/// agent's text was being written (SPEC §6): the first event after `at` and the inputs like it
+/// that follow, when it is the agent's message and answers none of them.
+async fn answer_above(
+    app: &AppState,
+    s: &SessionRow,
+    at: &db::EventRow,
+) -> sqlx::Result<Option<db::EventRow>> {
+    let Some(a) = db::first_after_inputs_during_text(&app.db, s.id, at.seq).await? else {
+        return Ok(None);
+    };
+    if a.kind != "agent.message" || a.author["kind"] != "agent" {
+        return Ok(None);
+    }
+    let answers = a.payload["in_reply_to"]
+        .as_str()
+        .and_then(|i| i.parse::<Uuid>().ok());
+    let answered = match answers {
+        Some(i) => db::event(&app.db, i).await?,
+        None => None,
+    };
+    let answers_one =
+        answered.is_some_and(|e| e.session_id == s.id && e.seq >= at.seq && e.seq < a.seq);
+    Ok((!answers_one).then_some(a))
 }

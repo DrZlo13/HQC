@@ -206,6 +206,12 @@ impl AppState {
         self.live.lock().unwrap().texts.remove(&session_id);
     }
 
+    /// The session's answer is being written: a delta came and the text is not done yet
+    /// (also once it outgrew the copy).
+    pub fn text_open(&self, session_id: Uuid) -> bool {
+        self.live.lock().unwrap().texts.contains_key(&session_id)
+    }
+
     /// The session's text as one `agent.delta` (`None` if there is none), and the number of
     /// the first delta not in it.
     pub fn live_text(&self, session_id: Uuid) -> (Option<Value>, u64) {

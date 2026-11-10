@@ -8,7 +8,8 @@
       "seq": 42,
       "type": "agent.message",
       "ts": "2026-10-22T09:14:03Z",
-      "snippet": "…all 212 tests pass; the migration backfills the search index in about a second…"
+      "snippet": "…all 212 tests pass; the migration backfills the search index in about a second…",
+      "session_hits": 3
     },
     {
       "session_id": "0199f3a2-7c10-7000-8000-000000000002",
@@ -16,8 +17,17 @@
       "title": "Migration plan",
       "archived": true,
       "ts": "2026-10-20T17:02:11Z",
-      "snippet": "Migration plan"
+      "snippet": "Migration plan",
+      "session_hits": 1
     }
   ],
-  "next_cursor": "20"
+  "next_cursor": "20",
+  "also": ["migrations", "migrate"],
+  "counts": {
+    "all": { "hits": 24, "sessions": 2 },
+    "message": { "hits": 17, "sessions": 2 },
+    "command": { "hits": 4, "sessions": 1 },
+    "output": { "hits": 2, "sessions": 1 },
+    "answer": { "hits": 0, "sessions": 0 }
+  }
 }

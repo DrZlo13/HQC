@@ -595,6 +595,30 @@ pub struct SearchPage {
     pub results: Vec<SearchHit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// The words of this page's hits the query found besides the words typed: their other
+    /// forms, the similar words of a fuzzy query; lowercased, most frequent first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<String>,
+    /// The hits of the whole query by kind, on the first page only (without `cursor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<SearchCounts>,
+}
+
+/// The hits and sessions of a query (SPEC §15): all of them (title hits too) and of each
+/// kind, whatever `kind` the query asked for.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchCounts {
+    pub all: SearchCount,
+    pub message: SearchCount,
+    pub command: SearchCount,
+    pub output: SearchCount,
+    pub answer: SearchCount,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchCount {
+    pub hits: u64,
+    pub sessions: u64,
 }
 
 /// One search hit: an event's text, or the session's title (no `seq`).
@@ -615,6 +639,8 @@ pub struct SearchHit {
     pub ts: DateTime<Utc>,
     /// A short piece of the text around the first match.
     pub snippet: String,
+    /// The hits of the query (with the same filters) in this hit's session.
+    pub session_hits: u64,
 }
 
 /// `POST /api/sessions/{id}/input`.
@@ -1029,6 +1055,10 @@ mod tests {
         let sp: SearchPage = roundtrip(include_str!("../examples/wire/api.search.json"));
         assert!(sp.results[0].seq.is_some() && sp.results[1].seq.is_none());
         assert!(sp.results[1].archived && sp.next_cursor.is_some());
+        assert_eq!(sp.results[0].session_hits, 3);
+        assert_eq!(sp.also, ["migrations", "migrate"]);
+        let c = sp.counts.unwrap();
+        assert_eq!((c.all.hits, c.all.sessions, c.command.hits), (24, 2, 4));
         roundtrip::<InputRequest>(include_str!("../examples/wire/api.input.request.json"));
         let r: InputResponse = roundtrip(include_str!("../examples/wire/api.input.json"));
         let ev: crate::event::Event = serde_json::from_value(r.event).unwrap();

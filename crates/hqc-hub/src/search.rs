@@ -15,14 +15,20 @@
 //!   similar words of `search_vocab`, the words of the index (trigram similarity), which finds
 //!   typos.
 //! - Order: best match first (`ts_rank` by the query without its negated words), then newest;
-//!   paged by an offset.
+//!   or newest first; paged by an offset.
+//! - For the client's search page: filters by session, kind ([`Kind`]) and time, at most so
+//!   many hits of each session, each hit's count of hits in its session, the counts of the
+//!   whole query by kind ([`counts`]), and the other forms of the query's words its hits have
+//!   ([`forms`]).
 //! - Cost (SPEC §20): a 5 s `statement_timeout` on each statement of a search (reading the
-//!   query, then the hits); per owner `Limits::searches_per_owner_min`
+//!   query, then the hits, the counts, the forms); per owner `Limits::searches_per_owner_min`
 //!   searches a minute, `Limits::fuzzy_searches_per_owner_min` of them fuzzy;
 //!   `Limits::search_concurrency` at once on the hub ([`capped`]).
 
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Utc};
-use hqc_proto::api::{SearchHit, SearchPage};
+use hqc_proto::api::{SearchCount, SearchCounts, SearchHit, SearchPage};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -43,15 +49,65 @@ pub const MAX_PAGE: usize = 50;
 /// Characters of a snippet, and of context before the match in it.
 const SNIPPET: usize = 160;
 const BEFORE: usize = 50;
+/// Words in [`SearchPage::also`] at most.
+const ALSO: usize = 8;
 
 #[derive(Debug, Clone, Default)]
 pub struct Query {
     pub text: String,
     /// Only this project of the owner.
     pub project_id: Option<Uuid>,
+    /// Only this session of the owner.
+    pub session_id: Option<Uuid>,
+    /// Only hits of this kind; a title hit is of none.
+    pub kind: Option<Kind>,
+    /// Only hits at or after this time; a title hit is at its session's creation.
+    pub since: Option<DateTime<Utc>>,
+    /// Newest first instead of best match first.
+    pub newest: bool,
+    /// At most this many hits of each session, its first ones in the order.
+    pub per_session: Option<usize>,
+    /// With the counts of the whole query by kind ([`SearchPage::counts`]).
+    pub counts: bool,
     pub fuzzy: bool,
     pub cursor: Option<String>,
     pub limit: usize,
+}
+
+/// What a hit is (`kind=` of `GET /api/search`), by the type of its event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Message,
+    Command,
+    Output,
+    Answer,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 4] = [Kind::Message, Kind::Command, Kind::Output, Kind::Answer];
+
+    pub fn parse(s: &str) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|k| k.name() == s)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Message => "message",
+            Kind::Command => "command",
+            Kind::Output => "output",
+            Kind::Answer => "answer",
+        }
+    }
+
+    /// The types of the events of this kind, among those the index holds (migration `0037`).
+    fn types(self) -> &'static [&'static str] {
+        match self {
+            Kind::Message => &["user.message", "agent.message", "peer.message", "system"],
+            Kind::Command => &["tool.call"],
+            Kind::Output => &["tool.result"],
+            Kind::Answer => &["clarify.response"],
+        }
+    }
 }
 
 /// A query the search refuses; the message is for the person or the agent.
@@ -115,6 +171,7 @@ struct Row {
     seq: Option<i64>,
     kind: Option<String>,
     ts: DateTime<Utc>,
+    session_hits: i64,
     text: String,
 }
 
@@ -143,15 +200,35 @@ pub async fn search(db: &PgPool, owner: Uuid, q: &Query) -> Result<SearchPage, S
         .unwrap_or(0);
     let limit = q.limit.clamp(1, MAX_PAGE);
     let parsed = Parsed::new(text);
-    let page = (owner, q.project_id, offset, limit);
     let mut tx = begin(db).await?;
-    let (mut rows, also) = ranked(&mut tx, &parsed, q.fuzzy, page)
+    let read = read_query(&mut tx, &parsed, q.fuzzy)
+        .await
+        .map_err(refused)?;
+    let (tsq, rank) = (
+        parsed.assembled(&read, true),
+        parsed.assembled(&read, false),
+    );
+    let mut rows = hits(&mut tx, (&tsq, &rank), owner, q, (offset, limit))
+        .await
+        .map_err(refused)?;
+    let counts = if q.counts {
+        Some(counts(&mut tx, &tsq, owner, q).await.map_err(refused)?)
+    } else {
+        None
+    };
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    let also = forms(&mut tx, &parsed, &read, &rows, text)
         .await
         .map_err(refused)?;
     tx.commit().await?;
-    let more = rows.len() > limit;
-    rows.truncate(limit);
     let next_cursor = more.then(|| (offset + limit as u32).to_string());
+    // The snippet starts at a fuzzy query's similar word or another form as well.
+    let found: Vec<String> = read
+        .into_iter()
+        .flat_map(|r| r.alts)
+        .chain(also.iter().cloned())
+        .collect();
     let results = rows
         .into_iter()
         .map(|r| SearchHit {
@@ -162,12 +239,15 @@ pub async fn search(db: &PgPool, owner: Uuid, q: &Query) -> Result<SearchPage, S
             seq: r.seq.map(|s| s.max(0) as u64),
             kind: r.kind,
             ts: r.ts,
-            snippet: snippet(&r.text, text, &also),
+            snippet: snippet(&r.text, text, &found),
+            session_hits: r.session_hits.max(0) as u64,
         })
         .collect();
     Ok(SearchPage {
         results,
         next_cursor,
+        also,
+        counts,
     })
 }
 
@@ -196,14 +276,13 @@ fn refused(e: sqlx::Error) -> SearchError {
     }
 }
 
-/// The page `(offset, limit)` of the hits of `parsed`, and the vocabulary's words a fuzzy query
-/// added (for the snippet).
-async fn ranked(
+/// The operands of `parsed` as Postgres reads them ([`READ`]), with the vocabulary's words a
+/// fuzzy query adds.
+async fn read_query(
     tx: &mut sqlx::PgConnection,
     parsed: &Parsed,
     fuzzy: bool,
-    page: (Uuid, Option<Uuid>, u32, usize),
-) -> sqlx::Result<(Vec<Row>, Vec<String>)> {
+) -> sqlx::Result<Vec<ReadOperand>> {
     if fuzzy {
         sqlx::query("SELECT set_config('pg_trgm.similarity_threshold', $1, true)")
             .bind(SIMILARITY.to_string())
@@ -223,18 +302,12 @@ async fn ranked(
                 .map(str::to_ascii_lowercase)
         })
         .collect();
-    let read: Vec<ReadOperand> = sqlx::query_as(READ)
+    sqlx::query_as(READ)
         .bind(&terms)
         .bind(&words)
         .bind(&prefixes)
         .fetch_all(&mut *tx)
-        .await?;
-    let (tsq, rank) = (
-        parsed.assembled(&read, true),
-        parsed.assembled(&read, false),
-    );
-    let rows = hits(tx, (&tsq, &rank), page).await?;
-    Ok((rows, read.into_iter().flat_map(|w| w.alts).collect()))
+        .await
 }
 
 /// An operand as Postgres read it: its text through `to_tsquery`, the words of
@@ -272,34 +345,51 @@ const READ: &str = "SELECT to_tsquery('hqc', term)::text AS read,
           tsvector_to_array(to_tsvector('hqc', coalesce(typed, ''))) p
      ORDER BY n";
 
-/// The page `(offset, limit)` of the hits among the sessions of `owner` (in one project) of
-/// the tsquery text `tsq` (`$5`), ranked by the tsquery text `rank` (`$6`), best first. One
-/// more hit than `limit` tells there is another page.
+/// The page `(offset, limit)` of the hits of `q` among the sessions of `owner` of the tsquery
+/// text `tsq` (`$5`), ranked by the tsquery text `rank` (`$6`), best first (or newest first),
+/// with the hits of each one's session. One more hit than `limit` tells there is another page.
 async fn hits(
     tx: &mut sqlx::PgConnection,
     (tsq, rank): (&str, &str),
-    (owner, project, offset, limit): (Uuid, Option<Uuid>, u32, usize),
+    owner: Uuid,
+    q: &Query,
+    (offset, limit): (u32, usize),
 ) -> sqlx::Result<Vec<Row>> {
-    // `$5` and `$6` are cast once each: the statement is planned for its values (below).
+    // `$5` and `$6` are cast once each: the statement is planned for its values (below). `ord`
+    // is the order: the rank, or nothing for newest first; `nth` a hit's place in its
+    // session in that order, `$11` the most of each session.
     const SQL: &str = r#"WITH s AS (
              SELECT s.id, s.title, s.slug, s.archived, s.created_at, p.slug AS project_slug
              FROM sessions s JOIN projects p ON p.id = s.project_id
              WHERE s.owner_id = $1 AND NOT s.system AND ($2::uuid IS NULL OR s.project_id = $2)
-         ), hit AS (
+                 AND ($7::uuid IS NULL OR s.id = $7)
+         ), m AS (
              SELECT e.session_id, e.seq, e.type AS kind, e.ts, e.event_id AS id,
                     ts_rank(e.search_words, $6::tsquery, 1) AS rank
              FROM events e JOIN s ON s.id = e.session_id
              WHERE e.search_words IS NOT NULL AND e.search_words @@ $5::tsquery
+                 AND ($8::text[] IS NULL OR e.type = ANY($8::text[]))
+                 AND ($9::timestamptz IS NULL OR e.ts >= $9::timestamptz)
              UNION ALL
              SELECT s.id, NULL, NULL, s.created_at, s.id, ts_rank(
                     setweight(to_tsvector('hqc', translate(s.title, '/.', '  ')), 'A'),
                     $6::tsquery, 1)
              FROM s WHERE to_tsvector('hqc', translate(s.title, '/.', '  ')) @@ $5::tsquery
-             ORDER BY rank DESC, ts DESC, id DESC
+                 AND $8::text[] IS NULL
+                 AND ($9::timestamptz IS NULL OR s.created_at >= $9::timestamptz)
+         ), o AS (
+             SELECT m.*, CASE WHEN $10::boolean THEN 0 ELSE m.rank END AS ord FROM m
+         ), n AS (
+             SELECT o.*, count(*) OVER per AS session_hits,
+                    row_number() OVER (per ORDER BY o.ord DESC, o.ts DESC, o.id DESC) AS nth
+             FROM o WINDOW per AS (PARTITION BY o.session_id)
+         ), hit AS (
+             SELECT * FROM n WHERE $11::bigint IS NULL OR n.nth <= $11::bigint
+             ORDER BY ord DESC, ts DESC, id DESC
              OFFSET $3 LIMIT $4
          )
          SELECT hit.session_id, s.title, s.project_slug, s.slug, s.archived, hit.seq, hit.kind,
-                hit.ts,
+                hit.ts, hit.session_hits,
                 CASE
                     WHEN hit.seq IS NULL THEN s.title
                     WHEN hit.kind = 'tool.call' THEN (e.payload ->> 'tool') || ' '
@@ -312,20 +402,167 @@ async fn hits(
                     ELSE e.payload ->> 'text'
                 END AS text
          FROM hit JOIN s ON s.id = hit.session_id LEFT JOIN events e ON e.event_id = hit.id
-         ORDER BY hit.rank DESC, hit.ts DESC, hit.id DESC"#;
+         ORDER BY hit.ord DESC, hit.ts DESC, hit.id DESC"#;
     // Not a prepared statement: planned for its values every time. A cached generic plan
     // does not know the owner's sessions and searches each one on its own (1.5 s instead of
     // 50 ms for "modbus" over 916k events).
     sqlx::query_as(SQL)
         .persistent(false)
         .bind(owner)
-        .bind(project)
+        .bind(q.project_id)
         .bind(offset as i64)
         .bind(limit as i64 + 1)
         .bind(tsq)
         .bind(rank)
+        .bind(q.session_id)
+        .bind(q.kind.map(|k| k.types().to_vec()))
+        .bind(q.since)
+        .bind(q.newest)
+        .bind(q.per_session.map(|n| n as i64))
         .fetch_all(tx)
         .await
+}
+
+#[derive(sqlx::FromRow)]
+struct CountRow {
+    kind: Option<String>,
+    hits: i64,
+    sessions: i64,
+}
+
+/// The hits of the tsquery text `tsq` among the sessions of `owner` in `q`'s project, session
+/// and time, and their sessions: all of them and of each [`Kind`], whatever kind `q` asks for.
+async fn counts(
+    tx: &mut sqlx::PgConnection,
+    tsq: &str,
+    owner: Uuid,
+    q: &Query,
+) -> sqlx::Result<SearchCounts> {
+    // `k` names the kind of each event type; a title hit is counted in all only. `g` counts per
+    // kind and session in a hash, so the matches are not sorted (a common word matches most
+    // events); the rows of all and of each kind are summed from it.
+    const SQL: &str = r#"WITH s AS (
+             SELECT s.id, s.title, s.created_at FROM sessions s
+             WHERE s.owner_id = $1 AND NOT s.system AND ($2::uuid IS NULL OR s.project_id = $2)
+                 AND ($3::uuid IS NULL OR s.id = $3)
+         ), k AS (
+             SELECT * FROM unnest($6::text[], $7::text[]) AS k(type, kind)
+         ), m AS (
+             SELECT e.session_id, k.kind
+             FROM events e JOIN s ON s.id = e.session_id JOIN k ON k.type = e.type
+             WHERE e.search_words IS NOT NULL AND e.search_words @@ $4::tsquery
+                 AND ($5::timestamptz IS NULL OR e.ts >= $5::timestamptz)
+             UNION ALL
+             SELECT s.id, 'title' FROM s
+             WHERE to_tsvector('hqc', translate(s.title, '/.', '  ')) @@ $4::tsquery
+                 AND ($5::timestamptz IS NULL OR s.created_at >= $5::timestamptz)
+         ), g AS (
+             SELECT kind, session_id, count(*) AS n FROM m GROUP BY kind, session_id
+         )
+         SELECT kind, sum(n)::bigint AS hits, count(*) AS sessions FROM g GROUP BY kind
+         UNION ALL
+         SELECT NULL, coalesce(sum(n), 0)::bigint, count(DISTINCT session_id) FROM g"#;
+    let (types, kinds): (Vec<&str>, Vec<&str>) = Kind::ALL
+        .into_iter()
+        .flat_map(|k| k.types().iter().map(move |t| (*t, k.name())))
+        .unzip();
+    let rows: Vec<CountRow> = sqlx::query_as(SQL)
+        .persistent(false)
+        .bind(owner)
+        .bind(q.project_id)
+        .bind(q.session_id)
+        .bind(tsq)
+        .bind(q.since)
+        .bind(types)
+        .bind(kinds)
+        .fetch_all(tx)
+        .await?;
+    let mut c = SearchCounts::default();
+    for r in rows {
+        let n = SearchCount {
+            hits: r.hits.max(0) as u64,
+            sessions: r.sessions.max(0) as u64,
+        };
+        match r.kind.as_deref().map(Kind::parse) {
+            None => c.all = n,
+            Some(Some(Kind::Message)) => c.message = n,
+            Some(Some(Kind::Command)) => c.command = n,
+            Some(Some(Kind::Output)) => c.output = n,
+            Some(Some(Kind::Answer)) => c.answer = n,
+            // Title hits.
+            Some(None) => {}
+        }
+    }
+    Ok(c)
+}
+
+/// The words of `rows` that `parsed` (read as `read`) finds other than those typed in `query`:
+/// at most [`ALSO`], in the most hits first ([`candidates`]).
+async fn forms(
+    tx: &mut sqlx::PgConnection,
+    parsed: &Parsed,
+    read: &[ReadOperand],
+    rows: &[Row],
+    query: &str,
+) -> sqlx::Result<Vec<String>> {
+    let any = parsed.any_operand(read);
+    let alts = read.iter().flat_map(|r| r.alts.iter().map(String::as_str));
+    let words = candidates(rows.iter().map(|r| r.text.as_str()), query, alts);
+    if any.is_empty() || words.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found: HashSet<String> = sqlx::query_scalar(
+        "SELECT w FROM unnest($1::text[]) w WHERE to_tsvector('hqc', w) @@ $2::tsquery",
+    )
+    .persistent(false)
+    .bind(&words)
+    .bind(&any)
+    .fetch_all(tx)
+    .await?
+    .into_iter()
+    .collect();
+    Ok(words
+        .into_iter()
+        .filter(|w| found.contains(w))
+        .take(ALSO)
+        .collect())
+}
+
+/// The words of `texts` that may be another form of a word of `query` or one of `alts` (its
+/// similar words): lowercased, not typed in it, and beginning with the first two letters of
+/// one of them, as a stemmer cuts only endings; in the most texts first, then alphabetically.
+fn candidates<'a, 'b>(
+    texts: impl Iterator<Item = &'a str>,
+    query: &str,
+    alts: impl Iterator<Item = &'b str>,
+) -> Vec<String> {
+    let typed: HashSet<String> = words(query).map(|w| w.into_iter().collect()).collect();
+    let head = |w: &str| -> String { w.chars().flat_map(char::to_lowercase).take(2).collect() };
+    let heads: HashSet<String> = typed
+        .iter()
+        .map(String::as_str)
+        .map(head)
+        .chain(alts.map(head))
+        .filter(|h| h.chars().count() == 2)
+        .collect();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for text in texts {
+        let mut here = HashSet::new();
+        for w in text.split(|c: char| !c.is_alphanumeric()) {
+            let w = w.to_lowercase();
+            let n = w.chars().count();
+            if (2..=40).contains(&n)
+                && !typed.contains(&w)
+                && heads.iter().any(|h| w.starts_with(h.as_str()))
+                && here.insert(w.clone())
+            {
+                *seen.entry(w).or_default() += 1;
+            }
+        }
+    }
+    let mut out: Vec<(String, usize)> = seen.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.into_iter().map(|(w, _)| w).collect()
 }
 
 /// A query read for `to_tsquery('hqc', …)`: groups ANDed, the operands of a group ORed, so
@@ -452,30 +689,44 @@ impl Parsed {
     /// in nine would become another ("прощан" becomes "проща") and miss the words it stands
     /// for.
     fn assembled(&self, read: &[ReadOperand], negated: bool) -> String {
-        self.assemble(negated, |n, o| {
-            let r = read.get(n)?;
-            let mut parts = Vec::new();
-            if !r.read.is_empty() {
-                parts.push(format!("( {} )", r.read));
-            }
-            if let Some(text) = o.prefix_word() {
-                let raw = format!("{}:*", quote(&text.to_lowercase()));
-                if raw != r.read {
-                    parts.push(raw);
-                }
-            }
-            parts.extend(r.stems.iter().map(|w| quote(w)));
-            parts.extend(r.alts.iter().map(|a| quote(a)));
-            match parts.len() {
-                0 => None,
-                1 => parts.pop(),
-                _ => Some(format!("( {} )", parts.join(" | "))),
-            }
-        })
+        self.assemble(negated, |n, o| o.assembled(read.get(n)?))
+    }
+
+    /// Any one of the operands not negated, as [`Parsed::assembled`] puts each: a word that
+    /// matches it is one the query finds.
+    fn any_operand(&self, read: &[ReadOperand]) -> String {
+        let parts: Vec<String> = self
+            .operands()
+            .zip(read)
+            .filter(|(o, _)| !o.not)
+            .filter_map(|(o, r)| o.assembled(r))
+            .collect();
+        parts.join(" | ")
     }
 }
 
 impl Operand {
+    /// The operand's tsquery text from `r`, as Postgres read it ([`Parsed::assembled`]).
+    fn assembled(&self, r: &ReadOperand) -> Option<String> {
+        let mut parts = Vec::new();
+        if !r.read.is_empty() {
+            parts.push(format!("( {} )", r.read));
+        }
+        if let Some(text) = self.prefix_word() {
+            let raw = format!("{}:*", quote(&text.to_lowercase()));
+            if raw != r.read {
+                parts.push(raw);
+            }
+        }
+        parts.extend(r.stems.iter().map(|w| quote(w)));
+        parts.extend(r.alts.iter().map(|a| quote(a)));
+        match parts.len() {
+            0 => None,
+            1 => parts.pop(),
+            _ => Some(format!("( {} )", parts.join(" | "))),
+        }
+    }
+
     /// The word a fuzzy query widens: not in a phrase, not negated, not a prefix, at least
     /// [`MIN_FUZZY`] characters after its leading dashes (`-rf` is not widened).
     fn fuzzy_word(&self) -> Option<&str> {
@@ -783,6 +1034,57 @@ mod tests {
         ] {
             assert_eq!(tsquery(q), want, "{q}");
         }
+    }
+
+    /// A word of a hit that matches any operand not negated is a form the query finds.
+    #[test]
+    fn any_operand_of_a_query() {
+        let p = Parsed::new("modbas -relay \"x y\" kube* or deploy");
+        let r = |read: &str, alts: &[&str]| ReadOperand {
+            read: read.into(),
+            alts: alts.iter().map(|a| a.to_string()).collect(),
+            stems: Vec::new(),
+        };
+        let read = [
+            r("'modba'", &["modbus"]),
+            r("'relay'", &[]),
+            r("'x' <-> 'y'", &[]),
+            r("'kube':*", &[]),
+            r("'deploy'", &[]),
+        ];
+        assert_eq!(
+            p.any_operand(&read),
+            "( ( 'modba' ) | 'modbus' ) | ( 'x' <-> 'y' ) | ( 'kube':* ) | ( 'deploy' )"
+        );
+        assert_eq!(Parsed::new("-relay").any_operand(&read[1..2]), "");
+    }
+
+    /// The words that may be other forms: not typed, beginning as a typed word or a similar
+    /// one does, in the most texts first.
+    #[test]
+    fn candidate_forms() {
+        let texts = [
+            "План переезда; переезда хаба, Переезд",
+            "при переезде — переезда нет",
+            "Modbus registers: MODBUS poll, перед",
+        ];
+        assert_eq!(
+            candidates(texts.into_iter(), "переезд modbas", ["modbus"].into_iter()),
+            ["переезда", "modbus", "перед", "переезде"]
+        );
+        // Nothing begins as a word of one letter does.
+        assert!(candidates(texts.into_iter(), "п", std::iter::empty()).is_empty());
+    }
+
+    #[test]
+    fn kinds() {
+        for k in Kind::ALL {
+            assert_eq!(Kind::parse(k.name()), Some(k));
+        }
+        assert_eq!(Kind::parse("Message"), None);
+        assert_eq!(Kind::parse(""), None);
+        let types: Vec<&str> = Kind::ALL.iter().flat_map(|k| k.types()).copied().collect();
+        assert_eq!(types.len(), 7);
     }
 
     #[test]

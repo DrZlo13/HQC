@@ -1379,14 +1379,25 @@ pub struct SearchQuery {
     pub q: String,
     /// A project id or slug of the user's.
     pub project: Option<String>,
+    /// A session id of the user's: only its hits.
+    pub session: Option<String>,
+    /// `message`, `command`, `output` or `answer`: only hits of that kind.
+    pub kind: Option<String>,
+    /// An RFC 3339 time: only hits at or after it.
+    pub since: Option<String>,
+    /// `best` (the default) or `newest`.
+    pub order: Option<String>,
+    /// At most this many hits of each session.
+    pub per_session: Option<usize>,
     /// `1` or `true`.
     pub fuzzy: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<usize>,
 }
 
-/// `GET /api/search?q=&project=&fuzzy=&cursor=&limit=` (SPEC §15): the user's sessions
-/// only; another user's project is `404`, as a missing one.
+/// `GET /api/search?q=&project=&session=&kind=&since=&order=&per_session=&fuzzy=&cursor=&limit=`
+/// (SPEC §15): the user's sessions only; another user's project is `404`, as a missing one,
+/// and another user's session has no hits.
 pub async fn search(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1400,11 +1411,47 @@ pub async fn search(
         ),
         None => None,
     };
+    let bad = |m: &str| ApiError::BadRequest(m.into());
+    let session_id = match q.session.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => Some(
+            s.parse::<Uuid>()
+                .map_err(|_| bad("session is not a session id"))?,
+        ),
+        None => None,
+    };
+    let kind = match q.kind.as_deref().filter(|k| !k.is_empty()) {
+        Some(k) => Some(
+            crate::search::Kind::parse(k)
+                .ok_or_else(|| bad("kind is one of message, command, output, answer"))?,
+        ),
+        None => None,
+    };
+    let since = match q.since.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|_| bad("since is not an RFC 3339 time"))?
+                .to_utc(),
+        ),
+        None => None,
+    };
+    let newest = match q.order.as_deref().unwrap_or("") {
+        "" | "best" => false,
+        "newest" => true,
+        _ => return Err(bad("order is best or newest")),
+    };
+    let cursor = q.cursor.filter(|c| !c.is_empty());
     let query = crate::search::Query {
         text: q.q,
         project_id,
+        session_id,
+        kind,
+        since,
+        newest,
+        per_session: q.per_session.map(|n| n.clamp(1, crate::search::MAX_PAGE)),
+        // The counts are of the whole query: its first page brings them, not a session's hits.
+        counts: cursor.is_none() && session_id.is_none(),
         fuzzy: matches!(q.fuzzy.as_deref(), Some("1" | "true")),
-        cursor: q.cursor.filter(|c| !c.is_empty()),
+        cursor,
         limit: q.limit.unwrap_or(crate::search::PAGE),
     };
     match crate::search::capped(&app, user.id, &query).await {

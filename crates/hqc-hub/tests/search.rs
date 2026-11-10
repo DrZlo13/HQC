@@ -650,6 +650,244 @@ async fn pages_follow_the_cursor() {
     hub.finish().await;
 }
 
+/// What the client's search page asks for: the hits of one kind, since a time, of one session,
+/// newest first, a few of each session, each with the hits of its session; the counts of the
+/// whole query by kind on the first page; the other forms of the words its hits have. Another
+/// user's session with the same word is in none of it.
+#[tokio::test]
+async fn filters_counts_and_word_forms_for_the_search_page() {
+    let hub = TestHub::start().await;
+    let db = hub.app.db.clone();
+    let (owner, personal) = me(&hub).await;
+    let work = Uuid::now_v7();
+    sqlx::query("INSERT INTO projects (id, owner_id, name, slug) VALUES ($1, $2, 'Work', 'work')")
+        .bind(work)
+        .bind(owner)
+        .execute(&db)
+        .await
+        .unwrap();
+    let a = session(&db, owner, personal, "move", "Переезд хаба").await;
+    let b = session(&db, owner, work, "notes", "Notes").await;
+    let c = session(&db, owner, personal, "relay", "Relay").await;
+    let user = |text: &str| json!({"text": text, "artifact_ids": []});
+    let agent = |text: &str| json!({"text": text, "final": true});
+    let output = |text: &str| json!({"call_id": "c", "result_preview": text, "error": false});
+    let a1 = event(&db, a, "user.message", user("План переезда хаба"), t(1)).await;
+    let a2 = event(
+        &db,
+        a,
+        "agent.message",
+        agent("Переезд закончен, при переезде ничего не потеряли"),
+        t(2),
+    )
+    .await;
+    let a3 = event(
+        &db,
+        a,
+        "tool.call",
+        json!({"call_id": "c", "tool": "Bash", "args_preview": r#"{"command":"rg -n переезд docs"}"#}),
+        t(3),
+    )
+    .await;
+    let a4 = event(
+        &db,
+        a,
+        "tool.result",
+        output("docs/SPEC.md: переезде сессии"),
+        t(4),
+    )
+    .await;
+    let a5 = event(
+        &db,
+        a,
+        "clarify.response",
+        json!({"request_id": "r", "answers": {"q1": "Убивать при переезде"}}),
+        t(5),
+    )
+    .await;
+    event(&db, a, "agent.message", agent("Nothing to see"), t(6)).await;
+    let b1 = event(
+        &db,
+        b,
+        "user.message",
+        user("Займёмся переездом завтра"),
+        t(10),
+    )
+    .await;
+    let b2 = event(&db, b, "tool.result", output("переезда не было"), t(11)).await;
+    event(
+        &db,
+        c,
+        "user.message",
+        user("Read the Modbus registers"),
+        t(12),
+    )
+    .await;
+    // Another user's session: the word, and a form of it only there.
+    let other = Uuid::now_v7();
+    let other_project = Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, 'other')")
+        .bind(other)
+        .bind(format!("other-{other}@example.com"))
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO projects (id, owner_id, name, slug) VALUES ($1, $2, 'Personal', 'personal')",
+    )
+    .bind(other_project)
+    .bind(other)
+    .execute(&db)
+    .await
+    .unwrap();
+    let foreign = session(&db, other, other_project, "move", "Переезд хаба").await;
+    event(
+        &db,
+        foreign,
+        "user.message",
+        user("Переезд и переездами займусь сам"),
+        t(13),
+    )
+    .await;
+    event(
+        &db,
+        foreign,
+        "tool.call",
+        json!({"call_id": "c", "tool": "Bash", "args_preview": "rg переезд"}),
+        t(14),
+    )
+    .await;
+    let pa = |seq| ("personal/move".to_string(), Some(seq));
+    let wb = |seq| ("work/notes".to_string(), Some(seq));
+    let title = ("personal/move".to_string(), None);
+    let word = q("переезд");
+    let count = |v: &Value, k: &str| {
+        (
+            v["counts"][k]["hits"].as_u64().unwrap(),
+            v["counts"][k]["sessions"].as_u64().unwrap(),
+        )
+    };
+    let session_hits = |v: &Value| -> Vec<u64> {
+        v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["session_hits"].as_u64().unwrap())
+            .collect()
+    };
+
+    // Newest first; each hit with the hits of its session; the counts of the whole query:
+    // the title hit is counted in all only.
+    let v = search(&hub, &format!("q={word}&order=newest")).await;
+    assert_eq!(
+        hits(&v),
+        vec![
+            wb(b2),
+            wb(b1),
+            pa(a5),
+            pa(a4),
+            pa(a3),
+            pa(a2),
+            pa(a1),
+            title.clone()
+        ],
+        "{v}"
+    );
+    assert_eq!(session_hits(&v), [2, 2, 6, 6, 6, 6, 6, 6]);
+    assert_eq!(count(&v, "all"), (8, 2), "{v}");
+    assert_eq!(count(&v, "message"), (3, 2));
+    assert_eq!(count(&v, "command"), (1, 1));
+    assert_eq!(count(&v, "output"), (2, 2));
+    assert_eq!(count(&v, "answer"), (1, 1));
+    // The other forms its hits have, in the most hits first; not the word typed.
+    assert_eq!(
+        v["also"],
+        json!(["переезде", "переезда", "переездом"]),
+        "{v}"
+    );
+
+    // One kind: no title hit; the counts stay the whole query's.
+    let v = search(&hub, &format!("q={word}&kind=output&order=newest")).await;
+    assert_eq!(hits(&v), vec![wb(b2), pa(a4)], "{v}");
+    assert_eq!(session_hits(&v), [1, 1]);
+    assert_eq!(count(&v, "all"), (8, 2));
+    assert_eq!(
+        hits(&search(&hub, &format!("q={word}&kind=command")).await),
+        vec![pa(a3)]
+    );
+    assert_eq!(
+        hits(&search(&hub, &format!("q={word}&kind=answer")).await),
+        vec![pa(a5)]
+    );
+    let v = search(&hub, &format!("q={word}&kind=message&order=newest")).await;
+    assert_eq!(hits(&v), vec![wb(b1), pa(a2), pa(a1)], "{v}");
+
+    // Since a time: the title, at the session's creation, is older.
+    let since = q(&t(4).to_rfc3339());
+    let v = search(&hub, &format!("q={word}&since={since}&order=newest")).await;
+    assert_eq!(hits(&v), vec![wb(b2), wb(b1), pa(a5), pa(a4)], "{v}");
+    assert_eq!(session_hits(&v), [2, 2, 2, 2]);
+    assert_eq!(count(&v, "all"), (4, 2));
+    assert_eq!(count(&v, "message"), (1, 1));
+
+    // One session, without the counts ("N more" of a card has them); another user's or an
+    // unknown one has no hits.
+    let v = search(&hub, &format!("q={word}&session={b}&order=newest")).await;
+    assert_eq!(hits(&v), vec![wb(b2), wb(b1)], "{v}");
+    assert!(v.get("counts").is_none(), "{v}");
+    for s in [foreign, Uuid::now_v7()] {
+        let v = search(&hub, &format!("q={word}&session={s}")).await;
+        assert!(hits(&v).is_empty() && v.get("counts").is_none(), "{v}");
+        assert_eq!(v["also"], json!(null), "{v}");
+    }
+
+    // A few of each session, its first ones in the order; the counts of their sessions stay
+    // whole. Pages go on with the cursor, without the counts.
+    let v = search(
+        &hub,
+        &format!("q={word}&per_session=2&order=newest&limit=3"),
+    )
+    .await;
+    assert_eq!(hits(&v), vec![wb(b2), wb(b1), pa(a5)], "{v}");
+    assert_eq!(session_hits(&v), [2, 2, 6]);
+    let cursor = v["next_cursor"].as_str().unwrap();
+    let v = search(
+        &hub,
+        &format!("q={word}&per_session=2&order=newest&limit=3&cursor={cursor}"),
+    )
+    .await;
+    assert_eq!(hits(&v), vec![pa(a4)], "{v}");
+    assert!(
+        v.get("counts").is_none() && v.get("next_cursor").is_none(),
+        "{v}"
+    );
+    // Best match first: each session's best hit, the title of the first.
+    let v = search(&hub, &format!("q={word}&per_session=1")).await;
+    assert_eq!(hits(&v).len(), 2, "{v}");
+    assert_eq!(hits(&v)[0], title, "{v}");
+
+    // A fuzzy query names the word it found for the typo.
+    let v = search(&hub, "q=modbas&fuzzy=1").await;
+    assert_eq!(v["also"], json!(["modbus"]), "{v}");
+    assert_eq!(count(&v, "message"), (1, 1));
+
+    // Refused filters.
+    for bad in [
+        "kind=messages",
+        "since=yesterday",
+        "order=oldest",
+        "session=nope",
+    ] {
+        let (s, v) = hub.get(&format!("/api/search?q={word}&{bad}")).await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (400, Some("bad_request")),
+            "{bad}: {v}"
+        );
+    }
+    hub.finish().await;
+}
+
 /// Migration 0037 indexes the events stored before it, tool output too.
 #[tokio::test]
 async fn the_migration_indexes_old_events() {

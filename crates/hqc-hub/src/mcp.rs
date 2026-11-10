@@ -379,6 +379,7 @@ async fn search_history(app: &AppState, caller: &SessionRow, v: Value) -> ToolRe
         fuzzy: a.fuzzy,
         cursor: a.cursor,
         limit: crate::search::PAGE,
+        ..Default::default()
     };
     let page = crate::search::capped(app, caller.owner_id, &q)
         .await

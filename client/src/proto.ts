@@ -87,7 +87,7 @@ export interface Chain {
 export interface EventBase {
   session_id: Uuid;
   event_id: Uuid;
-  /** Assigned by the hub; absent only on `agent.delta` (SPEC §5.2, §6). */
+  /** Assigned by the hub; absent only on `agent.delta` and `subagents.live` (SPEC §5.2, §6). */
   seq?: number;
   ts: string;
   author: Author;
@@ -113,6 +113,22 @@ export interface UserMessage {
 }
 export interface AgentDelta {
   text: string;
+}
+/** One subagent the agent runs now (SPEC §4, since 0.101). */
+export interface LiveSubagent {
+  task_id: string;
+  /** Its task. */
+  description: string;
+  /** What it does now; absent before any progress. */
+  activity?: string;
+  total_tokens?: number;
+  tool_uses?: number;
+  /** How long it had run when the list was sent. */
+  duration_ms: number;
+}
+/** The whole list, in the order they started; empty: none. Transport only. */
+export interface SubagentsLive {
+  agents: LiveSubagent[];
 }
 export interface AgentMessage {
   text: string;
@@ -233,6 +249,7 @@ export interface SystemNote {
 export interface PayloadByType {
   'user.message': UserMessage;
   'agent.delta': AgentDelta;
+  'subagents.live': SubagentsLive;
   'agent.message': AgentMessage;
   'agent.thinking': AgentThinking;
   'tool.call': ToolCall;
@@ -357,6 +374,19 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     during_text: optBool(p, 'during_text'),
   }),
   'agent.delta': (p) => ({ text: str(p, 'text') }),
+  'subagents.live': (p) => ({
+    agents: arr(p, 'agents').map((v, i) => {
+      const a = obj(v, `agents[${i}]`);
+      return {
+        task_id: str(a, 'task_id'),
+        description: str(a, 'description'),
+        activity: optStr(a, 'activity'),
+        total_tokens: optNum(a, 'total_tokens'),
+        tool_uses: optNum(a, 'tool_uses'),
+        duration_ms: num(a, 'duration_ms'),
+      };
+    }),
+  }),
   'agent.message': (p) => ({
     text: str(p, 'text'),
     final: bool(p, 'final'),

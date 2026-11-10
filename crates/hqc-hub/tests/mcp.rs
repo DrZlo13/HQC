@@ -477,20 +477,38 @@ async fn rename_sets_the_users_title() {
         )
     };
 
-    // This session, the title trimmed; the address stays.
+    // This session, the title made one line; the address stays; an open client learns it.
+    let mut c = FakeClient::connect(&hub).await;
+    c.send(json!({"type": "subscribe_summary"})).await;
+    c.until("summary").await;
     let r = call(
         &mut w,
         &token,
         "hqc_rename",
-        json!({"title": "  Renamed  "}),
+        json!({"title": "  Renamed\n\tagain  "}),
     )
     .await;
     assert_eq!(
         r["result"],
-        json!({"address": "personal/me", "title": "Renamed"}),
+        json!({"address": "personal/me", "title": "Renamed again"}),
         "{r}"
     );
-    assert_eq!(titled(&hub.session(&me).await), expect("Renamed", "me"));
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"]["session_id"] == me.as_str() && u["session"]["title"] == "Renamed again" {
+            break;
+        }
+    }
+    assert_eq!(
+        titled(&hub.session(&me).await),
+        expect("Renamed again", "me")
+    );
+    // Characters are counted, not bytes: 200 Cyrillic letters are 400 bytes.
+    let long = "я".repeat(200);
+    let r = call(&mut w, &token, "hqc_rename", json!({"title": long})).await;
+    assert_eq!(r["result"]["title"], long.as_str(), "{r}");
+    let r = call(&mut w, &token, "hqc_rename", json!({"title": "Renamed"})).await;
+    assert_eq!(r["result"]["title"], "Renamed", "{r}");
 
     // Another session by its address; the runtime's title no longer replaces the new one.
     let address = format!("personal/{slug}");
@@ -517,7 +535,8 @@ async fn rename_sets_the_users_title() {
         expect("Other renamed", &slug)
     );
 
-    // An empty title, a too long one; an unknown session. Nothing changes.
+    // An empty title, a too long one; an unknown session, another owner's, an archived one.
+    // Nothing changes.
     let r = call(&mut w, &token, "hqc_rename", json!({"title": "   "})).await;
     assert_eq!(code(&r), "invalid_args", "{r}");
     let r = call(
@@ -536,6 +555,64 @@ async fn rename_sets_the_users_title() {
     )
     .await;
     assert_eq!(code(&r), "not_found", "{r}");
+    let stranger = hqc_hub::db::ensure_user(&hub.app.db, "stranger-rename@example.com")
+        .await
+        .unwrap();
+    let theirs = hqc_hub::db::create_project(&hub.app.db, stranger.id, "Theirs", "")
+        .await
+        .unwrap();
+    let secret = hqc_hub::db::create_session(
+        &hub.app.db,
+        hqc_hub::db::NewSession {
+            project_id: theirs.id,
+            owner_id: stranger.id,
+            workspace_id: None,
+            worker_id: None,
+            cwd: ".",
+            title: Some("Secret"),
+            model: None,
+            auto_approve: false,
+            permission_mode: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (s, v) = hub
+        .post(
+            &format!("/api/projects/{pid}/sessions"),
+            json!({"title": "Old"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let old = v["id"].as_str().unwrap().to_string();
+    ack_start(&mut w, &old).await;
+    sqlx::query("UPDATE sessions SET archived = true, archived_at = now() WHERE id = $1")
+        .bind(old.parse::<Uuid>().unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    for target in [
+        secret.to_string(),
+        format!("{}/secret", theirs.slug),
+        old.clone(),
+    ] {
+        let r = call(
+            &mut w,
+            &token,
+            "hqc_rename",
+            json!({"title": "Lost", "session": target}),
+        )
+        .await;
+        assert_eq!(code(&r), "not_found", "{target}: {r}");
+    }
+    for (id, title) in [(secret, "Secret"), (old.parse().unwrap(), "Old")] {
+        let stored: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id = $1")
+            .bind(id)
+            .fetch_one(&hub.app.db)
+            .await
+            .unwrap();
+        assert_eq!(stored, title);
+    }
     assert_eq!(titled(&hub.session(&me).await), expect("Renamed", "me"));
     assert_eq!(
         titled(&hub.session(&other).await),

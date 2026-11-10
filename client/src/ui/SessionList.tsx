@@ -32,8 +32,7 @@ import { agentsLabel, formatAge, formatWhen, homePath, shortPath } from './label
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
-import { SearchHits } from './Search';
-import { LIST_MODES, bucketOf, groupSessions, lastLine, matchesQuery, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
+import { LIST_MODES, bucketOf, groupSessions, lastLine, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
 
 /** "+ project": asks for the name, then opens the new project's settings — a new project
  *  has no workspaces yet, and that is the first thing to add. */
@@ -158,14 +157,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   // The session whose "Move to project…" form is open.
   const [moving, setMoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // The phone searches on its own screen (`#/search`); a desktop opens the field from the
-  // header's magnifier, in the place of the project's name.
-  const [query, setQuery] = useState('');
-  const [searching, setSearching] = useState(false);
-  const searchInput = useRef<HTMLInputElement>(null);
-  const searchBtn = useRef<HTMLButtonElement>(null);
-  // Esc closed the search: the focus goes back to the magnifier, not to the page.
-  const toSearchBtn = useRef(false);
   // Reorder mode: the order being arranged; Done stores it, Cancel drops it.
   const [reorder, setReorder] = useState<string[] | null>(null);
   // A row's menu (a right click; a long press on a phone): the session, where it was opened,
@@ -198,24 +189,18 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     },
     [],
   );
-  useEffect(() => {
-    if (searching) searchInput.current?.focus();
-    else if (toSearchBtn.current) searchBtn.current?.focus();
-    toSearchBtn.current = false;
-  }, [searching]);
-
   const pathOf = (s: SessionInfo) => shortPath(app.sessionPath(s) ?? '');
   const whereOf = (s: SessionInfo) => [app.workerName(s.worker_id), pathOf(s)].filter(Boolean).join(' · ');
   const now = Date.now();
   // The project's favorites above its groups.
-  const favorites = reorder ? [] : app.favoriteSessions(pid).filter((s) => matchesQuery(s, pathOf(s), query));
+  const favorites = reorder ? [] : app.favoriteSessions(pid);
   let groups: SessionGroup[];
   if (reorder) {
     const items = reorder.map((id) => app.sessions.get(id)).filter((s): s is SessionInfo => !!s && !s.archived);
     groups = items.length ? [{ id: 'reorder', label: 'Drag to reorder', plain: true, items }] : [];
   } else {
     // A favorite is listed once, in the Favorites block; Reorder still holds every session.
-    const list = app.sortedSessions().filter((s) => !s.favorite_at && s.id !== draft?.started && matchesQuery(s, pathOf(s), query));
+    const list = app.sortedSessions().filter((s) => !s.favorite_at && s.id !== draft?.started);
     groups = groupSessions(list, mode, now, (pid && app.orders.get(pid)?.session_ids) || []);
   }
   // The phone's head says "offline" (a desktop's workers line does); not before the first list
@@ -225,8 +210,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const startReorder = () => {
     // The order sent must hold every live session: the waiting archive goes first.
     app.commitArchive();
-    setQuery('');
-    setSearching(false);
     setRowArchive(null);
     setReorder(app.orderedSessions().map((s) => s.id));
   };
@@ -239,11 +222,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     if (pid && reorder) void app.saveOrder(pid, reorder);
     setReorder(null);
   };
-  const closeSearch = () => {
-    setQuery('');
-    setSearching(false);
-  };
-
   const hideCard = () => {
     clearTimeout(cardTimer.current);
     setCard(null);
@@ -352,28 +330,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     },
   });
 
-  const search = (
-    <label class="search">
-      <IconSearch size={14} />
-      <input
-        ref={searchInput}
-        type="search"
-        aria-label="Search sessions"
-        placeholder="Search sessions and messages"
-        value={query}
-        onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
-        onKeyDown={(e) => {
-          if (e.key !== 'Escape') return;
-          // The field goes before the document hears the key: a permission card would take it
-          // for its own Esc (deny) with the focus no longer in a field.
-          e.stopPropagation();
-          toSearchBtn.current = true;
-          closeSearch();
-        }}
-        onBlur={() => !query && setSearching(false)}
-      />
-    </label>
-  );
   const order = reorder ? (
     <div class="reorder-bar" role="group" aria-label="Reorder">
       <span class="reorder-icon">
@@ -493,28 +449,15 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         </header>
       ) : (
         <>
-          {/* One row: the project's name (or the search field), the search, the order, the
-              project's menu and a new session. */}
+          {/* One row: the project's name, the search (its own page), the order, the project's
+              menu and a new session. */}
           <header class="side-head">
-            {searching ? (
-              search
-            ) : (
-              <>
-                <h2 class="project-title" title={project ? projectName(project) : undefined}>
-                  {project ? projectName(project) : 'HQC'}
-                </h2>
-                <button
-                  ref={searchBtn}
-                  type="button"
-                  class="icon-btn btn-search"
-                  aria-label="Search sessions and messages"
-                  title="Search"
-                  onClick={() => setSearching(true)}
-                >
-                  <IconSearch />
-                </button>
-              </>
-            )}
+            <h2 class="project-title" title={project ? projectName(project) : undefined}>
+              {project ? projectName(project) : 'HQC'}
+            </h2>
+            <a class="icon-btn btn-search" href="#/search" aria-label="Search sessions and messages" title="Search">
+              <IconSearch />
+            </a>
             <ModeMenu app={app} pid={pid} mode={mode} disabled={!!reorder} onReorder={startReorder} />
             {project && <ProjectMenu app={app} project={project} />}
             <button
@@ -567,8 +510,8 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
             <ul class="session-list">{g.items.map(row)}</ul>
           </div>
         ))}
-        {app.me && groups.length === 0 && (!draft || query) && !favorites.some((s) => s.project_id === pid) && (
-          <div class="empty">{query ? 'No sessions match' : 'No sessions yet'}</div>
+        {app.me && groups.length === 0 && !draft && !favorites.some((s) => s.project_id === pid) && (
+          <div class="empty">No sessions yet</div>
         )}
         {phone && (groups.length > 0 || favorites.length > 0) && (
           <p class="list-hint">
@@ -578,7 +521,6 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           </p>
         )}
         {!phone && toast}
-        {!phone && <SearchHits app={app} query={query} />}
         {project && archivedCount > 0 && !reorder && (
           <div class="list-foot">
             <button type="button" class="btn-link btn-archive-open" onClick={openArchive}>

@@ -41,6 +41,7 @@ import {
   type PermissionMode,
   type Project,
   type ProjectColor,
+  type SearchKind,
   type SearchPage,
   type Schedule,
   type ListMode,
@@ -76,6 +77,20 @@ export interface NewSessionOptions {
   permission_mode?: PermissionMode;
   /** Absent: the runtime's default model. */
   model?: string;
+}
+
+/** The filters, order and page of `GET /api/search` (SPEC §15). */
+export interface SearchOptions {
+  fuzzy?: boolean;
+  project?: string;
+  session?: string;
+  kind?: SearchKind;
+  /** ISO time: hits at or after it. */
+  since?: string;
+  newest?: boolean;
+  perSession?: number;
+  limit?: number;
+  cursor?: string;
 }
 
 /** `PATCH /api/sessions/{id}`: absent fields stay; `null` is the runtime's default. */
@@ -392,11 +407,19 @@ export class Api {
     return parseSessionInfo(await this.req('GET', `/api/sessions/${enc(id)}`));
   }
 
-  /** `GET /api/search` (SPEC §15): the user's sessions, newest hits first. */
-  async search(q: string, opts: { fuzzy?: boolean; project?: string; cursor?: string } = {}): Promise<SearchPage> {
+  /** `GET /api/search` (SPEC §15): the user's sessions, best hits first (`newest`: newest
+   *  first), within a project, a session, a kind of hit and a time (`since`, ISO), at most
+   *  `perSession` hits of each session. */
+  async search(q: string, opts: SearchOptions = {}): Promise<SearchPage> {
     const p = new URLSearchParams({ q });
     if (opts.fuzzy) p.set('fuzzy', '1');
     if (opts.project) p.set('project', opts.project);
+    if (opts.session) p.set('session', opts.session);
+    if (opts.kind) p.set('kind', opts.kind);
+    if (opts.since) p.set('since', opts.since);
+    if (opts.newest) p.set('order', 'newest');
+    if (opts.perSession) p.set('per_session', String(opts.perSession));
+    if (opts.limit) p.set('limit', String(opts.limit));
     if (opts.cursor) p.set('cursor', opts.cursor);
     return parseSearchPage(await this.req('GET', `/api/search?${p}`));
   }

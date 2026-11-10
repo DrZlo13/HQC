@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // T26: the session list — the "State" and "Recent" orders, the idle sessions by recency, the
-// search over title and path, the workers line with the running sessions of the open session's
+// magnifier that opens the search page, the workers line with the running sessions of the open session's
 // machine, the project rail with its "needs you" badge. T50: the order on the hub (State /
 // Recent / Custom, Reorder by the keyboard), the delayed archive with Undo, archive mode. The
 // one row menu (a right click; a long press on a phone), the row's card, the one-row header
@@ -274,16 +274,6 @@ const groups = () =>
     g.querySelector('.group-count')?.textContent,
     [...g.querySelectorAll('.session-title')].map((t) => t.textContent),
   ]);
-
-/** Types into the desktop column's search, opening it from the header's magnifier first. */
-async function type(value: string) {
-  if (!root.querySelector('input[aria-label="Search sessions"]')) await click(root.querySelector('.side-head .btn-search'));
-  const input = root.querySelector<HTMLInputElement>('input[aria-label="Search sessions"]')!;
-  await act(() => {
-    input.value = value;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-}
 
 /** A right click on a row (a long press on a phone does the same): its menu. */
 const menuOf = (title: string, x = 40, y = 120) =>
@@ -633,26 +623,14 @@ describe('SessionList (desktop column)', () => {
     expect(groups()[0][0]).toBe('Today');
   });
 
-  it('searches by title and by path from the magnifier, the field in the place of the name', async () => {
+  it('the magnifier opens the search page; the column keeps its name and every group', async () => {
     await mount(<SessionList app={makeApp()} />);
-    expect(root.querySelector('input[aria-label="Search sessions"]')).toBeNull();
-    await type('scene');
-    expect(root.querySelector('.side-head .project-title')).toBeNull();
-    expect(document.activeElement).toBe(root.querySelector('input[aria-label="Search sessions"]'));
-    expect(groups()).toEqual([['Idle · Last 7 days', '1', ['Cave scene port']]]);
-    await type('phys-det');
-    expect(groups()).toEqual([['Running', '1', ['Step determinism']]]);
-    await type('no such thing');
-    expect(groups()).toEqual([]);
-    expect(root.querySelector('.empty')!.textContent).toBe('No sessions match');
-    // Esc drops the search and brings the name back.
-    await act(async () => {
-      root.querySelector('input[aria-label="Search sessions"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    });
-    expect(root.querySelector('input[aria-label="Search sessions"]')).toBeNull();
+    const open = root.querySelector<HTMLAnchorElement>('.side-head .btn-search')!;
+    expect(open.tagName).toBe('A');
+    expect(open.getAttribute('href')).toBe('#/search');
+    expect(root.querySelector('.side-head input')).toBeNull();
     expect(root.querySelector('.side-head .project-title')!.textContent).toBe('physics-mp');
     expect(groups()).toHaveLength(4);
-    expect(document.activeElement).toBe(root.querySelector('.side-head .btn-search'));
   });
 
   it("the workers are one line: how many are online, the open session's machine and what runs there", async () => {
@@ -2008,10 +1986,7 @@ describe('favorites', () => {
     await act(() => app.selectProject('p1'));
     // Listed once: the project's own groups no longer hold it.
     expect(groups().slice(1).flatMap((g) => g[2])).toEqual(['Network sync', 'Stone textures', 'Step determinism']);
-    // The search narrows them too; Reorder hides them.
-    await type('cave');
-    expect(favoriteTitles()).toEqual(['Cave scene port']);
-    await type('');
+    // Reorder hides them.
     await startReorder();
     expect(root.querySelector('.group-favorites')).toBeNull();
   });
@@ -2544,12 +2519,6 @@ describe('menus over a pending permission card', () => {
     await pressKey('Escape');
     expect(root.querySelector('.wline-pop')).toBeNull();
     expect(actions.approve).not.toHaveBeenCalled();
-    // The search field: Esc closes it, and the card does not take the key.
-    await type('net');
-    await pressKey('Escape');
-    expect(root.querySelector('input[aria-label="Search sessions"]')).toBeNull();
-    expect(actions.approve).not.toHaveBeenCalled();
-
     // Nothing open: the card has its keys.
     (document.activeElement as HTMLElement).blur();
     await pressKey('Escape');
@@ -2976,7 +2945,7 @@ describe('a new session', () => {
     expect(win()!.querySelector('.composer-files')!.textContent).toContain('shot.txt');
   });
 
-  it('the workspace chip names itself with the whole path; a search that finds nothing says so under the draft', async () => {
+  it('the workspace chip names itself with the whole path', async () => {
     const { app } = draftApp();
     location.hash = '#/p/p1/new';
     await mount(<App app={app} />);
@@ -2984,9 +2953,6 @@ describe('a new session', () => {
     const ws = root.querySelector('.btn-chip-workspace')!;
     expect(ws.getAttribute('aria-label')).toBe('Workspace: phys-mp — home-mac:~/work/games/phys-mp');
     expect(ws.getAttribute('title')).toBe('Workspace: phys-mp — home-mac:~/work/games/phys-mp');
-    await type('zzz nothing');
-    expect(root.querySelector('.is-draft')).not.toBeNull();
-    expect(root.querySelector('.session-scroll .empty')!.textContent).toBe('No sessions match');
   });
 
   it('a create the hub refuses keeps the draft: the reason said, the text back in the input, the file with it; the next send starts it', async () => {

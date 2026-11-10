@@ -985,11 +985,6 @@ select.input {
   height: 34px;
   border-radius: 7px;
 }
-.side-head .search {
-  flex: 1;
-  min-width: 0;
-  margin-right: 4px;
-}
 .side-head .btn-new-session {
   width: 34px;
   height: 34px;
@@ -1036,9 +1031,6 @@ select.input {
 :root.list-compact .side-head .icon {
   width: 14px;
   height: 14px;
-}
-:root.list-compact .side-head .search {
-  height: 28px;
 }
 :root.list-compact .btn-mode {
   height: 26px;
@@ -6276,47 +6268,396 @@ button.ps-look {
   opacity: 0;
 }
 
-/* History search (SPEC §15): the hub's hits under the list, the phone's search screen, and
-   the event a hit opened. */
-.search-hits {
-  margin-bottom: 14px;
+/* History search (SPEC §15): a page in the place of the session column and the chat (on a
+   phone the whole screen), as the boards search-d and search-s draw it. The bar holds "‹
+   <project>" and the field with the counts; then the kinds with their counts, the project, the
+   time, "Also typos", Best match / Newest; "Also finds"; one card per session. Without "Full
+   width" (Settings → Feed) the body is a column of 820 px and the filters two rows; with it
+   (`.is-dense`) the body spans the page, the filters are one row and the type is smaller. */
+.layout.route-search > .main {
+  grid-column: 2 / -1;
 }
-.search-fuzzy {
-  margin-left: auto;
+.search-page {
+  --sp-fs: 14px;
+  --sp-sm: 13px;
+  --sp-meta: 12px;
+  --sp-ib: 34px;
+  --sp-x: 28px;
+  /* A hit row: its padding, the kind's column and the gap after it; the snippet starts past
+     them, and so does "N more in this session". */
+  --sp-pad: 14px;
+  --sp-kind: 92px;
+  --sp-gap: 12px;
+  --sp-hair: color-mix(in srgb, var(--border) 60%, transparent);
+  --sp-rule: color-mix(in srgb, var(--border) 40%, transparent);
+  background: var(--bg);
+}
+.search-page.is-dense {
+  --sp-fs: 13.5px;
+  --sp-sm: 12.5px;
+  --sp-meta: 11.5px;
+  --sp-ib: 26px;
+  --sp-x: 24px;
+}
+.search-page .sp-bar {
+  gap: 10px;
+  padding: 12px var(--sp-x);
+}
+.search-page.is-dense .sp-bar {
+  min-height: 50px;
+  padding: 8px var(--sp-x);
+  border-bottom-color: var(--sp-hair);
+}
+.sp-back {
+  flex: none;
+  max-width: 220px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: var(--sp-ib);
+  padding: 0 8px 0 4px;
+  border-radius: 7px;
+  color: var(--accent-text);
+  font-size: var(--sp-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+.sp-back:hover {
+  background: var(--row-hover);
+}
+.sp-back-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sp-q {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 4px;
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
+  gap: 8px;
+  height: calc(var(--sp-ib) + 8px);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
   color: var(--muted);
+}
+.sp-q:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.sp-q input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: var(--sp-fs) var(--sans);
+}
+.sp-q input::-webkit-search-cancel-button {
+  appearance: none;
+}
+.sp-total {
+  flex: none;
+  font-size: var(--sp-meta);
+  white-space: nowrap;
+}
+.sp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.sp-body {
+  max-width: calc(820px + 2 * var(--sp-x));
+  margin: 0 auto;
+  padding: 24px var(--sp-x) 40px;
+  padding-bottom: calc(40px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.search-page.is-dense .sp-body {
+  max-width: none;
+  padding-top: 14px;
+  gap: 12px;
+}
+.sp-fl,
+.sp-kinds {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.search-page.is-dense .sp-kinds {
+  margin-right: 12px;
+}
+.sp-chip {
+  height: calc(var(--sp-ib) + 2px);
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: var(--surface);
+  color: var(--text2);
+  font: 500 var(--sp-sm) var(--sans);
   cursor: pointer;
 }
-.search-snippet {
-  font-size: 12px;
-  line-height: 1.45;
+.sp-chip.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+.sp-n {
+  color: var(--muted);
+  font-size: var(--sp-meta);
+  font-weight: 500;
+}
+.sp-sel {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: calc(var(--sp-ib) + 2px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
   color: var(--text2);
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+}
+.sp-sel select {
+  appearance: none;
+  height: 100%;
+  max-width: 220px;
+  padding: 0 26px 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: var(--sp-sm) var(--sans);
+  cursor: pointer;
+}
+.sp-sel .icon {
+  position: absolute;
+  right: 8px;
+  pointer-events: none;
+}
+.sp-typos {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+  color: var(--text2);
+  font-size: var(--sp-sm);
+  cursor: pointer;
+}
+.sp-seg {
+  margin-left: auto;
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--shade) 22%, transparent);
+}
+.sp-seg button {
+  height: calc(var(--sp-ib) - 2px);
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text2);
+  font: 500 var(--sp-sm) var(--sans);
+  cursor: pointer;
+}
+.sp-seg button.is-on {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--shade) 30%, transparent);
+}
+.sp-also,
+.sp-empty {
+  color: var(--muted);
+  font-size: var(--sp-sm);
+}
+.sp-next {
+  align-self: center;
+}
+.sp-card {
+  flex: none;
   overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.sp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px var(--sp-pad);
+  border-bottom: 1px solid var(--sp-hair);
+  font-size: var(--sp-fs);
+}
+.sp-tile {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--text);
+  font: 700 11px var(--sans);
+}
+.search-page.is-dense .sp-tile {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  font-size: 10px;
+}
+.sp-tile .glyph-img {
+  padding: 2px;
+}
+.sp-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+.sp-title:hover {
+  text-decoration: underline;
+}
+.sp-archived,
+.sp-proj {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--sp-meta);
+}
+.sp-meta {
+  flex: none;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: var(--sp-meta);
+  white-space: nowrap;
+}
+.sp-hit {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-gap);
+  padding: 7px var(--sp-pad);
+  color: inherit;
+  text-decoration: none;
+}
+.sp-hit + .sp-hit {
+  border-top: 1px solid var(--sp-rule);
+}
+.sp-hit:hover {
+  background: var(--row-hover);
+}
+.sp-kind {
+  flex: none;
+  width: var(--sp-kind);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-top: 1px;
+  color: var(--muted);
+  font-size: var(--sp-meta);
+}
+.sp-kind-icon {
+  flex: none;
+  width: 14px;
+  display: flex;
+}
+.sp-x {
+  flex: 1;
+  min-width: 0;
+  color: var(--text2);
+  font-size: var(--sp-fs);
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.search-snippet mark {
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  border-radius: 3px;
+.sp-x.mono {
+  font-family: var(--mono);
+  font-size: calc(var(--sp-sm) - 0.5px);
 }
-.search-archived {
+.sp-x mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, #f2c94c 45%, transparent);
+  color: var(--text);
+}
+.sp-when {
   flex: none;
-  font-size: 11px;
   color: var(--muted);
+  font-size: var(--sp-meta);
 }
-.search-more {
-  margin: 4px 8px;
+/* The card's last row: a hit row's divider, its text where the snippets start. */
+.sp-more {
+  display: block;
+  width: 100%;
+  padding: 7px var(--sp-pad) 7px calc(var(--sp-pad) + var(--sp-kind) + var(--sp-gap));
+  border: 0;
+  border-top: 1px solid var(--sp-rule);
+  background: transparent;
+  color: var(--accent-text);
+  font: 600 var(--sp-sm) / 1.5 var(--sans);
+  text-align: left;
+  cursor: pointer;
 }
-.search-screen .m-head-row .search {
+.sp-more:hover {
+  background: var(--row-hover);
+}
+/* A phone: the bar as the other screens', the hit's kind and time on a line over the snippet,
+   "N more" under the snippets' edge. */
+.layout-phone .search-page {
+  --sp-x: 16px;
+  --sp-pad: 12px;
+}
+.layout-phone .sp-bar {
+  gap: 6px;
+}
+/* The title takes the card's width; the project and the counts go under it. */
+.layout-phone .sp-head {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+.layout-phone .sp-title {
   flex: 1;
+}
+.layout-phone .sp-meta {
+  flex-basis: 100%;
+  margin-left: 36px;
+}
+.layout-phone .sp-body {
+  padding-top: 14px;
+  gap: 12px;
+}
+.layout-phone .sp-seg {
+  margin-left: 0;
+}
+.layout-phone .sp-hit {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+}
+.layout-phone .sp-kind {
+  width: auto;
+}
+.layout-phone .sp-x {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+.layout-phone .sp-more {
+  padding-left: var(--sp-pad);
 }
 .feed-block.is-found {
   border-radius: 10px;

@@ -657,6 +657,69 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     sessions: [...sessions.values()].filter((s) => s.project_id === p.pid).map(info),
   }));
   route('GET', '/api/sessions', () => ({ sessions: [...sessions.values()].map(info) }));
+  // `GET /api/search` (SPEC §15) over the mock's own sessions, in the hub's shape: a word
+  // finds the words of a text that begin with it less its last letter (a stand-in for the
+  // hub's stemmer, so other forms are found and named in `also`); every word must be found;
+  // newest first whatever the order asked. Filters, counts on the first page (not of one
+  // session), the hits of a hit's session, at most `per_session` of each, pages by an offset.
+  const KIND_OF = {
+    'user.message': 'message', 'agent.message': 'message', 'peer.message': 'message', system: 'message',
+    'tool.call': 'command', 'tool.result': 'output', 'clarify.response': 'answer',
+  };
+  const textOf = (e) => {
+    const p = e.payload;
+    if (e.type === 'tool.call') return `${p.tool} ${p.args_preview ?? ''}`;
+    if (e.type === 'tool.result') return String(p.result_preview ?? '');
+    if (e.type === 'clarify.response') return Object.values(p.answers ?? {}).flat().join('; ');
+    return String(p.text ?? '');
+  };
+  const wordsOf = (t) => t.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  route('GET', '/api/search', (_, __, q) => {
+    const text = (q.get('q') ?? '').trim();
+    if (!text) throw fail(400, 'bad_request', 'the query is empty');
+    const typed = wordsOf(text);
+    const stems = typed.map((w) => (w.length > 4 ? w.slice(0, -1) : w));
+    const found = (t) => stems.every((st) => wordsOf(t).some((w) => w.startsWith(st)));
+    const since = q.get('since');
+    const all = [];
+    for (const s of sessions.values()) {
+      if (s.system || (q.get('project') && s.project_id !== q.get('project')) || (q.get('session') && s.id !== q.get('session'))) continue;
+      const hit = { session_id: s.id, address: `${projects.get(s.project_id)?.slug ?? 'personal'}/${s.slug}`, title: s.title, archived: s.archived };
+      if (found(s.title)) all.push({ hit: { ...hit, ts: s.created_at, snippet: s.title }, text: s.title });
+      for (const e of s.events) {
+        const kind = KIND_OF[e.type];
+        const t = kind ? textOf(e) : '';
+        if (t && found(t)) {
+          all.push({ kind, text: t, hit: { ...hit, seq: e.seq, type: e.type, ts: e.ts, snippet: t.replace(/\s+/g, ' ').slice(0, 160) } });
+        }
+      }
+    }
+    const inTime = all.filter((h) => !since || h.hit.ts >= since).sort((a, b) => b.hit.ts.localeCompare(a.hit.ts));
+    const countOf = (list) => ({ hits: list.length, sessions: new Set(list.map((h) => h.hit.session_id)).size });
+    const counts = { all: countOf(inTime) };
+    for (const k of ['message', 'command', 'output', 'answer']) counts[k] = countOf(inTime.filter((h) => h.kind === k));
+    let list = inTime.filter((h) => !q.get('kind') || h.kind === q.get('kind'));
+    const inSession = new Map();
+    for (const h of list) inSession.set(h.hit.session_id, (inSession.get(h.hit.session_id) ?? 0) + 1);
+    const cap = Number(q.get('per_session') || 0);
+    if (cap) {
+      const nth = new Map();
+      list = list.filter((h) => {
+        nth.set(h.hit.session_id, (nth.get(h.hit.session_id) ?? 0) + 1);
+        return nth.get(h.hit.session_id) <= cap;
+      });
+    }
+    const offset = Number(q.get('cursor') || 0);
+    const limit = Math.min(Number(q.get('limit') || 20), 50);
+    const page = list.slice(offset, offset + limit);
+    const also = [...new Set(page.flatMap((h) => wordsOf(h.text).filter((w) => !typed.includes(w) && stems.some((st) => w.startsWith(st)))))];
+    return {
+      results: page.map((h) => ({ ...h.hit, session_hits: inSession.get(h.hit.session_id) })),
+      ...(offset + limit < list.length ? { next_cursor: String(offset + limit) } : {}),
+      ...(also.length ? { also: also.slice(0, 8) } : {}),
+      ...(q.get('cursor') || q.get('session') ? {} : { counts }),
+    };
+  });
   // The order of the list (T50), by the hub's rules: only the project's unarchived sessions,
   // the missing ones first, newest first.
   const orderOf = (pid) => {

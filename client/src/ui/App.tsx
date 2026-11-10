@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import { applyLook, applyTheme } from '../theme';
 import { Chat } from './Chat';
@@ -9,7 +9,7 @@ import { ProjectRail } from './ProjectRail';
 import { ProjectSettings } from './ProjectSettings';
 import { RequestsScreen } from './requests';
 import { RulesScreen } from './Rules';
-import { SearchScreen } from './Search';
+import { SearchPage } from './Search';
 import { SessionList, WidthGrip } from './SessionList';
 import { rememberSession, reopenedSession } from './sessions';
 import { Settings } from './Settings';
@@ -30,7 +30,8 @@ export type Route =
  *  `#/p/<project>/new` (a new session, not on the hub until its first message),
  *  `#/p/<project>/settings` (the project's settings, T49), `#/p/<project>/rules/<workspace>`
  *  (`?session=<id>`: opened from that session; the folder's rules, T48), `#/s/<session>` (`?seq=<seq>`:
- *  scrolled to that event, a search hit), `#/search` (the phone's search screen),
+ *  scrolled to that event, a search hit), `#/search` (the search page; `?q=…` and its filters,
+ *  read by the page),
  *  `#/requests` (every open request, T37), `#/settings`, `#/enroll?code=ABCD-1234`. */
 export function parseRoute(hash: string): Route {
   const [path, query = ''] = hash.replace(/^#/, '').split('?');
@@ -96,6 +97,12 @@ export function App({ app }: { app: AppState }) {
     if (routeProject) app.selectProject(routeProject);
   }, [app, routeProject]);
 
+  // Where the search page goes back to: the last address before it, else the project.
+  const beforeSearch = useRef<string | null>(null);
+  useEffect(() => {
+    if (route.name !== 'search') beforeSearch.current = location.hash || '#/';
+  }, [route]);
+
   // A project opens its last session (on a desktop; a phone's project screen is its list).
   useEffect(() => {
     if (route.name === 'session' && sessionProject) rememberSession(sessionProject, route.id);
@@ -122,10 +129,11 @@ export function App({ app }: { app: AppState }) {
     case 'newSession':
       main = <NewSessionChat key={route.projectId} app={app} projectId={route.projectId} phone={phone} />;
       break;
-    case 'search':
-      // A phone screen; a desktop has the search in the left column.
-      main = phone ? <SearchScreen app={app} /> : <div class="placeholder">Search from the field on the left</div>;
+    case 'search': {
+      const pid = app.currentProjectId;
+      main = <SearchPage app={app} phone={phone} back={beforeSearch.current ?? (pid ? `#/p/${pid}` : '#/')} />;
       break;
+    }
     case 'requests':
       main = <RequestsScreen app={app} phone={phone} />;
       break;
@@ -166,14 +174,18 @@ export function App({ app }: { app: AppState }) {
       </div>
     );
   }
+  // The search page takes the session column's place and the chat's.
+  const page = route.name === 'search';
   return (
     <div class={`layout route-${route.name}`}>
       <ProjectRail app={app} />
-      <aside class="sidebar" aria-label="Project sessions">
-        <SessionList app={app} current={current} requests={route.name === 'requests'} />
-      </aside>
+      {!page && (
+        <aside class="sidebar" aria-label="Project sessions">
+          <SessionList app={app} current={current} requests={route.name === 'requests'} />
+        </aside>
+      )}
       {/* Out of the grid's flow, on the border between the session column and the chat. */}
-      <WidthGrip app={app} />
+      {!page && <WidthGrip app={app} />}
       <main class="main">{main}</main>
     </div>
   );

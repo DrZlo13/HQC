@@ -1501,11 +1501,30 @@ export interface SearchHit {
   type?: string;
   ts: string;
   snippet: string;
+  /** The hits of the query (with the same filters) in this hit's session. */
+  session_hits: number;
 }
+
+/** What a hit is, by the type of its event (`kind=` of the search). */
+export const SEARCH_KINDS = ['message', 'command', 'output', 'answer'] as const;
+export type SearchKind = (typeof SEARCH_KINDS)[number];
+
+export interface SearchCount {
+  hits: number;
+  sessions: number;
+}
+
+/** The hits and sessions of a whole query: all (title hits too) and of each kind. */
+export type SearchCounts = Record<'all' | SearchKind, SearchCount>;
 
 export interface SearchPage {
   results: SearchHit[];
   next_cursor?: string;
+  /** The words of the page's hits the query found besides the words typed: other forms, the
+   *  similar words of a fuzzy query. */
+  also: string[];
+  /** On the first page only. */
+  counts?: SearchCounts;
 }
 
 export function parseSearchPage(v: unknown): SearchPage {
@@ -1521,9 +1540,19 @@ export function parseSearchPage(v: unknown): SearchPage {
       type: optStr(h, 'type'),
       ts: str(h, 'ts'),
       snippet: str(h, 'snippet'),
+      session_hits: num(h, 'session_hits'),
     };
   });
-  return { results, next_cursor: optStr(o, 'next_cursor') };
+  let counts: SearchCounts | undefined;
+  if (present(o, 'counts')) {
+    const c = obj(o.counts, 'counts');
+    const one = (k: string): SearchCount => {
+      const n = obj(c[k], k);
+      return { hits: num(n, 'hits'), sessions: num(n, 'sessions') };
+    };
+    counts = { all: one('all'), message: one('message'), command: one('command'), output: one('output'), answer: one('answer') };
+  }
+  return { results, next_cursor: optStr(o, 'next_cursor'), also: optStrArr(o, 'also') ?? [], counts };
 }
 
 /** `{event}` of `POST /api/sessions/{id}/input`: the stored `user.message`. */

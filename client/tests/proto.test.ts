@@ -184,6 +184,12 @@ describe('examples/wire', () => {
       ['personal/migration-plan', undefined, true],
     ]);
     expect(sp.next_cursor).toBeTruthy();
+    expect(sp.results.map((h) => h.session_hits)).toEqual([3, 1]);
+    expect(sp.also).toEqual(['migrations', 'migrate']);
+    expect(sp.counts!.all).toEqual({ hits: 24, sessions: 2 });
+    expect(sp.counts!.command.hits).toBe(4);
+    // A later page has neither.
+    expect(parseSearchPage({ results: [] })).toEqual({ results: [], next_cursor: undefined, also: [], counts: undefined });
     const input = parseInputResponse(load('api.input.json'));
     expect(input.client_op_id).toBe((load('api.input.request.json') as { client_op_id: string }).client_op_id);
     expect(parseApiError(load('api.error.json')).error).toBe('request_closed');

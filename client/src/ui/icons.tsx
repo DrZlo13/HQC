@@ -81,6 +81,26 @@ export const IconChevron = ({ size = 14 }: { size?: number }) => (
   </Svg>
 );
 
+/** A message, a command and a tool's output: the kinds of a search hit. */
+export const IconMessage = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M4 5h12v8H9l-4 3v-3H4z" />
+  </Svg>
+);
+
+export const IconCommand = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M4 6l4 4-4 4M10 14h6" />
+  </Svg>
+);
+
+export const IconOutput = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <rect x="3" y="4" width="14" height="12" rx="2" />
+    <path d="M6 8h8M6 11h5" />
+  </Svg>
+);
+
 export const IconBack = ({ size = 22 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M12.5 4.5L7 10l5.5 5.5" />

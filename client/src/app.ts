@@ -43,9 +43,14 @@ const LOOK_KEY = 'hqc.look';
 function loadLook(): Look {
   try {
     const v = JSON.parse(localStorage.getItem(LOOK_KEY) ?? '{}') ?? {};
-    return { wideFeed: v.wideFeed === true, systemFont: v.systemFont === true, railNames: v.railNames === true };
+    return {
+      wideFeed: v.wideFeed === true,
+      systemFont: v.systemFont === true,
+      railNames: v.railNames === true,
+      timeInGap: v.timeInGap === true,
+    };
   } catch {
-    return { wideFeed: false, systemFont: false, railNames: false };
+    return { wideFeed: false, systemFont: false, railNames: false, timeInGap: false };
   }
 }
 
@@ -63,8 +68,8 @@ function loadList(): { home: string; projects: Project[]; sessions: SessionInfo[
 
 export class AppState {
   me: Me | null = null;
-  /** The full-width feed and the system font ("Settings" → "Feed"), the project names in the
-   *  project bar ("Settings" → "Project bar"), on this device. */
+  /** The full-width feed, the system font and the time in the gap ("Settings" → "Feed"), the
+   *  project names in the project bar ("Settings" → "Project bar"), on this device. */
   look: Look = loadLook();
   error: string | null = null;
   readonly projects = new Map<string, Project>();

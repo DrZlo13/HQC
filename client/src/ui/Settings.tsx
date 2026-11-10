@@ -155,6 +155,15 @@ export function Settings({ app }: { app: AppState }) {
           />
           The system font instead of Inter
         </label>
+        <label class="setting-check">
+          <input
+            type="checkbox"
+            name="time-in-gap"
+            checked={app.look.timeInGap}
+            onChange={(e) => app.setLook({ timeInGap: (e.currentTarget as HTMLInputElement).checked })}
+          />
+          A message's time in the space below it instead of a line of its own
+        </label>
 
         <h2>Project bar</h2>
         <label class="setting-check">

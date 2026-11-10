@@ -323,7 +323,7 @@ it('does not fetch the lists again for what the hub pushes or a read while they 
   expect(projectLists).toBe(1);
 });
 
-it('sets the full-width feed and the system font from "Settings" on the document root', async () => {
+it('sets the full-width feed, the system font and the time in the gap from "Settings" on the document root', async () => {
   const classes = () => document.documentElement.classList;
   expect(classes().contains('feed-wide')).toBe(false);
   location.hash = '#/settings';
@@ -338,6 +338,10 @@ it('sets the full-width feed and the system font from "Settings" on the document
   expect(classes().contains('font-system')).toBe(true);
   $<HTMLInputElement>('input[name=system-font]')!.click();
   await until('Inter again', () => !classes().contains('font-system'));
+  $<HTMLInputElement>('input[name=time-in-gap]')!.click();
+  await until('time in the gap', () => classes().contains('time-in-gap'));
+  $<HTMLInputElement>('input[name=time-in-gap]')!.click();
+  await until('time on its line again', () => !classes().contains('time-in-gap'));
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

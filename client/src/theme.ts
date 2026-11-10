@@ -140,12 +140,14 @@ export function statusVars(base: Theme = 'warm'): Record<string, string> {
 }
 
 /** How text reads on this device ("Settings" → "Feed"): the feed across the whole chat column
- *  instead of at most 780 px, the platform's own font instead of Inter; and ("Settings" →
- *  "Project bar") a row with each project's full name instead of a tile. */
+ *  instead of at most 780 px, the platform's own font instead of Inter, a message's time in
+ *  the gap below it instead of a line of its own; and ("Settings" → "Project bar") a row with
+ *  each project's full name instead of a tile. */
 export interface Look {
   wideFeed: boolean;
   systemFont: boolean;
   railNames: boolean;
+  timeInGap: boolean;
 }
 
 /** Sets the look as classes on `el` (the document root), read by styles.css. */
@@ -153,6 +155,7 @@ export function applyLook(el: HTMLElement, look: Look): void {
   el.classList.toggle('feed-wide', look.wideFeed);
   el.classList.toggle('font-system', look.systemFont);
   el.classList.toggle('rail-names', look.railNames);
+  el.classList.toggle('time-in-gap', look.timeInGap);
 }
 
 const THEME_KEY = 'hqc.theme';

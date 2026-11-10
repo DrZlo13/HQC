@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// "Settings" → "Feed" (SPEC 0.90): the full-width feed and the system font are kept in this
-// browser and set as classes on the document root, which styles.css reads.
+// "Settings" → "Feed" (SPEC 0.90): the full-width feed, the system font and the time in the gap
+// are kept in this browser and set as classes on the document root, which styles.css reads.
 
 import { afterEach, expect, it } from 'vitest';
 import { render } from 'preact';
@@ -23,49 +23,66 @@ afterEach(() => {
 
 const newApp = () =>
   new AppState({ workers: async () => [] } as unknown as Api, { onState: () => {} } as unknown as HubSocket);
+const look = (wideFeed: boolean, systemFont: boolean, timeInGap: boolean) => ({
+  wideFeed,
+  systemFont,
+  railNames: false,
+  timeInGap,
+});
 
-it('keeps the full-width feed and the system font on this device', async () => {
+it('keeps the full-width feed, the system font and the time in the gap on this device', async () => {
   const app = newApp();
-  expect(app.look).toEqual({ wideFeed: false, systemFont: false, railNames: false });
+  expect(app.look).toEqual(look(false, false, false));
   root = document.createElement('div');
   document.body.appendChild(root);
   await act(async () => render(<Settings app={app} />, root));
   const wide = root.querySelector<HTMLInputElement>('input[name=wide-feed]')!;
   const font = root.querySelector<HTMLInputElement>('input[name=system-font]')!;
-  expect([wide.checked, font.checked]).toEqual([false, false]);
+  const time = root.querySelector<HTMLInputElement>('input[name=time-in-gap]')!;
+  expect([wide.checked, font.checked, time.checked]).toEqual([false, false, false]);
 
   await act(async () => wide.click());
-  expect(app.look).toEqual({ wideFeed: true, systemFont: false, railNames: false });
+  expect(app.look).toEqual(look(true, false, false));
   await act(async () => font.click());
-  expect(app.look).toEqual({ wideFeed: true, systemFont: true, railNames: false });
+  expect(app.look).toEqual(look(true, true, false));
+  await act(async () => time.click());
+  expect(app.look).toEqual(look(true, true, true));
 
   // A reload reads it back, and the document root carries it.
   const again = newApp();
-  expect(again.look).toEqual({ wideFeed: true, systemFont: true, railNames: false });
+  expect(again.look).toEqual(look(true, true, true));
   applyLook(document.documentElement, again.look);
-  expect(document.documentElement.classList.contains('feed-wide')).toBe(true);
-  expect(document.documentElement.classList.contains('font-system')).toBe(true);
+  expect(document.documentElement.className.split(' ').sort()).toEqual(['feed-wide', 'font-system', 'time-in-gap']);
   again.setLook({ wideFeed: false });
   applyLook(document.documentElement, again.look);
   expect(document.documentElement.classList.contains('feed-wide')).toBe(false);
-  expect(newApp().look).toEqual({ wideFeed: false, systemFont: true, railNames: false });
+  expect(newApp().look).toEqual(look(false, true, true));
 });
 
 it('shows what this device keeps; broken storage is the default look', async () => {
-  localStorage.setItem('hqc.look', '{"wideFeed":true}');
+  localStorage.setItem('hqc.look', '{"wideFeed":true,"timeInGap":true}');
   root = document.createElement('div');
   document.body.appendChild(root);
   await act(async () => render(<Settings app={newApp()} />, root));
   expect(root.querySelector<HTMLInputElement>('input[name=wide-feed]')!.checked).toBe(true);
   expect(root.querySelector<HTMLInputElement>('input[name=system-font]')!.checked).toBe(false);
+  expect(root.querySelector<HTMLInputElement>('input[name=time-in-gap]')!.checked).toBe(true);
   localStorage.setItem('hqc.look', '{not json');
-  expect(newApp().look).toEqual({ wideFeed: false, systemFont: false, railNames: false });
+  expect(newApp().look).toEqual(look(false, false, false));
 });
 
-it('the classes lift the feed width and swap the font', () => {
+it('the classes lift the feed width, swap the font and move the time into the gap', () => {
   const css = readFileSync(join(import.meta.dirname, '../src/styles.css'), 'utf8');
   expect(css).toMatch(/:root\.feed-wide \.feed \{\s*max-width: none;/);
   expect(css).toMatch(/:root\.font-system \{\s*--sans: -apple-system,/);
+  expect(css).toMatch(
+    /:root\.time-in-gap \.msg-agent,\s*:root\.time-in-gap \.msg-user:not\(\.msg-pending\) \{\s*position: relative;/,
+  );
+  expect(css).toMatch(
+    /:root\.time-in-gap \.msg-agent > \.meta,\s*:root\.time-in-gap \.msg-user:not\(\.msg-pending\) > \.meta \{\s*position: absolute;\s*top: 100%;/,
+  );
+  expect(css).toMatch(/:root\.time-in-gap \.feed \{\s*padding-bottom: 24px;/);
+  expect(css).toMatch(/:root\.time-in-gap \.chat-phone \.feed \{\s*gap: 24px;/);
 });
 
 it('keeps the project names in the project bar on this device (SPEC 0.91)', async () => {
@@ -76,7 +93,7 @@ it('keeps the project names in the project bar on this device (SPEC 0.91)', asyn
   const names = root.querySelector<HTMLInputElement>('input[name=rail-names]')!;
   expect(names.checked).toBe(false);
   await act(async () => names.click());
-  expect(app.look).toEqual({ wideFeed: false, systemFont: false, railNames: true });
+  expect(app.look).toEqual({ wideFeed: false, systemFont: false, railNames: true, timeInGap: false });
   // A reload reads it back; the root's class widens the bar's column.
   const again = newApp();
   expect(again.look.railNames).toBe(true);

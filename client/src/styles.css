@@ -2058,6 +2058,27 @@ select.input {
   max-width: none;
 }
 
+/* "A message's time in the space below it" in Settings, on this device (applyLook): the time
+   and the message's buttons leave the flow and sit, on the right, in the feed's gap under the
+   message. The gap is at least their 24 px, on a phone too, and the feed keeps 24 px in the
+   flow below its last message for its time. */
+:root.time-in-gap .feed {
+  padding-bottom: 24px;
+}
+:root.time-in-gap .msg-agent,
+:root.time-in-gap .msg-user:not(.msg-pending) {
+  position: relative;
+}
+:root.time-in-gap .msg-agent > .meta,
+:root.time-in-gap .msg-user:not(.msg-pending) > .meta {
+  position: absolute;
+  top: 100%;
+  right: 0;
+}
+:root.time-in-gap .chat-phone .feed {
+  gap: 24px;
+}
+
 /* ---- messages ---- */
 
 .msg-agent {

@@ -6,12 +6,15 @@
 //! too). It also adds the text of every input it writes to stdin: a prompt record the stream
 //! did not name (a slash command such as `/compact` is written as `<command-name>`, T25; an
 //! echo with another uuid, seen in the field and not reproduced on 2.1.308) is the adapter's
-//! when its typed text matches an input not yet matched ([`OwnRecords::claim`]). The mirror
-//! asks the registry whether a record is the adapter's and whether a process of the session
-//! runs right now. Keyed by `runtime_session_id` (the transcript's uuid); in memory only: after a
-//! worker restart the mirror's offsets on disk say what was already handled.
+//! when its typed text matches an input not yet matched ([`OwnRecords::claim`]), or several
+//! inputs in a row joined by a newline: inputs the CLI took from its queue together are one
+//! prompt record with a new uuid (2.1.312, a message typed while a fresh process started). The
+//! mirror asks the registry whether a record is the adapter's and whether a process of the
+//! session runs right now. Keyed by `runtime_session_id` (the transcript's uuid); in memory only:
+//! after a worker restart the mirror's offsets on disk say what was already handled.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::sync::Mutex;
 
 use uuid::Uuid;
@@ -81,16 +84,15 @@ impl OwnRecords {
 
     /// Whether record `uuid` of transcript `session` is the adapter's: its uuid came in
     /// stream-json, or `typed` (what a prompt record stands for, `None` for other records)
-    /// matches an input not yet matched; then the record is the adapter's from now on. A
-    /// matching input is used up either way.
+    /// matches an input not yet matched, or several in a row joined by a newline; then the
+    /// record is the adapter's from now on. Matching inputs are used up either way.
     pub fn claim(&self, session: Uuid, uuid: Uuid, typed: Option<&str>) -> bool {
         let mut m = self.lock();
         let Some(e) = m.get_mut(&session) else {
             return false;
         };
-        let input = typed.and_then(|t| e.inputs.iter().position(|i| i == t.trim()));
-        if let Some(i) = input {
-            e.inputs.remove(i);
+        if let Some(r) = typed.and_then(|t| matching(&e.inputs, t.trim())) {
+            e.inputs.drain(r);
             e.uuids.insert(uuid);
             return true;
         }
@@ -111,6 +113,30 @@ impl OwnRecords {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Entry>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+/// The inputs `t` stands for: one input, else the first run of inputs in a row whose texts
+/// joined by a newline are `t`.
+fn matching(inputs: &VecDeque<String>, t: &str) -> Option<Range<usize>> {
+    if let Some(i) = inputs.iter().position(|i| i == t) {
+        return Some(i..i + 1);
+    }
+    (0..inputs.len()).find_map(|start| {
+        let mut joined = String::new();
+        for (j, input) in inputs.iter().enumerate().skip(start) {
+            if j > start {
+                joined.push('\n');
+            }
+            joined.push_str(input);
+            if !t.starts_with(joined.as_str()) {
+                return None;
+            }
+            if j > start && joined.len() == t.len() {
+                return Some(start..j + 1);
+            }
+        }
+        None
+    })
 }
 
 #[cfg(test)]
@@ -158,5 +184,34 @@ mod tests {
         }
         assert!(!r.claim(s, again, Some("0")), "dropped as the oldest");
         assert!(r.claim(s, again, Some("1")));
+    }
+
+    /// Inputs the CLI took from its queue together are one prompt record: "?" written to
+    /// start a fresh process, "rename yourself" while it started, the record "?\nrename
+    /// yourself" with a uuid the stream did not name (2.1.312).
+    #[test]
+    fn claim_inputs_taken_together() {
+        let r = OwnRecords::default();
+        let s = Uuid::new_v4();
+        let (merged, other) = (Uuid::new_v4(), Uuid::new_v4());
+        r.sent(s, "earlier");
+        r.sent(s, "?");
+        r.sent(s, "rename yourself\n");
+        assert!(
+            !r.claim(s, other, Some("?\nrename")),
+            "not the whole of an input"
+        );
+        assert!(
+            !r.claim(s, other, Some("rename yourself\n?")),
+            "not in the order written"
+        );
+        assert!(r.claim(s, merged, Some("?\nrename yourself")));
+        assert!(r.is_own(s, merged));
+        assert!(!r.claim(s, other, Some("?")), "used up");
+        assert!(!r.claim(s, other, Some("rename yourself")), "used up");
+        assert!(
+            r.claim(s, other, Some("earlier")),
+            "the input before the run stays"
+        );
     }
 }

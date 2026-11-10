@@ -1782,8 +1782,9 @@ away. With no session open the main column says "Open Sessions to pick a session
 one".
 
 The phone (since 0.114): the first screen, `#/`, lists the projects — Needs you (a session waits
-for the user), Running (one works, none waits), Favorites, and All projects in the bar's order
-with "New project" last; a project may be in several — or, picked from its title's menu,
+for the user), Running (one works, none waits), Favorites, and the other projects ("All
+projects" while no other group has one) with "New project" last, each group in the bar's order
+and each project in one group, a favorite only under Favorites — or, picked from its title's menu,
 "Sessions": every live session of the projects on the bar in the groups of State, each row with
 its project's name before the state line and its tile at the end, without a menu. Its head is
 one row: the title with that menu (kept while the page is open), "Requests" with the count, the

@@ -282,12 +282,14 @@ const groups = () =>
   ]);
 
 /** A phone's first screen, the Projects view: the names in a group (`wait`, `run`,
- *  `favorites`, `all`), a project's row in "All projects" and its marks — how many of its
+ *  `favorites`, `all`), a project's row (in one group) and its marks — how many of its
  *  sessions run, wait for the user and have unread events. */
 const phoneNames = (group: string) =>
   [...root.querySelectorAll(`.phone-home .group-${group} a.phone-project .phone-project-name`)].map((n) => n.textContent);
+/** Every project on the screen, group by group. */
+const phoneAll = () => [...root.querySelectorAll('.phone-home a.phone-project .phone-project-name')].map((n) => n.textContent);
 const phoneRow = (name: string) =>
-  [...root.querySelectorAll<HTMLElement>('.phone-home .group-all a.phone-project')].find(
+  [...root.querySelectorAll<HTMLElement>('.phone-home a.phone-project')].find(
     (r) => r.querySelector('.phone-project-name')!.textContent === name,
   )!;
 const phoneMarks = (name: string) => [...phoneRow(name).querySelectorAll('[aria-label]')].map((m) => m.getAttribute('aria-label'));
@@ -1254,8 +1256,9 @@ describe("the project bar's order", () => {
     await mount(<ProjectRail app={app} />);
     expect(bar()).toEqual(['Arduino', 'Boards', 'physics-mp', 'kiln', 'Personal', 'board9', 'board10']);
     await mount(<PhoneHome app={app} />);
-    expect(phoneNames('all')).toEqual(['Arduino', 'Boards', 'physics-mp', 'kiln', 'Personal', 'board9', 'board10']);
+    // Each group in the bar's order; physics-mp waits for the user, so it is under Needs you.
     expect(phoneNames('favorites')).toEqual(['Arduino', 'Boards']);
+    expect(phoneNames('all')).toEqual(['kiln', 'Personal', 'board9', 'board10']);
   });
 
   it('the order menu: a pick goes to the hub, the bar follows its answer', async () => {
@@ -3552,7 +3555,7 @@ describe('a window 900–1079 px wide', () => {
 });
 
 // A phone (< 900 px). `#/` lists the projects — Needs you, Running,
-// Favorites, All projects — or, from the title's menu, every project's sessions by state;
+// Favorites, the others, each project once — or, from the title's menu, every project's sessions by state;
 // `#/p/<id>` is one project's sessions under one header row. The look is the account's.
 describe('a phone (< 900 px)', () => {
   const project = (id: string, name: string, more: Partial<Project> = {}): Project => ({
@@ -3614,7 +3617,7 @@ describe('a phone (< 900 px)', () => {
     document.documentElement.className = '';
   });
 
-  it("`#/` is the projects: Needs you, Running, Favorites, then all of them in the bar's order and \"New project\"; a tap opens one", async () => {
+  it("`#/` is the projects: Needs you, Running, Favorites, then the others in the bar's order and \"New project\"; a tap opens one", async () => {
     const { app } = phoneApp();
     await open(app, '#/');
     expect(root.querySelector('.layout')!.classList.contains('layout-phone')).toBe(true);
@@ -3628,13 +3631,20 @@ describe('a phone (< 900 px)', () => {
       'Needs you1',
       'Running1',
       'Favorites1',
-      'All projects4',
+      'Other projects1',
     ]);
     expect(phoneNames('wait')).toEqual(['physics-mp']);
     // physics-mp runs too, but it is under Needs you already.
     expect(phoneNames('run')).toEqual(['kiln']);
     expect(phoneNames('favorites')).toEqual(['boards']);
-    expect(phoneNames('all')).toEqual(['boards', 'Personal', 'physics-mp', 'kiln']);
+    expect(phoneNames('all')).toEqual(['Personal']);
+    // Each project once: a favorite whose session works is under Favorites only.
+    expect(new Set(phoneAll()).size).toBe(phoneAll().length);
+    await act(async () => void (await app.setProjectFavorite('p3', true)));
+    expect(phoneNames('run')).toEqual([]);
+    expect(phoneNames('favorites')).toContain('kiln');
+    expect(phoneAll().filter((n) => n === 'kiln')).toHaveLength(1);
+    await act(async () => void (await app.setProjectFavorite('p3', false)));
     // A row: how many run, how many wait, how many have unread events (bold then); archived and
     // service sessions do not count.
     expect(['boards', 'Personal', 'physics-mp', 'kiln'].map(phoneMarks)).toEqual([['unread: 1'], [], ['running: 2', 'needs you: 1'], ['running: 2']]);
@@ -3698,7 +3708,7 @@ describe('a phone (< 900 px)', () => {
     await click(root.querySelector('.phone-view'));
     await click(root.querySelector('.menu .btn-view-projects'));
     expect(viewTitle()).toBe('Projects');
-    expect(phoneNames('all')).toHaveLength(4);
+    expect(phoneAll()).toHaveLength(4);
   });
 
   it('`#/p/<id>` is the project: its favorites pinned over the groups; "+" opens its new session', async () => {
@@ -3730,14 +3740,14 @@ describe('a phone (< 900 px)', () => {
     await click(root.querySelector('.menu .btn-archive-project'));
     await settle();
     expect(location.hash).toBe('#/');
-    expect(phoneNames('all')).toEqual(['boards', 'Personal', 'physics-mp']);
+    expect(phoneAll()).toEqual(['physics-mp', 'boards', 'Personal']);
     const toast = root.querySelector('.phone-home .toast-project')!;
     expect(toast.querySelector('.toast-text')!.textContent).toBe('Archived «kiln»');
     await click(toast.querySelector('.btn-undo'));
     await settle();
     expect(root.querySelector('.toast-project')).toBeNull();
     expect(unarchiveProject).toHaveBeenCalledWith('p3');
-    expect(phoneNames('all')).toEqual(['boards', 'Personal', 'physics-mp', 'kiln']);
+    expect(phoneAll()).toEqual(['physics-mp', 'kiln', 'boards', 'Personal']);
     // The hub refuses an archive: the project is back, and why is said where the phone is.
     Object.assign(api, { archiveProject: vi.fn(async () => Promise.reject(new Error('offline'))) });
     await go('#/p/p3');
@@ -3746,14 +3756,14 @@ describe('a phone (< 900 px)', () => {
     await settle();
     expect(location.hash).toBe('#/');
     expect(root.querySelector('.phone-home .notice')!.textContent).toBe('Not archived «kiln»: offline');
-    expect(phoneNames('all')).toContain('kiln');
+    expect(phoneAll()).toContain('kiln');
   });
 
   it("follows the account's look: Spacious, the counts under a project's name and the project and state under a session's title; Compact, one line", async () => {
-    const subs = () => [...root.querySelectorAll('.group-all a.phone-project')].map((r) => r.querySelector('.phone-project-sub')?.textContent ?? null);
+    const subs = () => [...root.querySelectorAll('.phone-home a.phone-project')].map((r) => r.querySelector('.phone-project-sub')?.textContent ?? null);
     await open(phoneApp('spacious').app, '#/');
     expect(document.documentElement.classList.contains('list-compact')).toBe(false);
-    expect(subs()).toEqual([null, null, '1 waiting · 2 running', '2 running']);
+    expect(subs()).toEqual(['1 waiting · 2 running', '2 running', null, null]);
     expect(phoneRow('physics-mp').querySelector('.phone-project-sub')!.classList.contains('is-wait')).toBe(true);
     await click(root.querySelector('.phone-view'));
     await click(root.querySelector('.menu .btn-view-sessions'));

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.117, 2026-11-11. Status: the architecture agreed after six reviews and a survey of
+Version 0.118, 2026-11-11. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -483,7 +483,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent_exited` | worker | the agent process exited on its own with an error or mid-turn (§17.3) |
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
 | `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. The client folds it into a "Background task" line with the first line of the text; opened, it shows all of it |
-| `context_compacted` | worker (adapter) | since 0.69: the runtime compacted the session's context (`/compact`); `text` "Context compacted" (§8.1); the client draws it as a divider |
+| `context_compacted` | worker (adapter) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); the client folds the summary into a "Context compacted" line that opens to all of it, and draws one with the fixed text as a divider |
 | `agent_start_failed` | hub | the agent failed to start 3 times in a row (or non-retryably); `pending` inputs became `failed` (§5.2) |
 | `input_rejected` | hub | the worker rejected an input other than as a failed start; the input became `failed` (§5.2) |
 | `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
@@ -2527,7 +2527,12 @@ started again when the `ping` ends, and sends a second notification with `handba
 the same summary); `system` `compact_boundary` (`compact_metadata.trigger: manual`
 after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
 that of the transcript's `system compact_boundary` record) →
-`system context_compacted` "Context compacted" with the `event_id` derived from that `uuid`; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
+`system context_compacted` with the `event_id` derived from that `uuid`, held until the summary:
+the main agent's next `user` line with `isSynthetic: true` (the transcript's `isCompactSummary`
+record; 2.1.308 sends it right after the boundary, a string `message.content`), whose content,
+a string or the text blocks of an array, is the `text` as is; a main agent's `user`,
+`assistant`, `stream_event` or `result` line that comes first, or the process's end, gives it
+the text "Context compacted", `system` lines and a subagent's lines in between keep it held; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
 → `ack` of `session.input` (this field tells the echo from a `user` with `tool_result`).
 Since 0.70 every user message the adapter writes carries a fresh v4 `uuid` (not the input's
 `event_id`: 2.1.312 drops a line whose `uuid` it has seen, echo and all, without a turn); its
@@ -4364,6 +4369,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.108 → 0.118 (the summary of a compaction)
+§4, §8.1: `system context_compacted` carries the summary Claude Code wrote when it compacted
+the context, the synthetic `user` line after `compact_boundary`, as its `text`; before, the
+adapter dropped the summary and the text was always "Context compacted". The client folds the
+summary into a "Context compacted" line that opens to all of it, as it folds a background
+task; an event with the fixed text stays a divider. No migration, no frame change; a client
+older than 0.118 draws the summary as the divider's text, so the hub goes first, then the
+workers. The summary is `system` text, so search indexes it as a message (weight A, §15): a
+search finds what was compacted, and the hit opens on the folded line. 0.109–0.117 are taken
+by other pull requests.
 
 ### 0.108 → 0.117 (a failed input the owner went on from does not keep the session in error)
 §17.1: a session stayed in `error` for as long as it had an input with `delivery: failed`, also

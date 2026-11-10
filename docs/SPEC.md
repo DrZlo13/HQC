@@ -467,6 +467,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
+| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
@@ -530,6 +531,15 @@ Rules:
   hub keeps the text of a session's deltas in memory until its `agent.message` or a `status`
   other than `running` (up to 512 KiB, and not past the worker's disconnect), so a client that
   subscribes mid-answer gets all of it (§6, since 0.72).
+- `subagents.live` (since 0.113) goes to clients the same way and is not saved either. The hub
+  keeps a session's latest list in memory while it is not empty, so a client that subscribes
+  or falls behind the stream gets it (§6), its `duration_ms` grown by the time the hub has kept
+  it; the worker sends an empty list when the agent's process stops. The hub takes it for an
+  archived session too, so that empty list drops the one kept. That list goes directly and is
+  lost on a broken link (§8.1), so the hub also drops the kept list itself, and sends the
+  session's subscribers an empty one, when the worker's `hello` says it restarted (every
+  session of that worker), when `session.state` reports `subagents` 0 (§5.4) and when the
+  session is deleted; a client that falls behind gets an empty list when none is kept.
 - History is never rewritten: besides an input's `delivery` and `delivered_at` (§3 Event), the
   one change of a stored event is `joined` of a person's `user.message` (since 0.112, §17.2).
   Protection against forged peer-message headers is applied on delivery to the runtime (§7.1).
@@ -672,7 +682,8 @@ Worker → hub:
   frame before parsing, as well as in the events it writes itself (client input, answers)
   and in the session `title`. The worker does the same replacement at the source: the Claude
   Code adapter in all event texts (`result_preview`, `error_text`, `args_preview`, `description`,
-  `agent.message`, `agent.delta`, `agent.thinking`, `clarify.request` questions).
+  `agent.message`, `agent.delta`, `agent.thinking`, `clarify.request` questions, since 0.113 the
+  `description` and `activity` of `subagents.live`).
 - An event the database rejected because of the data itself (an encoding error, a value out of
   range, a field too long: SQLSTATE classes 22, 23, 54) gets
   `error {code: invalid_frame, retryable: false}` and the worker discards it; a database
@@ -683,7 +694,7 @@ Worker → hub:
 - `seq` is assigned by the hub; clients see only events with a `seq`.
 - `agent.delta` is not written to the outbox and is lost on a disconnect; that is acceptable. It
   goes in the same `event` frame; the hub answers `ack {event_id}` without `seq` and does not
-  store it.
+  store it. So does `subagents.live` (since 0.113); a `mirror.event` of either is dropped.
 - The `ack` to `session.input` and `agent.delta` bypass the outbox, while the turn's events go
   through it, so the hub may receive the input's `ack` and the deltas later than the
   `tool.call`/`approval.request` of the same turn. The hub does not rely on the order between
@@ -1704,12 +1715,15 @@ Esc closes, a click or tap inserts. No list — no popup; only commands from the
 WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
-`agent.delta` with its text so far, and the stream carries only the deltas after it. Since
-0.108 a `user.message` or `peer.message` that came while that text was being written stands
-under it in the feed, live (after the text, before the activity line, with the messages not
-stored yet) and once the text is stored: the `agent.message` goes above the inputs with
-`during_text` right before it in `seq` order, never above the input it answers (`in_reply_to`).
-The client takes this from the hub's `payload.during_text`, never guesses it from times. On open
+`agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.113
+the session's latest `subagents.live` follows it when its list is not empty, and the stream
+carries each new one; a client whose part of the hub's event stream fell behind gets it again,
+or an empty one when none is kept, with the history it catches up. Since 0.108 a `user.message`
+or `peer.message` that came while that text was being written stands under it in the feed, live
+(after the text, before the activity line, with the messages not stored yet) and once the text
+is stored: the `agent.message` goes above the inputs with `during_text` right before it in `seq`
+order, never above the input it answers (`in_reply_to`). The client takes this from the hub's
+`payload.during_text`, never guesses it from times. On open
 the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
 older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
 each time the user scrolls to the top, and while the feed is shorter than its window (which
@@ -1728,10 +1742,11 @@ newer copy).
 `/api/ws` frames are flat JSON objects `{type, ...}` with no `id` and no `payload` wrapper:
 - client → hub: `{type: subscribe, session_id, after_seq?}`, `{type: unsubscribe,
   session_id}`, `{type: subscribe_summary}`, `{type: ping}`;
-- hub → client: `{type: event, event}`: the event as stored (§3), `agent.delta` without
-  `seq`; since 0.54 (T51) the hub sends the final `agent.message` that answered an `hqc_ask`
-  again, the same `seq`, with `reply_delivered_at` once the asker's worker acknowledged the
-  reply, to the subscriptions that already had it (the client takes the field over its copy);
+- hub → client: `{type: event, event}`: the event as stored (§3), `agent.delta` and (since
+  0.113) `subagents.live` without `seq`; since 0.54 (T51) the hub sends the final
+  `agent.message` that answered an `hqc_ask` again, the same `seq`, with `reply_delivered_at`
+  once the asker's worker acknowledged the reply, to the subscriptions that already had it (the
+  client takes the field over its copy);
   `{type: subscribed, session_id, last_seq}`: the history after `after_seq` has been
   sent, the live stream follows; `{type: delivery, session_id, event_id, seq, delivery,
   delivered_at?, joined?}`: the delivery of an input changed; the event itself is not resent, the
@@ -2622,6 +2637,20 @@ Monitor waiting for the `ping`, kept the list from going empty), so a drop of th
 `result` before the end of the turn). The
 number of tasks in the list stays in the worker: the agent is not idle while it is above 0
 (§17.3), and a move tells the agent how many it stopped (§5.3).
+Since 0.113 the adapter sends the subagents of that count one by one as `subagents.live` (§4),
+whenever they or a title change and on every `system` `task_progress` of one of them (2.1.312:
+`task_id`, `description` — what it does now, "Running Sleep for 6 seconds" —, `usage
+{total_tokens, tool_uses, duration_ms}`, `last_tool_name`, `summary?`). `description` of a row
+is that of the subagent's `task_started` (its task, "Sleep and reply with number"), empty while
+the CLI's list counts it before that line; `activity`, `total_tokens` and `tool_uses` are those
+of its latest `task_progress`; `duration_ms` is the worker's own time since it first saw the
+subagent's `task_started`, or the list that counted it before, counted when the list is sent.
+A repeated `task_started` of the same `task_id` keeps the first time; a subagent that stops
+counting is forgotten. The worker sends `subagents.live` directly, not through the outbox, as
+`agent.delta`, ignores a list read after the agent's process stopped and sends an empty list
+when it stops; after every reconnect it sends the last list it sent again, unless that one was
+empty, `duration_ms` grown by the time since it was sent, since a restarted hub has none and
+lists sent while disconnected are lost.
 The CLI repeats on stdout every `control_response` the adapter sent to stdin;
 the adapter skips those lines. `in_reply_to` = the `event_id` of the turn's input, as above,
 once its echo has come (since 0.69; before that, none); an input written into a running turn
@@ -4184,8 +4213,9 @@ buffered send from a session in `ask` (§7.1).
 - Hub restart: workers reconnect and resend their outbox; `PendingRequest`s
   are restored from the database, undelivered `mcp.result`s are resent.
 - Turn watchdog **[decision]**. If a session is `running` (§17.1) and its worker has sent no
-  event for it, `agent.delta` included, for longer than `HQC_TURN_WATCHDOG_S` (default
-  900 s, `0` turns it off), the hub considers the turn lost: it cancels open
+  event for it, `agent.delta` and (since 0.113) `subagents.live` included, for longer than
+  `HQC_TURN_WATCHDOG_S` (default 900 s, `0` turns it off), the hub considers the turn lost: it
+  cancels open
   `approval`/`clarify` with `timeout`, closes the turn without a final message
   (the input stays `delivered`), writes `system turn_lost` with the text "no events for N s",
   and the session shows `error` until the next input. The countdown runs from the worker's last
@@ -4468,6 +4498,15 @@ tokens` with that cost. Now a `result` with `num_turns: 0` and no tokens, unless
 grown total as `session_cost_usd`: the client's header counts it and the feed draws no line for
 it. The baseline of `cost_usd` stays, so the next turn's line carries what the subagent spent.
 0.109–0.114 are taken by open pull requests.
+
+### 0.112 → 0.113 (the subagents the agent runs now)
+§4, §5.2, §6, §8.1, §18: a new event `subagents.live`, transport only like `agent.delta`,
+carries the subagents the agent runs now, each with its task from its `task_started`, what it
+does now, its tokens and tool calls from its latest `task_progress` (2.1.312), and its run time;
+the worker sends it directly when they change and on each progress, empty when the process
+stops, and its last list again after a reconnect; the hub keeps a session's latest non-empty
+list in memory for a client that subscribes, and drops it when the worker restarts, the session
+counts no subagent or is deleted.
 
 ### 0.111 → 0.112 (an input that joined the running turn is kept on it)
 §3 Event, §4, §5.2, §6, §17.2: the hub keeps an input that joined the running turn, a person's

@@ -192,9 +192,9 @@ the hub keeps a copy from `hello` for display and early validation.
 ### Project
 `owner_id`, `name` (1–100 characters), `slug` (unique per owner, does not change on
 rename), `description`, `default_workspace_id` (nullable),
-`session_template` (§13.3), `is_personal`, `color`, `icon`. A project's first workspace becomes its
-`default_workspace_id`; when the default workspace is deleted, the earliest of the remaining
-ones takes its place. The personal project (`is_personal`) cannot be deleted or renamed (`409
+`session_template` (§13.3), `is_personal`, `color`, `icon`, `archived_at`. A project's first
+workspace becomes its `default_workspace_id`; when the default workspace is deleted, the
+earliest of the remaining ones takes its place. The personal project (`is_personal`) cannot be deleted or renamed (`409
 personal_project`); its other fields can change; any number of new projects can be created.
 Deleting a project deletes its workspace records and sessions (with events, as in §17.4); agent
 processes get `session.kill`; folders and transcripts on the workers are left untouched.
@@ -209,6 +209,13 @@ letters of the name. The image is stored on the hub in its own table (not an art
 belongs to no session, the artifact cleanup does not touch it, it goes with the project), one
 per project; `url` is `/api/projects/{id}/icon?v=<first 16 hex of its sha256>`. Setting an emoji
 or letters drops a stored image. Limits: §12.
+
+`archived_at` (since 0.110, hub migration `0038_project_archive`) — since when the project is
+archived, null while it is not: put away from the project bar (`GET /api/projects` leaves it
+out, `?archived=1` lists it, §6) and nothing else. Its sessions, workspaces, favorites and
+order stay as they are: its sessions are not archived and stay in `GET /api/sessions`, an agent
+of it keeps working, and it opens, takes new sessions and is changed like any project. Archiving
+it again keeps the first time; the personal project is not archived (`409 personal_project`).
 
 ### Workspace
 `project_id`, `worker_id`, `path`, `label`, `environment` (a name; a display of the binding
@@ -1215,18 +1222,29 @@ the rest is marked "later"):
   later keys; `PUT /api/me/project_order` {project_ids} (since 0.64,
   `api.project_order.request.json`) → `{projects[]}` in that order: the order of the project
   bar, kept per user (`users.project_order`); ids that are not the user's projects and repeats
-  are dropped
+  are dropped. The bar has no archived projects (§3 Project), so since 0.110 an archived
+  project the list leaves out keeps its place: right after the project before it in the order
+  stored so far (the projects missing from it after it), when that one is in the list, else at
+  its old index; restored, it comes back where it was. The reply has the projects that are not
+  archived
 - `GET /api/projects` → `{projects[]}` in the user's order, the projects missing from it last,
-  oldest first (since 0.64; before it oldest first), `POST /api/projects` {name, description?} → `201`
+  oldest first (since 0.64; before it oldest first), without the archived ones (since 0.110);
+  `?archived=1` gives the archived ones instead, in the same order
+  (`api.projects.archived.json`), `POST /api/projects` {name, description?} → `201`
   and the project, `GET/PATCH/DELETE /api/projects/{id}` (`PATCH` {name?, description?,
   default_workspace_id?, color?, icon?} — `default_workspace_id` a workspace of this project,
   otherwise `400`; `color` one of the 8 names and `icon` an emoji or letters within the limits
   of §3 Project, otherwise `422` (`{kind: image}` too: an image comes only by `PUT .../icon`);
   the personal project: `409 personal_project` on rename and delete, its `color` and `icon`
   change; `DELETE` → `204`, §3 Project).
+  `POST /api/projects/{id}/archive` and `POST /api/projects/{id}/unarchive` (since 0.110, §3
+  Project) → the project object: archived since now (again: the first time stays), or back on
+  the bar in its place of the user's order; the personal project: `409 personal_project` on
+  archive; another user's or a nonexistent project: `404`.
   The project object is `{id, owner_id, name, slug, description, default_workspace_id?,
-  is_personal, color, icon?, created_at, updated_at}` (`api.project.json`; `color` and `icon`
-  since 0.51)
+  is_personal, color, icon?, created_at, updated_at, favorite_at?, archived_at?}`
+  (`api.project.json`; `color` and `icon` since 0.51, `favorite_at` since 0.74, §3 Favorite,
+  `archived_at` since 0.110, only on an archived project)
 - `PUT /api/projects/{id}/icon` (since 0.51, T49; multipart: field `file`, like an attachment)
   → the project object with `icon: {kind: image, url}`: the image is checked as in §12
   ("Project icons"), anything else is `422 invalid_icon` with the reason in `message`; a body
@@ -4417,6 +4435,15 @@ tokens` with that cost. Now a `result` with `num_turns: 0` and no tokens, unless
 grown total as `session_cost_usd`: the client's header counts it and the feed draws no line for
 it. The baseline of `cost_usd` stays, so the next turn's line carries what the subagent spent.
 0.109–0.114 are taken by open pull requests.
+
+### 0.108 → 0.110 (a project is archived off the project bar)
+§3 Project, §6: a project can be archived, `archived_at` (hub migration `0038_project_archive`),
+by `POST /api/projects/{id}/archive` and back by `/unarchive`; the personal project is not
+archived. `GET /api/projects` leaves an archived project out and `?archived=1` lists the
+archived ones; its sessions, workspaces, favorites and order stay as they are, and `PUT
+/api/me/project_order`, which the project bar saves without the archived projects, keeps an
+archived project's place, so restored it comes back where it was. 0.109 is taken by an open pull
+request.
 
 ### 0.108 → 0.109 (a HEIC attached on an iPhone is sent as a JPEG)
 §12 Client: the composer reads an attached file into memory when it is attached and uploads

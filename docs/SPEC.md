@@ -1994,7 +1994,8 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   otherwise the session `session` names, an address or an id of a session of the owner, not
   archived, not a worker's service session, else `not_found` (the target rules of §7.1, except
   that the calling session itself and a session driven from VS Code are accepted). The title
-  is trimmed; an empty one or one longer than 200 characters is `invalid_args`. It is stored
+  is made one line (runs of whitespace, line breaks included, become one space, none at the
+  ends); an empty one or one longer than 200 characters is `invalid_args`. It is stored
   with `title_source: user` (§3 Session), so the runtime's title no longer replaces it; the
   address does not change. The result is `{address, title}` — the session's address and the
   title as stored. A repeat of the call (§5.2) sets the same title again.
@@ -4274,9 +4275,10 @@ without a hub each of these would have to be done peer-to-peer.
 ### 0.102 → 0.103 (an agent renames a session)
 §7: the tool `hqc_rename(title, session?)` renames the calling session, or another session of
 the owner by its address or id, as the client's Rename does (`PATCH /api/sessions/{id}` with
-`title`): the title is trimmed, at most 200 characters, and stored with `title_source: user`,
-so the runtime's title no longer replaces it; the address stays. The result is `{address,
-title}`. Before, an agent could not rename a session. `INSTRUCTIONS` (§7.2) name it.
+`title`): the title is made one line, at most 200 characters, and stored with
+`title_source: user`, so the runtime's title no longer replaces it; the address stays. The
+result is `{address, title}`. Before, an agent could not rename a session. `INSTRUCTIONS`
+(§7.2) name it.
 
 ### 0.100 → 0.102 (a session with a subagent at work is Running)
 §6 client layout: an `idle` session whose subagents still run (`subagents`) is in the list's

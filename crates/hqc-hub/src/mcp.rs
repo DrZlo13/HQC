@@ -425,7 +425,9 @@ struct RenameArgs {
 /// `{address, title}`. The address does not change.
 async fn rename(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
     let a: RenameArgs = args(v)?;
-    let t = a.title.trim();
+    // One line, as a runtime title is stored.
+    let t = a.title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t = t.as_str();
     if t.is_empty() {
         return Err(err(error_code::INVALID_ARGS, "title must not be empty"));
     }

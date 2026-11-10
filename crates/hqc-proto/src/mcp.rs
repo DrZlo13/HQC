@@ -322,7 +322,7 @@ pub const TOOLS: &[Tool] = &[
             otherwise the session at that address (<project-slug>/<session-slug>) or id. The \
             title is set as the user sets it in the client: the session list and the chat show \
             it, and the session's automatic title no longer replaces it. The address does not \
-            change. At most 200 characters.",
+            change. One line, at most 200 characters.",
         input_schema: || {
             json!({
                 "type": "object",

@@ -304,7 +304,9 @@ reported the agent runs in, `session.state.permission_mode`, §5.4; what the cli
 `permission_capped_by` (nullable; since 0.43, T39: while the worker runs the current turn in
 `ask` under its input's cap, §7.1, the address of the session up the chain whose `ask` set it,
 from `session.state.capped_input`, §5.4), `subagents` (since 0.70: the subagents the agent
-runs now, from `session.state.subagents`, §5.4; 0 after a worker restart). In
+runs now, from `session.state.subagents`, §5.4; 0 after a worker restart),
+`background_tasks` (since 0.104: the background tasks the runtime lists for the agent now,
+from `session.state.background_tasks`, §5.4; 0 after a worker restart). In
 `ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
 classifier decides and never asks (§8.1); the worker's `deny` stops a call in both. `state` and
 `queue_len` (§17.1) are **not stored**; the hub computes them when serving. In the first version
@@ -1132,6 +1134,11 @@ MCP calls (worker → hub → worker):
   `subagents` (since 0.70) — how many subagents the agent runs now (Claude Code: §8.1), 0 when
   it is stopped; absent — 0, and like `capped_input` every report says it. The hub stores it as
   the session's `subagents` and sets 0 on a worker restart.
+  `background_tasks` (since 0.104) — how many background tasks the runtime lists for the agent
+  now: its own background commands and monitors, its background subagents and their commands
+  (Claude Code: the list of `background_tasks_changed`, §8.1), 0 when it is stopped; absent —
+  0, and like `subagents` every report says it. The hub stores it as the session's
+  `background_tasks` and sets 0 on a worker restart.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — events
   from the mirror (§9.1, §9.2), through the outbox; the answer is `ack {event_id, seq}` as for
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
@@ -1639,7 +1646,8 @@ longer in the sidebar).
 The session list (since 0.53, T50): a State / Recent / Custom switch (State groups Needs you /
 Running / Idle, Recent Today / Yesterday / Earlier, Custom is one list in the saved order;
 since 0.102 an `idle` session whose subagents still work after its turn ended, `subagents` > 0,
-is under Running, and its row and the chat header say "Running") and a Reorder button; Reorder
+and since 0.104 one whose background tasks still run, `background_tasks` > 0, is under Running,
+and its row and the chat header say "Running") and a Reorder button; Reorder
 replaces the switch with "Reorder · Cancel · Done" and gives each row a handle (on the left
 on a desktop, on the right on a phone), dragged with pointer events (mouse and finger) or moved
 with ↑/↓ while focused; Done stores the order with `mode: custom`, Cancel
@@ -1681,11 +1689,14 @@ acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, archived_at?, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
 updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?,
-permission_capped_by?, subagents?}`.
+permission_capped_by?, subagents?, background_tasks?}`.
 `subagents` (since 0.70): the subagents the agent runs now, from `session.state` (§5.4);
 absent — 0. The client shows "N agents" ("1 agent") next to the state in the chat header and in
 the session's row of the list while it is above 0; a background subagent keeps it up after the
 turn that started it has ended.
+`background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
+from `session.state` (§5.4); absent — 0. A command the agent left running in the background
+keeps it up after the turn has ended.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header: `effective_permission_mode`, else
 `permission_mode`; "Auto" as a marked badge, "Ask" as plain text, "Ask (Auto asked)" while
@@ -1756,9 +1767,10 @@ newer copy).
   `{type: summary, sessions[]}`: the reply to `subscribe_summary`, all of the user's sessions;
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
-  permission_mode?, effective_permission_mode?, permission_capped_by?, subagents?}` (the same as
-  in the session object; the modes since 0.42, so the header follows a switch the worker
-  confirms, the cap since 0.43, `subagents` since 0.70); `{type: requests, requests[]}` (since 0.41, T37,
+  permission_mode?, effective_permission_mode?, permission_capped_by?, subagents?,
+  background_tasks?}` (the same as in the session object; the modes since 0.42, so the header
+  follows a switch the worker confirms, the cap since 0.43, `subagents` since 0.70,
+  `background_tasks` since 0.104); `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -2635,8 +2647,9 @@ the next line **[verify]** (inferred from that capture, where a second task of t
 Monitor waiting for the `ping`, kept the list from going empty), so a drop of the count that a
 `background_tasks_changed` alone brings is reported at the next line of another kind (at a
 `result` before the end of the turn). The
-number of tasks in the list stays in the worker: the agent is not idle while it is above 0
-(§17.3), and a move tells the agent how many it stopped (§5.3).
+number of tasks in the list goes into `session.state.background_tasks` (since 0.104, §5.4); the
+agent is not idle while it is above 0 (§17.3), and a move tells the agent how many it stopped
+(§5.3).
 Since 0.113 the adapter sends the subagents of that count one by one as `subagents.live` (§4),
 whenever they or a title change and on every `system` `task_progress` of one of them (2.1.312:
 `task_id`, `description` — what it does now, "Running Sleep for 6 seconds" —, `usage
@@ -4565,6 +4578,18 @@ from its queue together (one sent to start a fresh process, one typed while it s
 prompt record with a uuid stream-json did not name; the mirror took it for another writer's, and
 the chat showed the joined text as a third message after the two. 0.104 is taken by a pull request
 in preparation.
+
+### 0.103 → 0.104 (a session with a background task at work is Running)
+§5.4: `session.state.background_tasks` — the number of background tasks the runtime lists for
+the agent (Claude Code: the list of `background_tasks_changed`, §8.1: its own background
+commands and monitors, its background subagents and their commands), which the worker had kept
+to itself; §3, §6: the session's `background_tasks` in the session object and `session.summary`,
+migration `0041` (`0038`–`0040` are taken by an open pull request). §6 client layout: an `idle`
+session with `background_tasks` > 0 is in the list's Running group, its row and the chat header
+say "Running", a worker's row in the sidebar counts it as active and the folder removal dialog
+marks it "running, will be stopped"; before, a session whose agent had ended its turn with a
+command still running in the background sat under Idle. 0.104 is the number left for this pull
+request; the version line stays at 0.118.
 
 ### 0.102 → 0.103 (an agent renames a session)
 §7: the tool `hqc_rename(title, session?)` renames the calling session, or another session of

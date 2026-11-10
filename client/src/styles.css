@@ -2134,7 +2134,8 @@ select.input {
   font-variant-numeric: tabular-nums;
 }
 
-/* A background task's notification, folded: its label and the first line of its summary. */
+/* A folded line (a background task's notification, a compaction's summary): its label, and for
+   a task the first line of its summary. */
 .line-fold summary {
   list-style: none;
   display: flex;

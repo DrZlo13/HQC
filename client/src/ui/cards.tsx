@@ -287,8 +287,10 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
   const p = event.payload;
   if (p.code === 'worker_log') return <WorkerLogLine event={event} />;
   if (p.code === 'task_notification') return <TaskNotification text={p.text} />;
-  // The runtime's own line about a compaction is text as is.
+  // A compaction with the runtime's summary folds it; one without (older events carry the
+  // fixed text) is text as is.
   if (p.code === 'context_compacted') {
+    if (p.text && p.text !== 'Context compacted') return <CompactionSummary text={p.text} />;
     return <Line kind={`system line-system-${p.code}`}>{p.text || 'Context compacted'}</Line>;
   }
   const caption = SYSTEM_CODE_LABELS[p.code];
@@ -325,6 +327,20 @@ function TaskNotification({ text }: { text: string }) {
         <IconChevron size={12} />
         <span class="fold-label">Background task</span>
         <span class="fold-peek">{peek.trim()}</span>
+      </summary>
+      <div class="fold-text">{text}</div>
+    </details>
+  );
+}
+
+/** A compaction of the context, folded like a background task: "Context compacted"; open, the
+ *  summary the runtime wrote. */
+function CompactionSummary({ text }: { text: string }) {
+  return (
+    <details class="line-fold line-system-context_compacted">
+      <summary>
+        <IconChevron size={12} />
+        <span class="fold-label">Context compacted</span>
       </summary>
       <div class="fold-text">{text}</div>
     </details>

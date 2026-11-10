@@ -1135,6 +1135,20 @@ describe("the feed like the Claude Code tab", () => {
     show(t);
     const line = root.querySelector(".line.line-system-context_compacted")!;
     expect(line.textContent).toBe("Context compacted");
+    expect(root.querySelector("details.line-system-context_compacted")).toBeNull();
+  });
+
+  it("folds the summary of a compaction under a Context compacted line", () => {
+    const summary =
+      "This session is being continued from a previous conversation.\n\nSummary:\n1. Tests pass";
+    const t = new Timeline();
+    t.apply(system(1, "context_compacted", summary));
+    show(t);
+    const fold = root.querySelector("details.line-fold.line-system-context_compacted")!;
+    expect(fold.querySelector("summary .fold-label")!.textContent).toBe("Context compacted");
+    expect(fold.querySelector("summary .fold-peek")).toBeNull();
+    expect(fold.querySelector(".fold-text")!.textContent).toBe(summary);
+    expect(root.querySelector(".line.line-system-context_compacted")).toBeNull();
   });
 
   it("shows a reply Claude Code wrote itself as an error-style service line, not a message", () => {

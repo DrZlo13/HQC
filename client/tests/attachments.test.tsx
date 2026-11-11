@@ -312,8 +312,8 @@ describe('rendering attachments', () => {
 
     const diff = el.querySelector('.msg-user .md-code-diff')!;
     expect(diff.querySelector('.md-code-lang')!.textContent).toBe('fix.patch');
-    expect(diff.querySelector('.diff-add')!.textContent).toBe('+new\n');
-    expect(diff.querySelector('.diff-del')!.textContent).toBe('-old\n');
+    expect(diff.querySelector('.diff-add')!.textContent).toBe('+new');
+    expect(diff.querySelector('.diff-del')!.textContent).toBe('-old');
     expect(diff.querySelector('.diff-hunk')!.textContent).toContain('@@');
     expect(diff.querySelector('pre')!.textContent).toBe(DIFF);
 
@@ -464,7 +464,7 @@ describe('rendering attachments', () => {
     const img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
     expect(img.getAttribute('src')).toBe('/artifacts/img?exp=1&sig=s1');
     expect(el.querySelector('.attachment-caption')!.textContent).toBe('The layout');
-    expect(el.querySelector('.md-code-diff .diff-add')!.textContent).toBe('+new\n');
+    expect(el.querySelector('.md-code-diff .diff-add')!.textContent).toBe('+new');
     // The order of the feed: the call, the image, the call, the diff.
     const order = [...el.querySelectorAll('.tool-group, .attachment')].map((n) =>
       n.classList.contains('tool-group') ? 'call' : n.className.replace('attachment attachment-kind-', ''),
@@ -670,14 +670,14 @@ describe('paths of the working copy', () => {
 
   it('a diff code block in a message is coloured', () => {
     const el = mount(<Markdown text={'```diff\n-a\n+b\n```'} />);
-    expect(el.querySelector('.md-code-diff .diff-del')!.textContent).toBe('-a\n');
+    expect(el.querySelector('.md-code-diff .diff-del')!.textContent).toBe('-a');
     expect(el.querySelector('.md-code-diff .diff-add')!.textContent).toBe('+b');
   });
 
   it('only a pair of --- and +++ lines is a file header; one alone is a removed or added line', () => {
     const el = mount(<Markdown text={'```diff\n--- a/x.md\n+++ b/x.md\n@@ -1,2 +1,1 @@\n----\n-title\n+++ fast\n```'} />);
-    expect([...el.querySelectorAll('.diff-file')].map((l) => l.textContent)).toEqual(['--- a/x.md\n', '+++ b/x.md\n']);
-    expect([...el.querySelectorAll('.diff-del')].map((l) => l.textContent)).toEqual(['----\n', '-title\n']);
+    expect([...el.querySelectorAll('.diff-file')].map((l) => l.textContent)).toEqual(['--- a/x.md', '+++ b/x.md']);
+    expect([...el.querySelectorAll('.diff-del')].map((l) => l.textContent)).toEqual(['----', '-title']);
     expect([...el.querySelectorAll('.diff-add')].map((l) => l.textContent)).toEqual(['+++ fast']);
   });
 });

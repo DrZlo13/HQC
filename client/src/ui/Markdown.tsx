@@ -8,7 +8,7 @@
 // Temml, loaded on the first formula; until then, and if it fails, the source is shown.
 
 import { Marked, type MarkedToken, type Token, type TokenizerExtension, type Tokens } from 'marked';
-import type { ComponentChildren } from 'preact';
+import { Fragment, type ComponentChildren } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { copyText } from '../clipboard';
 import { IconCheck, IconCopy, IconCross } from './icons';
@@ -336,17 +336,20 @@ export function diffClass(line: string): string | undefined {
 function diffLines(code: string): ComponentChildren[] {
   const lines = code.split('\n');
   return lines.map((l, i) => {
-    const text = i < lines.length - 1 ? `${l}\n` : l;
+    const end = i < lines.length - 1 ? '\n' : '';
     let cls = diffClass(l);
     // File headers come as a pair; a `---` or `+++` line alone removes `--…` or adds `++…`.
     const pair = l.startsWith('---') ? lines[i + 1]?.startsWith('+++') : lines[i - 1]?.startsWith('---');
     if (cls === 'diff-file' && !pair) cls = l.startsWith('-') ? 'diff-del' : 'diff-add';
+    // The newline stays outside a marked line's inline block: inside it, it would end a line
+    // of the block only, and the next line would follow the block on the same row.
     return cls ? (
-      <span key={i} class={cls}>
-        {text}
-      </span>
+      <Fragment key={i}>
+        <span class={cls}>{l}</span>
+        {end}
+      </Fragment>
     ) : (
-      text
+      `${l}${end}`
     );
   });
 }

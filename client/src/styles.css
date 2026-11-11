@@ -3937,19 +3937,33 @@ a.relay-peer {
 .perm-change {
   margin: 10px 16px 0;
 }
-.perm-change .md-code {
+.perm-change .md-code,
+.tool-change .md-code {
   margin: 0;
 }
-.perm-change .md-code + .md-code {
+.perm-change .md-code + .md-code,
+.tool-change .md-code + .md-code {
   margin-top: 8px;
 }
 .perm-change .md-code pre {
   max-height: 240px;
   overflow-y: auto;
 }
-.perm-cut {
+.perm-cut,
+.tool-cut {
   margin-top: 6px;
   font-size: 12.5px;
+}
+
+/* The same in a call's row of the feed: long lines wrap, as the arguments did. */
+.tool-change {
+  margin-top: 6px;
+}
+.tool-change .md-code pre {
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .perm-note {

@@ -386,8 +386,9 @@ export function editDiff(before: string, after: string, cut = false): string {
   ].join('\n');
 }
 
-/** A part of the change a permission request is about: a diff of an edit, or a file's
- *  content; `title`, when set, names it in the code block's bar. */
+/** A part of an Edit's, a MultiEdit's or a Write's change, in its permission card or its row
+ *  of the feed: a diff of an edit, or a file's content; `title`, when set, names it in the
+ *  code block's bar. */
 export interface ChangePart {
   title?: string;
   code: string;
@@ -396,7 +397,7 @@ export interface ChangePart {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
-/** What an Edit, a MultiEdit or a Write would change, from its call's `args_preview`: a diff
+/** What an Edit, a MultiEdit or a Write changes, from its call's `args_preview`: a diff
  *  per edit (`old_string` → `new_string`), the content of a Write. `cut`: the preview is cut,
  *  so the last part may end early and later ones are missing. Undefined for other tools and
  *  for arguments without a change. */
@@ -413,8 +414,16 @@ export function fileChange(tool: string, argsPreview: string): { parts: ChangePa
       .filter(isRecord)
       .filter((e) => typeof e.old_string === 'string' || typeof e.new_string === 'string');
     edits.forEach((e, i) => {
-      // A cut preview may have lost later edits: their number is not known.
-      const title = tool === 'Edit' ? undefined : read.cut ? `Edit ${i + 1}` : `Edit ${i + 1} of ${edits.length}`;
+      // A cut preview may have lost later edits: their number is not known. An Edit with
+      // `replace_all` changes every occurrence, which its one diff does not show by itself.
+      const title =
+        tool === 'Edit'
+          ? e.replace_all === true
+            ? 'All occurrences'
+            : undefined
+          : read.cut
+            ? `Edit ${i + 1}`
+            : `Edit ${i + 1} of ${edits.length}`;
       parts.push({ title, code: editDiff(str(e.old_string) ?? '', str(e.new_string) ?? '', read.cut), diff: true });
     });
   }

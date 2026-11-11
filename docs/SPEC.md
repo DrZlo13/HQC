@@ -3589,7 +3589,8 @@ options from the request's `options[]`**, labelled by `canonical`; for Claude Co
 once / session / always / deny, for ACP agents whatever the agent offered. Since 0.69 the card of an
 Edit or MultiEdit call shows the change as a diff of `old_string` → `new_string` (each edit of a
 MultiEdit), of a Write the content, read from the call's `tool.call`; a preview cut at 4 KB is
-shown as far as it goes and marked cut. The request goes to
+shown as far as it goes and marked cut. An Edit with `replace_all` is marked "All occurrences".
+A call's row in the feed, opened, shows the same change in place of its arguments. The request goes to
 **the worker owner**; a collaborator with `write` sees the request but cannot answer it.
 The first answer wins: it closes the request, every device sees the `approval.response`
 event, and the client removes the buttons. A second answer (from another device) gets
@@ -4819,14 +4820,14 @@ width dragged by its edge. A new session opens at once as a window and is create
 message. A 900–1079 px window slides the session column over the chat; a phone opens on its
 projects, a working one with the bar's stripe around its tile. In the feed a message's time ends
 its first line and its buttons are in the bubble or the margin, a run of calls is "N tool calls
-(…)", a right click quotes a selection. The client keeps the 12 chats used last in memory and
-loads the next one when the mouse rests on its row or project, so a switch shows the chat at
-once, and the chats share their images' signed links (§12). §15, §6: the search is a page with
-filters — the kind of hit with the count of each, the project, the time, best match or newest, a
-few hits per session — over the filters and counts of `GET /api/search` (0.111). §6: the chat
-shows a line per subagent of `subagents.live` (0.113) above the input, outside the feed's
-scroll, and a message that joined the running turn (`payload.joined`, 0.112) says "joined the
-turn".
+(…)", an opened Edit, MultiEdit or Write call shows its change as the permission card does, a
+right click quotes a selection. The client keeps the 12 chats used last in memory and loads the
+next one when the mouse rests on its row or project, so a switch shows the chat at once, and the
+chats share their images' signed links (§12). §15, §6: the search is a page with filters — the
+kind of hit with the count of each, the project, the time, best match or newest, a few hits per
+session — over the filters and counts of `GET /api/search` (0.111). §6: the chat shows a line
+per subagent of `subagents.live` (0.113) above the input, outside the feed's scroll, and a
+message that joined the running turn (`payload.joined`, 0.112) says "joined the turn".
 
 ### 0.112 → 0.113 (the subagents the agent runs now)
 §4, §5.2, §6, §8.1, §18: a new event `subagents.live`, transport only like `agent.delta`,

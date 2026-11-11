@@ -610,6 +610,49 @@ describe("tool groups (T26)", () => {
     expect(row.textContent).toContain("1 test failed");
   });
 
+  it("shows an Edit's change as a diff, a MultiEdit's per edit, not their arguments", async () => {
+    const t = new Timeline();
+    t.apply(
+      call(1, "a", "Edit", { file_path: "/w/a.md", old_string: "one\ntwo\nfour", new_string: "one\nthree\nfour", replace_all: true }),
+    );
+    t.apply(result(2, "a"));
+    t.apply(
+      call(3, "b", "MultiEdit", {
+        file_path: "/w/b.md",
+        edits: [
+          { old_string: "x", new_string: "y" },
+          { old_string: "p", new_string: "q" },
+        ],
+      }),
+    );
+    t.apply(result(4, "b"));
+    t.apply(call(5, "c", "Bash", { command: "ls" }));
+    t.apply(result(6, "c"));
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const [edit, multi, bash] = [...g.querySelectorAll("details.tool-row")];
+    const diff = edit.querySelector(".tool-change .md-code-diff")!;
+    expect(diff.querySelector("pre")!.textContent).toBe(" one\n-two\n+three\n four");
+    expect([...diff.querySelectorAll(".diff-del")].map((s) => s.textContent)).toEqual(["-two"]);
+    expect([...diff.querySelectorAll(".diff-add")].map((s) => s.textContent)).toEqual(["+three"]);
+    // The newline after a marked line is outside its block, so the next line starts a row.
+    expect(diff.querySelector(".diff-add")!.nextSibling!.textContent).toBe("\n");
+    // `replace_all` is named in the block's bar.
+    expect(diff.querySelector(".md-code-lang")!.textContent).toBe("All occurrences");
+    expect(edit.textContent).not.toContain("Arguments");
+    expect(edit.textContent).not.toContain("old_string");
+    expect([...multi.querySelectorAll(".tool-change .md-code-lang")].map((s) => s.textContent)).toEqual([
+      "Edit 1 of 2",
+      "Edit 2 of 2",
+    ]);
+    // Other tools keep their arguments.
+    expect(bash.querySelector(".tool-change")).toBeNull();
+    expect(bash.textContent).toContain("Arguments");
+  });
+
   it("shows a result without its call as a group of its own", () => {
     const t = new Timeline();
     t.apply(ev("event.tool.result"));
@@ -1390,10 +1433,10 @@ describe("the feed like the Claude Code tab", () => {
     );
     expect(
       [...diff.querySelectorAll(".diff-del")].map((l) => l.textContent),
-    ).toEqual(["-    todo!();\n"]);
+    ).toEqual(["-    todo!();"]);
     expect(
       [...diff.querySelectorAll(".diff-add")].map((l) => l.textContent),
-    ).toEqual(["+    run();\n"]);
+    ).toEqual(["+    run();"]);
     expect(root.querySelector(".perm-cut")).toBeNull();
   });
 

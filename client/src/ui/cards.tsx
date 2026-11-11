@@ -17,6 +17,7 @@ import {
   callLine,
   callPeek,
   callRows,
+  fileChange,
   groupDuration,
   groupState,
   relativePaths,
@@ -54,7 +55,7 @@ import {
   oneLine,
   count,
 } from './labels';
-import { CopyButton, Markdown } from './Markdown';
+import { CodeBlock, CopyButton, Markdown } from './Markdown';
 import { PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
@@ -711,7 +712,8 @@ function StateMark({ state }: { state: 'running' | 'error' | 'ok' }) {
 }
 
 /** One call: `$ command` for Bash, else the tool and its main argument, paths under the
- *  session's folder relative to it; open, the arguments and the result. */
+ *  session's folder relative to it; open, the change of an Edit, a MultiEdit or a Write (else
+ *  the arguments) and the result. */
 function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   if (row.kind === 'thinking') return <Thinking event={row.event} />;
   const { call } = row;
@@ -719,6 +721,8 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   const r = result?.payload;
   const state = !r ? 'running' : r.error ? 'error' : 'ok';
   const line = call ? callLine(call.payload.tool, call.payload.args_preview) : undefined;
+  // An Edit, a MultiEdit or a Write shows its change, as its permission card does (SPEC §10.1).
+  const change = call ? fileChange(call.payload.tool, call.payload.args_preview) : undefined;
   return (
     <details class={`tool-row tool-${state}`}>
       <summary>
@@ -735,11 +739,20 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
         <StateMark state={state} />
       </summary>
       <div class="tool-row-body">
-        {call && (
-          <>
-            <div class="label">Arguments</div>
-            <pre class="pre">{call.payload.args_preview}</pre>
-          </>
+        {change ? (
+          <div class="tool-change">
+            {change.parts.map((c, i) => (
+              <CodeBlock key={i} code={c.code} lang={c.diff ? 'diff' : ''} title={c.title} />
+            ))}
+            {change.cut && <div class="tool-cut muted">The preview is cut at 4 KB: the rest of the change is not shown.</div>}
+          </div>
+        ) : (
+          call && (
+            <>
+              <div class="label">Arguments</div>
+              <pre class="pre">{call.payload.args_preview}</pre>
+            </>
+          )
         )}
         {r && (
           <>

@@ -1138,6 +1138,12 @@ export function Composer({
     <div class="composer-wrap">
       <form
         class={`composer ${phone ? 'composer-phone' : ''}`}
+        // A press on a button of the composer (send, attach, remove a file) leaves the focus in
+        // the field: on a phone the field losing it drops the keyboard and the composer grows by
+        // the home indicator's room at once, and the tap's click then lands under the button.
+        onMouseDown={(e) => {
+          if ((e.target as Element).closest('button')) e.preventDefault();
+        }}
         onSubmit={(e) => {
           e.preventDefault();
           submit();

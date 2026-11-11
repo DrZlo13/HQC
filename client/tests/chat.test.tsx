@@ -737,6 +737,27 @@ describe('composer', () => {
     expect([...row.children].map((c) => c.getAttribute('aria-label'))).toEqual(['Attach files', 'Message', 'Send']);
     expect(row.querySelector('textarea')!.getAttribute('placeholder')).toBe('Message');
   });
+
+  it("a press on the composer's buttons leaves the focus in the field (a phone keeps its keyboard and the buttons where the tap is)", async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app, true);
+    const area = $('.composer textarea') as HTMLTextAreaElement;
+    await act(() => {
+      area.value = 'deploy';
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    area.focus();
+    const press = (el: Element) => {
+      const e = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      el.dispatchEvent(e);
+      return e.defaultPrevented;
+    };
+    expect(press($('.composer .btn-send')!)).toBe(true);
+    expect(press($('.composer .btn-send svg')!)).toBe(true);
+    expect(press($('.composer .btn-attach')!)).toBe(true);
+    // The field itself takes the press as always.
+    expect(press(area)).toBe(false);
+  });
 });
 
 describe('phone (Mobile-Session)', () => {

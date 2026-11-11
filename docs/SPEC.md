@@ -1808,7 +1808,9 @@ the search, the settings pages and the worker enrollment) steps back through the
 when the entry under the screen is the arrow's address, and otherwise opens that address in
 place of the screen: the browser's or the phone's back gesture after an arrow never returns to
 the screen the arrow closed. Each entry keeps in its `history.state` the address it was opened
-from.
+from. A press on a button of the composer (send, attach, remove a file) leaves the focus in the
+field: a phone keeps its keyboard, and the composer does not grow under the tap by the home
+indicator's room before the click lands.
 
 A new session (since 0.114) opens at once as a chat window, `#/p/<project>/new`, with nothing on
 the hub yet: the header says "New session", "Draft" and where it will run; the list shows it as

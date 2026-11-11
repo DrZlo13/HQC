@@ -474,6 +474,12 @@ async fn after_store(
                 }
             }
             SessionState::Error => db::set_turn(&app.db, s.id, false, true).await?,
+            // A turn the runtime started by itself, with no input to open it (SPEC §17.1); only
+            // while its process runs: the outbox of a restarted worker sends it again after the
+            // `hello` that stopped the session and lost its turn (§17.3).
+            SessionState::Running if source == Source::Worker && s.process_state == "running" => {
+                db::set_turn(&app.db, s.id, true, false).await?
+            }
             _ => {}
         },
         _ => {}

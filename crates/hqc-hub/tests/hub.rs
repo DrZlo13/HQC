@@ -1006,6 +1006,46 @@ async fn late_input_ack_does_not_reopen_the_turn() {
     hub.finish().await;
 }
 
+/// SPEC §17.1: a turn the runtime starts by itself (Claude Code after a background task's end)
+/// has no input whose `ack` opens it; the worker's `status running` does while the agent's
+/// process runs, and `status idle` closes it. SPEC §17.3: the same event sent again from the
+/// outbox of a restarted worker, after its `hello` stopped the session, opens none.
+#[tokio::test]
+async fn a_worker_status_running_opens_a_turn() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("own turn").await;
+    ack_start(&mut w, &sid).await;
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["state"], "idle");
+    w.event(agent_event(&sid, "status", json!({"state": "running"})))
+        .await;
+    assert_eq!(hub.session(&sid).await["state"], "running");
+    w.event(agent_event(&sid, "status", json!({"state": "idle"})))
+        .await;
+    assert_eq!(hub.session(&sid).await["state"], "idle");
+
+    // A new boot_id: the worker restarted; its outbox sends a `status running` again.
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    hub.wait_session(&sid, "stopped", |v| {
+        v["agent"]["process_state"] == "stopped"
+    })
+    .await;
+    w.event(agent_event(&sid, "status", json!({"state": "running"})))
+        .await;
+    assert_eq!(hub.session(&sid).await["state"], "idle");
+    hub.finish().await;
+}
+
 /// SPEC §5.2: after hello the hub sends session.start (mode resume) and only after its ack
 /// the pending input, in seq order.
 #[tokio::test]

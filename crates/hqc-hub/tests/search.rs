@@ -1086,3 +1086,104 @@ async fn timing_over_100k_events() {
         hub.finish().await;
     }
 }
+
+/// Every byte but ASCII letters and digits as `%XX`, for a query string.
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// A query with quotes, backslashes, tsquery operators or a NUL is searched for, or refused
+/// with 400; it never breaks the statement (500). Its words are found like any others.
+#[tokio::test]
+async fn quotes_and_operators_in_a_query() {
+    // Over a hundred searches: past the per-minute limits of an owner.
+    let hub = TestHub::start_limited(hqc_hub::config::Limits {
+        searches_per_owner_min: 1000,
+        fuzzy_searches_per_owner_min: 1000,
+        ..Default::default()
+    })
+    .await;
+    let db = hub.app.db.clone();
+    let (owner, personal) = me(&hub).await;
+    let s = session(&db, owner, personal, "quotes", "Quotes").await;
+    event(
+        &db,
+        s,
+        "agent.message",
+        json!({"text": "O'Reilly's book on C:\\path\\to a&b | c!d <-> e:*", "final": true}),
+        t(1),
+    )
+    .await;
+    let nasty = [
+        "'",
+        "''",
+        "\\",
+        "\\'",
+        "'\\",
+        "O'Reilly",
+        "O''Reilly",
+        "' | '",
+        "a & b",
+        "a&b",
+        "a | b",
+        "!a",
+        "a <-> b",
+        "a <2> b",
+        "e:*",
+        ":*",
+        "'e':*",
+        "a:A",
+        "(a",
+        "a)",
+        "()",
+        "\"unclosed",
+        "\"a\" \"",
+        "-",
+        "--",
+        "- -a",
+        "or",
+        "or or",
+        "a or",
+        "'); DROP TABLE events; --",
+        "x' OR '1'='1",
+        "$1",
+        "\u{0}",
+        "a\u{0}b",
+        "ab*c",
+        "***",
+        "реилли'с",
+    ];
+    for q in nasty {
+        for extra in ["", "&fuzzy=1", "&order=newest&per_session=1&kind=message"] {
+            let (status, v) = hub.get(&format!("/api/search?q={}{extra}", enc(q))).await;
+            assert!(status == 200 || status == 400, "{q:?}{extra}: {status} {v}");
+        }
+    }
+    let found = |q: &str| {
+        let q = format!("q={}", enc(q));
+        let hub = &hub;
+        async move { search(hub, &q).await["results"].as_array().unwrap().len() }
+    };
+    // Postgres takes no U+0000: such a query is refused, not failed.
+    let (status, v) = hub.get(&format!("/api/search?q={}", enc("a\u{0}b"))).await;
+    assert_eq!(status, 400, "{v}");
+    assert_eq!(found("O'Reilly").await, 1);
+    assert_eq!(found("Reilly's").await, 1);
+    assert_eq!(found("path").await, 1);
+    // The events are all still there.
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE session_id = $1")
+        .bind(s)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    hub.finish().await;
+}

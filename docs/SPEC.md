@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.119, 2026-11-11. Status: the architecture agreed after six reviews and a survey of
+Version 0.121, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -483,7 +483,7 @@ the client renders only them. The "source" column is the component that produces
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
-| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1) |
+| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`) | hub or worker; codes below |
 
 `system` codes (the list is open; the client shows an unknown code as text):
@@ -2557,8 +2557,11 @@ Mapping of stream-json to §4: `stream_event` text delta → `agent.delta`; `ass
 with text → `agent.message`, where the adapter holds the last text until the
 next stream item: `tool_use` → `final: false`, `result` → `final: true`;
 `tool_use` → `tool.call`; `tool_result` → `tool.result`; `result` → `usage` and
-`status idle`. Since 0.69 a `result` with `num_turns: 0`, no tokens and no cost (a local slash
-command, the empty second `result` the CLI sends after a turn it started by itself) gives no
+`status idle`. Since 0.121 a `system/init` while no turn of hqc's runs (a turn the CLI starts by
+itself, e.g. after a background task's end; the turn of an input of hqc's that the CLI carries
+over, §17.2, is hqc's) → `status running`, before anything else of that turn (§17.1). Since
+0.69 a `result` with `num_turns: 0`, no tokens and no cost (a local slash command, the empty
+second `result` the CLI sends after a turn it started by itself) gives no
 `usage`, which the feed would show as an empty `0 → 0 tokens` line; `/compact` has no tokens
 either but costs, and keeps its `usage`. Since 0.115 a `result` with `num_turns: 0` and no tokens
 whose total grew, with no `compact_boundary` in it, gives a `usage` with no tokens, no `cost_usd`
@@ -4158,12 +4161,16 @@ A `status` event is not drawn as a feed line, except `error` with `detail`.
 
 The hub tracks "a turn is in progress" itself: a turn is opened by the worker's `ack` of
 `session.input` (the worker passes input to the runtime one per turn, except an input that joins
-a running turn, §17.2: its `ack` has `joined: true` and opens none, since 0.70) and closed by
+a running turn, §17.2: its `ack` has `joined: true` and opens none, since 0.70), since 0.121
+also by `status running` from the worker while the session's `process_state` is `running` (a
+turn the runtime starts by itself, with no input: Claude Code after a background task's end,
+§8.1), and closed by
 `agent.message` with `final: true`, `status` with `idle` or `error` (the latter means "the turn
 ended with an error"), the process stopping or the watchdog (§17.3, also "the turn ended with
 an error").
 "The turn ended with an error" keeps `error` until the next input: a new `user.message`
-clears the flag. `worker_offline`: the session has a worker and it is not connected now.
+clears the flag, and since 0.121 so does a turn the runtime starts by itself (`status
+running`). `worker_offline`: the session has a worker and it is not connected now.
 
 ### 17.2 Input during a turn **[decision]**
 Input from the input queue (§7.1) that arrives during a turn waits for the final answer
@@ -4214,7 +4221,8 @@ buffered send from a session in `ask` (§7.1).
   stay open until it returns or until `expires_at`.
 - The hub detects a worker restart by a new `boot_id` in `hello` (§5.2): all agents are
   `stopped`; open `approval`/`clarify` get `approval.cancel`/`clarify.cancel
-  {worker_restart}`; an unfinished turn is lost, the hub writes `system turn_lost`;
+  {worker_restart}`; an unfinished turn is lost, the hub writes `system turn_lost`, and a
+  `status running` the worker's outbox sends again after that `hello` opens no turn (§17.1);
   `pending` inputs are resent after `hello` (via `session.start` with `mode: resume`).
   A reconnect with the same `boot_id` is not a restart, nothing is cancelled.
 - An agent process that exits within 500 ms of launch is a failed
@@ -4477,6 +4485,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.118 → 0.121 (a turn the CLI starts by itself is running)
+§4, §8.1, §17.1: the Claude Code adapter sends `status running` on the `system/init` of a turn
+the CLI starts by itself (after a background task's end), and the hub opens the turn on it
+while the session's process runs (§17.3: not on one a restarted worker's outbox sends again).
+Before, only the `ack` of an input opened a turn: such a turn ran tool calls while the session
+stayed `idle`. 0.119 and 0.120 are taken by other pull requests.
 
 ### 0.118 → 0.119 (a search query with a NUL is refused)
 §20: a search query (`GET /api/search`, `hqc_search_history`) with U+0000 failed with `500

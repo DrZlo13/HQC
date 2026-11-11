@@ -625,7 +625,7 @@ describe("tool groups (T26)", () => {
         ],
       }),
     );
-    t.apply(result(4, "b"));
+    t.apply(result(4, "b", true));
     t.apply(call(5, "c", "Bash", { command: "ls" }));
     t.apply(result(6, "c"));
     show(t);
@@ -634,6 +634,11 @@ describe("tool groups (T26)", () => {
       g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
     );
     const [edit, multi, bash] = [...g.querySelectorAll("details.tool-row")];
+    const labels = (row: Element) => [...row.querySelectorAll(".label")].map((l) => l.textContent);
+    // An edit that went through has no Result; a failed one keeps its Error.
+    expect(labels(edit)).toEqual([]);
+    expect(labels(multi)).toEqual(["Error"]);
+    expect(labels(bash)).toEqual(["Arguments", "Result"]);
     const diff = edit.querySelector(".tool-change .md-code-diff")!;
     expect(diff.querySelector("pre")!.textContent).toBe(" one\n-two\n+three\n four");
     expect([...diff.querySelectorAll(".diff-del")].map((s) => s.textContent)).toEqual(["-two"]);

@@ -712,8 +712,8 @@ function StateMark({ state }: { state: 'running' | 'error' | 'ok' }) {
 }
 
 /** One call: `$ command` for Bash, else the tool and its main argument, paths under the
- *  session's folder relative to it; open, the change of an Edit, a MultiEdit or a Write (else
- *  the arguments) and the result. */
+ *  session's folder relative to it; open, the change of an Edit, a MultiEdit or a Write (its
+ *  result only if it failed), else the arguments and the result. */
 function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   if (row.kind === 'thinking') return <Thinking event={row.event} />;
   const { call } = row;
@@ -754,7 +754,8 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
             </>
           )
         )}
-        {r && (
+        {/* A change that went through says only that it did: its result is not shown. */}
+        {r && (r.error || !change) && (
           <>
             <div class="label">{r.error ? 'Error' : 'Result'}</div>
             {r.error_text && <div class="error-text">{r.error_text}</div>}

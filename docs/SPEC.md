@@ -3591,7 +3591,8 @@ once / session / always / deny, for ACP agents whatever the agent offered. Since
 Edit or MultiEdit call shows the change as a diff of `old_string` → `new_string` (each edit of a
 MultiEdit), of a Write the content, read from the call's `tool.call`; a preview cut at 4 KB is
 shown as far as it goes and marked cut. An Edit with `replace_all` is marked "All occurrences".
-A call's row in the feed, opened, shows the same change in place of its arguments. The request goes to
+A call's row in the feed, opened, shows the same change in place of its arguments, and its
+result only if the call failed. The request goes to
 **the worker owner**; a collaborator with `write` sees the request but cannot answer it.
 The first answer wins: it closes the request, every device sees the `approval.response`
 event, and the client removes the buttons. A second answer (from another device) gets

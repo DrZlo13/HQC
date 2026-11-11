@@ -2069,20 +2069,28 @@ pub async fn clear_turn_error(db: &PgPool, id: Uuid) -> sqlx::Result<()> {
     Ok(())
 }
 
+/// A session has an input that failed and no later input reached the agent after it, so it is
+/// in `error` (SPEC §17.1). Once a later input is delivered the owner has gone on: the failed
+/// one stays for Retry but no longer keeps the session in `error`. Over the alias `s`.
+pub const UNANSWERED_FAILED_INPUT: &str = "EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id
+    AND e.delivery = 'failed'
+    AND NOT EXISTS (SELECT 1 FROM events l WHERE l.session_id = s.id AND l.delivery = 'delivered'
+                    AND l.seq > e.seq))";
+
 /// Sessions whose computed state is `running` apart from worker presence (SPEC §17.1): a
 /// turn is open and nothing ranks above it. The caller checks that the worker is online.
 /// A session waiting for the answer to its `hqc_ask` or for the owner's answer to its
 /// `hqc_move` or to a move after its transcript is not silent but waiting, and is left out
 /// too (SPEC §7, §7.1, §9.2, §17.3).
 pub async fn running_turns(db: &PgPool) -> sqlx::Result<Vec<(Uuid, Option<Uuid>)>> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         "SELECT s.id, s.worker_id FROM sessions s
          WHERE s.turn_open AND NOT s.archived AND NOT s.last_turn_error AND s.locked_by <> 'vscode'
            AND NOT EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
                            AND p.closed_at IS NULL
                            AND p.kind IN ('approval', 'clarify', 'ask', 'move', 'follow'))
-           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed')",
-    )
+           AND NOT {UNANSWERED_FAILED_INPUT}",
+    ))
     .fetch_all(db)
     .await
 }

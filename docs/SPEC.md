@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.108, 2026-11-10. Status: the architecture agreed after six reviews and a survey of
+Version 0.117, 2026-11-11. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4024,7 +4024,7 @@ open requests, `process_state` and delivery. Priority top to bottom, the first t
 | `locked_vscode` | `locked_by: vscode` |
 | `worker_offline` | the worker is unreachable |
 | `waiting` | there is an open `approval`/`clarify` |
-| `error` | there is an input with `delivery: failed`, or the last turn ended with a process error |
+| `error` | there is an input with `delivery: failed` and no later input was delivered after it (since 0.117), or the last turn ended with a process error |
 | `running` | a turn is in progress |
 | `queued` | `queue_len > 0`, no turn (the agent is starting) |
 | `idle` | otherwise |
@@ -4358,6 +4358,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.108 → 0.117 (a failed input the owner went on from does not keep the session in error)
+§17.1: a session stayed in `error` for as long as it had an input with `delivery: failed`, also
+after a later input reached the agent and its turn ended well. A spawned session whose first
+input failed on the worker's `max_sessions` showed Error under "Needs you" while it answered the
+next message. Such an input now keeps `error` only while no later input was delivered after it;
+it stays `failed`, and Retry still sends it again. 0.109–0.116 are taken by other pull requests.
 
 ### 0.107 → 0.108 (an input written during the agent's text stands under it)
 §4, §6: a message the user wrote while the agent's text was being written stood above that

@@ -1689,36 +1689,41 @@ full name, the bar as wide as the longest name, 200–320 px (a longer one ends 
 name "HQC" by its mark, "+", the order menu, the settings and the avatar in one row at the
 bottom, and the session column narrower so the chat keeps at least 300 px. A project's mark, on
 the tile or on the row's icon: an amber count of its sessions that wait for the user ("needs
-you"), else a stripe that runs slowly around the icon while one of them works (the rule of a
-session row's pulsing dot: `running`, `queued`, a subagent or a background task at work after
-its turn, a busy VS Code; archived and service sessions do not count), under `prefers-reduced-motion` too, since a
-still arc does not read as work, else (since 0.67) a blue dot while one has
-unread events, the name bold in Compact; an idle project has none; a starred project also has a
-star on the icon's bottom right corner. "+" asks for a name, makes the project and opens its
-settings. The order menu (⇅, with more than one project) has Custom, Name and Recent (§3 User
-`project_sort`, `PATCH /api/me`, applied at once and put back if the hub refuses): Custom is the
-hub's order (`PUT /api/me/project_order`), Name the shown names, Recent the newest `updated_at`
-among the project's listed sessions (not archived, not a service session) first, the projects
-without one after them, the newest project first; the starred projects first in each. Its
-"Reorder…" (since 0.64) arranges the user's own order whichever is shown: the tiles are dragged
-(or moved with ↑/↓ when focused) instead of opened, ✓ stores the order with `PUT
-/api/me/project_order` and switches the bar to Custom, ✕ drops it. A right click on a project
-(or the menu key) opens the project's menu, the same as "⋯" in the session column's head: Open
-in new tab, Add to (Remove from) favorites, Project settings…, Archive project (Restore for an
-archived one) and Delete project…, neither of the last two for the personal project. Archive
-project takes it off the bar at once, without a question, the open one giving its place to the
-personal project (on a phone, back to the projects screen), and shows "Archived «name» · find it
-with the search on the bar · Undo" for 5 s at the bottom of the bar (on a phone "Archived «name»
-· Undo" at the bottom of the projects screen); Undo and Restore send `/unarchive`, and the
-project comes back in its place; a refusal of the hub puts it back on the bar in the hub's order
-and says why. The project search — its magnifier in the bar's head, or ⌘K on a Mac (Ctrl+K
-elsewhere) from anywhere — finds projects by their shown name, the archived ones too (marked
-"archived") once something is typed: in Compact the field takes the place of "HQC" and the bar's
-list shrinks to the matches, with tiles a 290 px panel with the names opens over the session
-column; ↑/↓ select, Enter opens the match, Esc (the focus back on the magnifier) or a press
-outside the bar closes it, "N of M" counts the matches, and a match's right click opens its
-project's menu. An archived project opened from the search, an address or one of its sessions
-shows its session list like any other; the bar has no tile for it.
+you"), else a stripe that runs around the icon while one of them works (the rule of a session
+row's pulsing dot: `running`, `queued`, a subagent or a background task at work after its turn,
+a busy VS Code; archived and service sessions do not count), under `prefers-reduced-motion` too,
+since a still arc does not read as work: one lap in 18 s, faster the more output tokens per
+second the project's working sessions report in `output_per_s` (§6, 0.122), the lap 18 s divided
+by min(6, 1 + log2(1 + rate / 40)), changed without a jump; else (since 0.67) a blue dot while
+one has unread events, the name bold in Compact; an idle project has none; a starred project
+also has a star on the icon's bottom right corner. While one of its sessions works, by that
+rule, the tile's tooltip names the project, the agents at work (each working session's agent and
+its `subagents`) and the rate, "hqc · 3 agents · 120 tokens/s", also beside the amber count. "+"
+asks for a name, makes the project and opens its settings. The order menu (⇅, with more than one
+project) has Custom, Name and Recent (§3 User `project_sort`, `PATCH /api/me`, applied at once
+and put back if the hub refuses): Custom is the hub's order (`PUT /api/me/project_order`), Name
+the shown names, Recent the newest `updated_at` among the project's listed sessions (not
+archived, not a service session) first, the projects without one after them, the newest project
+first; the starred projects first in each. Its "Reorder…" (since 0.64) arranges the user's own
+order whichever is shown: the tiles are dragged (or moved with ↑/↓ when focused) instead of
+opened, ✓ stores the order with `PUT /api/me/project_order` and switches the bar to Custom, ✕
+drops it. A right click on a project (or the menu key) opens the project's menu, the same as "⋯"
+in the session column's head: Open in new tab, Add to (Remove from) favorites, Project
+settings…, Archive project (Restore for an archived one) and Delete project…, neither of the
+last two for the personal project. Archive project takes it off the bar at once, without a
+question, the open one giving its place to the personal project (on a phone, back to the
+projects screen), and shows "Archived «name» · find it with the search on the bar · Undo" for 5
+s at the bottom of the bar (on a phone "Archived «name» · Undo" at the bottom of the projects
+screen); Undo and Restore send `/unarchive`, and the project comes back in its place; a refusal
+of the hub puts it back on the bar in the hub's order and says why. The project search — its
+magnifier in the bar's head, or ⌘K on a Mac (Ctrl+K elsewhere) from anywhere — finds projects by
+their shown name, the archived ones too (marked "archived") once something is typed: in Compact
+the field takes the place of "HQC" and the bar's list shrinks to the matches, with tiles a 290
+px panel with the names opens over the session column; ↑/↓ select, Enter opens the match, Esc
+(the focus back on the magnifier) or a press outside the bar closes it, "N of M" counts the
+matches, and a match's right click opens its project's menu. An archived project opened from the
+search, an address or one of its sessions shows its session list like any other; the bar has no
+tile for it.
 
 The session column (since 0.114): 280–310 px by default, narrowing with the window; its right
 edge is dragged (or moved with ←/→ in 16 px steps when focused) between 240 and 560 px, the
@@ -4798,7 +4803,8 @@ it. The baseline of `cost_usd` stays, so the next turn's line carries what the s
 `look`, migration `0039_user_look`, `PATCH /api/me`): Compact is the feed across the chat
 column in one column, as the VS Code tab draws it, the system font, each project's full name on
 the project bar and a line per session; Spacious is the layout as it was. The project bar marks
-a project whose session waits, works (a stripe running around its icon) or has unread events,
+a project whose session waits, works (a stripe running around its icon, the faster the more
+output tokens per second its sessions spend, `output_per_s` of 0.122) or has unread events,
 stars a favorite, finds projects by name with ⌘K / Ctrl+K, has one project menu (also "⋯" in
 the session column's head) and an order menu, Custom, Name or Recent (§3 User `project_sort`,
 migration `0040_project_sort`). A project is archived off the bar (§3 Project `archived_at`,

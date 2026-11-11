@@ -28,6 +28,31 @@ export function matchName(name: string, query: string): [string, string, string]
   return i < 0 ? null : [name.slice(0, i), name.slice(i, i + q.length), name.slice(i + q.length)];
 }
 
+/** How many times faster than its 18 s lap (the CSS) the stripe around a working project runs
+ *  at `rate` output tokens per second: twice at 40, about 2.8 times at 100, at most 6 (a lap
+ *  in 3 s). */
+export function runSpeed(rate: number): number {
+  return Math.min(6, 1 + Math.log2(1 + rate / 40));
+}
+
+/** The hover text of a working project's tile: its name, the agents at work in it (each
+ *  session's own and its subagents) and their output tokens per second. */
+export function runningTitle(name: string, agents: number, rate: number): string {
+  return `${name} · ${agents} agent${agents === 1 ? '' : 's'} · ${rate} tokens/s`;
+}
+
+/** The stripe around a working project's tile, at [`runSpeed`] of the project's rate. The
+ *  speed changes through the playback rate of its CSS animation, so the stripe goes on from
+ *  where it is: a new `animation-duration` would make it jump. */
+function RailRun({ rate }: { rate: number }) {
+  const el = useRef<HTMLSpanElement>(null);
+  const k = runSpeed(rate);
+  useEffect(() => {
+    for (const a of el.current?.getAnimations() ?? []) a.updatePlaybackRate(k);
+  }, [k]);
+  return <span ref={el} class="rail-run" aria-label="working" />;
+}
+
 /** A Mac (or an iPad with a keyboard): ⌘ is the shortcuts' key there, Ctrl elsewhere. */
 export function onMac(): boolean {
   return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -358,8 +383,10 @@ export function ProjectRail({ app }: { app: AppState }) {
         : projects.map((p) => {
             const name = projectName(p);
             const waiting = app.projectWaiting(p.id);
-            const running = waiting === 0 && app.projectRunning(p.id);
+            const works = app.projectRunning(p.id);
+            const running = waiting === 0 && works;
             const unread = waiting === 0 && !running && app.projectUnread(p.id);
+            const title = works ? runningTitle(name, app.projectAgents(p.id), app.projectRate(p.id)) : name;
             const on = p.id === current;
             // A row keeps the icon on its color and puts the name after it; a tile is the icon.
             const face = names ? (
@@ -382,7 +409,7 @@ export function ProjectRail({ app }: { app: AppState }) {
                     class={`${cls} rail-drag`}
                     role="button"
                     aria-label={`Drag to reorder «${name}», or use arrow keys`}
-                    title={name}
+                    title={title}
                     style={background}
                     {...tile(p.id)}
                   >
@@ -394,7 +421,7 @@ export function ProjectRail({ app }: { app: AppState }) {
                     href={`#/p/${p.id}`}
                     aria-label={name}
                     aria-current={on ? 'true' : undefined}
-                    title={name}
+                    title={title}
                     style={background}
                     {...prefetchOn(() => {
                       // The chat the project opens with.
@@ -411,7 +438,7 @@ export function ProjectRail({ app }: { app: AppState }) {
                     {waiting > 99 ? '99+' : waiting}
                   </span>
                 ) : running ? (
-                  <span class="rail-run" aria-label="working" />
+                  <RailRun rate={app.projectRate(p.id)} />
                 ) : (
                   unread && <span class="rail-unread" aria-label="unread" />
                 )}

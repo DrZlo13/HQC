@@ -432,6 +432,7 @@ export class AppState {
         permission_capped_by: s.permission_capped_by,
         subagents: s.subagents,
         background_tasks: s.background_tasks,
+        output_per_s: s.output_per_s,
         favorite_at: s.favorite_at,
       });
     }
@@ -899,6 +900,26 @@ export class AppState {
       if (s.project_id === projectId && !s.archived && !s.system && bucketOf(s) === 'run') return true;
     }
     return false;
+  }
+
+  /** The output tokens per second of the sessions [`projectRunning`] counts, their subagents'
+   *  included (`output_per_s`). */
+  projectRate(projectId: string): number {
+    let n = 0;
+    for (const s of this.sessions.values()) {
+      if (s.project_id === projectId && !s.archived && !s.system && bucketOf(s) === 'run') n += s.output_per_s ?? 0;
+    }
+    return n;
+  }
+
+  /** The agents at work in the sessions [`projectRunning`] counts: each session's own and its
+   *  subagents. */
+  projectAgents(projectId: string): number {
+    let n = 0;
+    for (const s of this.sessions.values()) {
+      if (s.project_id === projectId && !s.archived && !s.system && bucketOf(s) === 'run') n += 1 + (s.subagents ?? 0);
+    }
+    return n;
   }
 
   /** A worker's name: the title of its service session (SPEC §10.2). */

@@ -624,8 +624,9 @@ select.input {
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  /* Slow on purpose: a mark that creeps, not one that calls for attention. */
-  animation: rail-run 8s linear infinite;
+  /* The slowest lap, while the project's agents write no tokens; the more output tokens per
+     second they write, the faster it runs (RailRun, runSpeed). */
+  animation: rail-run 18s linear infinite;
   pointer-events: none;
 }
 @keyframes rail-run {

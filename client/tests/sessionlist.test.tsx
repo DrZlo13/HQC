@@ -21,7 +21,7 @@ import { App } from '../src/ui/App';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Chat } from '../src/ui/Chat';
 import { PhoneHome } from '../src/ui/PhoneHome';
-import { ProjectRail, onMac } from '../src/ui/ProjectRail';
+import { ProjectRail, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SessionList, WidthGrip } from '../src/ui/SessionList';
 import {
@@ -1090,7 +1090,8 @@ describe('ProjectRail', () => {
     await ev('pointerdown', 100);
     await ev('pointermove', 180);
     await ev('pointerup', 180);
-    expect(rows().map((r) => r.getAttribute('title'))).toEqual(['physics-mp', 'ukuetis_controller_backend', 'Personal']);
+    // physics-mp works: its hover text says how.
+    expect(rows().map((r) => r.getAttribute('title'))).toEqual(['physics-mp · 2 agents · 0 tokens/s', 'ukuetis_controller_backend', 'Personal']);
   });
 
   it('marks a project with unread events by a blue dot, unless someone waits there', async () => {
@@ -1145,6 +1146,18 @@ describe('ProjectRail', () => {
     app.sessions.set('net', sess('net', 'Network sync', 'waiting', at(0.2)));
     await mount(<ProjectRail app={app} />);
     expect(marks()).toEqual(['rail-run', 'rail-badge']);
+  });
+
+  it('runs the stripe faster the more output tokens per second the project writes, and says so on hover', () => {
+    // A lap in 18 s (the CSS) without tokens, 9 s at 40 tokens/s, 3 s at the fastest.
+    expect(runSpeed(0)).toBe(1);
+    expect(runSpeed(40)).toBe(2);
+    expect(18 / runSpeed(100)).toBeCloseTo(6.41, 2);
+    expect(18 / runSpeed(300)).toBeCloseTo(4.4, 2);
+    expect(runSpeed(5000)).toBe(6);
+    // Its hover text: the agents at work and their tokens per second.
+    expect(runningTitle('hqc', 1, 0)).toBe('hqc · 1 agent · 0 tokens/s');
+    expect(runningTitle('hqc', 3, 120)).toBe('hqc · 3 agents · 120 tokens/s');
   });
 
   it('in the Compact look: the same marks on the icon, an unread project in bold', async () => {
@@ -1294,8 +1307,16 @@ describe("the project bar's order", () => {
     await click(root.querySelector('.rail-order'));
     await click(root.querySelector('.menu .btn-reorder-projects'));
     const grips = () => [...root.querySelectorAll<HTMLElement>('.rail-drag')];
-    // Not the names' order: the one Reorder stores.
-    expect(grips().map((g) => g.getAttribute('title'))).toEqual(['Boards', 'Arduino', 'Personal', 'physics-mp', 'kiln', 'board10', 'board9']);
+    // Not the names' order: the one Reorder stores. physics-mp works: its hover text says how.
+    expect(grips().map((g) => g.getAttribute('title'))).toEqual([
+      'Boards',
+      'Arduino',
+      'Personal',
+      'physics-mp · 2 agents · 0 tokens/s',
+      'kiln',
+      'board10',
+      'board9',
+    ]);
     await act(async () => {
       grips().at(-1)!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
     });

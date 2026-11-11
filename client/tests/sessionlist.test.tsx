@@ -3135,6 +3135,25 @@ describe('a new session', () => {
     expect(api.uploadArtifact).not.toHaveBeenCalled();
   });
 
+  it('several files picked with the clip are all attached, though the input empties its list', async () => {
+    const { app } = draftApp(() => new Promise(() => {}));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await act(async () => {
+      const picker = root.querySelector<HTMLInputElement>('.chat-new input[type=file]')!;
+      // As a browser does: clearing the input's value empties the very list it handed over.
+      const files = [new File(['a'], 'one.txt', { type: 'text/plain' }), new File(['b'], 'two.txt', { type: 'text/plain' })];
+      Object.defineProperty(picker, 'files', { value: files, configurable: true });
+      Object.defineProperty(picker, 'value', { get: () => '', set: () => void (files.length = 0), configurable: true });
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await settle();
+    const shown = root.querySelector('.chat-new .composer-files')?.textContent ?? '';
+    expect(shown).toContain('one.txt');
+    expect(shown).toContain('two.txt');
+  });
+
   it("after the switch the caret is in the chat's input, and again when the chat is opened later", async () => {
     const { app } = draftApp();
     location.hash = '#/p/p1/new';

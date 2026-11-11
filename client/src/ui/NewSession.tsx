@@ -71,8 +71,16 @@ export function NewSessionChat({
   // As the create ends: the files attached while the session was being created.
   const filesNow = useRef(files);
   filesNow.current = files;
-  const addFiles = (picked: FileList | File[]) => {
-    void Promise.all([...picked].map(toOutgoing)).then((add) => setFiles((cur) => [...cur, ...add]));
+  const addFiles = (list: FileList | File[]) => {
+    // A copy now: the input empties the list it handed over right after.
+    const picked = [...list];
+    if (!picked.length) return;
+    // One at a time: each is read into memory, and a HEIC drawn on a canvas.
+    void (async () => {
+      const add: OutgoingFile[] = [];
+      for (const p of picked) add.push(await toOutgoing(p));
+      setFiles((cur) => [...cur, ...add]);
+    })();
   };
   const [dragging, setDragging] = useState(false);
   // The first message, while the session is being created.

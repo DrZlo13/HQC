@@ -1139,13 +1139,21 @@ describe('ProjectRail', () => {
     await mount(<PhoneHome app={app} />);
     expect(['Personal', 'physics-mp'].map(phoneMarks)).toEqual([['running: 1', 'unread: 1'], []]);
     expect(phoneNames('run')).toEqual(['Personal']);
+    // The bar's stripe around Personal's tile there too, without a label of its own: the row
+    // says how many run.
+    const stripes = () => ['Personal', 'physics-mp'].map((n) => !!phoneRow(n).querySelector('.rail-run'));
+    expect(stripes()).toEqual([true, false]);
     // Queued input works too; a session waiting for you wins over a working one.
     app.sessions.set('det', { ...app.sessions.get('det')!, state: 'queued' });
     await mount(<ProjectRail app={app} />);
     expect(marks()).toEqual(['rail-run', 'rail-run']);
+    await mount(<PhoneHome app={app} />);
+    expect(stripes()).toEqual([true, true]);
     app.sessions.set('net', sess('net', 'Network sync', 'waiting', at(0.2)));
     await mount(<ProjectRail app={app} />);
     expect(marks()).toEqual(['rail-run', 'rail-badge']);
+    await mount(<PhoneHome app={app} />);
+    expect(stripes()).toEqual([true, false]);
   });
 
   it('runs the stripe faster the more output tokens per second the project writes, and says so on hover', () => {

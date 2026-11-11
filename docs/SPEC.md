@@ -1794,9 +1794,10 @@ and each project in one group, a favorite only under Favorites — or, picked fr
 its project's name before the state line and its tile at the end, without a menu. Its head is
 one row: the title with that menu (kept while the page is open), "Requests" with the count, the
 search, the settings and the avatar; the workers line is at the bottom, and a project archived
-from there shows its "Archived «name» · Undo" there. A project's row has its tile, its name
-(bold with unread events; in Spacious "N waiting · N running" under it), then a running mark
-with how many work, the amber count of those that wait and the count of those with unread
+from there shows its "Archived «name» · Undo" there. A project's row has its tile (with the
+bar's stripe running around it, at the bar's speed, while one of its sessions works and none
+waits), its name (bold with unread events; in Spacious "N waiting · N running" under it), then a
+running mark with how many work, the amber count of those that wait and the count of those with unread
 events. A project opens its own screen, `#/p/<id>`, the session list; everything else replaces
 the screen as before. Both looks apply on a phone too: in Compact its list heads, groups and
 rows are denser and a row is one line with the state in the dot.
@@ -4800,29 +4801,30 @@ it. The baseline of `cost_usd` stays, so the next turn's line carries what the s
 
 ### 0.113 → 0.114 (the new screen)
 §6 client layout: one look for the whole client, Compact or Spacious, kept on the user (§3 User
-`look`, migration `0039_user_look`, `PATCH /api/me`): Compact is the feed across the chat
-column in one column, as the VS Code tab draws it, the system font, each project's full name on
-the project bar and a line per session; Spacious is the layout as it was. The project bar marks
-a project whose session waits, works (a stripe running around its icon, the faster the more
-output tokens per second its sessions spend, `output_per_s` of 0.122) or has unread events,
-stars a favorite, finds projects by name with ⌘K / Ctrl+K, has one project menu (also "⋯" in
-the session column's head) and an order menu, Custom, Name or Recent (§3 User `project_sort`,
-migration `0040_project_sort`). A project is archived off the bar (§3 Project `archived_at`,
-0.110) and found again by that search. The session column has a head of one row, the project's
-own favorites pinned over the list and a favorite listed only there, the idle sessions grouped
-by how long ago they were active, one menu per row on a right click, an archive button past the
+`look`, migration `0039_user_look`, `PATCH /api/me`): Compact is the feed across the chat column
+in one column, as the VS Code tab draws it, the system font, each project's full name on the
+project bar and a line per session; Spacious is the layout as it was. The project bar marks a
+project whose session waits, works (a stripe running around its icon, the faster the more output
+tokens per second its sessions spend, `output_per_s` of 0.122) or has unread events, stars a
+favorite, finds projects by name with ⌘K / Ctrl+K, has one project menu (also "⋯" in the session
+column's head) and an order menu, Custom, Name or Recent (§3 User `project_sort`, migration
+`0040_project_sort`). A project is archived off the bar (§3 Project `archived_at`, 0.110) and
+found again by that search. The session column has a head of one row, the project's own
+favorites pinned over the list and a favorite listed only there, the idle sessions grouped by
+how long ago they were active, one menu per row on a right click, an archive button past the
 column's edge and a card in place of the tooltip, the workers in one line at the bottom, and a
 width dragged by its edge. A new session opens at once as a window and is created by its first
 message. A 900–1079 px window slides the session column over the chat; a phone opens on its
-projects. In the feed a message's time ends its first line and its buttons are in the bubble or
-the margin, a run of calls is "N tool calls (…)", a right click quotes a selection. The client
-keeps the 12 chats used last in memory and loads the next one when the mouse rests on its row
-or project, so a switch shows the chat at once, and the chats share their images' signed links
-(§12). §15, §6: the search is a page with filters — the kind of hit with the count of each, the
-project, the time, best match or newest, a few hits per session — over the filters and counts
-of `GET /api/search` (0.111). §6: the chat shows a line per subagent of `subagents.live` (0.113)
-above the input, outside the feed's scroll, and a message that joined the running turn
-(`payload.joined`, 0.112) says "joined the turn".
+projects, a working one with the bar's stripe around its tile. In the feed a message's time ends
+its first line and its buttons are in the bubble or the margin, a run of calls is "N tool calls
+(…)", a right click quotes a selection. The client keeps the 12 chats used last in memory and
+loads the next one when the mouse rests on its row or project, so a switch shows the chat at
+once, and the chats share their images' signed links (§12). §15, §6: the search is a page with
+filters — the kind of hit with the count of each, the project, the time, best match or newest, a
+few hits per session — over the filters and counts of `GET /api/search` (0.111). §6: the chat
+shows a line per subagent of `subagents.live` (0.113) above the input, outside the feed's
+scroll, and a message that joined the running turn (`payload.joined`, 0.112) says "joined the
+turn".
 
 ### 0.112 → 0.113 (the subagents the agent runs now)
 §4, §5.2, §6, §8.1, §18: a new event `subagents.live`, transport only like `agent.delta`,

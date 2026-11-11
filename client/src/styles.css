@@ -2254,6 +2254,13 @@ select.input {
   font-size: 22px;
   font-weight: 400;
 }
+/* The tile and, while one of the project's sessions works and none waits, the project bar's
+   stripe around it (RailRun). */
+.phone-tile-wrap {
+  position: relative;
+  flex: none;
+  display: flex;
+}
 .phone-tile .glyph-img {
   padding: 3px;
 }
@@ -2296,6 +2303,14 @@ select.input {
 }
 :root.list-compact .phone-tile .glyph-img {
   padding: 1px;
+}
+/* Around the 18 px tile; the Compact look also sets `rail-names`, whose bar rule sizes the
+   stripe for the bar's row. */
+:root.list-compact .phone-tile-wrap .rail-run {
+  inset: -3px;
+  width: auto;
+  height: auto;
+  border-radius: 8px;
 }
 :root.list-compact .phone-run {
   font-size: 12px;

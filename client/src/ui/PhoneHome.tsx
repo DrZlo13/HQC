@@ -12,7 +12,7 @@ import { projectName } from './Appearance';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
 import { IconChevronDown, IconPlus, IconSearch, IconSettings } from './icons';
-import { ProjectUndo } from './ProjectRail';
+import { ProjectUndo, RailRun } from './ProjectRail';
 import { RequestsLink } from './requests';
 import { PhoneTile, SessionRow, WorkersLine, newProject } from './SessionList';
 import { bucketOf, groupSessions } from './sessions';
@@ -134,7 +134,7 @@ function Projects({ app, onError }: { app: AppState; onError: (m: string) => voi
           </div>
           <ul class="session-list">
             {g.items.map((p) => (
-              <ProjectRow key={p.id} p={p} c={of(p)} spacious={spacious} />
+              <ProjectRow key={p.id} p={p} c={of(p)} rate={app.projectRate(p.id)} spacious={spacious} />
             ))}
             {g.id === 'all' && (
               <li>
@@ -155,15 +155,19 @@ function Projects({ app, onError }: { app: AppState; onError: (m: string) => voi
   );
 }
 
-/** A project: its tile, its name (bold with unread events; in the Spacious look "N waiting ·
- *  N running" under it), then the running mark with how many run, the amber count of those
- *  that wait and the count of those with unread events. */
-function ProjectRow({ p, c, spacious }: { p: Project; c: Counts; spacious: boolean }) {
+/** A project: its tile (with the project bar's stripe around it, at the project's `rate`,
+ *  while one of its sessions works and none waits), its name (bold with unread events; in the
+ *  Spacious look "N waiting · N running" under it), then the running mark with how many run,
+ *  the amber count of those that wait and the count of those with unread events. */
+function ProjectRow({ p, c, rate, spacious }: { p: Project; c: Counts; rate: number; spacious: boolean }) {
   const sub = [c.wait && `${c.wait} waiting`, c.run && `${c.run} running`].filter(Boolean).join(' · ');
   return (
     <li>
       <a class={`phone-project ${c.unread ? 'has-unread' : ''}`} href={`#/p/${p.id}`}>
-        <PhoneTile p={p} />
+        <span class="phone-tile-wrap">
+          <PhoneTile p={p} />
+          {c.run > 0 && c.wait === 0 && <RailRun rate={rate} quiet />}
+        </span>
         <span class="phone-project-main">
           <span class="phone-project-name">{projectName(p)}</span>
           {spacious && sub && <span class={`phone-project-sub ${c.wait ? 'is-wait' : ''}`}>{sub}</span>}

@@ -157,7 +157,9 @@ pub async fn ingest(
     };
     if matches!(
         m.event.kind,
-        EventKind::AgentDelta { .. } | EventKind::SubagentsLive { .. }
+        EventKind::AgentDelta { .. }
+            | EventKind::SubagentsLive { .. }
+            | EventKind::TokensRate { .. }
     ) {
         return Ok(dropped.into());
     }

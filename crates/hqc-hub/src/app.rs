@@ -68,6 +68,8 @@ pub struct Inner {
     /// Session -> its latest `subagents.live`, unless that list was empty, and when it came
     /// ([`AppState::live_agents`]).
     live_agents: Mutex<HashMap<Uuid, (Value, Instant)>>,
+    /// Session -> its latest `tokens.rate`, unless it was 0 ([`AppState::token_rate`]).
+    token_rates: Mutex<HashMap<Uuid, u32>>,
 }
 
 /// A session's `agent.delta` text since its last `agent.message` or `status` other than
@@ -156,6 +158,7 @@ impl AppState {
             owner_locks: Mutex::new(HashMap::new()),
             live: Mutex::default(),
             live_agents: Mutex::default(),
+            token_rates: Mutex::default(),
             config,
         }))
     }
@@ -267,6 +270,23 @@ impl AppState {
         let lists = self.live_agents.lock().unwrap();
         let (event, at) = lists.get(&session_id)?;
         Some(aged(event.clone(), at.elapsed()))
+    }
+
+    /// Keep a `tokens.rate` as the session's rate, or drop the rate at 0; whether it changed.
+    pub fn token_rate_changed(&self, session_id: Uuid, output_per_s: u32) -> bool {
+        let mut rates = self.token_rates.lock().unwrap();
+        let before = if output_per_s == 0 {
+            rates.remove(&session_id)
+        } else {
+            rates.insert(session_id, output_per_s)
+        };
+        before.unwrap_or(0) != output_per_s
+    }
+
+    /// The session's latest `tokens.rate`, 0 without one.
+    pub fn token_rate(&self, session_id: Uuid) -> u32 {
+        let rates = self.token_rates.lock().unwrap();
+        rates.get(&session_id).copied().unwrap_or(0)
     }
 
     /// The worker sent something for the session (any event, `agent.delta` included).

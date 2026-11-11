@@ -319,8 +319,10 @@ async fn run(app: AppState, worker_id: Uuid, owner_id: Uuid, socket: WebSocket) 
         let _ = db::worker_seen(&app.db, worker_id).await;
         if let Ok(ids) = db::sessions_of_worker(&app.db, worker_id).await {
             for id in ids {
-                // Its deltas stopped with it.
+                // Its deltas stopped with it, and its rate: a 0 sent while it was going is lost,
+                // a rate above 0 it sends again on connect.
                 app.end_live_text(id);
+                app.token_rate_changed(id, 0);
                 app.session_changed(id);
             }
         }
@@ -612,6 +614,13 @@ async fn on_hello(
     // The worker reports its holders again after `hello.ack` (SPEC §9.3).
     for sid in db::forget_holders(&app.db, conn.worker_id).await? {
         app.session_changed(sid);
+    }
+    // Its rates go with the connection this one replaces, which the hub may still hold: a 0
+    // sent meanwhile is lost; a rate above 0 the worker sends again after `hello.ack`.
+    for sid in db::sessions_of_worker(&app.db, conn.worker_id).await? {
+        if app.token_rate_changed(sid, 0) {
+            app.session_changed(sid);
+        }
     }
     // Its log lines and requests go there (SPEC §10.2).
     let system_session_id = db::ensure_system_session(&app.db, conn.worker_id).await?;

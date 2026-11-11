@@ -135,6 +135,14 @@ pub async fn ingest_worker_event(
         app.live_agents_changed(s.id, raw, agents.is_empty());
         return Ok(dropped);
     }
+    if let EventKind::TokensRate { output_per_s } = &ev.kind {
+        // Transport only, like `subagents.live`: kept for the session object and its summary.
+        app.worker_activity(s.id);
+        if app.token_rate_changed(s.id, *output_per_s) {
+            app.session_changed(s.id);
+        }
+        return Ok(dropped);
+    }
     if s.archived && !ends_turn(&ev.kind) {
         tracing::debug!(session_id = %s.id, kind = kind_name, "event for an archived session dropped");
         return Ok(dropped);

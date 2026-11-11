@@ -337,6 +337,7 @@ pub async fn delete_project(
             });
         }
         app.drop_live_agents(*session_id);
+        app.token_rate_changed(*session_id, 0);
         app.session_changed(*session_id);
     }
     for (worker_id, f) in cleanups {
@@ -1304,8 +1305,10 @@ pub async fn delete_session(
         .bind(id)
         .execute(&app.db)
         .await?;
-    // The empty list its killed agent sends is dropped with the session unknown (SPEC §4).
+    // The empty list and the 0 rate its killed agent sends are dropped with the session unknown
+    // (SPEC §4).
     app.drop_live_agents(id);
+    app.token_rate_changed(id, 0);
     app.session_changed(id);
     // Its requests and asks went with it.
     app.requests_changed(s.owner_id);

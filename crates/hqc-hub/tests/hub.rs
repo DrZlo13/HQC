@@ -1962,6 +1962,73 @@ async fn background_tasks_are_kept_on_the_session() {
     hub.finish().await;
 }
 
+/// SPEC §4, §6: `tokens.rate` is transport only (no `seq`, not stored); the hub keeps the rate
+/// in memory for the session object and its summary, and 0 drops it (absent).
+#[tokio::test]
+async fn token_rate_is_kept_on_the_session() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Token rate").await;
+    ack_start(&mut w, &sid).await;
+    assert!(hub.session(&sid).await.get("output_per_s").is_none());
+    let mut c = FakeClient::connect(&hub).await;
+    c.send(json!({"type": "subscribe_summary"})).await;
+    c.until("summary").await;
+
+    let rate = agent_event(&sid, "tokens.rate", json!({"output_per_s": 42}));
+    let a = w.event(rate.clone()).await;
+    assert_eq!(
+        a,
+        json!({"event_id": rate["event_id"]}),
+        "no seq for tokens.rate"
+    );
+    assert_eq!(hub.session(&sid).await["output_per_s"], 42);
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"]["output_per_s"] == 42 {
+            break;
+        }
+    }
+    w.event(agent_event(&sid, "tokens.rate", json!({"output_per_s": 0})))
+        .await;
+    assert!(hub.session(&sid).await.get("output_per_s").is_none());
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"].get("output_per_s").is_none() {
+            break;
+        }
+    }
+    // A rate goes with its worker: a 0 sent while it was away would be lost.
+    w.event(agent_event(
+        &sid,
+        "tokens.rate",
+        json!({"output_per_s": 42}),
+    ))
+    .await;
+    assert_eq!(hub.session(&sid).await["output_per_s"], 42);
+    w.close().await;
+    // The hub drops the rates after it has taken the worker off, past a read of the database.
+    hub.wait_session(&sid, "worker_offline without a rate", |v| {
+        v["state"] == "worker_offline" && v.get("output_per_s").is_none()
+    })
+    .await;
+    // A connection that replaces one the hub still holds: the rates go with the old one.
+    let (mut w2, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    w2.event(agent_event(
+        &sid,
+        "tokens.rate",
+        json!({"output_per_s": 42}),
+    ))
+    .await;
+    assert_eq!(hub.session(&sid).await["output_per_s"], 42);
+    let (_w3, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    assert!(hub.session(&sid).await.get("output_per_s").is_none());
+    let events = hub.events(&sid).await;
+    assert!(events.iter().all(|e| e["type"] != "tokens.rate"));
+    hub.finish().await;
+}
+
 /// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
 /// service sessions included, the newest `updated_at` first; another user's sessions are not in
 /// it.

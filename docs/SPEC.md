@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.118, 2026-11-11. Status: the architecture agreed after six reviews and a survey of
+Version 0.119, 2026-11-11. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -4385,7 +4385,7 @@ buffered send from a session in `ask` (§7.1).
   | chain of peer messages (§7.1) | `depth` ≤ 3 nested asks, `hops` ≤ 20 messages | `mcp.result` `error limit_exceeded` |
   | `hqc_ask.timeout_s` (§7) | 1 … `ask_timeout_s` (600 s), larger cut to it | `0`: `error invalid_args` |
   | `hqc_list_sessions` (§7) | 200 sessions per call | `truncated: true` |
-  | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
+  | search query (§15, since 0.36): `GET /api/search`, `hqc_search_history` | `q` 1–200 characters, no U+0000 (since 0.119), fuzzy at least 3; 50 hits per page (the tool 20); 5 s `statement_timeout` | `400 bad_request` / `mcp.result` `error invalid_args` |
   | `hqc_spawn` (§7, since 0.37): sessions spawned in one chain (§7.1; a human's turn is one chain); since 0.61 (T47) the owner's ephemeral worktrees still being made count in both spawn limits, in every chain, as the sessions they will get (no limit of their own) | 5 | `mcp.result` `error limit_exceeded`, nothing is created |
   | … sessions spawned per owner | 20 in the last hour (sliding, by `created_at`; deleted sessions no longer count); since 0.39 counted and created under a per-owner lock, so parallel calls cannot overshoot | same |
   | `hqc_attach` file (§7, since 0.34) | a regular file of at most 100 MB, inside the session's workspace and `allowed_roots` after resolving symlinks; streamed, exactly the size of the open handle | `mcp.result` `error invalid_args` from the worker, nothing is uploaded |
@@ -4477,6 +4477,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.118 → 0.119 (a search query with a NUL is refused)
+§20: a search query (`GET /api/search`, `hqc_search_history`) with U+0000 failed with `500
+internal`: Postgres takes no U+0000 in a text parameter. It is refused with `400 bad_request`
+now (the tool: `invalid_args`), as a path or a rule check with one is. A test sends quotes,
+backslashes, tsquery operators and SQL-looking text as queries: each is searched for or
+refused, none breaks the statement.
 
 ### 0.108 → 0.118 (the summary of a compaction)
 §4, §8.1: `system context_compacted` carries the summary Claude Code wrote when it compacted

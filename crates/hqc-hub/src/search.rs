@@ -187,6 +187,10 @@ pub async fn search(db: &PgPool, owner: Uuid, q: &Query) -> Result<SearchPage, S
             "the query is longer than {MAX_QUERY} characters"
         )));
     }
+    // Postgres takes no U+0000 in a text parameter: the statement would fail.
+    if text.contains('\0') {
+        return Err(SearchError::Invalid("the query has a NUL character".into()));
+    }
     if q.fuzzy && chars < MIN_FUZZY {
         return Err(SearchError::Invalid(format!(
             "a fuzzy query needs at least {MIN_FUZZY} characters"

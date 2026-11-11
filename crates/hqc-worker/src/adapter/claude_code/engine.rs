@@ -53,7 +53,8 @@
 //!   §17.2); a carried input `cancelled` after the `result` ends the turn it was carried
 //!   into; a carried local command is taken by its own `result`;
 //! - `system` `init` → the model, and [`AdapterEvent::Commands`] when its `slash_commands`
-//!   differ from what this process reported (the CLI sends `init` before every turn);
+//!   differ from what this process reported (the CLI sends `init` before every turn); one
+//!   while no turn of ours runs (a turn the CLI starts by itself) → `status running` first;
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
 //!   rules suggested for the call) / `clarify.request`, an immediate allow by a `session`
 //!   rule or by the folder's hqc rules (T48), or an immediate deny plus `system
@@ -656,10 +657,20 @@ impl Core {
             "control_response" => self.on_control_response(&v),
             "system" => match v["subtype"].as_str() {
                 Some("init") => {
-                    // The CLI sends `init` before every turn; one without ours is its own.
+                    // The CLI sends `init` before every turn; one without ours is its own, and
+                    // `status running` opens it on the hub, which saw no input start it
+                    // (SPEC §17.1).
                     self.self_turn = !self.in_turn;
+                    let mut out = Vec::new();
+                    if self.self_turn {
+                        out.push(self.emit_new(EventKind::Status {
+                            state: SessionState::Running,
+                            detail: None,
+                            in_reply_to: None,
+                        }));
+                    }
                     self.model = v["model"].as_str().map(str::to_owned);
-                    let mut out = self.on_mode(&v["permissionMode"], false);
+                    out.extend(self.on_mode(&v["permissionMode"], false));
                     out.extend(self.on_init(&v));
                     out
                 }

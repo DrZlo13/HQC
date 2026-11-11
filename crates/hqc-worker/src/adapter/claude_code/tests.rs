@@ -2191,6 +2191,43 @@ fn a_turn_the_cli_starts_by_itself_can_be_stopped() {
     assert!(core.interrupt().is_none());
 }
 
+/// A turn the CLI starts by itself after a background task's end (`init` with no input of
+/// ours) is `status running`: no input opens it on the hub (SPEC §17.1). The `init` of a turn
+/// our input starts sends none: the input's `ack` opens that turn.
+#[test]
+fn a_turn_the_cli_starts_by_itself_is_running() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let running = |a: Vec<Action>| -> usize {
+        events(&emitted(a))
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    EventKind::Status {
+                        state: SessionState::Running,
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let init = r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5","permissionMode":"default","uuid":"fb2b6af8-8921-4277-a09e-61e710bfcdb2"}"#;
+    let result = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.004,"usage":{"input_tokens":4,"output_tokens":38}}"#;
+    play(
+        &mut core,
+        &format!(
+            r#"{result}
+{{"type":"system","subtype":"task_notification","task_id":"abd6ecd27912266e5","tool_use_id":"toolu_018foiN3RMuTb1fmFn53JffP","status":"completed","summary":"done","uuid":"614bde30-70d7-46cc-9ff9-9e22f9bdc118"}}"#
+        ),
+    );
+    assert_eq!(running(play(&mut core, init)), 1, "the CLI's own turn");
+    play(&mut core, result);
+    written(&mut core, sid, "x");
+    assert_eq!(running(play(&mut core, init)), 0, "our input's turn");
+}
+
 /// An input written while the CLI runs a turn it started by itself after a background task is
 /// only queued: its echo comes after that turn's `result` (lines of a live run on 2.1.312). That
 /// turn's final message and `status idle` name no input; the input's own turn, after the echo,
@@ -2207,6 +2244,10 @@ fn a_turn_the_cli_starts_by_itself_names_no_input() {
 {"type":"system","subtype":"task_notification","task_id":"abd6ecd27912266e5","tool_use_id":"toolu_018foiN3RMuTb1fmFn53JffP","status":"completed","summary":"The command ran and printed `hqc-live-check`.","uuid":"614bde30-70d7-46cc-9ff9-9e22f9bdc118"}"#,
     );
     let queued = written(&mut core, sid, "Reply with the single word PONG.");
+    // Only `status idle` names a turn's input. Here `status running` goes the other way round:
+    // the input is written before the `init` of the CLI's own turn, which then gets none, and
+    // with no `command_lifecycle` lines it counts as taken at that turn's `result`, so the
+    // `init` of the input's own turn looks like one the CLI starts by itself.
     let replies = |a: Vec<Action>| -> Vec<(String, Option<Uuid>)> {
         events(&emitted(a))
             .into_iter()
@@ -2214,7 +2255,11 @@ fn a_turn_the_cli_starts_by_itself_names_no_input() {
                 EventKind::AgentMessage { in_reply_to, .. } => {
                     Some(("agent.message".into(), *in_reply_to))
                 }
-                EventKind::Status { in_reply_to, .. } => Some(("status".into(), *in_reply_to)),
+                EventKind::Status {
+                    state: SessionState::Idle,
+                    in_reply_to,
+                    ..
+                } => Some(("status".into(), *in_reply_to)),
                 _ => None,
             })
             .collect()
@@ -3046,7 +3091,9 @@ async fn adapter_resumes_with_the_transcript_cost() {
 fn command_list_is_reported_when_it_changes() {
     let fx = fixture!("cost-resume", "2.1.308");
     let init = fx.stream.lines().find(|l| l.contains("\"init\"")).unwrap();
-    let mut core = Core::new(Uuid::now_v7(), false);
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    written(&mut core, sid, "x");
     assert_eq!(costs_and_commands(&core.on_line(init)).1.len(), 1);
     assert!(
         core.on_line(init).is_empty(),
@@ -3560,7 +3607,8 @@ fn a_message_during_a_command_joins_the_turn() {
 
 /// A message written during the final answer (a turn without tools) is not taken into it:
 /// after the `result` the CLI runs it by itself, `started` first, then its echo, its answer
-/// and its own `result`.
+/// and its own `result`. That turn is the input's, not the CLI's own: its `init` sends no
+/// `status running` (SPEC §8.1).
 #[test]
 fn a_message_during_the_final_answer_is_carried() {
     let sid = Uuid::now_v7();
@@ -3584,6 +3632,9 @@ fn a_message_during_the_final_answer_is_carried() {
             reply("A Tuesday of Salt and Iron"),
             result("success"),
             lifecycle(&ua, "completed"),
+            json!({"type": "system", "subtype": "init", "model": "claude-haiku-5-5",
+                "permissionMode": "default", "session_id": CLI_SESSION})
+            .to_string(),
             lifecycle(&ub, "started"),
             echo(&ub, &b.text),
             reply("Understood. BANANA"),

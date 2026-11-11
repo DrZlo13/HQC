@@ -1791,14 +1791,15 @@ for the user), Running (one works, none waits), Favorites, and the other project
 projects" while no other group has one) with "New project" last, each group in the bar's order
 and each project in one group, a favorite only under Favorites — or, picked from its title's menu,
 "Sessions": every live session of the projects on the bar in the groups of State, each row with
-its project's name before the state line and its tile at the end, without a menu. Its head is
-one row: the title with that menu (kept while the page is open), "Requests" with the count, the
-search, the settings and the avatar; the workers line is at the bottom, and a project archived
-from there shows its "Archived «name» · Undo" there. A project's row has its tile (with the
-bar's stripe running around it, at the bar's speed, while one of its sessions works and none
+its project's name before the state line and its tile at the end, without a menu, a working
+one's dot in that project's color, its unread count blue and "Draft" in the secondary text. Its
+head is one row: the title with that menu (kept while the page is open), "Requests" with the
+count, the search, the settings and the avatar; the workers line is at the bottom, and a project
+archived from there shows its "Archived «name» · Undo" there. A project's row has its tile (with
+the bar's stripe running around it, at the bar's speed, while one of its sessions works and none
 waits), its name (bold with unread events; in Spacious "N waiting · N running" under it), then a
-running mark with how many work, the amber count of those that wait and the count of those with unread
-events. A project opens its own screen, `#/p/<id>`, the session list; everything else replaces
+running mark in the project's own color with how many work, the amber count of those that wait
+and the count of those with unread events. A project opens its own screen, `#/p/<id>`, the session list; everything else replaces
 the screen as before. Both looks apply on a phone too: in Compact its list heads, groups and
 rows are denser and a row is one line with the state in the dot.
 

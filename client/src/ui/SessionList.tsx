@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
 import type { ListMode, Project, SessionInfo } from '../proto';
+import { colorHex } from '../theme';
 import { useSubscription } from './hooks';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { ArchiveList } from './Archive';
@@ -731,8 +732,9 @@ type CardHandlers = {
 };
 
 /** A session's state mark: a dot of its group (amber waits, the accent works, a ring is
- *  idle), `</>` while it is open in VS Code and not working there. */
-function StateMark({ s }: { s: SessionInfo }) {
+ *  idle), `</>` while it is open in VS Code and not working there. `color`: the project's own,
+ *  for a working dot in a list of several projects, where `--accent` is the last opened one's. */
+function StateMark({ s, color }: { s: SessionInfo; color?: string }) {
   const bucket = bucketOf(s);
   if (s.state === 'locked_vscode' && bucket !== 'run') {
     return (
@@ -741,7 +743,8 @@ function StateMark({ s }: { s: SessionInfo }) {
       </span>
     );
   }
-  return <span class={`dot dot-${bucket} state-${s.state}`} aria-hidden="true" />;
+  const style = bucket === 'run' && color ? { background: color } : undefined;
+  return <span class={`dot dot-${bucket} state-${s.state}`} style={style} aria-hidden="true" />;
 }
 
 /** A project's tile on a phone: its icon on its color at ~24 %; `named` where nothing else on
@@ -809,7 +812,7 @@ export function SessionRow({
   );
   const body = (
     <>
-      <StateMark s={s} />
+      <StateMark s={s} color={project && colorHex(project.color)} />
       <span class="session-main">
         <span class="session-top">
           <span class="session-title">{title}</span>

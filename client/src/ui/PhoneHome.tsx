@@ -8,6 +8,7 @@
 import { useRef, useState } from 'preact/hooks';
 import type { AppState, PhoneView } from '../app';
 import type { Project } from '../proto';
+import { colorHex } from '../theme';
 import { projectName } from './Appearance';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
@@ -157,8 +158,9 @@ function Projects({ app, onError }: { app: AppState; onError: (m: string) => voi
 
 /** A project: its tile (with the project bar's stripe around it, at the project's `rate`,
  *  while one of its sessions works and none waits), its name (bold with unread events; in the
- *  Spacious look "N waiting · N running" under it), then the running mark with how many run,
- *  the amber count of those that wait and the count of those with unread events. */
+ *  Spacious look "N waiting · N running" under it), then the running mark (in the project's
+ *  color) with how many run, the amber count of those that wait and the count of those with
+ *  unread events. */
 function ProjectRow({ p, c, rate, spacious }: { p: Project; c: Counts; rate: number; spacious: boolean }) {
   const sub = [c.wait && `${c.wait} waiting`, c.run && `${c.run} running`].filter(Boolean).join(' · ');
   return (
@@ -174,7 +176,8 @@ function ProjectRow({ p, c, rate, spacious }: { p: Project; c: Counts; rate: num
         </span>
         {c.run > 0 && (
           <span class="phone-run" aria-label={`running: ${c.run}`}>
-            <span class="dot dot-run" aria-hidden="true" />
+            {/* The project's own color: `--accent` is the last opened project's. */}
+            <span class="dot dot-run" aria-hidden="true" style={{ background: colorHex(p.color) }} />
             {c.run}
           </span>
         )}

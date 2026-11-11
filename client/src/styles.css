@@ -937,6 +937,20 @@ select.input {
   background: var(--unread);
   color: #fff;
 }
+/* The rest of the projects screen is not one project's either, so nothing there takes the color
+   of the project opened last: the sessions view's unread counts are blue as the projects', its
+   Draft label the secondary text, the count of open requests amber as what waits for the user. */
+.phone-home .session-row .badge {
+  background: var(--unread);
+  color: #fff;
+}
+.phone-home .session-draft {
+  color: var(--text2);
+}
+.phone-home .badge-request {
+  background: var(--waiting);
+  color: var(--waiting-ink);
+}
 /* A phone has no bar: over the projects screen's workers line, edge to edge (as specific as
    the rule above, and after it). */
 .sessions-phone.phone-home .toast-project {

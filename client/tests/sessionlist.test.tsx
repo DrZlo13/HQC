@@ -3678,6 +3678,9 @@ describe('a phone (< 900 px)', () => {
     // service sessions do not count.
     expect(['boards', 'Personal', 'physics-mp', 'kiln'].map(phoneMarks)).toEqual([['unread: 1'], [], ['running: 2', 'needs you: 1'], ['running: 2']]);
     expect(['boards', 'kiln'].map((n) => phoneRow(n).classList.contains('has-unread'))).toEqual([true, false]);
+    // The running dot is each project's own color (blue, coral), not the last opened project's.
+    const runDot = (n: string) => phoneRow(n).querySelector<HTMLElement>('.phone-run .dot')!.style.background;
+    expect(['physics-mp', 'kiln'].map(runDot)).toEqual(['#6E9BFF', '#F08A5D']);
     expect(root.querySelector('.group-all li:last-child .btn-new-project')!.textContent).toBe('New project');
     // The workers: one line at the bottom, their list above it on a press.
     expect(root.querySelector('.phone-home > .wline-box .wline-count')!.textContent).toBe('1 worker online');
@@ -3733,6 +3736,9 @@ describe('a phone (< 900 px)', () => {
     ]);
     const tile = (title: string) => rowOf(title).querySelector('.session-row > .phone-tile')!.getAttribute('aria-label');
     expect(['Network sync', 'Glaze test', 'Etching'].map(tile)).toEqual(['physics-mp', 'kiln', 'boards']);
+    // A working dot in its project's color (kiln's coral); waiting and idle keep theirs.
+    const dot = (title: string) => rowOf(title).querySelector<HTMLElement>('.session-row > .dot')!.style.background;
+    expect(['Glaze test', 'Network sync', 'Etching'].map(dot)).toEqual(['#F08A5D', '', '']);
     expect(rowOf('Etching').querySelector('a.session-row')!.getAttribute('href')).toBe('#/s/etch');
 
     // A project and back: still Sessions; nothing of it is stored.

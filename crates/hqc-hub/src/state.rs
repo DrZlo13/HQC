@@ -12,7 +12,10 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::{app::AppState, db::SessionRow};
+use crate::{
+    app::AppState,
+    db::{SessionRow, UNANSWERED_FAILED_INPUT},
+};
 
 /// Inputs of the §17.1 table.
 #[derive(Debug, Clone, Copy, Default)]
@@ -79,7 +82,7 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
     sqlx::query_as(&format!(
         "SELECT s.id,
             (SELECT count(*) FROM events e WHERE e.session_id = s.id AND e.delivery = 'pending') AS queue_len,
-            EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.delivery = 'failed') AS has_failed,
+            {UNANSWERED_FAILED_INPUT} AS has_failed,
             EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id AND p.closed_at IS NULL
                     AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'follow')) AS has_open_request,
             COALESCE(r.last_read_seq, 0) AS last_read_seq,

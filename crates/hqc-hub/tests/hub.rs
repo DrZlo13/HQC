@@ -375,6 +375,67 @@ async fn start_failures_fail_input_and_retry_requeues() {
     hub.finish().await;
 }
 
+/// 3b'. An input written after a failed one that reaches the agent ends the `error`: the owner
+/// has gone on. The failed input stays failed, for Retry (SPEC §17.1).
+#[tokio::test]
+async fn a_later_delivered_input_ends_the_error_of_a_failed_one() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("full").await;
+    ack_start(&mut w, &sid).await;
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (_, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "first"}),
+        )
+        .await;
+    let failed_id = r["event"]["event_id"].clone();
+
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    for _ in 0..3 {
+        let f = w.expect("session.start").await;
+        w.reply(
+            &f["id"],
+            "error",
+            json!({"code": "agent_start_failed", "message": "8 agents already run on this worker (max_sessions)", "retryable": true}),
+        )
+        .await;
+    }
+    hub.wait_session(&sid, "error", |v| v["state"] == "error")
+        .await;
+
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "again"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let input_id = r["event"]["event_id"].clone();
+    ack_start(&mut w, &sid).await;
+    let si = w.expect("session.input").await;
+    assert_eq!(si["payload"]["event_id"], input_id);
+    w.reply(&si["id"], "ack", json!({"event_id": input_id}))
+        .await;
+    w.event(agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "done", "final": true, "in_reply_to": input_id}),
+    ))
+    .await;
+    hub.wait_session(&sid, "idle", |v| v["state"] == "idle")
+        .await;
+
+    let events = hub.events(&sid).await;
+    let failed = events.iter().find(|e| e["event_id"] == failed_id).unwrap();
+    assert_eq!(failed["delivery"], "failed");
+    hub.finish().await;
+}
+
 /// 3c. A failed start is reported like the real worker does it: `session.state` starting and
 /// stopped around the `error`, in either order. The `stopped` must not restart the agent at
 /// once: starts are retried after `start_retry_delay`, three in all, and the input fails with

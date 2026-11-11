@@ -222,10 +222,10 @@ pub enum EventKind {
     /// none (since SPEC 0.101). Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "subagents.live")]
     SubagentsLive { agents: Vec<LiveSubagent> },
-    /// The output tokens per second of the responses the agent and its subagents finished
-    /// over the last 20 s (text, thinking and tool input; reading context does not count),
-    /// sent when it changes and 0 once the agent stops. Transport only, never stored (SPEC §4,
-    /// §5.2).
+    /// The output tokens per second the agent and its subagents spent over the last 20 s
+    /// (text, thinking and tool input; reading context does not count; a subagent's response
+    /// counts when it ends), sent when it changes and 0 once the agent stops. Transport only,
+    /// never stored (SPEC §4, §5.2).
     #[serde(rename = "tokens.rate")]
     TokensRate { output_per_s: u32 },
     #[serde(rename = "agent.message")]

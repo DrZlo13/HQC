@@ -3,7 +3,8 @@
 //! `session` rules live exactly as long as the process (SPEC §8.1).
 //!
 //! Mapping (SPEC §4, §8.1, docs/notes/claude-control-protocol.md):
-//! - `stream_event` `text_delta` → `agent.delta`; `message_delta` → its
+//! - `stream_event` `text_delta` → `agent.delta`; deltas (text, thinking, tool input at four
+//!   characters a token, redacted thinking at its `estimated_tokens`), then `message_delta`'s
 //!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`;
@@ -285,9 +286,15 @@ pub struct Core {
     /// it left running ends and the CLI resumes it; "the later one replaces what the earlier one
     /// showed", which an append-only feed cannot do).
     announced: HashSet<String>,
-    /// `output_tokens` of the main agent's responses since the last
-    /// [`Core::take_output_tokens`].
+    /// The main agent's output tokens since the last [`Core::take_output_tokens`]: those of
+    /// the response being written as estimated from its deltas, the rest of its
+    /// `usage.output_tokens` at its end.
     output_tokens: u64,
+    /// The response being written: characters of its deltas, the CLI's estimates of its
+    /// redacted thinking, and the tokens counted for it so far.
+    streamed_chars: u64,
+    streamed_estimated: u64,
+    streamed: u64,
     /// `session_id` of the latest `system/init`: its subagents' transcripts are in its folder.
     cli_session: Option<String>,
 }
@@ -333,6 +340,9 @@ impl Core {
             reported: HashSet::new(),
             announced: HashSet::new(),
             output_tokens: 0,
+            streamed_chars: 0,
+            streamed_estimated: 0,
+            streamed: 0,
             cli_session: None,
         }
     }
@@ -371,8 +381,9 @@ impl Core {
         self.rules.len()
     }
 
-    /// The output tokens of the main agent's responses since the last call (thinking and
-    /// tool input included).
+    /// The main agent's output tokens since the last call (thinking and tool input included):
+    /// those of the response being written as estimated from its deltas, the rest of its
+    /// `usage.output_tokens` at its end.
     pub fn take_output_tokens(&mut self) -> u64 {
         std::mem::take(&mut self.output_tokens)
     }
@@ -857,13 +868,42 @@ impl Core {
 
     fn on_stream_event(&mut self, v: &Value) -> Vec<Action> {
         let ev = &v["event"];
-        // One per response, at its end; a thinking delta carries at most a summary, not its
-        // tokens.
-        if ev["type"] == "message_delta" {
-            self.output_tokens += ev["usage"]["output_tokens"].as_u64().unwrap_or(0);
+        match ev["type"].as_str() {
+            Some("message_start") => {
+                (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0)
+            }
+            // The exact count comes once per response, at its end: it adds what the estimate
+            // of its deltas missed.
+            Some("message_delta") => {
+                let n = ev["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                self.output_tokens += n.saturating_sub(self.streamed);
+                (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
+            }
+            _ => {}
         }
-        if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
-            if let Some(t) = ev["delta"]["text"].as_str().filter(|t| !t.is_empty()) {
+        if ev["type"] != "content_block_delta" {
+            return vec![];
+        }
+        // While the response is written, its tokens are estimated, so a long answer speeds the
+        // rate up as it streams, not after it: a redacted thinking delta carries the CLI's own
+        // estimate of its tokens (`estimated_tokens`, an increment), any other delta its text,
+        // thinking summary or tool input at four characters a token, as the CLI counts.
+        let delta = &ev["delta"];
+        match delta["estimated_tokens"].as_u64() {
+            Some(n) => self.streamed_estimated += n,
+            None => {
+                let chunk = ["text", "thinking", "partial_json"]
+                    .iter()
+                    .find_map(|f| delta[f].as_str())
+                    .unwrap_or("");
+                self.streamed_chars += chunk.chars().count() as u64;
+            }
+        }
+        let estimate = self.streamed_estimated + self.streamed_chars / 4;
+        self.output_tokens += estimate - self.streamed;
+        self.streamed = estimate;
+        if delta["type"] == "text_delta" {
+            if let Some(t) = delta["text"].as_str().filter(|t| !t.is_empty()) {
                 return vec![self.emit_new(EventKind::AgentDelta { text: text(t) })];
             }
         }

@@ -3066,6 +3066,35 @@ fn output_tokens_are_counted_per_response() {
     assert_eq!(core.take_output_tokens(), 0);
 }
 
+/// A response's tokens count while it is written: its text, thinking summary and tool input
+/// at four characters a token, a redacted thinking delta at the CLI's `estimated_tokens`, then
+/// its `message_delta` adds only what that missed. A response cut off before its
+/// `message_delta` leaves nothing that the next one's count is reduced by.
+#[test]
+fn output_tokens_count_while_the_response_is_written() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let ev = |e: Value| json!({"type":"stream_event","parent_tool_use_id":null,"event":e});
+    let delta = |d: Value| ev(json!({"type":"content_block_delta","index":0,"delta":d}));
+    let start = ev(json!({"type":"message_start","message":{}})).to_string();
+    core.on_line(&start);
+    core.on_line(&delta(json!({"type":"text_delta","text":"x".repeat(4000)})).to_string());
+    assert_eq!(core.take_output_tokens(), 1000);
+    core.on_line(&start);
+    for d in [
+        json!({"type":"thinking_delta","thinking":"","estimated_tokens":50}),
+        json!({"type":"thinking_delta","thinking":"","estimated_tokens":30}),
+        json!({"type":"thinking_delta","thinking":"т".repeat(200)}),
+        json!({"type":"text_delta","text":"а".repeat(200)}),
+        json!({"type":"input_json_delta","partial_json":"b".repeat(200)}),
+    ] {
+        core.on_line(&delta(d).to_string());
+    }
+    assert_eq!(core.take_output_tokens(), 230);
+    let end = ev(json!({"type":"message_delta","delta":{},"usage":{"output_tokens":260}}));
+    core.on_line(&end.to_string());
+    assert_eq!(core.take_output_tokens(), 30);
+}
+
 /// After `--resume` the CLI starts from the transcript's last `cost-state`: the resumed
 /// turn costs 0.0043361 - 0.00398629. Without the baseline the whole total would be counted
 /// again (the "$44.401" of every line in T27's report).

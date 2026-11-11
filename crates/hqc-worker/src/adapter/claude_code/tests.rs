@@ -273,6 +273,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::Limits(_) => continue,
             // With every count and progress; `live_subagents_are_listed` looks at it.
             AdapterEvent::LiveSubagents(_) => continue,
+            // Counted every 2 s while the agent works, not by the stream's lines.
+            AdapterEvent::TokenRate(_) => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -3036,6 +3038,32 @@ fn turn_cost_is_the_growth_of_the_session_total() {
     ] {
         assert!(!list.contains(&c.to_string()), "{c} in {list:?}");
     }
+}
+
+/// The main agent's output tokens are the `usage.output_tokens` of each response's
+/// `message_delta`, thinking included: on this capture they add up to each turn's
+/// `result.usage.output_tokens` (5, then 80, 75 of it thinking). A subagent's stream line
+/// (`parent_tool_use_id` set) is not counted: its transcript is.
+#[test]
+fn output_tokens_are_counted_per_response() {
+    let stream =
+        include_str!("../../../../hqc-claude-jsonl/fixtures/stream-cost-turns-2.1.308.jsonl");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut turns = Vec::new();
+    for l in stream.lines() {
+        core.on_line(l);
+        if serde_json::from_str::<Value>(l).is_ok_and(|v| v["type"] == "result") {
+            turns.push(core.take_output_tokens());
+        }
+    }
+    assert_eq!(turns, [5, 80]);
+    let mut sub: Value = lines(stream)
+        .into_iter()
+        .find(|v| v["event"]["type"] == "message_delta")
+        .unwrap();
+    sub["parent_tool_use_id"] = json!("toolu_01");
+    core.on_line(&sub.to_string());
+    assert_eq!(core.take_output_tokens(), 0);
 }
 
 /// After `--resume` the CLI starts from the transcript's last `cost-state`: the resumed

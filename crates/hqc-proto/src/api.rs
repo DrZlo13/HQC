@@ -85,6 +85,10 @@ pub struct Session {
     /// — 0.
     #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
     pub background_tasks: u32,
+    /// The output tokens per second of the session's agent and its subagents, as its worker
+    /// last sent them (`tokens.rate`, kept in the hub's memory). Absent — 0.
+    #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
+    pub output_per_s: u32,
     /// When the requesting user made the session a favorite (`PUT .../favorite`); favorites
     /// are per user. Absent — not a favorite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,6 +121,7 @@ impl Session {
             permission_capped_by: self.permission_capped_by.clone(),
             subagents: self.subagents,
             background_tasks: self.background_tasks,
+            output_per_s: self.output_per_s,
             favorite_at: self.favorite_at,
         }
     }

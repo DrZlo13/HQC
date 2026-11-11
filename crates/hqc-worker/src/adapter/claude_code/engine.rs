@@ -3,7 +3,8 @@
 //! `session` rules live exactly as long as the process (SPEC §8.1).
 //!
 //! Mapping (SPEC §4, §8.1, docs/notes/claude-control-protocol.md):
-//! - `stream_event` `text_delta` → `agent.delta`;
+//! - `stream_event` `text_delta` → `agent.delta`; `message_delta` → its
+//!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`;
 //! - `assistant` `tool_use` → `tool.call`; non-empty `thinking` → `agent.thinking`;
@@ -284,6 +285,11 @@ pub struct Core {
     /// it left running ends and the CLI resumes it; "the later one replaces what the earlier one
     /// showed", which an append-only feed cannot do).
     announced: HashSet<String>,
+    /// `output_tokens` of the main agent's responses since the last
+    /// [`Core::take_output_tokens`].
+    output_tokens: u64,
+    /// `session_id` of the latest `system/init`: its subagents' transcripts are in its folder.
+    cli_session: Option<String>,
 }
 
 impl Core {
@@ -326,6 +332,8 @@ impl Core {
             held_ends: BTreeMap::new(),
             reported: HashSet::new(),
             announced: HashSet::new(),
+            output_tokens: 0,
+            cli_session: None,
         }
     }
 
@@ -361,6 +369,27 @@ impl Core {
 
     pub fn session_rules(&self) -> usize {
         self.rules.len()
+    }
+
+    /// The output tokens of the main agent's responses since the last call (thinking and
+    /// tool input included).
+    pub fn take_output_tokens(&mut self) -> u64 {
+        std::mem::take(&mut self.output_tokens)
+    }
+
+    /// A turn runs, or a subagent does.
+    pub fn working(&self) -> bool {
+        self.in_turn || self.self_turn || !self.live.is_empty()
+    }
+
+    /// The CLI's session id, from its latest `system/init`.
+    pub fn cli_session(&self) -> Option<&str> {
+        self.cli_session.as_deref()
+    }
+
+    /// The `task_id`s of the subagents of [`Core::live`].
+    pub fn live_ids(&self) -> Vec<String> {
+        self.live.iter().map(|a| a.task_id.clone()).collect()
     }
 
     // ---- from the supervisor -------------------------------------------------------
@@ -670,6 +699,7 @@ impl Core {
                         }));
                     }
                     self.model = v["model"].as_str().map(str::to_owned);
+                    self.cli_session = v["session_id"].as_str().map(str::to_owned);
                     out.extend(self.on_mode(&v["permissionMode"], false));
                     out.extend(self.on_init(&v));
                     out
@@ -827,6 +857,11 @@ impl Core {
 
     fn on_stream_event(&mut self, v: &Value) -> Vec<Action> {
         let ev = &v["event"];
+        // One per response, at its end; a thinking delta carries at most a summary, not its
+        // tokens.
+        if ev["type"] == "message_delta" {
+            self.output_tokens += ev["usage"]["output_tokens"].as_u64().unwrap_or(0);
+        }
         if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
             if let Some(t) = ev["delta"]["text"].as_str().filter(|t| !t.is_empty()) {
                 return vec![self.emit_new(EventKind::AgentDelta { text: text(t) })];

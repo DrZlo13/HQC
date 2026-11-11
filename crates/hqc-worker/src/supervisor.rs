@@ -38,7 +38,9 @@
 //!   ([`AdapterEvent::BackgroundTasks`]) are repeated in every `session.state` like `title`,
 //!   0 when the agent is stopped. The subagents' list ([`AdapterEvent::LiveSubagents`]) goes
 //!   as `subagents.live`, empty when the agent is stopped; the last one sent is sent again on
-//!   every connect unless it was empty, its run times counted then.
+//!   every connect unless it was empty, its run times counted then. The token rate
+//!   ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once when the agent
+//!   stops.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -889,6 +891,7 @@ impl Supervisor {
             subagents: 0,
             live: None,
             background_tasks: 0,
+            token_rate: 0,
             stop_asked: false,
             stopped_by_move: 0,
             delivered: VecDeque::new(),
@@ -1001,6 +1004,8 @@ struct Session {
     /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]), repeated
     /// in every `session.state`.
     background_tasks: u32,
+    /// The last `tokens.rate` sent.
+    token_rate: u32,
     /// A `session.stop` came since the last end of a turn: an input the runtime drops then
     /// was cancelled by the person, not lost ([`Session::end_turn`]).
     stop_asked: bool,
@@ -1177,6 +1182,11 @@ impl Session {
                         a.duration_ms = a.duration_ms.saturating_add(age);
                     }
                     self.live_subagents(agents);
+                }
+                // So was a rate; the hub dropped the session's rate when the link went, so a
+                // rate above 0 is sent again.
+                if self.token_rate != 0 {
+                    self.tokens_rate(self.token_rate);
                 }
             }
             Cmd::Release => self.release().await,
@@ -1710,6 +1720,13 @@ impl Session {
                     self.send_state();
                 }
             }
+            // As the count: a rate read from a process already stopped would outlive it.
+            AdapterEvent::TokenRate(r) => {
+                if self.state != ProcessState::Stopped && self.token_rate != r {
+                    self.token_rate = r;
+                    self.tokens_rate(r);
+                }
+            }
             AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
             AdapterEvent::RuntimeSessionId(r) => {
                 self.runtime_session_id = Some(r);
@@ -1966,6 +1983,10 @@ impl Session {
             self.live = None;
             self.live_subagents(vec![]);
             self.background_tasks = 0;
+            if self.token_rate != 0 {
+                self.token_rate = 0;
+                self.tokens_rate(0);
+            }
         }
         if self.state != s {
             self.state = s;
@@ -2016,6 +2037,18 @@ impl Session {
         );
         if let Err(e) = self.link.event(ev) {
             tracing::error!(session_id = %self.id, "subagents.live not sent: {e:#}");
+        }
+    }
+
+    /// `tokens.rate` with `output_per_s`: sent directly, never stored (SPEC §4).
+    fn tokens_rate(&self, output_per_s: u32) {
+        let ev = crate::adapter::new_event(
+            self.id,
+            hqc_proto::event::Author::Agent { id: self.id },
+            EventKind::TokensRate { output_per_s },
+        );
+        if let Err(e) = self.link.event(ev) {
+            tracing::error!(session_id = %self.id, "tokens.rate not sent: {e:#}");
         }
     }
 

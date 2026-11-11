@@ -9,10 +9,12 @@
 //!   [`ClaudeOptions::stop_grace`], the process group gets SIGINT.
 //! - `kill` sends SIGTERM to the process group, SIGKILL after 5 s.
 //! - A process that exits by itself is reported as [`AdapterEvent::Exited`].
+//! - While it runs, its token rate is counted every 2 s ([`rate`]).
 
 pub mod engine;
 pub mod paths;
 pub mod process;
+pub mod rate;
 pub mod rules;
 pub mod scripted;
 
@@ -782,6 +784,7 @@ impl ClaudeCodeAdapter {
             ssh_agent,
             fork_copy,
         ));
+        tokio::spawn(rate::meter(core.clone(), io.clone(), exited.clone()));
         let mut proc = Proc {
             core,
             io,

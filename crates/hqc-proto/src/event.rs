@@ -222,6 +222,12 @@ pub enum EventKind {
     /// none (since SPEC 0.101). Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "subagents.live")]
     SubagentsLive { agents: Vec<LiveSubagent> },
+    /// The output tokens per second of the responses the agent and its subagents finished
+    /// over the last 20 s (text, thinking and tool input; reading context does not count),
+    /// sent when it changes and 0 once the agent stops. Transport only, never stored (SPEC §4,
+    /// §5.2).
+    #[serde(rename = "tokens.rate")]
+    TokensRate { output_per_s: u32 },
     #[serde(rename = "agent.message")]
     AgentMessage {
         text: String,
@@ -385,6 +391,7 @@ impl EventKind {
         "user.message",
         "agent.delta",
         "subagents.live",
+        "tokens.rate",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -508,6 +515,7 @@ mod tests {
         "user.message",
         "agent.delta",
         "subagents.live",
+        "tokens.rate",
         "agent.message",
         "agent.thinking",
         "tool.call",
@@ -538,6 +546,10 @@ mod tests {
         (
             "subagents.live",
             include_str!("../examples/wire/event.subagents.live.json"),
+        ),
+        (
+            "tokens.rate",
+            include_str!("../examples/wire/event.tokens.rate.json"),
         ),
         (
             "agent.message",
@@ -600,6 +612,7 @@ mod tests {
             EventKind::UserMessage { .. } => "user.message",
             EventKind::AgentDelta { .. } => "agent.delta",
             EventKind::SubagentsLive { .. } => "subagents.live",
+            EventKind::TokensRate { .. } => "tokens.rate",
             EventKind::AgentMessage { .. } => "agent.message",
             EventKind::AgentThinking { .. } => "agent.thinking",
             EventKind::ToolCall { .. } => "tool.call",

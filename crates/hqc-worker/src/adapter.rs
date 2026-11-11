@@ -58,6 +58,12 @@ pub enum AdapterEvent {
     /// §17.3), and a move tells the agent how many it stopped (SPEC §5.3). Reported when it
     /// changes.
     BackgroundTasks(u32),
+    /// The output tokens per second of the responses the agent and its subagents finished
+    /// over the last 20 s (Claude Code: `output_tokens` of the main agent's `message_delta` and
+    /// of each response in its subagents' transcripts), every 2 s while a turn or a subagent
+    /// runs, 0 once neither does; sent as `tokens.rate`, transport only (SPEC §4). Reported
+    /// when it changes.
+    TokenRate(u32),
     /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
     /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
     Limits(hqc_proto::frame::Limits),

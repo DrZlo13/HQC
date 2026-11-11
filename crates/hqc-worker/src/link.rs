@@ -2,9 +2,9 @@
 //!
 //! Stored events and `mcp.call` go through the outbox (SPEC §5.2): written first, then the
 //! connection is woken to send them. Everything else (`agent.delta`, `subagents.live`,
-//! replies to hub frames, `session.state`, `mcp.cancel`) is sent directly when connected and
-//! dropped otherwise: the hub resends pending inputs after `hello` and the supervisor resends
-//! `session.state` on connect.
+//! `tokens.rate`, replies to hub frames, `session.state`, `mcp.cancel`) is sent directly when
+//! connected and dropped otherwise: the hub resends pending inputs after `hello` and the
+//! supervisor resends `session.state` on connect.
 
 use std::sync::Arc;
 
@@ -98,7 +98,9 @@ impl HubLink {
     pub fn event(&self, ev: Event) -> anyhow::Result<()> {
         if matches!(
             ev.kind,
-            EventKind::AgentDelta { .. } | EventKind::SubagentsLive { .. }
+            EventKind::AgentDelta { .. }
+                | EventKind::SubagentsLive { .. }
+                | EventKind::TokensRate { .. }
         ) {
             self.send(WorkerFrame::Event { event: ev });
             return Ok(());

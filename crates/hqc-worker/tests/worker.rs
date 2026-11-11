@@ -3060,6 +3060,50 @@ async fn live_agents(c: &mut HubConn) -> Value {
     }
 }
 
+// The token rate goes as `tokens.rate` when it changes; one above 0 is sent again on the next
+// connect (the hub dropped it with the link), a 0 is not; the agent stopped, it sends 0.
+#[tokio::test]
+async fn a_token_rate_is_sent_again_on_connect() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    adapters.emit(sid, AdapterEvent::TokenRate(42)).await;
+    assert_eq!(token_rate(&mut c).await, 42);
+    c.close().await;
+    c = hub.accept().await;
+    c.handshake().await;
+    assert_eq!(token_rate(&mut c).await, 42);
+    adapters.emit(sid, AdapterEvent::TokenRate(0)).await;
+    assert_eq!(token_rate(&mut c).await, 0);
+    c.close().await;
+    c = hub.accept().await;
+    c.handshake().await;
+    while let Some(f) = c.maybe("event", Duration::from_millis(300)).await {
+        assert_ne!(f["payload"]["event"]["type"], "tokens.rate", "{f}");
+    }
+    adapters.emit(sid, AdapterEvent::TokenRate(7)).await;
+    assert_eq!(token_rate(&mut c).await, 7);
+    let fk = c.frame("session.kill", json!({"session_id": sid})).await;
+    assert_eq!(token_rate(&mut c).await, 0);
+    ack_of(&mut c, &fk).await;
+    w.stop().await;
+}
+
+/// `output_per_s` of the next `tokens.rate`; other events read meanwhile are dropped.
+async fn token_rate(c: &mut HubConn) -> Value {
+    loop {
+        let f = c.expect("event").await;
+        if f["payload"]["event"]["type"] == "tokens.rate" {
+            return f["payload"]["event"]["payload"]["output_per_s"].clone();
+        }
+    }
+}
+
 /// The reply (`ack` or `error`) to frame `id`, skipped or next; other replies read meanwhile
 /// are dropped.
 async fn reply_to(c: &mut HubConn, id: &str) -> Value {

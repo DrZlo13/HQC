@@ -306,8 +306,9 @@ reported the agent runs in, `session.state.permission_mode`, §5.4; what the cli
 from `session.state.capped_input`, §5.4), `subagents` (since 0.70: the subagents the agent
 runs now, from `session.state.subagents`, §5.4; 0 after a worker restart),
 `background_tasks` (since 0.104: the background tasks the runtime lists for the agent now,
-from `session.state.background_tasks`, §5.4; 0 after a worker restart). In
-`ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
+from `session.state.background_tasks`, §5.4; 0 after a worker restart), `output_per_s` (since
+0.122: the session's latest `tokens.rate`, §4; absent — 0, also after its worker disconnects).
+In `ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
 classifier decides and never asks (§8.1); the worker's `deny` stops a call in both. `state` and
 `queue_len` (§17.1) are **not stored**; the hub computes them when serving. In the first version
 a session has exactly one agent; people's access to a session is determined by Grant only.
@@ -470,6 +471,7 @@ the client renders only them. The "source" column is the component that produces
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent |
+| `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
@@ -542,6 +544,11 @@ Rules:
   session's subscribers an empty one, when the worker's `hello` says it restarted (every
   session of that worker), when `session.state` reports `subagents` 0 (§5.4) and when the
   session is deleted; a client that falls behind gets an empty list when none is kept.
+- `tokens.rate` (since 0.122) goes to clients in the session object and `session.summary` as
+  `output_per_s` (§6), not as an event, and is not saved either. The hub keeps a session's
+  latest rate in memory while it is above 0 and drops the rates of a worker's sessions when that
+  worker disconnects or says `hello` again (the worker sends a rate above 0 again after
+  `hello.ack`), and a session's when it or its project is deleted.
 - History is never rewritten: besides an input's `delivery` and `delivered_at` (§3 Event), the
   one change of a stored event is `joined` of a person's `user.message` (since 0.112, §17.2).
   Protection against forged peer-message headers is applied on delivery to the runtime (§7.1).
@@ -696,7 +703,8 @@ Worker → hub:
 - `seq` is assigned by the hub; clients see only events with a `seq`.
 - `agent.delta` is not written to the outbox and is lost on a disconnect; that is acceptable. It
   goes in the same `event` frame; the hub answers `ack {event_id}` without `seq` and does not
-  store it. So does `subagents.live` (since 0.113); a `mirror.event` of either is dropped.
+  store it. So do `subagents.live` (since 0.113) and `tokens.rate` (since 0.122); a
+  `mirror.event` of any of them is dropped.
 - The `ack` to `session.input` and `agent.delta` bypass the outbox, while the turn's events go
   through it, so the hub may receive the input's `ack` and the deltas later than the
   `tool.call`/`approval.request` of the same turn. The hub does not rely on the order between
@@ -1689,7 +1697,7 @@ acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, archived_at?, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
 updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?,
-permission_capped_by?, subagents?, background_tasks?}`.
+permission_capped_by?, subagents?, background_tasks?, output_per_s?}`.
 `subagents` (since 0.70): the subagents the agent runs now, from `session.state` (§5.4);
 absent — 0. The client shows "N agents" ("1 agent") next to the state in the chat header and in
 the session's row of the list while it is above 0; a background subagent keeps it up after the
@@ -1768,9 +1776,10 @@ newer copy).
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
   permission_mode?, effective_permission_mode?, permission_capped_by?, subagents?,
-  background_tasks?}` (the same as in the session object; the modes since 0.42, so the header
-  follows a switch the worker confirms, the cap since 0.43, `subagents` since 0.70,
-  `background_tasks` since 0.104); `{type: requests, requests[]}` (since 0.41, T37,
+  background_tasks?, output_per_s?}` (the same as in the session object; the modes since 0.42,
+  so the header follows a switch the worker confirms, the cap since 0.43, `subagents` since
+  0.70, `background_tasks` since 0.104, `output_per_s` since 0.122); `{type: requests,
+  requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -2667,6 +2676,18 @@ counting is forgotten. The worker sends `subagents.live` directly, not through t
 when it stops; after every reconnect it sends the last list it sent again, unless that one was
 empty, `duration_ms` grown by the time since it was sent, since a restarted hub has none and
 lists sent while disconnected are lost.
+Since 0.122 the adapter counts the session's token rate (`tokens.rate`, §4) every 2 s. The main
+agent's response counts while it is written: a redacted thinking delta at its
+`estimated_tokens` (the CLI's own estimate), any other `stream_event` delta (text, thinking
+summary, tool input) at four characters a token; its `message_delta` (one per response, at its
+end) adds what that missed of its `usage.output_tokens`. A subagent of `subagents.live`, and
+once more after it ends, gives the responses new in its transcript
+`<projects folder>/<CLI session id>/subagents/agent-<task_id>.jsonl` (each counts when its line
+is written, so a long one counts at its end; 2.1.312: each content block is a line, the lines
+of one response share `message.id` and its `usage`, counted once; lines written before the
+process started do not count). The rate is their sum over the last 20 s per second, rounded;
+it is sent when it changes, directly, not through the outbox, 0 when the agent's process stops,
+and again after a reconnect when it is above 0.
 The CLI repeats on stdout every `control_response` the adapter sent to stdin;
 the adapter skips those lines. `in_reply_to` = the `event_id` of the turn's input, as above,
 once its echo has come (since 0.69; before that, none); an input written into a running turn
@@ -4243,9 +4264,9 @@ buffered send from a session in `ask` (§7.1).
 - Hub restart: workers reconnect and resend their outbox; `PendingRequest`s
   are restored from the database, undelivered `mcp.result`s are resent.
 - Turn watchdog **[decision]**. If a session is `running` (§17.1) and its worker has sent no
-  event for it, `agent.delta` and (since 0.113) `subagents.live` included, for longer than
-  `HQC_TURN_WATCHDOG_S` (default 900 s, `0` turns it off), the hub considers the turn lost: it
-  cancels open
+  event for it, `agent.delta`, (since 0.113) `subagents.live` and (since 0.122) `tokens.rate`
+  included, for longer than `HQC_TURN_WATCHDOG_S` (default 900 s, `0` turns it off), the hub
+  considers the turn lost: it cancels open
   `approval`/`clarify` with `timeout`, closes the turn without a final message
   (the input stays `delivered`), writes `system turn_lost` with the text "no events for N s",
   and the session shows `error` until the next input. The countdown runs from the worker's last
@@ -4502,6 +4523,18 @@ message.uuid", and every input to the fork failed. The Claude Code adapter now f
 the source cut right after the record, in which that record is the newest, and removes the
 copy when the process exits. No frame or hub change. 0.120–0.122 are taken by other pull
 requests.
+
+### 0.118 → 0.122 (a session's token rate)
+§4, §5.2, §6, §8.1, §17: a new event `tokens.rate`, transport only like `subagents.live`, carries
+the output tokens per second the agent and its subagents spent over the last 20 s: the worker
+estimates the main agent's response from its stream deltas while it is written and makes it
+exact by its `message_delta`, and reads a subagent's responses from its transcript; it sends
+the rate every 2 s when it changes, 0 when the process stops, and again after a reconnect. The
+hub keeps a session's rate in memory while above 0, drops a worker's rates when it disconnects
+or says `hello` again, and gives it to clients as `output_per_s` of the session object and
+`session.summary`, sent when it changes; deleting the session or its project drops it. Like
+`subagents.live`, it counts as the worker's activity for the turn watchdog (§17). No migration.
+0.119–0.121 are taken by other pull requests.
 
 ### 0.118 → 0.121 (a turn the CLI starts by itself is running)
 §4, §8.1, §17.1: the Claude Code adapter sends `status running` on the `system/init` of a turn

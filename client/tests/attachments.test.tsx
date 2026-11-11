@@ -12,6 +12,7 @@ import { ArtifactStore, formatSize } from '../src/artifacts';
 import { parseEvent, type Artifact, type ArtifactUrl, type HqcEvent } from '../src/proto';
 import { ChatSession, type OutgoingFile } from '../src/session';
 import { Timeline } from '../src/timeline';
+import { ArtifactViewer } from '../src/ui/attachments';
 import { ChatItems, type ChatActions } from '../src/ui/cards';
 import { Composer, toOutgoing } from '../src/ui/Chat';
 import { Markdown, diffClass, filePath } from '../src/ui/Markdown';
@@ -483,6 +484,42 @@ describe('rendering attachments', () => {
     expect(cards[1].querySelector('.relay-files')).toBeNull();
   });
 
+  it('with the viewer an image and a Markdown text open in it, other text in a tab', async () => {
+    const metas = [
+      meta('img', 'image', 'screen.png'),
+      meta('md', 'text', 'report.md'),
+      meta('plan', 'text', 'PLAN.Markdown'),
+      { ...meta('typed', 'text', 'summary'), mime: 'text/markdown; charset=utf-8' },
+      meta('txt', 'text', 'notes.txt'),
+    ];
+    const store = new ArtifactStore(fakeSource(metas) as never);
+    const viewArtifact = vi.fn();
+    const { el, actions } = chatWith(
+      [
+        ev('event.user.message', (e) => {
+          e.seq = 1;
+          e.payload = { text: 'Look', artifact_ids: metas.map((m) => m.id) };
+        }),
+      ],
+      store,
+      { viewArtifact },
+    );
+    await flush();
+    await flush();
+    await act(async () => el.querySelector<HTMLButtonElement>('.attachment-image')!.click());
+    expect(viewArtifact).toHaveBeenLastCalledWith({ id: 'img', name: 'screen.png', kind: 'image' });
+    const open = (name: string) =>
+      [...el.querySelectorAll('.card-attachment')].find((c) => c.textContent!.includes(name))!.querySelector<HTMLButtonElement>('button')!;
+    for (const m of metas.slice(1, 4)) {
+      await act(async () => open(m.name).click());
+      expect(viewArtifact).toHaveBeenLastCalledWith({ id: m.id, name: m.name, kind: 'markdown' });
+    }
+    expect(actions.openArtifact).not.toHaveBeenCalled();
+    await act(async () => open('notes.txt').click());
+    expect(actions.openArtifact).toHaveBeenLastCalledWith('txt');
+    expect(viewArtifact).toHaveBeenCalledTimes(4);
+  });
+
   it('without a store an attachment is a card from the event alone', () => {
     const { el } = chatWith([ev('event.attachment')]);
     expect(el.querySelector('.card-attachment .card-title')!.textContent).toContain('screen.png');
@@ -502,6 +539,87 @@ describe('rendering attachments', () => {
     );
     expect(el.querySelector<HTMLImageElement>('.msg-pending img')!.alt).toBe('a.png');
     expect(el.querySelector('.msg-pending .attachment-chip')!.textContent).toBe('b.txt 2.0 KB');
+  });
+});
+
+describe('the viewer over the chat (SPEC §12)', () => {
+  const viewer = (kind: 'image' | 'markdown', store: ArtifactStore, onClose = vi.fn(), onDownload = vi.fn()) =>
+    mount(<ArtifactViewer id="a" name={kind === 'image' ? 'screen.png' : 'report.md'} kind={kind} store={store} onClose={onClose} onDownload={onDownload} />);
+
+  it('renders a Markdown text as the feed does; Escape closes it and no key reaches the page', async () => {
+    const fetchImpl = vi.fn(async () => new Response('# Report\n\n| Step | Days |\n|---|---|\n| Design | 2 |\n'));
+    const store = new ArtifactStore(fakeSource([]) as never, fetchImpl as never);
+    const onClose = vi.fn();
+    const onDownload = vi.fn();
+    // The request card takes Enter and Escape on `document`.
+    const heard = vi.fn();
+    document.addEventListener('keydown', heard);
+    try {
+      const el = viewer('markdown', store, onClose, onDownload);
+      const dialog = el.querySelector('[role=dialog]')!;
+      expect(dialog.getAttribute('aria-modal')).toBe('true');
+      expect(dialog.querySelector('.viewer-body')!.textContent).toBe('loading…');
+      await flush();
+      expect(fetchImpl).toHaveBeenCalledWith('/artifacts/a?exp=1&sig=s1');
+      expect(dialog.querySelector('.md h1')!.textContent).toBe('Report');
+      expect([...dialog.querySelectorAll('.md-table th')].map((c) => c.textContent)).toEqual(['Step', 'Days']);
+      expect([...dialog.querySelectorAll('.md-table td')].map((c) => c.textContent)).toEqual(['Design', '2']);
+      // The text has the focus, so Space and the arrows scroll it instead of pressing "Close".
+      const body = dialog.querySelector<HTMLElement>('.viewer-body')!;
+      expect(document.activeElement).toBe(body);
+      // A browser focuses a <div> only with a tabindex (happy-dom focuses any element).
+      expect(body.getAttribute('tabindex')).toBe('-1');
+
+      await act(async () => void body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+      expect(onClose).not.toHaveBeenCalled();
+      await act(async () => void body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(heard).not.toHaveBeenCalled();
+      await act(async () => [...dialog.querySelectorAll('button')].find((b) => b.textContent === 'Download')!.click());
+      expect(onDownload).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener('keydown', heard);
+    }
+  });
+
+  it('a text that fails to load says why', async () => {
+    const fetchImpl = vi.fn(async () => new Response('x', { status: 500 }));
+    const el = viewer('markdown', new ArtifactStore(fakeSource([]) as never, fetchImpl as never));
+    await flush();
+    expect(el.querySelector('.viewer-body .error-text')!.textContent).toContain('HTTP 500');
+  });
+
+  it('an image from its signed link, renewed once when refused', async () => {
+    const el = viewer('image', new ArtifactStore(fakeSource([]) as never));
+    await flush();
+    let img = el.querySelector<HTMLImageElement>('.viewer-body img')!;
+    expect(img.getAttribute('src')).toBe('/artifacts/a?exp=1&sig=s1');
+    expect(img.alt).toBe('screen.png');
+    await act(async () => void img.dispatchEvent(new Event('error')));
+    await flush();
+    img = el.querySelector<HTMLImageElement>('.viewer-body img')!;
+    expect(img.getAttribute('src')).toBe('/artifacts/a?exp=1&sig=s2');
+  });
+
+  it('a click outside it or on its close button closes it, a click inside or a selection ending outside does not', async () => {
+    const onClose = vi.fn();
+    const el = viewer('image', new ArtifactStore(fakeSource([]) as never), onClose);
+    await flush();
+    const img = el.querySelector<HTMLElement>('.viewer-body img')!;
+    const scrim = el.querySelector<HTMLElement>('.modal-scrim')!;
+    const down = (on: HTMLElement) => act(async () => void on.dispatchEvent(new Event('pointerdown', { bubbles: true })));
+    await down(img);
+    await act(async () => img.click());
+    expect(onClose).not.toHaveBeenCalled();
+    // A selection started in the panel and let go on the scrim: the browser clicks the scrim.
+    await down(img);
+    await act(async () => scrim.click());
+    expect(onClose).not.toHaveBeenCalled();
+    await down(scrim);
+    await act(async () => scrim.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await act(async () => el.querySelector<HTMLButtonElement>('button[aria-label=Close]')!.click());
+    expect(onClose).toHaveBeenCalledTimes(2);
   });
 });
 

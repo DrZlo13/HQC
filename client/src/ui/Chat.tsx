@@ -6,6 +6,7 @@ import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import { ChatSession, type OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelField } from './agentSettings';
+import { ArtifactViewer, type ViewedArtifact } from './attachments';
 import { Limits } from './limits';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
@@ -50,6 +51,8 @@ export function Chat({
   const [schedules, setSchedules] = useState(false);
   const [moving, setMoving] = useState(false);
   const artifacts = useMemo(() => new ArtifactStore(app.api), [app]);
+  // The image or Markdown text shown in the viewer over the chat.
+  const [viewing, setViewing] = useState<ViewedArtifact | null>(null);
   const peerMessage = useMemo(() => peerMessages(app.api), [app]);
   const [files, setFiles] = useState<OutgoingFile[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -157,6 +160,7 @@ export function Chat({
           setNotice(`Attachment unavailable: ${e.message}`);
         });
     },
+    viewArtifact: setViewing,
   };
 
   const act = (fn: () => Promise<void>, failed: string) =>
@@ -548,6 +552,15 @@ export function Chat({
             chat.send(text, files);
             setFiles([]);
           }}
+        />
+      )}
+      {viewing && (
+        <ArtifactViewer
+          {...viewing}
+          store={artifacts}
+          phone={phone}
+          onClose={() => setViewing(null)}
+          onDownload={() => actions.openArtifact(viewing.id, true)}
         />
       )}
     </section>

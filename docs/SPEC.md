@@ -3627,8 +3627,13 @@ what is already uploaded. The worker puts them into `.hqc/inbox/` and substitute
 of `user.message` and `attachment` events render the same way: image — inline, diff — a code
 block with added and removed lines highlighted (up to 512 KB, larger as a card), html — an
 iframe from the artifacts domain or an "Open" link, text and file — a card with the name,
-size and "Open" (except file) and "Download" buttons. Agent → user: `hqc_attach` (§7, since
-0.34): the worker uploads the file with `PUT /worker/artifacts` (§5.4) under the worker token
+size and "Open" (except file) and "Download" buttons. In a chat a click on an image and
+"Open" of a Markdown text (a text named `.md` or `.markdown`, or typed `text/markdown`) show it
+in a viewer over the chat: the image fitted to the window, the Markdown rendered as the agent's
+messages; the viewer has "Download" and closes on its cross, Escape or a click outside it, and
+while it is open no key reaches the chat (a request card's Enter and Escape). Other text opens
+in a new tab. Agent → user: `hqc_attach` (§7, since 0.34): the worker uploads the file with
+`PUT /worker/artifacts` (§5.4) under the worker token
 for one of its sessions; the owner is the session's owner, dedup and `kind` as for the client's
 upload; the artifact is linked to the session in `artifact_sessions`, which is what the tool
 checks (and the session's worker may download it back). The `attachment` event renders like a
@@ -4396,6 +4401,12 @@ after a later input reached the agent and its turn ended well. A spawned session
 input failed on the worker's `max_sessions` showed Error under "Needs you" while it answered the
 next message. Such an input now keeps `error` only while no later input was delivered after it;
 it stays `failed`, and Retry still sends it again. 0.109–0.116 are taken by other pull requests.
+
+### 0.108 → 0.116 (images and Markdown open in a viewer over the chat)
+§12 Client: a click on an image in the chat and "Open" of a Markdown attachment show it in a
+viewer over the chat instead of a new browser tab, which showed a Markdown report as raw text
+with its `#`, `*` and `|`; the Markdown is rendered by the feed's renderer, "Download" still
+gives the file as it is. 0.109–0.115 are taken by other pull requests.
 
 ### 0.108 → 0.115 (no `0 → 0 tokens` line for a background subagent's spending)
 §4 `usage`, §8.1: the CLI closes a turn without calling the model on a background subagent's

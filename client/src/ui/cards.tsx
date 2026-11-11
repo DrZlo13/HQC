@@ -7,7 +7,7 @@ import { useState } from 'preact/hooks';
 import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
-import { AttachmentView, PendingAttachments } from './attachments';
+import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attachments';
 import {
   askTarget,
   buildFeed,
@@ -61,6 +61,9 @@ export interface ChatActions {
   discard(clientOpId: string): void;
   /** Opens the artifact in a new tab; `download`: as an attachment. */
   openArtifact(id: string, download?: boolean): void;
+  /** Shows an image or a Markdown text in the viewer over the chat; absent (the requests
+   *  screen): they open as `openArtifact`. */
+  viewArtifact?(a: ViewedArtifact): void;
   /** Metadata and signed links of artifacts; without it attachments are plain cards. */
   artifacts?: ArtifactStore;
   /** Wall clock, injectable for tests. */

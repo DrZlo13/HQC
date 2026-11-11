@@ -109,9 +109,9 @@ export function PhoneHome({ app }: { app: AppState }) {
   );
 }
 
-/** The projects in four groups, each in the bar's order and each project in one of them:
- *  Needs you, Running (none waits), Favorites (a favorite only there, whatever its sessions
- *  do), and the other projects with "New project" last. */
+/** The projects in four groups, each in the bar's order and each project in the first that
+ *  takes it: Favorites (whatever its sessions do), Needs you, Running (none waits), and the
+ *  other projects with "New project" last. */
 function Projects({ app, onError }: { app: AppState; onError: (m: string) => void }) {
   const counts = projectCounts(app);
   const of = (p: Project) => counts.get(p.id) ?? NONE;
@@ -119,9 +119,9 @@ function Projects({ app, onError }: { app: AppState; onError: (m: string) => voi
   const free = all.filter((p) => !p.favorite_at);
   const rest = free.filter((p) => of(p).wait === 0 && of(p).run === 0);
   const groups = [
+    { id: 'favorites', label: 'Favorites', items: all.filter((p) => p.favorite_at) },
     { id: 'wait', label: 'Needs you', items: free.filter((p) => of(p).wait > 0) },
     { id: 'run', label: 'Running', items: free.filter((p) => of(p).wait === 0 && of(p).run > 0) },
-    { id: 'favorites', label: 'Favorites', items: all.filter((p) => p.favorite_at) },
     { id: 'all', label: rest.length === all.length ? 'All projects' : 'Other projects', items: rest },
   ].filter((g) => g.items.length > 0 || g.id === 'all');
   const spacious = app.lookName() === 'spacious';

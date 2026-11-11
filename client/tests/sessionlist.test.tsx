@@ -3602,8 +3602,8 @@ describe('a window 900–1079 px wide', () => {
   });
 });
 
-// A phone (< 900 px). `#/` lists the projects — Needs you, Running,
-// Favorites, the others, each project once — or, from the title's menu, every project's sessions by state;
+// A phone (< 900 px). `#/` lists the projects — Favorites, Needs you,
+// Running, the others, each project once — or, from the title's menu, every project's sessions by state;
 // `#/p/<id>` is one project's sessions under one header row. The look is the account's.
 describe('a phone (< 900 px)', () => {
   const project = (id: string, name: string, more: Partial<Project> = {}): Project => ({
@@ -3665,7 +3665,7 @@ describe('a phone (< 900 px)', () => {
     document.documentElement.className = '';
   });
 
-  it("`#/` is the projects: Needs you, Running, Favorites, then the others in the bar's order and \"New project\"; a tap opens one", async () => {
+  it("`#/` is the projects: Favorites, Needs you, Running, then the others in the bar's order and \"New project\"; a tap opens one", async () => {
     const { app } = phoneApp();
     await open(app, '#/');
     expect(root.querySelector('.layout')!.classList.contains('layout-phone')).toBe(true);
@@ -3676,9 +3676,9 @@ describe('a phone (< 900 px)', () => {
     expect(head.querySelector('.btn-settings')!.getAttribute('href')).toBe('#/settings');
     expect(head.querySelector('.avatar')!.getAttribute('title')).toBe('who@example.com');
     expect([...root.querySelectorAll('.phone-home .group-head')].map((h) => h.textContent)).toEqual([
+      'Favorites1',
       'Needs you1',
       'Running1',
-      'Favorites1',
       'Other projects1',
     ]);
     expect(phoneNames('wait')).toEqual(['physics-mp']);
@@ -3810,14 +3810,14 @@ describe('a phone (< 900 px)', () => {
     await click(root.querySelector('.menu .btn-archive-project'));
     await settle();
     expect(location.hash).toBe('#/');
-    expect(phoneAll()).toEqual(['physics-mp', 'boards', 'Personal']);
+    expect(phoneAll()).toEqual(['boards', 'physics-mp', 'Personal']);
     const toast = root.querySelector('.phone-home .toast-project')!;
     expect(toast.querySelector('.toast-text')!.textContent).toBe('Archived «kiln»');
     await click(toast.querySelector('.btn-undo'));
     await settle();
     expect(root.querySelector('.toast-project')).toBeNull();
     expect(unarchiveProject).toHaveBeenCalledWith('p3');
-    expect(phoneAll()).toEqual(['physics-mp', 'kiln', 'boards', 'Personal']);
+    expect(phoneAll()).toEqual(['boards', 'physics-mp', 'kiln', 'Personal']);
     // The hub refuses an archive: the project is back, and why is said where the phone is.
     Object.assign(api, { archiveProject: vi.fn(async () => Promise.reject(new Error('offline'))) });
     await go('#/p/p3');
@@ -3833,7 +3833,7 @@ describe('a phone (< 900 px)', () => {
     const subs = () => [...root.querySelectorAll('.phone-home a.phone-project')].map((r) => r.querySelector('.phone-project-sub')?.textContent ?? null);
     await open(phoneApp('spacious').app, '#/');
     expect(document.documentElement.classList.contains('list-compact')).toBe(false);
-    expect(subs()).toEqual(['1 waiting · 2 running', '2 running', null, null]);
+    expect(subs()).toEqual([null, '1 waiting · 2 running', '2 running', null]);
     expect(phoneRow('physics-mp').querySelector('.phone-project-sub')!.classList.contains('is-wait')).toBe(true);
     await click(root.querySelector('.phone-view'));
     await click(root.querySelector('.menu .btn-view-sessions'));

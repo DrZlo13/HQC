@@ -130,6 +130,11 @@ export interface LiveSubagent {
 export interface SubagentsLive {
   agents: LiveSubagent[];
 }
+/** Output tokens per second of the agent and its subagents. Transport only: the hub keeps it
+ *  as the session's `output_per_s`. */
+export interface TokensRate {
+  output_per_s: number;
+}
 export interface AgentMessage {
   text: string;
   final: boolean;
@@ -250,6 +255,7 @@ export interface PayloadByType {
   'user.message': UserMessage;
   'agent.delta': AgentDelta;
   'subagents.live': SubagentsLive;
+  'tokens.rate': TokensRate;
   'agent.message': AgentMessage;
   'agent.thinking': AgentThinking;
   'tool.call': ToolCall;
@@ -387,6 +393,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
       };
     }),
   }),
+  'tokens.rate': (p) => ({ output_per_s: num(p, 'output_per_s') }),
   'agent.message': (p) => ({
     text: str(p, 'text'),
     final: bool(p, 'final'),
@@ -836,6 +843,8 @@ export interface SessionSummary {
   subagents?: number;
   /** Background tasks the runtime lists for the agent now; absent is 0. */
   background_tasks?: number;
+  /** Output tokens per second of the agent and its subagents; absent is 0. */
+  output_per_s?: number;
   /** When the user made it a favorite; absent: not one. */
   favorite_at?: string;
 }
@@ -934,6 +943,7 @@ export function parseSummary(v: unknown): SessionSummary {
     permission_capped_by: optStr(s, 'permission_capped_by'),
     subagents: optNum(s, 'subagents'),
     background_tasks: optNum(s, 'background_tasks'),
+    output_per_s: optNum(s, 'output_per_s'),
     favorite_at: optStr(s, 'favorite_at'),
   };
 }
@@ -1051,6 +1061,9 @@ export interface SessionInfo {
   /** Background tasks the runtime lists for the agent now (its own and its subagents'
    *  commands, monitors, background subagents), as its worker last reported; absent is 0. */
   background_tasks?: number;
+  /** Output tokens per second of the agent and its subagents, as its worker last sent them;
+   *  absent is 0. */
+  output_per_s?: number;
   /** When the user made it a favorite (favorites are per user); absent: not one. */
   favorite_at?: string;
   /** The model hqc starts the agent with (`agent.model`); absent: the runtime's default. */
@@ -1144,6 +1157,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     permission_capped_by: optStr(o, 'permission_capped_by'),
     subagents: optNum(o, 'subagents'),
     background_tasks: optNum(o, 'background_tasks'),
+    output_per_s: optNum(o, 'output_per_s'),
     favorite_at: optStr(o, 'favorite_at'),
     model: optStr(agent, 'model'),
   };

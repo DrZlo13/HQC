@@ -4757,6 +4757,12 @@ a.relay-peer {
   padding: 10px 12px;
   padding-bottom: calc(10px + env(safe-area-inset-bottom));
 }
+/* While the field is in focus the keyboard covers the home indicator: no room for it under the
+   composer (in the app on the Home Screen that room stayed as an empty band over the keyboard).
+   The field only: a button of the composer in focus (Android) leaves the keyboard down. */
+.chat-phone .composer-wrap:has(.composer-input:focus) {
+  padding-bottom: 10px;
+}
 
 .chat-phone .msg-bubble {
   padding: 9px 14px;

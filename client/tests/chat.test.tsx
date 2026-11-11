@@ -677,6 +677,25 @@ describe('composer', () => {
     expect(area.style.height).toBe('');
   });
 
+  it("keeps the form's height while the field is measured at one line, so the feed above does not lose its bottom", async () => {
+    const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
+    await mount(app);
+    const area = root.querySelector<HTMLTextAreaElement>('.composer textarea')!;
+    const form = area.form!;
+    Object.defineProperty(form, 'offsetHeight', { configurable: true, get: () => 120 });
+    // The form's min-height at the moment the field's lines are measured.
+    const held: string[] = [];
+    Object.defineProperty(area, 'clientHeight', { configurable: true, get: () => 36 });
+    Object.defineProperty(area, 'scrollHeight', { configurable: true, get: () => (held.push(form.style.minHeight), 64) });
+    await act(() => {
+      area.value = 'one\ntwo';
+      area.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(held.at(-1)).toBe('120px');
+    expect(form.style.minHeight).toBe('');
+    expect(area.style.height).toBe('64px');
+  });
+
   it('has the caret when the chat opens on a computer; not on a phone, nor over an open request', async () => {
     const { app } = setup('idle', { history: HISTORY.slice(0, 3) });
     await mount(app);
@@ -911,7 +930,55 @@ describe('history', () => {
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(h(5000));
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(h(600));
   };
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('stays at the bottom when the window over the feed shrinks (the composer grows, the keyboard opens), unless scrolled up', async () => {
+    // The observers the chat makes, by what they watch; happy-dom resizes nothing by itself.
+    const watched = new Map<Element, () => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        cb: () => void;
+        constructor(cb: () => void) {
+          this.cb = cb;
+        }
+        observe(el: Element) {
+          watched.set(el, this.cb);
+        }
+        disconnect() {}
+      },
+    );
+    let win = 600;
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 5000 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? win : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    expect(scroller.scrollTop).toBe(5000);
+    // The window is 100 px shorter and the scroll position stayed: the bottom is under the
+    // composer until the chat follows.
+    win = 500;
+    scroller.scrollTop = 4400;
+    await act(async () => watched.get(scroller)?.());
+    expect(scroller.scrollTop).toBe(5000);
+    // Scrolled up, the feed stays where the reader is.
+    for (const top of [5000, 3000]) {
+      await act(async () => {
+        scroller.scrollTop = top;
+        scroller.dispatchEvent(new Event('scroll'));
+      });
+    }
+    win = 400;
+    await act(async () => watched.get(scroller)?.());
+    expect(scroller.scrollTop).toBe(3000);
+  });
 
   it('shows the newest page at once and loads the older history behind it', async () => {
     tall();

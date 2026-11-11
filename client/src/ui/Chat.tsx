@@ -248,7 +248,8 @@ export function Chat({
     // asks for the older blocks: render them until it fills the window or none is left.
     if (el && start > 0 && el.scrollHeight <= el.clientHeight) showMore(blockSeq(blocks[Math.max(0, start - SHOWN)]));
   });
-  // Images and code blocks grow after the render: stay at the bottom while stuck to it.
+  // Images and code blocks grow after the render, and the window over the feed shrinks when
+  // the composer grows with its text or the keyboard opens: stay at the bottom while stuck to it.
   const feed = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = scroller.current;
@@ -257,6 +258,7 @@ export function Chat({
       if (stick.current) el.scrollTop = el.scrollHeight;
     });
     o.observe(feed.current);
+    o.observe(el);
     return () => o.disconnect();
   }, []);
   // "Quote": text selected in the feed goes into the composer. On a computer it is an item of
@@ -1045,10 +1047,16 @@ export function Composer({
   useLayoutEffect(() => {
     const el = area.current;
     if (!el) return;
+    // The form keeps its height while the field is measured at one line: a composer shorter
+    // for that moment let the feed above clamp its scroll, and the feed's bottom went under the
+    // composer on every key.
+    const form = el.form;
+    if (form) form.style.minHeight = `${form.offsetHeight}px`;
     // One line keeps the stylesheet's height, which follows the look (applied after this first
     // runs); more lines set it.
     el.style.height = '';
     if (el.scrollHeight > el.clientHeight) el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    if (form) form.style.minHeight = '';
     if (caretToEnd.current) {
       caretToEnd.current = false;
       el.setSelectionRange(el.value.length, el.value.length);

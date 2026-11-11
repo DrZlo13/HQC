@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { IconBack } from './icons';
+import { onBack } from '../nav';
 import type { AppState } from '../app';
 import { ApiError, type WorkerInfo } from '../api';
 import type { LookName, Theme } from '../proto';
@@ -118,7 +119,7 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
   return (
     <section class="page">
       <header class="bar">
-        <a class="back icon-btn" href={back} aria-label="Back" title="Back">
+        <a class="back icon-btn" href={back} aria-label="Back" title="Back" onClick={(e) => onBack(e, back)}>
           <IconBack />
         </a>
         <div class="bar-title">

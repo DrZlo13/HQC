@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { ApiError, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
+import { onBack } from '../nav';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
@@ -345,6 +346,8 @@ export function Chat({
   useEffect(() => {
     if (loaded) caret.current = false;
   }, [loaded]);
+  // A phone's "‹": the session's project.
+  const up = info ? `#/p/${info.project_id}` : '#/';
   return (
     <section
       class={`chat ${dragging ? 'chat-dragging' : ''} ${phone ? 'chat-phone' : ''} ${archived ? 'chat-archived' : ''}`}
@@ -365,7 +368,12 @@ export function Chat({
     >
       <header class="chat-head">
         {phone && (
-          <a class="icon-btn icon-btn-round back" href={info ? `#/p/${info.project_id}` : '#/'} aria-label="Back to sessions">
+          <a
+            class="icon-btn icon-btn-round back"
+            href={up}
+            aria-label="Back to sessions"
+            onClick={(e) => onBack(e, up)}
+          >
             <IconBack />
           </a>
         )}

@@ -33,6 +33,7 @@ function installGlobals(w: Window) {
     window: w,
     document: w.document,
     location: w.location,
+    history: w.history,
     addEventListener: w.addEventListener.bind(w),
     removeEventListener: w.removeEventListener.bind(w),
     prompt: () => promptAnswer,

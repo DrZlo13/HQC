@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import type { Api } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
 import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState } from '../src/proto';
+import { trackHistory } from '../src/nav';
 import { applyLook } from '../src/theme';
 import { Timeline } from '../src/timeline';
 import type { ConnState, HubSocket } from '../src/ws';
@@ -3867,5 +3868,24 @@ describe('a phone (< 900 px)', () => {
     expect(css).toMatch(/:root\.list-compact \.phone-tile \{\s*width: 18px;/);
     // Spacious: 42 px project tiles.
     expect(css).toMatch(/\n\.phone-tile \{[^}]*width: 42px;/);
+  });
+
+  it('"‹" steps back through the history: the back gesture from the project then goes to the projects, not to the session it closed', async () => {
+    trackHistory();
+    const { app } = phoneApp();
+    await open(app, '#/');
+    await click(phoneRow('physics-mp'));
+    await settle();
+    await click(root.querySelector('a.session-row[href="#/s/stones"]'));
+    await settle();
+    expect(location.hash).toBe('#/s/stones');
+    await click(root.querySelector('.chat-head a.back'));
+    await settle();
+    expect(location.hash).toBe('#/p/p1');
+    // The back gesture.
+    await act(async () => history.back());
+    await settle();
+    expect(location.hash).toBe('#/');
+    expect(viewTitle()).toBe('Projects');
   });
 });

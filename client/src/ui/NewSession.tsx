@@ -7,6 +7,7 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { AppState, NewSessionDraft } from '../app';
+import { onBack, replaceHash } from '../nav';
 import type { PermissionMode, Workspace } from '../proto';
 import type { OutgoingFile } from '../session';
 import { Timeline, type Item } from '../timeline';
@@ -110,7 +111,7 @@ export function NewSessionChat({
         return;
       }
       app.handOver(s.id, typed.current, filesNow.current);
-      location.replace(`#/s/${s.id}`);
+      replaceHash(`#/s/${s.id}`);
     } catch (e) {
       const reason = (e as Error).message;
       // Left meanwhile: nothing keeps the message, the list says so.
@@ -182,7 +183,12 @@ export function NewSessionChat({
     >
       <header class="chat-head">
         {phone && (
-          <a class="icon-btn icon-btn-round back" href={`#/p/${projectId}`} aria-label="Back to sessions">
+          <a
+            class="icon-btn icon-btn-round back"
+            href={`#/p/${projectId}`}
+            aria-label="Back to sessions"
+            onClick={(e) => onBack(e, `#/p/${projectId}`)}
+          >
             <IconBack />
           </a>
         )}

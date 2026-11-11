@@ -1,5 +1,6 @@
 import { useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { goUp } from '../nav';
 import { ApiError } from '../api';
 import type { Project, SessionInfo } from '../proto';
 import { projectName } from './Appearance';
@@ -40,7 +41,7 @@ export function ArchiveList({ app, project, current, phone }: { app: AppState; p
     app.deleteSession(s.id).then(
       () => {
         setToast(`Deleted «${titleOf(s)}»`);
-        if (s.id === current) location.hash = `#/p/${s.project_id}`;
+        if (s.id === current) goUp(`#/p/${s.project_id}`);
       },
       (e: Error) => setNotice(`Not deleted: ${e.message}`),
     );

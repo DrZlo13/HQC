@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiError, type WorkerInfo } from '../api';
 import type { AppState } from '../app';
+import { onBack } from '../nav';
 import type { CheckResult, PermissionMode, WorkspacePermissions, WorkspaceRule } from '../proto';
 import { isToolName, ruleCommand, ruleError } from '../rules';
 import { useSubscription } from './hooks';
@@ -179,7 +180,13 @@ export function RulesScreen({
   return (
     <section class={`page rules-page ${phone ? 'is-phone' : ''}`}>
       <header class="bar">
-        <a class="back icon-btn" href={back} aria-label={sessionId ? 'Back to session' : 'Back to project settings'} title="Back">
+        <a
+          class="back icon-btn"
+          href={back}
+          aria-label={sessionId ? 'Back to session' : 'Back to project settings'}
+          title="Back"
+          onClick={(e) => onBack(e, back)}
+        >
           <IconBack />
         </a>
         <div class="bar-title">

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { goUp, onBack } from '../nav';
 import type { ListMode, Project, SessionInfo } from '../proto';
 import { colorHex } from '../theme';
 import { useSubscription } from './hooks';
@@ -117,7 +118,7 @@ function toggleFavorite(app: AppState, s: SessionInfo): void {
 function remove(app: AppState, s: SessionInfo, current?: string): void {
   app.deleteSession(s.id).then(
     () => {
-      if (s.id === current) location.hash = `#/p/${s.project_id}`;
+      if (s.id === current) goUp(`#/p/${s.project_id}`);
     },
     (e: Error) => app.setListNotice(`Not deleted: ${e.message}`),
   );
@@ -397,7 +398,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           own page), the order, the project's menu and a new session. */}
       <header class="side-head">
         {phone && (
-          <a class="icon-btn btn-back" href="#/" aria-label="Back to projects">
+          <a class="icon-btn btn-back" href="#/" aria-label="Back to projects" onClick={(e) => onBack(e, '#/')}>
             <IconBack size={20} />
           </a>
         )}
@@ -665,7 +666,7 @@ export function projectMenu(app: AppState, project: Project, phone?: boolean): M
       onSelect: () => {
         const open = app.currentProjectId === project.id;
         app.archiveProject(project.id);
-        if (phone) location.hash = '#/';
+        if (phone) goUp('#/');
         else if (open && app.me) location.hash = `#/p/${app.me.personal_project_id}`;
       },
     });

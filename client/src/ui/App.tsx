@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { AppState } from '../app';
+import { replaceHash } from '../nav';
 import { applyLook, applyTheme } from '../theme';
 import { Chat, SessionsButton, type SessionsToggle } from './Chat';
 import { Enroll } from './Enroll';
@@ -119,7 +120,7 @@ export function App({ app }: { app: AppState }) {
   const opened = route.name === 'project' && !phone ? route.id : undefined;
   const reopen = opened ? reopenedSession(app, opened) : undefined;
   useEffect(() => {
-    if (reopen) location.replace(`#/s/${reopen}`);
+    if (reopen) replaceHash(`#/s/${reopen}`);
   }, [reopen]);
 
   // The theme (T49): the user's base and the current project's color, on the document root.

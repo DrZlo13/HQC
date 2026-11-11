@@ -10,6 +10,7 @@ import { Timeline } from '../timeline';
 import { ClarifyCard, type ChatActions } from './cards';
 import { useSubscription } from './hooks';
 import { IconBack } from './icons';
+import { onBack } from '../nav';
 import { PermissionBlock } from './permission';
 
 /** What the request's card needs: answers through the app, no feed of its own. The empty
@@ -117,7 +118,7 @@ export function RequestsScreen({ app, phone }: { app: AppState; phone?: boolean 
     <section class="chat requests-screen">
       <header class="chat-head">
         {phone && (
-          <a class="icon-btn icon-btn-round back" href="#/" aria-label="Back to sessions">
+          <a class="icon-btn icon-btn-round back" href="#/" aria-label="Back to sessions" onClick={(e) => onBack(e, '#/')}>
             <IconBack />
           </a>
         )}

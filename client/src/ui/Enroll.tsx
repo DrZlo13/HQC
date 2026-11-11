@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { IconBack } from './icons';
 import type { AppState } from '../app';
+import { onBack } from '../nav';
 import type { EnrollInfo, ReplaceableWorker } from '../proto';
 
 /** `ab cd-1234` -> `ABCD-1234` once all 8 characters are there, else `null`. */
@@ -83,7 +84,7 @@ export function Enroll({ app, initialCode }: { app: AppState; initialCode: strin
   return (
     <section class="page">
       <header class="bar">
-        <a class="back icon-btn" href="#/settings" aria-label="Back">
+        <a class="back icon-btn" href="#/settings" aria-label="Back" onClick={(e) => onBack(e, '#/settings')}>
           <IconBack />
         </a>
         <div class="bar-title">

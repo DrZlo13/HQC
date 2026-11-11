@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { ApiError, type WorkerInfo } from '../api';
 import type { AppState } from '../app';
+import { goUp, onBack } from '../nav';
 import {
   parseWorkspaceConflict,
   type Candidate,
@@ -84,7 +85,7 @@ export async function confirmDeleteProject(app: AppState, project: Project): Pro
   const n = [...app.sessions.values()].filter((s) => s.project_id === project.id).length;
   if (!confirm(`Delete project “${project.name}” and its sessions (${n})? The folders on the workers stay.`)) return;
   await app.deleteProject(project.id);
-  location.hash = '#/';
+  goUp('#/');
 }
 
 /** Project settings (T49, `ProjectSettings.dc.html`, `MSettings2.dc.html`), opened from the
@@ -190,7 +191,7 @@ export function ProjectSettings({ app, projectId, phone }: { app: AppState; proj
   return (
     <section class={`page project-settings ${phone ? 'is-phone' : ''}`}>
       <header class="bar">
-        <a class="back icon-btn" href={`#/p/${projectId}`} aria-label="Back to sessions" title="Back">
+        <a class="back icon-btn" href={`#/p/${projectId}`} aria-label="Back to sessions" title="Back" onClick={(e) => onBack(e, `#/p/${projectId}`)}>
           <IconBack />
         </a>
         <div class="bar-title">

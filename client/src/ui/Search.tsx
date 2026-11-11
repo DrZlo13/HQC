@@ -9,6 +9,7 @@ import type { ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { SearchOptions } from '../api';
 import type { AppState } from '../app';
+import { goUp, onBack } from '../nav';
 import { SEARCH_KINDS, type Project, type SearchCounts, type SearchHit, type SearchKind } from '../proto';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { useSubscription } from './hooks';
@@ -167,7 +168,7 @@ export function SearchPage({ app, phone, back }: { app: AppState; phone?: boolea
       const t = e.target as Node | null;
       if (t && t !== document.body && !root.current?.contains(t)) return;
       e.preventDefault();
-      location.hash = back;
+      goUp(back);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -337,7 +338,12 @@ export function SearchPage({ app, phone, back }: { app: AppState; phone?: boolea
   return (
     <section ref={root} class={`page search-page ${dense ? 'is-dense' : ''}`} aria-label="Search" aria-busy={busy}>
       <header class="bar sp-bar">
-        <a class="sp-back" href={back} aria-label={`Back to ${current ? projectName(current) : 'the sessions'}`}>
+        <a
+          class="sp-back"
+          href={back}
+          aria-label={`Back to ${current ? projectName(current) : 'the sessions'}`}
+          onClick={(e) => onBack(e, back)}
+        >
           <IconBack size={16} />
           {!phone && <span class="sp-back-name">{current ? projectName(current) : 'Back'}</span>}
         </a>

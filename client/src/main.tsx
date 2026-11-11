@@ -1,6 +1,7 @@
 import { render } from 'preact';
 import { createApp } from './app';
 import { watchTabIcon } from './favicon';
+import { trackHistory } from './nav';
 import { listenForNavigation, registerServiceWorker } from './push';
 import { applyTheme, storedTheme } from './theme';
 import { App } from './ui/App';
@@ -13,6 +14,8 @@ const app = createApp();
 // Before the first render: a kept list (`hqc.list`) the render throws on is still replaced by
 // the hub's answer, so the next load works.
 void app.init();
+// Before the app listens to the address: its entries are stamped first.
+trackHistory();
 render(<App app={app} />, document.getElementById('app')!);
 watchTabIcon(app);
 void registerServiceWorker();

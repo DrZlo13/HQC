@@ -122,9 +122,11 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   T39; §7.1): a turn an agent starts in another session (a peer message, the prompt of
   `hqc_spawn`, a run of its schedule) runs at most in the lowest mode of that session and
   every session up the chain (`ask` < `auto` < `allow_all`, since 0.129), so a session in
-  `ask` gets no work done without asking through one in `auto` or `allow_all`, nor one in
+  `ask` gets no turn run without asking through one in `auto` or `allow_all`, nor one in
   `auto` without the classifier through one in `allow_all`; since 0.44 (T40) neither through
-  a buffered send nor through a schedule made while it ran in a higher mode. The hub computes the cap and the worker applies it; a compromised hub could
+  a buffered send nor through a schedule made while it ran in a higher mode. What such a turn
+  leaves running (a background subagent or command, a wake-up) goes on in the session's own
+  mode after it (§7.1). The hub computes the cap and the worker applies it; a compromised hub could
   lift it, as it can answer requests itself (above). On a worker with `allow_subagent_messages`
   (§8.1, since 0.84) an agent can also start a turn in another Claude session that accepts
   messages from other sessions (a local one of the same machine; per §8.1 **[verify]** also the
@@ -329,7 +331,8 @@ from `session.state.background_tasks`, §5.4; 0 after a worker restart), `output
 0.122: the session's latest `tokens.rate`, §4; absent — 0, also after its worker disconnects).
 In `ask` a tool call outside the worker's rules is asked about (§10.1); in `auto` Claude Code's
 classifier decides and never asks (§8.1); in `allow_all` Claude Code runs it without the
-classifier and asks only about a call an `ask` rule of its settings files matches (§8.1); the
+classifier and asks only about a call an `ask` rule of its settings files matches and where
+it asks in every mode, its own safety checks and tools that need a person (§8.1); the
 worker's `deny` stops a call in every mode. `state` and
 `queue_len` (§17.1) are **not stored**; the hub computes them when serving. In the first version
 a session has exactly one agent; people's access to a session is determined by Grant only.
@@ -1975,14 +1978,16 @@ asked for a higher mode than its worker runs (not restarted yet, a process that 
 or `allow_auto = false`), nothing while both are absent; since 0.43 (T39), while
 `permission_capped_by` is set, "<runs> (asked by <address>) · <own> after this turn" ("Ask
 (asked by <address>) · Auto after this turn", "Auto (asked by <address>) · Allow all after
-this turn"): the turn runs in the cap's mode, the session's own mode comes back when it ends.
+this turn"; since 0.129 "the session's own mode" for <own> when `permission_mode` is absent,
+since the worker's default is not known to the client): the turn runs in the cap's mode, the
+session's own mode comes back when it ends.
 The session's "More" menu has "Switch to <mode>" for each of the two other modes; a new
 session's "Permissions" chip has the worker's default, Ask, Auto and Allow all. Going to Ask
 asks nothing; going to Auto asks one line: "Switch to Auto? Claude Code then runs tool calls
 without asking; the worker's deny list is the only limit."; going to Allow all asks its own:
 "Switch to Allow all? Claude Code then runs every tool call without asking, with no classifier
-either; the worker's deny list and the ask rules of Claude Code's settings are the only
-limits." `spawned_by` (since 0.37, T34) — `{session_id, address}`
+either; the worker's deny list, the ask rules of Claude Code's settings and its own safety
+checks are the only limits." `spawned_by` (since 0.37, T34) — `{session_id, address}`
 of the session whose agent started this one with `hqc_spawn` (§7), absent otherwise or once
 that session is deleted; the client shows "started by <address>" in the chat header as a
 link to it. `held_by` (`{entrypoint, status}`): the session is currently held open
@@ -2573,7 +2578,15 @@ Chains:
   when it is made, and its runs carry it. `session.input.permission_cap` takes it to the
   worker, which applies it to that turn only (§5.3): the turn runs in the lower of the cap and
   the target's own mode; the target's own mode does not enter the cap, since a target runs no
-  higher than its own mode anyway. A chain from before 0.43 has no cap.
+  higher than its own mode anyway. A chain from before 0.43 has no cap. The cap holds the
+  turn, not what it leaves running (a known limitation; user decision, 2026-11-12): Claude
+  Code's mode is the process's, and when the turn ends the worker asks for the session's own
+  mode again, so a background subagent the turn started (it reads the process's mode when it
+  checks a call, and starting one needs no card outside `auto`; read in the code of 2.1.312),
+  a background command, a wake-up the agent set, and the turn the CLI starts by itself on
+  their report run in the session's own mode. The same holds for `auto` since 0.43. Holding
+  the process down while such work runs does not close it: the work can start more work step
+  by step past anything the worker counts.
 - Since 0.44 (T40; user decision, 2026-10-26), two gaps of that rule are closed:
   - A buffered `send` (no wake) puts its text in front of the target's next input
     (`peer_prefix`), so that input's turn takes the lowest cap of the buffered messages it
@@ -3095,7 +3108,8 @@ relative without `..` while no earlier part is `cd`, `pushd` or `popd`). Suggest
 stands where the subcommand should, or `-C` points outside), `Bash(<first word> *)` otherwise
 (none for an assignment such as `FOO=1 make` or a word a rule cannot hold), the tool name for
 another tool. In `auto` the CLI sends no `can_use_tool`, so hqc's rules play no part there;
-in `allow_all` it sends one only for a call an `ask` rule of its settings matches.
+in `allow_all` it sends one only for a call an `ask` rule of its settings matches and where it
+asks in every mode: its safety checks and tools that need a person (below).
 Checked live on 2.1.308 (`claude_live::live_folder_rules`): `Bash(touch *)` answered the request
 for `touch a && touch b`, no card.
 
@@ -3109,7 +3123,10 @@ The `allow_all` mode (since 0.129; `--permission-mode bypassPermissions`): the C
 call without asking and without the classifier, except that the deny rules still stop a call
 and the ask rules of its settings still ask about one (checked by the owner on 2.1.312 with a
 one-shot `claude -p --permission-mode bypassPermissions`: `dd` was denied, a command under an
-`ask` rule was asked about). Checked live on 2.1.312 (headless, `--setting-sources local`): a
+`ask` rule was asked about), and it still asks where it asks in every mode (read in the code
+of 2.1.312): for a tool that needs a person (`ExitPlanMode`) and on its own safety checks (a
+dangerous removal, a check it could not finish, an edit of its own configuration files),
+which `bypassPermissions` does not waive. Checked live on 2.1.312 (headless, `--setting-sources local`): a
 process started with `--permission-mode bypassPermissions` reports `permissionMode:
 bypassPermissions` in `system/init`, and a Bash command the `default` mode denies runs; a
 `set_permission_mode` to `bypassPermissions` in a process started without
@@ -3836,16 +3853,19 @@ A session in the `auto` permission mode (since 0.42, T38; §3, §8.1) produces n
 `approval.request` for tool calls: Claude Code's classifier decides them on the worker, and only
 the worker's `deny` stops one; `AskUserQuestion` still reaches the user as `clarify.request`.
 A session in `allow_all` (since 0.129) produces one only for a call an `ask` rule of Claude
-Code's settings files matches; the rest runs without the classifier, and the worker's `deny`
-still stops a call. Only the worker owner switches a session to `auto` or `allow_all` (§6);
+Code's settings files matches and where Claude Code asks in every mode: its own safety checks
+and tools that need a person (§8.1); the rest runs without the classifier, and the worker's
+`deny` still stops a call. Only the worker owner switches a session to `auto` or `allow_all` (§6);
 spawned sessions start in `ask` (§7). This is the worker's mode, unlike `auto_approve`, which
 the hub applies to requests that do reach it. A message cannot raise it (since 0.43, T39;
 §7.1): a turn woken by another agent runs at most in the lowest mode up the chain, so a
 session in `auto` or `allow_all` asks about the tool calls of a turn that a session in `ask`
 started, and one in `allow_all` lets the classifier decide in a turn that a session in `auto`
 started, directly or along a chain; the header says so ("Ask (asked by <address>)", "Auto
-(asked by <address>)", §6). Requests of such a turn go to the worker owner as always and are
-answered in the target's feed or from the sessions waiting on it. Since 0.44 (T40) the same
+(asked by <address>)", §6). What such a turn leaves running (a background subagent or
+command, a wake-up) goes on in the session's own mode after it (§7.1). Requests
+of such a turn go to the worker owner as always and are answered in the target's feed or from
+the sessions waiting on it. Since 0.44 (T40) the same
 holds for a turn whose input carries a buffered send from a session in a lower mode, a
 person's own message included, and for a run of an agent's schedule whose creator runs in a
 lower mode now or was deleted.
@@ -4305,7 +4325,8 @@ Three levels, from strongest to weakest: the worker's `deny` (not run, not asked
 `settings.local.json` and (since 0.52, T48) hqc's allow rules of the folder (§3 Workspace, applied
 by the worker in `can_use_tool`, §8.1) (run without asking) → everything else (the owner is asked
 in `ask`, the CLI's classifier decides in `auto`, it runs in `allow_all` unless an `ask` rule of
-the CLI's settings files matches, which is asked about as in `ask`). hqc's rules come from the hub, like the
+the CLI's settings files matches or the CLI asks in every mode, its safety checks and tools
+that need a person (§8.1), which is asked about as in `ask`). hqc's rules come from the hub, like the
 owner's answers to requests (§2.1); they cannot lift a `deny`.
 
 An environment defines what the agent process is launched with (Claude Code or an ACP process,
@@ -5004,7 +5025,8 @@ change, no migration. 0.128 and 0.129 are taken by other pull requests.
 §3, §5.3, §5.4, §6, §7, §7.1, §8.1, §10.1, §14, §17.2 (user decision, 2026-11-12: "a third mode,
 Allow all", next to Ask and Auto, per session; Auto stays): `allow_all` is Claude Code's
 `bypassPermissions` — no cards and no classifier, the deny rules and the `ask` rules of the
-CLI's settings still apply. It is chosen on a new session's "Permissions" chip and in the
+CLI's settings still apply, and the CLI still asks where it asks in every mode (its safety
+checks, tools that need a person). It is chosen on a new session's "Permissions" chip and in the
 session's "More" menu after its own one-line confirmation, only by the worker owner, and stands
 out in the chat header like Auto. No new knob: `[permissions] allow_auto` gates it as it gates
 `auto`, `mode = "allow_all"` is accepted, and with `allow_auto` the worker starts every process
@@ -5017,12 +5039,15 @@ to `auto`), a switch during a capped turn reaches the runtime as far as the cap 
 lowest cap of the buffered messages in the same order, and an input with an `auto` cap joins no
 running turn; a runtime below the turn's mode with nothing asked of it (`plan`) takes a capped
 input at once. A schedule an agent in `auto` made before 0.129 stores an `auto` cap that names
-no session: its runs name the creator. Migration `0042_permission_allow_all` widens the checks
-of `sessions.permission_mode` and `effective_permission_mode` and gives `input_caps` the cap's
-mode (`ask` for the rows before). A worker older than 0.129 refuses a `session.start` or
-`session.permission_mode` with `allow_all`, and a `session.input` with `permission_cap:
-"allow_all"`, as an unreadable frame, so the workers go first, then the hub and the client.
-0.124–0.128 are taken by other pull requests.
+no session: its runs name the creator. What a capped turn leaves running (a background subagent
+or command, a wake-up) goes on in the session's own mode after it, as it did for `auto` (a known
+limitation, user decision 2026-11-12, §7.1). Without a mode of its own the header names none
+after a capped turn ("the session's own mode after this turn"). Migration
+`0042_permission_allow_all` widens the checks of `sessions.permission_mode` and
+`effective_permission_mode` and gives `input_caps` the cap's mode (`ask` for the rows before). A
+worker older than 0.129 refuses a `session.start` or `session.permission_mode` with `allow_all`,
+and a `session.input` with `permission_cap: "allow_all"`, as an unreadable frame, so the workers
+go first, then the hub and the client. 0.124–0.128 are taken by other pull requests.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

@@ -770,8 +770,10 @@ Three levels of `[permissions]`, from strongest to weakest:
    classifier decides without asking (verified: it lets through both `rm -rf` outside the
    folder and `git push --force` if the user asked for it), so in this mode `deny` is the only
    boundary; in "Allow all" (Claude Code's `bypassPermissions`) it runs without asking and
-   without the classifier, except a call an `ask` rule of Claude Code's settings files matches,
-   which is still asked about.
+   without the classifier, except a call an `ask` rule of Claude Code's settings files matches
+   and where Claude Code asks in every mode: its own safety checks (a dangerous removal, a
+   check it could not finish, an edit of its own configuration files) and tools that need a
+   person (leaving plan mode); those are still asked about.
 
 In an environment with `project_settings = true` (§14 of the SPEC) the permission rules of the
 repository's `.claude/settings.json` join levels 1 and 2 (the rules screen lists them), and none
@@ -787,7 +789,9 @@ Auto or Allow all asks for one confirmation, going to Ask none. A running agent 
 once, even in the middle of a turn (the next tool call is decided in the new mode); a stopped
 one starts in it. Only you, as the worker's owner, can switch a session on your worker to Auto
 or Allow all. Sessions an agent starts with `hqc_spawn` always begin in Ask, and a message from
-another session never changes a session's mode.
+another session never changes a session's mode. A turn another session's message starts runs
+no higher than that session's mode, but what the turn leaves running (a background subagent or
+command, a wake-up the agent set) goes on in the session's own mode after it.
 
 - `mode` is the default for sessions created without a choice (and for sessions from before
   T38). "auto" or "allow_all" here makes every such session run without asking, so the worker
@@ -798,10 +802,14 @@ another session never changes a session's mode.
   "auto"` or `"allow_all"` together with `allow_auto = false` is a startup error. With
   `allow_auto = true` the worker starts every Claude Code process with
   `--allow-dangerously-skip-permissions`, so that a running session can be switched to Allow
-  all; a process started before that switches only at its next start.
+  all; a process started before that switches only at its next start. Run as root, Claude Code
+  exits at start with that flag unless `IS_SANDBOX=1` is set, so a worker running as root needs
+  `allow_auto = false` or `IS_SANDBOX=1` in the environment's `env`.
 - In Auto and Allow all the `deny` list is still passed to Claude Code and still blocks.
   `auto_approve` of the hub is a different, older switch: it answers the cards that do reach
-  the hub; in Auto there are none, in Allow all only those of `ask` rules.
+  the hub; in Auto there are none, in Allow all those of `ask` rules and of the cases Claude
+  Code asks about in every mode (its safety checks, tools that need a person), and
+  `auto_approve` answers those too.
 
 Rule syntax: `Bash(cargo test:*)` is the `cargo test` command with any arguments (a prefix up
 to a word boundary: `Bash(mkfs*)` does not catch `mkfs.ext4`), `Bash(curl * | sh)`: `*` is any

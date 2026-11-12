@@ -2992,8 +2992,9 @@ async fn subagents_go_in_session_state() {
 }
 
 // The runtime's list of subagents goes as `subagents.live`; the last one sent is sent again on
-// the next connect unless it was empty, its run times counted then; an empty list, the
-// runtime's or the one sent when the agent is stopped, leaves nothing to send again.
+// the next connect, its run times counted then; so is the runtime's empty list that followed a
+// non-empty one, since the hub keeps the last non-empty list while a background task runs; the
+// empty list sent when the agent is stopped leaves nothing to send again.
 #[tokio::test]
 async fn live_subagents_are_sent_again_on_connect() {
     let env = Env::new();
@@ -3023,16 +3024,16 @@ async fn live_subagents_are_sent_again_on_connect() {
     let again = live_agents(&mut c).await;
     assert_eq!(again[0]["task_id"], "a1", "{again}");
     assert!(again[0]["duration_ms"].as_u64().unwrap() >= 1050, "{again}");
-    // Its subagents ended, the agent runs on: nothing is sent again.
+    // Its subagents ended, the agent runs on: the empty list is sent again, on every connect.
     adapters
         .emit(sid, AdapterEvent::LiveSubagents(vec![]))
         .await;
     assert_eq!(live_agents(&mut c).await, json!([]));
-    c.close().await;
-    c = hub.accept().await;
-    c.handshake().await;
-    while let Some(f) = c.maybe("event", Duration::from_millis(300)).await {
-        assert_ne!(f["payload"]["event"]["type"], "subagents.live", "{f}");
+    for _ in 0..2 {
+        c.close().await;
+        c = hub.accept().await;
+        c.handshake().await;
+        assert_eq!(live_agents(&mut c).await, json!([]));
     }
     adapters
         .emit(sid, AdapterEvent::LiveSubagents(vec![agent]))

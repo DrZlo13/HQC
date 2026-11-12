@@ -562,8 +562,8 @@ Rules:
   session of that worker), when `session.state` reports both `subagents` and (since 0.127)
   `background_tasks` 0 (§5.4), since the list holds the agent's background commands too (§8.1),
   and when the session is deleted; a client that falls behind gets an empty list when none is
-  kept. An empty list lost with the link while a background task still runs is not made up for
-  until the count goes to 0 or the worker restarts.
+  kept. Since 0.127 the worker sends an empty list that followed a non-empty one again on every
+  connect (§8.1), so one lost with the link while a background task still runs is made up for.
 - `tokens.rate` (since 0.122) goes to clients in the session object and `session.summary` as
   `output_per_s` (§6), not as an event, and is not saved either. The hub keeps a session's
   latest rate in memory while it is above 0 and drops the rates of a worker's sessions when that
@@ -2904,16 +2904,19 @@ after its `task_notification`.
 A subagent's row stands for its own commands; a command that a subagent which reported left
 running gets its own row when that subagent's row goes. Other task types (`mcp_task`,
 `local_workflow`, …) are no rows. A command's row is its `task_id`, its `description` — the
-entry's, which 2.1.312 sets to the Bash call's `description`, or to the command without one —
-and `duration_ms`, the worker's own time since the command's first `task_started` (for a
-command a subagent left, since the command started, not since it got its row); no `activity`,
-`total_tokens` or `tool_uses`. Commands go in the order they became rows; the list is sent
+entry's, which 2.1.312 sets to the Bash call's `description`, or to the command without one,
+cut to 4096 bytes as `args_preview` — and `duration_ms`, the worker's own time since the
+command's first `task_started` (for a command a subagent left, since the command started, not
+since it got its row); no `activity`, `total_tokens` or `tool_uses`. Commands go in the order they became rows; the list is sent
 again when one comes, goes or its `description` changes. They never change
 `session.state.subagents`. The worker sends `subagents.live` directly, not through the outbox, as
 `agent.delta`, ignores a list read after the agent's process stopped and sends an empty list
 when it stops; after every reconnect it sends the last list it sent again, unless that one was
 empty, `duration_ms` grown by the time since it was sent, since a restarted hub has none and
-lists sent while disconnected are lost.
+lists sent while disconnected are lost. Since 0.127 it also sends again an empty list that
+followed a non-empty one, on every reconnect until a non-empty list or the process's stop: the
+hub keeps the last non-empty list while a background task runs, and an empty one lost with the
+link would leave rows of work that has ended.
 Since 0.122 the adapter counts the session's token rate (`tokens.rate`, §4) every 2 s. The main
 agent's response counts while it is written: a redacted thinking delta at its
 `estimated_tokens` (the CLI's own estimate), any other `stream_event` delta (text, thinking
@@ -4799,15 +4802,18 @@ entries of the CLI's `background_tasks_changed` list, not `ambient`, from their 
 and not of a subagent that counts, whose row stands for them. Monitors are left out: 2.1.312
 lists a Monitor's task as `local_bash` without `ambient`, so it is told apart by the call that
 started it, a `Monitor` `tool_use` named by its `task_started`. A command's row is its
-`task_id`, its `description` from the list
-(the Bash call's `description`, or the command) and its run time, with no `activity` or counts;
+`task_id`, its `description` from the list (the Bash call's `description`, or the command, cut
+to 4096 bytes) and its run time since its `task_started`, with no `activity` or counts;
 commands do not change `session.state.subagents`. No frame changes: a command's row is an
 ordinary entry of `agents`, which a client reads as a row without counts.
 §4 hub: the hub dropped the kept list, and sent the subscribers an empty one, on every
 `session.state` with `subagents` 0; a session that runs only a background command reports just
 that, so each of its reports would have wiped the rows in open chats and for a new subscriber.
 The hub now keeps the list while background tasks run, and drops it when `session.state`
-counts neither subagents nor background tasks. The hub goes first, then the workers: under an
+counts neither subagents nor background tasks. §8.1: so that an empty list lost with the link
+does not leave rows of ended work while, say, a Monitor runs, the worker sends an empty list
+that followed a non-empty one again on every reconnect, until a non-empty list or the
+process's stop. The hub goes first, then the workers: under an
 older hub a worker's command rows are wiped at the session's next `session.state`; an older
 worker under the new hub sends no command rows, and its own empty list still drops its
 subagents' rows. 0.124–0.126 are taken by other pull requests.

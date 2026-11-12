@@ -4288,6 +4288,23 @@ fn a_background_command_of_the_agent_is_listed() {
     );
 }
 
+/// A command without a description is listed under the command itself, which may run to any
+/// length: its row has the first 4096 bytes, and the same list again sends nothing.
+#[test]
+fn a_long_command_is_cut_in_its_row() {
+    let command = "x".repeat(5000);
+    let list = json!({"type": "system", "subtype": "background_tasks_changed",
+        "tasks": [{"task_id": "blong", "task_type": "local_bash", "description": command}]})
+    .to_string();
+    let started = json!({"type": "system", "subtype": "task_started", "task_id": "blong",
+        "tool_use_id": "toolu_01Long", "description": command, "is_backgrounded": true,
+        "task_type": "local_bash"})
+    .to_string();
+    let lists = live_lists([list.as_str(), started.as_str(), list.as_str()].into_iter());
+    assert_eq!(lists[1][0][0].1.len(), 4096);
+    assert!(lists[2].is_empty(), "{:?}", lists[2].len());
+}
+
 /// An `ambient` entry of the CLI's list is no activity (the SDK): no row, though its
 /// `task_started` came, while the agent's command beside it has one.
 #[test]

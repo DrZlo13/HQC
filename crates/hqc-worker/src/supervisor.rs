@@ -38,9 +38,9 @@
 //!   ([`AdapterEvent::BackgroundTasks`]) are repeated in every `session.state` like `title`,
 //!   0 when the agent is stopped. The subagents' list ([`AdapterEvent::LiveSubagents`]) goes
 //!   as `subagents.live`, empty when the agent is stopped; the last one sent is sent again on
-//!   every connect unless it was empty, its run times counted then. The token rate
-//!   ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once when the agent
-//!   stops.
+//!   every connect, its run times counted then, an empty one only when it followed a non-empty
+//!   one and the process has not stopped since. The token rate ([`AdapterEvent::TokenRate`])
+//!   goes as `tokens.rate` when it changes, 0 once when the agent stops.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -890,6 +890,7 @@ impl Supervisor {
             injected: Vec::new(),
             subagents: 0,
             live: None,
+            live_cleared: false,
             background_tasks: 0,
             token_rate: 0,
             stop_asked: false,
@@ -1001,6 +1002,10 @@ struct Session {
     /// The last `subagents.live` list sent, unless it was empty, and when: sent again on every
     /// connect, its run times counted then.
     live: Option<(Vec<hqc_proto::event::LiveSubagent>, Instant)>,
+    /// The last list sent was empty and came after a non-empty one: sent again on every connect
+    /// until a non-empty one or the process's stop, since the hub keeps the last non-empty list
+    /// while a background task runs, and one lost with the link would stay.
+    live_cleared: bool,
     /// The background tasks the runtime lists ([`AdapterEvent::BackgroundTasks`]), repeated
     /// in every `session.state`.
     background_tasks: u32,
@@ -1182,6 +1187,8 @@ impl Session {
                         a.duration_ms = a.duration_ms.saturating_add(age);
                     }
                     self.live_subagents(agents);
+                } else if self.live_cleared {
+                    self.live_subagents(vec![]);
                 }
                 // So was a rate; the hub dropped the session's rate when the link went, so a
                 // rate above 0 is sent again.
@@ -1710,6 +1717,8 @@ impl Session {
             // As the count: a list read from a process already stopped would outlive it.
             AdapterEvent::LiveSubagents(agents) => {
                 if self.state != ProcessState::Stopped {
+                    self.live_cleared =
+                        agents.is_empty() && (self.live_cleared || self.live.is_some());
                     self.live = (!agents.is_empty()).then(|| (agents.clone(), Instant::now()));
                     self.live_subagents(agents);
                 }
@@ -1981,6 +1990,8 @@ impl Session {
             // And its subagents and background tasks; the next process counts its own.
             self.subagents = 0;
             self.live = None;
+            // Its `session.state` counts nothing, which drops the hub's list.
+            self.live_cleared = false;
             self.live_subagents(vec![]);
             self.background_tasks = 0;
             if self.token_rate != 0 {

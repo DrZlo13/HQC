@@ -1251,7 +1251,9 @@ impl Core {
             .retain(|c| listed.iter().any(|(id, _, _)| *id == c.task_id));
         let mut changed = self.live_commands.len() != before;
         for (id, description, started) in listed {
-            let title = text(&description);
+            // Without a description it is the whole command, which may run to any length; the
+            // row shows one line of it.
+            let title = preview(&description, PREVIEW_LIMIT);
             match self.live_commands.iter_mut().find(|c| c.task_id == id) {
                 Some(c) if c.title == title => {}
                 Some(c) => {
@@ -1261,7 +1263,8 @@ impl Core {
                 None => {
                     // Its run time counts from its `task_started`, also for a command that
                     // becomes a row only when the subagent that left it reports.
-                    let mut c = LiveAgent::new(&id, &description);
+                    let mut c = LiveAgent::new(&id, "");
+                    c.title = title;
                     c.since = started;
                     self.live_commands.push(c);
                     changed = true;

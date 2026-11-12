@@ -1244,7 +1244,7 @@ describe("the feed like the Claude Code tab", () => {
       e.payload = { code, text };
     });
 
-  it("folds a background task's notification into a line with its summary as the peek", () => {
+  it("folds a background task's notification into a line with its whole text as the peek", () => {
     const t = new Timeline();
     t.apply(
       system(
@@ -1259,12 +1259,32 @@ describe("the feed like the Claude Code tab", () => {
       "Background task",
     );
     expect(fold.querySelector("summary .fold-peek")!.textContent).toBe(
-      'Background command "npm test" completed (exit code 0)',
+      'Background command "npm test" completed (exit code 0) All 12 suites passed',
     );
     expect(fold.querySelector(".fold-text")!.textContent).toBe(
-      'Background command "npm test" completed (exit code 0)\nAll 12 suites passed',
+      'Background command "npm test" completed (exit code 0)All 12 suites passed',
     );
     expect(root.querySelector(".msg-agent")).toBeNull();
+  });
+
+  it("peeks at a subagent's Markdown report without its marks and shows it open as Markdown", () => {
+    const report =
+      "### Summary\n**Asked:** close two findings in `redraw()`.\n\n- first fixed\n- second fixed";
+    const t = new Timeline();
+    t.apply(system(1, "task_notification", report));
+    show(t);
+    const fold = root.querySelector("details.line-system-task_notification")!;
+    expect(fold.querySelector("summary .fold-peek")!.textContent).toBe(
+      "Summary Asked: close two findings in redraw(). first fixed second fixed",
+    );
+    const body = fold.querySelector(".fold-text.md")!;
+    expect(body.querySelector("h3")!.textContent).toBe("Summary");
+    expect(body.querySelector("p strong")!.textContent).toBe("Asked:");
+    expect(body.querySelector("p code")!.textContent).toBe("redraw()");
+    expect([...body.querySelectorAll("ul li")].map((li) => li.textContent)).toEqual([
+      "first fixed",
+      "second fixed",
+    ]);
   });
 
   it("draws the compaction of the context as a divider", () => {
@@ -1285,7 +1305,12 @@ describe("the feed like the Claude Code tab", () => {
     const fold = root.querySelector("details.line-fold.line-system-context_compacted")!;
     expect(fold.querySelector("summary .fold-label")!.textContent).toBe("Context compacted");
     expect(fold.querySelector("summary .fold-peek")).toBeNull();
-    expect(fold.querySelector(".fold-text")!.textContent).toBe(summary);
+    const body = fold.querySelector(".fold-text.md")!;
+    expect([...body.querySelectorAll(":scope > p")].map((p) => p.textContent)).toEqual([
+      "This session is being continued from a previous conversation.",
+      "Summary:",
+    ]);
+    expect(body.querySelector("ol li")!.textContent).toBe("Tests pass");
     expect(root.querySelector(".line.line-system-context_compacted")).toBeNull();
   });
 

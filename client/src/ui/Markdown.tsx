@@ -67,6 +67,51 @@ function isMath(t: Token): t is Token & MathToken {
   return t.type === 'math';
 }
 
+/** Markdown `src` as one line of plain text: the words without their marks, blocks and line
+ *  breaks as spaces (the peek of a folded line). */
+export function markdownLine(src: string): string {
+  let text: string;
+  try {
+    text = plain(parseMarkdown(src), ' ');
+  } catch {
+    text = src;
+  }
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** The words of `tokens` without their marks (a link and an image by their text, a task
+ *  without its checkbox), joined by `sep`: a space between blocks, nothing between the pieces
+ *  of one line. */
+function plain(tokens: Token[] | undefined, sep: string): string {
+  return (tokens ?? [])
+    .map((tok): string => {
+      if (isMath(tok)) return tok.raw;
+      const t = tok as MarkedToken;
+      switch (t.type) {
+        case 'space':
+        case 'def':
+        case 'hr':
+        case 'checkbox':
+          return '';
+        case 'br':
+          return ' ';
+        case 'list':
+          return t.items.map((it) => plain(it.tokens, ' ')).join(' ');
+        case 'blockquote':
+          return plain(t.tokens, ' ');
+        case 'table':
+          return [t.header, ...t.rows].flat().map((c) => plain(c.tokens, '')).join(' ');
+        case 'code':
+        case 'codespan':
+        case 'html':
+          return t.text;
+        default:
+          return 'tokens' in t && t.tokens ? plain(t.tokens, '') : decodeEntities(t.text);
+      }
+    })
+    .join(sep);
+}
+
 export function Markdown({ text, class: cls }: { text: string; class?: string }) {
   const tokens = useMemo(() => {
     try {

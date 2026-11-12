@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { parseEvent, type HqcEvent } from '../src/proto';
 import { Timeline } from '../src/timeline';
 import { ChatItems, StreamingMessage, type ChatActions } from '../src/ui/cards';
-import { Markdown, decodeEntities, parseMarkdown, safeHref } from '../src/ui/Markdown';
+import { Markdown, decodeEntities, markdownLine, parseMarkdown, safeHref } from '../src/ui/Markdown';
 import { copyText } from '../src/clipboard';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
@@ -61,6 +61,24 @@ describe('parser', () => {
     expect(types.filter((t) => t !== 'space')).toEqual(['heading', 'paragraph', 'table', 'list']);
     const p = parseMarkdown('a\nb')[0] as { tokens: { type: string }[] };
     expect(p.tokens.map((t) => t.type)).toEqual(['text', 'br', 'text']);
+  });
+
+  it('puts a text on one line without its marks, for a peek', () => {
+    const cases: [string, string][] = [
+      ['### Summary\n**Asked:** fix `redraw()`.\n\n- one\n- two', 'Summary Asked: fix redraw(). one two'],
+      ['- [x] done\n- [ ] todo', 'done todo'],
+      ['| a | b |\n|---|---|\n| 1 | **2** |', 'a b 1 2'],
+      ['> quoted\n> more\n\nafter', 'quoted more after'],
+      ['intro:\n```js\nconst x = 1;\nfoo();\n```\nend', 'intro: const x = 1; foo(); end'],
+      ['[text](https://x.y) and <https://auto.link>', 'text and https://auto.link'],
+      ['\\*not bold\\* \\<tag\\> \\&', '*not bold* <tag> &'],
+      ['a &amp; b &lt;c&gt;', 'a & b <c>'],
+      ['a <b>bold</b> c', 'a <b>bold</b> c'],
+      ['$x^2$ and \\(y\\)', '$x^2$ and \\(y\\)'],
+      ['**bold**text', 'boldtext'],
+      ['', ''],
+    ];
+    for (const [src, line] of cases) expect(markdownLine(src), src).toBe(line);
   });
 
   it('accepts only absolute http, https and mailto URLs', () => {

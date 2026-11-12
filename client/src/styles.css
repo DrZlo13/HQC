@@ -3350,7 +3350,7 @@ select.input {
 }
 
 /* A folded line (a background task's notification, a compaction's summary): its label, and for
-   a task the first line of its summary. */
+   a task its text on one line; open, the text as Markdown. */
 .line-fold summary {
   list-style: none;
   display: flex;
@@ -3384,7 +3384,6 @@ select.input {
   box-shadow: inset 1px 0 0 var(--border);
   color: var(--text2);
   font-size: 13px;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 

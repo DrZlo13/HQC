@@ -6,7 +6,7 @@
 // invalid events render as a collapsed row and never throw.
 
 import type { ComponentChildren } from 'preact';
-import { useState } from 'preact/hooks';
+import { useMemo, useState } from 'preact/hooks';
 import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
@@ -55,7 +55,7 @@ import {
   oneLine,
   count,
 } from './labels';
-import { CodeBlock, CopyButton, Markdown } from './Markdown';
+import { CodeBlock, CopyButton, Markdown, markdownLine } from './Markdown';
 import { PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
@@ -412,24 +412,26 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
   );
 }
 
-/** A background task's notification, folded as the tab folds it: "Background task" and the
- *  first line of its summary; open, the whole text. */
+/** A background task's notification, folded: "Background task" and its whole text on one line,
+ *  without Markdown marks, cut where the line ends (a first line alone, often a heading like
+ *  "### Summary", read as the whole message); open, the text as Markdown. */
 function TaskNotification({ text }: { text: string }) {
-  const peek = text.split('\n').find((l) => l.trim()) ?? '';
+  // The feed renders again on every streamed piece; the text is parsed once.
+  const peek = useMemo(() => markdownLine(text), [text]);
   return (
     <details class="line-fold line-system-task_notification">
       <summary>
         <IconChevron size={12} />
         <span class="fold-label">Background task</span>
-        <span class="fold-peek">{peek.trim()}</span>
+        <span class="fold-peek">{peek}</span>
       </summary>
-      <div class="fold-text">{text}</div>
+      <Markdown class="fold-text" text={text} />
     </details>
   );
 }
 
 /** A compaction of the context, folded like a background task: "Context compacted"; open, the
- *  summary the runtime wrote. */
+ *  summary the runtime wrote, as Markdown. */
 function CompactionSummary({ text }: { text: string }) {
   return (
     <details class="line-fold line-system-context_compacted">
@@ -437,7 +439,7 @@ function CompactionSummary({ text }: { text: string }) {
         <IconChevron size={12} />
         <span class="fold-label">Context compacted</span>
       </summary>
-      <div class="fold-text">{text}</div>
+      <Markdown class="fold-text" text={text} />
     </details>
   );
 }

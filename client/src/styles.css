@@ -1365,9 +1365,8 @@ select.input {
 
 /* The Compact look (applyLook) in the session list, in the desktop column only:
    a 26 px line per session, tighter gaps; the state is the dot (`</>` while open in VS Code,
-   faded while its worker is offline), the subagents after the title, the state line and the
-   worker and path in the row's card. Scoped to the live list's groups and rows: the archive and
-   the search hits keep their lines. */
+   faded while its worker is offline), the subagents after the title, no state line. Scoped to
+   the live list's groups and rows: the archive and the search hits keep their lines. */
 :root.list-compact .sessions:not(.sessions-phone):not(.sessions-archive) > .session-scroll {
   gap: 8px;
   padding-top: 8px;
@@ -1489,11 +1488,15 @@ select.input {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* A desktop row's archive: a round button past the column's right edge (and past its width
-   grip), level with the row the mouse is on, so it covers none of the row. */
-.row-archive {
+/* A desktop row's archive and favorites: round buttons past the column's right edge (and past
+   its width grip), level with the row the mouse is on, so they cover none of the row. */
+.row-buttons {
   position: fixed;
   z-index: 40;
+  display: flex;
+  gap: 6px;
+}
+.row-btn {
   width: 30px;
   height: 30px;
   border-radius: 50%;
@@ -1506,11 +1509,15 @@ select.input {
   justify-content: center;
   cursor: pointer;
 }
-.row-archive:hover,
-.row-archive:focus-visible {
+.row-btn:hover,
+.row-btn:focus-visible {
   outline: none;
   background: var(--row-hover);
   color: var(--text);
+}
+/* A favorite's star is filled. */
+.row-btn.is-on path {
+  fill: currentColor;
 }
 :root.list-compact .layout:not(.layout-phone) .ctx-menu .menu-item {
   height: 26px;
@@ -1529,65 +1536,6 @@ select.input {
   position: fixed;
   inset: 0;
   z-index: 39;
-}
-
-/* A desktop row's card in the place of a tooltip: right of the column over the feed, once the
-   mouse has rested on the row. */
-.session-card {
-  position: fixed;
-  z-index: 40;
-  width: max-content;
-  min-width: 240px;
-  max-width: 310px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  box-shadow: 0 10px 28px color-mix(in srgb, var(--shade) 35%, transparent);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--text2);
-  pointer-events: none;
-}
-.session-card-title {
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 1.35;
-  color: var(--text);
-}
-.session-card-state {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.session-card-state .dot,
-.session-card-state .dot-vs {
-  margin-top: 0;
-}
-.session-card-where {
-  font-size: 11px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-.session-card-last {
-  margin-top: 4px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-style: italic;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-:root.list-compact .session-card {
-  font-size: 12.5px;
-}
-:root.list-compact .session-card-title {
-  font-size: 13px;
 }
 
 /* The workers as one line at the bottom of a desktop column: how many are online, the open

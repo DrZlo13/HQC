@@ -29,11 +29,11 @@ export interface MenuItem {
 
 export type MenuEntry = MenuItem | 'sep';
 
-/** The space kept between a menu or a card and the window's edge, px. */
+/** The space kept between a menu and the window's edge, px. */
 const MARGIN = 8;
 
 /** Moves fixed box `box`, placed at (`x`, `y`), left and up as far as it overflows the window. */
-export function fitInView(box: HTMLElement, x: number, y: number): void {
+function fitInView(box: HTMLElement, x: number, y: number): void {
   const view = box.ownerDocument.defaultView;
   if (!view) return;
   const r = box.getBoundingClientRect();

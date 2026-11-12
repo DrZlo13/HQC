@@ -1,13 +1,12 @@
 // The session list of a project (T26, T50): three orders — by state ("Needs you",
 // "Running", then the idle ones by recency), by recency ("Today", "Yesterday", "Last 7 days",
 // "This month", "Earlier") and the user's own ("Custom"), the choice and the custom order kept
-// on the hub per user and project — a search over title and path, the last line of a turn for
-// a row's card, the session a project reopens. No DOM.
+// on the hub per user and project — a search over title and path, the session a project
+// reopens. No DOM.
 
 import type { AppState } from '../app';
-import type { HqcEvent, ListMode, SessionInfo } from '../proto';
-import { callPeek } from './feed';
-import { daysAgo, formatDay, oneLine } from './labels';
+import type { ListMode, SessionInfo } from '../proto';
+import { daysAgo, formatDay } from './labels';
 
 export const LIST_MODES: { id: ListMode; label: string }[] = [
   { id: 'state', label: 'State' },
@@ -178,18 +177,6 @@ export function groupSessions(list: SessionInfo[], mode: ListMode, now: number, 
         ]
       : byRecency(sorted, '', '');
   return groups.filter((g) => g.items.length > 0);
-}
-
-/** The last line of a session's turn, for its row's card: what the agent said, thought or
- *  ran last, or the user's message; undefined before its chat is loaded. */
-export function lastLine(events: HqcEvent[]): string | undefined {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.type === 'agent.message' || e.type === 'user.message') return oneLine(e.payload.text, 160);
-    if (e.type === 'agent.thinking') return `Thinking · ${oneLine(e.payload.text, 160)}`;
-    if (e.type === 'tool.call') return oneLine(callPeek(e.payload.tool, e.payload.args_preview, undefined), 160);
-  }
-  return undefined;
 }
 
 /** The search: every word of `query` is in the title or the path, case aside. */

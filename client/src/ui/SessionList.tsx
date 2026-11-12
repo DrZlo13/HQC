@@ -6,7 +6,7 @@ import { colorHex } from '../theme';
 import { useSubscription } from './hooks';
 import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { ArchiveList } from './Archive';
-import { ContextMenu, fitInView, type MenuEntry } from './ContextMenu';
+import { ContextMenu, type MenuEntry } from './ContextMenu';
 import {
   IconArchive,
   IconBack,
@@ -29,11 +29,11 @@ import {
   IconStarOff,
   IconTrash,
 } from './icons';
-import { agentsLabel, formatAge, formatWhen, homePath } from './labels';
+import { agentsLabel, formatWhen, homePath } from './labels';
 import { newSessionWhere } from './NewSession';
 import { MoveSession, confirmDeleteProject } from './ProjectSettings';
 import { RequestsLink } from './requests';
-import { LIST_MODES, bucketOf, groupSessions, lastLine, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
+import { LIST_MODES, bucketOf, groupSessions, moveTo, runningLabel, subLabel, type SessionGroup } from './sessions';
 
 /** "+ project": asks for the name, then opens the new project's settings — a new project
  *  has no workspaces yet, and that is the first thing to add. */
@@ -51,16 +51,13 @@ export async function newProject(app: AppState, onError: (m: string) => void): P
 /** A press this long on a phone row opens its menu (MList2). */
 const LONG_PRESS_MS = 450;
 
-/** The mouse resting this long on a row shows its card; passing over it shows nothing. */
-const CARD_MS = 500;
-
-/** A desktop row's archive button: its size, and how far past the column's right edge it
- *  stands (past the width grip, which reaches 9 px over the edge), px. */
-const ROW_ARCHIVE_SIZE = 30;
-const ROW_ARCHIVE_GAP = 12;
-/** The button stays this long after the mouse leaves the row or the button: the way from the
- *  row to the button crosses the column's edge. */
-const ROW_ARCHIVE_LEAVE_MS = 300;
+/** A desktop row's buttons, archive then favorites: how far past the column's right edge they
+ *  stand (past the width grip, which reaches 9 px over the edge) and a button's size, px. */
+const ROW_BUTTON_SIZE = 30;
+const ROW_BUTTONS_GAP = 12;
+/** The buttons stay this long after the mouse leaves the row or them: the way from the row to
+ *  them crosses the column's edge. */
+const ROW_BUTTONS_LEAVE_MS = 300;
 
 /** The session column's width when dragged by its right edge, px; ←/→ on the edge step it. */
 export const LIST_WIDTH_MIN = 240;
@@ -129,9 +126,9 @@ function remove(app: AppState, s: SessionInfo, current?: string): void {
  *  first screen is `PhoneHome`). T50: the delayed archive with Undo, State / Recent / Custom
  *  and Reorder, archive mode. A row's actions are its menu (a right click; a long press on a
  *  phone); the header is one row (on a phone after "‹" back to the projects) and the favorites
- *  are pinned over the list; on a desktop the row under the mouse has a round archive button
- *  past the column's edge and its card shows where it runs, the workers are one line at the
- *  bottom and the column's right edge sets its width. */
+ *  are pinned over the list; on a desktop the row under the mouse has round archive and
+ *  favorites buttons past the column's edge, the workers are one line at the bottom and the
+ *  column's right edge sets its width. */
 export function SessionList({
   app,
   current,
@@ -162,14 +159,11 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   // A row's menu (a right click; a long press on a phone): the session, where it was opened,
   // and whether it shows the delete step.
   const [menu, setMenu] = useState<{ id: string; x: number; y: number; confirm: boolean } | null>(null);
-  // The card of the row the mouse rests on (desktop), right of the column.
-  const [card, setCard] = useState<{ id: string; x: number; y: number } | null>(null);
-  const cardTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  // The archive button of the row the mouse is on (desktop), past the column's edge: the row's
-  // session and element.
-  const [rowArchive, setRowArchive] = useState<{ id: string; row: HTMLElement } | null>(null);
+  // The archive and favorites buttons of the row the mouse is on (desktop), past the column's
+  // edge: the row's session and element.
+  const [rowHover, setRowHover] = useState<{ id: string; row: HTMLElement } | null>(null);
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const rowArchiveBtn = useRef<HTMLButtonElement>(null);
+  const rowButtons = useRef<HTMLDivElement>(null);
   const project = app.currentProject();
   const pid = project?.id;
   const archivedCount = app.archivedSessions().length;
@@ -182,13 +176,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   };
 
   useEffect(() => setReorder(null), [pid]);
-  useEffect(
-    () => () => {
-      clearTimeout(cardTimer.current);
-      clearTimeout(leaveTimer.current);
-    },
-    [],
-  );
+  useEffect(() => () => clearTimeout(leaveTimer.current), []);
   const now = Date.now();
   // The project's favorites above its groups.
   const favorites = reorder ? [] : app.favoriteSessions(pid);
@@ -208,7 +196,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const startReorder = () => {
     // The order sent must hold every live session: the waiting archive goes first.
     app.commitArchive();
-    setRowArchive(null);
+    setRowHover(null);
     setReorder(app.orderedSessions().map((s) => s.id));
   };
   // The archive should list the session archived a moment ago: it goes to the hub now.
@@ -220,66 +208,47 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     if (pid && reorder) void app.saveOrder(pid, reorder);
     setReorder(null);
   };
-  const hideCard = () => {
-    clearTimeout(cardTimer.current);
-    setCard(null);
-  };
-  // The row's archive button goes a moment after the mouse leaves the row or the button, unless
-  // it comes onto the other one meanwhile.
-  const keepRowArchive = () => clearTimeout(leaveTimer.current);
-  const leaveRowArchive = () => {
+  // The row's buttons go a moment after the mouse leaves the row or them, unless it comes onto
+  // the other meanwhile.
+  const keepRowButtons = () => clearTimeout(leaveTimer.current);
+  const leaveRowButtons = () => {
     clearTimeout(leaveTimer.current);
-    leaveTimer.current = setTimeout(() => setRowArchive(null), ROW_ARCHIVE_LEAVE_MS);
+    leaveTimer.current = setTimeout(() => setRowHover(null), ROW_BUTTONS_LEAVE_MS);
   };
-  const hideRowArchive = () => {
+  const hideRowButtons = () => {
     clearTimeout(leaveTimer.current);
-    setRowArchive(null);
+    setRowHover(null);
   };
-  // Where a desktop row's archive button and card go: right of the column, the card past the
-  // button.
+  // Where a desktop row's buttons go: right of the column.
   const colRight = (row: HTMLElement) => (row.closest('.sessions') ?? row).getBoundingClientRect().right;
-  // A desktop row under the mouse: its archive button at once, its card once the mouse has
-  // rested on the row for CARD_MS.
-  const cardOn = (id: string) => ({
+  // A desktop row under the mouse shows its buttons.
+  const hoverOn = (id: string) => ({
     onPointerEnter: (e: PointerEvent) => {
       if (e.pointerType !== 'mouse') return;
-      const row = e.currentTarget as HTMLElement;
       clearTimeout(leaveTimer.current);
-      setRowArchive({ id, row });
-      clearTimeout(cardTimer.current);
-      // Another row's card goes at once, not when this one's comes.
-      setCard((c) => (c && c.id !== id ? null : c));
-      cardTimer.current = setTimeout(() => {
-        // The row moved to another group meanwhile (Running → Idle): its element is gone.
-        if (!row.isConnected) return;
-        const top = row.getBoundingClientRect().top;
-        setCard({ id, x: colRight(row) + ROW_ARCHIVE_GAP + ROW_ARCHIVE_SIZE + 8, y: top - 6 });
-      }, CARD_MS);
+      setRowHover({ id, row: e.currentTarget as HTMLElement });
     },
     onPointerLeave: (e: PointerEvent) => {
-      hideCard();
-      if (e.pointerType === 'mouse') leaveRowArchive();
+      if (e.pointerType === 'mouse') leaveRowButtons();
     },
-    onPointerDown: hideCard,
   });
-  // The archive button stands where its row is now: a row that moved under a still mouse
-  // (Running → Idle) takes it along, and a row that left the list (another group, archived)
-  // takes it away.
+  // The buttons stand where their row is now: a row that moved under a still mouse
+  // (Running → Idle) takes them along, and a row that left the list (another group, archived)
+  // takes them away.
   useLayoutEffect(() => {
-    const b = rowArchiveBtn.current;
-    if (!rowArchive || !b) return;
-    const { row } = rowArchive;
+    const b = rowButtons.current;
+    if (!rowHover || !b) return;
+    const { row } = rowHover;
     if (!row.isConnected) {
-      hideRowArchive();
+      hideRowButtons();
       return;
     }
     const r = row.getBoundingClientRect();
-    b.style.left = `${colRight(row) + ROW_ARCHIVE_GAP}px`;
-    b.style.top = `${r.top + r.height / 2 - ROW_ARCHIVE_SIZE / 2}px`;
+    b.style.left = `${colRight(row) + ROW_BUTTONS_GAP}px`;
+    b.style.top = `${r.top + r.height / 2 - ROW_BUTTON_SIZE / 2}px`;
   });
   const openMenu = (id: string, x: number, y: number) => {
-    hideCard();
-    hideRowArchive();
+    hideRowButtons();
     setMenu({ id, x, y, confirm: false });
   };
 
@@ -359,13 +328,13 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       current={s.id === current}
       draft={app.draft(s.id) !== ''}
       phone={phone}
-      // A desktop row has no time: its group says how old it is, its card says exactly.
+      // A desktop row has no time: its group says how old it is.
       when={phone && mode === 'recent' && !reorder ? formatWhen(s.updated_at, now) : undefined}
       compact={app.lookName() === 'compact'}
       grip={reorder ? grip(s.id) : undefined}
       dragging={dragId === s.id}
       menuOpen={menu?.id === s.id}
-      card={phone || reorder ? undefined : cardOn(s.id)}
+      hover={phone || reorder ? undefined : hoverOn(s.id)}
       onPrefetch={() => app.prefetchChat(s.id)}
       onMenu={(x, y) => openMenu(s.id, x, y)}
     />
@@ -384,12 +353,10 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
     </div>
   );
   const menuFor = menu && app.sessions.get(menu.id);
-  // No card while a menu is open; a menu whose session was deleted elsewhere is not shown and
-  // does not keep the cards away.
-  const cardFor = card && !menuFor && app.sessions.get(card.id);
-  // Not for a row that went meanwhile (archived here or elsewhere).
-  const hovered = rowArchive && app.sessions.get(rowArchive.id);
-  const archiveFor = hovered && !hovered.archived && hovered.id !== app.pendingArchive?.id && !menuFor && !reorder ? hovered : undefined;
+  // Not for a row that went meanwhile (archived here or elsewhere), nor while a menu is open; a
+  // menu whose session was deleted elsewhere is not shown and does not keep the buttons away.
+  const hovered = rowHover && app.sessions.get(rowHover.id);
+  const buttonsFor = hovered && !hovered.archived && hovered.id !== app.pendingArchive?.id && !menuFor && !reorder ? hovered : undefined;
   const moveFor = moving && app.sessions.get(moving);
 
   return (
@@ -438,14 +405,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       <div
         class="session-scroll"
         ref={scroll}
-        onScroll={
-          card || rowArchive
-            ? () => {
-                hideCard();
-                hideRowArchive();
-              }
-            : undefined
-        }
+        onScroll={rowHover ? hideRowButtons : undefined}
       >
         {draft && !reorder && <DraftRow app={app} />}
         {groups.map((g) => (
@@ -516,25 +476,35 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           )}
         </ContextMenu>
       )}
-      {archiveFor && (
-        <button
-          ref={rowArchiveBtn}
-          type="button"
-          class="row-archive btn-row-archive"
-          aria-label={`Archive «${titleOf(archiveFor)}»`}
-          title="Archive"
-          onPointerEnter={keepRowArchive}
-          onPointerLeave={leaveRowArchive}
-          onClick={() => {
-            hideRowArchive();
-            hideCard();
-            app.archiveLater(archiveFor);
-          }}
-        >
-          <IconArchive />
-        </button>
+      {buttonsFor && (
+        <div ref={rowButtons} class="row-buttons" onPointerEnter={keepRowButtons} onPointerLeave={leaveRowButtons}>
+          <button
+            type="button"
+            class="row-btn btn-row-archive"
+            aria-label={`Archive «${titleOf(buttonsFor)}»`}
+            title="Archive"
+            onClick={() => {
+              hideRowButtons();
+              app.archiveLater(buttonsFor);
+            }}
+          >
+            <IconArchive />
+          </button>
+          <button
+            type="button"
+            class={`row-btn btn-row-favorite ${buttonsFor.favorite_at ? 'is-on' : ''}`}
+            aria-label={`${buttonsFor.favorite_at ? 'Remove from' : 'Add to'} favorites «${titleOf(buttonsFor)}»`}
+            title={buttonsFor.favorite_at ? 'Remove from favorites' : 'Add to favorites'}
+            onClick={() => {
+              // The row moves between the Favorites block and its group: its buttons go.
+              hideRowButtons();
+              toggleFavorite(app, buttonsFor);
+            }}
+          >
+            <IconStar />
+          </button>
+        </div>
       )}
-      {cardFor && <SessionCard key={cardFor.id} app={app} s={cardFor} x={card!.x} y={card!.y} />}
     </section>
   );
 }
@@ -726,10 +696,9 @@ type GripHandlers = {
   onKeyDown: (e: KeyboardEvent) => void;
 };
 
-type CardHandlers = {
+type HoverHandlers = {
   onPointerEnter: (e: PointerEvent) => void;
   onPointerLeave: (e: PointerEvent) => void;
-  onPointerDown: () => void;
 };
 
 /** A session's state mark: a dot of its group (amber waits, the accent works, a ring is
@@ -765,10 +734,10 @@ export function PhoneTile({ p, named }: { p: Project; named?: boolean }) {
 }
 
 /** A row of the live list, without buttons of its own. Desktop: a right click opens its menu,
- *  the mouse resting on it its card. Phone: a long press or a right click opens the same menu.
- *  In Reorder: a handle (left on a desktop, right on a phone), no menu, no link. Without
- *  `onMenu` (a phone's "Sessions" view) it has no menu; with `project` its project's name
- *  starts the state line and its tile ends the row. */
+ *  the mouse on it the list's archive and favorites buttons past the column. Phone: a long
+ *  press or a right click opens the same menu. In Reorder: a handle (left on a desktop, right
+ *  on a phone), no menu, no link. Without `onMenu` (a phone's "Sessions" view) it has no menu;
+ *  with `project` its project's name starts the state line and its tile ends the row. */
 export function SessionRow({
   s,
   current,
@@ -780,7 +749,7 @@ export function SessionRow({
   grip,
   dragging,
   menuOpen,
-  card,
+  hover,
   onPrefetch,
   onMenu,
 }: {
@@ -797,7 +766,7 @@ export function SessionRow({
   dragging: boolean;
   /** Its menu is open: the row stays lit under it. */
   menuOpen?: boolean;
-  card?: CardHandlers;
+  hover?: HoverHandlers;
   /** Loads the newest page of the chat before it is opened. */
   onPrefetch: () => void;
   onMenu?: (x: number, y: number) => void;
@@ -874,7 +843,7 @@ export function SessionRow({
           },
         }
       : {
-          ...card,
+          ...hover,
           onContextMenu: (e: MouseEvent) => {
             e.preventDefault();
             // From the keyboard (the menu key) there is no pointer: next to the row.
@@ -913,7 +882,7 @@ export function SessionRow({
 
 /** The new session open in the main column (`AppState.newSession`), as the group "Draft" on
  *  top of the list: "New session", the current row, and under it "Draft" with where it will
- *  run. No menu, card or archive: it is not on the hub yet. */
+ *  run. No menu or row buttons: it is not on the hub yet. */
 function DraftRow({ app }: { app: AppState }) {
   const d = app.newSession!;
   const { worker, path } = newSessionWhere(app, d);
@@ -935,33 +904,6 @@ function DraftRow({ app }: { app: AppState }) {
           </a>
         </li>
       </ul>
-    </div>
-  );
-}
-
-/** A desktop row's card in the place of a tooltip, right of the column over the feed: the full
- *  title, the state and how long ago, the worker and the folder, the last line of the turn
- *  once its chat is loaded (resting on the row loads it, `prefetchOn`). */
-function SessionCard({ app, s, x, y }: { app: AppState; s: SessionInfo; x: number; y: number }) {
-  const [chat] = useState(() => app.chat(s.id));
-  useSubscription((fn) => chat.timeline.onChange(fn), [chat]);
-  const box = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    if (box.current) fitInView(box.current, x, y);
-  }, [x, y]);
-  const path = app.sessionPath(s);
-  const where = [app.workerName(s.worker_id), path && homePath(path)].filter(Boolean).join(' · ');
-  const state = [subLabel(s), agentsLabel(s.subagents), formatAge(s.updated_at, Date.now())].filter(Boolean).join(' · ');
-  const last = lastLine(chat.timeline.events());
-  return (
-    <div class="session-card" role="tooltip" ref={box} style={{ left: `${x}px`, top: `${y}px` }}>
-      <div class="session-card-title">{titleOf(s)}</div>
-      <div class="session-card-state">
-        <StateMark s={s} />
-        {state}
-      </div>
-      {where && <div class="session-card-where mono">{where}</div>}
-      {last && <div class="session-card-last">{last}</div>}
     </div>
   );
 }

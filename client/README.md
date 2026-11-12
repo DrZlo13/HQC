@@ -77,8 +77,8 @@ only push.
     projects; in the Compact look, a row per project with its icon and full name;
   - `SessionList.tsx` + `sessions.ts` — the session column: a head of one row (name, search, the
     order menu, "⋯", "+"), the project's favorites pinned over the list, the groups (Needs you,
-    Running, idle by age), one menu per row on a right click, the archive button past the column's
-    edge and the card in place of a tooltip, the workers line at the bottom; `PhoneHome.tsx` — a
+    Running, idle by age), one menu per row on a right click, archive and favorites buttons past
+    the column's edge on hover, the workers line at the bottom; `PhoneHome.tsx` — a
     phone's first screen, the projects; `NewSession.tsx` — a new session as a chat window with
     its chips; `ContextMenu.tsx` — the client's menus;
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the

@@ -1736,13 +1736,11 @@ while it works, an empty ring idle, `</>` while it is open in VS Code and not wo
 then the title, "Draft", the unread count, and in Spacious the state line under the title (the
 state, "N queued", "N agents"); Compact puts the row on one line, "N agents" after the title and
 the state in the dot alone (faded while the worker is offline). A desktop row has no time (its
-group says how old it is) and no `worker · path` (its card says where it runs); a phone row
-shows its time in Recent. On a desktop the mouse on a row shows a round archive button past the
-column's right edge (it stays 300 ms after the mouse leaves the row or the button, for the way
-between them), and resting on it for 500 ms its card right of the column, in place of a tooltip:
-the full title, the state, "N agents" and how long ago it was active ("4 min ago"), the worker
-and the folder, and once its chat is loaded the last line of the turn (the agent's text or
-thought, the call, or the user's message; resting on the row loads the chat, below). A right
+group says how old it is) and no `worker · path`; a phone row shows its time in Recent. On a
+desktop the mouse on a row shows two round buttons past the column's right edge, Archive and a
+star (they stay 300 ms after the mouse leaves the row or them, for the way between them), and no
+card or tooltip: Archive archives the row as its menu's Archive does; the star, filled on a
+favorite, adds the session to the favorites or takes it out as its menu's item does. A right
 click on a row (the menu key; on a phone a long press or a right click) opens its menu: Open in
 new tab, Add to (Remove from) favorites, Rename, Move to project…, Folder rules (with a
 workspace), Archive, and Delete…, which asks in a second step of the menu with the focus on
@@ -1750,7 +1748,7 @@ Cancel. At the bottom of a desktop column: "Requests" while one is open (§10.1)
 workers line — "N workers online", the open session's worker with "N running" (its sessions in
 every project, by the rule of the list's Running group), "offline" while the socket is down —
 whose click opens the "Workers" list above it (§10.2). A phone's project screen (`#/p/<id>`) has
-the same column with one head row after "‹" back to the projects, no card and no archive button;
+the same column with one head row after "‹" back to the projects and no buttons past the column;
 "Requests" and the workers line are on the phone's first screen (below). The client's menus (a
 row's, a project's, the head's, a new session's chips, the feed's) close on Esc or a press
 outside, move with ↑/↓ and give the focus back to what had it; while one, the workers list or
@@ -4823,9 +4821,9 @@ column's head) and an order menu, Custom, Name or Recent (§3 User `project_sort
 `0040_project_sort`). A project is archived off the bar (§3 Project `archived_at`, 0.110) and
 found again by that search. The session column has a head of one row, the project's own
 favorites pinned over the list and a favorite listed only there, the idle sessions grouped by
-how long ago they were active, one menu per row on a right click, an archive button past the
-column's edge and a card in place of the tooltip, the workers in one line at the bottom, and a
-width dragged by its edge. A new session opens at once as a window and is created by its first
+how long ago they were active, one menu per row on a right click, archive and favorites buttons
+past the column's edge on hover, the workers in one line at the bottom, and a width dragged by
+its edge. A new session opens at once as a window and is created by its first
 message. A 900–1079 px window slides the session column over the chat; a phone opens on its
 projects, favorites first, a working one with the bar's stripe around its tile, and a back arrow
 steps back through the tab's history. In the feed a message's time ends its first line and its

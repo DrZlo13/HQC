@@ -3956,8 +3956,14 @@ Client. User → agent: files are attached to a message (paperclip, drag and dro
 several; image previews as `data:` URLs). Since 0.109 a file of at most 100 MB is read into
 memory when it is attached and those bytes are uploaded, and a HEIC or HEIF image is sent as a
 JPEG where the browser decodes it (Safari, any browser on an iPhone), drawn within 16 million
-pixels, iOS's canvas limit: Claude Code does not read HEIC. A browser that does not decode it
-(Chrome on a computer) sends it as it is. First each goes through `POST /api/artifacts`, then
+pixels, iOS's canvas limit: Claude Code does not read HEIC. Since 0.124 a browser that does not
+decode it (Chrome or Firefox on a computer) decodes it with libheif's JavaScript build (the
+`libheif-js` package: no WebAssembly and no `eval`, which the CSP of §20 does not allow) in a
+Web Worker of the page, a separate file from the hub's own origin loaded only then, and sends
+that JPEG; the file goes as it is only where this fails too. A picked file shows in the
+composer as soon as it is read, and while any is still being read the composer says "reading N
+files…" and does not send; a new session's window hands the files attached while it starts over
+to its chat once they are read. First each goes through `POST /api/artifacts`, then
 the input with `artifact_ids` (the text may be empty); retrying a failed send does not upload
 what is already uploaded. The worker puts them into `.hqc/inbox/` and substitutes the paths
 (§8.1); for runtimes with vision, images are also passed as images. In the feed, attachments
@@ -3968,7 +3974,11 @@ size and "Open" (except file) and "Download" buttons. In a chat a click on an im
 "Open" of a Markdown text (a text named `.md` or `.markdown`, or typed `text/markdown`) show it
 in a viewer over the chat: the image fitted to the window, the Markdown rendered as the agent's
 messages; the viewer has "Download" and closes on its cross, Escape or a click outside it, and
-while it is open no key reaches the chat (a request card's Enter and Escape). Other text opens
+while it is open no key reaches the chat (a request card's Enter and Escape). Since 0.124 an
+image named `.heic` or `.heif` that the browser does not show (one sent before 0.124 or as it
+is, one an agent attached) is decoded the same way when its `<img>` fails with the renewed link
+too (a first failure may be an expired link, and Safari shows HEIC itself), and shown in the feed
+and in the viewer as a JPEG `data:` URL, decoded once while the chat is open. Other text opens
 in a new tab. Agent → user: `hqc_attach` (§7, since 0.34): the worker uploads the file with
 `PUT /worker/artifacts` (§5.4) under the worker token
 for one of its sessions; the owner is the session's owner, dedup and `kind` as for the client's
@@ -4764,6 +4774,17 @@ to something substantially different; and that every file it makes for the user 
 into the chat with `hqc_attach` in the same answer, also unasked, copied first into `.hqc/out/`
 of the workspace, which git does not see, when made outside it. Before, they only named `hqc_rename`, and asked softly to attach
 files rather than give paths. 0.120–0.125 are taken by other pull requests.
+
+### 0.123 → 0.124 (a HEIC is decoded where the browser does not decode it)
+§12 Client: a HEIC or HEIF photo attached in Chrome, Firefox or Brave on a computer went out as
+it was, so the feed showed a broken image and Claude Code could not read it. Where the browser
+does not decode it, libheif's JavaScript build decodes it in a Web Worker, a file of its own
+loaded only then, and the photo goes out as a JPEG, as it does from Safari; the composer of a
+chat and of a new session does not send while a picked file is still being read, and a new
+session's window waits for such a file before it gives way to its chat; a HEIC already
+in the feed is decoded the same way when it fails to load with a renewed link too, in the feed
+and in the viewer. The CSP of §20 is unchanged: the build uses no WebAssembly and no `eval`, and
+the worker is a same-origin file. Client only.
 
 ### 0.119 → 0.123 (a fork before a later compaction of its source)
 §8.1: a fork at a message before the source's last compaction did not start: the CLI resumes a

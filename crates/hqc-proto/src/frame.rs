@@ -148,6 +148,13 @@ pub enum WorkerFrame {
         /// following `session.state`, 0 when the agent is stopped. Absent — 0.
         #[serde(default, skip_serializing_if = "is_zero")]
         background_tasks: u32,
+        /// The calls of the agent itself the runtime runs in the foreground now and can move to
+        /// the background (`session.background`), by `call_id` (since SPEC 0.125; Claude Code:
+        /// the Bash calls and subagents of its `task_started` with `is_backgrounded: false`,
+        /// SPEC §8.1). Repeated in every following `session.state`, empty when the agent is
+        /// stopped. Absent — none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        foreground_calls: Vec<String>,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -443,6 +450,11 @@ pub enum HubFrame {
     /// Abort the current turn.
     #[serde(rename = "session.stop")]
     SessionStop { session_id: Uuid },
+    /// Move the agent's running call `call_id`, one of `session.state.foreground_calls`, to
+    /// the background; the agent goes on (since SPEC 0.125). Answered with `ack`, also when no
+    /// agent runs; what the runtime answers is the worker's log.
+    #[serde(rename = "session.background")]
+    SessionBackground { session_id: Uuid, call_id: String },
     /// Terminate the agent process.
     #[serde(rename = "session.kill")]
     SessionKill { session_id: Uuid },
@@ -1270,6 +1282,7 @@ mod tests {
         "session.start",
         "session.input",
         "session.stop",
+        "session.background",
         "session.kill",
         "session.permission_mode",
         "session.model",
@@ -1331,6 +1344,10 @@ mod tests {
         (
             "session.stop",
             include_str!("../examples/wire/hub.session.stop.json"),
+        ),
+        (
+            "session.background",
+            include_str!("../examples/wire/hub.session.background.json"),
         ),
         (
             "session.kill",
@@ -1538,6 +1555,7 @@ mod tests {
             HubFrame::SessionStart(_) => "session.start",
             HubFrame::SessionInput(_) => "session.input",
             HubFrame::SessionStop { .. } => "session.stop",
+            HubFrame::SessionBackground { .. } => "session.background",
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::SessionModel { .. } => "session.model",

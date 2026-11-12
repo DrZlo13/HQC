@@ -275,6 +275,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::LiveSubagents(_) => continue,
             // Counted every 2 s while the agent works, not by the stream's lines.
             AdapterEvent::TokenRate(_) => continue,
+            // `foreground_calls_are_reported` looks at it.
+            AdapterEvent::ForegroundCalls(_) => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -3294,6 +3296,80 @@ fn only_a_background_task_is_a_notification() {
             ("task_notification".into(), "4".into())
         ]
     );
+}
+
+/// The rule of the VS Code tab's "Run in background" (extension 2.1.319; the first lines are of
+/// live runs on 2.1.312, the `killed` one, the nested subagent, the task started in the
+/// background, the ones with `skip_transcript` or `monitor_mcp` and the task started again are
+/// made up after the CLI's code): a Bash call or a subagent of the agent itself whose
+/// `task_started` says it runs in the foreground is a foreground call, by its `tool_use_id`,
+/// until its `task_notification`, the CLI's move to the background or a `task_updated` that
+/// ends it, or a `task_started` of it in the background; a call of a subagent (its Bash call,
+/// its subagent), a task the CLI starts in the background, one without a transcript and one of
+/// another type are none.
+#[test]
+fn foreground_calls_are_reported() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let stream = r#"{"type":"system","subtype":"task_started","task_id":"bfis28nrx","tool_use_id":"toolu_01FoCFY4DmUbVxXAembc44PX","description":"Sleep for 15 seconds","is_backgrounded":false,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e01"}
+{"type":"system","subtype":"task_started","task_id":"b6yusn86f","owned_by_subagent":true,"tool_use_id":"toolu_01T7e2mWErkbKbbTuuN4vYrm","description":"Sleep for 6 seconds","is_backgrounded":false,"parent_task_id":"a52af2b436ded4cea","task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e04"}
+{"type":"system","subtype":"task_started","task_id":"a7c3e9d1b2f4a6c80","tool_use_id":"toolu_01NstdAgntSpwndBySbgnt1","description":"Nested subagent","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":2,"parent_task_id":"a52af2b436ded4cea","task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e21"}
+{"type":"system","subtype":"task_started","task_id":"bbgr0001","tool_use_id":"toolu_01BckgrndBashFromStart01","description":"Background from the start","is_backgrounded":true,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e22"}
+{"type":"system","subtype":"task_started","task_id":"bskp0001","tool_use_id":"toolu_01SkpTrnscrptBash000001","description":"Skipped transcript","is_backgrounded":false,"skip_transcript":true,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e23"}
+{"type":"system","subtype":"task_started","task_id":"mmcp0001","tool_use_id":"toolu_01MonitorMcpTask00000001","description":"A monitor","is_backgrounded":false,"task_type":"monitor_mcp","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e24"}
+{"type":"system","subtype":"task_notification","task_id":"bfis28nrx","tool_use_id":"toolu_01FoCFY4DmUbVxXAembc44PX","status":"completed","output_file":"","summary":"Sleep for 15 seconds","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e02"}
+{"type":"system","subtype":"task_started","task_id":"bnx80r4bg","tool_use_id":"toolu_01LkxBZReUQu4HTFtoWqC3Nb","description":"Sleep for 20 seconds","is_backgrounded":false,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e09"}
+{"type":"system","subtype":"task_updated","task_id":"bnx80r4bg","patch":{"is_backgrounded":true},"uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0a"}
+{"type":"system","subtype":"task_started","task_id":"brst0001","tool_use_id":"toolu_01RestartedInBackground01","description":"Started again","is_backgrounded":false,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e25"}
+{"type":"system","subtype":"task_started","task_id":"brst0001","tool_use_id":"toolu_01RestartedInBackground01","description":"Started again","is_backgrounded":true,"task_type":"local_bash","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e26"}
+{"type":"system","subtype":"task_started","task_id":"ac5672f5fc80df8ec","tool_use_id":"toolu_01TYRCeySHmvXd7Md3Y1rgb8","description":"Run ping and reply with 4","subagent_type":"general-purpose","is_backgrounded":false,"spawn_depth":1,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e0d"}
+{"type":"system","subtype":"task_updated","task_id":"ac5672f5fc80df8ec","patch":{"status":"killed","end_time":1793889489540},"uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e10"}"#;
+    let calls: Vec<Vec<String>> = play(&mut core, stream)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::ForegroundCalls(c)) => Some(c),
+            _ => None,
+        })
+        .collect();
+    let one = |id: &str| vec![id.to_string()];
+    assert_eq!(
+        calls,
+        [
+            one("toolu_01FoCFY4DmUbVxXAembc44PX"),
+            vec![],
+            one("toolu_01LkxBZReUQu4HTFtoWqC3Nb"),
+            vec![],
+            one("toolu_01RestartedInBackground01"),
+            vec![],
+            one("toolu_01TYRCeySHmvXd7Md3Y1rgb8"),
+            vec![],
+        ]
+    );
+}
+
+/// "Run in background": `control_request {subtype: background_tasks, tool_use_id}`; the CLI's
+/// answer, `{backgrounded}` or an error, gives no action.
+#[test]
+fn background_asks_the_cli_to_move_the_call() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let Action::Write(v) = core.background("toolu_01LkxBZReUQu4HTFtoWqC3Nb") else {
+        panic!("not a write");
+    };
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "background_tasks", "tool_use_id": "toolu_01LkxBZReUQu4HTFtoWqC3Nb"})
+    );
+    let id = v["request_id"].as_str().unwrap();
+    assert!(id.starts_with("hqc-background-"), "{id}");
+    for answer in [
+        json!({"subtype": "success", "request_id": id, "response": {"backgrounded": true}}),
+        json!({"subtype": "error", "request_id": id, "error": "Background tasks are disabled"}),
+    ] {
+        let line = json!({"type": "control_response", "response": answer});
+        assert!(core.on_line(&line.to_string()).is_empty());
+    }
 }
 
 /// `/compact` (lines of fixture `stream-resume-compact`, 2.1.308; the same `compact_boundary`

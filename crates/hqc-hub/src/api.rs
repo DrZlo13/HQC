@@ -357,6 +357,7 @@ pub async fn delete_project(
         }
         app.drop_live_agents(*session_id);
         app.token_rate_changed(*session_id, 0);
+        app.drop_foreground_calls(*session_id);
         app.session_changed(*session_id);
     }
     for (worker_id, f) in cleanups {
@@ -1328,6 +1329,7 @@ pub async fn delete_session(
     // (SPEC §4).
     app.drop_live_agents(id);
     app.token_rate_changed(id, 0);
+    app.drop_foreground_calls(id);
     app.session_changed(id);
     // Its requests and asks went with it.
     app.requests_changed(s.owner_id);
@@ -1590,6 +1592,40 @@ pub async fn stop(
     not_system(&s)?;
     requests::cancel_open_of_session(&app, id, CancelReason::Stopped).await?;
     let sent = send_to_worker(&app, &s, HubFrame::SessionStop { session_id: id });
+    Ok(Json(json!({ "sent": sent })))
+}
+
+/// Longest `call_id` of `POST .../background`, in bytes.
+const MAX_CALL_ID: usize = 128;
+
+#[derive(Debug, Deserialize)]
+pub struct BackgroundRequest {
+    pub call_id: String,
+}
+
+/// Move the agent's running call `call_id` (one of the session's `foreground_calls`) to the
+/// background: `session.background` to the worker, whose runtime's answer is only logged.
+pub async fn background(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<BackgroundRequest>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
+    if b.call_id.is_empty() || b.call_id.len() > MAX_CALL_ID || b.call_id.contains('\0') {
+        return Err(ApiError::BadRequest(format!(
+            "call_id must be 1 to {MAX_CALL_ID} bytes without NUL"
+        )));
+    }
+    let sent = send_to_worker(
+        &app,
+        &s,
+        HubFrame::SessionBackground {
+            session_id: id,
+            call_id: b.call_id,
+        },
+    );
     Ok(Json(json!({ "sent": sent })))
 }
 

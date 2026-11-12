@@ -92,5 +92,9 @@ project of `api.projects.json` carry `favorite_at`, the time the requesting user
 `api.session.json` shows `model` in `agent`, and `api.session.request.json` creates a session
 with one.
 
+SPEC 0.125: `worker.session.state.json` carries `foreground_calls`, the calls the agent runs in
+the foreground now; `api.session.json` and `client.session.summary.json` show them (absent:
+none). `hub.session.background.json` moves one of them to the background.
+
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.

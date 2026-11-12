@@ -41,6 +41,13 @@
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
+//! - `system` `task_started` with `is_backgrounded: false`, `task_type` `local_bash` or
+//!   `local_agent`, a `tool_use_id`, no `skip_transcript: true`, no `owned_by_subagent:
+//!   true` and no `parent_task_id` (a Bash call or a subagent of the agent itself in the
+//!   foreground, not of a subagent) until a `task_started` of the same `task_id` without all
+//!   that, a `task_updated` with `patch.is_backgrounded: true` or `patch.status` `completed`,
+//!   `failed` or `killed`, or its `task_notification` → [`AdapterEvent::ForegroundCalls`]
+//!   with their `tool_use_id`s when they change (the rule of the VS Code tab's "Run in background", extension 2.1.319);
 //! - `rate_limit_event` → [`AdapterEvent::Limits`] with the 5-hour and 7-day windows of its
 //!   `rate_limit_info.unifiedWindows` (2.1.310: one before each turn's answer);
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
@@ -70,7 +77,7 @@
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
-//! - the CLI's answer to our `set_model` is only logged;
+//! - the CLI's answers to our `set_model` and `background_tasks` are only logged;
 //! - other `control_response` lines are the CLI's echo of ours and are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
@@ -128,6 +135,10 @@ pub const SYNTHETIC_MODEL: &str = "<synthetic>";
 const MODE_REQUEST: &str = "hqc-mode-";
 /// `request_id` prefix of our `set_model` control requests.
 const MODEL_REQUEST: &str = "hqc-model-";
+/// `request_id` prefix of our `background_tasks` control requests.
+const BACKGROUND_REQUEST: &str = "hqc-background-";
+/// `patch.status` of a `task_updated` that ends a foreground call ([`Core::foreground`]).
+const CALL_ENDED: [&str; 3] = ["completed", "failed", "killed"];
 
 // Mostly `Emit`, like `AdapterEvent` itself; boxing would only add an allocation.
 #[allow(clippy::large_enum_variant)]
@@ -314,6 +325,10 @@ pub struct Core {
     streamed: u64,
     /// `session_id` of the latest `system/init`: its subagents' transcripts are in its folder.
     cli_session: Option<String>,
+    /// The Bash calls and subagents of the agent itself the CLI runs in the foreground, by
+    /// `task_id`: their `tool_use_id`, which `background_tasks` takes
+    /// ([`AdapterEvent::ForegroundCalls`]).
+    foreground: BTreeMap<String, String>,
 }
 
 impl Core {
@@ -364,6 +379,7 @@ impl Core {
             streamed_estimated: 0,
             streamed: 0,
             cli_session: None,
+            foreground: BTreeMap::new(),
         }
     }
 
@@ -528,6 +544,20 @@ impl Core {
             "type": "control_request",
             "request_id": format!("{MODEL_REQUEST}{}", Uuid::now_v7()),
             "request": {"subtype": "set_model", "model": model},
+        }))
+    }
+
+    /// Move the foreground Bash call or subagent of tool call `call_id` to the background:
+    /// `control_request {subtype: background_tasks, tool_use_id}`. The CLI answers `success`
+    /// with `{backgrounded}` (`false`: no such call in the foreground), or an error while
+    /// background tasks are disabled; the call itself gets its tool result ("Command was
+    /// manually backgrounded by user with ID: …" for Bash, `async_launched` for a subagent) and
+    /// the agent goes on (2.1.312).
+    pub fn background(&self, call_id: &str) -> Action {
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("{BACKGROUND_REQUEST}{}", Uuid::now_v7()),
+            "request": {"subtype": "background_tasks", "tool_use_id": call_id},
         }))
     }
 
@@ -778,15 +808,14 @@ impl Core {
                         // A command's row comes now, with the count, as the list's.
                         out.extend(self.report_subagents(None));
                     }
+                    out.extend(self.foreground_started(&v));
                     out
                 }
                 Some("task_progress") => self.on_task_progress(&v),
                 // Its end comes before the task's `task_notification` (2.1.312).
                 Some("task_updated") => {
-                    if let Some(id) = v["task_id"]
-                        .as_str()
-                        .filter(|_| v["patch"]["is_backgrounded"] == true)
-                    {
+                    let moved = v["patch"]["is_backgrounded"] == true;
+                    if let Some(id) = v["task_id"].as_str().filter(|_| moved) {
                         if self.quiet_tasks.get(id) == Some(&false) {
                             self.quiet_tasks.remove(id);
                         }
@@ -794,7 +823,15 @@ impl Core {
                     let ended = v["patch"]["status"]
                         .as_str()
                         .is_some_and(|s| s != "running");
-                    self.count_subagent(v["task_id"].as_str().filter(|_| ended), false)
+                    let mut out =
+                        self.count_subagent(v["task_id"].as_str().filter(|_| ended), false);
+                    let call_ended = v["patch"]["status"]
+                        .as_str()
+                        .is_some_and(|s| CALL_ENDED.contains(&s));
+                    if let Some(id) = v["task_id"].as_str().filter(|_| moved || call_ended) {
+                        out.extend(self.foreground_ended(id));
+                    }
+                    out
                 }
                 Some("task_notification") => {
                     // A `local_bash` task that ended is no row any more.
@@ -803,6 +840,9 @@ impl Core {
                     }
                     let mut out = self.on_task_notification(&v);
                     out.extend(self.count_subagent(v["task_id"].as_str(), false));
+                    if let Some(id) = v["task_id"].as_str() {
+                        out.extend(self.foreground_ended(id));
+                    }
                     out
                 }
                 Some("background_tasks_changed") => self.on_background_tasks(&v),
@@ -850,11 +890,19 @@ impl Core {
         vec![Action::Emit(AdapterEvent::PermissionMode(mode))]
     }
 
-    /// The CLI's answer to our `set_permission_mode` or `set_model` (logged); every other
-    /// `control_response` is the echo of one of ours.
+    /// The CLI's answer to our `set_permission_mode`, `set_model` or `background_tasks` (the
+    /// latter two logged); every other `control_response` is the echo of one of ours.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
+        if id.starts_with(BACKGROUND_REQUEST) {
+            if r["subtype"] == "success" && r["response"]["backgrounded"] != false {
+                tracing::info!(session_id = %self.session_id, request_id = id, "call moved to the background");
+            } else {
+                tracing::warn!(session_id = %self.session_id, request_id = id, error = %r["error"], "claude did not move the call to the background");
+            }
+            return vec![];
+        }
         if id.starts_with(MODEL_REQUEST) {
             if r["subtype"] == "success" {
                 tracing::info!(session_id = %self.session_id, model = ?r["response"]["model"].as_str(), "model switched");
@@ -1122,6 +1170,49 @@ impl Core {
             out.extend(self.report_subagents(None));
         }
         out
+    }
+
+    /// `system/task_started`: a Bash call or a subagent of the agent itself in the foreground
+    /// (`is_backgrounded: false`, `tool_use_id`, `task_type` `local_bash` or `local_agent`, no
+    /// `skip_transcript: true`, no `owned_by_subagent: true`, no `parent_task_id`: the CLI marks
+    /// a subagent's Bash calls `owned_by_subagent` and gives its subagents the `parent_task_id`
+    /// of their parent) joins [`Core::foreground`], any other task of that `task_id` leaves it;
+    /// [`AdapterEvent::ForegroundCalls`] when it changed.
+    fn foreground_started(&mut self, v: &Value) -> Vec<Action> {
+        let Some(id) = v["task_id"].as_str() else {
+            return vec![];
+        };
+        let call = v["tool_use_id"].as_str().filter(|_| {
+            v["is_backgrounded"] == false
+                && v["skip_transcript"] != true
+                && v["owned_by_subagent"] != true
+                && v["parent_task_id"].is_null()
+                && (v["task_type"] == "local_bash" || v["task_type"] == "local_agent")
+        });
+        let Some(call) = call else {
+            return self.foreground_ended(id);
+        };
+        if self.foreground.get(id).map(String::as_str) == Some(call) {
+            return vec![];
+        }
+        self.foreground.insert(id.to_owned(), call.to_owned());
+        vec![self.foreground_calls()]
+    }
+
+    /// Task `id` left the foreground (moved, ended, or started again in the background):
+    /// [`AdapterEvent::ForegroundCalls`] if it was there.
+    fn foreground_ended(&mut self, id: &str) -> Vec<Action> {
+        if self.foreground.remove(id).is_none() {
+            return vec![];
+        }
+        vec![self.foreground_calls()]
+    }
+
+    /// [`Core::foreground`] as sent: the `tool_use_id`s.
+    fn foreground_calls(&self) -> Action {
+        Action::Emit(AdapterEvent::ForegroundCalls(
+            self.foreground.values().cloned().collect(),
+        ))
     }
 
     /// The subagents at work: those the CLI reports running, and those the latest

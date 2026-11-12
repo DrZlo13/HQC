@@ -89,6 +89,11 @@ pub struct Session {
     /// last sent them (`tokens.rate`, kept in the hub's memory). Absent — 0.
     #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
     pub output_per_s: u32,
+    /// The calls the session's agent runs in the foreground now and can move to the background
+    /// (`POST .../background`), by `call_id`, as its worker last reported them
+    /// (`session.state.foreground_calls`, since SPEC 0.125). Absent — none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreground_calls: Vec<String>,
     /// When the requesting user made the session a favorite (`PUT .../favorite`); favorites
     /// are per user. Absent — not a favorite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +127,7 @@ impl Session {
             subagents: self.subagents,
             background_tasks: self.background_tasks,
             output_per_s: self.output_per_s,
+            foreground_calls: self.foreground_calls.clone(),
             favorite_at: self.favorite_at,
         }
     }

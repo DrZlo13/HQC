@@ -307,3 +307,79 @@ async fn background_tasks_go_in_session_state() {
     assert!(st["payload"].get("background_tasks").is_none(), "{st}");
     w.stop().await;
 }
+
+/// SPEC §5.3, §5.4: a Bash call the CLI runs in the foreground goes to the hub in
+/// `session.state.foreground_calls`; `session.background` with its id is acked and reaches the
+/// CLI as `control_request {subtype: background_tasks, tool_use_id}`.
+#[tokio::test]
+async fn a_foreground_call_is_moved_to_the_background() {
+    let env = Env::new();
+    let call = "toolu_01FoCFY4DmUbVxXAembc44PX";
+    let claude = ScriptedClaude::new(&format!(
+        r#"{{"type":"system","subtype":"task_started","task_id":"bfis28nrx","tool_use_id":"{call}","description":"Sleep for 15 seconds","is_backgrounded":false,"task_type":"local_bash"}}"#
+    ));
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": Uuid::now_v7(), "text": "sleep 15",
+               "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["foreground_calls"] == json!([call]) {
+            break;
+        }
+    }
+    let id = c
+        .frame(
+            "session.background",
+            json!({"session_id": sid, "call_id": call}),
+        )
+        .await;
+    loop {
+        let f = c.expect("ack").await;
+        if f["id"] == id.as_str() {
+            break;
+        }
+    }
+    // Written before the ack; the script records it on its own task.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let req = loop {
+        if let Some(r) = claude
+            .stdin()
+            .into_iter()
+            .find(|v| v["type"] == "control_request")
+        {
+            break r;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{:?}",
+            claude.stdin()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        req["request"],
+        json!({"subtype": "background_tasks", "tool_use_id": call})
+    );
+    assert!(req["request_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("hqc-background-"));
+    w.stop().await;
+}

@@ -70,6 +70,9 @@ pub struct Inner {
     live_agents: Mutex<HashMap<Uuid, (Value, Instant)>>,
     /// Session -> its latest `tokens.rate`, unless it was 0 ([`AppState::token_rate`]).
     token_rates: Mutex<HashMap<Uuid, u32>>,
+    /// Session -> the calls its agent runs in the foreground, as its worker last reported
+    /// them (`session.state.foreground_calls`), unless none ([`AppState::foreground_calls`]).
+    foreground_calls: Mutex<HashMap<Uuid, Vec<String>>>,
 }
 
 /// A session's `agent.delta` text since its last `agent.message` or `status` other than
@@ -159,6 +162,7 @@ impl AppState {
             live: Mutex::default(),
             live_agents: Mutex::default(),
             token_rates: Mutex::default(),
+            foreground_calls: Mutex::default(),
             config,
         }))
     }
@@ -287,6 +291,33 @@ impl AppState {
     pub fn token_rate(&self, session_id: Uuid) -> u32 {
         let rates = self.token_rates.lock().unwrap();
         rates.get(&session_id).copied().unwrap_or(0)
+    }
+
+    /// The session's foreground calls as its worker reported them in `session.state`; an
+    /// empty list drops them. In memory: a worker that comes back reports them again.
+    pub fn set_foreground_calls(&self, session_id: Uuid, calls: Vec<String>) {
+        let mut all = self.foreground_calls.lock().unwrap();
+        if calls.is_empty() {
+            all.remove(&session_id);
+        } else {
+            all.insert(session_id, calls);
+        }
+    }
+
+    /// The session's agent runs no foreground call any more: its process stopped, its worker
+    /// restarted, or the session was deleted.
+    pub fn drop_foreground_calls(&self, session_id: Uuid) {
+        self.foreground_calls.lock().unwrap().remove(&session_id);
+    }
+
+    /// The calls the session's agent runs in the foreground now, by `call_id`.
+    pub fn foreground_calls(&self, session_id: Uuid) -> Vec<String> {
+        self.foreground_calls
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The worker sent something for the session (any event, `agent.delta` included).

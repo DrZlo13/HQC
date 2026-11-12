@@ -644,6 +644,7 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::SessionStart(_) => "session.start",
         HubFrame::SessionInput(_) => "session.input",
         HubFrame::SessionStop { .. } => "session.stop",
+        HubFrame::SessionBackground { .. } => "session.background",
         HubFrame::SessionKill { .. } => "session.kill",
         HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
         HubFrame::SessionModel { .. } => "session.model",

@@ -36,11 +36,14 @@
 //!   goes back to the head of the queue, as does every one not taken when the process exits.
 //! - `subagents` (Claude Code: [`AdapterEvent::Subagents`]) and `background_tasks`
 //!   ([`AdapterEvent::BackgroundTasks`]) are repeated in every `session.state` like `title`,
-//!   0 when the agent is stopped. The subagents' list ([`AdapterEvent::LiveSubagents`]) goes
-//!   as `subagents.live`, empty when the agent is stopped; the last one sent is sent again on
-//!   every connect, its run times counted then, an empty one only when it followed a non-empty
-//!   one and the process has not stopped since. The token rate ([`AdapterEvent::TokenRate`])
-//!   goes as `tokens.rate` when it changes, 0 once when the agent stops.
+//!   0 when the agent is stopped; so is `foreground_calls` ([`AdapterEvent::ForegroundCalls`]),
+//!   empty then. `session.background` moves one of those calls to the background
+//!   ([`Adapter::background`]); it is acked, also with no agent running. The subagents' list
+//!   ([`AdapterEvent::LiveSubagents`]) goes as `subagents.live`, empty when the agent is
+//!   stopped; the last one sent is sent again on every connect, its run times counted then, an
+//!   empty one only when it followed a non-empty one and the process has not stopped since. The
+//!   token rate ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once
+//!   when the agent stops.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -238,6 +241,11 @@ enum Cmd {
     },
     Stop {
         id: String,
+    },
+    /// Move the agent's running call `call_id` to the background.
+    Background {
+        id: String,
+        call_id: String,
     },
     Kill {
         id: String,
@@ -467,6 +475,17 @@ impl Supervisor {
             }
             HubFrame::SessionInput(input) => (input.session_id, Cmd::Input { id, input }),
             HubFrame::SessionStop { session_id } => (session_id, Cmd::Stop { id }),
+            HubFrame::SessionBackground {
+                session_id,
+                call_id,
+            } => {
+                if !self.sessions.contains_key(&session_id) {
+                    // Nothing runs, nothing to move.
+                    self.link.reply(&id, ack(None));
+                    return;
+                }
+                (session_id, Cmd::Background { id, call_id })
+            }
             HubFrame::SessionKill { session_id } => {
                 if !self.sessions.contains_key(&session_id) {
                     // Nothing runs, nothing to kill.
@@ -893,6 +912,7 @@ impl Supervisor {
             live_cleared: false,
             background_tasks: 0,
             token_rate: 0,
+            foreground_calls: Vec::new(),
             stop_asked: false,
             stopped_by_move: 0,
             delivered: VecDeque::new(),
@@ -912,6 +932,7 @@ fn id_of(c: &Cmd) -> String {
         Cmd::Start { id, .. }
         | Cmd::Input { id, .. }
         | Cmd::Stop { id }
+        | Cmd::Background { id, .. }
         | Cmd::Kill { id }
         | Cmd::PermissionMode { id, .. }
         | Cmd::Model { id, .. }
@@ -1011,6 +1032,9 @@ struct Session {
     background_tasks: u32,
     /// The last `tokens.rate` sent.
     token_rate: u32,
+    /// The calls the runtime runs in the foreground ([`AdapterEvent::ForegroundCalls`]),
+    /// repeated in every `session.state`.
+    foreground_calls: Vec<String>,
     /// A `session.stop` came since the last end of a turn: an input the runtime drops then
     /// was cancelled by the person, not lost ([`Session::end_turn`]).
     stop_asked: bool,
@@ -1133,6 +1157,19 @@ impl Session {
                         self.link.reply(
                             &id,
                             wire_error(error_code::INTERNAL, format!("{e:#}"), true),
+                        );
+                        return;
+                    }
+                }
+                self.link.reply(&id, ack(None));
+            }
+            Cmd::Background { id, call_id } => {
+                if self.state == ProcessState::Running {
+                    if let Err(e) = self.adapter.background(&call_id).await {
+                        tracing::warn!(session_id = %self.id, "background failed: {e:#}");
+                        self.link.reply(
+                            &id,
+                            wire_error(error_code::INTERNAL, format!("{e:#}"), false),
                         );
                         return;
                     }
@@ -1736,6 +1773,12 @@ impl Session {
                     self.tokens_rate(r);
                 }
             }
+            AdapterEvent::ForegroundCalls(calls) => {
+                if self.state != ProcessState::Stopped && self.foreground_calls != calls {
+                    self.foreground_calls = calls;
+                    self.send_state();
+                }
+            }
             AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
             AdapterEvent::RuntimeSessionId(r) => {
                 self.runtime_session_id = Some(r);
@@ -1987,7 +2030,8 @@ impl Session {
             self.slot = None;
             // Its MCP server is gone with it; a call still open fails.
             self.link.mcp().unbind(self.id);
-            // And its subagents and background tasks; the next process counts its own.
+            // And its subagents, background tasks and foreground calls; the next process
+            // counts its own.
             self.subagents = 0;
             self.live = None;
             // Its `session.state` counts nothing, which drops the hub's list.
@@ -1998,6 +2042,7 @@ impl Session {
                 self.token_rate = 0;
                 self.tokens_rate(0);
             }
+            self.foreground_calls.clear();
         }
         if self.state != s {
             self.state = s;
@@ -2027,6 +2072,7 @@ impl Session {
             capped_input: self.capped_input(),
             subagents: self.subagents,
             background_tasks: self.background_tasks,
+            foreground_calls: self.foreground_calls.clone(),
         });
     }
 

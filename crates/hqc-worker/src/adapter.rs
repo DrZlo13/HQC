@@ -65,6 +65,11 @@ pub enum AdapterEvent {
     /// while a turn or a subagent runs, 0 once neither does; sent as `tokens.rate`, transport
     /// only (SPEC §4). Reported when it changes.
     TokenRate(u32),
+    /// The calls of the agent itself the runtime runs in the foreground and can move to the
+    /// background ([`Adapter::background`]), by `call_id` (Claude Code: the Bash calls and
+    /// subagents of `system/task_started` with `is_backgrounded: false`, SPEC §8.1); sent as
+    /// `session.state.foreground_calls`. Reported when they change.
+    ForegroundCalls(Vec<String>),
     /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
     /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
     Limits(hqc_proto::frame::Limits),
@@ -171,6 +176,13 @@ pub trait Adapter: Send {
     async fn set_model(&mut self, model: &str) -> anyhow::Result<()> {
         let _ = model;
         anyhow::bail!("this runtime cannot switch its model while it runs")
+    }
+    /// Move the running call `call_id`, one of [`AdapterEvent::ForegroundCalls`], to the
+    /// background; the agent goes on. With no process, nothing to do. What the runtime answers
+    /// is only logged.
+    async fn background(&mut self, call_id: &str) -> anyhow::Result<()> {
+        let _ = call_id;
+        anyhow::bail!("this runtime cannot move a call to the background")
     }
     /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
     async fn answer_approval(

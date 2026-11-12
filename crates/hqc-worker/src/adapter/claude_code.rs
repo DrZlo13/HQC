@@ -993,6 +993,15 @@ impl Adapter for ClaudeCodeAdapter {
         p.io.run(vec![action]).await
     }
 
+    async fn background(&mut self, call_id: &str) -> anyhow::Result<()> {
+        let Ok(p) = self.running() else {
+            return Ok(());
+        };
+        tracing::info!(session_id = %self.session_id, ?call_id, "moving a call to the background");
+        let action = lock(&p.core).background(call_id);
+        p.io.run(vec![action]).await
+    }
+
     async fn answer_approval(
         &mut self,
         request_id: &str,

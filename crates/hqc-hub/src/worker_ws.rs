@@ -453,6 +453,7 @@ async fn handle_text(
             capped_input,
             subagents,
             background_tasks,
+            foreground_calls,
         } => {
             let st = StateFrame {
                 session_id,
@@ -466,6 +467,7 @@ async fn handle_text(
                 capped_input,
                 subagents,
                 background_tasks,
+                foreground_calls,
             };
             on_session_state(app, conn, &id, st).await
         }
@@ -666,8 +668,10 @@ async fn after_hello(app: &AppState, conn: &Arc<WorkerConn>, restarted: bool) {
             crate::peers::worker_restarted(app, conn.worker_id).await?;
             db::worker_restarted(&app.db, conn.worker_id).await?;
             for sid in db::sessions_of_worker(&app.db, conn.worker_id).await? {
-                // Their subagents too; the new process has no list to send (SPEC §4).
+                // Their subagents and foreground calls too; the new process has no list to send
+                // (SPEC §4).
                 app.drop_live_agents(sid);
+                app.drop_foreground_calls(sid);
                 events::turn_lost(app, sid).await?;
                 app.session_changed(sid);
             }
@@ -707,6 +711,7 @@ struct StateFrame {
     capped_input: Option<Uuid>,
     subagents: u32,
     background_tasks: u32,
+    foreground_calls: Vec<String>,
 }
 
 async fn on_session_state(
@@ -727,6 +732,7 @@ async fn on_session_state(
         capped_input,
         subagents,
         background_tasks,
+        foreground_calls,
     } = st;
     if session_id.is_nil() {
         // A holder report (SPEC §5.4, §9.3): only `held_by` counts.
@@ -786,6 +792,12 @@ async fn on_session_state(
         app.drop_live_agents(session_id);
     }
     db::set_background_tasks(&app.db, session_id, background_tasks).await?;
+    // Every report carries the list, in memory only; a stopped agent runs none.
+    if process_state == ProcessState::Stopped {
+        app.drop_foreground_calls(session_id);
+    } else {
+        app.set_foreground_calls(session_id, foreground_calls);
+    }
     conn.reply(id, HubFrame::Ack(Ack::default()));
 
     if process_state == ProcessState::Stopped {

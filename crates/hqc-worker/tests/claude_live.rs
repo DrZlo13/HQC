@@ -53,6 +53,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::LiveSubagents(l) => format!("live_subagents:{}", l.len()),
         AdapterEvent::BackgroundTasks(n) => format!("background_tasks:{n}"),
         AdapterEvent::TokenRate(n) => format!("token_rate:{n}"),
+        AdapterEvent::ForegroundCalls(c) => format!("foreground_calls:{}", c.len()),
     }
 }
 

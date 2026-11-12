@@ -2051,6 +2051,69 @@ async fn token_rate_is_kept_on_the_session() {
     hub.finish().await;
 }
 
+/// SPEC §5.3, §5.4, §6: `session.state.foreground_calls` is kept on the session, in the session
+/// object and its summary, and goes when the agent stops and when its worker restarts;
+/// `POST .../background` reaches the worker as `session.background`, a `call_id` that is empty,
+/// too long or has a NUL is refused.
+#[tokio::test]
+async fn a_foreground_call_goes_to_the_background() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Foreground calls").await;
+    ack_start(&mut w, &sid).await;
+    assert!(hub.session(&sid).await.get("foreground_calls").is_none());
+    let mut c = FakeClient::connect(&hub).await;
+    c.send(json!({"type": "subscribe_summary"})).await;
+    c.until("summary").await;
+
+    let call = "toolu_01FoCFY4DmUbVxXAembc44PX";
+    let running = json!({"session_id": sid, "process_state": "running", "locked_by": "hqc",
+        "foreground_calls": [call]});
+    w.send("session.state", running.clone()).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["foreground_calls"], json!([call]));
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"]["foreground_calls"] == json!([call]) {
+            break;
+        }
+    }
+
+    let path = format!("/api/sessions/{sid}/background");
+    let (s, r) = hub.post(&path, json!({"call_id": call})).await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(true)));
+    let f = w.expect("session.background").await;
+    assert_eq!(f["payload"], json!({"session_id": sid, "call_id": call}));
+    let long = "x".repeat(129);
+    for bad in ["", "toolu_\u{0}", long.as_str()] {
+        let (s, _) = hub.post(&path, json!({"call_id": bad})).await;
+        assert_eq!(s, 400, "{bad:?}");
+    }
+
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert!(hub.session(&sid).await.get("foreground_calls").is_none());
+
+    w.send("session.state", running).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["foreground_calls"], json!([call]));
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (_w, _) = FakeWorker::online_boot(&hub, &token, WS_PATH, Uuid::new_v4()).await;
+    // The list goes right after the process state, outside its statement.
+    hub.wait_session(&sid, "stopped, no foreground calls", |v| {
+        v["agent"]["process_state"] == "stopped" && v.get("foreground_calls").is_none()
+    })
+    .await;
+    hub.finish().await;
+}
+
 /// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
 /// service sessions included, the newest `updated_at` first; another user's sessions are not in
 /// it.

@@ -118,6 +118,10 @@ pub struct SessionSummary {
     /// subagents; absent — 0.
     #[serde(default, skip_serializing_if = "crate::frame::is_zero")]
     pub output_per_s: u32,
+    /// As in the session object (SPEC 0.125): the calls the agent runs in the foreground now
+    /// and can move to the background; absent — none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreground_calls: Vec<String>,
     /// As in the session object: the user's, so the list of favorites follows other devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorite_at: Option<DateTime<Utc>>,

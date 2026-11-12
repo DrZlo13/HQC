@@ -64,7 +64,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             UNNotificationCategory(identifier: Self.approvalCategory, actions: [allow, deny],
                                    intentIdentifiers: [], options: []),
         ])
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             NSLog("%@", "HQC notifications: granted=\(granted) error=\(error.map { "\($0)" } ?? "nil")")
         }
     }

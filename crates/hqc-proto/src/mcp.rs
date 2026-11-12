@@ -38,12 +38,20 @@ pub const RENAME: &str = "hqc_rename";
 /// `instructions` of `initialize` (SPEC §7.2): the runtime keeps them in the system prompt while
 /// the tools themselves wait behind its tool search, so each tool is named here by its use.
 pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's owner; the user \
-    reads this session in the hqc chat. Show the user files you make (images, charts, reports, \
-    diffs) with hqc_attach, not just a path. Other sessions: hqc_list_sessions, hqc_send, \
-    hqc_ask, hqc_spawn; history: hqc_search_history; later or recurring messages: hqc_schedule; \
-    moving this session to another folder or project, only when the user asks (a folder that is \
-    not one of the user's workspaces in the same environment waits for the user to allow it): \
-    hqc_move; renaming a session: hqc_rename.";
+    reads this session in the hqc chat. Required in every session, also for a one-line question \
+    and a task from another session: the moment you understand what the work in this session \
+    is, usually on the first message and before you answer, call hqc_rename without `session` \
+    with a short title for that work; call it again whenever the work turns to something \
+    substantially different. Required as well: every file you make for the user to look at (an \
+    image, a chart, a report, a diff) goes into the chat with hqc_attach in the same answer, also \
+    when the user did not ask to see it; a path alone is not enough. hqc_attach takes only a file \
+    inside the session's workspace, so copy a file you made elsewhere (a scratchpad in /tmp) into \
+    .hqc/out/ of the workspace first, not elsewhere in it: hqc keeps .hqc/ out of git. \
+    Other sessions: hqc_list_sessions, hqc_send, hqc_ask, hqc_spawn; history: \
+    hqc_search_history; later or recurring messages: hqc_schedule; moving this session to \
+    another folder or project, only when the user asks (a folder that is not one of the user's \
+    workspaces in the same environment waits for the user to allow it): hqc_move; renaming a \
+    session: hqc_rename.";
 
 pub const TOOLS: &[Tool] = &[
     Tool {

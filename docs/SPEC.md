@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.123, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
+Version 0.126, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2520,9 +2520,22 @@ Chains:
   `tools/call`, `notifications/cancelled`; another method gets `-32601`, an unlisted tool
   `-32602`. Hand-written (no MCP SDK crate) since 0.33, T30.
 - `initialize` gives `instructions` (since 0.66): that the tools act with the owner's rights,
-  that the user reads the session in the hqc chat, that files made for the user (images,
-  charts, reports, diffs) go through `hqc_attach` rather than as a path, and every other tool by
-  its use (`hqc_proto::mcp::INSTRUCTIONS`, a test checks each tool is named). Claude Code keeps
+  that the user reads the session in the hqc chat, two requirements (since 0.126), and every
+  other tool by its use (`hqc_proto::mcp::INSTRUCTIONS`, a test checks each tool is named). The
+  requirements: in every session the agent calls `hqc_rename` without `session` (its own
+  session) with a short title the moment it understands what the work is, usually on the first
+  message and before it answers, and again whenever the work turns to something substantially
+  different; and every file it makes for the user to look at (images, charts, reports, diffs)
+  goes into the chat with `hqc_attach` in the same answer, also unasked, with a file made
+  outside the workspace (a scratchpad in `/tmp`) copied first into `.hqc/out/` of the
+  workspace, since `hqc_attach` takes only workspace files and the worker adds `.hqc/` to
+  `info/exclude` (§8.1), so the copy does not end up in a commit. Said softly the agent skips them: with
+  Claude Code 2.1.312 and Opus 5.5, a one-line question from another session got no rename when
+  the rule ended the tool list or opened with "Name this session" (one session each), and an
+  agent gave paths of images in its scratchpad until asked to attach them; worded as now, the
+  agent renamed on the first message and again on a different second task, and an agent asked
+  only to make a chart wrote it into `.hqc/out/` and attached it (checked on 2026-11-12).
+  Claude Code keeps
   server instructions in the system prompt while the tools wait behind `ToolSearch` (§8.1), so
   the agent knows them from the first turn; without them it did not attach files unasked
   (checked on 2026-11-04 with Claude Code 2.1.310: haiku quoted them with only the tool names
@@ -4742,6 +4755,15 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.119 → 0.126 (an agent names its session and shows its files in the chat)
+§7.2: `INSTRUCTIONS` require, right after saying the user reads the session in the hqc chat,
+that the agent name its session with `hqc_rename` the moment it understands what the work in it
+is, usually on the first message and before it answers, and rename it whenever the work turns
+to something substantially different; and that every file it makes for the user to look at go
+into the chat with `hqc_attach` in the same answer, also unasked, copied first into `.hqc/out/`
+of the workspace, which git does not see, when made outside it. Before, they only named `hqc_rename`, and asked softly to attach
+files rather than give paths. 0.120–0.125 are taken by other pull requests.
 
 ### 0.119 → 0.123 (a fork before a later compaction of its source)
 §8.1: a fork at a message before the source's last compaction did not start: the CLI resumes a

@@ -3,6 +3,7 @@
 // before it expires, and asked for again when the artifact host answers 403 or 410.
 
 import type { Api } from './api';
+import { dataUrl, heicToJpeg } from './heic';
 import type { Artifact } from './proto';
 
 type Source = Pick<Api, 'artifact' | 'artifactLink'>;
@@ -19,6 +20,8 @@ export type LinkCache = Map<string, { url: string; expires: number }>;
 
 export class ArtifactStore {
   private readonly metas = new Map<string, Promise<Artifact>>();
+  private readonly heicImages = new Map<string, Promise<string | null>>();
+  private readonly heicDecoded = new Map<string, string>();
 
   constructor(
     private readonly api: Source,
@@ -66,16 +69,45 @@ export class ArtifactStore {
   /** The content as text; an expired or refused link is renewed once (403/410). A body
    *  announced larger than `maxBytes` is not read. */
   async text(id: string, maxBytes = MAX_INLINE_TEXT): Promise<string> {
+    const res = await this.content(id);
+    const len = Number(res.headers.get('content-length') ?? NaN);
+    if (len > maxBytes) {
+      void res.body?.cancel();
+      throw new Error('attachment too large');
+    }
+    return res.text();
+  }
+
+  /** The content as a Blob; an expired or refused link is renewed once (403/410). */
+  async blob(id: string): Promise<Blob> {
+    return (await this.content(id)).blob();
+  }
+
+  /** A HEIC or HEIF image the browser does not show, as a JPEG `data:` URL; null where it
+   *  cannot be decoded. Decoded once for the feed and the viewer; a failure is not cached. */
+  heicImage(id: string): Promise<string | null> {
+    let p = this.heicImages.get(id);
+    if (!p) {
+      p = this.blob(id)
+        .then(heicToJpeg)
+        .then(async (jpeg) => (jpeg && (await dataUrl(jpeg))) || null)
+        .catch(() => null);
+      this.heicImages.set(id, p);
+      void p.then((u) => (u === null ? this.heicImages.delete(id) : this.heicDecoded.set(id, u)));
+    }
+    return p;
+  }
+
+  /** The JPEG `data:` URL of a HEIC decoded already, without waiting: an image shown again
+   *  (the viewer opened from the feed) starts from it, not from the link that fails. */
+  decodedHeic(id: string): string | undefined {
+    return this.heicDecoded.get(id);
+  }
+
+  private async content(id: string): Promise<Response> {
     for (const fresh of [false, true]) {
       const res = await this.fetchImpl(await this.url(id, fresh));
-      if (res.ok) {
-        const len = Number(res.headers.get('content-length') ?? NaN);
-        if (len > maxBytes) {
-          void res.body?.cancel();
-          throw new Error('attachment too large');
-        }
-        return res.text();
-      }
+      if (res.ok) return res;
       if (res.status !== 403 && res.status !== 410) throw new Error(`HTTP ${res.status}`);
     }
     throw new Error('attachment link rejected');

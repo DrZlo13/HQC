@@ -3060,6 +3060,108 @@ describe('a new session', () => {
     expect(shown).toContain('two.txt');
   });
 
+  it('a HEIC still being decoded holds the first message back, and shows when it is read', async () => {
+    const { app } = draftApp(() => new Promise(() => {}));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    // Brave on a computer: the browser does not decode HEIC, the worker answers when told to.
+    let answer: (() => void) | null = null;
+    vi.stubGlobal(
+      'Worker',
+      class {
+        onmessage: ((e: { data: Blob }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        postMessage() {
+          answer = () => this.onmessage?.({ data: new Blob(['jpeg'], { type: 'image/jpeg' }) });
+        }
+        terminate() {}
+      },
+    );
+    const decode = vi.spyOn(HTMLImageElement.prototype, 'decode').mockRejectedValue(new DOMException('', 'EncodingError'));
+    try {
+      // A text typed first: Send would be on but for the file being read.
+      const area = root.querySelector<HTMLTextAreaElement>('.chat-new textarea')!;
+      await act(async () => {
+        area.value = 'look';
+        area.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        const picker = root.querySelector<HTMLInputElement>('.chat-new input[type=file]')!;
+        const heic = new File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])], 'HQC.heic', { type: 'image/heic' });
+        Object.defineProperty(picker, 'files', { value: [heic], configurable: true });
+        picker.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      const send = () => root.querySelector<HTMLButtonElement>('.chat-new button[type=submit]')!;
+      await vi.waitFor(() => expect(root.querySelector('.chat-new .composer-files .attachment-chip')?.textContent).toBe('reading 1 file…'));
+      expect(send().disabled).toBe(true);
+      // The file is read before it goes to the worker.
+      await vi.waitFor(() => expect(answer).not.toBeNull());
+      expect(send().disabled).toBe(true);
+      await act(async () => answer!());
+      await vi.waitFor(() => expect(root.querySelector('.chat-new .attachment-thumb')?.getAttribute('title')).toBe('HQC.jpg'));
+      expect(root.querySelector('.chat-new .composer-files')!.textContent).not.toContain('reading');
+      expect(send().disabled).toBe(false);
+    } finally {
+      decode.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('HEICs attached while it is being created and still being read go to the chat once they are read', async () => {
+    let create!: (s: SessionInfo) => void;
+    const { app } = draftApp(() => new Promise((r) => (create = r)));
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    await typeMessage('Hello there');
+    await sendMessage();
+    // One worker per file; each answers when told to.
+    const answers: (() => void)[] = [];
+    vi.stubGlobal(
+      'Worker',
+      class {
+        onmessage: ((e: { data: Blob }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        postMessage() {
+          answers.push(() => this.onmessage?.({ data: new Blob(['jpeg'], { type: 'image/jpeg' }) }));
+        }
+        terminate() {}
+      },
+    );
+    const decode = vi.spyOn(HTMLImageElement.prototype, 'decode').mockRejectedValue(new DOMException('', 'EncodingError'));
+    const pick = (name: string) =>
+      act(async () => {
+        const picker = root.querySelector<HTMLInputElement>('.chat-new input[type=file]')!;
+        const heic = new File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])], name, { type: 'image/heic' });
+        Object.defineProperty(picker, 'files', { value: [heic], configurable: true });
+        picker.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    try {
+      await pick('one.heic');
+      await vi.waitFor(() => expect(answers).toHaveLength(1));
+      await act(async () => create(created()));
+      await settle();
+      // The window waits for the file before it gives way to the chat.
+      expect(location.hash).toBe('#/p/p1/new');
+      // A second one attached during that wait is waited for too.
+      await pick('two.heic');
+      await vi.waitFor(() => expect(answers).toHaveLength(2));
+      await act(async () => answers[0]());
+      await settle();
+      expect(location.hash).toBe('#/p/p1/new');
+      await act(async () => answers[1]());
+      await settle();
+      await vi.waitFor(() => expect(location.hash).toBe('#/s/fresh'));
+      await vi.waitFor(() =>
+        expect([...root.querySelectorAll('.main .chat .composer-files .attachment-thumb')].map((i) => i.getAttribute('title'))).toEqual(['one.jpg', 'two.jpg']),
+      );
+    } finally {
+      decode.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("after the switch the caret is in the chat's input, and again when the chat is opened later", async () => {
     const { app } = draftApp();
     location.hash = '#/p/p1/new';

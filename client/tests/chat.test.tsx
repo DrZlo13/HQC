@@ -1475,3 +1475,48 @@ describe('Quote', () => {
     expect(withQuote('draft\n\n', 'one\n\n  two\r\nthree')).toBe('draft\n\n> one\n>\n>   two\n> three\n\n');
   });
 });
+
+describe('picked files', () => {
+  it('a HEIC still being decoded holds the message back, and shows when it is read', async () => {
+    const { app } = setup('idle');
+    await mount(app);
+    // Brave on a computer: the browser does not decode HEIC, the worker answers when told to.
+    let answer: (() => void) | null = null;
+    vi.stubGlobal(
+      'Worker',
+      class {
+        onmessage: ((e: { data: Blob }) => void) | null = null;
+        onerror: (() => void) | null = null;
+        postMessage() {
+          answer = () => this.onmessage?.({ data: new Blob(['jpeg'], { type: 'image/jpeg' }) });
+        }
+        terminate() {}
+      },
+    );
+    const decode = vi.spyOn(HTMLImageElement.prototype, 'decode').mockRejectedValue(new DOMException('', 'EncodingError'));
+    try {
+      // A text typed first: Send would be on but for the file being read.
+      const area = $('.composer textarea') as HTMLTextAreaElement;
+      await act(async () => {
+        area.value = 'look';
+        area.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const input = $('input[type=file]') as HTMLInputElement;
+      const heic = new File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])], 'HQC.heic', { type: 'image/heic' });
+      Object.defineProperty(input, 'files', { value: [heic], configurable: true });
+      await act(async () => void input.dispatchEvent(new Event('change', { bubbles: true })));
+      await vi.waitFor(() => expect($('.composer-files .attachment-chip')?.textContent).toBe('reading 1 file…'));
+      expect(($('button[type=submit]') as HTMLButtonElement).disabled).toBe(true);
+      // The file is read before it goes to the worker.
+      await vi.waitFor(() => expect(answer).not.toBeNull());
+      expect(($('button[type=submit]') as HTMLButtonElement).disabled).toBe(true);
+      await act(async () => answer!());
+      await vi.waitFor(() => expect($('.composer-files .attachment-thumb')?.getAttribute('title')).toBe('HQC.jpg'));
+      expect(root.querySelector('.composer-files')!.textContent).not.toContain('reading');
+      expect(($('button[type=submit]') as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      decode.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});

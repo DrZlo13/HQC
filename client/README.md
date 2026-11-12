@@ -29,6 +29,14 @@ T49 (theme, project appearance, the project settings page) 4.0 KB gzip of JS (54
 the fonts (≈180 KB woff2) are loaded by the browser by `unicode-range` and weight, only the ones needed.
 The service worker (`public/sw.js`) is written in plain JS without a build: it is small and handles
 only push.
+HEIC and HEIF photos that the browser does not decode (Chrome, Firefox, Brave on a computer) are
+decoded by [libheif-js](https://github.com/catdad-experiments/libheif-js) 1.23.5, its default
+pure-JavaScript build of libheif: no WebAssembly and no `eval`, so CSP §20 does not get in the way
+(the WebAssembly build would need `wasm-unsafe-eval`, and `heic-to` starts its worker from a `blob:`
+URL, which the CSP does not allow). It runs in a Web Worker (`src/heic.worker.ts`) that Vite emits as a
+file of its own, about 3.2 MB, loaded only when a HEIC needs it; the main bundle does not grow by it.
+A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is in
+`public/licenses/libheif-LICENSE.txt`.
 
 ## Scripts
 
@@ -59,6 +67,9 @@ only push.
   root by `applyTheme`, which also keeps the base in `localStorage` (`hqc.theme`): `main.tsx` at
   start (that stored base, Warm without one), `App.tsx` whenever the user's theme or the current project changes. `styles.css` uses only
   these variables, no palette of its own.
+- `src/heic.ts`, `src/heic.worker.ts`, `src/heic-decode.ts` — a HEIC the browser does not decode,
+  decoded by libheif in a Web Worker into a JPEG: for a picked file (`toOutgoing`) and for an
+  attachment whose `<img>` fails with a renewed link too (`ArtifactStore.heicImage`).
 - `src/ui/` — the interface per the round 2 mockups (`docs/design/redesign-2026-11-01`; the
   T26 ones of `redesign-2026-10-24` for what round 2 did not redraw):
   - `App.tsx` — layout: on desktop the project bar (`ProjectRail`), the sidebar
@@ -103,7 +114,8 @@ only push.
   (http in a LAN).
 - `public/` — `manifest.webmanifest`, `sw.js`, icons, `fonts/` — Inter and JetBrains Mono
   (woff2 400/500/600, Latin and Cyrillic, from `@fontsource/*` 5.3.0, OFL licenses alongside): the hub
-  serves them itself, CSP `font-src 'self'` lets no external fonts in.
+  serves them itself, CSP `font-src 'self'` lets no external fonts in; `licenses/` — the license of
+  libheif, which the HEIC worker carries.
 - `mock/` — the mock hub for development and tests.
 
 Routes are in the hash, so the hub can serve the client as static files: `#/` — the list, `#/p/<id>` —

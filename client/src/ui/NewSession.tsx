@@ -72,16 +72,27 @@ export function NewSessionChat({
   // As the create ends: the files attached while the session was being created.
   const filesNow = useRef(files);
   filesNow.current = files;
+  // Files picked and not read yet: a message sent meanwhile would go without them.
+  const [reading, setReading] = useState(0);
+  // Their reading: the create waits for it before it hands the files over to the chat.
+  const reads = useRef<Promise<unknown>>(Promise.resolve());
   const addFiles = (list: FileList | File[]) => {
     // A copy now: the input empties the list it handed over right after.
     const picked = [...list];
     if (!picked.length) return;
-    // One at a time: each is read into memory, and a HEIC drawn on a canvas.
-    void (async () => {
-      const add: OutgoingFile[] = [];
-      for (const p of picked) add.push(await toOutgoing(p));
-      setFiles((cur) => [...cur, ...add]);
+    setReading((n) => n + picked.length);
+    // One at a time: each is read into memory, and a HEIC decoded into a JPEG; each shows
+    // as soon as it is read.
+    const done = (async () => {
+      for (const p of picked) {
+        const f = await toOutgoing(p);
+        // At once, not at the next render: the create may hand the files over right after.
+        filesNow.current = [...filesNow.current, f];
+        setFiles((cur) => [...cur, f]);
+        setReading((n) => n - 1);
+      }
     })();
+    reads.current = Promise.all([reads.current, done.catch(() => {})]);
   };
   const [dragging, setDragging] = useState(false);
   // The first message, while the session is being created.
@@ -105,6 +116,12 @@ export function NewSessionChat({
       // The chat opens with its first page (the line of its start) and the message, as this
       // window shows them: no "Loading…" in between. A failed load is tried again there.
       await chat.load().catch(() => {});
+      // A file attached meanwhile and still being read goes to the chat too: a HEIC libheif
+      // decodes takes a second or more, and one attached during that wait is waited for as well.
+      for (let r = reads.current; ; r = reads.current) {
+        await r.catch(() => {});
+        if (r === reads.current) break;
+      }
       // Left meanwhile: the session is in the list, what was typed is its draft.
       if (left.current) {
         app.setDraft(s.id, typed.current);
@@ -250,6 +267,7 @@ export function NewSessionChat({
         wait={first ? 'Starting…' : undefined}
         phone={phone}
         files={files}
+        reading={reading}
         onFiles={addFiles}
         onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
         onSend={send}

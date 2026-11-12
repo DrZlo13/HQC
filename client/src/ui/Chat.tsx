@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/ho
 import { ApiError, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
+import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { onBack } from '../nav';
 import type { PermissionMode, SessionInfo, SessionState } from '../proto';
 import type { OutgoingFile } from '../session';
@@ -72,6 +73,9 @@ export function Chat({
   // there and not sent, and the caret in the input.
   const [handed] = useState(() => app.takeHandover(sessionId));
   const [files, setFiles] = useState<OutgoingFile[]>(handed?.files ?? []);
+  // Files picked and not read yet: a HEIC libheif decodes takes a second or more, and a message
+  // sent meanwhile would go without it.
+  const [reading, setReading] = useState(0);
   // The caret goes to the input once, as the chat opens: on a computer, as in the VS Code tab,
   // unless a request waits for an answer; on a phone only from a new session's window (the
   // keyboard would cover the chat). An input shown later (after a sheet, a lock) leaves the
@@ -81,11 +85,15 @@ export function Chat({
   const addFiles = (list: FileList | File[] | null | undefined) => {
     const picked = [...(list ?? [])];
     if (!picked.length) return;
-    // One at a time: each is read into memory, and a HEIC drawn on a canvas.
+    setReading((n) => n + picked.length);
+    // One at a time: each is read into memory, and a HEIC decoded into a JPEG; each shows
+    // as soon as it is read.
     void (async () => {
-      const add: OutgoingFile[] = [];
-      for (const p of picked) add.push(await toOutgoing(p));
-      setFiles((cur) => [...cur, ...add]);
+      for (const p of picked) {
+        const f = await toOutgoing(p);
+        setFiles((cur) => [...cur, f]);
+        setReading((n) => n - 1);
+      }
     })();
   };
   // The feed shows once the newest page is in, in the first frame for a chat kept in memory or
@@ -621,6 +629,7 @@ export function Chat({
           phone={phone}
           commands={info?.commands}
           files={files}
+          reading={reading}
           onFiles={addFiles}
           onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))}
           onSend={(text) => {
@@ -907,14 +916,13 @@ const PREVIEW_MAX = 10 * 1024 * 1024;
 const HELD_MAX = 100 * 1000 * 1000;
 /** iOS draws a canvas of at most this many pixels; a larger photo is scaled down to it. */
 const CANVAS_MAX = 16_000_000;
-const HEIC_NAME = /\.hei[cf]$/i;
 
 /** A picked file, read into memory at once, with a `data:` preview for images (the CSP has
  *  no `blob:`). On an iPhone a HEIC file whose preview was read in full still went out cut
  *  off when the upload read it again ("incomplete multipart stream"), so the upload sends
  *  what was read here.
- *  A HEIC or HEIF image becomes a JPEG where the browser decodes it (Safari, any browser on an
- *  iPhone): the agent does not read HEIC. */
+ *  A HEIC or HEIF image becomes a JPEG: the agent does not read HEIC. The browser draws it
+ *  where it decodes it (Safari, any browser on an iPhone), libheif decodes it elsewhere. */
 export async function toOutgoing(file: File): Promise<OutgoingFile> {
   let f: OutgoingFile = { file, name: file.name || 'file' };
   if (file.size <= HELD_MAX) {
@@ -924,16 +932,19 @@ export async function toOutgoing(file: File): Promise<OutgoingFile> {
       // Not readable: the upload fails and says so.
       return f;
     }
-    if (/^image\/hei[cf]/i.test(file.type) || HEIC_NAME.test(f.name)) f = (await toJpeg(f)) ?? f;
+    if (/^image\/hei[cf]/i.test(file.type) || HEIC_NAME.test(f.name)) {
+      const jpeg = (await toJpeg(f.file)) ?? (await heicToJpeg(f.file));
+      if (jpeg) f = { file: jpeg, name: `${f.name.replace(HEIC_NAME, '')}.jpg` };
+    }
   }
   if (!f.file.type.startsWith('image/') || f.file.size > PREVIEW_MAX || typeof FileReader === 'undefined') return f;
   return { ...f, preview: await dataUrl(f.file) };
 }
 
-/** `f` drawn as a JPEG, or null where the browser does not decode it. */
-async function toJpeg(f: OutgoingFile): Promise<OutgoingFile | null> {
+/** `b` drawn as a JPEG, or null where the browser does not decode it. */
+async function toJpeg(b: Blob): Promise<Blob | null> {
   try {
-    const src = await dataUrl(f.file);
+    const src = await dataUrl(b);
     if (!src) return null;
     const img = new Image();
     img.src = src;
@@ -946,20 +957,10 @@ async function toJpeg(f: OutgoingFile): Promise<OutgoingFile | null> {
     const jpeg = await new Promise<Blob | null>((resolve) => c.toBlob(resolve, 'image/jpeg', 0.9));
     // iOS frees a canvas's memory only when it is collected.
     c.width = c.height = 0;
-    return jpeg ? { file: jpeg, name: `${f.name.replace(HEIC_NAME, '')}.jpg` } : null;
+    return jpeg;
   } catch {
     return null;
   }
-}
-
-function dataUrl(b: Blob): Promise<string | undefined> {
-  if (typeof FileReader === 'undefined') return Promise.resolve(undefined);
-  return new Promise((resolve) => {
-    const r = new FileReader();
-    r.onload = () => resolve(typeof r.result === 'string' ? r.result : undefined);
-    r.onerror = () => resolve(undefined);
-    r.readAsDataURL(b);
-  });
 }
 
 export function Composer({
@@ -968,6 +969,7 @@ export function Composer({
   phone = false,
   commands,
   files = [],
+  reading = 0,
   onFiles = () => {},
   onRemove = () => {},
   insertQuote,
@@ -982,6 +984,8 @@ export function Composer({
   /** The runtime's slash commands: `/` at the start of the text opens a list of them. */
   commands?: string[];
   files?: OutgoingFile[];
+  /** Files picked and still being read: nothing is sent until they are in `files`. */
+  reading?: number;
   onFiles?: (files: FileList | File[]) => void;
   onRemove?: (index: number) => void;
   /** Set here to a function that puts a quote of the feed into the message (`withQuote`),
@@ -1027,7 +1031,7 @@ export function Composer({
     };
   }, [insertQuote]);
   const picker = useRef<HTMLInputElement>(null);
-  const canSend = !wait && (text.trim() !== '' || files.length > 0);
+  const canSend = !wait && (text.trim() !== '' || files.length > 0) && reading === 0;
   // The slash command popup (T27): the matches, the highlighted one, and the text Esc closed
   // it at (typing on reopens it).
   const [pick, setPick] = useState(0);
@@ -1171,8 +1175,13 @@ export function Composer({
             ))}
           </ul>
         )}
-        {files.length > 0 && (
+        {(files.length > 0 || reading > 0) && (
           <div class="composer-files">
+            {reading > 0 && (
+              <span class="attachment-chip muted">
+                reading {reading} {reading === 1 ? 'file' : 'files'}…
+              </span>
+            )}
             {files.map((f, i) => (
               <span key={i} class="composer-file">
                 {f.preview ? (

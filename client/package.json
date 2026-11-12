@@ -18,6 +18,7 @@
     "icons": "node scripts/icons.mjs"
   },
   "dependencies": {
+    "libheif-js": "1.23.5",
     "marked": "^18.1.1",
     "preact": "^11.0.1",
     "temml": "0.14.0"

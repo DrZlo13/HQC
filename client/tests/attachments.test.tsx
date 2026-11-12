@@ -71,6 +71,34 @@ function fakeSource(metas: Artifact[], base = '') {
   };
 }
 
+/** The start of a HEIC file (`ftyp`). */
+const HEIC_BYTES = new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112]);
+
+/** A global `Worker` that answers each message with `answer`, as the HEIC worker does; the
+ *  list has what each one was sent and whether it was ended. */
+function workerAnswering(answer: Blob | null) {
+  const workers: { sent: Uint8Array; terminated: boolean }[] = [];
+  vi.stubGlobal(
+    'Worker',
+    class {
+      onmessage: ((e: { data: Blob | null }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      private readonly seen = { sent: new Uint8Array(), terminated: false };
+      constructor() {
+        workers.push(this.seen);
+      }
+      postMessage(buf: ArrayBuffer) {
+        this.seen.sent = new Uint8Array(buf);
+        setTimeout(() => this.onmessage?.({ data: answer }));
+      }
+      terminate() {
+        this.seen.terminated = true;
+      }
+    },
+  );
+  return workers;
+}
+
 describe('ArtifactStore', () => {
   it('caches links until close to expiry and renews them on 403/410', async () => {
     let now = 1_000_000;
@@ -192,16 +220,25 @@ describe('a picked file', () => {
     expect([f.name, f.file.type, await f.file.text()]).toEqual(['notes.txt', 'text/plain', 'hello']);
   });
 
-  it('a HEIC becomes a JPEG where the browser decodes it, and stays HEIC where it does not', async () => {
-    const heic = new File([new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112])], 'HQC.heic', { type: 'image/heic' });
-    // Chrome on a computer does not decode HEIC: the file is sent as it is.
+  it('a HEIC becomes a JPEG: drawn where the browser decodes it, decoded in a worker where it does not', async () => {
+    const heic = new File([HEIC_BYTES], 'HQC.heic', { type: 'image/heic' });
+    const jpeg = new Blob(['jpeg'], { type: 'image/jpeg' });
+    // Chrome on a computer does not decode HEIC: libheif does, in a worker.
     const reject = vi.spyOn(HTMLImageElement.prototype, 'decode').mockRejectedValue(new DOMException('', 'EncodingError'));
     try {
+      const workers = workerAnswering(jpeg);
+      const f = await toOutgoing(heic);
+      expect([f.name, f.file]).toEqual(['HQC.jpg', jpeg]);
+      expect(f.preview).toMatch(/^data:image\/jpeg;base64,/);
+      expect(workers).toEqual([{ sent: HEIC_BYTES, terminated: true }]);
+      // Without workers the file is sent as it is.
+      vi.stubGlobal('Worker', undefined);
       expect((await toOutgoing(heic)).name).toBe('HQC.heic');
     } finally {
       reject.mockRestore();
     }
-    const jpeg = new Blob(['jpeg'], { type: 'image/jpeg' });
+    // Where the browser decodes it, no worker is started.
+    const workers = workerAnswering(null);
     const draw = vi.fn();
     const spies = [
       vi.spyOn(HTMLImageElement.prototype, 'decode').mockResolvedValue(undefined),
@@ -218,6 +255,7 @@ describe('a picked file', () => {
       const [, , , w, h] = draw.mock.calls[0] as number[];
       expect(w * h).toBeLessThanOrEqual(16_000_000);
       expect(w / h).toBeCloseTo(8000 / 6000, 2);
+      expect(workers).toEqual([]);
     } finally {
       for (const s of spies) s.mockRestore();
     }
@@ -259,6 +297,17 @@ describe('composer', () => {
   it('without text and files nothing can be sent', () => {
     const el = mount(<Composer files={[]} onSend={() => {}} />);
     expect(el.querySelector<HTMLButtonElement>('button[type=submit]')!.disabled).toBe(true);
+  });
+
+  it('while a picked file is still being read it says so and does not send', async () => {
+    const onSend = vi.fn();
+    const el = mount(<Composer initial="look" files={[]} reading={2} onSend={onSend} />);
+    expect(el.querySelector('.composer-files .attachment-chip')!.textContent).toBe('reading 2 files…');
+    expect(el.querySelector<HTMLButtonElement>('button[type=submit]')!.disabled).toBe(true);
+    const area = el.querySelector<HTMLTextAreaElement>('textarea')!;
+    await act(async () => void area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(onSend).not.toHaveBeenCalled();
+    expect(area.value).toBe('look');
   });
 });
 
@@ -407,6 +456,58 @@ describe('rendering attachments', () => {
     await flush();
     expect(el.querySelector('.attachment-image')).toBeNull();
     expect(el.querySelector('.card-attachment')!.textContent).toContain('screen.png');
+  });
+
+  it('a HEIC the browser does not show is decoded in a worker and shown as a JPEG, once for the feed and the viewer', async () => {
+    const src = fakeSource([meta('heic', 'image', 'IMG_1161.HEIC')]);
+    const fetchImpl = vi.fn(async () => new Response(HEIC_BYTES, { headers: { 'content-type': 'image/heic' } }));
+    const store = new ArtifactStore(src as never, fetchImpl as never);
+    const workers = workerAnswering(new Blob(['jpeg'], { type: 'image/jpeg' }));
+    const { el } = chatWith([ev('event.attachment', (e) => (e.payload = { artifact_id: 'heic', kind: 'image', name: 'IMG_1161.HEIC' }))], store);
+    await flush();
+    let img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    // The browser is given the link first: Safari shows HEIC itself.
+    expect(img.getAttribute('src')).toBe('/artifacts/heic?exp=1&sig=s1');
+    // A first failure renews the link, as for any image: it may have expired.
+    await act(async () => void img.dispatchEvent(new Event('error')));
+    await vi.waitFor(() => expect(el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/heic?exp=1&sig=s2'));
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(workers).toEqual([]);
+    img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    await act(async () => void img.dispatchEvent(new Event('error')));
+    await vi.waitFor(() => expect(el.querySelector('.attachment-image img')!.getAttribute('src')).toMatch(/^data:image\/jpeg;base64,/));
+    expect(fetchImpl).toHaveBeenCalledWith('/artifacts/heic?exp=1&sig=s2');
+    expect(workers).toEqual([{ sent: HEIC_BYTES, terminated: true }]);
+
+    render(null, root!);
+    const viewer = mount(<ArtifactViewer id="heic" name="IMG_1161.HEIC" kind="image" store={store} onClose={vi.fn()} onDownload={vi.fn()} />);
+    await flush();
+    // Decoded already: the viewer starts from the JPEG, not from the link that fails.
+    expect(viewer.querySelector('.viewer-body img')!.getAttribute('src')).toMatch(/^data:image\/jpeg;base64,/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(workers).toHaveLength(1);
+  });
+
+  it('a HEIC libheif does not read becomes a card after the renewed link fails; the failure is not kept', async () => {
+    const src = fakeSource([meta('heic', 'image', 'IMG_1161.HEIC')]);
+    const fetchImpl = vi.fn(async () => new Response(HEIC_BYTES, { headers: { 'content-type': 'image/heic' } }));
+    const store = new ArtifactStore(src as never, fetchImpl as never);
+    const workers = workerAnswering(null);
+    const { el } = chatWith([ev('event.attachment', (e) => (e.payload = { artifact_id: 'heic', kind: 'image', name: 'IMG_1161.HEIC' }))], store);
+    await flush();
+    let img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    await act(async () => void img.dispatchEvent(new Event('error')));
+    await vi.waitFor(() => expect(el.querySelector('.attachment-image img')!.getAttribute('src')).toBe('/artifacts/heic?exp=1&sig=s2'));
+    expect(workers).toEqual([]);
+    img = el.querySelector<HTMLImageElement>('.attachment-image img')!;
+    await act(async () => void img.dispatchEvent(new Event('error')));
+    await vi.waitFor(() => expect(el.querySelector('.attachment-image')).toBeNull());
+    expect(workers).toHaveLength(1);
+    expect(el.querySelector('.card-attachment')!.textContent).toContain('IMG_1161.HEIC');
+
+    // A later try decodes again: a failed one (a network error, say) is not remembered.
+    workerAnswering(new Blob(['jpeg'], { type: 'image/jpeg' }));
+    expect(await store.heicImage('heic')).toMatch(/^data:image\/jpeg;base64,/);
   });
 
   it('HTML is a link on the hub domain and a sandboxed iframe on the artifact domain', async () => {

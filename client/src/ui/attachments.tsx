@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { formatSize, MAX_INLINE_TEXT, MAX_OPEN_TEXT, type ArtifactStore } from '../artifacts';
+import { HEIC_NAME } from '../heic';
 import type { Artifact, ArtifactKind } from '../proto';
 import type { PendingAttachment } from '../timeline';
 import { IconCross } from './icons';
@@ -152,8 +153,25 @@ function useArtifactUrl(store: ArtifactStore, id: string) {
   return { url, failed, renew };
 }
 
-function ImageView({ id, name, store, actions }: { id: string; name: string; store: ArtifactStore; actions: AttachmentActions }) {
+/** The source of an image: its signed link, renewed once when it fails (it may have expired).
+ *  A HEIC that fails with the renewed link too is one the browser does not show (Chrome,
+ *  Firefox, Brave on a computer): it is decoded into a JPEG `data:` URL. */
+function useImageSrc(store: ArtifactStore, id: string, name: string) {
   const { url, failed, renew } = useArtifactUrl(store, id);
+  const [decoded, setDecoded] = useState<string | null>(() => store.decodedHeic(id) ?? null);
+  const errors = useRef(0);
+  const onError = () => {
+    errors.current += 1;
+    // The first failure may be an expired link, and Safari shows a HEIC itself: decoding it
+    // there would cost an iPhone seconds and hundreds of megabytes per photo.
+    if (errors.current !== 2 || !HEIC_NAME.test(name)) return renew();
+    void store.heicImage(id).then((u) => (u ? setDecoded(u) : renew()));
+  };
+  return { src: decoded ?? url, failed, onError };
+}
+
+function ImageView({ id, name, store, actions }: { id: string; name: string; store: ArtifactStore; actions: AttachmentActions }) {
+  const { src, failed, onError } = useImageSrc(store, id, name);
   if (failed) return <FileCard id={id} name={name} kind="image" meta={null} actions={actions} />;
   return (
     <button
@@ -162,7 +180,7 @@ function ImageView({ id, name, store, actions }: { id: string; name: string; sto
       title={name}
       onClick={() => (actions.viewArtifact ? actions.viewArtifact({ id, name, kind: 'image' }) : actions.openArtifact(id))}
     >
-      {url ? <img src={url} alt={name} loading="lazy" onError={renew} /> : <span class="muted">{name}</span>}
+      {src ? <img src={src} alt={name} loading="lazy" onError={onError} /> : <span class="muted">{name}</span>}
     </button>
   );
 }
@@ -226,10 +244,10 @@ export function ArtifactViewer({
 }
 
 function ViewerImage({ id, name, store }: { id: string; name: string; store: ArtifactStore }) {
-  const { url, failed, renew } = useArtifactUrl(store, id);
+  const { src, failed, onError } = useImageSrc(store, id, name);
   if (failed) return <div class="error-text">The image failed to load</div>;
-  if (!url) return <div class="muted">loading…</div>;
-  return <img src={url} alt={name} onError={renew} />;
+  if (!src) return <div class="muted">loading…</div>;
+  return <img src={src} alt={name} onError={onError} />;
 }
 
 function ViewerMarkdown({ id, store }: { id: string; store: ArtifactStore }) {

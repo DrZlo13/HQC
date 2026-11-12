@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.126, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
+Version 0.127, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -487,7 +487,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
-| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent |
+| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent; a command's row carries only `task_id`, `description` (its Bash call's description, or the command) and `duration_ms` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -559,8 +559,11 @@ Rules:
   archived session too, so that empty list drops the one kept. That list goes directly and is
   lost on a broken link (§8.1), so the hub also drops the kept list itself, and sends the
   session's subscribers an empty one, when the worker's `hello` says it restarted (every
-  session of that worker), when `session.state` reports `subagents` 0 (§5.4) and when the
-  session is deleted; a client that falls behind gets an empty list when none is kept.
+  session of that worker), when `session.state` reports both `subagents` and (since 0.127)
+  `background_tasks` 0 (§5.4), since the list holds the agent's background commands too (§8.1),
+  and when the session is deleted; a client that falls behind gets an empty list when none is
+  kept. An empty list lost with the link while a background task still runs is not made up for
+  until the count goes to 0 or the worker restarts.
 - `tokens.rate` (since 0.122) goes to clients in the session object and `session.summary` as
   `output_per_s` (§6), not as an event, and is not saved either. The hub keeps a session's
   latest rate in memory while it is above 0 and drops the rates of a worker's sessions when that
@@ -2885,7 +2888,28 @@ the CLI's list counts it before that line; `activity`, `total_tokens` and `tool_
 of its latest `task_progress`; `duration_ms` is the worker's own time since it first saw the
 subagent's `task_started`, or the list that counted it before, counted when the list is sent.
 A repeated `task_started` of the same `task_id` keeps the first time; a subagent that stops
-counting is forgotten. The worker sends `subagents.live` directly, not through the outbox, as
+counting is forgotten. Since 0.127 the list holds, after the subagents, the main agent's
+background shell commands: the entries of the latest `background_tasks_changed` list with
+`task_type: local_bash`, without `ambient: true` (tasks the SDK says hosts should leave out of
+activity indicators), whose `task_started` has come and was not that of a `Monitor` call, and
+whose `parent_task_id` is none or a subagent that has reported. 2.1.312 registers a Monitor's
+task as `local_bash` too, without `ambient`, and nothing in the list tells it from a command:
+the adapter remembers the ids of the `Monitor` `tool_use` blocks of every `assistant` line, the
+agent's and its subagents', and marks the task whose `task_started` names one as its
+`tool_use_id`. A background task joins the list before its `task_started` (SDK), so a
+command's row comes at its `task_started` and a Monitor never shows; a Bash call moved to the
+background later, whose `task_started` came while it ran in the foreground, gets its row when
+the list takes it. A task whose `task_started` this process did not see has no row, nor has one
+after its `task_notification`.
+A subagent's row stands for its own commands; a command that a subagent which reported left
+running gets its own row when that subagent's row goes. Other task types (`mcp_task`,
+`local_workflow`, …) are no rows. A command's row is its `task_id`, its `description` — the
+entry's, which 2.1.312 sets to the Bash call's `description`, or to the command without one —
+and `duration_ms`, the worker's own time since the command's first `task_started` (for a
+command a subagent left, since the command started, not since it got its row); no `activity`,
+`total_tokens` or `tool_uses`. Commands go in the order they became rows; the list is sent
+again when one comes, goes or its `description` changes. They never change
+`session.state.subagents`. The worker sends `subagents.live` directly, not through the outbox, as
 `agent.delta`, ignores a list read after the agent's process stopped and sends an empty list
 when it stops; after every reconnect it sends the last list it sent again, unless that one was
 empty, `duration_ms` grown by the time since it was sent, since a restarted hub has none and
@@ -4765,6 +4789,28 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.123 → 0.127 (the background commands of the agent in the live list)
+§4, §8.1: the agent's own background shell commands, a Bash call run in the background or moved
+there, were counted in `session.state.background_tasks` but shown nowhere: the agent said a run
+was started in the background, and nothing in the chat showed it running. `subagents.live` now
+holds them after the subagents, in the order they became rows: the main agent's `local_bash`
+entries of the CLI's `background_tasks_changed` list, not `ambient`, from their `task_started`,
+and not of a subagent that counts, whose row stands for them. Monitors are left out: 2.1.312
+lists a Monitor's task as `local_bash` without `ambient`, so it is told apart by the call that
+started it, a `Monitor` `tool_use` named by its `task_started`. A command's row is its
+`task_id`, its `description` from the list
+(the Bash call's `description`, or the command) and its run time, with no `activity` or counts;
+commands do not change `session.state.subagents`. No frame changes: a command's row is an
+ordinary entry of `agents`, which a client reads as a row without counts.
+§4 hub: the hub dropped the kept list, and sent the subscribers an empty one, on every
+`session.state` with `subagents` 0; a session that runs only a background command reports just
+that, so each of its reports would have wiped the rows in open chats and for a new subscriber.
+The hub now keeps the list while background tasks run, and drops it when `session.state`
+counts neither subagents nor background tasks. The hub goes first, then the workers: under an
+older hub a worker's command rows are wiped at the session's next `session.state`; an older
+worker under the new hub sends no command rows, and its own empty list still drops its
+subagents' rows. 0.124–0.126 are taken by other pull requests.
 
 ### 0.119 → 0.126 (an agent names its session and shows its files in the chat)
 §7.2: `INSTRUCTIONS` require, right after saying the user reads the session in the hqc chat,

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.121, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
+Version 0.123, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2788,12 +2788,21 @@ adapter sends them as `worker.limits` (§5.4). Per-model weekly windows (`/usage
 week (Fable)") are not in it.
 
 Fork (since 0.80). A session with `session.start.fork` and no transcript yet starts with
-`--resume <source> --fork-session --session-id <its uuid> --resume-session-at <record>`: the CLI
+`--resume <copy> --fork-session --session-id <its uuid> --resume-session-at <record>`: the CLI
 writes a new transcript with the source's records up to and including `<record>` (their
 `uuid`s kept) and continues there; the source is not touched. Checked live on 2.1.310 with
-haiku in stream-json mode: the forked conversation knows only what came before the cut. The
-adapter registers the copied main-chain records as its own (§9.3), so the mirror neither
-imports them nor takes them for another writer. The CLI writes the switch into the transcript as a typed `/model <name>` record; the
+haiku in stream-json mode: the forked conversation knows only what came before the cut. Since
+0.123 `<copy>` is the source transcript cut right after the line of `<record>`, written to
+`hqc-fork-<its uuid>.jsonl` (mode 0600) in the worker's temporary folder and removed when the
+process exits; a path ending in `.jsonl` makes `--resume` read that file. On `--resume` the CLI
+reads a transcript from its newest record back through `parentUuid` to the last
+`compact_boundary`, whose `parentUuid` is null, so with the source itself a record before a
+later compaction is not found (`No message found with message.uuid of: <record>`, exit 1); in
+the copy `<record>` is the newest. Checked live on 2.1.312 with haiku: a session told "APPLE",
+then "BANANA", then `/compact`, forked before "BANANA" through the hub; the worker started the
+fork from the copy and it answered "APPLE", while `--resume <source>` with the same record
+exits with that error. The adapter registers the copied main-chain records as its own (§9.3),
+so the mirror neither imports them nor takes them for another writer. The CLI writes the switch into the transcript as a typed `/model <name>` record; the
 adapter counts it as its own input (§9.3), so the mirror imports no prompt from it (since 0.77).
 
 Interrupting a turn (`session.stop`): the adapter sends `control_request {subtype:
@@ -4485,6 +4494,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.119 → 0.123 (a fork before a later compaction of its source)
+§8.1: a fork at a message before the source's last compaction did not start: the CLI resumes a
+transcript only back to its last compaction and exited with "No message found with
+message.uuid", and every input to the fork failed. The Claude Code adapter now forks a copy of
+the source cut right after the record, in which that record is the newest, and removes the
+copy when the process exits. No frame or hub change. 0.120–0.122 are taken by other pull
+requests.
 
 ### 0.118 → 0.121 (a turn the CLI starts by itself is running)
 §4, §8.1, §17.1: the Claude Code adapter sends `status running` on the `system/init` of a turn

@@ -11,7 +11,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         window.title = "HQC"
-        window.contentViewController = MainViewController(store: store)
+        let main = MainViewController(store: store)
+        window.contentViewController = main
+
+        // No bar of its own: the title bar, 28 pt, is transparent over the window's background,
+        // which MainViewController sets to the project bar's colour. TitleBar puts its items
+        // into it as titlebar accessories, without a toolbar, so it keeps that height.
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        main.titleBar.install(in: window)
 
         super.init(window: window)
         window.delegate = self

@@ -4,6 +4,11 @@ A native macOS app that shows the hqc web client in its own window instead of a 
 Swift, AppKit and WKWebView, built with SwiftPM. Logins persist between launches. Links to other
 sites open in the default browser; the app never opens a second window.
 
+The window's title bar is the colour of the page's project bar (of the page itself where the
+client shows none) and holds, after the window buttons, ‹ › (the page's back and forward, as
+⌘[ ⌘]) and the breadcrumbs of the open session, `project › session › state`, or the open
+project's name; with two or more servers, a switch between them on the right.
+
 ## Requirements
 
 macOS 14 or later and Swift 5.9 or newer (Xcode or its command line tools). No dependencies.
@@ -21,8 +26,8 @@ macOS 14 or later and Swift 5.9 or newer (Xcode or its command line tools). No d
 Settings… (⌘,) holds:
 
 - **Servers**: the hubs, by name and address (`https://` is added when no scheme is typed). Each
-  server is a tab; the tab bar appears only when there are two or more. With no server the app
-  opens Settings at launch.
+  server is a tab, picked by the switch in the window's bar when there are two or more. With
+  no server the app opens Settings at launch.
 - **Shortcuts**: the app's own shortcuts, working while the app is active. They act on the
   active tab's page through the client's own controls; each is also an item in the File or Go
   menu. To change one, click its button, then press a key with at least one of ⌘ ⌃ ⌥; Esc
@@ -55,7 +60,8 @@ permission.
 A permission request has Allow and Deny buttons (not a publication: that one is allowed only
 on its card), which answer it without opening the app; when the request has no such option or
 the hub refuses the answer, the session opens instead. A request answered elsewhere disappears
-from Notification Center.
+from Notification Center, also one shown before the page reloaded or the app last quit, once
+the page is connected again.
 
 With the Alerts style (System Settings ▸ Notifications ▸ HQC) a notification stays on screen
 until it is dismissed; the app takes every one away after 5 s except permission requests,

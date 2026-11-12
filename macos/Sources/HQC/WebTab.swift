@@ -9,8 +9,20 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     let server: Server
     let webView: WKWebView
 
-    // Holds the notification script and its message handler.
+    // Holds the page scripts (notifications, the window's bar) and their message handlers.
     private let contentController = WKUserContentController()
+
+    // What the window's bar shows for this page: its colour, the project bar's (nil until the
+    // page reports one), and the breadcrumbs of the open session or project.
+    private(set) var barColor: NSColor?
+    private(set) var barCrumbs: [String] = []
+
+    // Fired (on the main thread) when the bar's colour, its breadcrumbs or whether the page can
+    // go back or forward changes.
+    var onChromeChanged: (() -> Void)?
+
+    // KVO tokens for `webView.canGoBack` and `canGoForward`.
+    private var historyObservations: [NSKeyValueObservation] = []
 
     // Guards against reloading the server URL on every tab switch.
     private var hasLoaded = false
@@ -44,11 +56,14 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
         // A page off screen keeps running (the default suspends it): its socket brings the
         // notifications.
         configuration.preferences.inactiveSchedulingPolicy = .none
-        // The notification script, before the page's own scripts open their socket.
-        contentController.addUserScript(WKUserScript(source: NotificationScript.source,
-                                                     injectionTime: .atDocumentStart,
-                                                     forMainFrameOnly: true,
-                                                     in: .page))
+        // The notification script, before the page's own scripts open their socket, and the
+        // script reporting the bar's colour.
+        for source in [NotificationScript.source, ChromeScript.source] {
+            contentController.addUserScript(WKUserScript(source: source,
+                                                         injectionTime: .atDocumentStart,
+                                                         forMainFrameOnly: true,
+                                                         in: .page))
+        }
         configuration.userContentController = contentController
 
         self.webView = WKWebView(frame: .zero, configuration: configuration)
@@ -57,8 +72,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
 
         // Through a weak proxy: the controller retains its handlers, and this tab owns the
         // controller.
-        contentController.add(WeakMessageHandler(self), contentWorld: .page,
-                              name: NotificationScript.handlerName)
+        for name in [NotificationScript.handlerName, ChromeScript.handlerName] {
+            contentController.add(WeakMessageHandler(self), contentWorld: .page, name: name)
+        }
 
         webView.autoresizingMask = [.width, .height]
         webView.allowsBackForwardNavigationGestures = true
@@ -69,6 +85,10 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
         titleObservation = webView.observe(\.title, options: [.new]) { [weak self] _, _ in
             self?.onTitleChanged?()
         }
+        historyObservations = [
+            webView.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in self?.onChromeChanged?() },
+            webView.observe(\.canGoForward, options: [.new]) { [weak self] _, _ in self?.onChromeChanged?() },
+        ]
     }
 
     // MARK: - Loading / navigation
@@ -157,8 +177,12 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
 
     // Stop any in-flight load and detach delegates before this tab is discarded.
     func tearDown() {
-        contentController.removeScriptMessageHandler(forName: NotificationScript.handlerName,
-                                                     contentWorld: .page)
+        for name in [NotificationScript.handlerName, ChromeScript.handlerName] {
+            contentController.removeScriptMessageHandler(forName: name, contentWorld: .page)
+        }
+        onChromeChanged = nil
+        historyObservations.forEach { $0.invalidate() }
+        historyObservations = []
         onTitleChanged = nil
         titleObservation?.invalidate()
         titleObservation = nil
@@ -170,13 +194,24 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
 
     // MARK: - WKScriptMessageHandler
 
-    // What the notification script reports, handed to the Notifier with this tab's server: an
-    // event to post, or `{resolved: tag}` for a permission request answered elsewhere.
+    // What the page scripts report. To `hqcChrome`: the bar's colour or its breadcrumbs. To
+    // `hqcNotify`, handed to the Notifier with this tab's server: an event to post, or
+    // `{open: [tag]}`, the tags of every open request, on each `requests` frame.
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let m = message.body as? [String: Any] else { return }
-        if let tag = m["resolved"] as? String {
-            Notifier.shared.remove(server: server, tag: tag)
+        if message.name == ChromeScript.handlerName {
+            if let css = m["background"] as? String, let color = Self.color(css: css) {
+                barColor = color
+            }
+            if let crumbs = m["crumbs"] as? [String] {
+                barCrumbs = crumbs
+            }
+            onChromeChanged?()
+            return
+        }
+        if let open = m["open"] as? [String] {
+            Notifier.shared.keepOpen(server: server, tags: Set(open))
             return
         }
         guard let session = m["session_id"] as? String,
@@ -192,6 +227,19 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
             requestID: m["request_id"] as? String,
             allowOption: m["allow_option"] as? String,
             denyOption: m["deny_option"] as? String))
+    }
+
+    // A computed CSS colour, `rgb(r, g, b)` or `rgba(r, g, b, a)`; nil for anything else and
+    // for a transparent one (a page without its styles yet).
+    private static func color(css: String) -> NSColor? {
+        guard let open = css.firstIndex(of: "("), let close = css.lastIndex(of: ")") else { return nil }
+        let parts = css[css.index(after: open)..<close]
+            .split(separator: ",")
+            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard parts.count == 3 || parts.count == 4 else { return nil }
+        let alpha = parts.count == 4 ? parts[3] : 1
+        guard alpha > 0 else { return nil }
+        return NSColor(srgbRed: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, alpha: alpha)
     }
 
     // MARK: - WKUIDelegate

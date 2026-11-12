@@ -1,15 +1,14 @@
 import AppKit
 
-// Hosts the server tab strip on top (shown only with two or more servers) and a content
-// container below that shows the selected server's persistent web view.
+// Hosts the selected server's persistent web view and drives the window's bar (TitleBar): its
+// arrows, its breadcrumbs, the server switch, and the window's background behind it.
 final class MainViewController: NSViewController {
 
     private let store: ServerStore
 
-    private let tabBar = TabBarView()
+    // The window's bar; MainWindowController puts it into the window's title bar.
+    let titleBar = TitleBar()
     private let contentContainer = NSView()
-    // Drives the tab strip's height (0 when hidden, 36 when shown). Assigned in viewDidLoad.
-    private var tabBarHeightConstraint: NSLayoutConstraint!
 
     // One kept-alive web tab per server, made and loaded at launch and when a server is added:
     // every server's page reports its notifications.
@@ -53,10 +52,12 @@ final class MainViewController: NSViewController {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 1200, height: 800))
     }
 
-    // At launch setContent runs before the view has a window: focus the page once it has one.
+    // At launch setContent runs before the view has a window: focus the page and dress the
+    // bar once it has one.
     override func viewDidAppear() {
         super.viewDidAppear()
         if let webView = activeTab?.webView { view.window?.makeFirstResponder(webView) }
+        updateChrome()
     }
 
     override func viewDidLoad() {
@@ -66,20 +67,11 @@ final class MainViewController: NSViewController {
         let savedZoom = UserDefaults.standard.double(forKey: Self.zoomDefaultsKey)
         currentZoom = savedZoom > 0 ? CGFloat(savedZoom) : 1.0
 
-        tabBar.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(tabBar)
         view.addSubview(contentContainer)
 
-        tabBarHeightConstraint = tabBar.heightAnchor.constraint(equalToConstant: 36)
-
         NSLayoutConstraint.activate([
-            tabBar.topAnchor.constraint(equalTo: view.topAnchor),
-            tabBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            tabBarHeightConstraint,
-
-            contentContainer.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            contentContainer.topAnchor.constraint(equalTo: view.topAnchor),
             contentContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             contentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor)
@@ -95,8 +87,12 @@ final class MainViewController: NSViewController {
             placeholderLabel.centerYAnchor.constraint(equalTo: contentContainer.centerYAnchor)
         ])
 
-        tabBar.onSelect = { [weak self] id in self?.selectServer(id: id) }
-        tabBar.onOpenSettings = { [weak self] in self?.presentSettings() }
+        titleBar.onBack = { [weak self] in self?.goBack(nil) }
+        titleBar.onForward = { [weak self] in self?.goForward(nil) }
+        titleBar.onSelectServer = { [weak self] index in
+            guard let self, self.store.servers.indices.contains(index) else { return }
+            self.selectServer(id: self.store.servers[index].id)
+        }
 
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(serversDidChange),
@@ -104,7 +100,7 @@ final class MainViewController: NSViewController {
                                                object: nil)
 
         // Initial population.
-        reloadTabBar()
+        reloadServerSwitch()
         if let first = store.servers.first {
             selectServer(id: first.id)
         } else {
@@ -119,7 +115,7 @@ final class MainViewController: NSViewController {
 
     // MARK: - Selection
 
-    // Select a server. Creates its web tab if it has none yet, then shows it and rebuilds the strip.
+    // Select a server. Creates its web tab if it has none yet, then shows it and updates the bar.
     func selectServer(id: UUID) {
         guard let server = store.servers.first(where: { $0.id == id }) else { return }
 
@@ -127,8 +123,9 @@ final class MainViewController: NSViewController {
         showTab(tab)
         selectedServerID = id
         placeholderLabel.isHidden = true
-        reloadTabBar()
+        reloadServerSwitch()
         updateWindowTitle()
+        updateChrome()
     }
 
     // Builds a kept-alive web tab for a server and registers it.
@@ -137,6 +134,10 @@ final class MainViewController: NSViewController {
         webTab.onTitleChanged = { [weak self, weak webTab] in
             guard let self, let webTab, self.activeTab === webTab else { return }
             self.updateWindowTitle()
+        }
+        webTab.onChromeChanged = { [weak self, weak webTab] in
+            guard let self, let webTab, self.activeTab === webTab else { return }
+            self.updateChrome()
         }
         webTabs[server.id] = webTab
         return webTab
@@ -182,12 +183,30 @@ final class MainViewController: NSViewController {
         view.window?.makeFirstResponder(webView)
     }
 
-    // Rebuild the tab strip; it is shown only when there are two or more servers.
-    private func reloadTabBar() {
-        let shown = store.servers.count > 1
-        tabBar.isHidden = !shown
-        tabBarHeightConstraint.constant = shown ? 36 : 0
-        tabBar.reload(servers: store.servers, selectedID: selectedServerID)
+    // The server switch in the bar; it is shown only when there are two or more servers.
+    private func reloadServerSwitch() {
+        titleBar.setServers(store.servers.map(\.name),
+                            selected: store.servers.firstIndex { $0.id == selectedServerID })
+    }
+
+    // The bar follows the active page: its arrows, its breadcrumbs, and the window's background
+    // (so the transparent bar takes the colour the page reports, its project bar's) with a dark
+    // or light appearance to match, so the traffic lights and the bar's text stay readable.
+    // Before the page reports its colour, the window's own.
+    private func updateChrome() {
+        let tab = activeTab
+        titleBar.setNavigation(canGoBack: tab?.webView.canGoBack ?? false,
+                               canGoForward: tab?.webView.canGoForward ?? false)
+        titleBar.setCrumbs(tab?.barCrumbs ?? [])
+        guard let window = view.window else { return }
+        if let color = tab?.barColor, let rgb = color.usingColorSpace(.sRGB) {
+            window.backgroundColor = color
+            let luminance = 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
+            window.appearance = NSAppearance(named: luminance < 0.5 ? .darkAqua : .aqua)
+        } else {
+            window.backgroundColor = .windowBackgroundColor
+            window.appearance = nil
+        }
     }
 
     // The window title follows the active page's title, else the (live) server name.
@@ -223,8 +242,8 @@ final class MainViewController: NSViewController {
                 selectedServerID = nil
                 selectServer(id: selected)
             } else {
-                // Selected server still exists; refresh the bar (name may have changed).
-                reloadTabBar()
+                // Selected server still exists; refresh the switch (a name may have changed).
+                reloadServerSwitch()
                 updateWindowTitle()
             }
         } else {
@@ -232,9 +251,10 @@ final class MainViewController: NSViewController {
             if let first = currentServers.first {
                 selectServer(id: first.id)
             } else {
-                reloadTabBar()
+                reloadServerSwitch()
                 updatePlaceholder()
                 updateWindowTitle()
+                updateChrome()
             }
         }
         // An added server, or one with a new address, notifies before it is opened.

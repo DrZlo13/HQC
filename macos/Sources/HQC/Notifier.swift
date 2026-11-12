@@ -22,8 +22,8 @@ struct PageEvent {
 }
 
 // macOS notifications for the events the pages' notification script reports, while the app
-// runs. A permission request has Allow and Deny buttons and stays until it is answered; every
-// other notification is taken away 5 s after it is posted.
+// runs. A permission request has Allow and Deny buttons and stays until the hub no longer lists
+// it open; every other notification is taken away 5 s after it is posted.
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     static let shared = Notifier()
@@ -31,6 +31,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     private static let approvalCategory = "hqc.approval"
     private static let allowAction = "allow"
     private static let denyAction = "deny"
+    // In a permission request's userInfo.
+    private static let approvalKey = "approval"
 
     // How long a notification other than a permission request stays.
     private static let lifetime: TimeInterval = 5
@@ -78,6 +80,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.body = event.body
         content.sound = .default
         var info: [String: Any] = ["server": server.id.uuidString, "session": event.sessionID]
+        // A permission request, with buttons or not (a publication): keepOpen takes it away.
+        if event.type == "approval.request" { info[Self.approvalKey] = true }
         if let request = event.requestID {
             content.categoryIdentifier = Self.approvalCategory
             info["request"] = request
@@ -101,10 +105,20 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    // Takes away a server's notification by its tag (a permission request answered elsewhere).
-    func remove(server: Server, tag: String) {
-        UNUserNotificationCenter.current()
-            .removeDeliveredNotifications(withIdentifiers: ["\(server.id.uuidString):\(tag)"])
+    // The requests the hub lists open for a server, as tags: that server's permission requests
+    // in Notification Center that are not among them were answered or went away, also those
+    // posted before the page got a new document or before the app last quit.
+    func keepOpen(server: Server, tags: Set<String>) {
+        let prefix = "\(server.id.uuidString):"
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { delivered in
+            let gone = delivered.map(\.request).filter { request in
+                request.identifier.hasPrefix(prefix)
+                    && request.content.userInfo[Self.approvalKey] as? Bool == true
+                    && !tags.contains(String(request.identifier.dropFirst(prefix.count)))
+            }.map(\.identifier)
+            if !gone.isEmpty { center.removeDeliveredNotifications(withIdentifiers: gone) }
+        }
     }
 
     // MARK: - UNUserNotificationCenterDelegate

@@ -8,8 +8,14 @@
 // as unread, crates/hqc-hub/src/state.rs UNREAD_FILTER) to the `hqcNotify` handler, worded as
 // the push: the project's name as the title, the session's title (sw.js describe() for an
 // untitled one) under it. A session mirrored from a CLI outside hqc (`held_by`) gets no push
-// from the hub and none here. A permission request that the `requests` frame no longer lists
-// is posted as `{resolved: tag}`.
+// from the hub and none here. On every `requests` frame it posts the tags of all the open
+// requests, `{open: [tag]}`: the app takes away the permission requests not among them.
+//
+// The same names make the window bar's breadcrumbs: the script posts `{crumbs}` to the
+// `hqcChrome` handler (ChromeScript) — on `#/s/<id>` the session's project, its title and its
+// state worded as the client's header pill (client/src/ui/labels.ts STATE_LABELS, ui/Chat.tsx
+// StatePill), on `#/p/<id>…` the project, else none — when the address, a summary or the open
+// requests change. The page's own `document.title` is always "HQC".
 enum NotificationScript {
 
     static let handlerName = "hqcNotify"
@@ -20,14 +26,19 @@ enum NotificationScript {
           const Native = window.WebSocket;
           if (!handler || !Native) return;
 
-          // Per session: unread and last_seq as the hub last reported them.
-          const kept = new Map();
+          // Per session: its summary as the hub last reported it (unread, last_seq, and the
+          // title, project and state for the window's bar).
+          const summaries = new Map();
           // Per session: the newest event already handled, so two reads post an event once.
           const posted = new Map();
           // Per session: the read in progress; the next one starts after it.
           const reads = new Map();
-          // The tags of the permission requests posted and not yet seen answered.
-          const approvals = new Set();
+          // The tags of the open requests in the last `requests` frame, and of all the requests
+          // any frame listed open.
+          let lastOpen = new Set();
+          const everOpen = new Set();
+          // The sessions with an open permission request in the last `requests` frame.
+          let asking = new Set();
           // Project id -> name, from the client's own projects call.
           const projects = new Map();
           let projectsLoad = null;
@@ -78,18 +89,26 @@ enum NotificationScript {
           };
 
           // The project names, named as the client names them (projectName(): "Personal" for
-          // the personal project); read once, and again for a project not known yet.
+          // the personal project), the archived projects too (the first call leaves them out,
+          // client/src/api.ts archivedProjects()); read once, and again for a project not known
+          // yet.
+          const projectList = (url) =>
+            fetch(url)
+              .then((res) => (res.ok ? res.json() : null))
+              .then((v) => (v && v.projects) || [])
+              .catch(() => []);
           const loadProjects = () => {
             if (!projectsLoad) {
-              projectsLoad = fetch('/api/projects')
-                .then((res) => (res.ok ? res.json() : null))
-                .then((v) => {
-                  for (const p of (v && v.projects) || []) {
+              projectsLoad = Promise.all([projectList('/api/projects'), projectList('/api/projects?archived=1')])
+                .then(([live, archived]) => {
+                  for (const p of [...live, ...archived]) {
                     if (p && typeof p.id === 'string') projects.set(p.id, p.is_personal ? 'Personal' : p.name);
                   }
                 })
-                .catch(() => {})
-                .finally(() => { projectsLoad = null; });
+                .finally(() => {
+                  projectsLoad = null;
+                  postCrumbs();
+                });
             }
             return projectsLoad;
           };
@@ -104,6 +123,63 @@ enum NotificationScript {
             if (!m) return null;
             try { return decodeURIComponent(m[1]); } catch { return null; }
           };
+
+          // The project open in the page (`#/p/<id>`, its new session, settings, rules), if any.
+          const openProject = () => {
+            const m = location.hash.match(/^#\\/p\\/([^/?]+)/);
+            if (!m) return null;
+            try { return decodeURIComponent(m[1]); } catch { return null; }
+          };
+
+          // A session's state as the client's header pill words it (ui/Chat.tsx StatePill): Running
+          // also while a subagent or a background task works after the turn (ui/sessions.ts
+          // atWorkAfterTurn); waiting for permission while it has an open permission request.
+          const STATE_LABELS = new Map([
+            ['archived', 'Archived'],
+            ['locked_vscode', 'In VS Code'],
+            ['worker_offline', 'Worker offline'],
+            ['waiting', 'Waiting for reply'],
+            ['error', 'Error'],
+            ['running', 'Running'],
+            ['queued', 'Queued'],
+            ['idle', 'Idle'],
+          ]);
+          const status = (s) => {
+            if (s.state === 'waiting' && asking.has(s.session_id)) return 'Waiting for permission';
+            if (s.state === 'idle' && ((s.subagents || 0) > 0 || (s.background_tasks || 0) > 0)) return 'Running';
+            return STATE_LABELS.get(s.state) || 'Unknown';
+          };
+
+          // The window bar's breadcrumbs: the open session's project, title and state, else the
+          // open project; a part not known (yet) is left out.
+          const chrome = window.webkit.messageHandlers.hqcChrome;
+          let lastCrumbs = null;
+          const postCrumbs = () => {
+            const session = openSession();
+            const project = openProject();
+            let crumbs = [];
+            if (session) {
+              const s = summaries.get(session);
+              if (s) crumbs = [projects.get(s.project_id) || '', s.title || '', status(s)].filter(Boolean);
+            } else if (project) {
+              crumbs = [projects.get(project) || ''].filter(Boolean);
+            }
+            const key = JSON.stringify(crumbs);
+            if (!chrome || key === lastCrumbs) return;
+            lastCrumbs = key;
+            chrome.postMessage({ crumbs });
+          };
+          // A project's name changes only by a rename, which the page does not hear of: the
+          // names are read again whenever a project is opened, and for an opened session whose
+          // project is not known (or whose summary has not come yet).
+          const routed = () => {
+            const session = openSession();
+            const s = session && summaries.get(session);
+            if (openProject() || (session && !(s && projects.has(s.project_id)))) loadProjects();
+            postCrumbs();
+          };
+          window.addEventListener('hashchange', routed);
+          routed();
 
           // One notification per request; other events of a session replace each other (SPEC §16).
           // A permission request (not a publication: the client publishes only on a click on its
@@ -123,7 +199,8 @@ enum NotificationScript {
               viewing: openSession() === id,
             };
             if (e.type === 'approval.request' && p.request_id) {
-              approvals.add(tag);
+              // Answered or gone already: an earlier `requests` frame listed it, the last one not.
+              if (everOpen.has(tag) && !lastOpen.has(tag)) return;
               if (p.tool !== 'hqc_publish') {
                 const options = Array.isArray(p.options) ? p.options : [];
                 const once = options.find((o) => o && o.canonical === 'once');
@@ -163,26 +240,30 @@ enum NotificationScript {
           const update = (sessions, baseline) => {
             for (const s of sessions || []) {
               if (!s || typeof s.session_id !== 'string') continue;
-              const was = kept.get(s.session_id) || { unread: 0, last_seq: 0 };
-              kept.set(s.session_id, { unread: s.unread, last_seq: s.last_seq });
+              const was = summaries.get(s.session_id) || { unread: 0, last_seq: 0 };
+              summaries.set(s.session_id, s);
               if (!baseline && !s.held_by && s.unread > was.unread && s.last_seq > was.last_seq) {
                 read(s.session_id, was.last_seq, s.title, s.project_id);
               }
             }
           };
 
-          // The open requests, whole: a posted permission request no longer among them was
-          // answered or went away.
-          const resolve = (requests) => {
+          // The open requests, whole: a permission request in Notification Center no longer among
+          // them was answered or went away.
+          const opened = (requests) => {
             const open = new Set();
+            const permission = new Set();
             for (const r of requests || []) {
-              if (r && r.session_id && r.request_id) open.add(`${r.session_id}:${r.request_id}`);
+              if (!r || typeof r.session_id !== 'string' || typeof r.request_id !== 'string') continue;
+              const tag = `${r.session_id}:${r.request_id}`;
+              open.add(tag);
+              everOpen.add(tag);
+              if (r.event && r.event.type === 'approval.request') permission.add(r.session_id);
             }
-            for (const tag of [...approvals]) {
-              if (open.has(tag)) continue;
-              approvals.delete(tag);
-              handler.postMessage({ resolved: tag });
-            }
+            lastOpen = open;
+            asking = permission;
+            handler.postMessage({ open: [...open] });
+            postCrumbs();
           };
 
           // `socket.baseline`: until this socket's first summary, its frames only set the baseline.
@@ -193,10 +274,12 @@ enum NotificationScript {
             if (f.type === 'summary') {
               update(f.sessions, socket.baseline);
               socket.baseline = false;
+              postCrumbs();
             } else if (f.type === 'session.summary') {
               update([f.session], socket.baseline);
+              postCrumbs();
             } else if (f.type === 'requests') {
-              resolve(f.requests);
+              opened(f.requests);
             }
           };
 

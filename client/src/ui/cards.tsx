@@ -412,9 +412,10 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
   );
 }
 
-/** A background task's notification, folded: "Background task" and its whole text on one line,
- *  without Markdown marks, cut where the line ends (a first line alone, often a heading like
- *  "### Summary", read as the whole message); open, the text as Markdown. */
+/** A background task's notification, folded: "Background task ·" and its whole text on one
+ *  line, without Markdown marks, cut where the line ends (a first line alone, often a heading
+ *  like "### Summary", read as the whole message), dimmed in italics like the Thinking line's
+ *  start of its text; open, the text as Markdown. */
 function TaskNotification({ text }: { text: string }) {
   // The feed renders again on every streamed piece; the text is parsed once.
   const peek = useMemo(() => markdownLine(text), [text]);
@@ -422,7 +423,7 @@ function TaskNotification({ text }: { text: string }) {
     <details class="line-fold line-system-task_notification">
       <summary>
         <IconChevron size={12} />
-        <span class="fold-label">Background task</span>
+        <span class="fold-label">Background task ·</span>
         <span class="fold-peek">{peek}</span>
       </summary>
       <Markdown class="fold-text" text={text} />

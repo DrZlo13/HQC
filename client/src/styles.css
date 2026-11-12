@@ -3370,6 +3370,7 @@ select.input {
 .fold-label {
   flex: none;
 }
+/* The start of the text, not a title: dimmed in italics, as the Thinking line shows its own. */
 .fold-peek {
   flex: 1;
   min-width: 0;
@@ -3377,6 +3378,8 @@ select.input {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12.5px;
+  font-style: italic;
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
 }
 .fold-text {
   margin: 6px 0 0 6px;

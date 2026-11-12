@@ -1256,7 +1256,7 @@ describe("the feed like the Claude Code tab", () => {
     show(t);
     const fold = root.querySelector("details.line-system-task_notification")!;
     expect(fold.querySelector("summary .fold-label")!.textContent).toBe(
-      "Background task",
+      "Background task ·",
     );
     expect(fold.querySelector("summary .fold-peek")!.textContent).toBe(
       'Background command "npm test" completed (exit code 0) All 12 suites passed',

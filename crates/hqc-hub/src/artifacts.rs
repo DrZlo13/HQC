@@ -102,8 +102,13 @@ pub async fn artifact(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ArtifactRow>
         .await
 }
 
-/// Insert, or the row the owner already has with this content and name (`false`).
-async fn insert_artifact(db: &PgPool, a: &ArtifactRow) -> sqlx::Result<(ArtifactRow, bool)> {
+/// Insert, or the row the owner already has with this content and name (`false`); with
+/// `set_kind` that row takes the kind of `a`, one the upload named.
+async fn insert_artifact(
+    db: &PgPool,
+    a: &ArtifactRow,
+    set_kind: bool,
+) -> sqlx::Result<(ArtifactRow, bool)> {
     let new: Option<ArtifactRow> = sqlx::query_as(&format!(
         "INSERT INTO artifacts (id, owner_id, kind, mime, size, sha256, name, storage_key)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -123,14 +128,17 @@ async fn insert_artifact(db: &PgPool, a: &ArtifactRow) -> sqlx::Result<(Artifact
     if let Some(r) = new {
         return Ok((r, true));
     }
-    // Used again: the cleanup counts its age from now.
+    // Used again: the cleanup counts its age from now. A kind the upload named replaces the
+    // old one, which would otherwise drop it without a word (SPEC 0.128).
     let old = sqlx::query_as(&format!(
-        "UPDATE artifacts SET updated_at = now()
+        "UPDATE artifacts SET updated_at = now(), kind = CASE WHEN $4 THEN $5 ELSE kind END
          WHERE owner_id = $1 AND sha256 = $2 AND name = $3 RETURNING {COLS}"
     ))
     .bind(a.owner_id)
     .bind(&a.sha256)
     .bind(&a.name)
+    .bind(set_kind)
+    .bind(&a.kind)
     .fetch_one(db)
     .await?;
     Ok((old, false))
@@ -752,7 +760,8 @@ fn created_status(created: bool) -> StatusCode {
 }
 
 /// Stores the record of an upload of `owner` (the same content and name: the existing one,
-/// `false`) and moves the content into place. `kind` absent: by type and extension (§12).
+/// `false`, with `kind` when it is given) and moves the content into place. `kind` absent: by
+/// type and extension (§12).
 async fn save(
     app: &AppState,
     owner: Uuid,
@@ -761,6 +770,7 @@ async fn save(
     mime: String,
     kind: Option<ArtifactKind>,
 ) -> ApiResult<(ArtifactRow, bool)> {
+    let named = kind.is_some();
     let kind = kind.unwrap_or_else(|| kind_of(&mime, &name));
     let row = ArtifactRow {
         id: db::new_id(),
@@ -777,7 +787,7 @@ async fn save(
         storage_key: stored.sha256.clone(),
         created_at: Utc::now(),
     };
-    let (row, created) = insert_artifact(&app.db, &row).await?;
+    let (row, created) = insert_artifact(&app.db, &row, named).await?;
     place(&app.config.artifacts, stored).await?;
     Ok((row, created))
 }

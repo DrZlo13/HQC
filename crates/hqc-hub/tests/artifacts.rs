@@ -55,6 +55,29 @@ async fn upload_kinds_and_dedup() {
     // The same content and name again: the same artifact, 200.
     let (s, again) = hub.upload("shot.png", "image/png", png.clone(), None).await;
     assert_eq!((s, &again["id"]), (200, &a["id"]), "{again}");
+    // Again without a kind: the artifact keeps its own, though the name says text; again with
+    // a kind named: the same artifact takes that kind.
+    let md = b"# Pitch\n".to_vec();
+    let (s, f) = hub
+        .upload("pitch.md", "text/markdown", md.clone(), Some("file"))
+        .await;
+    assert_eq!((s, f["kind"].as_str()), (201, Some("file")), "{f}");
+    let (s, t) = hub
+        .upload("pitch.md", "text/markdown", md.clone(), None)
+        .await;
+    assert_eq!(
+        (s, &t["id"], t["kind"].as_str()),
+        (200, &f["id"], Some("file")),
+        "{t}"
+    );
+    let (s, t) = hub
+        .upload("pitch.md", "text/markdown", md, Some("text"))
+        .await;
+    assert_eq!(
+        (s, &t["id"], t["kind"].as_str()),
+        (200, &f["id"], Some("text")),
+        "{t}"
+    );
     // Another name: another artifact over the same stored content.
     let (s, copy) = hub.upload("copy.png", "image/png", png.clone(), None).await;
     assert_eq!(s, 201);

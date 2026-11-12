@@ -497,6 +497,11 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/background`, { call_id: callId });
   }
 
+  /** Ends the agent's process and starts it again, resuming the conversation (SPEC §17.3). */
+  async restartSession(id: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/restart`);
+  }
+
   async retry(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/retry`);
   }

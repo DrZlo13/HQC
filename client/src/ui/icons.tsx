@@ -179,6 +179,14 @@ export const IconRestore = ({ size = 15 }: { size?: number }) => (
   </Svg>
 );
 
+/** "Restart session": a clockwise arrow, Restore's turned the other way. */
+export const IconRestart = ({ size = 15 }: { size?: number }) => (
+  <Svg size={size}>
+    <path d="M16 9.5a6 6 0 1 0-1.8 4.3" />
+    <path d="M16 4.5V9.5h-5" />
+  </Svg>
+);
+
 export const IconTrash = ({ size = 15 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M4 6h12M8 6V4h4v2M5.5 6l.8 10a1 1 0 0 0 1 .9h5.4a1 1 0 0 0 1-.9l.8-10" />

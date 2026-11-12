@@ -12,7 +12,7 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Api } from '../src/api';
+import { Api } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
 import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState } from '../src/proto';
 import { trackHistory } from '../src/nav';
@@ -280,7 +280,7 @@ const menuOf = (title: string, x = 40, y = 120) =>
     rowOf(title).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
   });
 const menuItems = () => [...root.querySelectorAll('.menu .menu-item')].map((b) => b.textContent);
-const SESSION_MENU = ['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Archive', 'Delete…'];
+const SESSION_MENU = ['Open in new tab', 'Add to favorites', 'Rename', 'Move to project…', 'Folder rules', 'Restart session', 'Archive', 'Delete…'];
 /** Archives a row from its menu's item. */
 async function archiveRow(title: string) {
   await menuOf(title);
@@ -767,6 +767,23 @@ describe('archive from the row (T50)', () => {
     await click(root.querySelector('.menu .btn-confirm-delete'));
     expect(api.deleteSession).toHaveBeenCalledWith('cave');
     expect(titles()).not.toContain('Cave scene port');
+  });
+
+  it('restarts the session from the menu with POST /restart; a session VS Code drives has no Restart', async () => {
+    const sent: { method?: string; url: string }[] = [];
+    const fetchHub: typeof fetch = async (input, init) => {
+      sent.push({ method: init?.method, url: String(input) });
+      return new Response('{"sent":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const list = [...LIST, sess('vsc', 'Opened in VS Code', 'locked_vscode', at(1))];
+    await mount(<SessionList app={makeApp(list, Object.assign(new Api('', fetchHub), hubApi()))} />);
+    await menuOf('Network sync');
+    await click(root.querySelector('.menu .btn-restart'));
+    expect(root.querySelector('.ctx-menu')).toBeNull();
+    expect(sent.filter((r) => r.url.endsWith('/restart'))).toEqual([{ method: 'POST', url: '/api/sessions/net/restart' }]);
+
+    await menuOf('Opened in VS Code');
+    expect(menuItems()).toEqual(SESSION_MENU.filter((l) => l !== 'Restart session'));
   });
 
   it('the menu: links to a new tab and to the folder rules, the move form in the column; Esc or a press away closes it', async () => {

@@ -21,6 +21,7 @@ import {
   IconPlus,
   IconRename,
   IconReorder,
+  IconRestart,
   IconRestore,
   IconSearch,
   IconSettings,
@@ -109,6 +110,11 @@ function rename(app: AppState, s: SessionInfo): void {
  *  notice. */
 function toggleFavorite(app: AppState, s: SessionInfo): void {
   app.setSessionFavorite(s.id, !s.favorite_at).catch((e: Error) => app.setListNotice(`Favorites not saved: ${e.message}`));
+}
+
+/** Restarts the session's agent process; a refusal goes to the list's notice. */
+function restart(app: AppState, s: SessionInfo): void {
+  app.api.restartSession(s.id).catch((e: Error) => app.setListNotice(`Not restarted: ${e.message}`));
 }
 
 /** Deletes a session; the one open goes back to its project. */
@@ -514,9 +520,12 @@ function titleOf(s: SessionInfo): string {
 }
 
 /** A session's menu, the same on a desktop row and a phone row: Open in new tab, favorites,
- *  then Rename, Move to project…, Folder rules, then Archive and Delete… (a step of its own). */
+ *  then Rename, Move to project…, Folder rules, then Restart session (not for an archived, a
+ *  service, a VS Code-driven session or one whose worker is offline), Archive and Delete… (a
+ *  step of its own). */
 function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; onAskDelete: () => void }): MenuEntry[] {
   const rules = rulesHref(s);
+  const restartable = !s.archived && !s.system && s.state !== 'locked_vscode' && s.state !== 'worker_offline';
   return [
     { label: 'Open in new tab', icon: <IconOpenNew />, cls: 'btn-open-tab', href: `#/s/${s.id}`, newTab: true },
     {
@@ -530,6 +539,7 @@ function sessionMenu(app: AppState, s: SessionInfo, on: { onMove: () => void; on
     { label: 'Move to project…', icon: <IconMove />, cls: 'btn-move', onSelect: on.onMove },
     ...(rules ? [{ label: 'Folder rules', icon: <IconShield />, cls: 'btn-rules', href: rules }] : []),
     'sep',
+    ...(restartable ? [{ label: 'Restart session', icon: <IconRestart />, cls: 'btn-restart', onSelect: () => restart(app, s) }] : []),
     { label: 'Archive', icon: <IconArchive />, cls: 'btn-archive', onSelect: () => app.archiveLater(s) },
     { label: 'Delete…', icon: <IconTrash />, cls: 'btn-delete', danger: true, keepOpen: true, onSelect: on.onAskDelete },
   ];

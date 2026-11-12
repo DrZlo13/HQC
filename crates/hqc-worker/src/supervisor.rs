@@ -28,7 +28,7 @@
 //!   the hub's `pending` inputs are the source of truth and come again after `hello`, so an
 //!   input already queued or delivered is recognised by `event_id` and not run twice.
 //! - While a turn runs, the head of the queue goes into it when the runtime can take it
-//!   ([`Adapter::can_inject`]), neither it nor the turn is capped to `ask`, the turn's own
+//!   ([`Adapter::can_inject`]), neither it nor the turn is capped, the turn's own
 //!   input has no `peer`, and only a person's input (no `peer`, no `schedule_id`) that is no
 //!   slash command: as the VS Code tab does with what the user types meanwhile.
 //!   Its acceptance is `ack {event_id, joined: true}`, also when it is resent; the first
@@ -47,19 +47,21 @@
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
-//!   go through [`Config::permission_mode`] (`auto` only with `allow_auto`); a running agent
-//!   switches at once, a stopped one starts in the mode. The mode the runtime confirms is
-//!   sent in `session.state.permission_mode`, repeated like `title`.
-//! - A cap of `ask` on an input (`session.input.permission_cap`, T39): the agent runs that
-//!   turn in `ask` whatever the session's mode. A running process is switched down and the
-//!   input waits for the runtime's confirmation ([`MODE_SWITCH_TIMEOUT`]; without it, or if
-//!   the runtime cannot switch, the process is restarted in `ask`); a process started for a
-//!   capped input starts in `ask`. When the turn ends (also when it is stopped), the
-//!   session's own mode comes back unless the next input is capped too; a process lost
-//!   mid-turn starts again in the mode of the input it runs next. A cap never raises the
-//!   mode, and a switch the user asks for meanwhile waits for the end of the capped turn.
-//!   `session.state.capped_input` names the input while a cap holds an `auto` session in
-//!   `ask`.
+//!   go through [`Config::permission_mode`] (`auto` and `allow_all` only with
+//!   `allow_auto`); a running agent switches at once, a stopped one starts in the mode. The
+//!   mode the runtime confirms is sent in `session.state.permission_mode`, repeated like
+//!   `title`.
+//! - A cap on an input (`session.input.permission_cap`, T39; `ask` < `auto` < `allow_all`):
+//!   the agent runs that turn in the lower of the cap and the session's own mode. A running
+//!   process is switched to that mode and the input waits for the runtime's confirmation
+//!   ([`MODE_SWITCH_TIMEOUT`]; without it, or if the runtime cannot switch, the process is
+//!   restarted in it); a process started for a capped input starts in it. When the turn ends
+//!   (also when it is stopped), the session's own mode comes back unless the next input is
+//!   capped too; a process lost mid-turn starts again in the mode of the input it runs next.
+//!   A cap never raises the mode, and a switch the user asks for meanwhile reaches the
+//!   runtime only as far as the cap allows, the rest at the end of the capped turn.
+//!   `session.state.capped_input` names the input while its cap holds the session's own mode
+//!   down.
 //! - Model: `session.model` switches a running agent at once, mid-turn too
 //!   ([`Adapter::set_model`]); `null` (the runtime's default) reaches it at its next start,
 //!   as any model reaches a stopped one. A `session.start` for a running agent with another
@@ -107,8 +109,8 @@ use crate::permissions::FolderRules;
 
 /// An input that ends this many turns without being taken is given up (see `end_turn`).
 const MAX_REQUEUES: u8 = 2;
-/// How long a capped input waits for the runtime to confirm `ask` before the process is
-/// restarted in `ask` (T39).
+/// How long a capped input waits for the runtime to confirm the cap's mode before the
+/// process is restarted in it (T39).
 pub const MODE_SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
 use crate::mirror::{MirrorCmd, MirrorHandle};
 
@@ -956,12 +958,13 @@ struct Turn {
     input: SessionInput,
     accepted: bool,
     requeued: u8,
-    /// The input's cap is `ask` (T39): the runtime confirmed `ask` before it got it, and the
-    /// session's own mode waits for the end of the turn.
+    /// The input has a cap (T39): the runtime confirmed the turn's mode before it got it,
+    /// and the session's own mode waits for the end of the turn.
     capped: bool,
 }
 
-/// A capped input waiting for the runtime to confirm `ask` (T39), ready to hand over.
+/// A capped input waiting for the runtime to confirm its turn's mode (T39), ready to hand
+/// over.
 struct Lowering {
     q: Queued,
     input: SessionInput,
@@ -969,9 +972,15 @@ struct Lowering {
     deadline: Instant,
 }
 
-/// The input must run in `ask` (T39).
+/// The highest mode the input's turn may run in (T39): its cap, `allow_all` without one.
+fn cap(input: &SessionInput) -> PermissionMode {
+    input.permission_cap.unwrap_or(PermissionMode::AllowAll)
+}
+
+/// The input has a cap below `allow_all` (T39): its turn runs in the lower of the cap and
+/// the session's own mode.
 fn capped(input: &SessionInput) -> bool {
-    input.permission_cap == Some(PermissionMode::Ask)
+    cap(input) < PermissionMode::AllowAll
 }
 
 struct Session {
@@ -1008,7 +1017,7 @@ struct Session {
     /// A `session.start` with another folder that came while the agent ran (a move, SPEC
     /// §5.3): the next process starts with it.
     moving: Option<Box<StartSpec>>,
-    /// A capped input waiting for the runtime's `ask` (T39).
+    /// A capped input waiting for the runtime's confirmation of its turn's mode (T39).
     lowering: Option<Lowering>,
     /// Stopped for that writer: `locked_by: vscode` until the next `session.start`.
     released: bool,
@@ -1080,7 +1089,7 @@ impl Session {
                     self.kill_process("idle timeout").await;
                 }
                 _ = sleep_until_opt(lowering_deadline), if lowering_deadline.is_some() => {
-                    self.restart_lowered("the runtime did not confirm ask in time").await;
+                    self.restart_lowered("the runtime did not confirm the turn's mode in time").await;
                 }
             }
         }
@@ -1256,8 +1265,8 @@ impl Session {
     /// check). A runtime that refuses keeps its mode until its next start; `session.state`
     /// says which mode it runs.
     ///
-    /// Under a cap (T39) the runtime stays in `ask`: the new mode comes when the capped turn
-    /// ends.
+    /// Under a cap (T39) the runtime goes no higher than the cap: a lower mode comes at once,
+    /// the rest when the capped turn ends.
     async fn switch_mode(&mut self, mode: PermissionMode) {
         if self.spec.permission_mode == mode {
             return;
@@ -1267,10 +1276,11 @@ impl Session {
         if self.state == ProcessState::Stopped {
             return;
         }
-        if self.under_cap() {
+        if let Some(c) = self.turn_cap() {
             tracing::info!(session_id = %self.id, "the turn runs under a cap; the mode follows when it ends");
             // Whether the cap still holds the session down changed.
             self.send_state();
+            self.ask_runtime(mode.min(c)).await;
             return;
         }
         self.ask_runtime(mode).await;
@@ -1300,8 +1310,8 @@ impl Session {
     /// A move waits (SPEC §5.3): the running process is stopped and started again in the new
     /// folder, its transcript moved there ([`Session::ensure_running`]), once no turn runs (a
     /// turn the runtime started by itself included: [`Adapter::runs_own_turn`]) and no
-    /// subagent, nothing is written into a turn and no capped input waits for `ask` (T39); the
-    /// end of a turn calls this again. Not the end of a background subagent: the runtime then
+    /// subagent, nothing is written into a turn and no capped input waits for its mode (T39);
+    /// the end of a turn calls this again. Not the end of a background subagent: the runtime then
     /// runs a turn of its own on its result, and the end of that turn moves; a queued input
     /// moves the agent once nothing runs ([`Session::pump`]), in case no such turn comes.
     /// Background commands of the agent itself die with the process; its next input says so.
@@ -1377,9 +1387,13 @@ impl Session {
         Ok(())
     }
 
-    /// A capped turn runs or waits for the runtime's `ask` (T39).
-    fn under_cap(&self) -> bool {
-        self.lowering.is_some() || self.turn.as_ref().is_some_and(|t| t.capped)
+    /// The cap of the capped turn that runs or waits for the runtime's confirmation (T39).
+    fn turn_cap(&self) -> Option<PermissionMode> {
+        match (&self.lowering, &self.turn) {
+            (Some(l), _) => Some(cap(&l.q.input)),
+            (None, Some(t)) if t.capped => Some(cap(&t.input)),
+            _ => None,
+        }
     }
 
     /// Asks the running process for `mode` unless it was asked for it last. A refusal or a
@@ -1474,7 +1488,8 @@ impl Session {
     /// the running turn ([`Session::inject_head`]). While a move waits the input is for the
     /// agent in the new folder: it waits as long as something holds the move, then the move
     /// goes first ([`Session::restart_for_move`]). A capped input first waits for the runtime
-    /// to confirm `ask` (T39); an uncapped one runs in the session's own mode.
+    /// to confirm its turn's mode, the lower of its cap and the session's own (T39); an
+    /// uncapped one runs in the session's own mode.
     async fn pump(&mut self) {
         while self.lowering.is_none() && self.state == ProcessState::Running {
             if self.turn.is_some() {
@@ -1499,19 +1514,21 @@ impl Session {
             let Some((input, files)) = self.prepared(&q).await else {
                 continue;
             };
+            let own = self.spec.permission_mode;
+            let mode = own.min(cap(&q.input));
             if !capped(&q.input) {
                 // After a capped turn whose next input was capped too (T39).
-                let own = self.spec.permission_mode;
                 self.ask_runtime(own).await;
-            } else if !(self.asked_mode == PermissionMode::Ask
-                && self.permission_mode == Some(PermissionMode::Ask))
+            } else if !(self.asked_mode == mode && self.permission_mode.is_some_and(|m| m <= mode))
             {
-                tracing::info!(session_id = %self.id, event_id = %q.input.event_id, "capped input: switching the agent to ask first");
-                if !self.ask_runtime(PermissionMode::Ask).await {
-                    // It cannot switch: a new process in `ask` runs it.
+                // The turn's mode is asked for or not confirmed yet. A runtime already at or
+                // below it with nothing new to ask (it may have lowered itself, as `plan` does)
+                // skips this wait: nothing would confirm a mode not asked for.
+                tracing::info!(session_id = %self.id, event_id = %q.input.event_id, mode = mode.as_str(), "capped input: switching the agent first");
+                if !self.ask_runtime(mode).await {
+                    // It cannot switch: a new process in the turn's mode runs it.
                     self.queue.push_front(q);
-                    self.restart_for_cap("the runtime cannot switch to ask")
-                        .await;
+                    self.restart_for_cap("the runtime cannot switch").await;
                     continue;
                 }
                 self.lowering = Some(Lowering {
@@ -1574,7 +1591,7 @@ impl Session {
     /// Writes the head of the queue into the running turn (SPEC §17.2), as the VS Code tab
     /// does with what the user types meanwhile: a person's input (no `peer`, no
     /// `schedule_id`) that is no slash command, into a turn whose own input has no `peer`
-    /// (an `hqc_ask` is answered by its own turn alone), neither of them capped to `ask`
+    /// (an `hqc_ask` is answered by its own turn alone), neither of them capped
     /// (T39), the runtime asks nothing now and no move waits (the input is for the agent in
     /// the new folder). Only the head goes, so `seq` order holds.
     /// False: the head waits for the end of the turn.
@@ -1651,8 +1668,8 @@ impl Session {
         }
     }
 
-    /// The runtime did not confirm `ask` for the capped input that waits (T39): the input
-    /// goes back to the head of the queue and a new process in `ask` runs it.
+    /// The runtime did not confirm the mode of the capped input that waits (T39): the input
+    /// goes back to the head of the queue and a new process in that mode runs it.
     async fn restart_lowered(&mut self, why: &str) {
         let Some(l) = self.lowering.take() else {
             return;
@@ -1663,23 +1680,20 @@ impl Session {
     }
 
     /// Kills the process and starts it again for the capped input at the head of the
-    /// queue, which makes it start in `ask` ([`Session::start_mode`]).
+    /// queue, which makes it start in that input's mode ([`Session::start_mode`]).
     async fn restart_for_cap(&mut self, why: &str) {
-        tracing::warn!(session_id = %self.id, "restarting the agent in ask for a capped input: {why}");
+        tracing::warn!(session_id = %self.id, "restarting the agent in the mode of a capped input: {why}");
         self.kill_process("permission cap").await;
         if let Err(e) = self.ensure_running().await {
             self.fail_queue(&e);
         }
     }
 
-    /// The mode a new process starts in: `ask` for a capped input at the head of the queue
-    /// (T39), otherwise the session's own.
+    /// The mode a new process starts in: for the input at the head of the queue, the lower
+    /// of its cap and the session's own mode (T39); the session's own without one.
     fn start_mode(&self) -> PermissionMode {
-        if self.queue.front().is_some_and(|q| capped(&q.input)) {
-            PermissionMode::Ask
-        } else {
-            self.spec.permission_mode
-        }
+        let own = self.spec.permission_mode;
+        self.queue.front().map_or(own, |q| own.min(cap(&q.input)))
     }
 
     /// The capped turn is over (T39): the session's own mode again, unless the next input
@@ -1803,7 +1817,7 @@ impl Session {
                     self.send_state();
                 }
                 // The confirmation a capped input waits for (T39).
-                if m == PermissionMode::Ask && self.asked_mode == PermissionMode::Ask {
+                if m == self.asked_mode {
                     if let Some(l) = self.lowering.take() {
                         self.hand(l.q, l.input, l.files).await;
                     }
@@ -1819,7 +1833,7 @@ impl Session {
                 let lost: Vec<Uuid> = self.injected.iter().map(|q| q.input.event_id).collect();
                 self.end_turn(&[], &lost);
                 if let Some(l) = self.lowering.take() {
-                    // It never reached the runtime; the next process starts in `ask` for it.
+                    // It never reached the runtime; the next process starts in its mode.
                     self.queue.push_front(l.q);
                 }
                 self.set_state(ProcessState::Stopped);
@@ -2077,12 +2091,11 @@ impl Session {
         });
     }
 
-    /// The input of the current turn while its cap holds a session of its own in `auto`
-    /// down to `ask` (T39).
+    /// The input of the current turn while its cap holds the session's own mode down (T39).
     fn capped_input(&self) -> Option<Uuid> {
         self.turn
             .as_ref()
-            .filter(|t| t.capped && self.spec.permission_mode == PermissionMode::Auto)
+            .filter(|t| t.capped && cap(&t.input) < self.spec.permission_mode)
             .map(|t| t.input.event_id)
     }
 

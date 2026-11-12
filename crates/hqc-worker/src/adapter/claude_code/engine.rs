@@ -524,7 +524,9 @@ impl Core {
     /// Switch the running process to `mode` (T38): `control_request {subtype:
     /// set_permission_mode}`, which the CLI applies to the next permission check and
     /// confirms with `system/status {permissionMode}` (checked on 2.1.308). `ask` is the
-    /// CLI's `default`, the name it reports for `manual` too.
+    /// CLI's `default`, the name it reports for `manual` too; `allow_all` is
+    /// `bypassPermissions`, which the CLI takes only from a process started with
+    /// `--allow-dangerously-skip-permissions` or in that mode.
     pub fn set_permission_mode(&mut self, mode: PermissionMode) -> Action {
         Action::Write(json!({
             "type": "control_request",
@@ -532,6 +534,7 @@ impl Core {
             "request": {"subtype": "set_permission_mode", "mode": match mode {
                 PermissionMode::Ask => "default",
                 PermissionMode::Auto => "auto",
+                PermissionMode::AllowAll => "bypassPermissions",
             }},
         }))
     }
@@ -868,19 +871,20 @@ impl Core {
         out
     }
 
-    /// The CLI's permission mode: `auto` is `auto`, any other (`default`, which `manual`
-    /// shows as, or `acceptEdits`/`plan` the CLI may enter by itself) asks. Reported when it
-    /// changes, and on every confirmation of a switch of ours (`confirm`): the supervisor
-    /// waits for that before it hands over a turn capped to `ask` (T39), also when the
-    /// process already ran in `ask` because a switch back to `auto` was refused.
+    /// The CLI's permission mode: `auto` is `auto`, `bypassPermissions` is `allow_all`, any
+    /// other (`default`, which `manual` shows as, or `acceptEdits`/`plan` the CLI may enter
+    /// by itself) asks. Reported when it changes, and on every confirmation of a switch of
+    /// ours (`confirm`): the supervisor waits for that before it hands over a capped turn
+    /// (T39), also when the process already ran in the cap's mode because a switch back up
+    /// was refused.
     fn on_mode(&mut self, v: &Value, confirm: bool) -> Vec<Action> {
         let Some(m) = v.as_str() else {
             return vec![];
         };
-        let mode = if m == "auto" {
-            PermissionMode::Auto
-        } else {
-            PermissionMode::Ask
+        let mode = match m {
+            "auto" => PermissionMode::Auto,
+            "bypassPermissions" => PermissionMode::AllowAll,
+            _ => PermissionMode::Ask,
         };
         if self.permission_mode == Some(mode) && !confirm {
             return vec![];

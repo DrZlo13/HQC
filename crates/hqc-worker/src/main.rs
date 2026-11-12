@@ -9,6 +9,7 @@ use hqc_worker::adapter::claude_code::McpLaunch;
 use hqc_worker::adapter::BuiltinAdapters;
 use hqc_worker::config::{self, Config};
 use hqc_worker::connection::{ConnOptions, Status};
+use hqc_worker::permissions::PermissionMode;
 use hqc_worker::token::TokenStore;
 use hqc_worker::{capabilities, enroll, worker_log, Worker};
 use tokio_util::sync::CancellationToken;
@@ -173,10 +174,17 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
             "worker.toml: no [[env_bindings]] names [environments.{name}], so no folder runs in it"
         );
     }
-    if p.mode == hqc_worker::permissions::PermissionMode::Auto {
-        tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call");
-    } else if p.allow_auto {
-        tracing::info!("[permissions] allow_auto: a session switched to auto in hqc runs without asking; only the deny list stops a call");
+    match p.mode {
+        PermissionMode::Auto => {
+            tracing::warn!("[permissions] mode = \"auto\": Claude Code decides tool calls itself and never asks; only the deny list stops a call")
+        }
+        PermissionMode::AllowAll => {
+            tracing::warn!("[permissions] mode = \"allow_all\": Claude Code runs tool calls without asking and without its classifier; only the deny list and the ask rules of its settings stop a call")
+        }
+        PermissionMode::Ask if p.allow_auto => {
+            tracing::info!("[permissions] allow_auto: a session switched to auto or allow_all in hqc runs without asking; only the deny list stops a call")
+        }
+        PermissionMode::Ask => {}
     }
     // The agents' hqc MCP server is this binary (SPEC §7.2).
     let mcp_socket = hqc_worker::mcp::socket_path(&config::hqc_home()?);

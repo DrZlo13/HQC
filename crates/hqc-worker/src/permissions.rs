@@ -3,7 +3,7 @@
 //!
 //! ```toml
 //! [permissions]
-//! mode = "ask"                                  # "ask" | "auto"
+//! mode = "ask"                                  # "ask" | "auto" | "allow_all"
 //! allow = ["Bash(cargo test:*)", "Read"]        # run without asking
 //! deny = ["Bash(sudo:*)", "Bash(git push:*)"]   # never run, never ask; beats `always`
 //! ```
@@ -55,9 +55,11 @@ pub const DEFAULT_DENY: &[&str] = &[
 ];
 
 /// What the CLI does with a call no rule matches: ask the owner (`can_use_tool` →
-/// `approval.request`), or `--permission-mode auto`, where the CLI's classifier decides and
-/// never asks and only `deny` stops a call (checked on 2.1.308). A session may ask for
-/// either (T38); `mode` is the default.
+/// `approval.request`), `--permission-mode auto`, where the CLI's classifier decides and
+/// never asks and only `deny` stops a call (checked on 2.1.308), or (`allow_all`, since SPEC
+/// 0.129) `--permission-mode bypassPermissions`, where the CLI runs the call without the
+/// classifier and only the deny and ask rules of its settings stop it or ask. A session may
+/// ask for any of them (T38); `mode` is the default.
 pub use hqc_proto::frame::PermissionMode;
 
 fn yes() -> bool {
@@ -69,7 +71,7 @@ fn yes() -> bool {
 pub struct RawPermissions {
     #[serde(default)]
     mode: PermissionMode,
-    /// `false`: a session that asks for `auto` runs in `ask` (T38).
+    /// `false`: a session that asks for `auto` or `allow_all` runs in `ask` (T38).
     #[serde(default = "yes")]
     allow_auto: bool,
     #[serde(default)]
@@ -83,7 +85,7 @@ pub struct RawPermissions {
 pub struct Permissions {
     /// The mode of a session that does not ask for one.
     pub mode: PermissionMode,
-    /// Whether hqc may run a session in `auto` (T38).
+    /// Whether hqc may run a session in `auto` or `allow_all` (T38).
     pub allow_auto: bool,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
@@ -105,8 +107,11 @@ impl Permissions {
         let Some(raw) = raw else {
             return Ok(Self::default());
         };
-        if raw.mode == PermissionMode::Auto && !raw.allow_auto {
-            bail!("permissions: mode = \"auto\" with allow_auto = false");
+        if raw.mode != PermissionMode::Ask && !raw.allow_auto {
+            bail!(
+                "permissions: mode = {:?} with allow_auto = false",
+                raw.mode.as_str()
+            );
         }
         let p = Self {
             mode: raw.mode,
@@ -155,11 +160,11 @@ impl Permissions {
         })
     }
 
-    /// The mode a session runs in: the one hqc asks for, else `mode`; `auto` only with
-    /// `allow_auto` (T38). The worker decides, not the hub (SPEC §2.1).
+    /// The mode a session runs in: the one hqc asks for, else `mode`; `auto` and `allow_all`
+    /// only with `allow_auto` (T38). The worker decides, not the hub (SPEC §2.1).
     pub fn mode_for(&self, asked: Option<PermissionMode>) -> PermissionMode {
         match asked.unwrap_or(self.mode) {
-            PermissionMode::Auto if self.allow_auto => PermissionMode::Auto,
+            m @ (PermissionMode::Auto | PermissionMode::AllowAll) if self.allow_auto => m,
             _ => PermissionMode::Ask,
         }
     }

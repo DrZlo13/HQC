@@ -71,9 +71,9 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_permission_mode: Option<PermissionMode>,
     /// While the current turn runs under a peer message's cap (T39, SPEC §10.1): the
-    /// address of the session up the chain whose `ask` lowered this `auto` session to `ask`
-    /// for the turn, as the worker reported it (`session.state.capped_input`). Absent
-    /// otherwise.
+    /// address of the session up the chain whose mode lowered this session's own mode for
+    /// the turn (`ask` lowers `auto` and `allow_all`, `auto` lowers `allow_all`), as the
+    /// worker reported it (`session.state.capped_input`). Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_capped_by: Option<String>,
     /// How many subagents the session's agent runs now, as its worker last reported it
@@ -232,7 +232,8 @@ pub struct CreateSessionRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub auto_approve: bool,
-    /// Absent: the worker's `[permissions] mode` (T38). `auto` only from the worker owner.
+    /// Absent: the worker's `[permissions] mode` (T38). `auto` and `allow_all` only from the
+    /// worker owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
 }

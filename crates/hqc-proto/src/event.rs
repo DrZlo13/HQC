@@ -39,12 +39,13 @@ pub struct Chain {
     pub hops: u8,
     /// The highest permission mode a turn this message starts may run in (since SPEC 0.43,
     /// T39): the lower of the sender's mode and the cap of the input that started the
-    /// sender's turn; `auto` only if every session up the chain ran in `auto`. Absent on
-    /// chains made before 0.43: no cap.
+    /// sender's turn, i.e. the lowest mode up the chain (`ask` < `auto` < `allow_all`). Absent
+    /// on chains made before 0.43: no cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_cap: Option<crate::frame::PermissionMode>,
-    /// With a cap of `ask`: the address (`<project-slug>/<session-slug>`) of the session up
-    /// the chain whose `ask` set it, for the header of the capped turn.
+    /// With a cap below `allow_all`: the address (`<project-slug>/<session-slug>`) of the
+    /// first session up the chain in the cap's mode, which set it, for the header of the
+    /// capped turn (for an `auto` cap since SPEC 0.129).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capped_by: Option<String>,
 }

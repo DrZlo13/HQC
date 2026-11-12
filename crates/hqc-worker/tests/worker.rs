@@ -1572,6 +1572,168 @@ async fn the_cap_never_raises() {
     w.stop().await;
 }
 
+// SPEC 0.129: an `auto` cap holds an Allow all session down to Auto: the runtime is switched
+// to Auto and confirms it before the input, the session reports the cap meanwhile, a switch the
+// user asks for goes no higher than Auto until the turn ends, and Allow all comes back after
+// it. A stopped agent starts in Auto for such an input.
+#[tokio::test]
+async fn an_auto_cap_holds_allow_all_down_to_auto() {
+    use PermissionMode::{AllowAll, Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "allow_all").await;
+    assert_eq!(adapters.start_modes(), [(sid, AllowAll)]);
+
+    let e1 = Uuid::now_v7();
+    c.frame("session.input", capped_input(sid, e1, "auto"))
+        .await;
+    adapters
+        .wait_for("switch down", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, Auto))
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let first = FakeCall::Input {
+        session_id: sid,
+        event_id: e1,
+    };
+    assert!(
+        !adapters.calls().contains(&first),
+        "before the runtime confirms Auto"
+    );
+    adapters.emit(sid, AdapterEvent::PermissionMode(Auto)).await;
+    adapters
+        .wait_for("capped input", |c| c.contains(&first))
+        .await;
+    let st = state_where(&mut c, sid, |st| st["payload"]["capped_input"] == json!(e1)).await;
+    assert_eq!(st["payload"]["permission_mode"], "auto");
+    adapters.accept_input(sid, e1).await;
+
+    // A switch to Ask mid-turn goes at once; back to Allow all goes no higher than Auto.
+    for mode in ["ask", "allow_all"] {
+        let id = c
+            .frame(
+                "session.permission_mode",
+                json!({"session_id": sid, "permission_mode": mode}),
+            )
+            .await;
+        loop {
+            let ack = c.expect("ack").await;
+            if ack["id"] == id.as_str() {
+                break;
+            }
+        }
+    }
+    adapters
+        .wait_for("switches mid-turn", |c| switches(c).len() == 3)
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(switches(&adapters.calls()), [Auto, Ask, Auto]);
+
+    adapters.end_turn(sid).await;
+    adapters
+        .wait_for("own mode back", |c| {
+            c.contains(&FakeCall::PermissionMode(sid, AllowAll))
+        })
+        .await;
+    assert_eq!(switches(&adapters.calls()), [Auto, Ask, Auto, AllowAll]);
+
+    // Stopped: the next process starts in Auto for an `auto`-capped input, and an `ask` cap
+    // starts it in Ask.
+    for (cap, want) in [("auto", Auto), ("ask", Ask)] {
+        c.frame("session.kill", json!({"session_id": sid})).await;
+        state_where(&mut c, sid, |st| {
+            st["payload"]["process_state"] == "stopped"
+        })
+        .await;
+        let e = Uuid::now_v7();
+        c.frame("session.input", capped_input(sid, e, cap)).await;
+        adapters
+            .wait_for("input", |c| {
+                c.contains(&FakeCall::Input {
+                    session_id: sid,
+                    event_id: e,
+                })
+            })
+            .await;
+        assert_eq!(adapters.start_modes().last(), Some(&(sid, want)), "{cap}");
+        adapters.accept_input(sid, e).await;
+        adapters.end_turn(sid).await;
+    }
+    w.stop().await;
+}
+
+// SPEC 0.129: an `allow_all` cap (a chain of Allow all sessions) holds nothing down.
+#[tokio::test]
+async fn an_allow_all_cap_changes_nothing() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    for mode in ["ask", "auto", "allow_all"] {
+        let sid = Uuid::now_v7();
+        started_in(&mut c, &env, sid, mode).await;
+        let e = Uuid::now_v7();
+        c.frame("session.input", capped_input(sid, e, "allow_all"))
+            .await;
+        adapters
+            .wait_for("input", |c| {
+                c.contains(&FakeCall::Input {
+                    session_id: sid,
+                    event_id: e,
+                })
+            })
+            .await;
+        adapters.accept_input(sid, e).await;
+        adapters.end_turn(sid).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(switches(&adapters.calls()), []);
+    w.stop().await;
+}
+
+// SPEC 0.129: an Auto session whose runtime lowered itself (`plan` reads as Ask) takes an
+// input capped to Auto at once: nothing is asked of the runtime, so nothing would confirm it,
+// and waiting would end in a restart after MODE_SWITCH_TIMEOUT.
+#[tokio::test]
+async fn a_runtime_below_the_cap_takes_the_capped_input_at_once() {
+    use PermissionMode::{Ask, Auto};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    started_in(&mut c, &env, sid, "auto").await;
+    adapters.emit(sid, AdapterEvent::PermissionMode(Ask)).await;
+    state_with_mode(&mut c, sid, "ask").await;
+
+    let e = Uuid::now_v7();
+    c.frame("session.input", capped_input(sid, e, "auto")).await;
+    let calls = adapters
+        .wait_for("capped input", |c| {
+            c.contains(&FakeCall::Input {
+                session_id: sid,
+                event_id: e,
+            })
+        })
+        .await;
+    assert_eq!(switches(&calls), []);
+    assert!(!calls.contains(&FakeCall::Kill(sid)), "{calls:?}");
+    assert_eq!(adapters.start_modes(), [(sid, Auto)]);
+    adapters.accept_input(sid, e).await;
+    adapters.end_turn(sid).await;
+    w.stop().await;
+}
+
 // T39: a runtime that cannot switch is restarted in ask for the capped input; a process
 // started again later starts in the session's own mode.
 #[tokio::test]

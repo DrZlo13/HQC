@@ -652,6 +652,7 @@ async fn command_line_new_then_resume() {
             "user,local",
             "--permission-mode",
             "default",
+            "--allow-dangerously-skip-permissions",
             mode,
             &claude_session.to_string(),
             "--verbose",
@@ -1066,6 +1067,77 @@ environment = "mine"
         "{restricted:?}"
     );
     assert_eq!(sources(&restricted), None, "{restricted:?}");
+}
+
+/// SPEC 0.129: a session in allow_all starts with `--permission-mode bypassPermissions`; with
+/// `allow_auto` every process of a session that is not restricted gets
+/// `--allow-dangerously-skip-permissions`, so that a switch to allow_all takes (the CLI
+/// refuses the flag together with `--restricted`); without `allow_auto` none does.
+#[test]
+fn allow_all_starts_in_bypass_permissions() {
+    use crate::permissions::{PermissionMode, Permissions};
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let f = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude));
+    let a = ClaudeCodeAdapter {
+        session_id: Uuid::nil(),
+        opts: f.opts.clone(),
+        spawner: f.spawner.clone(),
+        events: mpsc::channel(1).0,
+        proc: None,
+    };
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let args = |s: &StartSpec| a.command(s, &Uuid::nil(), Launch::New, None).args;
+    let mode = |args: &[String]| {
+        let i = args.iter().position(|a| a == "--permission-mode").unwrap();
+        args[i + 1].clone()
+    };
+    let allows = |args: &[String]| {
+        args.iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions")
+    };
+    for (m, want) in [
+        (PermissionMode::Ask, "default"),
+        (PermissionMode::Auto, "auto"),
+        (PermissionMode::AllowAll, "bypassPermissions"),
+    ] {
+        s.permission_mode = m;
+        let line = args(&s);
+        assert_eq!(mode(&line), want);
+        assert!(allows(&line), "{m:?}: allow_auto is on by default");
+    }
+    s.restricted = true;
+    assert!(!allows(&args(&s)), "never with --restricted");
+    s.restricted = false;
+    s.permission_mode = PermissionMode::Ask;
+    s.environment = with_permissions(Permissions {
+        allow_auto: false,
+        ..Permissions::default()
+    });
+    assert!(!allows(&args(&s)), "not without allow_auto");
+}
+
+/// SPEC 0.129: allow_all is `bypassPermissions` both ways: in our `set_permission_mode` and in
+/// what the CLI reports.
+#[test]
+fn allow_all_switches_as_bypass_permissions() {
+    use crate::permissions::PermissionMode;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let Action::Write(v) = core.set_permission_mode(PermissionMode::AllowAll) else {
+        panic!("not a write");
+    };
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "set_permission_mode", "mode": "bypassPermissions"})
+    );
+    let status = r#"{"type":"system","subtype":"status","status":null,"permissionMode":"bypassPermissions"}"#;
+    assert_eq!(
+        core.on_line(status),
+        [Action::Emit(AdapterEvent::PermissionMode(
+            PermissionMode::AllowAll
+        ))]
+    );
 }
 
 /// T38: a running process switches with `set_permission_mode` (`default` for ask, the
@@ -2564,6 +2636,7 @@ async fn native_messaging_follows_the_worker_config() {
         "user,local",
         "--permission-mode",
         "default",
+        "--allow-dangerously-skip-permissions",
         "--session-id",
         &Uuid::nil().to_string(),
         "--verbose",

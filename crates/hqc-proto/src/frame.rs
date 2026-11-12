@@ -132,8 +132,8 @@ pub enum WorkerFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_mode: Option<PermissionMode>,
         /// The input whose `permission_cap` the agent runs its current turn under (since
-        /// SPEC 0.43, T39): the session's own mode is `auto`, the runtime confirmed `ask` for
-        /// this turn. Absent — no cap applies now.
+        /// SPEC 0.43, T39): the cap is below the session's own mode, and the runtime confirmed
+        /// the cap's mode for this turn. Absent — no cap applies now.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capped_input: Option<Uuid>,
         /// How many subagents the session's agent runs now (since SPEC 0.68; Claude Code:
@@ -960,8 +960,12 @@ pub enum Runtime {
 
 /// A session's permission mode (SPEC §3 Session, §8.1, T38): what the runtime does with a
 /// tool call no rule of the worker's `[permissions]` decides. The worker's `deny` stops a
-/// call in both.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// call in every mode. Ordered from the lowest: `Ask < Auto < AllowAll`; a cap (T39) is the
+/// lowest mode up a chain, and a capped turn runs in the lower of the cap and the session's
+/// own mode.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     /// Ask the worker owner (`approval.request`).
@@ -969,6 +973,10 @@ pub enum PermissionMode {
     Ask,
     /// Claude Code's classifier decides and never asks (`--permission-mode auto`).
     Auto,
+    /// Claude Code runs every call without asking and without the classifier
+    /// (`--permission-mode bypassPermissions`, since SPEC 0.129); the CLI still applies the
+    /// deny and ask rules of its settings.
+    AllowAll,
 }
 
 impl PermissionMode {
@@ -976,6 +984,7 @@ impl PermissionMode {
         match self {
             Self::Ask => "ask",
             Self::Auto => "auto",
+            Self::AllowAll => "allow_all",
         }
     }
 
@@ -983,6 +992,7 @@ impl PermissionMode {
         match s {
             "ask" => Some(Self::Ask),
             "auto" => Some(Self::Auto),
+            "allow_all" => Some(Self::AllowAll),
             _ => None,
         }
     }
@@ -1067,8 +1077,8 @@ pub struct SessionStart {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub requested_by_owner: bool,
     /// The mode hqc asks for (T38); absent: the worker's `[permissions] mode`. The worker
-    /// may run `ask` instead (`allow_auto = false`) and reports what it runs in
-    /// `session.state.permission_mode`.
+    /// may run `ask` instead of `auto` or `allow_all` (`allow_auto = false`) and reports what
+    /// it runs in `session.state.permission_mode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
     /// hqc's allow rules of the session's workspace (since SPEC 0.52, T48), as
@@ -1235,8 +1245,9 @@ pub struct SessionInput {
     /// `text` (SPEC §7.1, since 0.34); absent for a `user.message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<PeerHeader>,
-    /// `permission_cap` of the input's chain (since SPEC 0.43, T39): with `ask`, a session
-    /// running in `auto` runs this turn in `ask`. The worker only ever lowers the mode for it.
+    /// `permission_cap` of the input's chain (since SPEC 0.43, T39): a session whose own mode
+    /// is higher runs this turn in the cap's mode (`ask`, or since 0.129 `auto` for a session
+    /// in `allow_all`). The worker only ever lowers the mode for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_cap: Option<PermissionMode>,
     /// `schedule_id` of a `user.message` the hub cron sent (since SPEC 0.68, §16): the run
@@ -1990,6 +2001,25 @@ mod tests {
         ))
         .unwrap();
         assert!(matches!(f.body, HubFrame::SessionModel { model: None, .. }));
+    }
+
+    /// SPEC 0.129: `allow_all` is a mode on the wire, the highest one: a cap of `auto` holds
+    /// it down to `auto` (T39).
+    #[test]
+    fn allow_all_is_the_highest_mode() {
+        use PermissionMode::{AllowAll, Ask, Auto};
+        for m in [Ask, Auto, AllowAll] {
+            assert_eq!(PermissionMode::parse(m.as_str()), Some(m));
+            assert_eq!(serde_json::to_value(m).unwrap(), json!(m.as_str()));
+        }
+        assert_eq!(AllowAll.as_str(), "allow_all");
+        assert_eq!(
+            serde_json::from_value::<PermissionMode>(json!("allow_all")).unwrap(),
+            AllowAll
+        );
+        assert!(Ask < Auto && Auto < AllowAll);
+        assert_eq!(AllowAll.min(Auto), Auto);
+        assert_eq!(Auto.min(Ask), Ask);
     }
 
     /// T30: a call and its answer share the frame `id` and `request_id`; an error has the one

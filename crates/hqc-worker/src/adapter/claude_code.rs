@@ -157,7 +157,8 @@ pub struct ClaudeOptions {
     /// The CLI's "ask" mode, `default` or `manual` by version
     /// ([`crate::capabilities::claude_permission_mode`]). `--permission-mode` is always
     /// passed, so that a `defaultMode` from settings (`bypassPermissions`, `acceptEdits`)
-    /// does not apply: this, or `auto` for a session in auto (T38).
+    /// does not apply: this, `auto` for a session in auto or `bypassPermissions` for one in
+    /// allow_all (T38).
     pub ask_mode: String,
     /// Claude Code's own cross-session messaging, on top of `session.start.disallowed_tools`
     /// (`allow_native_messaging` and `allow_subagent_messages` in the worker config).
@@ -477,11 +478,13 @@ impl ClaudeCodeAdapter {
     /// The CLI command line (SPEC §8.1). Besides the protocol flags:
     /// - `--thinking-display summarized`, as the VS Code extension passes it: without it the
     ///   thinking blocks of newer models (opus 5.5 on 2.1.312) come with empty text;
-    /// - `--setting-sources user,local` and `--permission-mode` (the ask mode or `auto`,
-    ///   T38): a repository's own
-    ///   `.claude/settings.json` (hooks, `defaultMode`) is not applied; `local` stays for the
-    ///   rules `always` writes; `--setting-sources user,project,local` when the environment has
-    ///   `project_settings` (the owner trusts every repository in its folders, SPEC §14);
+    /// - `--setting-sources user,local` and `--permission-mode` (the ask mode, `auto` or
+    ///   `bypassPermissions`, T38; with `allow_auto` and without `restricted` also
+    ///   `--allow-dangerously-skip-permissions`, so that a switch to `allow_all` takes): a
+    ///   repository's own `.claude/settings.json` (hooks, `defaultMode`) is not applied;
+    ///   `local` stays for the rules `always` writes; `--setting-sources user,project,local`
+    ///   when the environment has `project_settings` (the owner trusts every repository in
+    ///   its folders, SPEC §14);
     /// - `restricted` → `--restricted` (no command-running tools, file tools confined to the
     ///   working directory, no settings files; SPEC §8.4);
     /// - the allow/deny rules of the session's environment (`[permissions]` merged with the
@@ -557,8 +560,14 @@ impl ClaudeCodeAdapter {
             match spec.permission_mode {
                 PermissionMode::Ask => self.opts.ask_mode.clone(),
                 PermissionMode::Auto => "auto".into(),
+                PermissionMode::AllowAll => "bypassPermissions".into(),
             },
         ]);
+        // Lets a running process be switched to `bypassPermissions` (the CLI refuses the switch
+        // otherwise); `--restricted` refuses the flag (CLI 2.1.312).
+        if spec.environment.permissions.allow_auto && !spec.restricted {
+            args.push("--allow-dangerously-skip-permissions".into());
+        }
         if let Some(p) = spec.system_prompt.as_deref().filter(|p| !p.is_empty()) {
             args.extend(["--append-system-prompt".into(), p.to_string()]);
         }

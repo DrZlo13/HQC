@@ -20,8 +20,8 @@
 //! # show_in_vscode = true          # sessions run by hqc appear in VS Code's history
 //!
 //! [permissions]                  # optional, see crate::permissions
-//! mode = "ask"                   # "ask" | "auto": sessions that do not ask for a mode
-//! allow_auto = true              # false: a session that asks for "auto" runs in "ask" (T38)
+//! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
+//! allow_auto = true              # false: one that asks for "auto" or "allow_all" runs "ask"
 //! allow = ["Bash(cargo test:*)"]
 //! # deny: default crate::permissions::DEFAULT_DENY (sudo, ssh, scp, rm -rf /*, ...)
 //!
@@ -620,16 +620,16 @@ impl Config {
             .collect()
     }
 
-    /// The mode a session runs in when hqc asks for `asked` (T38): `auto` only with
-    /// `[permissions] allow_auto`; a refusal is logged, the session runs in `ask`.
+    /// The mode a session runs in when hqc asks for `asked` (T38): `auto` and `allow_all`
+    /// only with `[permissions] allow_auto`; a refusal is logged, the session runs in `ask`.
     pub fn permission_mode(
         &self,
         session_id: Uuid,
         asked: Option<PermissionMode>,
     ) -> PermissionMode {
         let mode = self.permissions.mode_for(asked);
-        if asked == Some(PermissionMode::Auto) && mode != PermissionMode::Auto {
-            tracing::warn!(%session_id, "the hub asked for permission mode auto; [permissions] allow_auto = false, running ask");
+        if let Some(a) = asked.filter(|a| *a != mode) {
+            tracing::warn!(%session_id, "the hub asked for permission mode {}; [permissions] allow_auto = false, running ask", a.as_str());
         }
         mode
     }
@@ -1017,6 +1017,32 @@ mod tests {
         ))
         .unwrap_err();
         assert!(format!("{e:#}").contains("allow_auto"), "{e:#}");
+    }
+
+    /// SPEC 0.129: `allow_all` is a mode like `auto`: hqc may ask for it, `mode` may name it,
+    /// and `allow_auto = false` refuses it the same way.
+    #[test]
+    fn allow_all_permission_mode() {
+        use crate::permissions::PermissionMode::{AllowAll, Ask};
+        let base = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n";
+        let id = Uuid::nil();
+        let c = Config::parse(base).unwrap();
+        assert_eq!(c.permission_mode(id, Some(AllowAll)), AllowAll);
+
+        let c = Config::parse(&format!("{base}[permissions]\nmode = \"allow_all\"\n")).unwrap();
+        assert_eq!(c.permissions.mode, AllowAll);
+        assert_eq!(c.permission_mode(id, None), AllowAll);
+        assert_eq!(c.permission_mode(id, Some(Ask)), Ask);
+
+        let c = Config::parse(&format!("{base}[permissions]\nallow_auto = false\n")).unwrap();
+        assert_eq!(c.permission_mode(id, Some(AllowAll)), Ask);
+
+        let e = Config::parse(&format!(
+            "{base}[permissions]\nmode = \"allow_all\"\nallow_auto = false\n"
+        ))
+        .unwrap_err();
+        assert!(format!("{e:#}").contains("allow_auto"), "{e:#}");
+        assert!(format!("{e:#}").contains("allow_all"), "{e:#}");
     }
 
     #[test]

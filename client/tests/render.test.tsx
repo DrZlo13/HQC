@@ -802,11 +802,24 @@ describe("messages", () => {
     t.addPending("op-9", "hi");
     t.failPending("op-9", "HTTP 502");
     const { actions } = show(t);
-    expect(root.querySelector(".msg-failed")!.textContent).toContain(
-      "HTTP 502",
-    );
+    // An alert box under the message: the mark, "Not sent" and the reason, then Retry and
+    // Discard as buttons of one size.
+    const alert = root.querySelector(".msg-failed .send-alert")!;
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(
+      [...alert.children].map((c) => [c.className, c.textContent]),
+    ).toEqual([
+      ["send-alert-icon", ""],
+      ["send-alert-text", "Not sentHTTP 502"],
+      ["send-alert-acts", "RetryDiscard"],
+    ]);
+    expect(
+      [...alert.querySelectorAll(".send-alert-acts button")].map((b) => b.className),
+    ).toEqual(["btn btn-small btn-primary btn-resend", "btn btn-small btn-discard"]);
     await act(async () => buttonByText("Retry")!.click());
     expect(actions.resend).toHaveBeenCalledWith("op-9");
+    await act(async () => buttonByText("Discard")!.click());
+    expect(actions.discard).toHaveBeenCalledWith("op-9");
   });
 
   it("marks a failed delivery", () => {

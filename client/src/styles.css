@@ -3184,12 +3184,67 @@ select.input {
 .msg-pending .msg-bubble {
   opacity: 0.7;
 }
-.msg-failed .msg-bubble {
-  opacity: 1;
-  box-shadow: inset 0 0 0 1px var(--danger);
+/* A message the hub did not take: the bubble dimmed as while it is being sent, and under it an
+   alert box of its own, as wide as the bubble can be on a computer (the whole plate in one
+   column) — the mark, "Not sent" and the reason, then Retry and Discard as buttons of one size. */
+.send-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 80%;
+  padding: 6px 6px 6px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text2);
 }
-.msg-failed .meta {
+:root.feed-column .msg-user > .send-alert {
+  max-width: none;
+  margin-top: 6px;
+}
+.send-alert-icon {
+  flex: none;
+  display: flex;
   color: var(--danger);
+}
+.send-alert-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 6px;
+}
+.send-alert-text b {
+  color: var(--danger);
+  font-weight: 600;
+}
+.send-alert-reason {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.send-alert-acts {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+.send-alert .btn-small {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+}
+/* On a phone the box takes the feed's whole width and the buttons are finger-sized: a miss on
+   Retry must not land on Discard. */
+.chat-phone .send-alert {
+  max-width: none;
+}
+.chat-phone .send-alert-acts {
+  gap: 8px;
+}
+.chat-phone .send-alert .btn-small {
+  height: 36px;
+  padding: 0 14px;
 }
 
 .msg-answer .msg-bubble {

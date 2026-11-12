@@ -590,21 +590,29 @@ function PendingBubble({ pending, actions }: { pending: PendingMessage; actions:
         {pending.text && <UserText text={pending.text} />}
         {pending.attachments && <PendingAttachments files={pending.attachments} />}
       </div>
-      <div class="meta">
-        {pending.status === 'sending' ? (
-          'sending…'
-        ) : (
-          <>
-            not sent: {pending.error}{' '}
-            <button type="button" class="btn btn-small" onClick={() => actions.resend(pending.client_op_id)}>
+      {pending.status === 'sending' ? (
+        <div class="meta">sending…</div>
+      ) : (
+        // An alert of its own under the message: what happened on the left, the two ways out
+        // on the right.
+        <div class="send-alert" role="alert">
+          <span class="send-alert-icon">
+            <IconWarn size={15} />
+          </span>
+          <span class="send-alert-text">
+            <b>Not sent</b>
+            {pending.error && <span class="send-alert-reason">{pending.error}</span>}
+          </span>
+          <span class="send-alert-acts">
+            <button type="button" class="btn btn-small btn-primary btn-resend" onClick={() => actions.resend(pending.client_op_id)}>
               Retry
-            </button>{' '}
-            <button type="button" class="btn btn-small btn-ghost" onClick={() => actions.discard(pending.client_op_id)}>
+            </button>
+            <button type="button" class="btn btn-small btn-discard" onClick={() => actions.discard(pending.client_op_id)}>
               Discard
             </button>
-          </>
-        )}
-      </div>
+          </span>
+        </div>
+      )}
     </div>
   );
 }

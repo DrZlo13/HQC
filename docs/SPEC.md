@@ -4831,7 +4831,9 @@ projects, favorites first, a working one with the bar's stripe around its tile, 
 steps back through the tab's history. In the feed a message's time ends its first line and its
 buttons are in the bubble or the margin, a run of calls is "N tool calls (…)", an opened Edit,
 MultiEdit or Write call shows its change as the permission card does, a right click quotes a
-selection. The client keeps the 12 chats used last in memory and loads the next one when the
+selection, a "Background task ·" line peeks at the whole text of its notification on one line
+without Markdown marks (§4), and that text and a compaction's summary open as Markdown. The
+client keeps the 12 chats used last in memory and loads the next one when the
 mouse rests on its row or project, so a switch shows the chat at once, and the chats share their
 images' signed links (§12). §15, §6: the search is a page with filters — the kind of hit with
 the count of each, the project, the time, best match or newest, a few hits per session — over

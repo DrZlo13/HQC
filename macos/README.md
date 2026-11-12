@@ -41,3 +41,10 @@ Settings… (⌘,) holds:
 
 Closing the window hides it, so the pages keep their state; a click on the Dock icon shows it
 again, ⌘Q quits.
+
+## Notifications
+
+The app shows macOS notifications for the events the hub sends a browser push for: permission
+requests, questions, the agent's final reply and input that failed, worded as the push. They
+come only while the app runs (its window may be closed); a click opens the session. Nothing is
+shown for the session you are looking at. macOS asks once for permission.

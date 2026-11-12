@@ -27,6 +27,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         ShortcutMonitor.shared.start()
 
+        // macOS notifications for what the hub would push, while the app runs.
+        Notifier.shared.isShowing = { [weak self] serverID in
+            guard NSApp.isActive, let window = self?.windowController?.window, window.isVisible else { return false }
+            return self?.mainViewController?.selectedServerID == serverID
+        }
+        Notifier.shared.onOpen = { [weak self] serverID, sessionID in
+            self?.openSession(serverID: serverID, sessionID: sessionID)
+        }
+        Notifier.shared.start()
+
         // With no server yet, open Settings so the user can add one.
         if store.servers.isEmpty {
             mainViewController?.presentSettings()
@@ -43,6 +53,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         mainViewController?.perform(action)
+    }
+
+    // A clicked notification: shows the window (also when it was closed) and opens the session
+    // in its server's tab.
+    private func openSession(serverID: UUID, sessionID: String) {
+        if let window = windowController?.window, window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        windowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        mainViewController?.openSession(serverID: serverID, sessionID: sessionID)
     }
 
     // The File and Go items of the shortcut actions; the action is the item's represented object.

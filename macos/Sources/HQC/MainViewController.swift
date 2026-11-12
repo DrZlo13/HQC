@@ -14,7 +14,7 @@ final class MainViewController: NSViewController {
     // One kept-alive web tab per server, created on its first selection.
     private var webTabs: [UUID: WebTab] = [:]
     // The currently selected server.
-    private var selectedServerID: UUID?
+    private(set) var selectedServerID: UUID?
     // The web view currently installed in the content container (so we only swap on change).
     private weak var installedContentView: NSView?
 
@@ -246,6 +246,16 @@ final class MainViewController: NSViewController {
             // Release the controller once the sheet dismisses so it rebuilds fresh next time.
             self?.settingsWindowController = nil
         }
+    }
+
+    // MARK: - Notifications
+
+    // A clicked notification: the server's tab, then the session in its page.
+    func openSession(serverID: UUID, sessionID: String) {
+        selectServer(id: serverID)
+        guard let tab = activeTab, tab.server.id == serverID else { return }
+        view.window?.makeFirstResponder(tab.webView)
+        tab.openSession(sessionID)
     }
 
     // MARK: - Shortcut actions

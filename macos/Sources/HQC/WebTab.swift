@@ -3,10 +3,13 @@ import WebKit
 
 // Wraps one persistent WKWebView bound to a single server. Created lazily on first
 // selection and kept alive so switching tabs preserves the page state and login.
-final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
+final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
 
     let server: Server
     let webView: WKWebView
+
+    // Holds the notification script and its message handler.
+    private let contentController = WKUserContentController()
 
     // Guards against reloading the server URL on every tab switch.
     private var hasLoaded = false
@@ -33,10 +36,21 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         let configuration = WKWebViewConfiguration()
         // Use the default persistent data store so cookies/logins survive restarts.
         configuration.websiteDataStore = .default()
+        // The notification script, before the page's own scripts open their socket.
+        contentController.addUserScript(WKUserScript(source: NotificationScript.source,
+                                                     injectionTime: .atDocumentStart,
+                                                     forMainFrameOnly: true,
+                                                     in: .page))
+        configuration.userContentController = contentController
 
         self.webView = WKWebView(frame: .zero, configuration: configuration)
 
         super.init()
+
+        // Through a weak proxy: the controller retains its handlers, and this tab owns the
+        // controller.
+        contentController.add(WeakMessageHandler(self), contentWorld: .page,
+                              name: NotificationScript.handlerName)
 
         webView.autoresizingMask = [.width, .height]
         webView.allowsBackForwardNavigationGestures = true
@@ -96,8 +110,16 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
                                     completionHandler: nil)
     }
 
+    // Opens a session in the page, as a click on its row does.
+    func openSession(_ id: String) {
+        webView.callAsyncJavaScript("location.hash = '#/s/' + encodeURIComponent(id);",
+                                    arguments: ["id": id], in: nil, in: .page, completionHandler: nil)
+    }
+
     // Stop any in-flight load and detach delegates before this tab is discarded.
     func tearDown() {
+        contentController.removeScriptMessageHandler(forName: NotificationScript.handlerName,
+                                                     contentWorld: .page)
         onTitleChanged = nil
         titleObservation?.invalidate()
         titleObservation = nil
@@ -105,6 +127,22 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
         webView.removeFromSuperview()
+    }
+
+    // MARK: - WKScriptMessageHandler
+
+    // An event the notification script reports: handed to the Notifier with this tab's server.
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let m = message.body as? [String: Any],
+              let session = m["session_id"] as? String,
+              let tag = m["tag"] as? String else { return }
+        Notifier.shared.notify(server: server,
+                               sessionID: session,
+                               tag: tag,
+                               title: m["title"] as? String ?? "",
+                               body: m["body"] as? String ?? "",
+                               viewing: m["viewing"] as? Bool ?? false)
     }
 
     // MARK: - WKUIDelegate
@@ -233,5 +271,19 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
     // The page's web process crashed or was killed: load it again.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         webView.reload()
+    }
+}
+
+// Forwards script messages to a handler it does not retain.
+private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
+    private weak var target: WKScriptMessageHandler?
+
+    init(_ target: WKScriptMessageHandler) {
+        self.target = target
+    }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
     }
 }

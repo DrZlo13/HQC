@@ -111,6 +111,7 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/input", post(api::input))
         .route("/api/sessions/{id}/stop", post(api::stop))
         .route("/api/sessions/{id}/background", post(api::background))
+        .route("/api/sessions/{id}/restart", post(api::restart))
         .route("/api/sessions/{id}/retry", post(api::retry))
         .route("/api/sessions/{id}/archive", post(api::archive))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive))

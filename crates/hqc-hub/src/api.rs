@@ -39,7 +39,7 @@ use crate::{
     requests,
     security::ClientIp,
     state,
-    worker_ws::RequestError,
+    worker_ws::{RequestError, StartState},
 };
 
 /// SPEC §11 `can(user, action, resource)`. Iteration 1: owner only.
@@ -1490,18 +1490,9 @@ pub async fn search(
     }
 }
 
-/// `POST /api/sessions/{id}/input`: stored as `user.message` with `delivery: pending`
-/// and delivered when the worker is there (SPEC §5.2). A repeated `client_op_id` returns
-/// the event stored the first time, with 200 instead of 201.
-pub async fn input(
-    State(app): State<AppState>,
-    user: CurrentUser,
-    Path(id): Path<Uuid>,
-    Json(b): Json<InputRequest>,
-) -> ApiResult<(StatusCode, Json<InputResponse>)> {
-    let reply = |status, r: &db::EventRow| (status, Json(InputResponse { event: r.to_json() }));
-    let s = session_for(&app, &user, id, Action::Write).await?;
-    not_system(&s)?;
+/// Input and a restart go only to a session that is not archived (`409 archived`) and that
+/// VS Code does not drive (`409 locked_vscode`).
+fn driven_from_hqc(s: &SessionRow) -> ApiResult<()> {
     if s.archived {
         return Err(ApiError::Conflict(
             "archived",
@@ -1522,6 +1513,22 @@ pub async fn input(
             extra,
         ));
     }
+    Ok(())
+}
+
+/// `POST /api/sessions/{id}/input`: stored as `user.message` with `delivery: pending`
+/// and delivered when the worker is there (SPEC §5.2). A repeated `client_op_id` returns
+/// the event stored the first time, with 200 instead of 201.
+pub async fn input(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(b): Json<InputRequest>,
+) -> ApiResult<(StatusCode, Json<InputResponse>)> {
+    let reply = |status, r: &db::EventRow| (status, Json(InputResponse { event: r.to_json() }));
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
+    driven_from_hqc(&s)?;
     if b.text.trim().is_empty() && b.artifact_ids.is_empty() {
         return Err(ApiError::BadRequest(
             "text or artifact_ids is required".into(),
@@ -1629,6 +1636,34 @@ pub async fn background(
         },
     );
     Ok(Json(json!({ "sent": sent })))
+}
+
+/// End the agent's process and start it again at once, resuming the transcript (SPEC §17.3).
+pub async fn restart(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
+    driven_from_hqc(&s)?;
+    let Some(conn) = s.worker_id.and_then(|w| app.workers.get(w)) else {
+        return Ok(Json(json!({ "sent": false })));
+    };
+    {
+        // The kill goes out under the lock, so its `stopped` finds `Started` only if the process
+        // it ends had its start still unanswered at the press; then that `stopped` brings one
+        // more `session.start`, which the worker acks without touching the new process. Inputs
+        // sent to the old process go again after the start's `ack`.
+        let mut st = conn.st.lock().await;
+        conn.send(HubFrame::SessionKill { session_id: id });
+        if let Some(sc) = st.sessions.get_mut(&id) {
+            sc.start = StartState::NotStarted;
+            sc.inflight.clear();
+        }
+    }
+    delivery::kick(&app, id, true).await;
+    Ok(Json(json!({ "sent": true })))
 }
 
 pub async fn retry(

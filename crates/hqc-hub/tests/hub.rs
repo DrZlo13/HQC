@@ -1449,6 +1449,62 @@ async fn archive_cancels_and_fails() {
     hub.finish().await;
 }
 
+/// Restart (SPEC §17.3): `session.kill`, then at once `session.start` with `mode: resume`; the
+/// worker's `stopped` for the kill leaves that start alone, and an input the old process did
+/// not take goes again after the start's `ack`, once. An archived session is not restarted.
+#[tokio::test]
+async fn restart_kills_and_starts_again() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("restart").await;
+    ack_start(&mut w, &sid).await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "go"}))
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let input_id = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    assert_eq!(si["payload"]["event_id"], input_id);
+
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/restart"), json!({}))
+        .await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(true)), "{r}");
+    let kill = w.expect("session.kill").await;
+    assert_eq!(kill["payload"]["session_id"], sid);
+    let start = w.expect("session.start").await;
+    assert_eq!(start["payload"]["session_id"], sid);
+    assert_eq!(start["payload"]["mode"], "resume");
+    // As the worker reports the kill: `stopped`, then the kill's `ack`.
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none"}),
+    )
+    .await;
+    w.expect("ack").await;
+    w.reply(&kill["id"], "ack", json!({})).await;
+    w.reply(&start["id"], "ack", json!({})).await;
+    let si = w.expect("session.input").await;
+    assert_eq!(si["payload"]["event_id"], input_id);
+    w.reply(&si["id"], "ack", json!({"event_id": input_id}))
+        .await;
+    hub.wait_session(&sid, "running", |v| v["state"] == "running")
+        .await;
+    w.expect_silence(Duration::from_millis(300)).await;
+
+    let (s, _) = hub
+        .post(&format!("/api/sessions/{sid}/archive"), json!({}))
+        .await;
+    assert_eq!(s, 200);
+    w.expect("session.kill").await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/restart"), json!({}))
+        .await;
+    assert_eq!((s, r["error"].as_str()), (409, Some("archived")), "{r}");
+    hub.finish().await;
+}
+
 /// T13 (SPEC §17.3): a `running` session whose worker sends nothing (not even
 /// `agent.delta`) for the watchdog period loses its turn: `system turn_lost` "no events for
 /// N s", state `error` until the next input. Waiting for an answer does not count.

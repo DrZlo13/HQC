@@ -1474,13 +1474,16 @@ the rest is marked "later"):
   the stored `user.message` with `client_op_id` and `delivery: pending`; a repeat with the same
   `client_op_id` (deduplicated by `(session_id, client_op_id)`) → `200 {event}` with the event
   stored the first time
-- `POST /api/sessions/{id}/stop`, `/steer`, `/takeover`, `/archive`, `/unarchive`, `/retry`
-  (§5.2). `/takeover` (§9.3) continues in hqc a session that VS Code was driving: `locked_by:
+- `POST /api/sessions/{id}/stop`, `/restart`, `/steer`, `/takeover`, `/archive`, `/unarchive`,
+  `/retry` (§5.2). `/takeover` (§9.3) continues in hqc a session that VS Code was driving: `locked_by:
   hqc`, `system session_taken_over`, `session.start` with `mode: resume` to the worker; the
   response is the session object; with `locked_by: hqc` it does nothing. A live foreign process
   holds the transcript: `409 vscode_open` with `held_by`; no registry data and VS Code wrote
   less than 30 s ago: `409 vscode_active`; worker offline: `409 worker_offline`; archived:
-  `409 archived`; service session: `409 system_session`
+  `409 archived`; service session: `409 system_session`. Since 0.130 `/restart` ends the agent's
+  process and starts it again at once (`session.kill`, then `session.start` with `mode: resume`,
+  §17.3) and answers `{sent}`, `false` with nothing sent while the worker is offline; archived:
+  `409 archived`, driven from VS Code: `409 locked_vscode`, service session: `409 system_session`
 - `POST /api/sessions/{id}/background` {call_id} → `{sent}` (since 0.125; `write` level, as
   `/stop`): `session.background` to the worker (§5.3), `sent: false` when the worker is not
   connected; nothing comes back of what the runtime did, the call leaves the session's
@@ -1779,7 +1782,8 @@ card or tooltip: Archive archives the row as its menu's Archive does; the star, 
 favorite, adds the session to the favorites or takes it out as its menu's item does. A right
 click on a row (the menu key; on a phone a long press or a right click) opens its menu: Open in
 new tab, Add to (Remove from) favorites, Rename, Move to project…, Folder rules (with a
-workspace), Archive, and Delete…, which asks in a second step of the menu with the focus on
+workspace), Restart session (§17.3; not for an archived, a service, a VS Code-driven session or
+one whose worker is offline), Archive, and Delete…, which asks in a second step of the menu with the focus on
 Cancel. At the bottom of a desktop column: "Requests" while one is open (§10.1), then the
 workers line — "N workers online", the open session's worker with "N running" (its sessions in
 every project, by the rule of the list's Running group), "offline" while the socket is down —
@@ -4598,6 +4602,11 @@ buffered send from a session in `ask` (§7.1).
   reconnect to the hub and a change of the holder of any transcript (§9.3: Claude Code in VS
   Code or a terminal on the same machine) do not count as the agent's activity; a holder of
   the session's own transcript stops the agent anyway.
+- Restart (since 0.130, `POST /api/sessions/{id}/restart`, §6): the hub sends `session.kill` and
+  right after it `session.start` with `mode: resume`: the process ends and starts again at once,
+  resuming its transcript, so its MCP servers and settings are read anew. A turn that runs is
+  lost as when the process dies (open `approval`/`clarify` get `stopped`, `system turn_lost`);
+  inputs the old process did not take go to the new one after the start's `ack`.
 - Worker offline: input accumulates in the hub (`pending`), the session is `worker_offline`,
   delivery on connect in `seq` order. Open `approval`s on an offline worker
   stay open until it returns or until `expires_at`.
@@ -4918,6 +4927,16 @@ pull requests.
 rest out, so an owner who answered one question of four sent it and the agent took the other
 three as skipped. "Answer" now stays disabled until every question has an answer, as in the
 VS Code tab; "Other" chosen with nothing typed counts as one. 0.129 and 0.130 are taken by open
+
+### 0.127 → 0.130 (a session's agent restarted from its menu)
+§6, §17.3: `POST /api/sessions/{id}/restart` ends the session's agent process and starts it
+again at once, resuming its transcript, so its MCP servers and settings are read anew; before,
+the client had no way to restart a session's process in place: it ended only when the session
+was archived or deleted, or started anew in another folder by a move. The hub sends
+`session.kill`, then `session.start` with `mode: resume`; a turn that runs is lost as when the
+process dies. The client has "Restart session" in a session's menu before Archive, not for an
+archived, a service, a VS Code-driven session or one whose worker is offline. No frame or worker
+change, no migration. 0.128 and 0.129 are taken by other pull requests.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

@@ -46,7 +46,9 @@ Settings… (⌘,) holds:
   the project shortcuts do nothing either.
 
 Closing the window hides it, so the pages keep their state; a click on the Dock icon shows it
-again, ⌘Q quits.
+again, ⌘Q quits. The Dock icon shows how many sessions have something unread on all servers,
+archived ones and the workers' own aside: the sessions the client's tab icon marks with its
+light dot.
 
 ## Notifications
 

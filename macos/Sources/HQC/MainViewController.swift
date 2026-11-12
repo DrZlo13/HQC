@@ -192,16 +192,16 @@ final class MainViewController: NSViewController {
                             selected: store.servers.firstIndex { $0.id == selectedServerID })
     }
 
-    // The bar follows the active page: its arrows, its breadcrumbs, and the window's background
-    // (so the transparent bar takes the colour the page reports, its project bar's) with a dark
-    // or light appearance to match, so the traffic lights and the bar's text stay readable.
-    // Before the page reports its colour, the window's own.
     // The Dock icon's badge: the sessions with something unread on every server; none at 0.
     private func updateBadge() {
         let total = webTabs.values.reduce(0) { $0 + $1.unreadSessions }
         NSApp.dockTile.badgeLabel = total > 0 ? String(total) : nil
     }
 
+    // The bar follows the active page: its arrows, its breadcrumbs, and the window's background
+    // (so the transparent bar takes the colour the page reports, its project bar's) with a dark
+    // or light appearance to match, so the traffic lights and the bar's text stay readable.
+    // Before the page reports its colour, the window's own.
     private func updateChrome() {
         let tab = activeTab
         titleBar.setNavigation(canGoBack: tab?.webView.canGoBack ?? false,

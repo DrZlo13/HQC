@@ -17,6 +17,11 @@
 // StatePill; a session in VS Code or Claude Code without the pill's "on <machine>"), on
 // `#/p/<id>…` the project, else none — when the address, a summary or the open requests change.
 // The page's own `document.title` is always "HQC".
+//
+// For the Dock badge it posts `{badge: n}` to `hqcChrome`: the sessions with `unread > 0`,
+// archived and service ones aside, as client/src/favicon.ts picks them for its light dot. The
+// service sessions come from `GET /api/sessions`, read at load and again for a session the last
+// read did not list.
 enum NotificationScript {
 
     static let handlerName = "hqcNotify"
@@ -225,6 +230,30 @@ enum NotificationScript {
             return sessionsLoad;
           };
           loadSessions();
+
+          // The hub tells the page's socket nothing when a session or a project is deleted (the
+          // row is gone, crates/hqc-hub/src/client_ws.rs SessionChanged), and the client drops
+          // it from its own list (client/src/app.ts): the badge follows the client's successful
+          // DELETE of a session or a project.
+          const nativeFetch = window.fetch.bind(window);
+          window.fetch = async (input, init) => {
+            const res = await nativeFetch(input, init);
+            try {
+              const method = String((init && init.method) || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+              if (res.ok && method === 'DELETE') {
+                const path = new URL(input instanceof Request ? input.url : String(input), location.href).pathname;
+                let m;
+                if ((m = path.match(/^\\/api\\/sessions\\/([^/]+)$/))) {
+                  summaries.delete(decodeURIComponent(m[1]));
+                } else if ((m = path.match(/^\\/api\\/projects\\/([^/]+)$/))) {
+                  const project = decodeURIComponent(m[1]);
+                  for (const [id, s] of [...summaries]) if (s.project_id === project) summaries.delete(id);
+                }
+                postBadge();
+              }
+            } catch {}
+            return res;
+          };
 
           // One notification per request; other events of a session replace each other (SPEC §16).
           // A permission request (not a publication: the client publishes only on a click on its

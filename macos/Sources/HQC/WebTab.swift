@@ -199,9 +199,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
 
     // MARK: - WKScriptMessageHandler
 
-    // What the page scripts report. To `hqcChrome`: the bar's colour or its breadcrumbs. To
-    // `hqcNotify`, handed to the Notifier with this tab's server: an event to post, or
-    // `{open: [tag]}`, the tags of every open request, on each `requests` frame.
+    // What the page scripts report. To `hqcChrome`: the bar's colour, its breadcrumbs, or the
+    // count for the Dock badge. To `hqcNotify`, handed to the Notifier with this tab's server: an
+    // event to post, or `{open: [tag]}`, the tags of every open request, on each `requests` frame.
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let m = message.body as? [String: Any] else { return }

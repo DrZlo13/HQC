@@ -35,6 +35,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Notifier.shared.onOpen = { [weak self] serverID, sessionID in
             self?.openSession(serverID: serverID, sessionID: sessionID)
         }
+        Notifier.shared.onAnswer = { [weak self] serverID, sessionID, requestID, optionID, done in
+            guard let main = self?.mainViewController else { return done(false) }
+            main.answer(serverID: serverID, sessionID: sessionID, requestID: requestID,
+                        optionID: optionID, done: done)
+        }
         Notifier.shared.start()
 
         // With no server yet, open Settings so the user can add one.

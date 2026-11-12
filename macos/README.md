@@ -46,6 +46,17 @@ again, ⌘Q quits.
 ## Notifications
 
 The app shows macOS notifications for the events the hub sends a browser push for: permission
-requests, questions, the agent's final reply and input that failed, worded as the push. They
-come only while the app runs (its window may be closed); a click opens the session. Nothing is
-shown for the session you are looking at. macOS asks once for permission.
+requests, questions, the agent's final reply and input that failed, worded as the push, with
+the project's name on top and the session's title under it. Every server notifies, also one
+whose tab is not open. They come only while the app runs (its window may be closed); a click
+opens the session. Nothing is shown for the session you are looking at. macOS asks once for
+permission.
+
+A permission request has Allow and Deny buttons (not a publication: that one is allowed only
+on its card), which answer it without opening the app; when the request has no such option or
+the hub refuses the answer, the session opens instead. A request answered elsewhere disappears
+from Notification Center.
+
+With the Alerts style (System Settings ▸ Notifications ▸ HQC) a notification stays on screen
+until it is dismissed; the app takes every one away after 5 s except permission requests,
+which stay until they are answered.

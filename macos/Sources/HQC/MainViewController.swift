@@ -11,7 +11,8 @@ final class MainViewController: NSViewController {
     // Drives the tab strip's height (0 when hidden, 36 when shown). Assigned in viewDidLoad.
     private var tabBarHeightConstraint: NSLayoutConstraint!
 
-    // One kept-alive web tab per server, created on its first selection.
+    // One kept-alive web tab per server, made and loaded at launch and when a server is added:
+    // every server's page reports its notifications.
     private var webTabs: [UUID: WebTab] = [:]
     // The currently selected server.
     private(set) var selectedServerID: UUID?
@@ -109,6 +110,7 @@ final class MainViewController: NSViewController {
         } else {
             updatePlaceholder()
         }
+        loadAllTabs()
     }
 
     deinit {
@@ -117,7 +119,7 @@ final class MainViewController: NSViewController {
 
     // MARK: - Selection
 
-    // Select a server. Creates its web tab on demand, then shows it and rebuilds the strip.
+    // Select a server. Creates its web tab if it has none yet, then shows it and rebuilds the strip.
     func selectServer(id: UUID) {
         guard let server = store.servers.first(where: { $0.id == id }) else { return }
 
@@ -138,6 +140,15 @@ final class MainViewController: NSViewController {
         }
         webTabs[server.id] = webTab
         return webTab
+    }
+
+    // Makes and loads the web tab of every server that has none.
+    private func loadAllTabs() {
+        for server in store.servers where webTabs[server.id] == nil {
+            let tab = makeWebTab(server: server)
+            tab.setPageZoom(currentZoom)
+            tab.loadIfNeeded()
+        }
     }
 
     private func updatePlaceholder() {
@@ -197,7 +208,7 @@ final class MainViewController: NSViewController {
         }
 
         // Tear down web tabs whose server URL changed so they load the new address
-        // (lazily recreated on next selection).
+        // (made again below).
         for server in currentServers {
             if let tab = webTabs[server.id], tab.server.url != server.url {
                 webTabs.removeValue(forKey: server.id)?.tearDown()
@@ -226,6 +237,8 @@ final class MainViewController: NSViewController {
                 updateWindowTitle()
             }
         }
+        // An added server, or one with a new address, notifies before it is opened.
+        loadAllTabs()
     }
 
     // MARK: - Settings
@@ -256,6 +269,16 @@ final class MainViewController: NSViewController {
         guard let tab = activeTab, tab.server.id == serverID else { return }
         view.window?.makeFirstResponder(tab.webView)
         tab.openSession(sessionID)
+    }
+
+    // A permission request answered from its notification, in the server's page.
+    func answer(serverID: UUID, sessionID: String, requestID: String, optionID: String,
+                done: @escaping (Bool) -> Void) {
+        guard let tab = webTabs[serverID] else {
+            done(false)
+            return
+        }
+        tab.answer(session: sessionID, request: requestID, option: optionID, done: done)
     }
 
     // MARK: - Shortcut actions

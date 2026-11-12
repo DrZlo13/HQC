@@ -1,11 +1,39 @@
 import AppKit
 import UserNotifications
 
-// macOS notifications for the events the pages' notification script reports
-// (NotificationScript), while the app runs.
+// One event the notification script reports (NotificationScript).
+struct PageEvent {
+    let sessionID: String
+    let tag: String
+    // The event's type; only `approval.request` stays in Notification Center.
+    let type: String
+    // The project's name; the session's title when the project is not known.
+    let title: String
+    // The session's title, or empty when it is the title.
+    let subtitle: String
+    let body: String
+    // The page shows this session now.
+    let viewing: Bool
+    // A permission request with Allow and Deny buttons; an option is nil when the request has
+    // none of that kind.
+    let requestID: String?
+    let allowOption: String?
+    let denyOption: String?
+}
+
+// macOS notifications for the events the pages' notification script reports, while the app
+// runs. A permission request has Allow and Deny buttons and stays until it is answered; every
+// other notification is taken away 5 s after it is posted.
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     static let shared = Notifier()
+
+    private static let approvalCategory = "hqc.approval"
+    private static let allowAction = "allow"
+    private static let denyAction = "deny"
+
+    // How long a notification other than a permission request stays.
+    private static let lifetime: TimeInterval = 5
 
     // Whether the server's page is in front: the app active, the window visible and that
     // server's tab the active one.
@@ -15,11 +43,25 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     // `#/s/<session>` in its page.
     var onOpen: ((_ serverID: UUID, _ sessionID: String) -> Void)?
 
-    // Becomes the notification center's delegate and asks for permission (macOS asks the
-    // user once); the answer goes to the system log.
+    // Answers a permission request in the server's page; `done` gets whether the hub took it.
+    var onAnswer: ((_ serverID: UUID, _ sessionID: String, _ requestID: String, _ optionID: String,
+                    _ done: @escaping (Bool) -> Void) -> Void)?
+
+    // Per notification identifier: the post its removal belongs to, so a later post with the
+    // same identifier is not taken away by the earlier one's timer.
+    private var removals: [String: UUID] = [:]
+
+    // Becomes the notification center's delegate, sets up the permission request's buttons
+    // and asks for permission (macOS asks the user once); the answer goes to the system log.
     func start() {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
+        let allow = UNNotificationAction(identifier: Self.allowAction, title: "Allow", options: [])
+        let deny = UNNotificationAction(identifier: Self.denyAction, title: "Deny", options: [.destructive])
+        center.setNotificationCategories([
+            UNNotificationCategory(identifier: Self.approvalCategory, actions: [allow, deny],
+                                   intentIdentifiers: [], options: []),
+        ])
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             NSLog("%@", "HQC notifications: granted=\(granted) error=\(error.map { "\($0)" } ?? "nil")")
         }
@@ -28,16 +70,41 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     // Posts one event of a session. Skipped when the user is looking at that session now.
     // The identifier is `<server id>:<tag>`, so a later notification with the same tag
     // replaces the earlier one.
-    func notify(server: Server, sessionID: String, tag: String, title: String, body: String, viewing: Bool) {
-        if viewing, isShowing?(server.id) == true { return }
+    func notify(server: Server, event: PageEvent) {
+        if event.viewing, isShowing?(server.id) == true { return }
         let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
+        content.title = event.title
+        content.subtitle = event.subtitle
+        content.body = event.body
         content.sound = .default
-        content.userInfo = ["server": server.id.uuidString, "session": sessionID]
-        let request = UNNotificationRequest(identifier: "\(server.id.uuidString):\(tag)",
-                                            content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        var info: [String: Any] = ["server": server.id.uuidString, "session": event.sessionID]
+        if let request = event.requestID {
+            content.categoryIdentifier = Self.approvalCategory
+            info["request"] = request
+            if let allow = event.allowOption { info["allow"] = allow }
+            if let deny = event.denyOption { info["deny"] = deny }
+        }
+        content.userInfo = info
+        let identifier = "\(server.id.uuidString):\(event.tag)"
+        let center = UNUserNotificationCenter.current()
+        center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+
+        // The Alerts style keeps a notification until it is dismissed: only a permission
+        // request stays.
+        guard event.type != "approval.request" else { return }
+        let token = UUID()
+        removals[identifier] = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.lifetime) { [weak self] in
+            guard let self, self.removals[identifier] == token else { return }
+            self.removals[identifier] = nil
+            center.removeDeliveredNotifications(withIdentifiers: [identifier])
+        }
+    }
+
+    // Takes away a server's notification by its tag (a permission request answered elsewhere).
+    func remove(server: Server, tag: String) {
+        UNUserNotificationCenter.current()
+            .removeDeliveredNotifications(withIdentifiers: ["\(server.id.uuidString):\(tag)"])
     }
 
     // MARK: - UNUserNotificationCenterDelegate
@@ -49,14 +116,36 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         completionHandler([.banner, .list, .sound])
     }
 
+    // A click opens the session. Allow or Deny answers the request in the background; when the
+    // request has no such option, or the hub does not take the answer, the session opens instead.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
-        if let server = (info["server"] as? String).flatMap(UUID.init(uuidString:)),
-           let session = info["session"] as? String {
-            DispatchQueue.main.async { self.onOpen?(server, session) }
+        let action = response.actionIdentifier
+        DispatchQueue.main.async {
+            guard let server = (info["server"] as? String).flatMap(UUID.init(uuidString:)),
+                  let session = info["session"] as? String else {
+                completionHandler()
+                return
+            }
+            let open = { self.onOpen?(server, session) }
+            guard action == Self.allowAction || action == Self.denyAction else {
+                if action == UNNotificationDefaultActionIdentifier { open() }
+                completionHandler()
+                return
+            }
+            guard let request = info["request"] as? String,
+                  let option = info[action == Self.allowAction ? "allow" : "deny"] as? String,
+                  let answer = self.onAnswer else {
+                open()
+                completionHandler()
+                return
+            }
+            answer(server, session, request, option) { ok in
+                if !ok { open() }
+                completionHandler()
+            }
         }
-        completionHandler()
     }
 }

@@ -1,8 +1,9 @@
 import AppKit
 import WebKit
 
-// Wraps one persistent WKWebView bound to a single server. Created lazily on first
-// selection and kept alive so switching tabs preserves the page state and login.
+// Wraps one persistent WKWebView bound to a single server. Every server's tab is made and
+// loaded at launch and kept alive, on screen or not: switching tabs keeps the page state and
+// login, and each page reports its server's notifications.
 final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
 
     let server: Server
@@ -17,6 +18,10 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     // A shortcut action asked for while the page was still loading; its script then runs
     // once the load finishes.
     private var pendingAction: ShortcutAction?
+
+    // A session a notification click asked for while the page was still loading; it is opened
+    // once the load finishes, in the new document.
+    private var pendingSession: String?
 
     // Fired (on the main thread) whenever the document title changes.
     var onTitleChanged: (() -> Void)?
@@ -36,6 +41,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
         let configuration = WKWebViewConfiguration()
         // Use the default persistent data store so cookies/logins survive restarts.
         configuration.websiteDataStore = .default()
+        // A page off screen keeps running (the default suspends it): its socket brings the
+        // notifications.
+        configuration.preferences.inactiveSchedulingPolicy = .none
         // The notification script, before the page's own scripts open their socket.
         contentController.addUserScript(WKUserScript(source: NotificationScript.source,
                                                      injectionTime: .atDocumentStart,
@@ -110,10 +118,41 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
                                     completionHandler: nil)
     }
 
-    // Opens a session in the page, as a click on its row does.
+    // Opens a session in the page, as a click on its row does; while the page is still
+    // loading, once after the load finishes.
     func openSession(_ id: String) {
+        if webView.isLoading {
+            pendingSession = id
+        } else {
+            setHash(session: id)
+        }
+    }
+
+    private func setHash(session id: String) {
         webView.callAsyncJavaScript("location.hash = '#/s/' + encodeURIComponent(id);",
                                     arguments: ["id": id], in: nil, in: .page, completionHandler: nil)
+    }
+
+    // Answers a permission request with one of its options, by the client's own call
+    // (client/src/api.ts approve()); `done` gets whether the hub took it.
+    func answer(session: String, request: String, option: String, done: @escaping (Bool) -> Void) {
+        let script = """
+            const res = await fetch('/api/sessions/' + encodeURIComponent(session) + '/requests/' + encodeURIComponent(request), {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ option_id: option }),
+            });
+            return res.ok;
+            """
+        webView.callAsyncJavaScript(script, arguments: ["session": session, "request": request, "option": option],
+                                    in: nil, in: .page) { result in
+            if case .success(let ok) = result, ok as? Bool == true {
+                done(true)
+            } else {
+                done(false)
+            }
+        }
     }
 
     // Stop any in-flight load and detach delegates before this tab is discarded.
@@ -131,18 +170,28 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
 
     // MARK: - WKScriptMessageHandler
 
-    // An event the notification script reports: handed to the Notifier with this tab's server.
+    // What the notification script reports, handed to the Notifier with this tab's server: an
+    // event to post, or `{resolved: tag}` for a permission request answered elsewhere.
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
-        guard let m = message.body as? [String: Any],
-              let session = m["session_id"] as? String,
+        guard let m = message.body as? [String: Any] else { return }
+        if let tag = m["resolved"] as? String {
+            Notifier.shared.remove(server: server, tag: tag)
+            return
+        }
+        guard let session = m["session_id"] as? String,
               let tag = m["tag"] as? String else { return }
-        Notifier.shared.notify(server: server,
-                               sessionID: session,
-                               tag: tag,
-                               title: m["title"] as? String ?? "",
-                               body: m["body"] as? String ?? "",
-                               viewing: m["viewing"] as? Bool ?? false)
+        Notifier.shared.notify(server: server, event: PageEvent(
+            sessionID: session,
+            tag: tag,
+            type: m["type"] as? String ?? "",
+            title: m["title"] as? String ?? "",
+            subtitle: m["subtitle"] as? String ?? "",
+            body: m["body"] as? String ?? "",
+            viewing: m["viewing"] as? Bool ?? false,
+            requestID: m["request_id"] as? String,
+            allowOption: m["allow_option"] as? String,
+            denyOption: m["deny_option"] as? String))
     }
 
     // MARK: - WKUIDelegate
@@ -262,20 +311,26 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if let id = pendingSession {
+            pendingSession = nil
+            setHash(session: id)
+        }
         if let action = pendingAction {
             pendingAction = nil
             run(action)
         }
     }
 
-    // A load that failed drops the action waiting for it, so a later reload does not run it.
+    // A load that failed drops what waited for it, so a later reload does not run it.
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         pendingAction = nil
+        pendingSession = nil
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
                  withError error: Error) {
         pendingAction = nil
+        pendingSession = nil
     }
 
     // The page's web process crashed or was killed: load it again.

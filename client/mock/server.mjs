@@ -32,6 +32,8 @@ const STATUS = Symbol('status');
 const RAW = Symbol('raw');
 /** Project colors (T49, `hqc_proto::api::ProjectColor`). */
 const COLORS = ['teal', 'plum', 'blue', 'rose', 'moss', 'coral', 'cyan', 'slate'];
+/** Permission modes (T38, `hqc_proto::frame::PermissionMode`). */
+const MODES = ['ask', 'auto', 'allow_all'];
 
 /** The answer to a message with "markdown": every element of T11 to look at. */
 export const MARKDOWN_ANSWER = `## Run summary
@@ -755,7 +757,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     if (ws.state && ws.state !== 'ready') throw fail(409, 'workspace_not_ready', `the worker is still making ${ws.path}`);
     const n = [...sessions.values()].filter((s) => s.project_id === pr.id).length + 1;
     const mode = body?.permission_mode;
-    if (mode !== undefined && mode !== 'ask' && mode !== 'auto') throw fail(400, 'bad_request', 'permission_mode is ask or auto');
+    if (mode !== undefined && !MODES.includes(mode)) throw fail(400, 'bad_request', 'permission_mode is ask, auto or allow_all');
     const agent = agentSettings({}, body);
     const s = newSession(String(body?.title || `Session ${n}`), randomUUID(), {
       project_id: pr.id, workspace_id: ws.id, cwd: String(body?.cwd || '.'),
@@ -1043,7 +1045,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     }
     const mode = body?.permission_mode;
     if (mode !== undefined) {
-      if (mode !== 'ask' && mode !== 'auto') throw fail(400, 'bad_request', 'permission_mode is ask or auto');
+      if (!MODES.includes(mode)) throw fail(400, 'bad_request', 'permission_mode is ask, auto or allow_all');
       s.permission_mode = mode;
       pushSummary(s);
     }

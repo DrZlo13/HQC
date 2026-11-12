@@ -17,7 +17,7 @@ import { Composer, SessionsButton, toOutgoing, type SessionsToggle } from './Cha
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
 import { IconBack, IconChevronUp, IconFolder, IconModel, IconPlus, IconShield, IconWorkspace } from './icons';
-import { AUTO_CONFIRM, homePath, modelName } from './labels';
+import { homePath, modeConfirm, modelName } from './labels';
 import { workspaceName } from './ProjectSettings';
 
 /** The first message: shown as being sent until the session exists. */
@@ -282,11 +282,12 @@ const PERMISSIONS: [PermissionMode | undefined, string][] = [
   [undefined, "The worker's default"],
   ['ask', 'Ask'],
   ['auto', 'Auto'],
+  ['allow_all', 'Allow all'],
 ];
 
 /** The chips over a new session's input: the workspace (each of the project's with its worker
  *  and whole path, the default marked, "Add a workspace…" under them), the folder inside it
- *  (typed), the permissions (the worker's default, Ask, Auto) and the model (Claude Code's
+ *  (typed), the permissions (the worker's default, Ask, Auto, Allow all) and the model (Claude Code's
  *  default, an alias, another name typed). Each opens its menu upwards; a pick gives the caret
  *  back to the input. */
 function NewSessionChips({
@@ -377,8 +378,10 @@ function NewSessionChips({
         cls: `btn-permissions-${mode ?? 'default'}`,
         checked: draft.permission_mode === mode,
         onSelect: () => {
-          // Auto after a one-line confirmation; Ask and the default at once.
-          if (mode === 'auto' && draft.permission_mode !== 'auto' && !confirm(AUTO_CONFIRM)) return;
+          // Auto and Allow all after a one-line confirmation of their own; Ask and the default
+          // at once.
+          const line = mode && mode !== draft.permission_mode ? modeConfirm(mode) : undefined;
+          if (line && !confirm(line)) return;
           app.setNewSession({ permission_mode: mode });
         },
       }));

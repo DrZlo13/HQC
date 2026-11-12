@@ -26,6 +26,7 @@ import { PhoneHome } from '../src/ui/PhoneHome';
 import { ProjectRail, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
 import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SessionList, WidthGrip } from '../src/ui/SessionList';
+import { ALLOW_ALL_CONFIRM } from '../src/ui/labels';
 import {
   arrange,
   bucketOf,
@@ -2919,6 +2920,42 @@ describe('a new session', () => {
     expect(api.createSession).not.toHaveBeenCalled();
   });
 
+  // SPEC 0.129: Allow all on the permissions chip, after a one-line confirmation of its own;
+  // declined, the chip keeps what it had.
+  it('Allow all from the permissions chip after its own confirmation', async () => {
+    const { app, api } = draftApp();
+    location.hash = '#/p/p1/new';
+    await mount(<App app={app} />);
+    await settle();
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    try {
+      await click(root.querySelector('.btn-chip-permissions'));
+      await click(root.querySelector('.ctx-menu .btn-permissions-allow_all'));
+      expect(confirm).toHaveBeenCalledWith(ALLOW_ALL_CONFIRM);
+      expect(ALLOW_ALL_CONFIRM.includes('\n')).toBe(false);
+      expect(chips()[2]).toBe("Permissions: worker's default");
+      confirm.mockReturnValue(true);
+      await click(root.querySelector('.btn-chip-permissions'));
+      await click(root.querySelector('.ctx-menu .btn-permissions-allow_all'));
+      expect(chips()[2]).toBe('Permissions: Allow all');
+      // Picked again, it asks nothing.
+      confirm.mockClear();
+      await click(root.querySelector('.btn-chip-permissions'));
+      await click(root.querySelector('.ctx-menu .btn-permissions-allow_all'));
+      expect(confirm).not.toHaveBeenCalled();
+      await typeMessage('Go');
+      await sendMessage();
+      expect(api.createSession).toHaveBeenCalledWith(
+        'p1',
+        undefined,
+        expect.objectContaining({ workspace_id: 'w1', permission_mode: 'allow_all' }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("the first message creates it with the chips' choices and goes in as its first input; the window becomes its chat, the message in it", async () => {
     let create!: (s: SessionInfo) => void;
     const { app, api, hold } = draftApp(() => new Promise((r) => (create = r)));
@@ -2929,7 +2966,7 @@ describe('a new session', () => {
     await typeInMenu('cwd', 'net');
     expect(root.querySelector('.ctx-menu')).toBeNull();
     await click(root.querySelector('.btn-chip-permissions'));
-    expect(menuItems()).toEqual(["The worker's default", 'Ask', 'Auto']);
+    expect(menuItems()).toEqual(["The worker's default", 'Ask', 'Auto', 'Allow all']);
     await click(root.querySelector('.ctx-menu .btn-permissions-ask'));
     await click(root.querySelector('.btn-chip-model'));
     expect(menuItems()).toEqual(["Claude Code's default", 'Opus', 'Sonnet', 'Haiku', 'Fable', 'Another model…']);

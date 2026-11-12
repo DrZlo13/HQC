@@ -2583,8 +2583,9 @@ select.input {
   color: var(--danger);
 }
 
-/* T38: the permission mode next to the state pill; Auto stands out. */
-.perm-auto {
+/* T38: the permission mode next to the state pill; Auto and Allow all stand out. */
+.perm-auto,
+.perm-allow-all {
   display: inline-flex;
   align-items: center;
   height: 22px;
@@ -2602,7 +2603,7 @@ select.input {
   white-space: nowrap;
 }
 
-/* T39: a turn capped to Ask by a message; the session's own Auto, dimmer, after it. */
+/* T39: a turn capped by a message; the session's own mode, dimmer, after it. */
 .perm-capped {
   overflow: hidden;
   text-overflow: ellipsis;

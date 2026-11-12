@@ -20,7 +20,7 @@ import {
   type SessionState,
   type SpawnedBy,
 } from '../src/proto';
-import { AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
+import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
 
@@ -275,6 +275,75 @@ describe('permission mode', () => {
     expect(mark()).toEqual({ auto: 'Auto', ask: undefined });
   });
 
+  // SPEC 0.129: Allow all stands out like Auto; asked but not run yet it says so; a turn an
+  // Auto cap holds down shows Auto, who asked, and Allow all after it.
+  it('marks Allow all, what the worker runs below it, and an Auto cap', async () => {
+    const all = () => $('.perm-allow-all')?.textContent;
+    let { app } = setup('idle', { permission_mode: 'allow_all', effective_permission_mode: 'allow_all' });
+    await mount(app);
+    expect(all()).toBe('Allow all');
+    expect(mark()).toEqual({ auto: undefined, ask: undefined });
+    expect($('.perm-allow-all')!.getAttribute('title')).toContain('deny list');
+    render(null, root);
+
+    ({ app } = setup('idle', { permission_mode: 'allow_all', effective_permission_mode: 'auto' }));
+    await mount(app);
+    expect(mark()).toEqual({ auto: 'Auto (Allow all asked)', ask: undefined });
+    render(null, root);
+
+    ({ app } = setup('idle', { permission_mode: 'allow_all', effective_permission_mode: 'ask' }));
+    await mount(app);
+    expect(mark()).toEqual({ auto: undefined, ask: 'Ask (Allow all asked)' });
+    render(null, root);
+
+    ({ app } = setup('running', {
+      permission_mode: 'allow_all',
+      effective_permission_mode: 'auto',
+      permission_capped_by: 'personal/a',
+    }));
+    await mount(app);
+    expect(mark()).toEqual({ auto: 'Auto (asked by personal/a) · Allow all after this turn', ask: undefined });
+    expect($('.perm-capped')!.getAttribute('title')).toContain('cannot raise permissions');
+    render(null, root);
+
+    // An Ask cap on an Allow all session names Allow all as the mode after it.
+    ({ app } = setup('running', {
+      permission_mode: 'allow_all',
+      effective_permission_mode: 'ask',
+      permission_capped_by: 'personal/a',
+    }));
+    await mount(app);
+    expect(mark()).toEqual({ auto: undefined, ask: 'Ask (asked by personal/a) · Allow all after this turn' });
+  });
+
+  it('switches to Allow all after its own one-line confirmation', async () => {
+    const { app, api } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'auto' });
+    await mount(app);
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    try {
+      let items = await menu();
+      expect(items.map((b) => b.textContent)).toEqual(['Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Allow all']);
+      await act(async () => items.find((b) => b.textContent === 'Switch to Allow all')!.click());
+      expect(confirm).toHaveBeenCalledWith(ALLOW_ALL_CONFIRM);
+      expect(ALLOW_ALL_CONFIRM.includes('\n')).toBe(false);
+      expect(api.patchSession).not.toHaveBeenCalled();
+
+      confirm.mockReturnValue(true);
+      items = await menu();
+      await act(async () => {
+        items.find((b) => b.textContent === 'Switch to Allow all')!.click();
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      expect(api.patchSession).toHaveBeenCalledWith('s1', { permission_mode: 'allow_all' });
+      expect($('.perm-allow-all')!.textContent).toBe('Allow all');
+      items = await menu();
+      expect(items.map((b) => b.textContent)).toEqual(['Schedules', 'Move to project…', 'Switch to Ask', 'Switch to Auto']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('follows the mode a summary brings', async () => {
     const { app } = setup('idle', { permission_mode: 'auto', effective_permission_mode: 'ask' });
     await mount(app);
@@ -500,6 +569,7 @@ describe('header', () => {
       'Schedules',
       'Move to project…',
       'Switch to Auto',
+      'Switch to Allow all',
     ]);
   });
 

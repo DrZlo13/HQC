@@ -13,12 +13,11 @@ import type { CheckResult, PermissionMode, WorkspacePermissions, WorkspaceRule }
 import { isToolName, ruleCommand, ruleError } from '../rules';
 import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconInfo, IconPlus, IconShield } from './icons';
-import { homePath } from './labels';
+import { MODE_LABELS, homePath } from './labels';
 
 const HQC = 'HQC';
 const EXAMPLES = ['git status', 'npm install && npm test', 'Edit'];
 const FORMATS = ['Bash(command *)', 'Edit', 'mcp__server'];
-const MODE_LABELS: Record<PermissionMode, string> = { ask: 'Ask', auto: 'Auto' };
 /** How long the check waits for the typing to stop. */
 export const CHECK_DELAY = 300;
 
@@ -306,7 +305,9 @@ export function RulesScreen({
               <span class="rules-group-text">
                 {mode === 'ask'
                   ? 'This folder runs in Ask: a permission card appears in the session. (In Auto, the classifier would decide.)'
-                  : 'This folder runs in Auto: the classifier decides. (In Ask, a permission card would appear.)'}
+                  : mode === 'auto'
+                    ? 'This folder runs in Auto: the classifier decides. (In Ask, a permission card would appear.)'
+                    : 'This folder runs in Allow all: it runs without asking, except for the ask rules here. (In Ask, a permission card would appear.)'}
               </span>
             </div>
             {asks.length > 0 && <ul class="rule-list">{asks.map(rowView)}</ul>}
@@ -330,7 +331,12 @@ function CheckView({
   mode: PermissionMode;
   onAllow: (rule: string) => void;
 }) {
-  const card = mode === 'ask' ? 'A permission card will appear.' : 'In Auto, the classifier decides.';
+  const card =
+    mode === 'ask'
+      ? 'A permission card will appear.'
+      : mode === 'auto'
+        ? 'In Auto, the classifier decides.'
+        : 'In Allow all, it runs without asking unless an ask rule matches.';
   let label = '—';
   let kind = 'none';
   let body = <>Type a command to see what happens.</>;
@@ -366,7 +372,7 @@ function CheckView({
           <>The worker can’t split this command into simple parts, so no rule covers it. {card}</>
         ) : r.parts > 1 ? (
           <>
-            {r.uncovered} of {r.parts} parts not covered. {mode === 'ask' ? 'A permission card will appear.' : 'The classifier decides.'}
+            {r.uncovered} of {r.parts} parts not covered. {mode === 'ask' ? 'A permission card will appear.' : mode === 'auto' ? 'The classifier decides.' : 'It runs without asking.'}
           </>
         ) : (
           <>{card}</>

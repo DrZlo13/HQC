@@ -4,7 +4,7 @@ import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { onBack } from '../nav';
-import type { PermissionMode, SessionInfo, SessionState } from '../proto';
+import { PERMISSION_MODES, type PermissionMode, type SessionInfo, type SessionState } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelField } from './agentSettings';
@@ -17,7 +17,7 @@ import { useSubscription } from './hooks';
 import { copyText } from '../clipboard';
 import { ContextMenu } from './ContextMenu';
 import { IconArchive, IconAttach, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSend, IconShield, IconStop } from './icons';
-import { AUTO_CONFIRM, STATE_LABELS, agentsLabel, formatCost, homePath, modelName, shownModel } from './labels';
+import { MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
 import { PermissionBlock } from './permission';
@@ -386,9 +386,10 @@ export function Chat({
 
   const stop = () => act(() => chat.stop(), 'Not stopped');
   const toBackground = (callId: string) => void act(() => chat.background(callId), 'Not moved to the background');
-  // T38: Ask at once, Auto after a one-line confirmation.
+  // T38: Ask at once, Auto and Allow all after a one-line confirmation.
   const setMode = (mode: PermissionMode) => {
-    if (mode === 'auto' && !confirm(AUTO_CONFIRM)) return;
+    const line = modeConfirm(mode);
+    if (line && !confirm(line)) return;
     void act(() => app.setPermissionMode(sessionId, mode), 'Not switched');
   };
   const setAgent = (patch: AgentPatch) => void act(() => app.setAgentSettings(sessionId, patch), 'Not changed');
@@ -793,42 +794,63 @@ function StatePill({ state, timeline, where }: { state: SessionState; timeline: 
   );
 }
 
+/** Each mode's mark: Auto and Allow all stand out, Ask is plain text. */
+const MODE_MARKS: Record<PermissionMode, { cls: string; title: string }> = {
+  ask: { cls: 'perm-ask', title: "Tool calls outside the worker's rules are asked about" },
+  auto: { cls: 'perm-auto', title: "Claude Code decides tool calls itself; only the worker's deny list stops one" },
+  allow_all: {
+    cls: 'perm-allow-all',
+    title: "Claude Code runs every tool call without asking, with no classifier either; only the worker's deny list and the ask rules of Claude Code's settings limit it",
+  },
+};
+
+/** What a switch to each mode in "More" does (T38). */
+const SWITCH_TITLES: Record<PermissionMode, string> = {
+  ask: "Ask before tool calls outside the worker's rules",
+  auto: "Claude Code decides tool calls itself; the worker's deny list is the only limit",
+  allow_all:
+    "Claude Code runs every tool call without asking, with no classifier either; the worker's deny list and the ask rules of Claude Code's settings are the only limits",
+};
+
 /** The session's permission mode (T38): what the worker reports the agent runs in, else
- *  what hqc asked for. "Auto" stands out: nothing but the worker's deny list stops a call.
- *  A turn capped by a message from a session in Ask (T39) shows both: Ask for this turn,
- *  named by that session, and the session's own Auto after it. */
+ *  what hqc asked for. "Auto" and "Allow all" stand out: nothing but the worker's deny list
+ *  (and in Allow all the ask rules of Claude Code's settings) stops a call. A turn capped by
+ *  a message from a session in a lower mode (T39) shows both: the cap's mode for this turn,
+ *  named by that session, and the session's own mode after it. */
 export function PermissionMark({ info }: { info: SessionInfo }) {
   const runs = info.effective_permission_mode;
   const asked = info.permission_mode;
   const by = info.permission_capped_by;
   if (by) {
+    const now = runs ?? 'ask';
+    // A cap only lowers: under an Auto cap the session's own mode is Allow all.
+    const own = asked ?? (now === 'auto' ? 'allow_all' : 'auto');
     return (
       <span
-        class="perm-ask perm-capped"
-        title={`This turn runs in Ask: it was started by a message along a chain with ${by}, which runs in Ask, and a message cannot raise permissions. The session's own mode, Auto, comes back when the turn ends.`}
+        class={`${MODE_MARKS[now].cls} perm-capped`}
+        title={`This turn runs in ${MODE_LABELS[now]}: it was started by a message along a chain with ${by}, which runs in ${MODE_LABELS[now]}, and a message cannot raise permissions. The session's own mode, ${MODE_LABELS[own]}, comes back when the turn ends.`}
       >
-        Ask (asked by {by})<span class="perm-next"> · Auto after this turn</span>
+        {MODE_LABELS[now]} (asked by {by})<span class="perm-next"> · {MODE_LABELS[own]} after this turn</span>
       </span>
     );
   }
-  if (runs === 'auto' || (!runs && asked === 'auto')) {
+  if (asked && runs && PERMISSION_MODES.indexOf(asked) > PERMISSION_MODES.indexOf(runs)) {
+    // Asked for a higher mode than the worker runs: not restarted yet, a process that cannot
+    // switch, or a worker that does not allow it.
     return (
-      <span class="perm-auto" title="Claude Code decides tool calls itself; only the worker's deny list stops one">
-        Auto
+      <span
+        class={MODE_MARKS[runs].cls}
+        title={`The worker runs this session in ${MODE_LABELS[runs]}: until the agent next runs, or for good if the worker does not allow ${MODE_LABELS[asked]}`}
+      >
+        {MODE_LABELS[runs]} ({MODE_LABELS[asked]} asked)
       </span>
     );
   }
-  if (asked === 'auto') {
-    return (
-      <span class="perm-ask" title="The worker runs this session in Ask: until the agent next runs, or for good if the worker does not allow Auto">
-        Ask (Auto asked)
-      </span>
-    );
-  }
-  if (!runs && !asked) return null;
+  const shown = runs ?? asked;
+  if (!shown) return null;
   return (
-    <span class="perm-ask" title="Tool calls outside the worker's rules are asked about">
-      Ask
+    <span class={MODE_MARKS[shown].cls} title={MODE_MARKS[shown].title}>
+      {MODE_LABELS[shown]}
     </span>
   );
 }
@@ -934,14 +956,9 @@ function MoreMenu({
           {!info.archived &&
             item('btn-move', 'Move to project…', onMove, 'Continue this session in another folder and project on its worker')}
           {!info.archived &&
-            (currentMode(info) === 'auto'
-              ? item('btn-mode-ask', 'Switch to Ask', () => onPermissionMode('ask'), 'Ask before tool calls outside the worker\'s rules')
-              : item(
-                  'btn-mode-auto',
-                  'Switch to Auto',
-                  () => onPermissionMode('auto'),
-                  "Claude Code decides tool calls itself; the worker's deny list is the only limit",
-                ))}
+            PERMISSION_MODES.filter((m) => m !== currentMode(info)).map((m) =>
+              item(`btn-mode-${m}`, `Switch to ${MODE_LABELS[m]}`, () => onPermissionMode(m), SWITCH_TITLES[m]),
+            )}
           {!info.archived && (
             <div class="menu-settings">
               <ModelField value={info.model} onChange={(m) => onAgent({ model: m ?? null })} />

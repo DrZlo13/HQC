@@ -56,8 +56,9 @@ export type LockedBy = (typeof LOCKED_BY)[number];
 
 export const START_MODES = ['new', 'resume'] as const;
 
-/** A session's permission mode (T38): ask the worker owner, or Claude Code decides. */
-export const PERMISSION_MODES = ['ask', 'auto'] as const;
+/** A session's permission mode (T38), from the lowest: ask the worker owner, Claude Code's
+ *  classifier decides, or (since SPEC 0.129) Claude Code runs every call without asking. */
+export const PERMISSION_MODES = ['ask', 'auto', 'allow_all'] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 /** The app's base palette (T49): three dark ones and their light counterparts. */
 export const THEME_NAMES = ['warm', 'graphite', 'contrast', 'warm_light', 'graphite_light', 'contrast_light'] as const;
@@ -86,7 +87,8 @@ export interface Chain {
   hops: number;
   /** The highest mode a turn this message starts may run in (T39); absent: no cap. */
   permission_cap?: PermissionMode;
-  /** With an `ask` cap: the address of the session up the chain whose Ask set it. */
+  /** With a cap below `allow_all`: the address of the first session up the chain in the
+   *  cap's mode, which set it. */
   capped_by?: string;
 }
 
@@ -1079,8 +1081,8 @@ export interface SessionInfo {
   permission_mode?: PermissionMode;
   /** The mode the agent runs in, as the worker last reported it; absent until reported. */
   effective_permission_mode?: PermissionMode;
-  /** While the current turn runs in Ask under a peer message's cap (T39): the address of
-   *  the session up the chain whose Ask set it. */
+  /** While the current turn runs below the session's own mode under a peer message's cap
+   *  (T39): the address of the session up the chain whose mode set it. */
   permission_capped_by?: string;
   /** Subagents the agent runs now, as its worker last reported; absent is 0. */
   subagents?: number;
@@ -1434,7 +1436,7 @@ export function parseWorkspacePermissions(v: unknown): WorkspacePermissions {
     present(x, k) ? arr(x, k).filter((s): s is string => typeof s === 'string') : [];
   const c = present(o, 'check') ? obj(o.check, 'check') : undefined;
   return {
-    mode: o.mode === 'auto' ? 'auto' : 'ask',
+    mode: optPermissionMode(o, 'mode') ?? 'ask',
     allow_auto: o.allow_auto !== false,
     sources: arr(o, 'sources').map((e, i) => {
       const s = obj(e, `sources[${i}]`);

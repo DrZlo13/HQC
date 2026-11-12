@@ -200,6 +200,12 @@ it('creates a project, adds a workspace from the folder tree and starts a sessio
   // T38: Auto from its chip, confirmed (the globals answer every confirm with yes).
   $<HTMLButtonElement>('.btn-chip-permissions')!.click();
   await until('permissions menu', () => $('.ctx-menu .btn-permissions-auto'));
+  expect($('.ctx-menu .btn-permissions-allow_all')!.textContent).toContain('Allow all');
+  $<HTMLButtonElement>('.ctx-menu .btn-permissions-allow_all')!.click();
+  await settle();
+  expect($('.btn-chip-permissions')!.textContent).toBe('Permissions: Allow all');
+  $<HTMLButtonElement>('.btn-chip-permissions')!.click();
+  await until('permissions menu', () => $('.ctx-menu .btn-permissions-auto'));
   $<HTMLButtonElement>('.ctx-menu .btn-permissions-auto')!.click();
   await settle();
   expect($('.btn-chip-permissions')!.textContent).toBe('Permissions: Auto');

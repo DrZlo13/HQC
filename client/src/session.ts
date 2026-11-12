@@ -199,6 +199,10 @@ export class ChatSession {
     return this.api.stop(this.id);
   }
 
+  background(callId: string): Promise<void> {
+    return this.api.background(this.id, callId);
+  }
+
   retry(): Promise<void> {
     return this.api.retry(this.id);
   }

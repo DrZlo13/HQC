@@ -491,6 +491,12 @@ export class Api {
     await this.req('POST', `/api/sessions/${enc(id)}/stop`);
   }
 
+  /** Moves the agent's running call `callId`, one of the session's `foreground_calls`, to the
+   *  background. */
+  async background(id: string, callId: string): Promise<void> {
+    await this.req('POST', `/api/sessions/${enc(id)}/background`, { call_id: callId });
+  }
+
   async retry(id: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/retry`);
   }

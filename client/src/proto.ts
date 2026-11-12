@@ -753,6 +753,10 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optPermissionMode(p, 'permission_cap');
   },
   'session.stop': (p) => void str(p, 'session_id'),
+  'session.background': (p) => {
+    str(p, 'session_id');
+    str(p, 'call_id');
+  },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {
     str(p, 'session_id');
@@ -857,6 +861,8 @@ export interface SessionSummary {
   background_tasks?: number;
   /** Output tokens per second of the agent and its subagents; absent is 0. */
   output_per_s?: number;
+  /** Calls the agent runs in the foreground now and can move to the background; absent: none. */
+  foreground_calls?: string[];
   /** When the user made it a favorite; absent: not one. */
   favorite_at?: string;
 }
@@ -958,6 +964,7 @@ export function parseSummary(v: unknown): SessionSummary {
     subagents: optNum(s, 'subagents'),
     background_tasks: optNum(s, 'background_tasks'),
     output_per_s: optNum(s, 'output_per_s'),
+    foreground_calls: optStrArr(s, 'foreground_calls'),
     favorite_at: optStr(s, 'favorite_at'),
   };
 }
@@ -1083,6 +1090,9 @@ export interface SessionInfo {
   /** Output tokens per second of the agent and its subagents, as its worker last sent them;
    *  absent is 0. */
   output_per_s?: number;
+  /** The calls (`call_id`) the agent runs in the foreground now and can move to the background
+   *  ("Run in background"), as its worker last reported; absent: none. */
+  foreground_calls?: string[];
   /** When the user made it a favorite (favorites are per user); absent: not one. */
   favorite_at?: string;
   /** The model hqc starts the agent with (`agent.model`); absent: the runtime's default. */
@@ -1179,6 +1189,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     subagents: optNum(o, 'subagents'),
     background_tasks: optNum(o, 'background_tasks'),
     output_per_s: optNum(o, 'output_per_s'),
+    foreground_calls: optStrArr(o, 'foreground_calls'),
     favorite_at: optStr(o, 'favorite_at'),
     model: optStr(agent, 'model'),
   };

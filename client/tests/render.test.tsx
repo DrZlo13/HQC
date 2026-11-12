@@ -1050,6 +1050,38 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     expect(draw("running", t)!.textContent).toBe("Agent is working");
   });
 
+  it('a call the runtime runs in the foreground: "Run in background", which moves it', () => {
+    const t = new Timeline();
+    t.apply(call(1, "toolu_a", "Bash", { command: "sleep 30" }));
+    const moved = vi.fn();
+    const line = (foreground: string[] | undefined) => {
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      act(() =>
+        render(
+          <ActivityLine
+            state="running"
+            timeline={t}
+            now={() => NOW}
+            foreground={foreground}
+            onBackground={moved}
+          />,
+          root,
+        ),
+      );
+      return root.querySelector<HTMLButtonElement>(".activity-background");
+    };
+    // A running call the worker did not report as a foreground one: no button.
+    expect(line(undefined)).toBeNull();
+    render(null, root);
+    expect(line(["toolu_b"])).toBeNull();
+    render(null, root);
+    const button = line(["toolu_b", "toolu_a"])!;
+    expect(button.textContent).toBe("Run in background");
+    act(() => button.click());
+    expect(moved).toHaveBeenCalledWith("toolu_a");
+  });
+
   it("queued and waiting: their line; waiting with its request on screen: none", () => {
     expect(draw("queued")!.textContent).toBe("Input queued");
     render(null, root);

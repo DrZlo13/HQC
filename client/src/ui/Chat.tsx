@@ -326,6 +326,7 @@ export function Chat({
   });
 
   const stop = () => act(() => chat.stop(), 'Not stopped');
+  const toBackground = (callId: string) => void act(() => chat.background(callId), 'Not moved to the background');
   // T38: Ask at once, Auto after a one-line confirmation.
   const setMode = (mode: PermissionMode) => {
     if (mode === 'auto' && !confirm(AUTO_CONFIRM)) return;
@@ -542,7 +543,7 @@ export function Chat({
           {requestsOnly && items.length === 0 && <div class="empty">No requests</div>}
           {t.streaming && <StreamingMessage text={t.streaming} />}
           <FeedBlocks blocks={under} actions={actions} />
-          {!system && <ActivityLine state={state} timeline={t} />}
+          {!system && <ActivityLine state={state} timeline={t} foreground={info?.foreground_calls} onBackground={toBackground} />}
           {!system && <WaitedRequests app={app} sessionId={sessionId} />}
         </div>
       </div>

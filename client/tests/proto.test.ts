@@ -163,6 +163,10 @@ describe('examples/wire', () => {
     expect(s.background_tasks).toBe(1);
     expect(sys.background_tasks).toBeUndefined();
     expect(one.type === 'session.summary' && one.session.background_tasks).toBe(1);
+    // SPEC 0.125: the calls the agent runs in the foreground, in the session and its summary.
+    expect(s.foreground_calls).toEqual(['toolu_01FoCFY4DmUbVxXAembc44PX']);
+    expect(sys.foreground_calls).toBeUndefined();
+    expect(one.type === 'session.summary' && one.session.foreground_calls).toEqual(['toolu_01FoCFY4DmUbVxXAembc44PX']);
     // Favorites: the user's, in the session and its summary; absent is not a favorite.
     expect(s.favorite_at).toBe('2026-10-22T09:30:00Z');
     expect(sys.favorite_at).toBeUndefined();

@@ -253,8 +253,22 @@ export function onlyRequests(items: Item[]): Item[] {
 }
 
 /** The last line of the feed while a turn is on or input waits (SPEC §17.1): the running
- *  command with its timer, or what the session is doing. */
-export function ActivityLine({ state, timeline, now }: { state: SessionState; timeline: Timeline; now?: () => number }) {
+ *  command with its timer, or what the session is doing. A command or subagent the runtime
+ *  runs in the foreground (`foreground`, the session's `foreground_calls`) gets "Run in
+ *  background", which calls `onBackground` with its `call_id`. */
+export function ActivityLine({
+  state,
+  timeline,
+  now,
+  foreground,
+  onBackground,
+}: {
+  state: SessionState;
+  timeline: Timeline;
+  now?: () => number;
+  foreground?: string[];
+  onBackground?: (callId: string) => void;
+}) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
   const t = useNow(1000, !!call, now);
   if (call) {
@@ -271,12 +285,18 @@ export function ActivityLine({ state, timeline, now }: { state: SessionState; ti
       );
     }
     const line = callLine(call.payload.tool, call.payload.args_preview);
+    const callId = call.payload.call_id;
     return (
       <div class="activity activity-running" role="status" aria-live="polite">
         <span class="pulse-dot" aria-hidden="true" />
         <span class="activity-label">Running</span>
         <span class="activity-what mono">{line.text ? (line.shell ? line.text : `${call.payload.tool} ${line.text}`) : call.payload.tool}</span>
         <span class="activity-timer">{formatTimer(t - Date.parse(call.ts))}</span>
+        {onBackground && foreground?.includes(callId) && (
+          <button type="button" class="btn-link activity-background" onClick={() => onBackground(callId)}>
+            Run in background
+          </button>
+        )}
       </div>
     );
   }

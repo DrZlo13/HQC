@@ -71,6 +71,7 @@ function setup(
     permission_capped_by?: string;
     subagents?: number;
     background_tasks?: number;
+    foreground_calls?: string[];
     model?: string;
   } = {},
 ) {
@@ -100,6 +101,8 @@ function setup(
     })),
     // POST /api/sessions/{id}/fork: the new session.
     forkSession: vi.fn(async () => ({ ...info, id: 's2', title: 'test 12 (fork)', last_seq: 4, last_read_seq: 4 })),
+    // POST /api/sessions/{id}/background.
+    background: vi.fn(async () => {}),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -148,6 +151,7 @@ function setup(
     permission_capped_by: opts.permission_capped_by,
     subagents: opts.subagents,
     background_tasks: opts.background_tasks,
+    foreground_calls: opts.foreground_calls,
     model: opts.model,
   };
   app.sessions.set('s1', info);
@@ -459,6 +463,21 @@ describe('header', () => {
       ]),
     );
     expect($('.pill')!.textContent).toBe('Idle');
+  });
+
+  it('offers "Run in background" for a running call the worker reports in the foreground', async () => {
+    // SPEC 0.125: the running `ls /` is `toolu_01`; a summary without it takes the button away.
+    const { api, app } = setup('running', { history: HISTORY.slice(0, 5), foreground_calls: ['toolu_01'] });
+    await mount(app);
+    await act(async () => button('Run in background')!.click());
+    expect(api.background).toHaveBeenCalledWith('s1', 'toolu_01');
+    const s = app.sessions.get('s1')!;
+    await act(async () =>
+      app.mergeSummary([
+        { session_id: 's1', project_id: 'p1', title: s.title, state: 'running', queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 },
+      ]),
+    );
+    expect(button('Run in background')).toBeUndefined();
   });
 
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {

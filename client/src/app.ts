@@ -433,6 +433,7 @@ export class AppState {
         subagents: s.subagents,
         background_tasks: s.background_tasks,
         output_per_s: s.output_per_s,
+        foreground_calls: s.foreground_calls,
         favorite_at: s.favorite_at,
       });
     }

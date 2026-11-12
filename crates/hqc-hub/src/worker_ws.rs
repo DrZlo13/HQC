@@ -796,7 +796,7 @@ async fn on_session_state(
     if process_state == ProcessState::Stopped {
         app.drop_foreground_calls(session_id);
     } else {
-        app.set_foreground_calls(session_id, foreground_calls);
+        app.set_foreground_calls(session_id, runtime_calls(foreground_calls));
     }
     conn.reply(id, HubFrame::Ack(Ack::default()));
 
@@ -824,6 +824,30 @@ async fn on_session_state(
     }
     app.session_changed(session_id);
     Ok(())
+}
+
+/// At most this many foreground calls of a session are kept.
+pub(crate) const MAX_CALLS: usize = 64;
+
+/// The foreground calls of a session as kept: `call_id`s of 1 to [`crate::api::MAX_CALL_ID`]
+/// bytes without whitespace or control characters, unique, in the worker's order, cut to
+/// [`MAX_CALLS`]; others are dropped. The worker is trusted for the list, not for its size.
+pub(crate) fn runtime_calls(list: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in list {
+        if c.is_empty()
+            || c.len() > crate::api::MAX_CALL_ID
+            || c.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+            || out.contains(&c)
+        {
+            continue;
+        }
+        out.push(c);
+        if out.len() == MAX_CALLS {
+            break;
+        }
+    }
+    out
 }
 
 /// At most this many slash commands are kept, each at most [`MAX_COMMAND`] characters.

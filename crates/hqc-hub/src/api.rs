@@ -1595,16 +1595,18 @@ pub async fn stop(
     Ok(Json(json!({ "sent": sent })))
 }
 
-/// Longest `call_id` of `POST .../background`, in bytes.
-const MAX_CALL_ID: usize = 128;
+/// Longest `call_id` of `POST .../background` and of a kept foreground call, in bytes.
+pub(crate) const MAX_CALL_ID: usize = 128;
 
 #[derive(Debug, Deserialize)]
 pub struct BackgroundRequest {
     pub call_id: String,
 }
 
-/// Move the agent's running call `call_id` (one of the session's `foreground_calls`) to the
+/// Move the agent's running call `call_id` (the client sends one of the session's
+/// `foreground_calls`; a call not in the foreground the runtime does not move) to the
 /// background: `session.background` to the worker, whose runtime's answer is only logged.
+/// An empty `call_id` is refused: Claude Code takes it for every call in the foreground.
 pub async fn background(
     State(app): State<AppState>,
     user: CurrentUser,

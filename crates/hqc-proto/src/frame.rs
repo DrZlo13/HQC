@@ -450,9 +450,10 @@ pub enum HubFrame {
     /// Abort the current turn.
     #[serde(rename = "session.stop")]
     SessionStop { session_id: Uuid },
-    /// Move the agent's running call `call_id`, one of `session.state.foreground_calls`, to
-    /// the background; the agent goes on (since SPEC 0.125). Answered with `ack`, also when no
-    /// agent runs; what the runtime answers is the worker's log.
+    /// Move the agent's running call `call_id` (the client sends one of
+    /// `session.state.foreground_calls`) to the background; the agent goes on (since SPEC
+    /// 0.125). Answered with `ack`, also when no agent runs or `call_id` is empty; what the
+    /// runtime answers is the worker's log.
     #[serde(rename = "session.background")]
     SessionBackground { session_id: Uuid, call_id: String },
     /// Terminate the agent process.

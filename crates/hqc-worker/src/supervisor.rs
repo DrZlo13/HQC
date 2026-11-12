@@ -479,8 +479,9 @@ impl Supervisor {
                 session_id,
                 call_id,
             } => {
-                if !self.sessions.contains_key(&session_id) {
-                    // Nothing runs, nothing to move.
+                // Nothing runs, nothing to move; an empty id would move every foreground call
+                // of Claude Code's.
+                if call_id.is_empty() || !self.sessions.contains_key(&session_id) {
                     self.link.reply(&id, ack(None));
                     return;
                 }

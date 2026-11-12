@@ -2080,6 +2080,27 @@ async fn a_foreground_call_goes_to_the_background() {
         }
     }
 
+    // The worker is trusted for the list, not for its size: 64 unique ids of 1..=128 bytes
+    // without whitespace or control characters are kept.
+    let many: Vec<String> = (0..70).map(|i| format!("toolu_{i:02}")).collect();
+    let mut flood = vec![
+        call.to_string(),
+        call.to_string(),
+        String::new(),
+        "x".repeat(129),
+    ];
+    flood.push("toolu_\n1".into());
+    flood.extend(many.iter().cloned());
+    let flooded = json!({"session_id": sid, "process_state": "running", "locked_by": "hqc",
+        "foreground_calls": flood});
+    w.send("session.state", flooded).await;
+    w.expect("ack").await;
+    let mut kept = vec![call.to_string()];
+    kept.extend(many.iter().take(63).cloned());
+    assert_eq!(hub.session(&sid).await["foreground_calls"], json!(kept));
+    w.send("session.state", running.clone()).await;
+    w.expect("ack").await;
+
     let path = format!("/api/sessions/{sid}/background");
     let (s, r) = hub.post(&path, json!({"call_id": call})).await;
     assert_eq!((s, r["sent"].as_bool()), (200, Some(true)));

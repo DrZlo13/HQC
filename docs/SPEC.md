@@ -934,10 +934,12 @@ MCP calls (worker → hub → worker):
   §16): such a run waits for the end of a running turn instead of joining it (§17.2).
 - `session.stop` {session_id} — interrupt the current turn.
 - `session.background` {session_id, call_id} → `ack` (since 0.125) — move the agent's
-  running call `call_id`, one of its `session.state.foreground_calls` (§5.4), to the
-  background: the agent goes on, the call keeps running (Claude Code: the `background_tasks`
-  control request, §8.1). Like `session.kill` it is acked also when no agent runs; what the
-  runtime answers (moved, not moved, refused) is only in the worker's log.
+  running call `call_id` to the background: the agent goes on, the call keeps running (Claude
+  Code: the `background_tasks` control request, §8.1). The client sends one of the session's
+  `session.state.foreground_calls` (§5.4); a call not in the foreground the runtime does not
+  move. Like `session.kill` it is acked also when no agent runs, and so is an empty `call_id`,
+  which Claude Code would take for every call in the foreground; what the runtime answers
+  (moved, not moved, refused) is only in the worker's log.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
 - `session.kill` {session_id} — terminate the agent process.
@@ -1177,7 +1179,8 @@ MCP calls (worker → hub → worker):
   §5.3; Claude Code: §8.1), empty when it is stopped; absent — none, and like `subagents`
   every report says it. The hub keeps the list in memory, not in the database, as the
   session's `foreground_calls` (§6), and drops it when the agent stops, its worker restarts or
-  the session is deleted.
+  the session is deleted; it keeps at most 64 unique ids of 1 to 128 bytes without whitespace
+  or control characters, in the worker's order, and drops the rest (§20).
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — events
   from the mirror (§9.1, §9.2), through the outbox; the answer is `ack {event_id, seq}` as for
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
@@ -1478,7 +1481,9 @@ the rest is marked "later"):
 - `POST /api/sessions/{id}/background` {call_id} → `{sent}` (since 0.125; `write` level, as
   `/stop`): `session.background` to the worker (§5.3), `sent: false` when the worker is not
   connected; nothing comes back of what the runtime did, the call leaves the session's
-  `foreground_calls` when the worker reports it moved. A `call_id` that is empty, longer than
+  `foreground_calls` when the worker reports it moved. The `call_id` is not checked against
+  `foreground_calls`: Claude Code moves a foreground call of the session by its id, a
+  subagent's too, and the session is the user's own. A `call_id` that is empty, longer than
   128 bytes or has U+0000: `400 bad_request`; service session: `409 system_session`
 - `POST /api/sessions/{id}/fork` {event_id} → `201` and the new session object (since 0.80;
   `manage` level): a new session in the same project, workspace, worker and `cwd`, with the
@@ -4721,6 +4726,7 @@ buffered send from a session in `ask` (§7.1).
   | … `cwd` | up to 4096 bytes and inside the workspace path | same |
   | a worker event of type `user.message`, `approval.response`, `clarify.response`, `peer.message` (§4: only the hub writes them) | forbidden in any session | `error invalid_frame` |
   | a worker event in its service session (§10.2) | only `system` with `code: worker_log` | `error invalid_frame` |
+  | `session.state.foreground_calls` (§5.4, since 0.125) | 64 unique ids of 1–128 bytes without whitespace or control characters | the rest of the list is dropped |
   | a worker event in an archived session (§17.4) | only one that ends a turn: the final `agent.message`, `status idle`/`error` | `ack` without `seq` |
   | `fs.stat`, `fs.list_dirs`, `workspace.list_candidates`, `permissions.inspect` (since 0.52), `workspace.inspect` and `workspace.delete` (since 0.58) from the API (§5.3, §6) | 4 at once per worker | `429 worker_busy`, no frame goes to the worker |
   | a clone (§5.3, since 0.58, T45) | `url` up to 2048 bytes by `check_clone_url`, `branch` up to 255 by `check_branch`; `clone_timeout` (default 600 s) on the worker | `400 invalid_url` / `invalid_branch`; the worker kills `git` and removes the folder, `failed` |
@@ -4876,8 +4882,8 @@ their `call_id`s go in `session.state.foreground_calls`; §5.3: the frame `sessi
 {session_id, call_id} → `ack` (example `hub.session.background.json`), fire-and-forget like `session.stop`, the
 runtime's answer only in the worker's log; §6: `POST /api/sessions/{id}/background` {call_id}
 → `{sent}` and `foreground_calls` in the session object and `session.summary`, kept in the
-hub's memory, no migration; §17.1: the chat's "Running <command> <time>" line has a "Run in
-background" button for such a call. Before, a long foreground command could only be waited
+hub's memory, no migration, at most 64 ids (§20); §17.1: the chat's "Running <command>
+<time>" line has a "Run in background" button for such a call. Before, a long foreground command could only be waited
 for or stopped with the whole turn. An older worker answers `session.background` with `error
 {invalid_frame}` and never reports `foreground_calls`, so no button shows for its sessions;
 older hubs and clients ignore the new field. 0.124 is taken by another pull request.

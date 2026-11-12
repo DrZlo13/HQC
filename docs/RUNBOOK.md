@@ -733,10 +733,10 @@ claude_bin = "/Users/me/.local/bin/claude"
 # allow_auto = true, allow is empty, deny is the default set (sudo, ssh, scp, rm -rf /*,
 # curl | sh, dd, mkfs, git push --force / -f).
 [permissions]
-# The mode of a session that does not choose one in hqc ("ask" | "auto").
+# The mode of a session that does not choose one in hqc ("ask" | "auto" | "allow_all").
 mode = "ask"
-# Whether a session may be switched to "auto" in hqc. false: every session runs in "ask",
-# whatever the web client says.
+# Whether a session may be switched to "auto" or "allow_all" in hqc. false: every session runs
+# in "ask", whatever the web client says.
 allow_auto = true
 allow = [
   # Edit/Write without parentheses: editing any file the user can write to, not only the
@@ -759,43 +759,49 @@ deny = [
 
 Three levels of `[permissions]`, from strongest to weakest:
 
-1. **`deny`**: not run and not asked about. Neither "Always allow", nor `mode = "auto"`, nor
-   the hub's `auto_approve` overrides it; instead of a card the chat shows the line
-   "Blocked by worker policy". A tool without parentheses (`WebFetch`) disappears from the
-   session entirely. Your own `deny` **replaces** the default set, so copy into it the default
+1. **`deny`**: not run and not asked about. Neither "Always allow", nor `mode = "auto"` or
+   `"allow_all"`, nor the hub's `auto_approve` overrides it; instead of a card the chat shows
+   the line "Blocked by worker policy". A tool without parentheses (`WebFetch`) disappears from
+   the session entirely. Your own `deny` **replaces** the default set, so copy into it the default
    rules you need; `deny = []` disables the bans altogether.
 2. **`allow`** and "Always allow" rules (the CLI writes them to
    `<git repository root>/.claude/settings.local.json`): run without asking.
 3. **Everything else**: in "Ask" a permission card appears; in "Auto" the Claude Code
    classifier decides without asking (verified: it lets through both `rm -rf` outside the
    folder and `git push --force` if the user asked for it), so in this mode `deny` is the only
-   boundary.
+   boundary; in "Allow all" (Claude Code's `bypassPermissions`) it runs without asking and
+   without the classifier, except a call an `ask` rule of Claude Code's settings files matches,
+   which is still asked about.
 
 In an environment with `project_settings = true` (§14 of the SPEC) the permission rules of the
 repository's `.claude/settings.json` join levels 1 and 2 (the rules screen lists them), and none
 of the three levels covers the repository's own hooks: Claude Code runs them itself, without a
 card and outside `deny`.
 
-**The mode of each session** (T38). Every session runs in "Ask" or "Auto". The chat header
-shows which: an orange "Auto" badge, or "Ask" in plain text ("Ask (Auto asked)" when the
-session asked for Auto but the worker runs it in Ask). It is chosen in the new-session form
-("Permissions": the worker's default, Ask or Auto) and switched in the session's "More" menu
-("Switch to Auto" / "Switch to Ask"); going to Auto asks for one confirmation, going to Ask
-none. A running agent switches at once, even in the middle of a turn (the next tool call is
-decided in the new mode); a stopped one starts in it. Only you, as the worker's owner, can
-switch a session on your worker to Auto. Sessions an agent starts with `hqc_spawn` always
-begin in Ask, and a message from another session never changes a session's mode.
+**The mode of each session** (T38). Every session runs in "Ask", "Auto" or "Allow all". The
+chat header shows which: an orange "Auto" or "Allow all" badge, or "Ask" in plain text ("Ask
+(Auto asked)" when the session asked for a higher mode than the worker runs it in). It is
+chosen in the new-session form ("Permissions": the worker's default, Ask, Auto or Allow all)
+and switched in the session's "More" menu ("Switch to …" for each of the other two); going to
+Auto or Allow all asks for one confirmation, going to Ask none. A running agent switches at
+once, even in the middle of a turn (the next tool call is decided in the new mode); a stopped
+one starts in it. Only you, as the worker's owner, can switch a session on your worker to Auto
+or Allow all. Sessions an agent starts with `hqc_spawn` always begin in Ask, and a message from
+another session never changes a session's mode.
 
 - `mode` is the default for sessions created without a choice (and for sessions from before
-  T38). "auto" here makes every such session run without asking, so the worker logs a warning
-  at start.
+  T38). "auto" or "allow_all" here makes every such session run without asking, so the worker
+  logs a warning at start.
 - `allow_auto = false` is the machine's veto: the worker runs every session in Ask whatever
   the hub sends, logs `the hub asked for permission mode auto; [permissions] allow_auto =
-  false, running ask`, and reports Ask, which the header then shows. `mode = "auto"` together
-  with `allow_auto = false` is a startup error.
-- In Auto the `deny` list is still passed to Claude Code and still blocks; nothing else does.
+  false, running ask` (or `allow_all`), and reports Ask, which the header then shows. `mode =
+  "auto"` or `"allow_all"` together with `allow_auto = false` is a startup error. With
+  `allow_auto = true` the worker starts every Claude Code process with
+  `--allow-dangerously-skip-permissions`, so that a running session can be switched to Allow
+  all; a process started before that switches only at its next start.
+- In Auto and Allow all the `deny` list is still passed to Claude Code and still blocks.
   `auto_approve` of the hub is a different, older switch: it answers the cards that do reach
-  the hub; in Auto there are none.
+  the hub; in Auto there are none, in Allow all only those of `ask` rules.
 
 Rule syntax: `Bash(cargo test:*)` is the `cargo test` command with any arguments (a prefix up
 to a word boundary: `Bash(mkfs*)` does not catch `mkfs.ext4`), `Bash(curl * | sh)`: `*` is any

@@ -561,6 +561,22 @@ describe('live subagents', () => {
     await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = []))));
     expect($('.live-agents')).toBeNull();
   });
+
+  it('shows a background command while no subagent runs: its description and run time', async () => {
+    const { app } = setup('idle', { subagents: 0, background_tasks: 1 });
+    await mount(app);
+    await act(async () =>
+      subscriber!.onEvent(
+        live(
+          (e) =>
+            (e.payload.agents = [
+              { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards on cirunner', duration_ms: 65_000 },
+            ]),
+        ),
+      ),
+    );
+    expect(rows()).toEqual([['Full run over 1000 boards on cirunner', '1m 5s']]);
+  });
 });
 
 describe('the request card through the chat', () => {

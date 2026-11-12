@@ -90,8 +90,8 @@ only push.
     Enter, Esc, a tap);
   - `Chat.tsx` — the header (state pill, worker, path, model and cost from `usage`,
     "Stop", the "More" menu), the feed, a bar in place of the input field while VS Code holds the
-    session, the live subagents over the input (`LiveSubagents.tsx`), the input field; on a
-    phone an open request is a bottom sheet in place of the input field;
+    session, the live subagents and background commands over the input (`LiveSubagents.tsx`),
+    the input field; on a phone an open request is a bottom sheet in place of the input field;
   - `feed.ts` — pure feed logic: tool call groups captioned by the intermediate
     reply, `usage` under the final answer, `tool.call` inside the card of its request;
   - `cards.tsx` — messages, tool groups, service lines, the agent's question;

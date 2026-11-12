@@ -543,7 +543,10 @@ export function Chat({
           {notice}
         </div>
       )}
-      {(info?.subagents ?? 0) > 0 && <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} />}
+      {/* The list also holds the agent's background commands, which only background_tasks counts. */}
+      {((info?.subagents ?? 0) > 0 || (info?.background_tasks ?? 0) > 0) && (
+        <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} />
+      )}
       {locked && (
         <div class="composer-wrap">
           {/* In place of the composer it says only what to do; where it is open, the pill. */}

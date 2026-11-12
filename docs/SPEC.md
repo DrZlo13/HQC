@@ -1890,7 +1890,9 @@ scroll away): a line each, `<task>: <what it does now>` (the task alone before a
 at its right `<tokens> tokens · <n> tools · <run time>` (`155.3k tokens · 188 tools · 4m 13s`),
 what was not reported yet left out, the run time ticking every second from `duration_ms`; a long
 line is cut with an ellipsis. A subagent's line goes when it ends; a dropped socket, and a chat
-closed, clear the lines until the next subscribe brings the hub's list.
+closed, clear the lines until the next subscribe brings the hub's list. Since 0.127 the list also
+holds the agent's background commands, which only `background_tasks` counts, so the chat shows it while
+either count is above 0; a command's line is its description and its run time.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
 keeps it up after the turn has ended.
@@ -4835,8 +4837,9 @@ client keeps the 12 chats used last in memory and loads the next one when the
 mouse rests on its row or project, so a switch shows the chat at once, and the chats share their
 images' signed links (§12). §15, §6: the search is a page with filters — the kind of hit with
 the count of each, the project, the time, best match or newest, a few hits per session — over
-the filters and counts of `GET /api/search` (0.111). §6: the chat shows a line per subagent of
-`subagents.live` (0.113) above the input, outside the feed's scroll, and a message that joined
+the filters and counts of `GET /api/search` (0.111). §6: the chat shows a line per subagent and
+background command of `subagents.live` (0.113) above the input, outside the feed's scroll, while
+`subagents` or `background_tasks` is above 0, and a message that joined
 the running turn (`payload.joined`, 0.112) says "joined the turn".
 
 ### 0.112 → 0.113 (the subagents the agent runs now)

@@ -110,9 +110,10 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
     let p = &cfg.permissions;
     let _ = writeln!(
         out,
-        "mode: {} by default (allow_auto: {})",
+        "mode: {} by default (allow_auto: {}, allow_all: {})",
         p.mode.as_str(),
-        p.allow_auto
+        p.allow_auto,
+        p.allow_all
     );
     let env_source = rule_source::environment(&e.name);
     let source = |r: &String, own: &[String]| {

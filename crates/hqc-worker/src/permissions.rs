@@ -59,7 +59,8 @@ pub const DEFAULT_DENY: &[&str] = &[
 /// never asks and only `deny` stops a call (checked on 2.1.308), or (`allow_all`, since SPEC
 /// 0.129) `--permission-mode bypassPermissions`, where the CLI runs the call without the
 /// classifier and only the deny and ask rules of its settings stop it or ask. A session may
-/// ask for any of them (T38); `mode` is the default.
+/// ask for any of them (T38); `mode` is the default; the worker runs `auto` only with
+/// `allow_auto` and `allow_all` only with `allow_all`.
 pub use hqc_proto::frame::PermissionMode;
 
 fn yes() -> bool {
@@ -71,9 +72,13 @@ fn yes() -> bool {
 pub struct RawPermissions {
     #[serde(default)]
     mode: PermissionMode,
-    /// `false`: a session that asks for `auto` or `allow_all` runs in `ask` (T38).
+    /// `false`: a session that asks for `auto` runs in `ask` (T38).
     #[serde(default = "yes")]
     allow_auto: bool,
+    /// `false` (the default): a session that asks for `allow_all` runs in the highest mode
+    /// the worker allows, `auto` with `allow_auto`, else `ask` (since SPEC 0.129).
+    #[serde(default)]
+    allow_all: bool,
     #[serde(default)]
     allow: Vec<String>,
     /// Absent: [`DEFAULT_DENY`]; `deny = []` turns it off.
@@ -85,8 +90,12 @@ pub struct RawPermissions {
 pub struct Permissions {
     /// The mode of a session that does not ask for one.
     pub mode: PermissionMode,
-    /// Whether hqc may run a session in `auto` or `allow_all` (T38).
+    /// Whether hqc may run a session in `auto` (T38).
     pub allow_auto: bool,
+    /// Whether hqc may run a session in `allow_all`, and so whether the CLI starts with
+    /// `--allow-dangerously-skip-permissions` (since SPEC 0.129). Off by default: the hub
+    /// alone must not get a machine to run without checks (SPEC §2.1).
+    pub allow_all: bool,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
 }
@@ -96,6 +105,7 @@ impl Default for Permissions {
         Self {
             mode: PermissionMode::Ask,
             allow_auto: true,
+            allow_all: false,
             allow: vec![],
             deny: DEFAULT_DENY.iter().map(|r| r.to_string()).collect(),
         }
@@ -107,15 +117,19 @@ impl Permissions {
         let Some(raw) = raw else {
             return Ok(Self::default());
         };
-        if raw.mode != PermissionMode::Ask && !raw.allow_auto {
-            bail!(
-                "permissions: mode = {:?} with allow_auto = false",
-                raw.mode.as_str()
-            );
+        match raw.mode {
+            PermissionMode::Auto if !raw.allow_auto => {
+                bail!("permissions: mode = \"auto\" with allow_auto = false")
+            }
+            PermissionMode::AllowAll if !raw.allow_all => {
+                bail!("permissions: mode = \"allow_all\" without allow_all = true")
+            }
+            _ => {}
         }
         let p = Self {
             mode: raw.mode,
             allow_auto: raw.allow_auto,
+            allow_all: raw.allow_all,
             allow: raw.allow,
             deny: raw.deny.unwrap_or_else(|| Self::default().deny),
         };
@@ -160,11 +174,15 @@ impl Permissions {
         })
     }
 
-    /// The mode a session runs in: the one hqc asks for, else `mode`; `auto` and `allow_all`
-    /// only with `allow_auto` (T38). The worker decides, not the hub (SPEC §2.1).
+    /// The mode a session runs in: the one hqc asks for, else `mode`; `auto` only with
+    /// `allow_auto` (T38), `allow_all` only with `allow_all` (SPEC 0.129) — without it the
+    /// highest mode the worker allows. The worker decides, not the hub (SPEC §2.1).
     pub fn mode_for(&self, asked: Option<PermissionMode>) -> PermissionMode {
         match asked.unwrap_or(self.mode) {
-            m @ (PermissionMode::Auto | PermissionMode::AllowAll) if self.allow_auto => m,
+            PermissionMode::AllowAll if self.allow_all => PermissionMode::AllowAll,
+            PermissionMode::AllowAll | PermissionMode::Auto if self.allow_auto => {
+                PermissionMode::Auto
+            }
             _ => PermissionMode::Ask,
         }
     }
@@ -1061,6 +1079,7 @@ mod tests {
         let p = Policy::new(&Permissions {
             mode: PermissionMode::Ask,
             allow_auto: true,
+            allow_all: false,
             allow: vec![
                 "Bash(cargo test:*)".into(),
                 "Bash(git status)".into(),
@@ -1346,6 +1365,7 @@ mod tests {
     fn environment_rules() {
         let worker = Permissions {
             allow: vec!["Read".into()],
+            allow_all: true,
             ..Permissions::default()
         };
         let env = EnvPermissions {
@@ -1358,7 +1378,10 @@ mod tests {
         assert!(p.deny.contains(&"Bash(scp:*)".to_string()));
         assert_eq!(p.deny.last().unwrap(), "Bash(git push:*)");
         assert_eq!(p.allow, ["Read", "Bash(ssh debian@192.168.1.20:*)"]);
-        assert_eq!((p.mode, p.allow_auto), (worker.mode, worker.allow_auto));
+        assert_eq!(
+            (p.mode, p.allow_auto, p.allow_all),
+            (worker.mode, worker.allow_auto, worker.allow_all)
+        );
         let policy = Policy::new(&p);
         assert_eq!(
             policy.denied_by("Bash", &bash("ssh debian@192.168.1.20 true")),
@@ -1579,6 +1602,7 @@ mod tests {
         let none = Permissions {
             mode: PermissionMode::Ask,
             allow_auto: true,
+            allow_all: false,
             allow: vec![],
             deny: vec![],
         };

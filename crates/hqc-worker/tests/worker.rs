@@ -1376,6 +1376,60 @@ async fn allow_auto_false_runs_ask() {
     w.stop().await;
 }
 
+// SPEC 0.129: Allow all needs `[permissions] allow_all`, off by default: without it a session
+// the hub asks to run in it runs in the highest mode the worker allows — Auto, or Ask with
+// `allow_auto = false` — at the start and on a switch, and reports that mode.
+#[tokio::test]
+async fn allow_all_needs_its_own_setting() {
+    use hqc_proto::frame::PermissionMode::{AllowAll, Ask, Auto};
+    for (extra, want, reported) in [
+        ("", Auto, "auto"),
+        ("[permissions]\nallow_auto = false\n", Ask, "ask"),
+    ] {
+        let env = Env::new();
+        let adapters = FakeAdapters::new();
+        let mut hub = FakeHub::start().await;
+        let cfg =
+            hqc_worker::config::Config::parse(&format!("{}{extra}", env.config_toml(&hub.url())))
+                .unwrap();
+        let w = start_worker_with(&env, cfg, &adapters);
+        let sid = Uuid::now_v7();
+        let mut c = hub.accept().await;
+        c.handshake().await;
+        let mut start = env.start_payload(sid);
+        start["permission_mode"] = json!("allow_all");
+        c.frame("session.start", start).await;
+        c.expect("ack").await;
+        state_with_mode(&mut c, sid, reported).await;
+        assert_eq!(adapters.start_modes(), [(sid, want)], "{extra:?}");
+        c.frame(
+            "session.permission_mode",
+            json!({"session_id": sid, "permission_mode": "allow_all"}),
+        )
+        .await;
+        c.expect("ack").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !adapters
+                .calls()
+                .iter()
+                .any(|c| matches!(c, FakeCall::PermissionMode(_, AllowAll))),
+            "{extra:?}: no switch to allow_all"
+        );
+        w.stop().await;
+    }
+}
+
+/// A worker whose owner allowed Allow all (`[permissions] allow_all = true`, SPEC 0.129).
+fn allow_all_worker(env: &Env, hub_url: &str, adapters: &FakeAdapters) -> RunningWorker {
+    let cfg = hqc_worker::config::Config::parse(&format!(
+        "{}[permissions]\nallow_all = true\n",
+        env.config_toml(hub_url)
+    ))
+    .unwrap();
+    start_worker_with(env, cfg, adapters)
+}
+
 /// An input with `permission_cap` (T39).
 fn capped_input(sid: Uuid, eid: Uuid, cap: &str) -> Value {
     let mut v = input(sid, eid, "from another session");
@@ -1575,14 +1629,14 @@ async fn the_cap_never_raises() {
 // SPEC 0.129: an `auto` cap holds an Allow all session down to Auto: the runtime is switched
 // to Auto and confirms it before the input, the session reports the cap meanwhile, a switch the
 // user asks for goes no higher than Auto until the turn ends, and Allow all comes back after
-// it. A stopped agent starts in Auto for such an input.
+// it. A stopped agent starts in Auto for such an input. On a worker that allows Allow all.
 #[tokio::test]
 async fn an_auto_cap_holds_allow_all_down_to_auto() {
     use PermissionMode::{AllowAll, Ask, Auto};
     let env = Env::new();
     let adapters = FakeAdapters::new();
     let mut hub = FakeHub::start().await;
-    let w = start_worker(&env, &hub.url(), &adapters);
+    let w = allow_all_worker(&env, &hub.url(), &adapters);
     let sid = Uuid::now_v7();
     let mut c = hub.accept().await;
     c.handshake().await;
@@ -1668,13 +1722,14 @@ async fn an_auto_cap_holds_allow_all_down_to_auto() {
     w.stop().await;
 }
 
-// SPEC 0.129: an `allow_all` cap (a chain of Allow all sessions) holds nothing down.
+// SPEC 0.129: an `allow_all` cap (a chain of Allow all sessions) holds nothing down, on a
+// worker that allows Allow all.
 #[tokio::test]
 async fn an_allow_all_cap_changes_nothing() {
     let env = Env::new();
     let adapters = FakeAdapters::new();
     let mut hub = FakeHub::start().await;
-    let w = start_worker(&env, &hub.url(), &adapters);
+    let w = allow_all_worker(&env, &hub.url(), &adapters);
     let mut c = hub.accept().await;
     c.handshake().await;
     for mode in ["ask", "auto", "allow_all"] {

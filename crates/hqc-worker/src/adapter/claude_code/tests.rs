@@ -652,7 +652,6 @@ async fn command_line_new_then_resume() {
             "user,local",
             "--permission-mode",
             "default",
-            "--allow-dangerously-skip-permissions",
             mode,
             &claude_session.to_string(),
             "--verbose",
@@ -854,6 +853,7 @@ async fn command_line_carries_permissions() {
     s.environment = with_permissions(Permissions {
         mode: PermissionMode::Ask,
         allow_auto: true,
+        allow_all: false,
         allow: vec!["Bash(cargo test:*)".into(), "Read".into()],
         deny: vec!["Bash(git push:*)".into()],
     });
@@ -1070,9 +1070,9 @@ environment = "mine"
 }
 
 /// SPEC 0.129: a session in allow_all starts with `--permission-mode bypassPermissions`; with
-/// `allow_auto` every process of a session that is not restricted gets
+/// `[permissions] allow_all` every process of a session that is not restricted gets
 /// `--allow-dangerously-skip-permissions`, so that a switch to allow_all takes (the CLI
-/// refuses the flag together with `--restricted`); without `allow_auto` none does.
+/// refuses the flag together with `--restricted`); without it none does, `allow_auto` or not.
 #[test]
 fn allow_all_starts_in_bypass_permissions() {
     use crate::permissions::{PermissionMode, Permissions};
@@ -1097,25 +1097,35 @@ fn allow_all_starts_in_bypass_permissions() {
         args.iter()
             .any(|a| a == "--allow-dangerously-skip-permissions")
     };
-    for (m, want) in [
+    let modes = [
         (PermissionMode::Ask, "default"),
         (PermissionMode::Auto, "auto"),
         (PermissionMode::AllowAll, "bypassPermissions"),
-    ] {
+    ];
+    // The default: allow_auto on, allow_all off.
+    for (m, want) in modes {
         s.permission_mode = m;
         let line = args(&s);
         assert_eq!(mode(&line), want);
-        assert!(allows(&line), "{m:?}: allow_auto is on by default");
+        assert!(!allows(&line), "{m:?}: not by default, allow_auto alone");
+    }
+    s.environment = with_permissions(Permissions {
+        allow_all: true,
+        ..Permissions::default()
+    });
+    for (m, _) in modes {
+        s.permission_mode = m;
+        assert!(allows(&args(&s)), "{m:?}: with allow_all");
     }
     s.restricted = true;
     assert!(!allows(&args(&s)), "never with --restricted");
     s.restricted = false;
-    s.permission_mode = PermissionMode::Ask;
     s.environment = with_permissions(Permissions {
         allow_auto: false,
+        allow_all: true,
         ..Permissions::default()
     });
-    assert!(!allows(&args(&s)), "not without allow_auto");
+    assert!(allows(&args(&s)), "allow_all without allow_auto");
 }
 
 /// SPEC 0.129: allow_all is `bypassPermissions` both ways: in our `set_permission_mode` and in
@@ -1720,6 +1730,7 @@ fn policy(allow: &[&str], deny: &[&str]) -> Arc<crate::permissions::Policy> {
         &crate::permissions::Permissions {
             mode: crate::permissions::PermissionMode::Ask,
             allow_auto: true,
+            allow_all: false,
             allow: allow.iter().map(|r| r.to_string()).collect(),
             deny: deny.iter().map(|r| r.to_string()).collect(),
         },
@@ -2636,7 +2647,6 @@ async fn native_messaging_follows_the_worker_config() {
         "user,local",
         "--permission-mode",
         "default",
-        "--allow-dangerously-skip-permissions",
         "--session-id",
         &Uuid::nil().to_string(),
         "--verbose",

@@ -730,14 +730,17 @@ claude_bin = "/Users/me/.local/bin/claude"
 # logs a warning about it on start; remove it from the file.
 
 # Claude Code permission policy (SPEC §8.1, §14). The block may be omitted: then mode = "ask",
-# allow_auto = true, allow is empty, deny is the default set (sudo, ssh, scp, rm -rf /*,
-# curl | sh, dd, mkfs, git push --force / -f).
+# allow_auto = true, allow_all = false, allow is empty, deny is the default set (sudo, ssh, scp,
+# rm -rf /*, curl | sh, dd, mkfs, git push --force / -f).
 [permissions]
 # The mode of a session that does not choose one in hqc ("ask" | "auto" | "allow_all").
 mode = "ask"
-# Whether a session may be switched to "auto" or "allow_all" in hqc. false: every session runs
-# in "ask", whatever the web client says.
+# Whether a session may be switched to "auto" in hqc. false: a session that asks for "auto"
+# runs in "ask", whatever the web client says.
 allow_auto = true
+# Whether a session may be switched to "allow_all" in hqc (Claude Code's bypassPermissions).
+# false, the default: a session that asks for it runs in "auto" ("ask" with allow_auto = false).
+allow_all = false
 allow = [
   # Edit/Write without parentheses: editing any file the user can write to, not only the
   # workspace; remove them if you want to confirm every edit.
@@ -788,7 +791,7 @@ and switched in the session's "More" menu ("Switch to …" for each of the other
 Auto or Allow all asks for one confirmation, going to Ask none. A running agent switches at
 once, even in the middle of a turn (the next tool call is decided in the new mode); a stopped
 one starts in it. Only you, as the worker's owner, can switch a session on your worker to Auto
-or Allow all. Sessions an agent starts with `hqc_spawn` always begin in Ask, and a message from
+or Allow all, and Allow all runs only on a worker with `allow_all = true`. Sessions an agent starts with `hqc_spawn` always begin in Ask, and a message from
 another session never changes a session's mode. A turn another session's message starts runs
 no higher than that session's mode, but what the turn leaves running (a background subagent or
 command, a wake-up the agent set) goes on in the session's own mode after it.
@@ -796,15 +799,22 @@ command, a wake-up the agent set) goes on in the session's own mode after it.
 - `mode` is the default for sessions created without a choice (and for sessions from before
   T38). "auto" or "allow_all" here makes every such session run without asking, so the worker
   logs a warning at start.
-- `allow_auto = false` is the machine's veto: the worker runs every session in Ask whatever
-  the hub sends, logs `the hub asked for permission mode auto; [permissions] allow_auto =
-  false, running ask` (or `allow_all`), and reports Ask, which the header then shows. `mode =
-  "auto"` or `"allow_all"` together with `allow_auto = false` is a startup error. With
-  `allow_auto = true` the worker starts every Claude Code process with
-  `--allow-dangerously-skip-permissions`, so that a running session can be switched to Allow
-  all; a process started before that switches only at its next start. Run as root, Claude Code
-  exits at start with that flag unless `IS_SANDBOX=1` is set, so a worker running as root needs
-  `allow_auto = false` or `IS_SANDBOX=1` in the environment's `env`.
+- `allow_auto = false` is the machine's veto on Auto: the worker runs a session that asks for
+  Auto in Ask whatever the hub sends, logs `the hub asked for permission mode auto;
+  [permissions] allow_auto = false, running ask`, and reports Ask, which the header then shows.
+  `mode = "auto"` together with `allow_auto = false` is a startup error.
+- `allow_all` (default `false`) lets a session run in Allow all. Without it a session the hub
+  asks to run in Allow all runs in the highest mode the worker allows, Auto (Ask with
+  `allow_auto = false`): the worker logs `the hub asked for permission mode allow_all;
+  [permissions] allow_all = false, running auto` and reports that mode. `mode = "allow_all"`
+  without `allow_all = true` is a startup error. The setting is the machine's own, like
+  `allow_auto`: the hub cannot turn it on, so neither a hub nor an owner's session in the wrong
+  hands can make the worker run without checks. With `allow_all = true` the worker starts every
+  Claude Code process that is not restricted with `--allow-dangerously-skip-permissions`, so
+  that a running session can be switched to Allow all; a process started before that switches
+  only at its next start. Run as root, Claude Code exits at start with that flag unless
+  `IS_SANDBOX=1` is set, so a worker running as root keeps `allow_all = false` or sets
+  `IS_SANDBOX=1` in the environment's `env`.
 - In Auto and Allow all the `deny` list is still passed to Claude Code and still blocks.
   `auto_approve` of the hub is a different, older switch: it answers the cards that do reach
   the hub; in Auto there are none, in Allow all those of `ask` rules and of the cases Claude

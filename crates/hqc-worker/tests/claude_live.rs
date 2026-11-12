@@ -1106,6 +1106,7 @@ async fn live_permission_policy() {
         environment: Arc::new(Environment::default_of(&Permissions {
             mode: PermissionMode::Ask,
             allow_auto: true,
+            allow_all: false,
             allow: vec!["Bash(touch hqc-allowed:*)".into()],
             deny,
         })),

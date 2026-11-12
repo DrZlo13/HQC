@@ -1077,8 +1077,9 @@ pub struct SessionStart {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub requested_by_owner: bool,
     /// The mode hqc asks for (T38); absent: the worker's `[permissions] mode`. The worker
-    /// may run `ask` instead of `auto` or `allow_all` (`allow_auto = false`) and reports what
-    /// it runs in `session.state.permission_mode`.
+    /// may run a lower mode (`ask` for `auto` with `allow_auto = false`, the highest it allows
+    /// for `allow_all` without `allow_all = true`) and reports what it runs in
+    /// `session.state.permission_mode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
     /// hqc's allow rules of the session's workspace (since SPEC 0.52, T48), as

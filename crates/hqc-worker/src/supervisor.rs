@@ -47,9 +47,9 @@
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
-//!   go through [`Config::permission_mode`] (`auto` and `allow_all` only with
-//!   `allow_auto`); a running agent switches at once, a stopped one starts in the mode. The
-//!   mode the runtime confirms is sent in `session.state.permission_mode`, repeated like
+//!   go through [`Config::permission_mode`] (`auto` only with `allow_auto`, `allow_all` only
+//!   with `allow_all`); a running agent switches at once, a stopped one starts in the mode.
+//!   The mode the runtime confirms is sent in `session.state.permission_mode`, repeated like
 //!   `title`.
 //! - A cap on an input (`session.input.permission_cap`, T39; `ask` < `auto` < `allow_all`):
 //!   the agent runs that turn in the lower of the cap and the session's own mode. A running

@@ -21,7 +21,8 @@
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
-//! allow_auto = true              # false: one that asks for "auto" or "allow_all" runs "ask"
+//! allow_auto = true              # false: one that asks for "auto" runs "ask"
+//! allow_all = false              # true: one may run "allow_all" (bypassPermissions)
 //! allow = ["Bash(cargo test:*)"]
 //! # deny: default crate::permissions::DEFAULT_DENY (sudo, ssh, scp, rm -rf /*, ...)
 //!
@@ -620,8 +621,9 @@ impl Config {
             .collect()
     }
 
-    /// The mode a session runs in when hqc asks for `asked` (T38): `auto` and `allow_all`
-    /// only with `[permissions] allow_auto`; a refusal is logged, the session runs in `ask`.
+    /// The mode a session runs in when hqc asks for `asked` (T38): `auto` only with
+    /// `[permissions] allow_auto`, `allow_all` only with `[permissions] allow_all` (SPEC
+    /// 0.129); a refusal is logged, the session runs in the highest mode the worker allows.
     pub fn permission_mode(
         &self,
         session_id: Uuid,
@@ -629,7 +631,12 @@ impl Config {
     ) -> PermissionMode {
         let mode = self.permissions.mode_for(asked);
         if let Some(a) = asked.filter(|a| *a != mode) {
-            tracing::warn!(%session_id, "the hub asked for permission mode {}; [permissions] allow_auto = false, running ask", a.as_str());
+            let off = match (a, mode) {
+                (PermissionMode::AllowAll, PermissionMode::Auto) => "allow_all = false",
+                (PermissionMode::AllowAll, _) => "allow_all = false, allow_auto = false",
+                _ => "allow_auto = false",
+            };
+            tracing::warn!(%session_id, "the hub asked for permission mode {}; [permissions] {off}, running {}", a.as_str(), mode.as_str());
         }
         mode
     }
@@ -1000,6 +1007,7 @@ mod tests {
         let id = Uuid::nil();
         let c = Config::parse(base).unwrap();
         assert!(c.permissions.allow_auto, "allowed by default");
+        assert!(!c.permissions.allow_all, "allow_all is not");
         assert_eq!(c.permission_mode(id, None), Ask);
         assert_eq!(c.permission_mode(id, Some(Auto)), Auto);
         assert_eq!(c.permission_mode(id, Some(Ask)), Ask);
@@ -1019,30 +1027,58 @@ mod tests {
         assert!(format!("{e:#}").contains("allow_auto"), "{e:#}");
     }
 
-    /// SPEC 0.129: `allow_all` is a mode like `auto`: hqc may ask for it, `mode` may name it,
-    /// and `allow_auto = false` refuses it the same way.
+    /// SPEC 0.129: `allow_all` has a setting of its own, off by default and independent of
+    /// `allow_auto`: without it a session hqc asks to run in `allow_all` runs in the highest
+    /// mode the worker allows (`auto` with `allow_auto`, else `ask`), and `mode = "allow_all"`
+    /// is a config error, as `mode = "auto"` is with `allow_auto = false`.
     #[test]
     fn allow_all_permission_mode() {
-        use crate::permissions::PermissionMode::{AllowAll, Ask};
+        use crate::permissions::PermissionMode::{AllowAll, Ask, Auto};
         let base = "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n";
         let id = Uuid::nil();
         let c = Config::parse(base).unwrap();
-        assert_eq!(c.permission_mode(id, Some(AllowAll)), AllowAll);
-
-        let c = Config::parse(&format!("{base}[permissions]\nmode = \"allow_all\"\n")).unwrap();
-        assert_eq!(c.permissions.mode, AllowAll);
-        assert_eq!(c.permission_mode(id, None), AllowAll);
-        assert_eq!(c.permission_mode(id, Some(Ask)), Ask);
+        assert_eq!(c.permission_mode(id, Some(AllowAll)), Auto);
 
         let c = Config::parse(&format!("{base}[permissions]\nallow_auto = false\n")).unwrap();
         assert_eq!(c.permission_mode(id, Some(AllowAll)), Ask);
 
+        let c = Config::parse(&format!("{base}[permissions]\nallow_all = true\n")).unwrap();
+        assert!(c.permissions.allow_all);
+        assert_eq!(c.permission_mode(id, Some(AllowAll)), AllowAll);
+        assert_eq!(c.permission_mode(id, Some(Auto)), Auto);
+        assert_eq!(c.permission_mode(id, None), Ask);
+
+        let c = Config::parse(&format!(
+            "{base}[permissions]\nallow_all = true\nallow_auto = false\n"
+        ))
+        .unwrap();
+        assert_eq!(c.permission_mode(id, Some(AllowAll)), AllowAll);
+        assert_eq!(c.permission_mode(id, Some(Auto)), Ask);
+
+        let c = Config::parse(&format!(
+            "{base}[permissions]\nmode = \"allow_all\"\nallow_all = true\nallow_auto = false\n"
+        ))
+        .unwrap();
+        assert_eq!(c.permissions.mode, AllowAll);
+        assert_eq!(c.permission_mode(id, None), AllowAll);
+        assert_eq!(c.permission_mode(id, Some(Ask)), Ask);
+
+        for bad in [
+            "mode = \"allow_all\"\n",
+            "mode = \"allow_all\"\nallow_all = false\n",
+            "mode = \"allow_all\"\nallow_auto = true\n",
+        ] {
+            let e = Config::parse(&format!("{base}[permissions]\n{bad}")).unwrap_err();
+            assert!(
+                format!("{e:#}").contains("allow_all = true"),
+                "{bad}: {e:#}"
+            );
+        }
         let e = Config::parse(&format!(
-            "{base}[permissions]\nmode = \"allow_all\"\nallow_auto = false\n"
+            "{base}[permissions]\nmode = \"auto\"\nallow_all = true\nallow_auto = false\n"
         ))
         .unwrap_err();
-        assert!(format!("{e:#}").contains("allow_auto"), "{e:#}");
-        assert!(format!("{e:#}").contains("allow_all"), "{e:#}");
+        assert!(format!("{e:#}").contains("allow_auto = false"), "{e:#}");
     }
 
     #[test]

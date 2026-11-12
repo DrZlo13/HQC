@@ -479,8 +479,8 @@ impl ClaudeCodeAdapter {
     /// - `--thinking-display summarized`, as the VS Code extension passes it: without it the
     ///   thinking blocks of newer models (opus 5.5 on 2.1.312) come with empty text;
     /// - `--setting-sources user,local` and `--permission-mode` (the ask mode, `auto` or
-    ///   `bypassPermissions`, T38; with `allow_auto` and without `restricted` also
-    ///   `--allow-dangerously-skip-permissions`, so that a switch to `allow_all` takes): a
+    ///   `bypassPermissions`, T38; with `[permissions] allow_all` and without `restricted`
+    ///   also `--allow-dangerously-skip-permissions`, so that a switch to `allow_all` takes): a
     ///   repository's own `.claude/settings.json` (hooks, `defaultMode`) is not applied;
     ///   `local` stays for the rules `always` writes; `--setting-sources user,project,local`
     ///   when the environment has `project_settings` (the owner trusts every repository in
@@ -564,8 +564,9 @@ impl ClaudeCodeAdapter {
             },
         ]);
         // Lets a running process be switched to `bypassPermissions` (the CLI refuses the switch
-        // otherwise); `--restricted` refuses the flag (CLI 2.1.312).
-        if spec.environment.permissions.allow_auto && !spec.restricted {
+        // otherwise), only where the worker owner allowed `allow_all`; `--restricted` refuses
+        // the flag (CLI 2.1.312).
+        if spec.environment.permissions.allow_all && !spec.restricted {
             args.push("--allow-dangerously-skip-permissions".into());
         }
         if let Some(p) = spec.system_prompt.as_deref().filter(|p| !p.is_empty()) {

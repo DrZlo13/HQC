@@ -88,8 +88,9 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   (T43) `session.start` carries no environment, the worker resolves it from the canonical
   workspace path on every start, and what the hub shows about environments is a display. Nor
   can it run a
-  session in the `auto` permission mode (or since 0.129 `allow_all`) on a worker with
-  `[permissions] allow_auto = false` (since 0.42, T38): the worker runs `ask` and reports it.
+  session in the `auto` permission mode on a worker with `[permissions] allow_auto = false`
+  (since 0.42, T38), or in `allow_all` on a worker without `[permissions] allow_all = true`
+  (since 0.129, off by default): the worker runs the highest mode it allows and reports it.
   Where they are allowed, a hub that switches a session to one gains nothing it did not have
   (it can answer `once` itself); the worker's `deny` stays in force in every mode. The same holds for hqc's allow rules of a folder
   (since 0.52, T48): standing answers the worker applies after its `deny`, never over it. In an
@@ -880,8 +881,9 @@ MCP calls (worker → hub → worker):
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto` | `allow_all` (since 0.129),
   the session's `permission_mode` (§3); absent — the worker's `[permissions] mode`; the worker
-  runs `auto` and `allow_all` only with `allow_auto` (§14) and reports the mode it runs in
-  `session.state`; `requested_by_owner` (sent only as `true`) — the worker
+  runs `auto` only with `allow_auto` and `allow_all` only with `allow_all` (§14), otherwise the
+  highest mode it allows, and reports the mode it runs in `session.state`;
+  `requested_by_owner` (sent only as `true`) — the worker
   owner added the session's workspace: no confirmation of a new folder is needed (§10.2); the worker calls the adapter's `start` or `resume` (§8);
   on `new` the Claude Code adapter still checks for a jsonl with this uuid and, if there is one,
   continues it with `--resume` (§8.1); `owner_is_worker_owner` is needed by the worker for `allow_foreign_sessions`, the choice
@@ -928,12 +930,12 @@ MCP calls (worker → hub → worker):
   session's own mode (`ask` < `auto` < `allow_all`): `ask` holds a session in `auto` or
   `allow_all` down to `ask`, `auto` holds one in `allow_all` down to `auto`. It only ever
   lowers: a session in `ask` stays in `ask` under an `auto` cap, `allow_all` caps nothing, and
-  the worker's own rules (`allow_auto`, `deny`) are untouched. Before the runtime gets a capped
-  input, a running process is switched to the turn's mode unless the runtime confirmed it
-  already or runs below it with nothing asked of it (it lowered itself, as `plan` does; since
-  0.129), and the input waits for the runtime's confirmation (Claude Code: the answer to
-  `set_permission_mode`, §8.1); with no confirmation in 10 s, or a runtime that cannot switch,
-  the process is restarted in that mode (resuming its transcript). A process started for a
+  the worker's own rules (`allow_auto`, `allow_all`, `deny`) are untouched. Before the runtime
+  gets a capped input, a running process is switched to the turn's mode unless the runtime
+  confirmed it already or runs below it with nothing asked of it (it lowered itself, as `plan`
+  does; since 0.129), and the input waits for the runtime's confirmation (Claude Code: the
+  answer to `set_permission_mode`, §8.1); with no confirmation in 10 s, or a runtime that cannot
+  switch, the process is restarted in that mode (resuming its transcript). A process started for a
   capped input starts in its turn's mode. When the turn ends (a final answer, `stop`), the
 
   the worker writes the header (§7.1); `text` is the message's text without it. Since 0.134
@@ -970,10 +972,11 @@ MCP calls (worker → hub → worker):
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
 - `session.kill` {session_id} — terminate the agent process.
 - `session.permission_mode` {session_id, permission_mode} → `ack` (since 0.42, T38) — the user
-  switched the session's mode (§6). The worker decides as for `session.start` (`auto` and
-  `allow_all` only with `allow_auto`); a running agent switches at once, also mid-turn (Claude Code: §8.1), a stopped
-  one starts in the mode; a session the worker has not started is only acked (the next
-  `session.start` carries the mode). The hub sends it when the worker is connected and
+  switched the session's mode (§6). The worker decides as for `session.start` (`auto` only
+  with `allow_auto`, `allow_all` only with `allow_all`); a running agent switches at once,
+  also mid-turn (Claude Code: §8.1), a stopped one starts in the mode; a session the worker
+  has not started is only acked (the next `session.start` carries the mode). The hub sends it
+  when the worker is connected and
   otherwise relies on `session.start`; a `session.start` for a running agent whose mode differs
   switches it too.
 - `session.model` {session_id, model | null} → `ack` (since 0.74) — the user changed the
@@ -1975,7 +1978,8 @@ null. The client shows the mode in the chat header: `effective_permission_mode`,
 `permission_mode`; "Auto" and (since 0.129) "Allow all" as a marked badge, "Ask" as plain
 text, "<runs> (<asked> asked)" ("Ask (Auto asked)", "Auto (Allow all asked)") while the session
 asked for a higher mode than its worker runs (not restarted yet, a process that cannot switch,
-or `allow_auto = false`), nothing while both are absent; since 0.43 (T39), while
+`allow_auto = false`, or Allow all on a worker without `allow_all = true`), nothing while both
+are absent; since 0.43 (T39), while
 `permission_capped_by` is set, "<runs> (asked by <address>) · <own> after this turn" ("Ask
 (asked by <address>) · Auto after this turn", "Auto (asked by <address>) · Allow all after
 this turn"; since 0.129 "the session's own mode" for <own> when `permission_mode` is absent,
@@ -3134,10 +3138,12 @@ bypassPermissions` in `system/init`, and a Bash command the `default` mode denie
 bypassPermissions because the session was not launched with --dangerously-skip-permissions",
 and with that flag `success`, then `system/status` with `permissionMode: bypassPermissions`,
 and the command runs. So
-with `allow_auto` (§14) the worker passes that flag to every process it starts, except a
+with `allow_all` (§14) the worker passes that flag to every process it starts, except a
 `--restricted` one, which the CLI refuses with it ("bypassPermissions not supported in
-restricted mode"). A process started without the flag (before 0.129, or with `allow_auto =
-false`) keeps its mode on such a switch until its next start, as for any refusal.
+restricted mode"); without it the worker passes no such flag and never asks the CLI for
+`bypassPermissions`. A process started without the flag (before 0.129, or before the worker
+owner set `allow_all = true`) keeps its mode on such a switch until its next start, as for any
+refusal.
 
 Switching a running process (since 0.42, T38): the adapter writes `{"type": "control_request",
 "request_id": "hqc-mode-<uuid>", "request": {"subtype": "set_permission_mode", "mode": "auto" |
@@ -3855,8 +3861,9 @@ the worker's `deny` stops one; `AskUserQuestion` still reaches the user as `clar
 A session in `allow_all` (since 0.129) produces one only for a call an `ask` rule of Claude
 Code's settings files matches and where Claude Code asks in every mode: its own safety checks
 and tools that need a person (§8.1); the rest runs without the classifier, and the worker's
-`deny` still stops a call. Only the worker owner switches a session to `auto` or `allow_all` (§6);
-spawned sessions start in `ask` (§7). This is the worker's mode, unlike `auto_approve`, which
+`deny` still stops a call. Only the worker owner switches a session to `auto` or `allow_all` (§6),
+and the worker runs `allow_all` only with `[permissions] allow_all = true` (§14); spawned
+sessions start in `ask` (§7). This is the worker's mode, unlike `auto_approve`, which
 the hub applies to requests that do reach it. A message cannot raise it (since 0.43, T39;
 §7.1): a turn woken by another agent runs at most in the lowest mode up the chain, so a
 session in `auto` or `allow_all` asks about the tool calls of a turn that a session in `ask`
@@ -4291,24 +4298,33 @@ sessions; since 0.56 an environment can extend it with its own `permissions`, be
 ```toml
 [permissions]
 mode = "ask"     # "ask" | "auto" | "allow_all": sessions that do not ask for a mode
-allow_auto = true  # false: a session that asks for "auto" or "allow_all" runs in "ask"
+allow_auto = true  # false: a session that asks for "auto" runs in "ask"
+allow_all = false  # true: a session may run in "allow_all" (bypassPermissions)
 allow = ["Bash(cargo test:*)", "Read"]   # run without asking
 deny = ["Bash(sudo:*)", "Bash(git push:*)"]  # never run and never ask
 ```
 
 - `mode = "ask"` (default): calls outside both lists are asked about (`approval.request`);
   `mode = "auto"`: `--permission-mode auto`, the CLI decides by itself and never asks (§8.1),
-  the only boundary is `deny`; `mode = "allow_all"` (since 0.129): `--permission-mode
-  bypassPermissions`, the CLI runs every call without the classifier and asks only by the `ask`
-  rules of its settings files (§8.1); for both the worker writes a warning to the log at start.
+  the only boundary is `deny`; `mode = "allow_all"` (since 0.129, only with `allow_all =
+  true`): `--permission-mode bypassPermissions`, the CLI runs every call without the
+  classifier and asks only by the `ask` rules of its settings files (§8.1); for both the
+  worker writes a warning to the log at start.
   Since 0.42 (T38) `mode` is the default of a session that does not ask for a mode: hqc may ask
   for `ask`, `auto` or `allow_all` per session (`session.start.permission_mode`,
   `session.permission_mode`, §5.3);
-- `allow_auto` (default `true`; since 0.42, T38): `false` — the worker runs every session in
-  `ask` whatever hqc asks for, and reports `ask` (§5.4); `mode = "auto"` or `"allow_all"` with
-  `allow_auto = false` is a config error; `true` — since 0.129 the worker also starts every
-  Claude Code process that is not `--restricted` with `--allow-dangerously-skip-permissions`,
-  so that a running session can be switched to `allow_all` (§8.1);
+- `allow_auto` (default `true`; since 0.42, T38): `false` — the worker runs a session that
+  asks for `auto` in `ask` whatever hqc asks for, and reports `ask` (§5.4); `mode = "auto"`
+  with `allow_auto = false` is a config error;
+- `allow_all` (default `false`; since 0.129): `false` — a session hqc asks to run in
+  `allow_all` runs in the highest mode the worker allows, `auto` with `allow_auto`, else `ask`;
+  the worker logs a warning and reports the mode it runs (§5.4); `mode = "allow_all"` without
+  `allow_all = true` is a config error; `true` — the worker also starts every Claude Code
+  process that is not `--restricted` with `--allow-dangerously-skip-permissions`, so that a
+  running session can be switched to `allow_all` (§8.1). A setting of its own, independent of
+  `allow_auto` and off by default, because `bypassPermissions` drops the classifier that `auto`
+  keeps: the hub must not be able to get a worker to run without checks (§2.1), neither a
+  compromised hub nor an owner's session in the wrong hands;
 - `allow` is empty by default;
 - `deny`, if the field (or the block) is absent: `Bash(sudo:*)`, `Bash(ssh:*)`, `Bash(scp:*)`,
   `Bash(rm -rf /*)`, `Bash(curl * | sh)`, `Bash(curl * | bash)`, `Bash(dd:*)`, `Bash(mkfs*)`,
@@ -5022,32 +5038,36 @@ archived, a service, a VS Code-driven session or one whose worker is offline. No
 change, no migration. 0.128 and 0.129 are taken by other pull requests.
 
 ### 0.127 → 0.129 (Allow all, a third permission mode)
-§3, §5.3, §5.4, §6, §7, §7.1, §8.1, §10.1, §14, §17.2 (user decision, 2026-11-12: "a third mode,
-Allow all", next to Ask and Auto, per session; Auto stays): `allow_all` is Claude Code's
+§2.1, §3, §5.3, §5.4, §6, §7, §7.1, §8.1, §10.1, §14, §17.2 (user decision, 2026-11-12: "a third
+mode, Allow all", next to Ask and Auto, per session; Auto stays): `allow_all` is Claude Code's
 `bypassPermissions` — no cards and no classifier, the deny rules and the `ask` rules of the
 CLI's settings still apply, and the CLI still asks where it asks in every mode (its safety
 checks, tools that need a person). It is chosen on a new session's "Permissions" chip and in the
 session's "More" menu after its own one-line confirmation, only by the worker owner, and stands
-out in the chat header like Auto. No new knob: `[permissions] allow_auto` gates it as it gates
-`auto`, `mode = "allow_all"` is accepted, and with `allow_auto` the worker starts every process
-that is not `--restricted` with `--allow-dangerously-skip-permissions`, so that a running
-session can be switched to it. T39 generalizes to the order `ask` < `auto` < `allow_all`: a
-chain's cap is the lowest mode of the sender and everything up the chain, a capped turn runs in
-the lower of the cap and the session's own mode (an `auto` cap holds an `allow_all` session down
-to `auto`), a switch during a capped turn reaches the runtime as far as the cap allows, and
-`capped_by` names the first session in the cap's mode for an `auto` cap too; T40 takes the
-lowest cap of the buffered messages in the same order, and an input with an `auto` cap joins no
-running turn; a runtime below the turn's mode with nothing asked of it (`plan`) takes a capped
-input at once. A schedule an agent in `auto` made before 0.129 stores an `auto` cap that names
-no session: its runs name the creator. What a capped turn leaves running (a background subagent
-or command, a wake-up) goes on in the session's own mode after it, as it did for `auto` (a known
-limitation, user decision 2026-11-12, §7.1). Without a mode of its own the header names none
-after a capped turn ("the session's own mode after this turn"). Migration
-`0042_permission_allow_all` widens the checks of `sessions.permission_mode` and
-`effective_permission_mode` and gives `input_caps` the cap's mode (`ask` for the rows before). A
-worker older than 0.129 refuses a `session.start` or `session.permission_mode` with `allow_all`,
-and a `session.input` with `permission_cap: "allow_all"`, as an unreadable frame, so the workers
-go first, then the hub and the client. 0.124–0.128 are taken by other pull requests.
+out in the chat header like Auto. The worker runs it only with a setting of its own,
+`[permissions] allow_all`, off by default and independent of `allow_auto` (review, 2026-11-12:
+`allow_auto` is on by default, and the hub must not get a worker to run without checks, §2.1):
+without it a session hqc asks to run in `allow_all` runs in the highest mode the worker allows
+(`auto` with `allow_auto`, else `ask`, with a warning in the log) and `mode = "allow_all"` is a
+config error; with it the worker starts every process that is not `--restricted` with
+`--allow-dangerously-skip-permissions`, so that a running session can be switched to it. T39
+generalizes to the order `ask` < `auto` < `allow_all`: a chain's cap is the lowest mode of the
+sender and everything up the chain, a capped turn runs in the lower of the cap and the session's
+own mode (an `auto` cap holds an `allow_all` session down to `auto`), a switch during a capped
+turn reaches the runtime as far as the cap allows, and `capped_by` names the first session in
+the cap's mode for an `auto` cap too; T40 takes the lowest cap of the buffered messages in the
+same order, and an input with an `auto` cap joins no running turn; a runtime below the turn's
+mode with nothing asked of it (`plan`) takes a capped input at once. A schedule an agent in
+`auto` made before 0.129 stores an `auto` cap that names no session: its runs name the creator.
+What a capped turn leaves running (a background subagent or command, a wake-up) goes on in the
+session's own mode after it, as it did for `auto` (a known limitation, user decision 2026-11-12,
+§7.1). Without a mode of its own the header names none after a capped turn ("the session's own
+mode after this turn"). Migration `0042_permission_allow_all` widens the checks of
+`sessions.permission_mode` and `effective_permission_mode` and gives `input_caps` the cap's mode
+(`ask` for the rows before). A worker older than 0.129 refuses a `session.start` or
+`session.permission_mode` with `allow_all`, and a `session.input` with `permission_cap:
+"allow_all"`, as an unreadable frame, so the workers go first, then the hub and the client.
+0.128 is taken by another pull request.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

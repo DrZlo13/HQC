@@ -442,6 +442,23 @@ describe('rendering attachments', () => {
     expect(src.artifactLink).toHaveBeenCalledTimes(1);
   });
 
+  it('a file attached again with another kind is shown with it in an open chat', async () => {
+    const metas = [meta('rep', 'file', 'report.txt')];
+    const store = new ArtifactStore(fakeSource(metas) as never);
+    const attached = (kind: Artifact['kind']) =>
+      ev('event.attachment', (e) => (e.payload = { artifact_id: 'rep', kind, name: 'report.txt' }));
+    const first = chatWith([attached('file')], store);
+    await flush();
+    expect(first.el.querySelector('.card-title')!.textContent).toBe('report.txt file · 10 B');
+    // The agent attaches the same file as text: the hub gives the record that kind.
+    metas[0] = meta('rep', 'text', 'report.txt');
+    const again = chatWith([attached('text')], store);
+    await flush();
+    await flush();
+    expect(again.el.querySelector('.card-title')!.textContent).toBe('report.txt text · 10 B');
+    expect([...again.el.querySelectorAll('.card-attachment button')].map((b) => b.textContent)).toEqual(['Open', 'Download']);
+  });
+
   it('a broken image link is renewed once, then the image becomes a card', async () => {
     const src = fakeSource([meta('img', 'image', 'screen.png')]);
     const store = new ArtifactStore(src as never);
@@ -632,6 +649,41 @@ describe('rendering attachments', () => {
     await act(async () => open('notes.txt').click());
     expect(actions.openArtifact).toHaveBeenLastCalledWith('txt');
     expect(viewArtifact).toHaveBeenCalledTimes(4);
+  });
+
+  it('a Markdown file attached as a file opens in the viewer, and only there', async () => {
+    const metas = [
+      meta('pitch', 'file', 'pitch.md'),
+      { ...meta('typed', 'file', 'summary'), mime: 'text/markdown' },
+      meta('big', 'file', 'big.md', 3 * 1024 * 1024),
+      meta('bin', 'file', 'data.bin'),
+    ];
+    const events = [
+      ev('event.user.message', (e) => {
+        e.seq = 1;
+        e.payload = { text: 'Files', artifact_ids: metas.map((m) => m.id) };
+      }),
+    ];
+    const buttons = (el: HTMLElement, name: string) =>
+      [...[...el.querySelectorAll('.card-attachment')].find((c) => c.textContent!.includes(name))!.querySelectorAll('button')].map(
+        (b) => b.textContent,
+      );
+    const viewArtifact = vi.fn();
+    const { el } = chatWith(events, new ArtifactStore(fakeSource(metas) as never), { viewArtifact });
+    await flush();
+    await flush();
+    expect(buttons(el, 'pitch.md')).toEqual(['Open', 'Download']);
+    expect(buttons(el, 'summary')).toEqual(['Open', 'Download']);
+    // Over 2 MB a Markdown file is only downloaded, as a text is.
+    expect(buttons(el, 'big.md')).toEqual(['Download']);
+    expect(buttons(el, 'data.bin')).toEqual(['Download']);
+    await act(async () => el.querySelector<HTMLButtonElement>('.card-attachment button')!.click());
+    expect(viewArtifact).toHaveBeenLastCalledWith({ id: 'pitch', name: 'pitch.md', kind: 'markdown' });
+    // Without the viewer a new tab would only download it.
+    const plain = chatWith(events, new ArtifactStore(fakeSource(metas) as never));
+    await flush();
+    await flush();
+    expect(buttons(plain.el, 'pitch.md')).toEqual(['Download']);
   });
 
   it('without a store an attachment is a card from the event alone', () => {

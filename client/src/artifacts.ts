@@ -32,8 +32,9 @@ export class ArtifactStore {
     private readonly links: LinkCache = new Map(),
   ) {}
 
-  meta(id: string): Promise<Artifact> {
-    let p = this.metas.get(id);
+  /** The artifact's record; `fresh` asks the hub again (it may have taken another kind). */
+  meta(id: string, fresh = false): Promise<Artifact> {
+    let p = fresh ? undefined : this.metas.get(id);
     if (!p) {
       p = this.api.artifact(id);
       this.metas.set(id, p);

@@ -417,8 +417,9 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
  *  like "### Summary", read as the whole message), dimmed in italics like the Thinking line's
  *  start of its text; open, the text as Markdown. */
 function TaskNotification({ text }: { text: string }) {
-  // The feed renders again on every streamed piece; the text is parsed once.
-  const peek = useMemo(() => markdownLine(text), [text]);
+  // The feed renders again on every streamed piece; the text is parsed once. A report runs to
+  // tens of KB, and its first 2000 characters are wider than any window.
+  const peek = useMemo(() => markdownLine(text.slice(0, 2000)), [text]);
   return (
     <details class="line-fold line-system-task_notification">
       <summary>

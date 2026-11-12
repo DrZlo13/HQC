@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.127, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
+Version 0.128, 2026-11-12. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -410,7 +410,8 @@ and the project object carry `favorite_at?` (the row's `created_at`) for the req
 `kind` (file/image/diff/html/text), `mime`, `size`, `sha256`, `name` (the last path component
 without control characters, up to 255 bytes), `storage_key` (= `sha256`: the content on
 disk is shared by all records with the same hash). A record is unique by `(owner_id, sha256,
-name)`: the same file from the same user under the same name is the same record. The hub
+name)`: the same file from the same user under the same name is the same record; since 0.128
+an upload of it that names a `kind` gives the record that kind. The hub
 separately remembers which sessions received the artifact in their input: their workers may
 download it (§5.3, §12). Events refer only to `artifact_id`; download links are issued at render
 time (§12). Unused artifacts are removed by the hub's cleanup (since 0.23, §12); `updated_at` is
@@ -1551,7 +1552,8 @@ the rest is marked "later"):
   `canonical: deny`/`deny_always`, non-empty, up to 16 KiB, otherwise `400`
 - `POST /api/artifacts` (multipart: field `file`, optional `kind`) → `201` and the artifact
   object `{id, kind, name, mime, size, sha256, created_at}` (`api.artifact.json`); the same
-  file under the same name again → `200` and the earlier object; over 100 MB: `413
+  file under the same name again → `200` and the earlier object, with the `kind` given (since
+  0.128); over 100 MB: `413
   too_large`; unknown `kind` or no `file`: `400`; a body the multipart parser refuses: `400`
   with the parser's reason, `multipart: …` (since 0.109). Without the field, `kind` is derived
   from the type and extension (§12). `GET /api/artifacts/{id}` → the artifact object; `GET
@@ -3970,7 +3972,9 @@ Storage: the hub's disk (`HQC_ARTIFACT_DIR`, file `<dir>/<sha256[0..2]>/<sha256>
 later), keyed by sha256, one content per hash. Kinds: file, image, diff, html, text.
 Artifact limit 100 MB (the stream is written to a temporary file while sha256 is computed;
 exceeding it gives `413 too_large` and the file is deleted). Record: §3 Artifact; uploading
-the same file again by the same user under the same name returns the existing record.
+the same file again by the same user under the same name returns the existing record, which
+since 0.128 takes the `kind` the upload names (an agent's second `hqc_attach` of a file with
+another `kind` was shown with the first one); without one the record keeps its kind.
 At start (since 0.63, T53) the hub writes and removes a probe file in the store and, in a
 container (`/.dockerenv`), compares the store's device with the root's: a store it cannot
 write to, or one on the root's device (the container's own layer, gone with the next deploy
@@ -4048,7 +4052,10 @@ image named `.heic` or `.heif` that the browser does not show (one sent before 0
 is, one an agent attached) is decoded the same way when its `<img>` fails with the renewed link
 too (a first failure may be an expired link, and Safari shows HEIC itself), and shown in the feed
 and in the viewer as a JPEG `data:` URL, decoded once while the chat is open. Other text opens
-in a new tab. Agent → user: `hqc_attach` (§7, since 0.34): the worker uploads the file with
+in a new tab. Since 0.128 a Markdown file of kind file has "Open" in a chat too, up to 2 MB;
+elsewhere a file has only "Download" (a new tab would download it). An `attachment` event
+naming another kind than the record the client holds makes it ask for the record again (the
+file was attached again, §3). Agent → user: `hqc_attach` (§7, since 0.34): the worker uploads the file with
 `PUT /worker/artifacts` (§5.4) under the worker token
 for one of its sessions; the owner is the session's owner, dedup and `kind` as for the client's
 upload; the artifact is linked to the session in `artifact_sessions`, which is what the tool
@@ -4838,6 +4845,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
+§3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned
+the existing record with the kind of its first upload and dropped the `kind` it named: an agent
+that attached a `.md` as `file` and then again as `text` got `file` back, and the chat kept it a
+download. Such an upload now gives the record the kind it names; one without `kind` keeps the
+record's kind. §12 Client: in a chat a Markdown attachment of kind file (named `.md` or
+`.markdown`, or typed `text/markdown`, up to 2 MB) has "Open", which shows it in the viewer;
+an `attachment` event naming another kind than the record held for its artifact asks for the
+record again, so an open chat shows the new kind.
 
 ### 0.123 → 0.127 (the background commands of the agent in the live list)
 §4, §8.1: the agent's own background shell commands, a Bash call run in the background or moved

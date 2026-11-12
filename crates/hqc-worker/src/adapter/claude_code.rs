@@ -391,9 +391,46 @@ pub enum Launch {
     New,
     /// `--resume`: the transcript exists.
     Resume,
-    /// `--resume <from> --fork-session --session-id <uuid> --resume-session-at <at>`: a new
-    /// transcript with `from`'s records up to `at`.
-    Fork { from: Uuid, at: Uuid },
+    /// `--resume <fork_copy_path(uuid)> --fork-session --session-id <uuid> --resume-session-at
+    /// <at>`: a new transcript with the source's records up to `at`.
+    Fork { at: Uuid },
+}
+
+/// The copy of a fork's source transcript, cut right after the record the fork starts at
+/// (SPEC §8.1). On `--resume` the CLI reads a transcript from its newest record back to the
+/// last compaction, so a record before a later compaction of the source is not found (`No
+/// message found with message.uuid`); in the copy that record is the newest. The name ends in
+/// `.jsonl`, which makes `--resume` read it as a file; it is outside the Claude Code config
+/// folder, so the mirror does not take it for a session.
+fn fork_copy_path(uuid: &Uuid) -> PathBuf {
+    std::env::temp_dir().join(format!("hqc-fork-{uuid}.jsonl"))
+}
+
+/// The end, past its newline, of the line of record `uuid` in transcript `text`.
+fn line_end(text: &str, uuid: &Uuid) -> Option<usize> {
+    let id = uuid.to_string();
+    let mut end = 0;
+    for line in text.split_inclusive('\n') {
+        end += line.len();
+        if line.contains(&id)
+            && serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .is_some_and(|r| r["uuid"] == id.as_str())
+        {
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// A file removed when this is dropped: the fork copy, which lives as long as the process that
+/// read it.
+struct RemoveOnDrop(PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Where a fork cuts transcript `text`: the record of the first of `at` (event ids, SPEC §3)
@@ -527,9 +564,9 @@ impl ClaudeCodeAdapter {
             Launch::New => args.extend(["--session-id".into(), uuid.to_string()]),
             Launch::Resume => args.extend(["--resume".into(), uuid.to_string()]),
             // A new transcript `uuid` with the source's records up to `at` (SPEC §8.1).
-            Launch::Fork { from, at } => args.extend([
+            Launch::Fork { at } => args.extend([
                 "--resume".into(),
-                from.to_string(),
+                fork_copy_path(uuid).display().to_string(),
                 "--fork-session".into(),
                 "--session-id".into(),
                 uuid.to_string(),
@@ -571,10 +608,16 @@ impl ClaudeCodeAdapter {
     }
 
     /// The fork of `f` for transcript `uuid` (SPEC §8.1): the source transcript in the
-    /// session's own folder, cut at the record of the first of `f.at_event_ids` in it. The
-    /// records the fork copies are registered as the adapter's, so the mirror does not take
-    /// them for another writer's.
-    fn fork(&self, spec: &StartSpec, f: &ForkFrom, uuid: Uuid) -> anyhow::Result<Launch> {
+    /// session's own folder, cut at the record of the first of `f.at_event_ids` in it, and
+    /// written up to that record to [`fork_copy_path`], which the CLI resumes. The records the fork
+    /// copies are registered as the adapter's, so the mirror does not take them for another
+    /// writer's.
+    fn fork(
+        &self,
+        spec: &StartSpec,
+        f: &ForkFrom,
+        uuid: Uuid,
+    ) -> anyhow::Result<(Launch, RemoveOnDrop)> {
         let from: Uuid = f
             .runtime_session_id
             .parse()
@@ -589,10 +632,23 @@ impl ClaudeCodeAdapter {
             .with_context(|| format!("fork source {}", path.display()))?;
         let (at, copied) = fork_point(&text, &f.at_event_ids)
             .with_context(|| format!("the message to fork at is not in {}", path.display()))?;
+        let end = line_end(&text, &at)
+            .with_context(|| format!("the record {at} is not a line of {}", path.display()))?;
+        let copy = RemoveOnDrop(fork_copy_path(&uuid));
+        // The conversation in a shared temporary folder: 0600, as the transcript itself; a
+        // copy left by a worker that died is replaced.
+        let _ = std::fs::remove_file(&copy.0);
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        o.open(&copy.0)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, &text.as_bytes()[..end]))
+            .with_context(|| format!("fork copy {}", copy.0.display()))?;
         for u in copied {
             self.opts.own_records.add(uuid, u);
         }
-        Ok(Launch::Fork { from, at })
+        Ok((Launch::Fork { at }, copy))
     }
 
     async fn spawn(&mut self, spec: &StartSpec, why: &str) -> anyhow::Result<()> {
@@ -608,10 +664,14 @@ impl ClaudeCodeAdapter {
             .map(|d| paths::transcript_path(d, &spec.workdir, &uuid));
         let resume = transcript.as_ref().is_some_and(|p| p.exists());
         // A fork is made once, by the first start: after it the session has its transcript.
-        let launch = match (&spec.fork, resume) {
-            (_, true) => Launch::Resume,
-            (Some(f), false) => self.fork(spec, f, uuid)?,
-            (None, false) => Launch::New,
+        // The fork copy goes with the process, like its ssh-agent below.
+        let (launch, fork_copy) = match (&spec.fork, resume) {
+            (_, true) => (Launch::Resume, None),
+            (Some(f), false) => {
+                let (launch, copy) = self.fork(spec, f, uuid)?;
+                (launch, Some(copy))
+            }
+            (None, false) => (Launch::New, None),
         };
         // T44: an ssh-agent of this process's own; it stops when the process has exited
         // (the monitor drops it), or right here if the spawn fails.
@@ -720,6 +780,7 @@ impl ClaudeCodeAdapter {
             stderr_tail.clone(),
             live,
             ssh_agent,
+            fork_copy,
         ));
         let mut proc = Proc {
             core,
@@ -969,6 +1030,7 @@ async fn monitor(
     stderr_tail: Arc<Mutex<String>>,
     live: Live,
     ssh_agent: Option<crate::ssh::SshAgent>,
+    fork_copy: Option<RemoveOnDrop>,
 ) {
     let mut rd = BufReader::new(stdout);
     let mut buf = Vec::new();
@@ -1009,8 +1071,9 @@ async fn monitor(
     // The process wrote its last record: the mirror may treat what follows as another
     // writer's.
     drop(live);
-    // Its ssh-agent goes with it (T44).
+    // Its ssh-agent goes with it (T44), and the fork copy it resumed (SPEC §8.1).
     drop(ssh_agent);
+    drop(fork_copy);
     let actions = lock(&core).on_exit();
     let _ = io.run(actions).await;
     let _ = gate.wait_for(|started| *started).await;

@@ -2739,9 +2739,11 @@ fn a_fork_cuts_at_the_first_event_found() {
     assert_eq!(super::fork_point(&text, &[missing]), None);
 }
 
-/// SPEC §8.1: a session that forks starts with `--resume <source> --fork-session --session-id
-/// <its own> --resume-session-at <record>`, the copied records are its own; once its
-/// transcript is there it resumes it.
+/// SPEC §8.1: a session that forks starts with `--resume <copy> --fork-session --session-id
+/// <its own> --resume-session-at <record>`, the copy being the source cut right after the
+/// record (the CLI resumes a transcript from its newest record back to the last compaction,
+/// so a record before a later compaction would not be found) and removed with the process;
+/// the copied records are its own; once its transcript is there it resumes it.
 #[tokio::test]
 async fn a_fork_starts_from_the_source_transcript() {
     let (text, ids) = two_turns();
@@ -2771,11 +2773,12 @@ async fn a_fork_starts_from_the_source_transcript() {
     a.start(&s).await.unwrap();
     let args = claude.commands()[0].args.clone();
     let at = args.iter().position(|a| a == "--resume").unwrap();
+    let copy = std::path::PathBuf::from(&args[at + 1]);
     assert_eq!(
         args[at..at + 7],
         [
             "--resume".to_string(),
-            source.to_string(),
+            super::fork_copy_path(&runtime).display().to_string(),
             "--fork-session".into(),
             "--session-id".into(),
             runtime.to_string(),
@@ -2783,9 +2786,19 @@ async fn a_fork_starts_from_the_source_transcript() {
             ids[1].to_string(),
         ]
     );
+    // The copy is the source up to and including the record's line, nothing after it.
+    let cut: String = text.split_inclusive('\n').take(3).collect();
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), cut);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&copy).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    }
     assert!(own.is_own(runtime, ids[0]) && own.is_own(runtime, ids[1]));
     assert!(!own.is_own(runtime, ids[3]));
     a.kill().await.unwrap();
+    assert!(!copy.exists(), "the copy outlived the process");
 
     // The fork made the session's transcript: the next start resumes it.
     let to = super::paths::transcript_path(config.path(), work.path(), &runtime);

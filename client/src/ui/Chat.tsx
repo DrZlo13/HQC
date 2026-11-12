@@ -800,7 +800,7 @@ const MODE_MARKS: Record<PermissionMode, { cls: string; title: string }> = {
   auto: { cls: 'perm-auto', title: "Claude Code decides tool calls itself; only the worker's deny list stops one" },
   allow_all: {
     cls: 'perm-allow-all',
-    title: "Claude Code runs every tool call without asking, with no classifier either; only the worker's deny list and the ask rules of Claude Code's settings limit it",
+    title: "Claude Code runs every tool call without asking, with no classifier either; only the worker's deny list, the ask rules of Claude Code's settings and its own safety checks limit it",
   },
 };
 
@@ -809,28 +809,28 @@ const SWITCH_TITLES: Record<PermissionMode, string> = {
   ask: "Ask before tool calls outside the worker's rules",
   auto: "Claude Code decides tool calls itself; the worker's deny list is the only limit",
   allow_all:
-    "Claude Code runs every tool call without asking, with no classifier either; the worker's deny list and the ask rules of Claude Code's settings are the only limits",
+    "Claude Code runs every tool call without asking, with no classifier either; the worker's deny list, the ask rules of Claude Code's settings and its own safety checks are the only limits",
 };
 
 /** The session's permission mode (T38): what the worker reports the agent runs in, else
  *  what hqc asked for. "Auto" and "Allow all" stand out: nothing but the worker's deny list
- *  (and in Allow all the ask rules of Claude Code's settings) stops a call. A turn capped by
- *  a message from a session in a lower mode (T39) shows both: the cap's mode for this turn,
- *  named by that session, and the session's own mode after it. */
+ *  (and in Allow all the ask rules of Claude Code's settings and its own safety checks) stops
+ *  a call. A turn capped by a message from a session in a lower mode (T39) shows both: the
+ *  cap's mode for this turn, named by that session, and the session's own mode after it. */
 export function PermissionMark({ info }: { info: SessionInfo }) {
   const runs = info.effective_permission_mode;
   const asked = info.permission_mode;
   const by = info.permission_capped_by;
   if (by) {
     const now = runs ?? 'ask';
-    // A cap only lowers: under an Auto cap the session's own mode is Allow all.
-    const own = asked ?? (now === 'auto' ? 'allow_all' : 'auto');
+    // Without a mode of its own the session runs the worker's default, which is not known here.
+    const own = asked ? MODE_LABELS[asked] : "the session's own mode";
     return (
       <span
         class={`${MODE_MARKS[now].cls} perm-capped`}
-        title={`This turn runs in ${MODE_LABELS[now]}: it was started by a message along a chain with ${by}, which runs in ${MODE_LABELS[now]}, and a message cannot raise permissions. The session's own mode, ${MODE_LABELS[own]}, comes back when the turn ends.`}
+        title={`This turn runs in ${MODE_LABELS[now]}: it was started by a message along a chain with ${by}, which runs in ${MODE_LABELS[now]}, and a message cannot raise permissions. ${asked ? `The session's own mode, ${MODE_LABELS[asked]},` : "The session's own mode"} comes back when the turn ends.`}
       >
-        {MODE_LABELS[now]} (asked by {by})<span class="perm-next"> · {MODE_LABELS[own]} after this turn</span>
+        {MODE_LABELS[now]} (asked by {by})<span class="perm-next"> · {own} after this turn</span>
       </span>
     );
   }

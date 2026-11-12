@@ -314,6 +314,12 @@ describe('permission mode', () => {
     }));
     await mount(app);
     expect(mark()).toEqual({ auto: undefined, ask: 'Ask (asked by personal/a) · Allow all after this turn' });
+    render(null, root);
+
+    // With no mode of its own it runs the worker's default, which the client does not know.
+    ({ app } = setup('running', { effective_permission_mode: 'ask', permission_capped_by: 'personal/a' }));
+    await mount(app);
+    expect(mark()).toEqual({ auto: undefined, ask: "Ask (asked by personal/a) · the session's own mode after this turn" });
   });
 
   it('switches to Allow all after its own one-line confirmation', async () => {

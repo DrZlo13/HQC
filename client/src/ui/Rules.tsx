@@ -307,7 +307,7 @@ export function RulesScreen({
                   ? 'This folder runs in Ask: a permission card appears in the session. (In Auto, the classifier would decide.)'
                   : mode === 'auto'
                     ? 'This folder runs in Auto: the classifier decides. (In Ask, a permission card would appear.)'
-                    : 'This folder runs in Allow all: it runs without asking, except for the ask rules here. (In Ask, a permission card would appear.)'}
+                    : 'This folder runs in Allow all: it runs without asking, except for the ask rules here and where Claude Code asks in every mode (its safety checks, tools that need a person). (In Ask, a permission card would appear.)'}
               </span>
             </div>
             {asks.length > 0 && <ul class="rule-list">{asks.map(rowView)}</ul>}
@@ -336,7 +336,7 @@ function CheckView({
       ? 'A permission card will appear.'
       : mode === 'auto'
         ? 'In Auto, the classifier decides.'
-        : 'In Allow all, it runs without asking unless an ask rule matches.';
+        : 'In Allow all, it runs without asking unless an ask rule matches or Claude Code asks for it in every mode (its safety checks, tools that need a person).';
   let label = '—';
   let kind = 'none';
   let body = <>Type a command to see what happens.</>;

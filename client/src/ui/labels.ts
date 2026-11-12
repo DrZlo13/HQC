@@ -32,7 +32,7 @@ export const AUTO_CONFIRM =
 
 /** The one line asked before a session goes to Allow all (SPEC 0.129), as for Auto. */
 export const ALLOW_ALL_CONFIRM =
-  "Switch to Allow all? Claude Code then runs every tool call without asking, with no classifier either; the worker's deny list and the ask rules of Claude Code's settings are the only limits.";
+  "Switch to Allow all? Claude Code then runs every tool call without asking, with no classifier either; the worker's deny list, the ask rules of Claude Code's settings and its own safety checks are the only limits.";
 
 /** A permission mode's name in the UI (T38). */
 export const MODE_LABELS: Record<PermissionMode, string> = { ask: 'Ask', auto: 'Auto', allow_all: 'Allow all' };

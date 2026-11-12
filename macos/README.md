@@ -23,10 +23,21 @@ Settings… (⌘,) holds:
 - **Servers**: the hubs, by name and address (`https://` is added when no scheme is typed). Each
   server is a tab; the tab bar appears only when there are two or more. With no server the app
   opens Settings at launch.
-- **New session hotkey**: a global shortcut, empty by default. Click the button, then press a key
-  with at least one of ⌘ ⌃ ⌥; Esc cancels, Delete clears it. The hotkey brings the window
-  forward, also when it was closed, and opens a new session in the current project of the
-  active tab. It needs no Accessibility permission.
+- **Shortcuts**: the app's own shortcuts, working while the app is active. They act on the
+  active tab's page through the client's own controls; each is also an item in the File or Go
+  menu. To change one, click its button, then press a key with at least one of ⌘ ⌃ ⌥; Esc
+  cancels, Delete clears it. A shortcut recorded for one action is taken off any other action
+  that had it.
 
-Closing the window hides it, so the pages keep their state and the hotkey still works; a click
-on the Dock icon shows it again, ⌘Q quits.
+  | action | default | menu | what it does |
+  |---|---|---|---|
+  | New Session | ⌘N | File | a new session in the current project |
+  | Archive Session | ⌃⌘A | File | archives the open session, as its row's menu does (with Undo) |
+  | Previous Session / Next Session | ⌥⌘↑ / ⌥⌘↓ | Go | the row above or below in the session column |
+  | Previous Project / Next Project | ⌃⌘↑ / ⌃⌘↓ | Go | the project above or below on the project bar |
+
+  Where the session column is not shown (a narrow window, the search page) the session
+  shortcuts other than New Session do nothing.
+
+Closing the window hides it, so the pages keep their state; a click on the Dock icon shows it
+again, ⌘Q quits.

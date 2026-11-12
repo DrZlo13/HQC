@@ -13,6 +13,7 @@ enum MenuBuilder {
         mainMenu.addItem(fileMenuItem())
         mainMenu.addItem(editMenuItem())
         mainMenu.addItem(viewMenuItem())
+        mainMenu.addItem(goMenuItem())
 
         let windowItem = windowMenuItem()
         mainMenu.addItem(windowItem)
@@ -26,16 +27,39 @@ enum MenuBuilder {
 
     // MARK: - File menu
 
-    // File ▸ New Session; NewSessionShortcut keeps its key equivalent in step with Settings.
+    // File ▸ New Session, Archive Session.
     private static func fileMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "File")
-        let newSession = NSMenuItem(title: "New Session",
-                                    action: #selector(AppDelegate.newSessionFromMenu(_:)),
-                                    keyEquivalent: "")
-        menu.addItem(newSession)
-        NewSessionShortcut.shared.menuItem = newSession
+        menu.addItem(actionItem(.newSession))
+        menu.addItem(actionItem(.archiveSession))
         item.submenu = menu
+        return item
+    }
+
+    // MARK: - Go menu
+
+    // Go ▸ up and down the session column and the project rail.
+    private static func goMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Go", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Go")
+        menu.addItem(actionItem(.previousSession))
+        menu.addItem(actionItem(.nextSession))
+        menu.addItem(.separator())
+        menu.addItem(actionItem(.previousProject))
+        menu.addItem(actionItem(.nextProject))
+        item.submenu = menu
+        return item
+    }
+
+    // A shortcut action's item: routed to AppDelegate.performShortcutAction(_:) through the
+    // responder chain; ShortcutMonitor keeps its key equivalent in step with Settings.
+    private static func actionItem(_ action: ShortcutAction) -> NSMenuItem {
+        let item = NSMenuItem(title: action.title,
+                              action: #selector(AppDelegate.performShortcutAction(_:)),
+                              keyEquivalent: "")
+        item.representedObject = action.rawValue
+        ShortcutMonitor.shared.menuItems[action] = item
         return item
     }
 

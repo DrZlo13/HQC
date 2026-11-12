@@ -21,11 +21,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.windowController = windowController
         windowController.showWindow(nil)
 
-        // The new-session shortcut inside the app (⌘N unless the user records another one).
-        NewSessionShortcut.shared.onPress = { [weak self] in
-            self?.newSession()
+        // The shortcuts inside the app (their defaults until the user records others).
+        ShortcutMonitor.shared.onPress = { [weak self] action in
+            self?.perform(action)
         }
-        NewSessionShortcut.shared.start()
+        ShortcutMonitor.shared.start()
 
         // With no server yet, open Settings so the user can add one.
         if store.servers.isEmpty {
@@ -35,19 +35,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // Shows the window (also when it was closed) and starts a new session in the active tab.
-    private func newSession() {
+    // Shows the window (also when it was closed) and runs a shortcut action in the active tab.
+    private func perform(_ action: ShortcutAction) {
         if let window = windowController?.window, window.isMiniaturized {
             window.deminiaturize(nil)
         }
         windowController?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-        mainViewController?.newSession()
+        mainViewController?.perform(action)
     }
 
-    // File ▸ New Session.
-    @objc func newSessionFromMenu(_ sender: Any?) {
-        newSession()
+    // The File and Go items of the shortcut actions; the action is the item's represented object.
+    @objc func performShortcutAction(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let action = ShortcutAction(rawValue: raw) else { return }
+        perform(action)
     }
 
     // App menu ▸ Settings… (⌘,). Lives here, at the end of the responder chain, so it works

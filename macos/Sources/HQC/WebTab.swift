@@ -11,9 +11,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
     // Guards against reloading the server URL on every tab switch.
     private var hasLoaded = false
 
-    // Set when a new session was asked for while the page was still loading; the click
-    // then runs once the load finishes.
-    private var pendingNewSession = false
+    // A shortcut action asked for while the page was still loading; its script then runs
+    // once the load finishes.
+    private var pendingAction: ShortcutAction?
 
     // Fired (on the main thread) whenever the document title changes.
     var onTitleChanged: (() -> Void)?
@@ -26,32 +26,6 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         let t = webView.title
         return (t?.isEmpty == false) ? t : nil
     }
-
-    // Clicks the client's own "New session" button as soon as it is there and enabled (it is
-    // disabled until the client has loaded the user), checking every 100 ms for up to 5 s.
-    // A narrow window shows no session column, so the button is absent: the script then slides
-    // the list out ("Sessions" in the chat header) or, where there is no such toggle, follows the
-    // page's "Back to sessions" link (the phone layout's chat, Project settings), each at most
-    // once, and waits for the list's button. Resolves to whether it clicked.
-    private static let newSessionScript = """
-        return await new Promise((resolve) => {
-          const started = Date.now();
-          let slidOut = false, wentBack = false;
-          const check = () => {
-            const b = document.querySelector('button.btn-new-session');
-            if (b && !b.disabled) { b.click(); resolve(true); return; }
-            if (!b) {
-              const toggle = document.querySelector('button.btn-sessions');
-              const back = document.querySelector('a[aria-label="Back to sessions"]:not(.requests-screen *)');
-              if (toggle && !slidOut) { toggle.click(); slidOut = true; }
-              else if (!toggle && back && !wentBack) { back.click(); wentBack = true; }
-            }
-            if (Date.now() - started >= 5000) { resolve(false); }
-            else { setTimeout(check, 100); }
-          };
-          check();
-        });
-        """
 
     init(server: Server) {
         self.server = server
@@ -107,18 +81,18 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView.pageZoom = factor
     }
 
-    // Opens a new session through the client's own button; while the page is still
-    // loading, once after the load finishes.
-    func newSession() {
+    // Runs a shortcut action's script in the page; while the page is still loading, once
+    // after the load finishes.
+    func perform(_ action: ShortcutAction) {
         if webView.isLoading {
-            pendingNewSession = true
+            pendingAction = action
         } else {
-            runNewSessionScript()
+            run(action)
         }
     }
 
-    private func runNewSessionScript() {
-        webView.callAsyncJavaScript(Self.newSessionScript, arguments: [:], in: nil, in: .page,
+    private func run(_ action: ShortcutAction) {
+        webView.callAsyncJavaScript(action.script, arguments: [:], in: nil, in: .page,
                                     completionHandler: nil)
     }
 
@@ -250,9 +224,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if pendingNewSession {
-            pendingNewSession = false
-            runNewSessionScript()
+        if let action = pendingAction {
+            pendingAction = nil
+            run(action)
         }
     }
 

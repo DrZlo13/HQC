@@ -1,7 +1,7 @@
 import AppKit
 
 // Settings, shown as a sheet on the main window: the server list (a table with Name/Address
-// columns plus add/remove/edit) and the new-session hotkey.
+// columns plus add/remove/edit) and the app's shortcuts.
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
 
     private let store: ServerStore
@@ -9,7 +9,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
     private let removeButton = NSButton()
     private let editButton = NSButton()
-    private let recorder = ShortcutRecorder()
+    private let recorders = ShortcutAction.allCases.map { ShortcutRecorder(action: $0) }
 
     // Private pasteboard type used only for intra-table drag-to-reorder of servers.
     private let serverRowType = NSPasteboard.PasteboardType("io.github.drzlo13.hqc.settings.server-row")
@@ -18,14 +18,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         self.store = store
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
             // Not closable: it is a sheet, closed by Done; ⌘W (performClose:) must not close it.
             styleMask: [.titled, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Settings"
-        window.contentMinSize = NSSize(width: 480, height: 320)
+        window.contentMinSize = NSSize(width: 480, height: 520)
 
         super.init(window: window)
 
@@ -93,12 +93,17 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         buttonStack.spacing = 8
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // The global hotkey that brings the window forward and opens a new session.
-        let hotkeyLabel = NSTextField(labelWithString: "New session hotkey")
-        let hotkeyStack = NSStackView(views: [hotkeyLabel, recorder])
-        hotkeyStack.orientation = .horizontal
-        hotkeyStack.spacing = 8
-        hotkeyStack.translatesAutoresizingMaskIntoConstraints = false
+        // The shortcuts inside the app: one row per action, its name and its recorder.
+        let shortcutsLabel = NSTextField(labelWithString: "Shortcuts")
+        shortcutsLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        shortcutsLabel.translatesAutoresizingMaskIntoConstraints = false
+        let shortcutsGrid = NSGridView(views: zip(ShortcutAction.allCases, recorders).map { action, recorder in
+            [NSTextField(labelWithString: action.title), recorder]
+        })
+        shortcutsGrid.rowSpacing = 6
+        shortcutsGrid.columnSpacing = 12
+        shortcutsGrid.rowAlignment = .firstBaseline
+        shortcutsGrid.translatesAutoresizingMaskIntoConstraints = false
 
         // "Done" closes the settings sheet.
         let closeButton = NSButton(title: "Done", target: self, action: #selector(closeSettings))
@@ -108,7 +113,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
 
         contentView.addSubview(scrollView)
         contentView.addSubview(buttonStack)
-        contentView.addSubview(hotkeyStack)
+        contentView.addSubview(shortcutsLabel)
+        contentView.addSubview(shortcutsGrid)
         contentView.addSubview(closeButton)
 
         NSLayoutConstraint.activate([
@@ -120,11 +126,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             buttonStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             buttonStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
 
-            hotkeyStack.topAnchor.constraint(equalTo: buttonStack.bottomAnchor, constant: 20),
-            hotkeyStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            hotkeyStack.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
+            shortcutsLabel.topAnchor.constraint(equalTo: buttonStack.bottomAnchor, constant: 20),
+            shortcutsLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
 
-            closeButton.topAnchor.constraint(equalTo: hotkeyStack.bottomAnchor, constant: 20),
+            shortcutsGrid.topAnchor.constraint(equalTo: shortcutsLabel.bottomAnchor, constant: 8),
+            shortcutsGrid.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            shortcutsGrid.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -16),
+
+            closeButton.topAnchor.constraint(equalTo: shortcutsGrid.bottomAnchor, constant: 20),
             closeButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             closeButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14)
         ])
@@ -268,8 +277,8 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     @objc private func closeSettings() {
-        // A recording left on would keep the hotkey unregistered and the key monitor alive.
-        recorder.stopRecording()
+        // A recording left on would keep the shortcuts paused and its key monitor alive.
+        recorders.forEach { $0.stopRecording() }
         guard let window = window else { return }
         if let sheetParent = window.sheetParent {
             sheetParent.endSheet(window)

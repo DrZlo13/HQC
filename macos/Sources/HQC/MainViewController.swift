@@ -248,14 +248,14 @@ final class MainViewController: NSViewController {
         }
     }
 
-    // MARK: - New session
+    // MARK: - Shortcut actions
 
-    // Clicks the client's "New session" button in the active tab.
-    func newSession() {
+    // Runs a shortcut action in the active tab.
+    func perform(_ action: ShortcutAction) {
         guard let tab = activeTab else { return }
         // The new session's message field takes the focus only inside a focused web view.
         view.window?.makeFirstResponder(tab.webView)
-        tab.newSession()
+        tab.perform(action)
     }
 
     // MARK: - Menu actions (responder chain targets)

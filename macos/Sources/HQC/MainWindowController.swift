@@ -30,8 +30,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         fatalError("init(coder:) is not used")
     }
 
-    // Closing hides the window instead, so the pages keep their state and the hotkey can
-    // bring it back.
+    // Closing hides the window instead, so the pages keep their state; the Dock icon brings it
+    // back, and so does any of the app's shortcuts while the app is still active.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
         return false

@@ -33,7 +33,11 @@
 //! - the same subagents one by one → [`AdapterEvent::LiveSubagents`] when they or a title
 //!   change, and on every `system` `task_progress` of one of them: the title from its
 //!   `task_started`, what it does now (`description`), `total_tokens` and `tool_uses` from its
-//!   latest `task_progress` (2.1.312);
+//!   latest `task_progress` (2.1.312); after them, in the same list, the main agent's
+//!   background shell commands of the latest `background_tasks_changed` list (`task_type:
+//!   local_bash`, not `ambient`, whose `task_started` has come and was not a `Monitor` call's,
+//!   of no subagent that counts), each with its `description` and run time only, when they or
+//!   a `description` change;
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
@@ -171,13 +175,15 @@ struct Written {
     carried: bool,
 }
 
-/// A subagent of [`Core::live`].
+/// A subagent of [`Core::live`], or a command of [`Core::live_commands`].
 #[derive(Debug)]
 struct LiveAgent {
     task_id: String,
     /// `description` of its `task_started`; empty while the CLI's list counts it before that.
+    /// A command's: `description` of its entry in the CLI's list.
     title: String,
     /// Its first `task_started`, or the line that counted it first when that came earlier.
+    /// A command's: its first `task_started`.
     since: Instant,
     /// `description` of its latest `task_progress`: what it does now.
     activity: Option<String>,
@@ -233,6 +239,17 @@ pub struct Core {
     /// The subagents of the count last reported, in the order they started, with what the CLI
     /// said of each ([`AdapterEvent::LiveSubagents`]).
     live: Vec<LiveAgent>,
+    /// The main agent's background shell commands of [`Core::background`], in the order they
+    /// became rows, sent after [`Core::live`] ([`Core::update_live_commands`]). Apart from it:
+    /// they are no subagents and never change the subagent count.
+    live_commands: Vec<LiveAgent>,
+    /// Ids of the `Monitor` `tool_use` blocks of `assistant` lines, the agent's and its
+    /// subagents', until the `task_started` that names one in `tool_use_id`.
+    monitor_calls: HashSet<String>,
+    /// `local_bash` tasks whose `task_started` came, `true` for a Monitor's (2.1.312 lists a
+    /// Monitor's task as `local_bash` without `ambient`, nothing in the list tells it from a
+    /// command), and when the first came, until the task's `task_notification`.
+    bash_tasks: HashMap<String, (bool, Instant)>,
     /// [`Core::live`] got a subagent or a title since it was last reported.
     live_changed: bool,
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
@@ -319,6 +336,9 @@ impl Core {
             subagents: HashSet::new(),
             subagents_reported: 0,
             live: Vec::new(),
+            live_commands: Vec::new(),
+            monitor_calls: HashSet::new(),
+            bash_tasks: HashMap::new(),
             live_changed: false,
             recount: false,
             background: Vec::new(),
@@ -668,6 +688,15 @@ impl Core {
                 self.seen.push(u);
             }
         }
+        // A Monitor's task is listed as a command ([`Core::bash_tasks`]), a subagent's too.
+        if ty == "assistant" {
+            for b in blocks(&v) {
+                if b["type"] == "tool_use" && b["name"] == "Monitor" {
+                    self.monitor_calls
+                        .extend(b["id"].as_str().map(str::to_owned));
+                }
+            }
+        }
         // A held compaction gets the summary from the main agent's synthetic `user` line;
         // another line of the main conversation comes without one. `system` lines and a
         // subagent's lines keep it held.
@@ -734,7 +763,22 @@ impl Core {
                         self.reported.remove(id);
                         self.live_started(id, v["description"].as_str().unwrap_or(""));
                     }
-                    self.count_subagent(v["task_id"].as_str().filter(|_| agent), true)
+                    let mut out =
+                        self.count_subagent(v["task_id"].as_str().filter(|_| agent), true);
+                    if let Some(id) = v["task_id"]
+                        .as_str()
+                        .filter(|_| v["task_type"] == "local_bash")
+                    {
+                        let monitor = v["tool_use_id"]
+                            .as_str()
+                            .is_some_and(|c| self.monitor_calls.remove(c));
+                        self.bash_tasks
+                            .entry(id.to_owned())
+                            .or_insert((monitor, Instant::now()));
+                        // A command's row comes now, with the count, as the list's.
+                        out.extend(self.report_subagents(None));
+                    }
+                    out
                 }
                 Some("task_progress") => self.on_task_progress(&v),
                 // Its end comes before the task's `task_notification` (2.1.312).
@@ -753,6 +797,10 @@ impl Core {
                     self.count_subagent(v["task_id"].as_str().filter(|_| ended), false)
                 }
                 Some("task_notification") => {
+                    // A `local_bash` task that ended is no row any more.
+                    if let Some(id) = v["task_id"].as_str() {
+                        self.bash_tasks.remove(id);
+                    }
                     let mut out = self.on_task_notification(&v);
                     out.extend(self.count_subagent(v["task_id"].as_str(), false));
                     out
@@ -1146,8 +1194,9 @@ impl Core {
     }
 
     /// [`AdapterEvent::LiveSubagents`] when the subagents of [`Core::running_subagents`] or a
-    /// title differ from those last reported. [`Core::live`] keeps exactly them; one the CLI's
-    /// list counts before its `task_started` has no title until that comes.
+    /// title differ from those last reported, or [`Core::live_commands`] changed.
+    /// [`Core::live`] keeps exactly those subagents; one the CLI's list counts before its
+    /// `task_started` has no title until that comes.
     fn report_live(&mut self) -> Option<Action> {
         let ids: HashSet<String> = self
             .running_subagent_ids()
@@ -1166,7 +1215,60 @@ impl Core {
             self.live.push(LiveAgent::new(id, ""));
             changed = true;
         }
+        changed |= self.update_live_commands();
         changed.then(|| self.live_list())
+    }
+
+    /// Brings [`Core::live_commands`] to the main agent's background shell commands of the
+    /// latest `background_tasks_changed` list: `task_type: local_bash`, not `ambient` (no
+    /// activity, the SDK says), its `task_started` come and not a Monitor's
+    /// ([`Core::bash_tasks`]; a task joins the list before its `task_started`, so a Monitor
+    /// never shows), and no subagent of [`Core::parent`] (none, or one that has reported): a
+    /// subagent that counts stands for its commands with its own row. A new one goes last, a
+    /// changed `description` replaces its row's, one that no longer qualifies goes. Whether
+    /// anything changed.
+    fn update_live_commands(&mut self) -> bool {
+        let listed: Vec<(String, String, Instant)> = self
+            .background
+            .iter()
+            .filter(|t| {
+                t["task_type"] == "local_bash" && t["ambient"] != true && self.parent(t).is_none()
+            })
+            .filter_map(|t| {
+                let id = t["task_id"].as_str()?;
+                let (monitor, started) = self.bash_tasks.get(id)?;
+                (!monitor).then(|| {
+                    (
+                        id.to_owned(),
+                        t["description"].as_str().unwrap_or("").to_owned(),
+                        *started,
+                    )
+                })
+            })
+            .collect();
+        let before = self.live_commands.len();
+        self.live_commands
+            .retain(|c| listed.iter().any(|(id, _, _)| *id == c.task_id));
+        let mut changed = self.live_commands.len() != before;
+        for (id, description, started) in listed {
+            let title = text(&description);
+            match self.live_commands.iter_mut().find(|c| c.task_id == id) {
+                Some(c) if c.title == title => {}
+                Some(c) => {
+                    c.title = title;
+                    changed = true;
+                }
+                None => {
+                    // Its run time counts from its `task_started`, also for a command that
+                    // becomes a row only when the subagent that left it reports.
+                    let mut c = LiveAgent::new(&id, &description);
+                    c.since = started;
+                    self.live_commands.push(c);
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// Subagent `id`'s `task_started` with `title` (its `description`): a repeated one keeps
@@ -1203,11 +1305,12 @@ impl Core {
         vec![self.live_list()]
     }
 
-    /// [`Core::live`] as sent: the run time of each subagent counted now.
+    /// [`Core::live`], then [`Core::live_commands`], as sent: the run time of each counted now.
     fn live_list(&self) -> Action {
         Action::Emit(AdapterEvent::LiveSubagents(
             self.live
                 .iter()
+                .chain(&self.live_commands)
                 .map(|a| LiveSubagent {
                     task_id: a.task_id.clone(),
                     description: a.title.clone(),

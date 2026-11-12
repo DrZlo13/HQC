@@ -167,7 +167,8 @@ pub struct ClarifyQuestion {
     pub multi: Option<bool>,
 }
 
-/// One subagent of `subagents.live` (SPEC §4, since 0.101).
+/// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
+/// shell command of the agent, with only `task_id`, `description` and `duration_ms`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSubagent {
     pub task_id: String,
@@ -218,8 +219,9 @@ pub enum EventKind {
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
     AgentDelta { text: String },
-    /// The subagents the agent runs now, the whole list in the order they started; empty:
-    /// none (since SPEC 0.101). Transport only, never stored (SPEC §4, §5.2).
+    /// The subagents the agent runs now, the whole list in the order they started, then (since
+    /// SPEC 0.127) its background shell commands; empty: none (since SPEC 0.101). Transport
+    /// only, never stored (SPEC §4, §5.2).
     #[serde(rename = "subagents.live")]
     SubagentsLive { agents: Vec<LiveSubagent> },
     /// The output tokens per second the agent and its subagents spent over the last 20 s

@@ -4267,6 +4267,199 @@ const TWO_SUBAGENTS: &str = r#"{"type":"system","subtype":"task_started","task_i
 {"type":"system","subtype":"task_notification","task_id":"a55949578b136436b","run_id":"0mw3mr55z-1b9c337c","tool_use_id":"toolu_01Ti9wrYYVp7kqsruhoHEsLf","status":"completed","output_file":"/tmp/tasks/a55949578b136436b.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e08"}
 {"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","run_id":"0mw3mxs60-f1597f03","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"completed","output_file":"/tmp/tasks/a52af2b436ded4cea.output","summary":"4","uuid":"0f6c1d2e-5555-4a55-9d0e-1a2b3c4d5e09"}"#;
 
+/// The agent's own background shell command (`local_bash` without `parent_task_id`, with the
+/// `description` of its Bash call) is a row with that description and no counts from its
+/// `task_started`, which comes after the CLI's list holds it, until the list drops it.
+#[test]
+fn a_background_command_of_the_agent_is_listed() {
+    let lines = [
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass over 1000 boards on cirunner","is_backgrounded":true,"task_type":"local_bash"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+    ];
+    let row = live_row(
+        "b2st7oc3z",
+        "Run the full pass over 1000 boards on cirunner",
+        None,
+    );
+    assert_eq!(
+        live_lists(lines.into_iter()),
+        [vec![], vec![vec![row]], vec![vec![]]]
+    );
+}
+
+/// An `ambient` entry of the CLI's list is no activity (the SDK): no row, though its
+/// `task_started` came, while the agent's command beside it has one.
+#[test]
+fn an_ambient_task_is_not_listed() {
+    let lines = [
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bamb","task_type":"local_bash","description":"Watch the build log","ambient":true},{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"bamb","tool_use_id":"toolu_01Log","description":"Watch the build log","is_backgrounded":true,"task_type":"local_bash"}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass over 1000 boards on cirunner","is_backgrounded":true,"task_type":"local_bash"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+    ];
+    let row = live_row(
+        "b2st7oc3z",
+        "Run the full pass over 1000 boards on cirunner",
+        None,
+    );
+    assert_eq!(
+        live_lists(lines.into_iter()),
+        [vec![], vec![], vec![vec![row]], vec![vec![]]]
+    );
+}
+
+/// A background Bash call and a Monitor of the agent: 2.1.312 lists both as `local_bash`, the
+/// Monitor without `ambient`, each before its `task_started`. One row, the Bash call's, from its
+/// `task_started`; no list carries the Monitor, told apart by the call that started it.
+#[test]
+fn a_monitor_of_the_agent_is_not_listed() {
+    let monitor = json!({"type": "assistant", "message": {"model": "claude-haiku-5-5",
+        "role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01Watch",
+            "name": "Monitor", "input": {"command": "tail -f run.log",
+                "description": "Watch the run's log"}}]},
+        "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    .to_string();
+    let lines: [String; 8] = [
+        bash("toolu_01Run", "make all-boards"),
+        monitor,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#.into(),
+        r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass over 1000 boards on cirunner","is_backgrounded":true,"task_type":"local_bash"}"#.into(),
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"},{"task_id":"bwatch1","task_type":"local_bash","description":"Watch the run's log"}]}"#.into(),
+        r#"{"type":"system","subtype":"task_started","task_id":"bwatch1","tool_use_id":"toolu_01Watch","description":"Watch the run's log","is_backgrounded":true,"task_type":"local_bash"}"#.into(),
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bwatch1","task_type":"local_bash","description":"Watch the run's log"}]}"#.into(),
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#.into(),
+    ];
+    let row = live_row(
+        "b2st7oc3z",
+        "Run the full pass over 1000 boards on cirunner",
+        None,
+    );
+    assert_eq!(
+        live_lists(lines.iter().map(String::as_str)),
+        [
+            vec![],
+            vec![],
+            vec![],
+            vec![vec![row]],
+            vec![],
+            vec![],
+            vec![vec![]],
+            vec![]
+        ]
+    );
+}
+
+/// Subagent `A` with a command `c` of its own, and the agent's own command `m`, each listed
+/// before its `task_started`; `A` hands its report over while `c` still runs, the CLI's list
+/// drops `A`, and the `result` reports the drop.
+const COMMANDS_BESIDE_A_SUBAGENT: [&str; 8] = [
+    r#"{"type":"system","subtype":"task_started","task_id":"A","description":"Build the boards","is_backgrounded":true,"task_type":"local_agent"}"#,
+    r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"A","task_type":"local_agent","description":"Build the boards"},{"task_id":"c","task_type":"local_bash","description":"make boards","parent_task_id":"A"},{"task_id":"m","task_type":"local_bash","description":"Run the full pass"}]}"#,
+    r#"{"type":"system","subtype":"task_started","task_id":"c","owned_by_subagent":true,"tool_use_id":"toolu_01Make","description":"make boards","is_backgrounded":true,"parent_task_id":"A","task_type":"local_bash"}"#,
+    r#"{"type":"system","subtype":"task_started","task_id":"m","tool_use_id":"toolu_01Pass","description":"Run the full pass","is_backgrounded":true,"task_type":"local_bash"}"#,
+    r#"{"type":"system","subtype":"task_updated","task_id":"A","patch":{"status":"completed"}}"#,
+    r#"{"type":"system","subtype":"task_notification","task_id":"A","status":"completed","handback":"send","summary":"reported"}"#,
+    r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"c","task_type":"local_bash","description":"make boards","parent_task_id":"A"},{"task_id":"m","task_type":"local_bash","description":"Run the full pass"}]}"#,
+    r#"{"type":"result","subtype":"success","num_turns":1}"#,
+];
+
+/// [`COMMANDS_BESIDE_A_SUBAGENT`] before the report reaches the list: the command of the subagent
+/// that counts has no row of its own, the subagent's row stands for it; the agent's own command
+/// follows the subagent from its `task_started`. No command changes the subagent count.
+#[test]
+fn a_command_of_a_counted_subagent_is_not_listed() {
+    let a = live_row("A", "Build the boards", None);
+    let m = live_row("m", "Run the full pass", None);
+    assert_eq!(
+        live_lists(COMMANDS_BESIDE_A_SUBAGENT[..7].iter().copied()),
+        [
+            vec![vec![a.clone()]],
+            vec![],
+            vec![],
+            vec![vec![a, m]],
+            vec![],
+            vec![],
+            vec![]
+        ]
+    );
+    let subagents = |lines: &[String]| -> Vec<Vec<String>> {
+        task_counts(lines.iter().map(String::as_str))
+            .into_iter()
+            .map(|e| {
+                e.into_iter()
+                    .filter(|e| e.starts_with("subagents"))
+                    .collect()
+            })
+            .collect()
+    };
+    let with: Vec<String> = COMMANDS_BESIDE_A_SUBAGENT.map(str::to_owned).to_vec();
+    let without: Vec<String> = with
+        .iter()
+        .map(|l| {
+            let mut v: Value = serde_json::from_str(l).unwrap();
+            if let Some(tasks) = v["tasks"].as_array_mut() {
+                tasks.retain(|t| t["task_type"] != "local_bash");
+            }
+            v.to_string()
+        })
+        .collect();
+    assert_eq!(subagents(&with), subagents(&without));
+    assert_eq!(
+        subagents(&with),
+        [
+            vec!["subagents:1".to_string()],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec!["subagents:0".to_string()]
+        ]
+    );
+}
+
+/// [`COMMANDS_BESIDE_A_SUBAGENT`]: once the subagent handed its report over, the command it left
+/// running is the session's background work: it gets a row of its own, after the agent's command
+/// listed before it, when the subagent's row goes.
+#[test]
+fn a_command_a_subagent_left_running_is_listed_after_its_report() {
+    let lists = live_lists(COMMANDS_BESIDE_A_SUBAGENT.into_iter());
+    assert_eq!(
+        lists[7],
+        [vec![
+            live_row("m", "Run the full pass", None),
+            live_row("c", "make boards", None)
+        ]]
+    );
+}
+
+/// [`COMMANDS_BESIDE_A_SUBAGENT`]: the run time of the command the subagent left counts from its
+/// `task_started`, not from the report that made it a row.
+#[test]
+fn a_command_a_subagent_left_running_counts_from_its_start() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    for l in COMMANDS_BESIDE_A_SUBAGENT[..3].iter().copied() {
+        core.on_line(l);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut last = None;
+    for l in COMMANDS_BESIDE_A_SUBAGENT[3..].iter().copied() {
+        for a in core.on_line(l) {
+            if let Action::Emit(AdapterEvent::LiveSubagents(list)) = a {
+                last = Some(list);
+            }
+        }
+    }
+    let c = last
+        .unwrap()
+        .into_iter()
+        .find(|s| s.task_id == "c")
+        .unwrap();
+    assert!(c.duration_ms >= 50, "{}", c.duration_ms);
+}
+
 /// A foreground subagent the CLI sent no end for (an interrupt, a denied call,
 /// `error_max_turns`) stops counting at the `result` of the main turn; a background one goes
 /// on until its `task_notification`.
@@ -4618,11 +4811,11 @@ const REPORTED_SUBAGENT: &str = r#"{"type":"system","subtype":"init"}
 {"type":"system","subtype":"task_started","task_id":"a7b736ac9a06b8816","description":"Run ping command once","is_backgrounded":true,"task_type":"local_agent"}
 {"type":"result","subtype":"success","num_turns":2}
 {"type":"system","subtype":"task_started","task_id":"baydyre83","owned_by_subagent":true,"is_backgrounded":false,"parent_task_id":"a7b736ac9a06b8816","task_type":"local_bash"}
-{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"},{"task_id":"baydyre83","task_type":"local_bash","parent_task_id":"a7b736ac9a06b8816"}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a7b736ac9a06b8816","task_type":"local_agent"},{"task_id":"baydyre83","task_type":"local_bash","description":"Ping localhost 200 times quietly","parent_task_id":"a7b736ac9a06b8816"}]}
 {"type":"system","subtype":"task_updated","task_id":"baydyre83","patch":{"is_backgrounded":true}}
 {"type":"system","subtype":"task_updated","task_id":"a7b736ac9a06b8816","patch":{"status":"completed"}}
 {"type":"system","subtype":"task_notification","task_id":"a7b736ac9a06b8816","status":"completed","handback":"send","summary":"This agent's report was delivered to you as a message from \"a7b736ac9a06b8816\" (its SubagentHandback call). Read it there; it is not repeated here.\n"}
-{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"baydyre83","task_type":"local_bash","parent_task_id":"a7b736ac9a06b8816"}]}
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"baydyre83","task_type":"local_bash","description":"Ping localhost 200 times quietly","parent_task_id":"a7b736ac9a06b8816"}]}
 {"type":"system","subtype":"init"}
 {"type":"result","subtype":"success","num_turns":1}
 {"type":"system","subtype":"init"}
@@ -4664,8 +4857,9 @@ fn a_subagent_that_reports_twice_gives_one_line() {
 }
 
 /// [`REPORTED_SUBAGENT`]: shown with no title from the CLI's list until its `task_started`,
-/// gone once it reported with only its `ping` left, then shown again the same way when the CLI
-/// lists and starts it again, and gone at the end.
+/// gone once it reported with only its `ping` left, which is then the session's background
+/// command with a row of its own until it leaves the list, then shown again the same way when
+/// the CLI lists and starts it again, and gone at the end.
 #[test]
 fn a_subagent_that_reports_twice_is_listed_twice() {
     let id = "a7b736ac9a06b8816";
@@ -4674,7 +4868,12 @@ fn a_subagent_that_reports_twice_is_listed_twice() {
     let mut want: Vec<Vec<Vec<LiveRow>>> = vec![vec![]; 24];
     want[1] = untitled.clone();
     want[2] = titled.clone();
-    want[10] = vec![vec![]];
+    want[10] = vec![vec![live_row(
+        "baydyre83",
+        "Ping localhost 200 times quietly",
+        None,
+    )]];
+    want[16] = vec![vec![]];
     want[17] = untitled;
     want[18] = titled;
     want[22] = vec![vec![]];

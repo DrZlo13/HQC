@@ -123,7 +123,8 @@ export interface UserMessage {
 export interface AgentDelta {
   text: string;
 }
-/** One subagent the agent runs now (SPEC §4, since 0.101). */
+/** One subagent the agent runs now (SPEC §4, since 0.101), or (since 0.127) one background
+ *  shell command of the agent, with only `task_id`, `description` and `duration_ms`. */
 export interface LiveSubagent {
   task_id: string;
   /** Its task. */
@@ -135,7 +136,8 @@ export interface LiveSubagent {
   /** How long it had run when the list was sent. */
   duration_ms: number;
 }
-/** The whole list, in the order they started; empty: none. Transport only. */
+/** The whole list: the subagents in the order they started, then (since 0.127) the agent's
+ *  background commands; empty: none. Transport only. */
 export interface SubagentsLive {
   agents: LiveSubagent[];
 }

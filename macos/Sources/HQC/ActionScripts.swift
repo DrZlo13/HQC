@@ -18,21 +18,26 @@ extension ShortcutAction {
 
     // Clicks the client's own "New session" button as soon as it is there and enabled (it is
     // disabled until the client has loaded the user), checking every 100 ms for up to 5 s.
-    // A narrow window shows no session column, so the button is absent: the script then slides
-    // the list out ("Sessions" in the chat header) or, where there is no such toggle, follows the
-    // page's "Back to sessions" link (the phone layout's chat, Project settings), each at most
-    // once, and waits for the list's button. Resolves to whether it clicked.
+    // Where the button is absent the script first brings the live list back, each step at most
+    // once, and waits for the list's button: it leaves the column's archive mode, slides the list
+    // out in a narrow window ("Sessions" in the chat header), leaves the search page, or follows
+    // the page's "Back to sessions" link (the phone layout's chat, Project settings). Resolves to
+    // whether it clicked.
     private static let newSessionScript = """
         return await new Promise((resolve) => {
           const started = Date.now();
-          let slidOut = false, wentBack = false;
+          let leftArchive = false, slidOut = false, leftSearch = false, wentBack = false;
           const check = () => {
             const b = document.querySelector('button.btn-new-session');
             if (b && !b.disabled) { b.click(); resolve(true); return; }
             if (!b) {
+              const archive = document.querySelector('button.btn-archive-back');
               const toggle = document.querySelector('button.btn-sessions');
+              const search = document.querySelector('a.sp-back');
               const back = document.querySelector('a[aria-label="Back to sessions"]:not(.requests-screen *)');
-              if (toggle && !slidOut) { toggle.click(); slidOut = true; }
+              if (archive && !leftArchive) { archive.click(); leftArchive = true; }
+              else if (toggle && !slidOut) { toggle.click(); slidOut = true; }
+              else if (!toggle && search && !leftSearch) { search.click(); leftSearch = true; }
               else if (!toggle && back && !wentBack) { back.click(); wentBack = true; }
             }
             if (Date.now() - started >= 5000) { resolve(false); }
@@ -44,8 +49,9 @@ extension ShortcutAction {
 
     // Archives the open session (`#/s/<id>`) as its row's menu does, Undo toast included: a
     // right click on the row opens the menu, then its Archive item is clicked once it renders
-    // (up to 1 s). No row in the column (an archived session, archive mode), no menu or no
-    // Archive item: nothing.
+    // (up to 1 s) — only the menu of that row (`is-menu`), never one already open on another.
+    // No row in the column (an archived session, archive mode), no menu or no Archive item:
+    // nothing.
     private static let archiveScript = """
         const m = location.hash.match(/^#\\/s\\/([^/?#]+)/);
         const side = document.querySelector('aside.sidebar');
@@ -57,7 +63,7 @@ extension ShortcutAction {
         return await new Promise((resolve) => {
           const started = Date.now();
           const check = () => {
-            const item = side.querySelector('.ctx-menu button.btn-archive');
+            const item = row.classList.contains('is-menu') && side.querySelector('.ctx-menu button.btn-archive');
             if (item) { item.click(); resolve(true); }
             else if (Date.now() - started >= 1000) { resolve(false); }
             else { setTimeout(check, 50); }

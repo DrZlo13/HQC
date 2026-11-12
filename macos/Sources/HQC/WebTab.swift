@@ -268,6 +268,16 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
         }
     }
 
+    // A load that failed drops the action waiting for it, so a later reload does not run it.
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        pendingAction = nil
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        pendingAction = nil
+    }
+
     // The page's web process crashed or was killed: load it again.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         webView.reload()

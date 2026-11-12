@@ -37,7 +37,8 @@ Settings… (⌘,) holds:
   | Previous Project / Next Project | ⌃⌘↑ / ⌃⌘↓ | Go | the project above or below on the project bar |
 
   Where the session column is not shown (a narrow window, the search page) the session
-  shortcuts other than New Session do nothing.
+  shortcuts other than New Session do nothing; below 900 px the client has no project bar, and
+  the project shortcuts do nothing either.
 
 Closing the window hides it, so the pages keep their state; a click on the Dock icon shows it
 again, ⌘Q quits.

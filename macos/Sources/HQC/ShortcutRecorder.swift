@@ -44,8 +44,11 @@ final class ShortcutRecorder: NSButton {
         // The shortcut itself would run its action instead of being recorded.
         ShortcutMonitor.shared.isPaused = true
         title = "Press a shortcut…"
+        // Only the keys of the Settings window: typing in another sheet (a server's address)
+        // goes on as usual and is never recorded.
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handle(event)
+            guard let self, event.window === self.window else { return event }
+            self.handle(event)
             return nil
         }
     }

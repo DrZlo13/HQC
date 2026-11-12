@@ -668,23 +668,35 @@ async fn run_chain(app: &AppState, r: &ScheduleRow) -> anyhow::Result<Option<Val
         return Ok(None);
     };
     let mut c: Chain = serde_json::from_value(stored.clone())?;
-    if c.permission_cap == Some(PermissionMode::Ask) {
+    let stored_cap = c.permission_cap.unwrap_or(PermissionMode::AllowAll);
+    if stored_cap == PermissionMode::Ask {
         return Ok(Some(stored.clone()));
     }
     let creator = match r.created_by {
         Some(id) => db::session(&app.db, id).await?,
         None => None,
     };
-    let by = match &creator {
-        None => Some(GONE_CREATOR.to_string()),
-        Some(s) if crate::peers::sender_mode(s) == PermissionMode::Ask => {
-            Some(crate::peers::address(app, s).await?)
+    let lower = match &creator {
+        None => Some((PermissionMode::Ask, GONE_CREATOR.to_string())),
+        Some(s) => {
+            let mode = crate::peers::sender_mode(s);
+            if mode < stored_cap {
+                Some((mode, crate::peers::address(app, s).await?))
+            } else {
+                None
+            }
         }
-        Some(_) => None,
     };
-    if let Some(by) = by {
-        c.permission_cap = Some(PermissionMode::Ask);
-        c.capped_by = Some(by);
+    match (lower, &creator) {
+        (Some((mode, by)), _) => {
+            c.permission_cap = Some(mode);
+            c.capped_by = Some(by);
+        }
+        // An `auto` cap stored before 0.129 names no session: its creator stands for it.
+        (None, Some(s)) if stored_cap < PermissionMode::AllowAll && c.capped_by.is_none() => {
+            c.capped_by = Some(crate::peers::address(app, s).await?);
+        }
+        _ => {}
     }
     Ok(Some(serde_json::to_value(c)?))
 }

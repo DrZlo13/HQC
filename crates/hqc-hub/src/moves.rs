@@ -133,9 +133,10 @@ pub async fn tool(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
             "the session's agent is not run by hqc now",
         ));
     }
-    // The chain the turn runs on, not the worker's report, which names a cap only while the
-    // session runs in `auto`. Any `ask` cap refuses, one the session set itself too (the input
-    // after its own move, an answer to its own message, a run of its own schedule).
+    // The chain the turn runs on, not the worker's report, which names a cap only while it
+    // holds the session's own mode down. Any `ask` cap refuses, one the session set itself
+    // too (the input after its own move, an answer to its own message, a run of its own
+    // schedule).
     let turn = crate::peers::call_chain(app, caller, c)
         .await
         .map_err(internal)?;

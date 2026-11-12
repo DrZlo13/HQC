@@ -172,11 +172,8 @@ async fn the_cap_is_the_senders_mode_in_all_four_combinations() {
         );
         let chain = stored_chain(&hub, &input).await;
         assert_eq!(chain["permission_cap"], sender);
-        if sender == "ask" {
-            assert_eq!(chain["capped_by"], format!("personal/s{i}"));
-        } else {
-            assert!(chain.get("capped_by").is_none(), "{chain}");
-        }
+        // Since 0.129 an `auto` cap is named too: it holds an Allow all session down.
+        assert_eq!(chain["capped_by"], format!("personal/s{i}"));
         if (sender, target) == ("ask", "auto") {
             // The worker runs the turn in ask and says why; the header names the sender.
             report(
@@ -273,6 +270,61 @@ async fn the_reported_mode_counts() {
     human_turn(&hub, &mut w, &n).await;
     let input = ask(&mut w, &tn, "personal/b", &b).await;
     assert_eq!(input["payload"]["permission_cap"], "ask");
+    hub.finish().await;
+}
+
+/// SPEC 0.129: Allow all is the highest mode. A chain of Allow all sessions caps nothing;
+/// a session in Auto up the chain holds an Allow all one down to Auto, named by it, and the
+/// target shows it while its worker says the cap holds it down. What the sender asked for
+/// counts as soon as it is lower than what its worker reported.
+#[tokio::test]
+async fn auto_up_the_chain_holds_allow_all_down_to_auto() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (x, tx) = session(&hub, &mut w, "X", "allow_all", None).await;
+    let (a, ta) = session(&hub, &mut w, "A", "auto", None).await;
+    let (b, tb) = session(&hub, &mut w, "B", "allow_all", None).await;
+    let (c, _) = session(&hub, &mut w, "C", "allow_all", None).await;
+    let (d, _) = session(&hub, &mut w, "D", "allow_all", None).await;
+
+    human_turn(&hub, &mut w, &x).await;
+    let input = ask(&mut w, &tx, "personal/c", &c).await;
+    assert_eq!(input["payload"]["permission_cap"], "allow_all", "{input}");
+    assert!(stored_chain(&hub, &input).await.get("capped_by").is_none());
+
+    human_turn(&hub, &mut w, &a).await;
+    let to_b = ask(&mut w, &ta, "personal/b", &b).await;
+    assert_eq!(to_b["payload"]["permission_cap"], "auto", "{to_b}");
+    assert_eq!(stored_chain(&hub, &to_b).await["capped_by"], "personal/a");
+    report(
+        &mut w,
+        &b,
+        json!({"permission_mode": "auto", "capped_input": to_b["payload"]["event_id"]}),
+    )
+    .await;
+    let v = hub.session(&b).await;
+    assert_eq!(v["permission_capped_by"], "personal/a", "{v}");
+    assert_eq!(v["effective_permission_mode"], "auto");
+    assert_eq!(v["permission_mode"], "allow_all");
+    // B, in Allow all, passes A's cap on.
+    let to_c = ask(&mut w, &tb, "personal/c", &c).await;
+    assert_eq!(to_c["payload"]["permission_cap"], "auto", "{to_c}");
+    assert_eq!(stored_chain(&hub, &to_c).await["capped_by"], "personal/a");
+    report(&mut w, &b, json!({"permission_mode": "allow_all"})).await;
+    assert!(hub.session(&b).await.get("permission_capped_by").is_none());
+
+    // X switched to Auto, its worker still reports Allow all: Auto counts at once.
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{x}"),
+            json!({"permission_mode": "auto"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let input = ask(&mut w, &tx, "personal/d", &d).await;
+    assert_eq!(input["payload"]["permission_cap"], "auto", "{input}");
+    assert_eq!(stored_chain(&hub, &input).await["capped_by"], "personal/x");
     hub.finish().await;
 }
 

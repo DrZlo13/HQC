@@ -71,9 +71,12 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
                 let mut frame = input_frame(session_id, p.event_id, &p.payload, p.chain.as_ref());
                 let prefix = crate::peers::take_prefix(app, session_id, p.event_id).await?;
                 frame.peer_prefix = prefix.messages;
-                // Buffered text from a session in Ask never runs in Auto (T40).
-                if prefix.capped_by.is_some() {
-                    frame.permission_cap = Some(PermissionMode::Ask);
+                // Buffered text never runs above the mode of the session that sent it (T40).
+                if let Some(cap) = prefix
+                    .cap
+                    .filter(|c| *c < frame.permission_cap.unwrap_or(PermissionMode::AllowAll))
+                {
+                    frame.permission_cap = Some(cap);
                 }
                 // A fork's agent learns it is a copy with its first input (SPEC §6), unless it is
                 // a slash command, which text in front of it would turn into a plain message; the

@@ -111,7 +111,7 @@ async fn send(w: &mut FakeWorker, token: &str, to: &str, text: &str) {
 
 /// A buffered send from a session in Ask caps the turn of the person's input that carries
 /// it, names that session in the header and caps what the turn sends on; one from a session
-/// in Auto caps nothing.
+/// in Auto caps it to Auto (since 0.129), which holds only an Allow all session down.
 #[tokio::test]
 async fn a_buffered_send_caps_the_input_that_carries_it() {
     let hub = TestHub::start().await;
@@ -127,11 +127,11 @@ async fn a_buffered_send_caps_the_input_that_carries_it() {
     human_input(&hub, &mut w, &a).await;
     human_input(&hub, &mut w, &c).await;
 
-    // From Auto: the person's next input runs in B's own mode.
+    // From Auto: capped to Auto, which is B's own mode.
     send(&mut w, &tc, "personal/b", "from auto").await;
     let input = human_input(&hub, &mut w, &b).await;
     assert_eq!(input["payload"]["peer_prefix"][0]["text"], "from auto");
-    assert!(input["payload"].get("permission_cap").is_none(), "{input}");
+    assert_eq!(input["payload"]["permission_cap"], "auto", "{input}");
 
     // From Auto, then from Ask: the lowest cap of the two, named by the session in Ask.
     send(&mut w, &tc, "personal/b", "from auto again").await;
@@ -192,6 +192,43 @@ async fn a_buffered_send_caps_the_input_that_carries_it() {
     // The buffer is empty again: the next input of the person runs uncapped.
     let input = human_input(&hub, &mut w, &b).await;
     assert!(input["payload"].get("permission_cap").is_none(), "{input}");
+    hub.finish().await;
+}
+
+/// SPEC 0.129: a buffered send from a session in Auto holds the person's input to an Allow
+/// all session down to Auto, named by the sender; one from an Allow all session caps nothing.
+#[tokio::test]
+async fn a_buffered_send_from_auto_caps_an_allow_all_session() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = session(&hub, &mut w, "A", "auto").await;
+    let (c, tc) = session(&hub, &mut w, "C", "allow_all").await;
+    let (b, _) = session(&hub, &mut w, "B", "allow_all").await;
+    for s in [&a, &b, &c] {
+        hub.buffer_sends(s).await;
+    }
+    human_input(&hub, &mut w, &a).await;
+    human_input(&hub, &mut w, &c).await;
+
+    send(&mut w, &tc, "personal/b", "from allow all").await;
+    let input = human_input(&hub, &mut w, &b).await;
+    assert!(input["payload"].get("permission_cap").is_none(), "{input}");
+
+    send(&mut w, &ta, "personal/b", "from auto").await;
+    let input = human_input(&hub, &mut w, &b).await;
+    assert_eq!(input["payload"]["permission_cap"], "auto", "{input}");
+    report(
+        &mut w,
+        &b,
+        json!({"permission_mode": "auto", "capped_input": input["payload"]["event_id"]}),
+    )
+    .await;
+    let v = hub.session(&b).await;
+    assert_eq!(v["permission_capped_by"], "personal/a", "{v}");
+    assert_eq!(v["permission_mode"], "allow_all");
+    report(&mut w, &b, json!({"permission_mode": "allow_all"})).await;
+    assert!(hub.session(&b).await.get("permission_capped_by").is_none());
     hub.finish().await;
 }
 
@@ -287,6 +324,39 @@ async fn a_schedule_run_is_capped_by_its_creators_mode_now() {
         hub.session(&b).await["permission_capped_by"],
         hqc_hub::schedules::GONE_CREATOR
     );
+    hub.finish().await;
+}
+
+/// SPEC 0.129: a schedule an agent in Auto made before 0.129 stores an `auto` cap that names
+/// no session; its runs hold an Allow all session down to Auto, named by the creator.
+#[tokio::test]
+async fn an_unnamed_auto_cap_of_an_old_schedule_is_named_by_its_creator() {
+    let hub = TestHub::start().await;
+    hub.app.clock.set(utc("2026-10-26T10:00:00Z"));
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, ta) = session(&hub, &mut w, "A", "auto").await;
+    let (b, _) = session(&hub, &mut w, "B", "allow_all").await;
+    human_input(&hub, &mut w, &a).await;
+    let id = schedule(&mut w, &ta, "2026-10-26T10:05:00Z", "old schedule").await;
+    sqlx::query("UPDATE scheduled_messages SET chain = chain - 'capped_by' WHERE id = $1")
+        .bind(id)
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+
+    hub.app.clock.set(utc("2026-10-26T10:05:01Z"));
+    assert_eq!(hqc_hub::schedules::run_due(&hub.app).await.unwrap(), 1);
+    let input = input_of(&mut w, vec![], &b).await;
+    assert_eq!(input["payload"]["permission_cap"], "auto", "{input}");
+    deliver(&mut w, &input).await;
+    report(
+        &mut w,
+        &b,
+        json!({"permission_mode": "auto", "capped_input": input["payload"]["event_id"]}),
+    )
+    .await;
+    assert_eq!(hub.session(&b).await["permission_capped_by"], "personal/a");
     hub.finish().await;
 }
 

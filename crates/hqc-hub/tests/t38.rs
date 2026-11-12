@@ -59,7 +59,24 @@ async fn a_session_is_created_with_a_mode_and_shows_what_the_worker_runs() {
     let start = ack_start(&mut w, &other).await;
     assert!(start["payload"].get("permission_mode").is_none(), "{start}");
 
-    // Only ask or auto.
+    // SPEC 0.129: Allow all is stored, sent and shown as reported like the others.
+    let (s, v) = create(
+        &hub,
+        json!({"title": "All", "permission_mode": "allow_all"}),
+    )
+    .await;
+    assert_eq!(s, 201, "{v}");
+    let all = v["id"].as_str().unwrap().to_string();
+    assert_eq!(v["permission_mode"], "allow_all");
+    let start = ack_start(&mut w, &all).await;
+    assert_eq!(start["payload"]["permission_mode"], "allow_all");
+    report(&mut w, &all, "allow_all").await;
+    hub.wait_session(&all, "reported mode", |v| {
+        v["effective_permission_mode"] == "allow_all"
+    })
+    .await;
+
+    // Only ask, auto or allow_all: the CLI's own name is not one.
     let (s, v) = create(&hub, json!({"permission_mode": "bypassPermissions"})).await;
     assert_eq!(s, 422, "{v}");
 }
@@ -279,20 +296,22 @@ async fn only_the_worker_owner_switches_to_auto() {
         assert_eq!(s, 404, "{mode}");
     }
 
-    // My session on another owner's worker: ask yes, auto no.
+    // My session on another owner's worker: ask yes, auto and allow_all no.
     sqlx::query("UPDATE workers SET owner_id = $2 WHERE id = $1::uuid")
         .bind(&worker_id)
         .bind(stranger.id)
         .execute(db)
         .await
         .unwrap();
-    let (s, v) = hub
-        .patch(
-            &format!("/api/sessions/{sid}"),
-            json!({"permission_mode": "auto"}),
-        )
-        .await;
-    assert_eq!(s, 403, "{v}");
+    for mode in ["auto", "allow_all"] {
+        let (s, v) = hub
+            .patch(
+                &format!("/api/sessions/{sid}"),
+                json!({"permission_mode": mode}),
+            )
+            .await;
+        assert_eq!(s, 403, "{mode}: {v}");
+    }
     let (s, v) = hub
         .patch(
             &format!("/api/sessions/{sid}"),

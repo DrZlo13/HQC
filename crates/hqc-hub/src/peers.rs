@@ -226,14 +226,15 @@ async fn link_files(app: &AppState, session_id: Uuid, ids: &[Uuid]) -> anyhow::R
     Ok(())
 }
 
-/// An input with its chain and its cap from the send buffer (`input_caps`).
-type TurnInput = (Uuid, Option<Value>, Option<String>);
+/// An input with its chain and its cap from the send buffer (`input_caps`: the mode and who
+/// set it).
+type TurnInput = (Uuid, Option<Value>, Option<String>, Option<String>);
 
 /// The input that started the session's current turn (SPEC §7.1): the last input delivered
 /// to it. `None`: no turn yet.
 async fn last_delivered(app: &AppState, session_id: Uuid) -> anyhow::Result<Option<TurnInput>> {
     Ok(sqlx::query_as(
-        "SELECT e.event_id, e.chain, c.capped_by
+        "SELECT e.event_id, e.chain, c.permission_cap, c.capped_by
          FROM events e LEFT JOIN input_caps c ON c.event_id = e.event_id
          WHERE e.session_id = $1 AND e.delivery = 'delivered'
          ORDER BY e.seq DESC LIMIT 1",
@@ -244,13 +245,13 @@ async fn last_delivered(app: &AppState, session_id: Uuid) -> anyhow::Result<Opti
 }
 
 /// The chain of input `input` of a session: its own, or for a human's input one derived
-/// from it; capped to `ask` by `buffered` when the send buffer the input carried had an
-/// `ask` cap and its own chain has none (T40, [`take_prefix`]).
+/// from it; capped by `buffered` when the send buffer the input carried had a lower cap than
+/// its own chain (T40, [`take_prefix`]).
 fn input_chain(
     session_id: Uuid,
     input: Uuid,
     chain: Option<Value>,
-    buffered: Option<String>,
+    buffered: Option<(PermissionMode, String)>,
 ) -> Chain {
     let mut c = chain
         .and_then(|c| serde_json::from_value(c).ok())
@@ -261,8 +262,10 @@ fn input_chain(
             permission_cap: None,
             capped_by: None,
         });
-    if let Some(by) = buffered.filter(|_| c.permission_cap != Some(PermissionMode::Ask)) {
-        c.permission_cap = Some(PermissionMode::Ask);
+    if let Some((cap, by)) =
+        buffered.filter(|(cap, _)| *cap < c.permission_cap.unwrap_or(PermissionMode::AllowAll))
+    {
+        c.permission_cap = Some(cap);
         c.capped_by = Some(by);
     }
     c
@@ -283,7 +286,10 @@ pub(crate) async fn call_chain(
 ) -> anyhow::Result<Option<Chain>> {
     Ok(call_input(app, caller, c)
         .await?
-        .map(|(input, chain, buffered)| input_chain(caller.id, input, chain, buffered)))
+        .map(|(input, chain, cap, by)| {
+            let buffered = cap.as_deref().and_then(PermissionMode::parse).zip(by);
+            input_chain(caller.id, input, chain, buffered)
+        }))
 }
 
 /// The input the turn of call `c` runs on, by the rules of [`call_chain`].
@@ -293,8 +299,8 @@ async fn call_input(
     c: &McpCall,
 ) -> anyhow::Result<Option<TurnInput>> {
     if let Some(input) = c.turn_input {
-        let row: Option<(Option<Value>, Option<String>)> = sqlx::query_as(
-            "SELECT e.chain, c.capped_by
+        let row: Option<(Option<Value>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT e.chain, c.permission_cap, c.capped_by
              FROM events e LEFT JOIN input_caps c ON c.event_id = e.event_id
              WHERE e.event_id = $1 AND e.session_id = $2
                AND e.type IN ('user.message', 'peer.message')
@@ -306,8 +312,8 @@ async fn call_input(
         .bind(caller.id)
         .fetch_optional(&app.db)
         .await?;
-        if let Some((chain, buffered)) = row {
-            return Ok(Some((input, chain, buffered)));
+        if let Some((chain, cap, by)) = row {
+            return Ok(Some((input, chain, cap, by)));
         }
         tracing::debug!(session_id = %caller.id, %input, "turn_input is not the session's current input; the hub's last delivered one counts");
     }
@@ -363,34 +369,33 @@ pub(crate) async fn outgoing_chain(
 }
 
 /// The mode of session `s` for a cap: the lower of what the user asked for (T38) and what its
-/// worker last reported, so a switch to `ask` counts at once, before the worker confirms it;
-/// `ask` before any report: what the hub does not know cannot lift a cap (T39).
+/// worker last reported, so a switch to a lower mode counts at once, before the worker
+/// confirms it; `ask` before any report: what the hub does not know cannot lift a cap (T39).
 pub fn sender_mode(s: &SessionRow) -> PermissionMode {
-    if s.permission_mode.as_deref().and_then(PermissionMode::parse) == Some(PermissionMode::Ask) {
-        return PermissionMode::Ask;
-    }
-    s.effective_permission_mode
+    let asked = s.permission_mode.as_deref().and_then(PermissionMode::parse);
+    let runs = s
+        .effective_permission_mode
         .as_deref()
         .and_then(PermissionMode::parse)
-        .unwrap_or(PermissionMode::Ask)
+        .unwrap_or(PermissionMode::Ask);
+    asked.map_or(runs, |a| a.min(runs))
 }
 
 /// The cap of a message sent in `mode` by `from` from a turn with chain `turn` (T39, SPEC
-/// §7.1): `auto` only if the sender and every session up the chain ran in `auto`, i.e. the
-/// lower of `mode` and the cap of the sender's turn; a human's turn has no cap. With `ask`,
-/// the session that set it: the first one up the chain in `ask`.
+/// §7.1): the lowest mode of the sender and every session up the chain, i.e. the lower of
+/// `mode` and the cap of the sender's turn; a human's turn has no cap. Below `allow_all`,
+/// the session that set it: the first one up the chain in the cap's mode.
 pub fn chain_cap(
     turn: Option<&Chain>,
     mode: PermissionMode,
     from: &str,
 ) -> (PermissionMode, Option<String>) {
     match turn.and_then(|t| Some((t.permission_cap?, t.capped_by.clone()))) {
-        Some((PermissionMode::Ask, by)) => (
-            PermissionMode::Ask,
-            Some(by.unwrap_or_else(|| from.to_string())),
-        ),
-        _ if mode == PermissionMode::Ask => (PermissionMode::Ask, Some(from.to_string())),
-        _ => (PermissionMode::Auto, None),
+        Some((cap, by)) if cap <= mode && cap < PermissionMode::AllowAll => {
+            (cap, Some(by.unwrap_or_else(|| from.to_string())))
+        }
+        _ if mode < PermissionMode::AllowAll => (mode, Some(from.to_string())),
+        _ => (PermissionMode::AllowAll, None),
     }
 }
 
@@ -525,7 +530,7 @@ pub async fn send(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<An
         ask: false,
         with_reply: true,
     };
-    if let Some((input, _, _)) = call_input(app, caller, c).await.map_err(internal)? {
+    if let Some((input, ..)) = call_input(app, caller, c).await.map_err(internal)? {
         if let Some(seq) = join_reply(app, caller, &t, input, &c.request_id, m, &chain).await? {
             tracing::info!(from = %caller.id, to = %t.id, "peer message goes with the reply");
             return Ok(Answer::Now(send_result(&to, WITH_REPLY, seq)));
@@ -764,9 +769,9 @@ async fn buffer(
 /// stay in the buffer until its `ack`. Taking newer ones into a resent input would let its
 /// `ack` clear them although the agent may have got the first frame, without them (T32).
 ///
-/// With them the input's turn takes the lowest cap (T40, SPEC §7.1): when one of them has
-/// an `ask` cap, so does the input, named by the first such message's `capped_by`; it is
-/// kept in `input_caps` for the header and for what the turn sends ([`input_chain`]).
+/// With them the input's turn takes the lowest cap (T40, SPEC §7.1): the lowest cap below
+/// `allow_all` among them, named by the first message with it (its `capped_by`); it is kept
+/// in `input_caps` for the header and for what the turn sends ([`input_chain`]).
 pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyhow::Result<Prefix> {
     let first =
         sqlx::query("INSERT INTO input_prefix (event_id) VALUES ($1) ON CONFLICT DO NOTHING")
@@ -801,15 +806,28 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
         .await?
     };
     let from = |p: &Value| p["from"].as_str().unwrap_or("?").to_string();
-    let capped_by = rows.iter().find_map(|(_, p, _, chain)| {
-        let c: Chain = serde_json::from_value(chain.clone()?).ok()?;
-        (c.permission_cap? == PermissionMode::Ask).then(|| c.capped_by.unwrap_or_else(|| from(p)))
-    });
-    if let Some(by) = &capped_by {
+    let mut cap: Option<(PermissionMode, String)> = None;
+    for (_, p, _, chain) in &rows {
+        let Some(c) = chain
+            .clone()
+            .and_then(|c| serde_json::from_value::<Chain>(c).ok())
+        else {
+            continue;
+        };
+        let Some(m) = c.permission_cap.filter(|m| *m < PermissionMode::AllowAll) else {
+            continue;
+        };
+        if cap.as_ref().is_none_or(|(low, _)| m < *low) {
+            cap = Some((m, c.capped_by.unwrap_or_else(|| from(p))));
+        }
+    }
+    if let Some((m, by)) = &cap {
         sqlx::query(
-            "INSERT INTO input_caps (event_id, capped_by) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            "INSERT INTO input_caps (event_id, permission_cap, capped_by) VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING",
         )
         .bind(input)
+        .bind(m.as_str())
         .bind(by)
         .execute(&app.db)
         .await?;
@@ -828,7 +846,7 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
                     .unwrap_or_default(),
             })
             .collect(),
-        capped_by,
+        cap: cap.map(|(m, _)| m),
     })
 }
 
@@ -836,8 +854,8 @@ pub async fn take_prefix(app: &AppState, session_id: Uuid, input: Uuid) -> anyho
 pub struct Prefix {
     /// Its `peer_prefix`.
     pub messages: Vec<PeerPrefix>,
-    /// With an `ask` cap among them: the session that set the first one.
-    pub capped_by: Option<String>,
+    /// The lowest cap below `allow_all` among them (T40).
+    pub cap: Option<PermissionMode>,
 }
 
 /// Input `input` reached the agent: the messages it carried leave the buffer. They keep no
@@ -1328,7 +1346,7 @@ mod tests {
         let human = input_chain(Uuid::now_v7(), Uuid::now_v7(), None, None);
         assert_eq!(human.permission_cap, None);
         let a = next_chain(Some(human.clone()), true, Auto, "p/a").unwrap();
-        assert_eq!(cap(&a), (Some(Auto), None));
+        assert_eq!(cap(&a), (Some(Auto), Some("p/a".into())));
         let a = next_chain(Some(human), true, Ask, "p/a").unwrap();
         assert_eq!(cap(&a), (Some(Ask), Some("p/a".into())));
         // Along the chain: Auto -> Ask -> Auto stays Ask, named by the first one in Ask.
@@ -1349,7 +1367,58 @@ mod tests {
                 .unwrap();
         assert_eq!(
             cap(&next_chain(Some(old), false, Auto, "p/a").unwrap()),
-            (Some(Auto), None)
+            (Some(Auto), Some("p/a".into()))
+        );
+    }
+
+    // SPEC 0.129: three levels, Ask < Auto < Allow all. Only a chain of Allow all sessions has
+    // no cap below it; Auto up the chain holds an Allow all sender down to Auto, named by the
+    // first session in Auto; a buffered message caps a person's input the same way (T40).
+    #[test]
+    fn allow_all_is_capped_by_the_lowest_mode_up_the_chain() {
+        use PermissionMode::{AllowAll, Ask, Auto};
+        let cap = |c: &Chain| (c.permission_cap, c.capped_by.clone());
+        let human = input_chain(Uuid::now_v7(), Uuid::now_v7(), None, None);
+        let a = next_chain(Some(human), false, AllowAll, "p/a").unwrap();
+        assert_eq!(cap(&a), (Some(AllowAll), None));
+        let b = next_chain(Some(a.clone()), false, AllowAll, "p/b").unwrap();
+        assert_eq!(cap(&b), (Some(AllowAll), None));
+        // Allow all -> Auto -> Allow all stays Auto, named by the first one in Auto.
+        let c = next_chain(Some(b), false, Auto, "p/c").unwrap();
+        assert_eq!(cap(&c), (Some(Auto), Some("p/c".into())));
+        let d = next_chain(Some(c), false, AllowAll, "p/d").unwrap();
+        assert_eq!(cap(&d), (Some(Auto), Some("p/c".into())));
+        let e = next_chain(Some(d), false, Auto, "p/e").unwrap();
+        assert_eq!(
+            cap(&e),
+            (Some(Auto), Some("p/c".into())),
+            "the first Auto names it"
+        );
+        // Ask below an Auto cap lowers it further and names itself.
+        let f = next_chain(Some(e), false, Ask, "p/f").unwrap();
+        assert_eq!(cap(&f), (Some(Ask), Some("p/f".into())));
+        assert_eq!(
+            cap(&next_chain(Some(f), false, AllowAll, "p/g").unwrap()),
+            (Some(Ask), Some("p/f".into()))
+        );
+        // T40: a buffered Auto cap lowers a person's input (no cap of its own) and an input
+        // capped to Allow all, but not one capped to Ask.
+        let buffered = || Some((Auto, "p/c".to_string()));
+        let (s, i) = (Uuid::now_v7(), Uuid::now_v7());
+        assert_eq!(
+            cap(&input_chain(s, i, None, buffered())),
+            (Some(Auto), Some("p/c".into()))
+        );
+        let own = serde_json::to_value(&a).unwrap();
+        assert_eq!(
+            cap(&input_chain(s, i, Some(own), buffered())),
+            (Some(Auto), Some("p/c".into()))
+        );
+        let asked = next_chain(None, true, Ask, "p/x").unwrap();
+        let own = serde_json::to_value(&asked).unwrap();
+        assert_eq!(
+            cap(&input_chain(s, i, Some(own), buffered())),
+            (Some(Ask), Some("p/x".into()))
         );
     }
 

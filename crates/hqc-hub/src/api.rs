@@ -1164,7 +1164,8 @@ pub async fn new_session(
             model: b.model.as_deref(),
             // Only the worker owner may enable it (SPEC §10.1); here that is the creator.
             auto_approve: b.auto_approve && worker.owner_id == owner,
-            // The creator owns the worker (above), so `auto` is theirs to choose (T38).
+            // The creator owns the worker (above), so `auto` and `allow_all` are theirs to
+            // choose (T38).
             permission_mode: b.permission_mode,
         },
         spawn,
@@ -1211,7 +1212,7 @@ pub async fn get_session(
 pub struct PatchSession {
     pub title: Option<String>,
     pub auto_approve: Option<bool>,
-    /// T38: `auto` only by the worker owner; a running agent switches at once.
+    /// T38: `auto` and `allow_all` only by the worker owner; a running agent switches at once.
     pub permission_mode: Option<PermissionMode>,
     /// Absent: unchanged; `null`: the runtime's default. A running agent switches to a named
     /// model at once; `null` takes effect at its next start.
@@ -1273,11 +1274,13 @@ pub async fn patch_session(
             Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
             None => None,
         };
-        // Auto runs tool calls the worker owner would otherwise be asked about (SPEC §10.1).
-        if m == PermissionMode::Auto && owner != Some(user.id) {
-            return Err(ApiError::Forbidden(
-                "only the worker owner switches a session to auto".into(),
-            ));
+        // Auto and Allow all run tool calls the worker owner would otherwise be asked about
+        // (SPEC §10.1).
+        if m != PermissionMode::Ask && owner != Some(user.id) {
+            return Err(ApiError::Forbidden(format!(
+                "only the worker owner switches a session to {}",
+                m.as_str()
+            )));
         }
         db::set_permission_mode(&app.db, id, m).await?;
         // A stopped agent starts in it; an offline worker gets it with `session.start`.

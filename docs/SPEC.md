@@ -933,6 +933,11 @@ MCP calls (worker → hub → worker):
   `schedule_id?` (since 0.70) — the `schedule_id` of a `user.message` the hub cron sent (§4,
   §16): such a run waits for the end of a running turn instead of joining it (§17.2).
 - `session.stop` {session_id} — interrupt the current turn.
+- `session.background` {session_id, call_id} → `ack` (since 0.125) — move the agent's
+  running call `call_id`, one of its `session.state.foreground_calls` (§5.4), to the
+  background: the agent goes on, the call keeps running (Claude Code: the `background_tasks`
+  control request, §8.1). Like `session.kill` it is acked also when no agent runs; what the
+  runtime answers (moved, not moved, refused) is only in the worker's log.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
 - `session.kill` {session_id} — terminate the agent process.
@@ -1167,6 +1172,12 @@ MCP calls (worker → hub → worker):
   (Claude Code: the list of `background_tasks_changed`, §8.1), 0 when it is stopped; absent —
   0, and like `subagents` every report says it. The hub stores it as the session's
   `background_tasks` and sets 0 on a worker restart.
+  `foreground_calls` (since 0.125) — the `call_id`s of the calls of the agent itself that the
+  runtime runs in the foreground now and can move to the background (`session.background`,
+  §5.3; Claude Code: §8.1), empty when it is stopped; absent — none, and like `subagents`
+  every report says it. The hub keeps the list in memory, not in the database, as the
+  session's `foreground_calls` (§6), and drops it when the agent stops, its worker restarts or
+  the session is deleted.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — events
   from the mirror (§9.1, §9.2), through the outbox; the answer is `ack {event_id, seq}` as for
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
@@ -1464,6 +1475,11 @@ the rest is marked "later"):
   holds the transcript: `409 vscode_open` with `held_by`; no registry data and VS Code wrote
   less than 30 s ago: `409 vscode_active`; worker offline: `409 worker_offline`; archived:
   `409 archived`; service session: `409 system_session`
+- `POST /api/sessions/{id}/background` {call_id} → `{sent}` (since 0.125; `write` level, as
+  `/stop`): `session.background` to the worker (§5.3), `sent: false` when the worker is not
+  connected; nothing comes back of what the runtime did, the call leaves the session's
+  `foreground_calls` when the worker reports it moved. A `call_id` that is empty, longer than
+  128 bytes or has U+0000: `400 bad_request`; service session: `409 system_session`
 - `POST /api/sessions/{id}/fork` {event_id} → `201` and the new session object (since 0.80;
   `manage` level): a new session in the same project, workspace, worker and `cwd`, with the
   source's model, `permission_mode` and `auto_approve`, titled "<title> (fork)", whose
@@ -1882,7 +1898,7 @@ acp_agent?, model?, runtime_session_id?, process_state, system_prompt?,
 disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, locked_by,
 last_seq, archived, archived_at?, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
 updated_at, commands?, spawned_by?, permission_mode?, effective_permission_mode?,
-permission_capped_by?, subagents?, background_tasks?, output_per_s?}`.
+permission_capped_by?, subagents?, background_tasks?, output_per_s?, foreground_calls?}`.
 `subagents` (since 0.70): the subagents the agent runs now, from `session.state` (§5.4);
 absent — 0. The client shows "N agents" ("1 agent") next to the state in the chat header and in
 the session's row of the list while it is above 0; a background subagent keeps it up after the
@@ -1899,6 +1915,10 @@ either count is above 0; a command's line is its description and its run time.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
 keeps it up after the turn has ended.
+`foreground_calls` (since 0.125): the `call_id`s of the calls the agent runs in the foreground
+now and can move to the background (`POST .../background`), from `session.state` (§5.4), kept
+in the hub's memory; absent — none. The chat offers "Run in background" for such a call
+(§17.1).
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header: `effective_permission_mode`, else
 `permission_mode`; "Auto" as a marked badge, "Ask" as plain text, "Ask (Auto asked)" while
@@ -1980,10 +2000,10 @@ newer copy).
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
   permission_mode?, effective_permission_mode?, permission_capped_by?, subagents?,
-  background_tasks?, output_per_s?}` (the same as in the session object; the modes since 0.42,
-  so the header follows a switch the worker confirms, the cap since 0.43, `subagents` since
-  0.70, `background_tasks` since 0.104, `output_per_s` since 0.122); `{type: requests,
-  requests[]}` (since 0.41, T37,
+  background_tasks?, output_per_s?, foreground_calls?}` (the same as in the session object; the
+  modes since 0.42, so the header follows a switch the worker confirms, the cap since 0.43,
+  `subagents` since 0.70, `background_tasks` since 0.104, `output_per_s` since 0.122,
+  `foreground_calls` since 0.125); `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -3072,6 +3092,23 @@ Interrupting a turn (`session.stop`): the adapter sends `control_request {subtyp
 error_during_execution`, the partial reply text comes as a separate `assistant` record, and
 the process stays alive (checked on 2.1.308). If there is no `result` within 10 s, the process
 group gets SIGINT; the CLI exits on it, and the next input brings the process up via `--resume`.
+
+Moving a call to the background (since 0.125, the VS Code tab's "Run in background", extension
+2.1.319). A call of the agent itself the CLI runs in the foreground is one whose `system`
+`task_started` has `is_backgrounded: false`, a `tool_use_id`, `task_type` `local_bash` (a Bash
+call that runs for more than about 2 s) or `local_agent` (a foreground subagent), no
+`skip_transcript: true`, no `owned_by_subagent: true` and no `parent_task_id` (a subagent's own
+calls are left out: the CLI marks its Bash calls `owned_by_subagent` and gives its subagents
+the `parent_task_id` of their parent); it stays one until a `task_started` of the same
+`task_id` without all that, a `task_updated` with `patch.is_backgrounded: true` or
+`patch.status` `completed`, `failed` or `killed`, or its `task_notification`. The adapter
+sends their `tool_use_id`s, which are the `call_id`s of their `tool.call`s, whenever they
+change, and the worker repeats them in `session.state.foreground_calls` (§5.4). `session.background` (§5.3) is `control_request
+{subtype: "background_tasks", tool_use_id: <call_id>}` (2.1.312): the CLI moves that local
+Bash task or subagent to the background if it has not been moved yet and answers `success`
+with `{backgrounded: bool}`, or an error when background tasks are disabled; the call gets its
+tool result ("Command was manually backgrounded by user with ID: …" for Bash, `async_launched`
+for a subagent) and the agent goes on. The adapter only logs the answer.
 
 The working directory is `<workspace>/<cwd>`. The process environment comes from the binding
 of the workspace path in the worker's local config (§14). Authentication is the subscription
@@ -4460,7 +4497,10 @@ The `status.state` event uses the same set.
 The client shows the turn from `state` (from `summary`/`session.summary` and the session object),
 with no separate events: `running` — a pulsing "Running" pill in the header and an "Agent is
 working" line at the bottom of the feed ("Running <command or tool> <time since the call's
-`ts`>" while the last `tool.call` has no `tool.result`, T26), `queued` — "Input queued",
+`ts`>" while the last `tool.call` has no `tool.result`, T26; since 0.125, when that call is one
+of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
+which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
+goes once the worker reports the call moved or ended), `queued` — "Input queued",
 `waiting` — "Waiting for approval" if the open request is not in the feed (otherwise its card is
 that line).
 A `status` event is not drawn as a feed line, except `error` with `detail`.
@@ -4826,6 +4866,21 @@ to something substantially different; and that every file it makes for the user 
 into the chat with `hqc_attach` in the same answer, also unasked, copied first into `.hqc/out/`
 of the workspace, which git does not see, when made outside it. Before, they only named `hqc_rename`, and asked softly to attach
 files rather than give paths. 0.120–0.125 are taken by other pull requests.
+
+### 0.123 → 0.125 (a running command is moved to the background from the chat)
+§8.1: the Claude Code adapter follows the Bash calls and foreground subagents of the agent
+itself that the CLI runs in the foreground (`task_started` with `is_backgrounded: false`, the
+rule of the VS Code tab's "Run in background", a subagent's own calls and subagents left
+out) and moves one to the background with the CLI's `background_tasks` control request; §5.4:
+their `call_id`s go in `session.state.foreground_calls`; §5.3: the frame `session.background`
+{session_id, call_id} → `ack` (example `hub.session.background.json`), fire-and-forget like `session.stop`, the
+runtime's answer only in the worker's log; §6: `POST /api/sessions/{id}/background` {call_id}
+→ `{sent}` and `foreground_calls` in the session object and `session.summary`, kept in the
+hub's memory, no migration; §17.1: the chat's "Running <command> <time>" line has a "Run in
+background" button for such a call. Before, a long foreground command could only be waited
+for or stopped with the whole turn. An older worker answers `session.background` with `error
+{invalid_frame}` and never reports `foreground_calls`, so no button shows for its sessions;
+older hubs and clients ignore the new field. 0.124 is taken by another pull request.
 
 ### 0.123 → 0.124 (a HEIC is decoded where the browser does not decode it)
 §12 Client: a HEIC or HEIF photo attached in Chrome, Firefox or Brave on a computer went out as

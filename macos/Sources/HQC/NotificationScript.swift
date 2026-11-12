@@ -14,9 +14,9 @@
 // The same names make the window bar's breadcrumbs: the script posts `{crumbs}` to the
 // `hqcChrome` handler (ChromeScript) — on `#/s/<id>` the session's project, its title and its
 // state worded as the client's header pill (client/src/ui/labels.ts STATE_LABELS, ui/Chat.tsx
-// StatePill; a held session without the pill's "on <machine>"), on `#/p/<id>…` the project, else
-// none — when the address, a summary or the open
-// requests change. The page's own `document.title` is always "HQC".
+// StatePill; a session in VS Code or Claude Code without the pill's "on <machine>"), on
+// `#/p/<id>…` the project, else none — when the address, a summary or the open requests change.
+// The page's own `document.title` is always "HQC".
 enum NotificationScript {
 
     static let handlerName = "hqcNotify"

@@ -43,6 +43,11 @@ enum NotificationScript {
           // Project id -> name, from the client's own projects call.
           const projects = new Map();
           let projectsLoad = null;
+          // The workers' service sessions (`system`) and every session id the list call knew,
+          // from the client's own all-sessions call (client/src/api.ts allSessions()).
+          const service = new Set();
+          const listed = new Set();
+          let sessionsLoad = null;
 
           const clip = (s, n) => {
             const c = Array.from(s || '');
@@ -186,6 +191,41 @@ enum NotificationScript {
           window.addEventListener('hashchange', routed);
           routed();
 
+          // The Dock badge: the sessions with something unread, archived and service sessions
+          // aside, as the client's tab icon counts them for its light dot (client/src/favicon.ts).
+          let lastBadge = null;
+          const postBadge = () => {
+            let n = 0;
+            for (const s of summaries.values()) {
+              if (s.unread > 0 && s.state !== 'archived' && !service.has(s.session_id)) n++;
+            }
+            if (!chrome || n === lastBadge) return;
+            lastBadge = n;
+            chrome.postMessage({ badge: n });
+          };
+          // Which sessions are service ones: read once, and again when a summary names a session
+          // the last read did not list (a worker enrolled since).
+          const loadSessions = () => {
+            if (!sessionsLoad) {
+              sessionsLoad = fetch('/api/sessions')
+                .then((res) => (res.ok ? res.json() : null))
+                .then((v) => {
+                  for (const s of (v && v.sessions) || []) {
+                    if (!s || typeof s.id !== 'string') continue;
+                    listed.add(s.id);
+                    if (s.system) service.add(s.id);
+                  }
+                })
+                .catch(() => {})
+                .finally(() => {
+                  sessionsLoad = null;
+                  postBadge();
+                });
+            }
+            return sessionsLoad;
+          };
+          loadSessions();
+
           // One notification per request; other events of a session replace each other (SPEC §16).
           // A permission request (not a publication: the client publishes only on a click on its
           // card) carries the options of the card's Allow and Deny buttons.
@@ -271,18 +311,30 @@ enum NotificationScript {
             postCrumbs();
           };
 
+          // After summaries: the badge, re-read once the list call has not listed one of them.
+          const sessionsSeen = (sessions) => {
+            const unknown = (sessions || []).some((s) => s && typeof s.session_id === 'string' && !listed.has(s.session_id));
+            if (unknown && !sessionsLoad) loadSessions();
+            else postBadge();
+          };
+
           // `socket.baseline`: until this socket's first summary, its frames only set the baseline.
           const watch = (data, socket) => {
             let f;
             try { f = JSON.parse(data); } catch { return; }
             if (!f) return;
             if (f.type === 'summary') {
+              // The whole list: a session no longer in it was deleted and counts no more.
+              const ids = new Set((f.sessions || []).map((s) => s && s.session_id));
+              for (const id of [...summaries.keys()]) if (!ids.has(id)) summaries.delete(id);
               update(f.sessions, socket.baseline);
               socket.baseline = false;
               postCrumbs();
+              sessionsSeen(f.sessions);
             } else if (f.type === 'session.summary') {
               update([f.session], socket.baseline);
               postCrumbs();
+              sessionsSeen([f.session]);
             } else if (f.type === 'requests') {
               opened(f.requests);
             }

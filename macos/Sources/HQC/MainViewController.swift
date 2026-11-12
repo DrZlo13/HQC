@@ -139,6 +139,9 @@ final class MainViewController: NSViewController {
             guard let self, let webTab, self.activeTab === webTab else { return }
             self.updateChrome()
         }
+        webTab.onBadgeChanged = { [weak self] in
+            self?.updateBadge()
+        }
         webTabs[server.id] = webTab
         return webTab
     }
@@ -193,6 +196,12 @@ final class MainViewController: NSViewController {
     // (so the transparent bar takes the colour the page reports, its project bar's) with a dark
     // or light appearance to match, so the traffic lights and the bar's text stay readable.
     // Before the page reports its colour, the window's own.
+    // The Dock icon's badge: the sessions with something unread on every server; none at 0.
+    private func updateBadge() {
+        let total = webTabs.values.reduce(0) { $0 + $1.unreadSessions }
+        NSApp.dockTile.badgeLabel = total > 0 ? String(total) : nil
+    }
+
     private func updateChrome() {
         let tab = activeTab
         titleBar.setNavigation(canGoBack: tab?.webView.canGoBack ?? false,
@@ -233,6 +242,8 @@ final class MainViewController: NSViewController {
                 webTabs.removeValue(forKey: server.id)?.tearDown()
             }
         }
+        // A torn-down tab's sessions leave the Dock badge.
+        updateBadge()
 
         // Resolve the selection after deletions / URL changes.
         if let selected = selectedServerID, validIDs.contains(selected) {

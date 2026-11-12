@@ -17,6 +17,11 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     private(set) var barColor: NSColor?
     private(set) var barCrumbs: [String] = []
 
+    // The sessions of this server with something unread (the page's count for the Dock badge),
+    // and the call fired (on the main thread) when it changes.
+    private(set) var unreadSessions = 0
+    var onBadgeChanged: (() -> Void)?
+
     // Fired (on the main thread) when the bar's colour, its breadcrumbs or whether the page can
     // go back or forward changes.
     var onChromeChanged: (() -> Void)?
@@ -206,6 +211,10 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
             }
             if let crumbs = m["crumbs"] as? [String] {
                 barCrumbs = crumbs
+            }
+            if let badge = m["badge"] as? Int {
+                unreadSessions = badge
+                onBadgeChanged?()
             }
             onChromeChanged?()
             return

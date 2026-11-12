@@ -56,7 +56,17 @@ export function AttachmentView({
     if (!store) return;
     let live = true;
     store.meta(id).then(
-      (m) => live && setMeta(m),
+      (m) => {
+        if (!live) return;
+        if (!kind || m.kind === kind) return setMeta(m);
+        // The event names another kind: the file was attached again with it and the record
+        // took it (SPEC 0.128), so the cached one is stale. Asked once; the cached one only
+        // when that fails.
+        store.meta(id, true).then(
+          (f) => live && setMeta(f),
+          () => live && setMeta(m),
+        );
+      },
       () => live && setMetaFailed(true),
     );
     return () => {
@@ -94,8 +104,12 @@ function FileCard({
   meta: Artifact | null;
   actions: AttachmentActions;
 }) {
-  // Large text and diffs are only downloaded: a browser tab would hold all of it (T22).
-  const openable = kind !== 'file' && !((kind === 'text' || kind === 'diff') && meta && meta.size > MAX_OPEN_TEXT);
+  // Large text and diffs are only downloaded: a browser tab would hold all of it (T22). A file
+  // opens only when it is Markdown and the viewer is there: a new tab would download it.
+  const openable =
+    kind === 'file'
+      ? !!actions.viewArtifact && !!meta && meta.size <= MAX_OPEN_TEXT && isMarkdown(kind, name, meta)
+      : !((kind === 'text' || kind === 'diff') && meta && meta.size > MAX_OPEN_TEXT);
   const open = () =>
     // Only with its size known: the 2 MB cap of "Open" holds before the text is read.
     actions.viewArtifact && meta && isMarkdown(kind, name, meta) ? actions.viewArtifact({ id, name, kind: 'markdown' }) : actions.openArtifact(id);
@@ -122,9 +136,13 @@ function FileCard({
   );
 }
 
-/** A text the viewer renders as Markdown: named `.md` or `.markdown`, or typed `text/markdown`. */
+/** A text or a file the viewer renders as Markdown: named `.md` or `.markdown`, or typed
+ *  `text/markdown`. */
 function isMarkdown(kind: ArtifactKind, name: string, meta: Artifact | null): boolean {
-  return kind === 'text' && (/\.(md|markdown)$/i.test(name) || (meta?.mime ?? '').startsWith('text/markdown'));
+  return (
+    (kind === 'text' || kind === 'file') &&
+    (/\.(md|markdown)$/i.test(name) || (meta?.mime ?? '').startsWith('text/markdown'))
+  );
 }
 
 /** A signed link for `id`, renewed by `renew()` (an expired link on `<img>` or `<iframe>`). */

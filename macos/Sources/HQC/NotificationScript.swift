@@ -14,7 +14,8 @@
 // The same names make the window bar's breadcrumbs: the script posts `{crumbs}` to the
 // `hqcChrome` handler (ChromeScript) — on `#/s/<id>` the session's project, its title and its
 // state worded as the client's header pill (client/src/ui/labels.ts STATE_LABELS, ui/Chat.tsx
-// StatePill), on `#/p/<id>…` the project, else none — when the address, a summary or the open
+// StatePill; a held session without the pill's "on <machine>"), on `#/p/<id>…` the project, else
+// none — when the address, a summary or the open
 // requests change. The page's own `document.title` is always "HQC".
 enum NotificationScript {
 
@@ -145,6 +146,10 @@ enum NotificationScript {
             ['idle', 'Idle'],
           ]);
           const status = (s) => {
+            // The pill names the holder (ui/Chat.tsx `holder`); its "on <machine>" is not in a summary.
+            if (s.state === 'locked_vscode') {
+              return s.held_by && s.held_by.entrypoint !== 'claude-vscode' ? 'In Claude Code' : 'In VS Code';
+            }
             if (s.state === 'waiting' && asking.has(s.session_id)) return 'Waiting for permission';
             if (s.state === 'idle' && ((s.subagents || 0) > 0 || (s.background_tasks || 0) > 0)) return 'Running';
             return STATE_LABELS.get(s.state) || 'Unknown';

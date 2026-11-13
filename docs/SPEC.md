@@ -553,11 +553,11 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}` | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
+| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}` | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.150 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one; `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
-| `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived) | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
-| `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], multi?: bool}]` | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. ACP agents have no source for it |
-| `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`) | client |
+| `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.150 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn by the agent") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
+| `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], multi?: bool}]` | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. ACP agents have no source for it. Since 0.150 also an MCP server's request for input (Claude Code: `elicitation`, §8.1), with `server?` — the server that asks, `message?` — its text, `url?` — the page it sends the person to, then with no `questions`; the client heads the card "<server> asks", shows the text above the questions, the link (only an http, https or mailto one as a link), no "Other", the submit button ("Done" for a link) and "Decline" |
+| `clarify.response` | `request_id`, `answers` (`{<question id>: string \| [string]}`), `action?` (since 0.150, only for a request with `server`: `accept` — the answers, also none, are the input; `decline` — the person declined, `answers` empty; the client shows "Declined") | client |
 | `clarify.cancel` | `request_id`, `reason` (the same set as for `approval.cancel`) | adapter, worker or hub |
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
@@ -605,6 +605,7 @@ the client renders only them. The "source" column is the component that produces
 | `turn_ended_early` | worker (adapter) | since 0.161: the runtime ended the turn early for another reason — an error, the limit of turns or of budget, a hook (Claude Code: an error `result`, or a `terminal_reason` other than `completed`, `background_requested` and `tool_deferred`, §8.1); `text` "Turn ended early: " and the reason; one per turn, at its end, after its `usage` |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
+| `elicitation_unsupported` | worker (adapter) | since 0.150: an MCP server asked for input the card cannot ask (a property that is an object or an array, a link without a URL); the adapter declined to show it and answered the runtime `cancel` (§8.1); `text` names the server |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
 | `worker_replaced` | hub | in the service session: the worker was re-enrolled with replacement (§5.1); extra fields `old_name`, `new_name` |
 | `worker_revoked` | hub | in the service session: the worker's token was revoked, the session archived (§5.1, §10.2) |
@@ -614,7 +615,7 @@ Rules:
 - Events are tolerant: unknown fields in `payload` are ignored; an event of an unknown
   `type` is parsed as "unknown" and stored and forwarded as is; clients do not
   render it but do not crash; an unknown enum value inside an event
-  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`) reads as "unknown". An event
+  (`state`, `canonical`, `mode`, `kind`, `reason`, `policy_hint`, since 0.150 `action`) reads as "unknown". An event
   of a known `type` with an invalid `payload` is an error.
 
 - The user's files always go into `user.message.artifact_ids[]`, including without text
@@ -1112,14 +1113,17 @@ MCP calls (worker → hub → worker):
   `request_id` equals the frame's `id`; the hub waits 30 s for the answer.
 - `approval.response` {session_id, request_id, option_id, message?} (`message` — an answer
   as text with a deny option, §10.1),
-  `clarify.response` {session_id, request_id, answers}; there is no `by` field in the frames, it
-  is only in the events. There is no `approval.cancel` frame: when cancelling a request itself
-  (timeout, archiving, `stop` with no worker connected, §10.1), the hub writes an `approval.cancel` event and sends the worker
+  `clarify.response` {session_id, request_id, answers, action?} (`action` since 0.150, only for
+  an MCP server's request, §4: `accept` or `decline`, which the adapter answers the runtime
+  with, §8.1); there is no `by` field in the frames, it is only in the events. There is no
+  `approval.cancel` frame: when cancelling a request itself (timeout, archiving, `stop` with no
+  worker connected, §10.1), the hub writes an `approval.cancel` event and sends the worker
   an `approval.response` with the `option_id` of the `canonical: deny` option, so that the
   adapter closes the request in the runtime. Likewise for `clarify`: the hub writes a
-  `clarify.cancel` event and sends `clarify.response` with `answers: {}` — an empty object means
-  cancellation; the Claude Code adapter answers the `can_use_tool` for `AskUserQuestion` with
-  the `deny` behavior, and the model continues the turn without answers.
+  `clarify.cancel` event and sends `clarify.response` with `answers: {}` — an empty object without
+  `action` means cancellation; the Claude Code adapter answers the `can_use_tool` for
+  `AskUserQuestion` with the `deny` behavior, and the model continues the turn without answers,
+  and an MCP server's request with `cancel` (since 0.150).
 - `fs.stat` {request_id, path, create?} → `result {request_id, exists, is_dir, canonical?,
   inside_allowed_roots, environment?}` — checking a folder before creating a workspace (§13.1).
   `canonical` — the path with symlinks resolved, present if the path exists;
@@ -1850,12 +1854,16 @@ the rest is marked "later"):
   row of the session list dragged onto another project on the bar moves the session there
   without the form when that project has exactly one `ready` folder on the session's worker;
   otherwise the form opens over the list with that project chosen.
-- `POST /api/sessions/{id}/requests/{request_id}` {option_id, message? | answers} → `{event_id, seq}`
+- `POST /api/sessions/{id}/requests/{request_id}` {option_id, message? | answers?, action?} →
+  `{event_id, seq}`
   of the stored answer; closed request: `409 request_closed` (§10.1). The same call answers a
   request wherever the client shows it (its own feed, the feed of a session waiting on it, the
   "Requests" list, §10.1): `{id}` is always the request's own session. `message` is a text reply
   instead of the call (§10.1): only for an `approval` in a session and only with an option of
-  `canonical: deny`/`deny_always`, non-empty, up to 16 KiB, otherwise `400`
+  `canonical: deny`/`deny_always`, non-empty, up to 16 KiB, otherwise `400`. A `clarify` takes
+  non-empty `answers`; since 0.150 one with `server` (an MCP server's, §4) also takes `action`:
+  `accept` with `answers` or without (a link's Done), `decline` without answers; `action` on
+  another clarify, an unknown one, or `decline` with answers: `400`
 - `POST /api/artifacts` (multipart: field `file`, optional `kind`) → `201` and the artifact
   object `{id, kind, name, mime, size, sha256, created_at}` (`api.artifact.json`); the same
   file under the same name again → `200` and the earlier object, with the `kind` given (since
@@ -3726,6 +3734,48 @@ description). The
 exact JSON: `docs/notes/claude-control-protocol.md`; fixtures:
 `crates/hqc-claude-jsonl/fixtures/*-2.1.307.jsonl`.
 
+A request only a person may answer (since 0.150): a `can_use_tool` with
+`requires_user_interaction: true` (the CLI: "no stored grant or automatic approval may answer
+it" — a call the classifier of `auto` handed to a person, a tool whose card is its own input, an
+MCP server named like a claude.ai connector, an ask the host worded), with `matched_ask_rule` (a
+user's `permissions.ask` rule forced the prompt) or with `suppress_always_allow_rule: true` (no
+persistent rule may be offered). Neither a `session` rule nor the folder's hqc rules answer it,
+the card offers only `once` and `deny`, without `rule_suggestions`, and the `approval.request`
+carries `human_only: true`, which the hub's `auto_approve` leaves to the owner (§10.1); the deny
+check of `[permissions]` still comes first. `AskUserQuestion`, which comes with
+`requires_user_interaction: true` every time (checked live on 2.1.312), stays a
+`clarify.request`. Every `approval.request` carries the request's `decision_reason` (why the CLI
+asks: a safety check, an ask rule, a hook) as `reason`, cut to 1024 bytes, and its
+`display_name` (the CLI's name of the tool, `Bash` for Bash on 2.1.307) as `display_name`, cut to
+256 bytes. `matched_ask_rule` and `suppress_always_allow_rule` were not seen live (**[verify]**).
+
+A withdrawn request (since 0.150): the CLI sends `{"type": "control_cancel_request",
+"request_id"}` when it stops waiting for a request of its own (the wait was aborted: the turn
+stopped, the call or the subagent ended). For an open `can_use_tool` or `elicitation` the adapter
+sends `approval.cancel` / `clarify.cancel {withdrawn}` and forgets the request, so an answer that
+comes later is not written to the CLI (which drops one anyway) and gets an error result; another
+`request_id` is ignored. Before, such a card stayed open until the turn's `result` or, for a
+background subagent, its `task_notification`.
+
+An MCP server asks for input (since 0.150, **[verify]** on a live CLI): `control_request
+{subtype: elicitation}` (`mcp_server_name`, `message`, `mode?` `form`/`url`, `url?`,
+`requested_schema?`, `property_order?`) → `clarify.request` with `server`, `message` and, for
+`mode: url`, `url` and no questions. A form's questions are `requested_schema.properties` in
+`property_order` (then any it leaves out), ids `1`, `2`, …: a string with `enum` gives its
+values as options, a boolean the options Yes and No, a string, a number or an integer free text;
+`title` is the question's `header` and `description` its `text` (the title, else the property's
+name, without one). For a property of another type (an object, an array) or a link without `url`
+the adapter answers `{action: cancel}` at once and writes `system elicitation_unsupported` (§4).
+The answer goes back as the `control_response` `{action: accept, content}` — the answers by
+property name, a Yes/No as `true`/`false`, an integer's or a number's text as a number when it
+reads as one (else as typed), an empty one left out, no `content` without questions —,
+`{action: decline}` for `clarify.response.action: decline`, `{action: cancel}` for the hub's
+cancel (empty `answers`, no `action`). The request names no agent, so the turn's end does not
+cancel it; its withdrawal does. Before 0.150 the adapter answered every `control_request` but
+`can_use_tool` with `error`, which the CLI takes as `cancel`. Unlike the agent's question, one
+cancelled by a worker restart or Stop is not answered later by a message (§10.1): a message goes
+to the agent, not to the server.
+
 Mapping of stream-json to §4: `stream_event` text delta → `agent.delta`; `assistant`
 with text → `agent.message`, where the adapter holds the last text until the
 next stream item: `tool_use` → `final: false`, `result` → `final: true`;
@@ -5003,7 +5053,9 @@ live on 2.1.312). A subagent's request still open when its `task_notification` c
 subagent ended) is cancelled there the same way, whichever comes first, that or the main
 turn's `result`; a notification without the subagent's report that comes while the latest
 `background_tasks_changed` list holds the subagent or a task of it is no end (§8.1), and the
-cancel waits with it. The hub stores
+cancel waits with it. Since 0.150 a request the runtime withdraws (Claude Code:
+`control_cancel_request`, §8.1) gets `approval.cancel`/`clarify.cancel {withdrawn}` from the
+adapter at once, the main agent's and a subagent's alike. The hub stores
 a worker's cancel only if it closes an open request, in the transaction that closes it, so a
 cancel that fails to be stored leaves the request open for the worker's resend: one it closed
 already (a stopped process's, `stop` with no worker connected, an answer that crossed the cancel)
@@ -5134,7 +5186,9 @@ stopping, a worker restart nor archiving cancels it. The client draws it with th
 worker's request, header "Move this session after its transcript?".
 
 With `auto_approve` the hub answers with the first option with `canonical: once`, `by: auto`
-(calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14);
+(calls under `deny` in the worker's `[permissions]` never reach the hub, §8.1, §14), except
+(since 0.150) a request with `human_only` (§4), which the runtime gives only to a person: it
+waits for the owner, as do its card's only options, `once` and `deny`;
 only the worker owner can turn the mode on, and it is highlighted in the UI; on a shared
 project it means collaborators run code without confirmation, and the UI warns about this when
 the mode is turned on and when a `write` grant is given. A push notification for every
@@ -6305,6 +6359,30 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.149 → 0.150 (the CLI's requests: only a person's, the reason, a withdrawal, an MCP server's)
+§8.1: the Claude Code adapter answered a `can_use_tool` from a `session` rule or the folder's hqc
+rules, and the hub's `auto_approve` answered it, also when the CLI said that only a person may
+(`requires_user_interaction`, `matched_ask_rule`, `suppress_always_allow_rule`), and the card
+offered "Allow for this session" and "Always allow" there. Such a request now reaches the card
+with `human_only: true` (§4) and only `once` and `deny`, without `rule_suggestions`; §10.1:
+`auto_approve` leaves it to the owner. §4, §8.1: `approval.request` carries the CLI's
+`decision_reason` as `reason?` (at most 1024 bytes) and `display_name?` (at most 256 bytes); the
+card shows the reason under its title and names the tool by `display_name`. §4, §8.1, §10.1:
+`control_cancel_request` of the CLI was not read, so a card the CLI no longer waited for stayed
+open until the turn's end or, for a background subagent, its end; the adapter now closes it with
+the new cancel reason `withdrawn` ("withdrawn by the agent") and writes no later answer. §4,
+§5.3, §6, §8.1: an MCP server's request for input (`elicitation`) got `error`, which the CLI
+takes as `cancel`, and never reached the person; it is now a `clarify.request` with `server?`,
+`message?` and, for a link, `url?`: a form's properties are its questions, its answer goes back
+typed as `accept`; `clarify.response` and its frame carry `action?` (`accept`, `decline`), which
+`POST …/requests/{request_id}` takes for such a request only, `decline` and a link's Done without
+answers; a form with an object or an array is answered `cancel` with `system
+elicitation_unsupported`. The plan of `ExitPlanMode` is not part of this change. An older
+client shows such a card without its reason and an MCP server's request as the agent's
+question, a form without "Decline" and a link without its URL; an older hub's `auto_approve`
+answers a `human_only` request, and it takes no `action`, so a declined or done request gets
+`400`.
 
 ### 0.172 → 0.173 (what the agent is doing now: retries, compaction, thinking, long calls; the CLI's notices)
 §8.1, §5.4, §6, §17.1: while Claude Code retried a failed request to the model API, compacted

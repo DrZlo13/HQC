@@ -287,7 +287,7 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
       .find((m) => m.textContent?.includes(`input ${seq}`))!
       .querySelector(".msg-time")!.textContent;
 
-  it("stands at the bottom while the turn runs, queued for the next turn", () => {
+  it("stands at the bottom while the turn runs, queued", () => {
     const t = new Timeline();
     t.applyAll([
       input(1, 1.2),
@@ -298,7 +298,7 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     ]);
     expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e3"]);
     show(t);
-    expect(time(3)).toBe(`${formatTime(at(3))} · queued for the next turn`);
+    expect(time(3)).toBe(`${formatTime(at(3))} · queued`);
   });
 
   it("delivered, stands after the turn it waited through and before the work of its own", () => {
@@ -359,7 +359,90 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(queued.map((i) => i.key)).toEqual(["e3", "e4"]);
   });
 
-  it("stands under the inputs written during the text, live and once the text is stored", () => {
+  it("a joined input behind a waiting one stays behind it: two inputs carried past a final answer", () => {
+    // Both written during the thinking of a turn with no calls (DrZlo13/hqc#42): the CLI runs
+    // the first as the next turn, the second joins that turn.
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      ev("event.agent.thinking", (e) => ((e.seq = 2), (e.ts = at(2)))),
+      input(3, 6.1),
+      input(4, 7.1, (e) => (e.payload.joined = true)),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.thinking", (e) => ((e.seq = 7), (e.ts = at(7)))),
+      final(8, 4),
+      idle(9, 4),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e4", "e7", "e8", "e9"]);
+  });
+
+  it("a joined input behind a waiting one stays behind it: inputs during a turn another session's question started", () => {
+    const t = new Timeline();
+    t.applyAll([
+      ev("event.peer.message", (e) => {
+        e.seq = 1;
+        e.event_id = id(1);
+        e.ts = at(1);
+        e.delivery = "delivered";
+        e.delivered_at = at(1.2);
+      }),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 8.1),
+      input(4, 10.1, (e) => (e.payload.joined = true)),
+      result(5, "a"),
+      final(6, 1),
+      ev("event.usage", withSeq(7)),
+      idle(8, 1),
+      call(9, "b", "Bash", { command: "ls" }),
+      result(10, "b"),
+      final(11, 3),
+      idle(12, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e7", "e8", "e3", "e4", "e9", "e10", "e11", "e12"]);
+  });
+
+  it("a /compact typed during a turn stands above the compaction it started", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 7.1, (e) => (e.payload.text = "/compact")),
+      result(4, "a"),
+      final(5, 1),
+      ev("event.usage", withSeq(6)),
+      idle(7, 1),
+      ev("event.system", (e) => {
+        e.seq = 8;
+        e.payload = { code: "context_compacted", text: "Summary of the conversation" };
+      }),
+      ev("event.usage", (e) => ((e.seq = 9), (e.payload = { input_tokens: 0, output_tokens: 0, cost_usd: 0.0014 }))),
+      idle(10, 3),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3", "e8", "e9", "e10"]);
+  });
+
+  it("a turn lost right after it was taken ends the waiting input's own turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.1),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.system", (e) => {
+        e.seq = 7;
+        e.payload = { code: "turn_lost", text: "The agent process stopped during a turn; the turn was lost" };
+      }),
+      input(8, 8.1),
+      call(9, "b", "Bash", { command: "ls" }),
+      final(10, 8),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7", "e8", "e9", "e10"]);
+  });
+
+  it("one written during the text waits behind the one queued before it, live and once the text is stored", () => {
     const t = new Timeline();
     t.applyAll([
       input(1, 1.2),
@@ -368,9 +451,58 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
       result(4, "a"),
       input(5, undefined, (e) => (e.payload.during_text = true)),
     ]);
-    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e3"]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e3", "e5"]);
     t.applyAll([final(6, 1), ev("event.usage", withSeq(7))]);
-    expect(order(t)).toEqual(["e1", "e2", "e4", "e6", "e7", "e5", "e3"]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e6", "e7", "e3", "e5"]);
+  });
+
+  it("one written during the agent's thinking or text and taken after that turn stands after it", () => {
+    // A real session's events: 180 came while the thinking of 179's turn streamed, the agent
+    // took it five seconds after that turn ended and answered it in a turn of its own.
+    const thinking = (seq: number) => ev("event.agent.thinking", (e) => ((e.seq = seq), (e.ts = at(seq))));
+    const t = new Timeline();
+    t.applyAll([
+      input(179, 179.5),
+      input(180, undefined, (e) => (e.payload.during_text = true)),
+      thinking(181),
+      final(182, 179),
+      ev("event.usage", withSeq(183)),
+      idle(184, 179),
+    ]);
+    expect(order(t)).toEqual(["e179", "e181", "e182", "e183", "e184", "e180"]);
+    show(t);
+    expect(time(180)).toBe(`${formatTime(at(180))} · queued`);
+    t.applyDelivery({
+      session_id: "s",
+      event_id: id(180),
+      seq: 180,
+      delivery: "delivered",
+      delivered_at: at(184.5),
+    });
+    t.applyAll([thinking(185), final(186, 180), ev("event.usage", withSeq(187)), idle(188, 180)]);
+    expect(order(t)).toEqual(["e179", "e181", "e182", "e183", "e184", "e180", "e185", "e186", "e187", "e188"]);
+  });
+
+  it("the text that starts the own turn of one written during the text stays under it", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      result(3, "a"),
+      input(4, 6.1, (e) => (e.payload.during_text = true)),
+      final(5, 1),
+      idle(6, 1),
+      ev("event.agent.message", (e) => {
+        e.seq = 7;
+        e.ts = at(7);
+        e.payload = { text: "Let me look.", final: false };
+      }),
+      call(8, "b", "Read", { file_path: "a.rs" }),
+      result(9, "b"),
+      final(10, 4),
+      idle(11, 4),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e3", "e5", "e6", "e4", "e7", "e8", "e9", "e10", "e11"]);
   });
 
   it("a question from another session waits too, and says so", () => {
@@ -385,7 +517,7 @@ describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
     expect(order(t)).toEqual(["e1", "e2", "e4", "e3"]);
     show(t);
     expect(root.querySelector(".relay-when")!.textContent).toBe(
-      `${formatTime("2026-10-22T10:00:00Z")} · queued for the next turn`,
+      `${formatTime("2026-10-22T10:00:00Z")} · queued`,
     );
   });
 

@@ -415,7 +415,8 @@ export class Timeline {
     // An input that came while the agent's text was being written stands under that text
     // (SPEC §6): the `agent.message` goes above the inputs with `during_text` right before it
     // in `seq` order, never above the input it answers. A final one takes the `usage` right
-    // after it along, which the feed draws in its block.
+    // after it along, which the feed draws in its block. An input `placeQueued` moved after the
+    // turn it waited through is no longer there: its own turn's text stays under it.
     let floor = 0;
     for (let i = 0; i < out.length; i++) {
       const a = out[i];
@@ -426,7 +427,7 @@ export class Timeline {
       let at = i;
       while (at > floor) {
         const prev = out[at - 1];
-        if (prev.kind !== "event" || !duringText(prev) || prev.event.event_id === answers) break;
+        if (prev.kind !== "event" || !duringText(prev) || prev.queued || prev.event.event_id === answers) break;
         at--;
       }
       if (at < i) out.splice(at, 0, ...out.splice(i, n));
@@ -482,30 +483,34 @@ function isInput(e: HqcEvent): e is EventOf<"user.message" | "peer.message"> {
 }
 
 /** An input that, come while a turn runs, waits for a turn of its own: not `joined` to that
- *  turn, not under its text (`during_text`), not failed, and not taken when it was written (a
- *  mirrored one is delivered at its own `ts`, SPEC §9.2). */
+ *  turn, not failed, and not taken when it was written (a mirrored one is delivered at its own
+ *  `ts`, SPEC §9.2). One with `during_text` too: taken only after that turn, it stands after it. */
 function mayWait(e: EventOf<"user.message" | "peer.message">): boolean {
   return (
     !joined(e) &&
-    e.payload.during_text !== true &&
     e.delivery !== "failed" &&
     !(e.delivered_at && Date.parse(e.delivered_at) <= Date.parse(e.ts))
   );
 }
 
-/** An event of the agent's work in a turn: `status running`, or what its runtime wrote but an
- *  input and the turn's `usage`. */
+/** An event of the agent's work in a turn: `status running`, `system context_compacted` (a
+ *  `/compact` starts its turn with it), or what its runtime wrote but an input and the turn's
+ *  `usage`. */
 function agentWork(e: HqcEvent): boolean {
   if (e.type === "status") return e.payload.state === "running";
+  if (e.type === "system" && e.payload.code === "context_compacted") return true;
   return e.author.kind === "agent" && e.type !== "peer.message" && e.type !== "usage";
 }
 
 /** The inputs that came while a turn ran and wait for a turn of their own (SPEC §6), out of
  *  their `seq` place: each stands where its turn starts, after the turns it waited through,
- *  before the agent's first event of work (or the end of its own turn, by `in_reply_to`); one
- *  whose turn has not started stands at the bottom. In `seq` order a turn runs from an input
- *  that does not wait, or from the agent's work, to an event that `endsTurn`. A delivered input
- *  waited only if the first end of a turn after it is not its own. */
+ *  before the agent's first event of work, or before the end of its own turn: one that names it
+ *  (`in_reply_to`), or one with no turn opened since the end before that names no input and is
+ *  no `status` closing that same turn; one whose turn has not started stands at the bottom. In
+ *  `seq` order a turn runs from an input that does not wait, or from the agent's work, to an
+ *  event that `endsTurn`. A delivered input waited only if the first end of a turn after it is
+ *  not its own. A `joined` input behind a waiting one went into one of the later turns: it
+ *  stays right behind it. */
 function placeQueued(items: Item[]): Item[] {
   const nextEnd: (HqcEvent | undefined)[] = [];
   let end: HqcEvent | undefined;
@@ -516,14 +521,21 @@ function placeQueued(items: Item[]): Item[] {
   }
   const out: Item[] = [];
   const waiting: Extract<Item, { kind: "event" }>[] = [];
+  // The first `n` waiting inputs, with the joined ones right behind them.
   const take = (n: number) => {
+    while (n > 0 && n < waiting.length && joined(waiting[n].event)) n++;
     for (const w of waiting.splice(0, n)) out.push({ ...w, queued: true });
   };
+  const headDelivered = () => waiting[0]?.event.delivery === "delivered";
   let open = false;
   items.forEach((it, i) => {
     if (it.kind !== "event") return void out.push(it);
     const e = it.event;
     if (isInput(e)) {
+      if (joined(e) && waiting.length > 0) {
+        waiting.push(it);
+        return;
+      }
       const waited =
         e.delivery === "pending" || (nextEnd[i] !== undefined && endOf(nextEnd[i]) !== e.event_id);
       if ((open || waiting.length > 0) && mayWait(e) && waited) {
@@ -536,13 +548,15 @@ function placeQueued(items: Item[]): Item[] {
     }
     if (endsTurn(e)) {
       // The end of a waiting input's own turn: it started without work of the agent before.
-      take(waiting.findIndex((w) => w.event.event_id === endOf(e)) + 1);
+      const own = waiting.findIndex((w) => w.event.event_id === endOf(e));
+      if (own >= 0) take(own + 1);
+      else if (!open && e.type !== "status" && endOf(e) === undefined && headDelivered()) take(1);
       out.push(it);
       open = false;
       return;
     }
     if (!open && agentWork(e)) {
-      if (waiting[0]?.event.delivery === "delivered") take(1);
+      if (headDelivered()) take(1);
       open = true;
     }
     out.push(it);

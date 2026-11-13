@@ -1492,7 +1492,7 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
     expect(under($('.msg-pending')!)).toBe(true);
   });
 
-  it('one queued for the next turn stands under the text and under the inputs written during it', async () => {
+  it('one queued while the turn runs stands under the text and under the inputs written during it', async () => {
     const { push } = await writing([first]);
     const queued = ev('event.user.message', 2, (e) => {
       e.event_id = '0199f3a2-7c10-7000-8000-000000000320';
@@ -1504,7 +1504,7 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
     await act(async () => push(meanwhile(3)));
     expect(under(block('queued meanwhile'))).toBe(true);
     expect(block('written meanwhile').compareDocumentPosition(block('queued meanwhile')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(block('queued meanwhile').querySelector('.msg-time')!.textContent).toContain('· queued for the next turn');
+    expect(block('queued meanwhile').querySelector('.msg-time')!.textContent).toMatch(/ · queued$/);
   });
 
   it('one that came during an earlier text stays above it', async () => {

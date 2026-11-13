@@ -137,7 +137,7 @@ export function PeerMessageBlock({ event, actions, queued }: { event: EventOf<'p
       dir="in"
       label={p.mode === 'ask' ? 'Question from' : 'Message from'}
       peer={<PeerLink target={p.from_session_id} label={p.from ?? `session ${p.from_session_id.slice(-8)}`} actions={actions} />}
-      when={queued && event.delivery === 'pending' ? `${formatTime(event.ts)} · queued for the next turn` : formatTime(event.ts)}
+      when={queued && event.delivery === 'pending' ? `${formatTime(event.ts)} · queued` : formatTime(event.ts)}
       copy={p.text}
     >
       <Markdown class="text" text={p.text} />

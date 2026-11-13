@@ -608,7 +608,7 @@ function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'
         note={event.payload.joined ? 'joined the turn' : undefined}
         time={[
           event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
-          d === 'pending' && <span class="delivery"> · {queued ? 'queued for the next turn' : 'awaiting delivery'}</span>,
+          d === 'pending' && <span class="delivery"> · {queued ? 'queued' : 'awaiting delivery'}</span>,
           d === 'failed' && <span class="delivery delivery-failed"> · not delivered</span>,
           forking && (
             <span class="forking" role="status">

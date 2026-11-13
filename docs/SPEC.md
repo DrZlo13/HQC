@@ -1667,7 +1667,7 @@ the rest is marked "later"):
   the worker when the sessions between never ran (the CLI writes a fork's transcript at its
   first message) or were deleted (§17.4). Since 0.108 a fork before a message with
   `during_text` keeps the `agent.message` the client shows above it (below, the WebSocket
-  paragraph) as the newest cut and the last copied event. Since 0.138 a fork before a message
+  paragraph) as the newest cut and the last copied event. Since 0.137 a fork before a message
   the client shows after the turns it waited through (the same paragraph; one with
   `during_text` too) cuts after them: the
   newest cut is the last `agent.message` before the place the client shows the message at, and
@@ -2084,7 +2084,7 @@ from here." while it is held, else "VS Code was the last to run this session." w
 here" (§9.3). "Retry" of a failed session is a filled button. In the feed a message's time
 stands at the right end of its first line, inside the bubble or plate for the user's, after a
 note on that line ("joined the turn", §17.2; "instead of the request", §10.1) and before "·
-scheduled", "· awaiting delivery", "· queued" (since 0.138, an input that came while a turn
+scheduled", "· awaiting delivery", "· queued" (since 0.137, an input that came while a turn
 ran, see the WebSocket below), "· not delivered" or "· forking…"; its buttons show on hover: the user's copy
 and "Fork from here" inside the bubble left of the time, an agent message's copy in the margin
 left of the feed, on a phone under the message. Since 0.156, until the hub answers
@@ -2145,7 +2145,7 @@ slid-out column is open; on a phone only when the chat replaces a new session's 
 stays at its bottom while its images load: only a scroll up lets go of the bottom.
 
 than the text, and an open thinking block is prose in the feed's font. A call without a
-`tool.result` is running (a pulsing dot) until its turn ends; since 0.138 one with an end of a
+`tool.result` is running (a pulsing dot) until its turn ends; since 0.137 one with an end of a
 turn after it in `seq` order (the final `agent.message`, `status` `idle` or `error`, `system
 turn_lost`) is not finished, marked with the cross of a failed call, as the VS Code tab marks a
 call without a result once the session is not busy; a run is running while one of its calls
@@ -2262,11 +2262,11 @@ or an empty one when none is kept, with the history it catches up. Since 0.108 a
 or `peer.message` that came while that text was being written stands under it in the feed, live
 (after the text, before the activity line, with the messages not stored yet) and once the text
 is stored: the `agent.message` goes above the inputs with `during_text` right before it in `seq`
-order, never above the input it answers (`in_reply_to`) and, since 0.138, never above one that
+order, never above the input it answers (`in_reply_to`) and, since 0.137, never above one that
 waited for a turn of its own and stands after the turns it waited through (below); a final one
 takes along its `usage` and, since 0.137, the `system turn_interrupted` or `turn_ended_early`
 line after it. The client takes this from the hub's `payload.during_text`, never guesses it
-from times. Since 0.138 an
+from times. Since 0.137 an
 input with a `delivery` (`user.message`, `peer.message`) that came while a turn ran (with
 `during_text` too, not failed, and not delivered at its own `ts` as a mirrored one is, §9.2)
 stands at the bottom of the feed until the agent takes it, under everything live (after the
@@ -2789,7 +2789,7 @@ The reply to an ask:
   mirror stores in the target; it closes the ask with `{from, reply}` (§7). Since 0.46 (T41)
   the reply also carries the files of the answering turn: the artifacts of the target's
   `attachment` events between the question (the `peer.message`) and that final message (since
-  0.138 also after the last end of a turn before that final message, §6: a question that came
+  0.137 also after the last end of a turn before that final message, §6: a question that came
   while a turn ran waits for a turn of its own, and the attachments of the turn it waited
   through are not the answer's), oldest first, each once, at most 32, only artifacts of the session's owner (a worker can
   write an `attachment` event itself, and another owner's id in one is left out), as
@@ -3579,7 +3579,9 @@ Stopping one task (since 0.137, the VS Code tab's stop of a background task, whi
 `success` with `{}`, also for a task it does not know or one that has already ended, or an
 error with the reason it did not stop it; the subagent then ends as any end of it, with
 `task_updated` `killed` and `task_notification` `stopped` **[verify]**: its row goes and its
-"Background task" line comes (above). The adapter only logs the answer.
+"Background task" line comes (above); the CLI then queues the task's notification ("was
+stopped by user") for the main agent, which starts a turn of its own (§17.1, since 0.121)
+**[verify]**. The adapter only logs the answer.
 
 Moving a call to the background (since 0.125, the VS Code tab's "Run in background", extension
 2.1.319). A call of the agent itself the CLI runs in the foreground is one whose `system`
@@ -5084,7 +5086,7 @@ with no separate events: `running` — a pulsing "Running" pill in the header an
 working" line at the bottom of the feed ("Running <command or tool> <time since the call's
 `ts`>" while the last `tool.call` has no `tool.result`, T26, since 0.132 once that call has run
 for 2 s, counted from its `ts` or from a later answer to a request after it (a permission or a
-question it, or a subagent it runs, waited for), since 0.138 only a call after the last end of a
+question it, or a subagent it runs, waited for), since 0.137 only a call after the last end of a
 turn, §6; since 0.125, when that call is one
 of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
 which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
@@ -5462,29 +5464,7 @@ call, the Running line, an approval card), so a cut command shows its first line
 count of the lines that follow reads "+N+ lines" when the preview is cut. 0.150–0.154 are taken
 by other pull requests.
 
-### 0.137 → 0.138 (an input queued behind a turn stands after it, and a call its turn left without a result)
-§6: a message written while a turn ran that waited for a turn of its own (one written in the
-seconds before the final answer, an answer to a permission request that ended the turn, a
-slash command, a run of a schedule, another session's message, a person's input while another
-session's question runs) stood in the feed at its `seq`, above the rest of that turn and its
-answer, which never saw it, with "· awaiting delivery" as if the worker were off. An input
-that came while a turn ran now stands at the bottom of the feed until the agent takes it, "·
-queued" while `pending`; one the agent took into that turn (`joined`) then stands at its `seq`
-as before, one that waited for a turn of its own where the agent took it: after the turns it
-waited through, before the work of its own, a `joined` one behind it right after it. One
-written during the agent's text (0.108) and taken only after that turn stood under that text,
-above the rest of the turn, though the agent answered it in a turn of its own: it now stands
-after that turn too, with the text of its own turn under it; one the agent took into that turn
-keeps its place under the text. §6, §7.1 hub: a fork before such an
-input cuts after the turns it waited through, and the files of a reply to a question that
-waited are those of its own turn, not of the turn it waited through. §6, §17.1: a tool call
-without a result stayed "running" for good when its turn was lost (the worker restarted, the
-agent died), and the
-activity line of a later turn showed "Running $ <that command>" with its time growing until the
-agent called a tool. A call with an end of a turn after it is now not finished, marked as a
-failed call, and the activity line looks only at the calls after the last end of a turn.
-
-### 0.136 → 0.137 (Stop spares background subagents; an interrupted or early-ended turn says so)
+### 0.136 → 0.137 (Stop spares background subagents; an interrupted or early-ended turn says so; a queued input stands after the turn it waited through)
 §8.1: Stop killed the agent's background subagents and workflows along with the turn: the worker
 sent no `initialize`, and without its `perTaskStopAffordance` the CLI's interrupt stops them. The
 worker now writes `control_request` `initialize` with only `perTaskStopAffordance: true` as the
@@ -5730,6 +5710,27 @@ fire-and-forget like `session.background`, and the worker writes `control_reques
 line and gives its "Background task" line, as before. An older worker sends no `stoppable`, so no
 button shows for its sessions, and answers `session.stop_task` with `error {invalid_frame}`;
 older hubs and clients ignore the new field.
+
+§6: a message written while a turn ran that waited for a turn of its own (one written in the
+seconds before the final answer, an answer to a permission request that ended the turn, a
+slash command, a run of a schedule, another session's message, a person's input while another
+session's question runs) stood in the feed at its `seq`, above the rest of that turn and its
+answer, which never saw it, with "· awaiting delivery" as if the worker were off. An input
+that came while a turn ran now stands at the bottom of the feed until the agent takes it, "·
+queued" while `pending`; one the agent took into that turn (`joined`) then stands at its `seq`
+as before, one that waited for a turn of its own where the agent took it: after the turns it
+waited through, before the work of its own, a `joined` one behind it right after it. One
+written during the agent's text (0.108) and taken only after that turn stood under that text,
+above the rest of the turn, though the agent answered it in a turn of its own: it now stands
+after that turn too, with the text of its own turn under it; one the agent took into that turn
+keeps its place under the text. §6, §7.1 hub: a fork before such an
+input cuts after the turns it waited through, and the files of a reply to a question that
+waited are those of its own turn, not of the turn it waited through. §6, §17.1: a tool call
+without a result stayed "running" for good when its turn was lost (the worker restarted, the
+agent died), and the
+activity line of a later turn showed "Running $ <that command>" with its time growing until the
+agent called a tool. A call with an end of a turn after it is now not finished, marked as a
+failed call, and the activity line looks only at the calls after the last end of a turn.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

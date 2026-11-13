@@ -21,7 +21,9 @@
 //! - `assistant` text with `aborted: true` (an interrupt cut it off) → `agent.message` with
 //!   `interrupted: true`, held and flushed as any;
 //! - `system` `task_notification` (a background task ended) → `system task_notification`
-//!   with its `status`, its `task_id` and the task's `tool_use_id` as `call_id`, except for a
+//!   with its `status`, its `task_id`, its `usage` and the task's `tool_use_id` as
+//!   `call_id`, then its `output_file` as
+//!   [`AdapterEvent::TaskOutput`], except for a task with `skip_transcript: true`, a
 //!   task that a subagent started or whose `task_started` said it runs in the foreground,
 //!   until a `task_updated` moves it to the background; one without the subagent's report
 //!   (`handback`) while the latest `background_tasks_changed` still holds the subagent, or a
@@ -69,6 +71,8 @@
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with the number of those not `ambient` when it changes;
+//!   a task with `ambient: true` there or in its `task_started` is none of the above (no
+//!   activity, the SDK says), nor a subagent as the `parent_task_id` of another task;
 //! - `system` `task_started` with `is_backgrounded: false`, `task_type` `local_bash` or
 //!   `local_agent`, a `tool_use_id`, no `skip_transcript: true`, no `owned_by_subagent:
 //!   true` and no `parent_task_id` (a Bash call or a subagent of the agent itself in the
@@ -128,8 +132,9 @@
 //! - the result of the main agent's `ScheduleWakeup` call → [`AdapterEvent::Wakeup`] with its
 //!   `scheduledFor`, none for 0; a `command_lifecycle` `started` with `wakeup_source:
 //!   loop_wakeup` and that `scheduled_for` → [`AdapterEvent::Wakeup`] with none;
-//! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
-//!   rules suggested for the call) / `clarify.request`, an immediate allow by a `session`
+//! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint`, the hqc
+//!   rules suggested for the call and the subagent whose `agent_id` it names) /
+//!   `clarify.request` (with that subagent too), an immediate allow by a `session`
 //!   rule or by the folder's hqc rules (T48), or an immediate deny plus `system
 //!   policy_denied` when a deny rule of `[permissions]` matches (checked first); a request
 //!   only a person may answer gets no allow by a rule and only `once` / `deny`;
@@ -163,7 +168,7 @@ use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
     AnswerInput, ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
     ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent,
-    SessionState, MODEL_NOT_SWITCHED,
+    RequestSubagent, SessionState, TaskUsage, MODEL_NOT_SWITCHED,
 };
 use hqc_proto::frame::{Activity, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -475,8 +480,12 @@ pub struct Core {
     /// A `background_tasks_changed` lowered [`Core::running_subagents`] below the count last
     /// reported: the next line of another kind reports it.
     recount: bool,
-    /// `tasks` of the latest `system` `background_tasks_changed`.
+    /// `tasks` of the latest `system` `background_tasks_changed`, without the `ambient` ones.
     background: Vec<Value>,
+    /// The `task_id`s the CLI marked `ambient: true`, in a `task_started` or the list: none is
+    /// a subagent, also as the `parent_task_id` of a task ([`Core::parent`]; 2.1.312 runs a
+    /// skill with `context: fork` as such a `local_agent`, and its commands name it).
+    ambient: HashSet<String>,
     in_turn: bool,
     /// A turn the CLI started by itself (`system/init` while no turn of ours runs, e.g. after
     /// a background task's `task_notification`), until its `result`: Stop interrupts it too.
@@ -625,6 +634,7 @@ impl Core {
             live_changed: false,
             recount: false,
             background: Vec::new(),
+            ambient: HashSet::new(),
             in_turn: false,
             self_turn: false,
             stopping: false,
@@ -1249,7 +1259,11 @@ impl Core {
                     if let (Some(id), Some(call)) = (v["task_id"].as_str(), call) {
                         self.task_calls.insert(id.to_owned(), call.to_owned());
                     }
-                    let agent = v["task_type"] == "local_agent";
+                    // An `ambient` one is no activity (the SDK): no running subagent.
+                    if let Some(id) = v["task_id"].as_str().filter(|_| v["ambient"] == true) {
+                        self.ambient.insert(id.to_owned());
+                    }
+                    let agent = v["task_type"] == "local_agent" && v["ambient"] != true;
                     if let Some(id) = v["task_id"].as_str().filter(|_| agent) {
                         self.reported.remove(id);
                         self.live_started(id, v["description"].as_str().unwrap_or(""), call);
@@ -1470,6 +1484,7 @@ impl Core {
                 status: None,
                 task_id: None,
                 from_session_id: None,
+                usage: None,
                 fork: None,
                 compaction: None,
                 model: kept.clone(),
@@ -1803,7 +1818,19 @@ impl Core {
     /// inferred from a capture where a second task of the subagent kept the list non-empty).
     fn on_background_tasks(&mut self, v: &Value) -> Vec<Action> {
         let before = self.background_work();
-        self.background = v["tasks"].as_array().cloned().unwrap_or_default();
+        // An `ambient` task is no activity (the SDK): not counted, no row, no subagent, nor the
+        // parent of one of its tasks.
+        let (ambient, tasks): (Vec<&Value>, Vec<&Value>) = v["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .partition(|t| t["ambient"] == true);
+        self.ambient.extend(
+            ambient
+                .iter()
+                .filter_map(|t| t["task_id"].as_str().map(str::to_owned)),
+        );
+        self.background = tasks.into_iter().cloned().collect();
         let mut out = Vec::new();
         let n = self.background_work();
         if n != before {
@@ -1876,19 +1903,15 @@ impl Core {
         self.running_subagent_ids().len()
     }
 
-    /// The tasks of the latest `background_tasks_changed` list that are work: those without
+    /// The tasks of the latest `background_tasks_changed` list that are work: those of
+    /// [`Core::background`], which [`Core::on_background_tasks`] keeps without the ones marked
     /// `ambient: true`. 2.1.312 sets it on tasks that are no activity: its own housekeeping
     /// (`skip_transcript`) and every live-update watcher, such as the one that follows the
     /// comments on a page the agent published with the Artifact tool (`monitor_ws`,
     /// `persistent`, no timeout, so it stays for the whole process). The SDK tells hosts to
     /// leave them out of activity, and the VS Code tab does.
     fn background_work(&self) -> u32 {
-        let n = self
-            .background
-            .iter()
-            .filter(|t| t["ambient"] != true)
-            .count();
-        u32::try_from(n).unwrap_or(u32::MAX)
+        u32::try_from(self.background.len()).unwrap_or(u32::MAX)
     }
 
     /// The `task_id`s of [`Core::running_subagents`].
@@ -1903,17 +1926,16 @@ impl Core {
         ids
     }
 
-    /// The subagent listed task `t` belongs to, unless that subagent has reported or `t` is
-    /// marked `ambient`: 2.1.312 gives the comment watcher of a page a subagent published the
-    /// subagent as `parent_task_id`, and the watcher stays for the whole process, so it would
-    /// keep a subagent that ended counted for good ([`Core::background_work`]).
+    /// The subagent listed task `t` belongs to, unless that subagent has reported or is one of
+    /// [`Core::ambient`] (no subagent: its task is the agent's own). A task marked `ambient` is
+    /// none of the list ([`Core::on_background_tasks`]): 2.1.312 gives the comment watcher of a
+    /// page a subagent published the subagent as `parent_task_id`, and the watcher stays for
+    /// the whole process, so it would keep a subagent that ended counted for good
+    /// ([`Core::background_work`]).
     fn parent<'a>(&self, t: &'a Value) -> Option<&'a str> {
-        if t["ambient"] == true {
-            return None;
-        }
         t["parent_task_id"]
             .as_str()
-            .filter(|p| !self.reported.contains(*p))
+            .filter(|p| !self.reported.contains(*p) && !self.ambient.contains(*p))
     }
 
     /// The latest `background_tasks_changed` list holds subagent `id` or a task of it.
@@ -1982,20 +2004,18 @@ impl Core {
     }
 
     /// Brings [`Core::live_commands`] to the main agent's background shell commands and
-    /// Monitor watchers of the latest `background_tasks_changed` list: `task_type:
-    /// local_bash`, not `ambient` (no activity, the SDK says), its `task_started` come (a task
-    /// joins the list before it, and only that tells a Monitor's task from a command's,
-    /// [`Core::bash_tasks`]), and no subagent of [`Core::parent`] (none, or one that has
-    /// reported): a subagent that counts stands for its commands with its own row. A new one
-    /// goes last, a changed `description` replaces its row's, one that no longer qualifies
-    /// goes. Whether anything changed.
+    /// Monitor watchers of the latest `background_tasks_changed` list ([`Core::background`]:
+    /// none is `ambient`, no activity, the SDK says): `task_type: local_bash`, its
+    /// `task_started` come (a task joins the list before it, and only that tells a Monitor's
+    /// task from a command's, [`Core::bash_tasks`]), and no subagent of [`Core::parent`] (none,
+    /// an `ambient` task, or one that has reported): a subagent that counts stands for its
+    /// commands with its own row. A new one goes last, a changed `description` replaces its
+    /// row's, one that no longer qualifies goes. Whether anything changed.
     fn update_live_commands(&mut self) -> bool {
         let listed: Vec<(String, String, Instant, LiveKind)> = self
             .background
             .iter()
-            .filter(|t| {
-                t["task_type"] == "local_bash" && t["ambient"] != true && self.parent(t).is_none()
-            })
+            .filter(|t| t["task_type"] == "local_bash" && self.parent(t).is_none())
             .filter_map(|t| {
                 let id = t["task_id"].as_str()?;
                 let (monitor, started) = self.bash_tasks.get(id)?;
@@ -2591,6 +2611,7 @@ impl Core {
                     server: None,
                     message: None,
                     url: None,
+                    subagent: self.subagent_of(req),
                 })];
             }
             tracing::warn!(session_id = %self.session_id, "AskUserQuestion without questions; asking as an approval");
@@ -2700,6 +2721,7 @@ impl Core {
             reason: field("decision_reason", REASON_LIMIT),
             display_name: field("display_name", DISPLAY_NAME_LIMIT),
             human_only,
+            subagent: self.subagent_of(req),
         })]
     }
 
@@ -2747,6 +2769,7 @@ impl Core {
                     }
                 }),
             url,
+            subagent: None,
         };
         let size = serde_json::to_vec(&kind).map_or(0, |v| v.len());
         if size > ELICITATION_LIMIT {
@@ -2789,6 +2812,22 @@ impl Core {
         };
         tracing::info!(session_id = %self.session_id, request_id = id, ?reason, "the CLI withdrew its request");
         vec![self.cancel_event(id.to_owned(), &p, reason)]
+    }
+
+    /// The subagent request `req` comes from: its `agent_id` is the subagent's `task_id`
+    /// (2.1.312: a `local_agent` task's id is its `agentId`), one of [`Core::live`] with the
+    /// title of its `task_started`, cut to [`PREVIEW_LIMIT`]; `None` for the agent itself and
+    /// a subagent not known so.
+    fn subagent_of(&self, req: &Value) -> Option<RequestSubagent> {
+        let id = req["agent_id"].as_str()?;
+        let a = self
+            .live
+            .iter()
+            .find(|a| a.task_id == id && !a.title.is_empty())?;
+        Some(RequestSubagent {
+            task_id: a.task_id.clone(),
+            description: preview(&a.title, PREVIEW_LIMIT),
+        })
     }
 
     /// `system/permission_denied`: the CLI refused a call without asking. In this adapter's
@@ -2842,8 +2881,9 @@ impl Core {
 
     /// The end of the task of `task_notification` `v` ([`Core::on_task_notification`]). The
     /// line carries the task's `tool_use_id` (the notification's, else that of its
-    /// `task_started`, [`Core::task_calls`]) as `call_id`, and the notification's `status` and
-    /// `task_id`.
+    /// `task_started`, [`Core::task_calls`]) as `call_id`, and the notification's `status`,
+    /// `task_id` and `usage`; its `output_file` follows it as [`AdapterEvent::TaskOutput`].
+    /// One with `skip_transcript: true` gives no line.
     fn on_task_ended(&mut self, v: &Value) -> Vec<Action> {
         let id = v["task_id"].as_str();
         let started = id.and_then(|id| self.task_calls.remove(id));
@@ -2854,6 +2894,10 @@ impl Core {
             None => vec![],
         };
         if id.is_some_and(|id| self.quiet_tasks.remove(id).is_some()) {
+            return out;
+        }
+        // A task the CLI keeps out of the transcript is no activity (the SDK): no line.
+        if v["skip_transcript"] == true {
             return out;
         }
         if id.is_some_and(|id| !self.announced.insert(id.to_owned())) {
@@ -2879,11 +2923,15 @@ impl Core {
                 status: v["status"].as_str().map(str::to_owned),
                 task_id: id.map(str::to_owned),
                 from_session_id: None,
+                usage: task_usage(&v["usage"]),
                 fork: None,
                 compaction: None,
                 model: None,
             },
         ))));
+        if let Some(path) = v["output_file"].as_str().filter(|p| !p.is_empty()) {
+            out.push(Action::Emit(AdapterEvent::TaskOutput(path.into())));
+        }
         out
     }
 
@@ -2995,6 +3043,7 @@ impl Core {
                 status: None,
                 task_id: None,
                 from_session_id: None,
+                usage: None,
                 fork: None,
                 compaction,
                 model: None,
@@ -3520,6 +3569,16 @@ pub fn args_preview(tool: &str, input: &Value) -> String {
         None => compact(input),
     };
     preview(&json, PREVIEW_LIMIT)
+}
+
+/// The `usage` of a `task_notification` (`total_tokens`, `tool_uses`, `duration_ms`); `None`
+/// unless it has all three.
+fn task_usage(u: &Value) -> Option<TaskUsage> {
+    Some(TaskUsage {
+        total_tokens: u["total_tokens"].as_u64()?,
+        tool_uses: u["tool_uses"].as_u64()?,
+        duration_ms: u["duration_ms"].as_u64()?,
+    })
 }
 
 /// Event text: U+0000 (binary tool output) becomes U+FFFD, which the hub can store

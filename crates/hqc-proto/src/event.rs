@@ -302,6 +302,23 @@ pub struct ApiRetry {
     pub error_status: Option<u16>,
 }
 
+/// The subagent that asks in `approval.request` and `clarify.request` (SPEC §4, since 0.175):
+/// its `task_id` as `subagents.live` names it, and its task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestSubagent {
+    pub task_id: String,
+    pub description: String,
+}
+
+/// What a background task spent, in `system task_notification` (SPEC §4, since 0.175; Claude
+/// Code: the `usage` of its `task_notification`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskUsage {
+    pub total_tokens: u64,
+    pub tool_uses: u64,
+    pub duration_ms: u64,
+}
+
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -435,6 +452,10 @@ pub enum EventKind {
         /// `auto_approve`; absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         human_only: bool,
+        /// The subagent whose call it is (since SPEC 0.175); absent for the agent itself and
+        /// for a subagent the worker does not know.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<RequestSubagent>,
     },
     #[serde(rename = "approval.response")]
     ApprovalResponse {
@@ -466,6 +487,9 @@ pub enum EventKind {
         /// The page the server sends the person to, with no questions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
+        /// As in `approval.request` (since SPEC 0.175).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<RequestSubagent>,
     },
     /// `answers` is keyed by `ClarifyQuestion::id`.
     #[serde(rename = "clarify.response")]
@@ -557,6 +581,10 @@ pub enum EventKind {
         /// 0.172, §7.1.1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_session_id: Option<Uuid>,
+        /// Only with `task_notification`: what the task spent, when the runtime says it
+        /// (since SPEC 0.175).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<TaskUsage>,
         /// Only with [`SESSION_FORKED`]: its fields sit next to `text` and `code`.
         #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
         fork: Option<SessionForked>,
@@ -980,6 +1008,39 @@ mod tests {
         }
     }
 
+    /// SPEC 0.175: the end of a background task with what it spent, and a request a subagent
+    /// makes, naming it.
+    #[test]
+    fn task_usage_and_request_subagent_roundtrip() {
+        let src = include_str!("../examples/wire/event.system.task_notification.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { usage, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(
+            *usage,
+            Some(TaskUsage {
+                total_tokens: 155300,
+                tool_uses: 188,
+                duration_ms: 253000
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+
+        let src = include_str!("../examples/wire/event.approval.request.subagent.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ApprovalRequest { subagent, .. } = &e.kind else {
+            panic!("not approval.request: {:?}", e.kind);
+        };
+        assert_eq!(
+            subagent.as_ref().map(|s| s.task_id.as_str()),
+            Some("a52af2b436ded4cea")
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+    }
+
     #[test]
     fn a_scheduled_user_message_roundtrips() {
         let src = include_str!("../examples/wire/event.user.message.scheduled.json");
@@ -1293,6 +1354,7 @@ mod tests {
                 status: None,
                 task_id: None,
                 from_session_id: None,
+                usage: None,
                 fork: None,
                 compaction: None,
                 model: None

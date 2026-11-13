@@ -3410,6 +3410,73 @@ async fn live_agents(c: &mut HubConn) -> Value {
     }
 }
 
+// SPEC 0.175: the output file of a background task that ended is uploaded for its session as
+// `hqc_attach` uploads a file, its last 2 MB when it is larger, and comes as an `attachment`
+// of the agent, `text`, named as the file, whose caption says it was cut. A symlink in its
+// place is not followed and gives nothing.
+#[tokio::test]
+async fn a_task_output_becomes_an_attachment() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let dir = env.dir.path().join("tasks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("bnx80r4bg.output");
+    std::fs::write(&small, "make: *** [all] Error 2\n").unwrap();
+    let big = dir.join("b2st7oc3z.output");
+    // 10 bytes more than 2 MB: the first 10 go, the error at the end stays.
+    let mut output = b"make all\n\n".to_vec();
+    output.extend(vec![b'x'; 2 * 1024 * 1024 - 6]);
+    output.extend(b"Error\n");
+    std::fs::write(&big, &output).unwrap();
+    let linked = dir.join("a52af2b436ded4cea.output");
+    std::os::unix::fs::symlink(&small, &linked).unwrap();
+    let empty = dir.join("bq4m1t0ys.output");
+    std::fs::write(&empty, "").unwrap();
+    for p in [&linked, &empty, &small, &big] {
+        adapters
+            .emit(sid, AdapterEvent::TaskOutput(p.clone()))
+            .await;
+    }
+    let mut attached = Vec::new();
+    while attached.len() < 2 {
+        let f = c.expect("event").await;
+        let e = &f["payload"]["event"];
+        if e["type"] == "attachment" {
+            assert_eq!(e["author"], json!({"kind": "agent", "id": sid}), "{e}");
+            attached.push(e["payload"].clone());
+        }
+    }
+    attached.sort_by_key(|p| p["name"].as_str().unwrap().to_owned());
+    let mut uploads = hub.artifacts.uploads();
+    uploads.sort_by_key(|u| u.headers["x-hqc-artifact-name"].clone());
+    assert_eq!(uploads.len(), 2);
+    for u in &uploads {
+        assert_eq!(u.headers["x-hqc-session-id"], sid.to_string());
+        assert_eq!(u.headers["x-hqc-artifact-kind"], "text");
+    }
+    assert!(uploads[0].body == output[10..], "not the last 2 MB");
+    assert_eq!(uploads[1].body, b"make: *** [all] Error 2\n");
+    assert_eq!(
+        attached,
+        [
+            json!({"artifact_id": uploads[0].id, "kind": "text", "name": "b2st7oc3z.output",
+                   "caption": "The last 2 MB of 2097162 bytes"}),
+            json!({"artifact_id": uploads[1].id, "kind": "text", "name": "bnx80r4bg.output"}),
+        ]
+    );
+    while let Some(f) = c.maybe("event", Duration::from_millis(300)).await {
+        assert_ne!(f["payload"]["event"]["type"], "attachment", "{f}");
+    }
+    assert_eq!(hub.artifacts.uploads().len(), 2);
+    w.stop().await;
+}
+
 // The token rate goes as `tokens.rate` when it changes; one above 0 is sent again on the next
 // connect (the hub dropped it with the link), a 0 is not; the agent stopped, it sends 0.
 #[tokio::test]

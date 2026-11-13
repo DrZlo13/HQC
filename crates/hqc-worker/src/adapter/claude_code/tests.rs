@@ -293,6 +293,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::Activity(_) | AdapterEvent::Heartbeat => continue,
             AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
             AdapterEvent::ToolResult { .. } => "tool.result".into(),
+            // `a_task_end_carries_its_usage_and_output` looks at it.
+            AdapterEvent::TaskOutput(_) => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -4954,6 +4956,166 @@ fn a_task_notification_carries_its_call_status_and_task() {
     );
 }
 
+/// The line of a task's end (SPEC 0.175; lines made up after 2.1.312's code): the
+/// notification's `usage`; its `output_file`, when there is one, right after the line.
+#[test]
+fn a_task_end_carries_its_usage_and_output() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let stream = r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"toolu_A1","status":"completed","output_file":"/tmp/tasks/a1.output","summary":"Fixed both nets.","usage":{"total_tokens":23176,"tool_uses":4,"duration_ms":61000}}
+{"type":"system","subtype":"task_notification","task_id":"a2","tool_use_id":"toolu_A2","status":"completed","output_file":"","summary":"Done, 4."}
+{"type":"system","subtype":"task_notification","task_id":"bnx80r4bg","tool_use_id":"toolu_B1","status":"failed","output_file":"/tmp/tasks/bnx80r4bg.output","summary":"Background command \"make\" failed with exit code 2"}"#;
+    let mut lines = Vec::new();
+    for a in play(&mut core, stream) {
+        match a {
+            Action::Emit(AdapterEvent::Event(Event {
+                kind: EventKind::System { text, usage, .. },
+                ..
+            })) => lines.push(format!("{text} | {usage:?}")),
+            Action::Emit(AdapterEvent::TaskOutput(p)) => lines.push(p.display().to_string()),
+            _ => {}
+        }
+    }
+    let usage = hqc_proto::event::TaskUsage {
+        total_tokens: 23176,
+        tool_uses: 4,
+        duration_ms: 61000,
+    };
+    assert_eq!(
+        lines,
+        [
+            format!("Fixed both nets. | {:?}", Some(usage)),
+            "/tmp/tasks/a1.output".into(),
+            "Done, 4. | None".into(),
+            "Background command \"make\" failed with exit code 2 | None".into(),
+            "/tmp/tasks/bnx80r4bg.output".into(),
+        ]
+    );
+}
+
+/// A task the CLI keeps out of the transcript (`skip_transcript: true`; 2.1.312 sends it so for
+/// its own tasks, with `ambient: true`) is no activity: no line, no output.
+#[test]
+fn a_task_kept_out_of_the_transcript_gives_no_line() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let a = play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_notification","task_id":"m1","status":"completed","output_file":"/tmp/tasks/m1.output","summary":"saving memories","skip_transcript":true,"ambient":true}"#,
+    );
+    assert!(
+        !a.iter().any(|a| matches!(
+            a,
+            Action::Emit(AdapterEvent::Event(_) | AdapterEvent::TaskOutput(_))
+        )),
+        "{a:?}"
+    );
+}
+
+/// An `ambient` task (2.1.312: in the CLI's list and in its `task_started`, a task the SDK says
+/// is no activity) is not counted in the background tasks, is no running subagent and no row
+/// above the input; the agent's command beside it is all three.
+#[test]
+fn an_ambient_task_is_no_activity() {
+    let lines = [
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"amem","task_type":"post_turn_memory","description":"saving memories","ambient":true},{"task_id":"afork","task_type":"local_agent","description":"Fork worker","ambient":true},{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"afork","tool_use_id":"toolu_01Fork","description":"Fork worker","is_backgrounded":true,"task_type":"local_agent","skip_transcript":true,"ambient":true}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass","is_backgrounded":true,"task_type":"local_bash"}"#,
+    ];
+    let want: [&[&str]; 3] = [&["background_tasks:1"], &[], &[]];
+    assert_eq!(task_counts(lines.into_iter()), want);
+    let row = live_row("b2st7oc3z", "Run the full pass", None);
+    assert_eq!(
+        live_lists(lines.into_iter()),
+        [vec![], vec![], vec![vec![row]]]
+    );
+}
+
+/// The tasks of an `ambient` one (2.1.312 runs a skill with `context: fork` as an `ambient`
+/// `local_agent`, and its tasks name it as their `parent_task_id`) are the agent's own: its
+/// subagent counts and has its row, its command has its row, and it counts as no subagent;
+/// its `task_started` or its entry in the list alone says it is `ambient`.
+#[test]
+fn the_tasks_of_an_ambient_one_are_the_agents() {
+    let start = r#"{"type":"system","subtype":"task_started","task_id":"afork","tool_use_id":"toolu_01Fork","description":"/review","is_backgrounded":true,"task_type":"local_agent","skip_transcript":true,"ambient":true}"#;
+    let fork =
+        r#"{"task_id":"afork","task_type":"local_agent","description":"/review","ambient":true},"#;
+    let listed = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"afork","task_type":"local_agent","description":"/review","ambient":true},{"task_id":"achild","task_type":"local_agent","description":"Check the board","parent_task_id":"afork"},{"task_id":"bchild","task_type":"local_bash","description":"Run the full pass","parent_task_id":"afork"}]}"#;
+    let unlisted = listed.replace(fork, "");
+    let child = r#"{"type":"system","subtype":"task_started","task_id":"achild","tool_use_id":"toolu_01Chk","description":"Check the board","is_backgrounded":true,"task_type":"local_agent","parent_task_id":"afork"}"#;
+    let command = r#"{"type":"system","subtype":"task_started","task_id":"bchild","tool_use_id":"toolu_01Run","description":"Run the full pass","is_backgrounded":true,"task_type":"local_bash"}"#;
+    let counts: [&[&str]; 4] = [&[], &["background_tasks:2", "subagents:1"], &[], &[]];
+    let subagent = live_row("achild", "Check the board", None);
+    let lists = [
+        vec![],
+        vec![vec![live_row("achild", "", None)]],
+        vec![vec![subagent.clone()]],
+        vec![vec![
+            subagent,
+            live_row("bchild", "Run the full pass", None),
+        ]],
+    ];
+    // Both say it; the list alone; the `task_started` alone.
+    for (lines, from) in [
+        (vec![start, listed, child, command], 0),
+        (vec![listed, child, command], 1),
+        (vec![start, unlisted.as_str(), child, command], 0),
+    ] {
+        assert_eq!(
+            task_counts(lines.iter().copied()),
+            counts[from..],
+            "{lines:?}"
+        );
+        assert_eq!(
+            live_lists(lines.iter().copied()),
+            lists[from..],
+            "{lines:?}"
+        );
+    }
+}
+
+/// A request of a subagent names it (SPEC 0.175): the CLI's `agent_id` is the subagent's
+/// `task_id` (2.1.312), and its task is the `description` of its `task_started`. The agent's
+/// own request, and one of a subagent the adapter has not seen start, name none.
+#[test]
+fn a_subagents_request_names_it() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_started","task_id":"a8b8fdc3b4a031d4f","tool_use_id":"toolu_01BR8iav6ZtPUAhpuCWdQPCt","description":"Touch hqc-live-check file","is_backgrounded":true,"task_type":"local_agent"}"#,
+    );
+    let asked = |core: &mut Core, line: Value| {
+        emitted(core.on_line(&line.to_string()))
+            .into_iter()
+            .find_map(|e| match e {
+                AdapterEvent::Event(Event {
+                    kind:
+                        EventKind::ApprovalRequest { subagent, .. }
+                        | EventKind::ClarifyRequest { subagent, .. },
+                    ..
+                }) => Some(subagent.map(|s| (s.task_id, s.description))),
+                _ => None,
+            })
+            .expect("a request")
+    };
+    let named = Some((
+        "a8b8fdc3b4a031d4f".to_string(),
+        "Touch hqc-live-check file".to_string(),
+    ));
+    let mut v: Value = serde_json::from_str(&can_use_tool_line(&fx, "r1", None)).unwrap();
+    assert_eq!(asked(&mut core, v.clone()), None);
+    v["request_id"] = json!("r2");
+    v["request"]["agent_id"] = json!("a8b8fdc3b4a031d4f");
+    assert_eq!(asked(&mut core, v.clone()), named);
+    v["request_id"] = json!("r3");
+    v["request"]["agent_id"] = json!("aunknown");
+    assert_eq!(asked(&mut core, v), None);
+    let q = json!({"type": "control_request", "request_id": "q1", "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "agent_id": "a8b8fdc3b4a031d4f",
+        "input": {"questions": [{"question": "Which net?", "header": "Net", "multiSelect": false,
+            "options": [{"label": "VCC"}, {"label": "GND"}]}]}}});
+    assert_eq!(asked(&mut core, q), named);
+}
+
 /// An `Agent` call's `args_preview` has its `prompt` last: with a prompt past the 4 KB cut the
 /// sorted keys lost `subagent_type` and `run_in_background`, which the subagent's card shows.
 /// The other fields go from the shortest value to the longest.
@@ -5712,6 +5874,7 @@ fn a_refused_model_switch_is_a_line_and_the_kept_model() {
             status: None,
             task_id: None,
             from_session_id: None,
+            usage: None,
             fork: None,
             compaction: None,
             model: Some("claude-opus-5-5".into()),

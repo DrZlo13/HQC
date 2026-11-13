@@ -89,6 +89,10 @@ pub enum AdapterEvent {
     /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
     /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
     Limits(hqc_proto::frame::Limits),
+    /// The file a background task that ended wrote its output to (Claude Code: `output_file`
+    /// of its `task_notification`, SPEC §8.1), right after its `system task_notification`: the
+    /// worker uploads it as an `attachment` of the session.
+    TaskOutput(std::path::PathBuf),
     /// The runtime reported its own session id (ACP), or the session goes on under another
     /// one (Claude Code: after `/clear`, the new transcript, SPEC §8.1); sent in
     /// `session.state`, and later starts continue it.

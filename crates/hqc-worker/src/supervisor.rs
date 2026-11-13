@@ -45,7 +45,9 @@
 //!   one and the process has not stopped since. `session.stop_task` stops one of its tasks
 //!   alone ([`Adapter::stop_task`]); it is acked, also with no agent running. The token rate
 //!   ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once when the agent
-//!   stops, and again as it is on every [`AdapterEvent::Heartbeat`].
+//!   stops, and again as it is on every [`AdapterEvent::Heartbeat`]. The output file of a
+//!   background task that ended ([`AdapterEvent::TaskOutput`]) is uploaded and becomes an
+//!   `attachment` of the session.
 //! - A tool result with files ([`AdapterEvent::ToolResult`]: its whole text, its images) goes to
 //!   the hub once they are uploaded with `PUT /worker/artifacts`, before the adapter's next
 //!   event (SPEC §8.1).
@@ -2122,6 +2124,11 @@ impl Session {
             // the adapter sends with it (SPEC §8.1).
             AdapterEvent::ModelKept(m) => self.spec.model = Some(m),
             AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
+            // Uploaded beside the session's loop, which goes on meanwhile.
+            AdapterEvent::TaskOutput(path) => {
+                let (link, artifacts, id) = (self.link.clone(), self.artifacts.clone(), self.id);
+                tokio::spawn(async move { attach_task_output(&link, &artifacts, id, &path).await });
+            }
             AdapterEvent::RuntimeSessionId(r) => {
                 // A start of this task resumes it, as the hub's next `session.start` will
                 // (after `/clear` the transcript is another one, SPEC §8.1).
@@ -2479,6 +2486,7 @@ impl Session {
                 status: None,
                 task_id: None,
                 from_session_id: None,
+                usage: None,
                 fork: None,
                 compaction: None,
                 model: None,
@@ -2492,6 +2500,66 @@ impl Session {
 
 fn start_failed(e: &anyhow::Error) -> WorkerFrame {
     wire_error(error_code::AGENT_START_FAILED, format!("{e:#}"), true)
+}
+
+/// The most of a background task's output uploaded: 2 MB, what "Open" of a text shows in the
+/// client (SPEC §8.1).
+const MAX_TASK_OUTPUT: u64 = 2 * 1024 * 1024;
+
+/// The output file `path` of a background task that ended ([`AdapterEvent::TaskOutput`]) as an
+/// `attachment` of session `id` (SPEC §8.1): a regular file, opened as `hqc_attach` opens one
+/// (no symlink in its last component), is uploaded as `hqc_attach` uploads, its last
+/// [`MAX_TASK_OUTPUT`] bytes when it is larger (where a failed build says why; the CLI gives
+/// the model the tail too), which the caption then says; the event is the agent's, `text`,
+/// named as the file. A file that is not there, not regular or empty, or an upload the hub
+/// refuses, gives no event.
+async fn attach_task_output(link: &HubLink, artifacts: &ArtifactClient, id: Uuid, path: &Path) {
+    use hqc_proto::event::{ArtifactKind, Author};
+    use std::io::{Seek, SeekFrom};
+    let (mut file, size) = match crate::mcp::attach::open_regular(path, u64::MAX) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::info!(session_id = %id, path = %path.display(), "task output not attached: {}", e.message);
+            return;
+        }
+    };
+    if size == 0 {
+        tracing::info!(session_id = %id, path = %path.display(), "task output empty, not attached");
+        return;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let sent = size.min(MAX_TASK_OUTPUT);
+    if let Err(e) = file.seek(SeekFrom::Start(size - sent)) {
+        tracing::warn!(session_id = %id, path = %path.display(), "task output not attached: {e}");
+        return;
+    }
+    let artifact_id = match artifacts
+        .upload(id, file, sent, &name, Some(ArtifactKind::Text))
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(session_id = %id, path = %path.display(), code = %e.code, "task output upload: {}", e.message);
+            return;
+        }
+    };
+    tracing::info!(session_id = %id, path = %path.display(), %artifact_id, size, "task output attached");
+    let ev = crate::adapter::new_event(
+        id,
+        Author::Agent { id },
+        EventKind::Attachment {
+            artifact_id,
+            kind: ArtifactKind::Text,
+            name,
+            caption: (sent < size).then(|| format!("The last 2 MB of {size} bytes")),
+        },
+    );
+    if let Err(e) = link.event(ev) {
+        tracing::error!(session_id = %id, "outbox write failed: {e:#}");
+    }
 }
 
 async fn sleep_until_opt(t: Option<Instant>) {

@@ -1654,14 +1654,14 @@ function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number 
 }
 
 /** Index of the first of the last blocks that are inputs come while the text being written now
- *  was (`during_text`, stored after the last event that ended a text), inputs waiting for a turn
- *  of their own (`queued`, still `pending`) or messages not stored yet. */
+ *  was (`during_text`, stored after the last event that ended a text or a thinking), inputs
+ *  waiting for a turn of their own (`queued`, still `pending`) or messages not stored yet. */
 function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
   const evs = t.events();
   let ended = 0;
   for (let i = evs.length - 1; i >= 0; i--) {
     const e = evs[i];
-    if (e.type === 'agent.message' || (e.type === 'status' && e.payload.state !== 'running')) {
+    if (e.type === 'agent.message' || e.type === 'agent.thinking' || (e.type === 'status' && e.payload.state !== 'running')) {
       ended = e.seq!;
       break;
     }

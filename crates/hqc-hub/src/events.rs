@@ -85,7 +85,8 @@ fn ends_turn(kind: &EventKind) -> bool {
     )
 }
 
-/// The event ends the text of `agent.delta` clients show (SPEC §6), as the client does.
+/// The event ends the text of `agent.delta` clients show, and the thinking (SPEC §6), as the
+/// client does.
 fn ends_live_text(kind: &EventKind) -> bool {
     match kind {
         EventKind::AgentMessage { .. } => true,
@@ -155,13 +156,20 @@ pub async fn ingest_worker_event(
         return Ok(dropped);
     }
     app.worker_activity(s.id);
-    if let EventKind::AgentDelta { text, reset } = &ev.kind {
+    if let EventKind::AgentDelta {
+        text,
+        reset,
+        thinking,
+    } = &ev.kind
+    {
         // Transport only: to clients without seq, never stored (SPEC §4).
-        app.delta(s.id, raw, text, *reset);
+        app.delta(s.id, raw, text, *reset, *thinking);
         return Ok(dropped);
     }
     if ends_live_text(&ev.kind) {
         app.end_live_text(s.id);
+    } else if matches!(ev.kind, EventKind::AgentThinking { .. }) {
+        app.end_live_thinking(s.id);
     }
     let str_field = |k: &str| raw.get(k).and_then(Value::as_str).map(str::to_string);
     let mut payload = raw.get("payload").cloned().unwrap_or(Value::Null);
@@ -317,8 +325,8 @@ async fn store_hub_event_as(
     hqc_proto::replace_nul_json(&mut author);
     hqc_proto::replace_nul_json(&mut payload);
     let client_op_id = client_op_id.map(|c| hqc_proto::replace_nul(&c).into_owned());
-    // Clients put an input that came while the agent's text was being written under that text
-    // (SPEC §6).
+    // Clients put an input that came while the agent's text or thinking was being written
+    // under it (SPEC §6).
     if kind == "user.message" && app.text_open(s.id) {
         payload["during_text"] = json!(true);
     }

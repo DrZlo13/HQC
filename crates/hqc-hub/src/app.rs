@@ -63,7 +63,7 @@ pub struct Inner {
     /// `(what, owner)` -> a lock held while a cap is counted and the row it counts is
     /// written ([`AppState::owner_lock`]); `("room", room)` -> a room's ([`crate::rooms::lock`]).
     owner_locks: Mutex<HashMap<(&'static str, Uuid), OwnerLock>>,
-    /// The text of the answer being written ([`AppState::live_text`]).
+    /// The text of the answer and of the thinking being written ([`AppState::live_text`]).
     live: Mutex<LiveText>,
     /// Session -> its latest `subagents.live`, unless that list was empty, and when it came
     /// ([`AppState::live_agents`]).
@@ -79,14 +79,23 @@ pub struct Inner {
 }
 
 /// A session's `agent.delta` text since its last `agent.message` or `status` other than
-/// `running`, so a client that subscribes mid-answer sees all of it (SPEC §6). Deltas are
+/// `running`, so a client that subscribes mid-answer sees all of it (SPEC §6); the deltas of
+/// the thinking make a text of their own, which its `agent.thinking` ends too. Deltas are
 /// numbered across sessions: a subscription skips the ones its copy of the text holds.
 #[derive(Default)]
 struct LiveText {
     next: u64,
-    /// Session -> the first delta of the text (its envelope for the copy) and the text;
-    /// `None` once the text outgrew [`MAX_LIVE_TEXT`].
-    texts: HashMap<Uuid, Option<(Value, String)>>,
+    /// (Session, thinking) -> the first delta of the text (its envelope for the copy) and the
+    /// text; `None` once the text outgrew [`MAX_LIVE_TEXT`].
+    texts: HashMap<(Uuid, bool), Option<(Value, String)>>,
+}
+
+impl LiveText {
+    /// The session's text and its thinking are done.
+    fn end(&mut self, session_id: Uuid) {
+        self.texts.remove(&(session_id, false));
+        self.texts.remove(&(session_id, true));
+    }
 }
 
 /// Over this, a subscription mid-answer gets only the deltas after it, as before.
@@ -197,19 +206,20 @@ impl AppState {
         let _ = self.bus.send(Arc::new(n));
     }
 
-    /// Fan an `agent.delta` out to clients and add it to the session's text; one with `reset`
-    /// (the runtime abandoned the attempt that wrote it, SPEC §4) drops the text instead. Under
-    /// the lock of the text, so the bus carries deltas in the order of their numbers.
-    pub fn delta(&self, session_id: Uuid, event: Value, text: &str, reset: bool) {
+    /// Fan an `agent.delta` out to clients and add it to the session's text, or to its
+    /// thinking; one with `reset` (the runtime abandoned the attempt that wrote it, SPEC §4)
+    /// drops the text and the thinking instead. Under the lock of the text, so the bus carries
+    /// deltas in the order of their numbers.
+    pub fn delta(&self, session_id: Uuid, event: Value, text: &str, reset: bool, thinking: bool) {
         let mut live = self.live.lock().unwrap();
         let at = live.next;
         live.next += 1;
         if reset {
-            live.texts.remove(&session_id);
+            live.end(session_id);
         } else {
             let slot = live
                 .texts
-                .entry(session_id)
+                .entry((session_id, thinking))
                 .or_insert_with(|| Some((event.clone(), String::new())));
             if let Some((_, t)) = slot {
                 if t.len() + text.len() > MAX_LIVE_TEXT {
@@ -226,32 +236,46 @@ impl AppState {
         });
     }
 
-    /// The session's answer was stored or its turn ended: the text is done. Called before
-    /// the event is stored, so that a subscription that missed the event in its backfill
-    /// cannot get a copy of the text after it.
+    /// The session's answer was stored or its turn ended: the text is done, and so is the
+    /// thinking. Called before the event is stored, so that a subscription that missed the
+    /// event in its backfill cannot get a copy of the text after it.
     pub fn end_live_text(&self, session_id: Uuid) {
-        self.live.lock().unwrap().texts.remove(&session_id);
+        self.live.lock().unwrap().end(session_id);
     }
 
-    /// The session's answer is being written: a delta came and the text is not done yet
-    /// (also once it outgrew the copy).
+    /// The session's thinking was stored: its text is done. Called before the event is
+    /// stored, as [`AppState::end_live_text`].
+    pub fn end_live_thinking(&self, session_id: Uuid) {
+        self.live.lock().unwrap().texts.remove(&(session_id, true));
+    }
+
+    /// The session's answer or thinking is being written: a delta of it came and its text is
+    /// not done yet (also once it outgrew the copy).
     pub fn text_open(&self, session_id: Uuid) -> bool {
-        self.live.lock().unwrap().texts.contains_key(&session_id)
+        let live = self.live.lock().unwrap();
+        live.texts.contains_key(&(session_id, false))
+            || live.texts.contains_key(&(session_id, true))
     }
 
-    /// The session's text as one `agent.delta` (`None` if there is none), and the number of
-    /// the first delta not in it.
-    pub fn live_text(&self, session_id: Uuid) -> (Option<Value>, u64) {
+    /// The session's thinking and its text, each as one `agent.delta` (none for one there is
+    /// not), and the number of the first delta not in them.
+    pub fn live_text(&self, session_id: Uuid) -> (Vec<Value>, u64) {
         let live = self.live.lock().unwrap();
-        let copy = match live.texts.get(&session_id) {
-            Some(Some((envelope, text))) if !text.is_empty() => {
+        let mut copies = Vec::new();
+        for thinking in [true, false] {
+            if let Some(Some((envelope, text))) = live.texts.get(&(session_id, thinking)) {
+                if text.is_empty() {
+                    continue;
+                }
                 let mut ev = envelope.clone();
                 ev["payload"] = serde_json::json!({ "text": text });
-                Some(ev)
+                if thinking {
+                    ev["payload"]["thinking"] = true.into();
+                }
+                copies.push(ev);
             }
-            _ => None,
-        };
-        (copy, live.next)
+        }
+        (copies, live.next)
     }
 
     /// Fan a `subagents.live` out to clients and keep it as the session's list, or drop the

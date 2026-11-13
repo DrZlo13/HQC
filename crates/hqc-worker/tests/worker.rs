@@ -9,11 +9,16 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use hqc_proto::event::{EventKind, LiveKind, LiveSubagent};
+use hqc_proto::frame::Hello;
 use hqc_worker::adapter::fake::{agent_event, agent_message, FakeAdapters, FakeCall};
 use hqc_worker::adapter::AdapterEvent;
-use hqc_worker::connection::Status;
+use hqc_worker::connection::{Connection, Status};
+use hqc_worker::link::HubLink;
 use hqc_worker::outbox::Outbox;
+use hqc_worker::token::Secret;
 use serde_json::{json, Value};
+use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Next stored event frame (not `agent.delta`); `session.state`, acks etc. are skipped.
@@ -238,6 +243,7 @@ async fn outbox_survives_reconnect_and_restart() {
         EventKind::AgentDelta {
             text: "par".into(),
             reset: false,
+            thinking: false,
         },
     );
     adapters.emit(sid, AdapterEvent::Event(delta.clone())).await;
@@ -251,7 +257,7 @@ async fn outbox_survives_reconnect_and_restart() {
     let got: Vec<Uuid> = frames.iter().map(event_id).collect();
     let want: Vec<Uuid> = evs[..3].iter().map(|e| e.event_id).collect();
     assert_eq!(got, want);
-    // A live delta is sent directly; it is not ordered with stored events.
+    // A live delta is sent directly, not through the outbox.
     let is_delta = |f: &Value| f["payload"]["event"]["type"] == "agent.delta";
     if !c.skipped.iter().any(is_delta) {
         let f = c.expect("event").await;
@@ -307,6 +313,92 @@ async fn outbox_survives_reconnect_and_restart() {
     assert_eq!(got, want, "resent in the same order after restart");
     wait_outbox(&env, "all acked", |ob| ob.is_empty().unwrap()).await;
     w2.stop().await;
+}
+
+/// A delta queued before a stored event goes to the hub before it (SPEC §5.2): the last chunks
+/// of a thinking come from the CLI with its `agent.thinking`, and the hub opens a new thinking
+/// from a chunk that comes after it. Many times: with both queues ready, the order was a coin
+/// toss.
+#[tokio::test]
+async fn a_delta_goes_before_a_stored_event_queued_after_it() {
+    let mut hub = FakeHub::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let outbox = Arc::new(Outbox::open(&dir.path().join("outbox")).unwrap());
+    let (link, direct) = HubLink::new(outbox);
+    let (inbound, _inbound) = mpsc::channel(16);
+    let (status_tx, mut status) = watch::channel(Status::Connecting);
+    let hello = Hello {
+        protocol_version: hqc_proto::PROTOCOL_VERSION,
+        boot_id: Uuid::new_v4(),
+        capabilities: json!({}),
+        environments: vec![],
+        env_bindings: vec![],
+        allowed_roots: vec![],
+        allow_foreign_sessions: false,
+        share_local_models: false,
+        local_models: vec![],
+        providers: vec![],
+        session_secrets: false,
+        browser: false,
+        machine_id: None,
+    };
+    let conn = Connection::new(
+        hub.url(),
+        Secret::new(TOKEN),
+        hello,
+        link.clone(),
+        direct,
+        inbound,
+        status_tx,
+        fast_conn(),
+    );
+    let stop = CancellationToken::new();
+    let task = tokio::spawn(conn.run(stop.clone()));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    tokio::time::timeout(
+        WAIT,
+        status.wait_for(|s| matches!(s, Status::Connected { .. })),
+    )
+    .await
+    .expect("connected")
+    .unwrap();
+
+    let sid = Uuid::now_v7();
+    for i in 0..30 {
+        let chunk = agent_event(
+            sid,
+            EventKind::AgentDelta {
+                text: "done.".into(),
+                reset: false,
+                thinking: true,
+            },
+        );
+        let stored = agent_event(
+            sid,
+            EventKind::AgentThinking {
+                text: "All done.".into(),
+            },
+        );
+        let (chunk_id, stored_id) = (chunk.event_id, stored.event_id);
+        // The last chunk and the thinking stored: no await in between.
+        link.event(chunk).unwrap();
+        link.event(stored).unwrap();
+        let first = c.expect("event").await;
+        assert_eq!(
+            event_id(&first),
+            chunk_id,
+            "round {i}: the stored thinking went first"
+        );
+        let next = c.expect("event").await;
+        assert_eq!(event_id(&next), stored_id);
+        c.ack_event(&next, i + 1).await;
+    }
+    stop.cancel();
+    tokio::time::timeout(WAIT, task)
+        .await
+        .expect("connection stopped")
+        .unwrap();
 }
 
 // T10. An event the hub answers with a retryable error is resent after each reconnect, but

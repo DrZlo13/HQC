@@ -2555,6 +2555,12 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
     await writing([first, meanwhile(2), answer, idle]);
     expect(under(block('written meanwhile'))).toBe(false);
   });
+
+  it('one that came during the thinking before the text stays above it', async () => {
+    const thought = ev('event.agent.thinking', 3, (e) => (e.payload = { text: 'Checking' }));
+    await writing([first, meanwhile(2), thought]);
+    expect(under(block('written meanwhile'))).toBe(false);
+  });
 });
 
 // SPEC §6: the client keeps the chats used most recently in memory.

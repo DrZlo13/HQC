@@ -3,12 +3,12 @@
 //! `session` rules live exactly as long as the process (SPEC §8.1).
 //!
 //! Mapping (SPEC §4, §8.1, docs/notes/claude-control-protocol.md):
-//! - `stream_event` `text_delta` → `agent.delta`; deltas (text, thinking, tool input at four
-//!   characters a token, redacted thinking at its `estimated_tokens`), then `message_delta`'s
-//!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
-//!   after text deltas no assistant text took up, a `message_start` or an `assistant` of
-//!   another `message.id` than the one streamed → `agent.delta` with `reset: true`
-//!   ([`Core::live_text`]);
+//! - `stream_event` `text_delta` → `agent.delta`, `thinking_delta` with text → `agent.delta`
+//!   with `thinking`; deltas (text, thinking, tool input at four characters a token, redacted
+//!   thinking at its `estimated_tokens`), then `message_delta`'s `usage.output_tokens` for the
+//!   token rate ([`Core::take_output_tokens`], [`super::rate`]); after text deltas no
+//!   assistant text took up, a `message_start` or an `assistant` of another `message.id` than
+//!   the one streamed → `agent.delta` with `reset: true` ([`Core::live_text`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`; an
 //!   input written during a turn the CLI started by itself leaves it held; a text that is the
@@ -1590,6 +1590,7 @@ impl Core {
                     return vec![self.emit_new(EventKind::AgentDelta {
                         text: String::new(),
                         reset: true,
+                        thinking: false,
                     })];
                 }
             }
@@ -1623,16 +1624,26 @@ impl Core {
         let estimate = self.streamed_estimated + self.streamed_chars / 4;
         self.output_tokens += estimate - self.streamed;
         self.streamed = estimate;
-        if delta["type"] == "text_delta" {
-            if let Some(t) = delta["text"].as_str().filter(|t| !t.is_empty()) {
-                self.live_text = true;
-                return vec![self.emit_new(EventKind::AgentDelta {
+        // A thinking chunk carries text only with `--thinking-display summarized` (2.1.312); an
+        // empty one gives nothing.
+        let (field, thinking) = match delta["type"].as_str() {
+            Some("text_delta") => ("text", false),
+            Some("thinking_delta") => ("thinking", true),
+            _ => return vec![],
+        };
+        match delta[field].as_str().filter(|t| !t.is_empty()) {
+            Some(t) => {
+                if !thinking {
+                    self.live_text = true;
+                }
+                vec![self.emit_new(EventKind::AgentDelta {
                     text: text(t),
                     reset: false,
-                })];
+                    thinking,
+                })]
             }
+            None => vec![],
         }
-        vec![]
     }
 
     fn on_assistant(&mut self, v: &Value) -> Vec<Action> {
@@ -1658,6 +1669,7 @@ impl Core {
             out.push(self.emit_new(EventKind::AgentDelta {
                 text: String::new(),
                 reset: true,
+                thinking: false,
             }));
         }
         for (i, block) in blocks(v).iter().enumerate() {

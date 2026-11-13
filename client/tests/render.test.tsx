@@ -13,6 +13,7 @@ import { PermissionBlock } from "../src/ui/permission";
 import {
   ActivityLine,
   ChatItems,
+  StreamingMessage,
   onlyRequests,
   type ChatActions,
 } from "../src/ui/cards";
@@ -173,6 +174,118 @@ describe("every example event renders", () => {
   });
 });
 
+describe("the thinking being written (SPEC §6)", () => {
+  const thinking = (text: string) =>
+    ev("event.agent.delta", (e) => (e.payload = { text, thinking: true }));
+
+  it("is drawn as the thinking it will be stored as, in its place", () => {
+    const t = new Timeline();
+    t.apply(ev("event.user.message", withSeq(1)));
+    t.apply(thinking("Checking"));
+    const { actions } = show(t);
+    // As the chat draws its feed: the answer being written under the blocks.
+    const draw = () =>
+      act(() =>
+        render(
+          <>
+            <ChatItems items={t.items()} actions={actions} />
+            {t.streaming && <StreamingMessage text={t.streaming} />}
+          </>,
+          root,
+        ),
+      );
+    // The thinking line of each block of the feed.
+    const blocks = () =>
+      [...root.querySelectorAll(".feed-block")].map(
+        (b) => b.querySelector(".thinking summary")?.textContent,
+      );
+    draw();
+    expect(blocks()).toEqual([undefined, "Thinking · Checking"]);
+    t.apply(thinking(" the tests first"));
+    draw();
+    expect(blocks()).toEqual([undefined, "Thinking · Checking the tests first"]);
+    expect(root.querySelector(".thinking-text")!.textContent).toBe("Checking the tests first");
+    expect(t.streaming).toBe("");
+    // The user opens it to read the thinking as it is written.
+    const live = root.querySelector<HTMLDetailsElement>("details.thinking")!;
+    act(() => {
+      live.setAttribute("open", "");
+      live.dispatchEvent(new Event("toggle"));
+    });
+
+    // The stored text, told apart from the live one by its full stop.
+    t.apply(
+      ev("event.agent.thinking", (e) => {
+        e.seq = 2;
+        e.payload.text = "Checking the tests first.";
+      }),
+    );
+    draw();
+    expect(t.thinking).toBeNull();
+    expect(blocks()).toEqual([undefined, "Thinking · Checking the tests first."]);
+    // It stays open when the thinking is stored.
+    const stored = root.querySelector<HTMLDetailsElement>("details.thinking")!;
+    expect(stored.hasAttribute("open")).toBe(true);
+    expect(stored.querySelector(".thinking-text")!.textContent).toBe("Checking the tests first.");
+
+    t.apply(ev("event.agent.delta", (e) => (e.payload.text = "Yes.")));
+    draw();
+    expect(blocks()).toEqual([undefined, "Thinking · Checking the tests first."]);
+    expect(root.querySelector(".msg-streaming")!.textContent).toBe("Yes.");
+  });
+
+  it("after a tool call is a row of its group, and a row the user opened stays open", () => {
+    const t = new Timeline();
+    t.applyAll([call(1, "c1", "Bash", { command: "ls" }), result(2, "c1")]);
+    t.apply(thinking("Checking"));
+    const { draw } = show(t);
+    expect(buildFeed(t.items(), t).map((b) => b.kind)).toEqual(["tools"]);
+    act(() => root.querySelector<HTMLButtonElement>(".tool-group-head")!.click());
+    const row = () => root.querySelector<HTMLDetailsElement>(".tool-group-body details.thinking")!;
+    expect(row().querySelector("summary")!.textContent).toBe("Thinking · Checking");
+    act(() => {
+      row().setAttribute("open", "");
+      row().dispatchEvent(new Event("toggle"));
+    });
+
+    t.apply(
+      ev("event.agent.thinking", (e) => {
+        e.seq = 3;
+        e.payload.text = "Checking.";
+      }),
+    );
+    draw();
+    expect(root.querySelectorAll("details.thinking")).toHaveLength(1);
+    expect(row().hasAttribute("open")).toBe(true);
+    expect(row().querySelector(".thinking-text")!.textContent).toBe("Checking.");
+  });
+
+  const ends: [string, (t: Timeline) => void][] = [
+    [
+      "the turn's end",
+      (t) =>
+        t.apply(
+          ev("event.status", (e) => {
+            e.seq = 2;
+            e.payload = { state: "idle" };
+          }),
+        ),
+    ],
+    ["an answer stored", (t) => t.apply(ev("event.agent.message", withSeq(2)))],
+    ["a dropped socket", (t) => t.reset()],
+  ];
+  for (const [what, end] of ends) {
+    it(`ends with ${what}`, () => {
+      const t = new Timeline();
+      t.apply(ev("event.user.message", withSeq(1)));
+      t.apply(thinking("Checking"));
+      end(t);
+      expect(t.thinking).toBeNull();
+      expect(t.items().some((i) => i.kind === "event" && i.event.type === "agent.delta")).toBe(false);
+    });
+  }
+});
+
 describe("delivery after a dropped socket", () => {
   const input = (
     delivery: "pending" | "delivered",
@@ -238,6 +351,7 @@ describe("an input that came while the agent's text was being written (SPEC §6)
       if (inReplyTo) e.payload.in_reply_to = inReplyTo;
     });
   const order = (t: Timeline) => t.items().map((i) => i.key);
+  const thought = (seq: number) => ev("event.agent.thinking", withSeq(seq));
 
   it("stands under the answer stored after it", () => {
     const t = new Timeline();
@@ -262,6 +376,27 @@ describe("an input that came while the agent's text was being written (SPEC §6)
     const t = new Timeline();
     t.applyAll([answer(1), input(2, true), answer(3), answer(4)]);
     expect(order(t)).toEqual(["e1", "e3", "e2", "e4"]);
+  });
+
+  it("stands under the thinking stored after it, and the answer after that stays under it", () => {
+    const t = new Timeline();
+    // Taken into the turn: one that waits for a turn of its own stands after the turn instead.
+    const into = input(2, true);
+    (into.payload as { joined?: boolean }).joined = true;
+    t.applyAll([input(1, false), into, thought(3), answer(4)]);
+    expect(order(t)).toEqual(["e1", "e3", "e2", "e4"]);
+  });
+
+  it("stands under the thinking being written, before and after it is stored", () => {
+    const t = new Timeline();
+    t.apply(input(1, false));
+    t.apply(ev("event.agent.delta", (e) => (e.payload = { text: "Checking", thinking: true })));
+    t.apply(input(2, true));
+    expect(order(t)).toEqual(["e1", "t1", "e2"]);
+    t.apply(thought(3));
+    expect(order(t)).toEqual(["e1", "t1", "e2"]);
+    const [, stored] = t.items();
+    expect(stored.kind === "event" && stored.event.seq).toBe(3);
   });
 
   it("a final answer keeps its usage line in its block", () => {

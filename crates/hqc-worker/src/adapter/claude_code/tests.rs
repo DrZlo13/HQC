@@ -3651,7 +3651,7 @@ fn a_new_request_drops_the_text_of_an_abandoned_attempt() {
         events(&emitted(a))
             .into_iter()
             .filter_map(|e| match &e.kind {
-                EventKind::AgentDelta { text, reset } => Some((text.clone(), *reset)),
+                EventKind::AgentDelta { text, reset, .. } => Some((text.clone(), *reset)),
                 _ => None,
             })
             .collect()
@@ -3718,7 +3718,7 @@ fn a_reply_without_a_stream_drops_the_text_of_an_abandoned_attempt() {
         events(&emitted(a))
             .into_iter()
             .map(|e| match &e.kind {
-                EventKind::AgentDelta { text, reset } => format!("delta {text:?} {reset}"),
+                EventKind::AgentDelta { text, reset, .. } => format!("delta {text:?} {reset}"),
                 EventKind::AgentMessage { text, .. } => format!("message {text:?}"),
                 _ => "other".into(),
             })
@@ -3949,6 +3949,7 @@ fn nul_never_reaches_an_event() {
     assert!(kinds.contains(&EventKind::AgentDelta {
         text: "d\u{FFFD}".into(),
         reset: false,
+        thinking: false,
     }));
     let mut seen = 0;
     for k in &kinds {
@@ -3970,6 +3971,49 @@ fn nul_never_reaches_an_event() {
         seen += 1;
     }
     assert_eq!(seen, 3, "{kinds:?}");
+}
+
+/// SPEC §8.1: with `--thinking-display summarized` the CLI streams the thinking as it is
+/// written, `thinking_delta` chunks with text (2.1.312): each is an `agent.delta` with
+/// `thinking`; an empty chunk (an older CLI, the recorded fixtures) gives nothing, and the
+/// answer's text stays a plain delta.
+#[test]
+fn thinking_chunks_are_thinking_deltas() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let chunk = |delta: Value| {
+        json!({"type":"stream_event","parent_tool_use_id":null,"event":{
+            "type":"content_block_delta","index":0,"delta":delta},
+            "thinking_display":"summarized"})
+        .to_string()
+    };
+    let mut kinds = vec![];
+    for l in [
+        chunk(json!({"type":"thinking_delta","thinking":"I'm checking wh"})),
+        chunk(json!({"type":"thinking_delta","thinking":""})),
+        chunk(json!({"type":"thinking_delta","thinking":"ether 1001"})),
+        chunk(json!({"type":"text_delta","text":"Yes."})),
+    ] {
+        for e in emitted(core.on_line(&l)) {
+            if let AdapterEvent::Event(e) = e {
+                kinds.push(e.kind);
+            }
+        }
+    }
+    let delta = |text: &str, thinking| EventKind::AgentDelta {
+        text: text.into(),
+        reset: false,
+        thinking,
+    };
+    assert_eq!(
+        kinds,
+        [
+            delta("I'm checking wh", true),
+            delta("ether 1001", true),
+            delta("Yes.", false),
+        ]
+    );
 }
 
 /// SPEC §8.1: Claude Code's own cross-session messaging by the worker config. By default the

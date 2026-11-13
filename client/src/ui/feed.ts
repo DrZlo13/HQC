@@ -16,7 +16,8 @@ import { oneLine } from './labels';
 export type ToolRow =
   /** `unfinished`: a call without a result whose turn ended after it (SPEC §6). */
   | { kind: 'call'; key: string; call?: EventOf<'tool.call'>; result?: EventOf<'tool.result'>; unfinished?: boolean }
-  | { kind: 'thinking'; key: string; event: EventOf<'agent.thinking'> };
+  /** The thinking, stored or being written (an `agent.delta` with `thinking`). */
+  | { kind: 'thinking'; key: string; event: EventOf<'agent.thinking' | 'agent.delta'> };
 
 /** An `hqc_send` / `hqc_ask` call of this session's agent and its result (T51). */
 export interface PeerCall {
@@ -187,7 +188,10 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         } else group.rows.push({ kind: 'call', key: it.key, result: e });
         continue;
       }
+      // The thinking being written (the timeline's only `agent.delta` item) stands where its
+      // `agent.thinking` will.
       case 'agent.thinking':
+      case 'agent.delta':
         if (group) {
           group.rows.push({ kind: 'thinking', key: it.key, event: e });
           continue;

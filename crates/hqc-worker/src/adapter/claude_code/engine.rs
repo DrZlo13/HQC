@@ -58,8 +58,8 @@
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
-//! - `result` → `usage` (one with `num_turns: 0`, no tokens and no `compact_boundary` in it
-//!   gives none, or, when the total grew, one with no tokens, no `cost_usd` and the total),
+//! - `result` → `usage` (one with no tokens and no `compact_boundary` in it gives none, or,
+//!   when the total grew, one with no tokens, no `cost_usd` and the total),
 //!   then `system turn_interrupted` for a `terminal_reason` `aborted_*`, or `system
 //!   turn_ended_early` for an error or a `terminal_reason` other than `completed`,
 //!   `background_requested` and `tool_deferred` ([`turn_end_line`]), then `status idle`, end
@@ -1578,15 +1578,12 @@ impl Core {
                 .as_object()
                 .and_then(|m| m.keys().next().cloned())
         });
-        // A result with no model turn and no tokens (a local slash command, the empty second
-        // `result` after a turn the CLI started by itself, one the CLI closes on a background
-        // subagent's notification) is not a turn's `usage`: the feed would show an empty `0 → 0
-        // tokens` line. `/compact` has `num_turns: 0` and no tokens but costs, so it keeps its
-        // `usage`.
-        if v["num_turns"].as_u64() != Some(0)
-            || input_tokens + output_tokens > 0
-            || (spent && compacted)
-        {
+        // A result with no tokens (a local slash command, the empty second `result` after a turn
+        // the CLI started by itself, one the CLI closes on a background subagent's
+        // notification, a turn interrupted while its reply streamed) is not a turn's `usage`:
+        // the feed would show an empty `0 → 0 tokens` line. `/compact` has no tokens but costs,
+        // so it keeps its `usage`.
+        if input_tokens + output_tokens > 0 || (spent && compacted) {
             let cost_usd = total.map(|t| self.turn_cost(t));
             out.push(self.emit_new(EventKind::Usage {
                 input_tokens,

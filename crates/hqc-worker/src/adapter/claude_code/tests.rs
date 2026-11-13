@@ -2548,6 +2548,41 @@ fn an_interrupted_answer_is_marked_and_the_turn_says_so() {
     );
 }
 
+/// A turn interrupted while its reply streamed can end with a `result` of no tokens though the
+/// total grew (seen on the stand, 2.1.312): no `0 → 0 tokens` line, only the session's total.
+#[test]
+fn an_interrupted_turn_without_tokens_gives_no_usage_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        &format!(
+            r#"{{"type":"assistant","message":{{"model":"claude-haiku-5-5","content":[{{"type":"text","text":"Once upon"}}]}},"parent_tool_use_id":null,"uuid":"{}","aborted":true}}
+{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"stop_reason":null,"terminal_reason":"aborted_streaming","result":"Once upon","total_cost_usd":0.00013,"usage":{{"input_tokens":0,"output_tokens":0}}}}"#,
+            Uuid::new_v4()
+        ),
+    );
+    let evs = emitted(a.clone());
+    assert_eq!(
+        shape(&evs),
+        [
+            "agent.message:true",
+            "usage",
+            "system",
+            "status",
+            "turn_ended"
+        ]
+    );
+    let wire: Vec<Value> = events(&evs)
+        .into_iter()
+        .map(|e| serde_json::to_value(&e.kind).unwrap())
+        .collect();
+    assert_eq!(wire[1]["payload"]["input_tokens"], 0);
+    assert!(wire[1]["payload"].get("cost_usd").is_none());
+    assert_eq!(wire[1]["payload"]["session_cost_usd"], 0.00013);
+}
+
 /// A turn the CLI ended early for any reason but an interrupt ends with one line that says
 /// why, after its `usage`: the `terminal_reason` (the subtype without one), the API's status
 /// and `errors`, cut to 300 bytes; not the `result` text of `is_error: true`, which the CLI's
@@ -4162,12 +4197,12 @@ fn synthetic_reply_is_a_runtime_agent_message() {
     );
     let a = play(&mut core, &stream);
     let evs = emitted(a.clone());
+    // No tokens and no cost: no empty `0 → 0 tokens` line.
     assert_eq!(
         shape(&evs),
         [
             "agent.message:false",
             "agent.message:true",
-            "usage",
             "system",
             "status",
             "turn_ended"

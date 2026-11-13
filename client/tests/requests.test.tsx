@@ -202,8 +202,15 @@ describe('the request of a waited-on session in the asking session', () => {
     await mount(<Chat app={app} sessionId={A} />);
     const card = $('.foreign-request')!;
     expect(card.querySelector('.card-clarify')).not.toBeNull();
-    const radio = card.querySelector<HTMLInputElement>('input[type=radio]')!;
-    await act(async () => radio.click());
+    // Answer waits for every question: an option, a checked label, a typed text.
+    await act(async () => card.querySelector<HTMLInputElement>('input[type=radio]')!.click());
+    await act(async () => card.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+    await act(async () => {
+      const texts = card.querySelectorAll<HTMLInputElement>('input[type=text]');
+      const text = texts[texts.length - 1];
+      text.value = 'no';
+      text.dispatchEvent(new Event('input', { bubbles: true }));
+    });
     await act(async () => {
       button(card, 'Answer')!.click();
       await new Promise((r) => setTimeout(r, 0));

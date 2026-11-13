@@ -567,6 +567,46 @@ describe("clarify.request", () => {
     });
   });
 
+  it("Answer waits for an answer to every question", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request"));
+    const { actions } = show(t);
+    const qs = root.querySelectorAll(".card-clarify fieldset");
+    const submit = () =>
+      root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!;
+    const type = (value: string) =>
+      act(() => {
+        const text = qs[2].querySelector<HTMLInputElement>("input[type=text]")!;
+        text.value = value;
+        text.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    expect(submit().disabled).toBe(true);
+    await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+    await type("no");
+    // The multi question has nothing checked yet.
+    expect(submit().disabled).toBe(true);
+    await act(async () => {
+      root.querySelector("form.card-clarify")!.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(actions.answer).not.toHaveBeenCalled();
+    const fmt = () => qs[1].querySelector<HTMLInputElement>('input[value="fmt"]')!;
+    await act(() => fmt().click());
+    expect(submit().disabled).toBe(false);
+    // A label checked and unchecked again leaves the question unanswered.
+    await act(() => fmt().click());
+    expect(submit().disabled).toBe(true);
+    // Other chosen with nothing typed is an answer.
+    await act(() =>
+      qs[1].querySelector<HTMLInputElement>(".choice-other input[type=checkbox]")!.click(),
+    );
+    expect(submit().disabled).toBe(false);
+    // A text of spaces is not.
+    await type("  ");
+    expect(submit().disabled).toBe(true);
+  });
+
   it("closes after clarify.response", () => {
     const t = new Timeline();
     t.apply(ev("event.clarify.request", withSeq(1)));

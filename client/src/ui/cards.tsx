@@ -854,6 +854,13 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
     }
     return out;
   };
+  // Answer waits for an answer to every question, as in the VS Code tab: an option picked, a
+  // text typed, or Other chosen.
+  const toSend = collect();
+  const complete = p.questions.every((q) => {
+    const v = toSend[q.id];
+    return Array.isArray(v) ? v.length > 0 : v !== undefined && v.trim() !== '';
+  });
   // What a question shows: the options picked and Other; once answered, what was sent, an
   // answer that is not an option being the text of Other.
   const shown = (q: ClarifyQuestion): { picked: string[]; other: OtherAnswer } => {
@@ -873,7 +880,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       class={`card card-clarify ${open ? 'is-open' : 'is-closed'}`}
       onSubmit={(e) => {
         e.preventDefault();
-        if (open) run(() => actions.answer(p.request_id, collect()));
+        if (open && complete) run(() => actions.answer(p.request_id, toSend));
       }}
     >
       <div class="card-title">Agent asks</div>
@@ -940,7 +947,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       })}
       {open && (
         <div class="actions">
-          <button type="submit" class="btn btn-primary" disabled={busy}>
+          <button type="submit" class="btn btn-primary" disabled={busy || !complete}>
             Answer
           </button>
         </div>

@@ -41,9 +41,10 @@
 //!   ([`Adapter::background`]); it is acked, also with no agent running. The subagents' list
 //!   ([`AdapterEvent::LiveSubagents`]) goes as `subagents.live`, empty when the agent is
 //!   stopped; the last one sent is sent again on every connect, its run times counted then, an
-//!   empty one only when it followed a non-empty one and the process has not stopped since. The
-//!   token rate ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once
-//!   when the agent stops.
+//!   empty one only when it followed a non-empty one and the process has not stopped since.
+//!   `session.stop_task` stops one of its tasks alone ([`Adapter::stop_task`]); it is acked,
+//!   also with no agent running. The token rate ([`AdapterEvent::TokenRate`]) goes as
+//!   `tokens.rate` when it changes, 0 once when the agent stops.
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -253,6 +254,11 @@ enum Cmd {
     Background {
         id: String,
         call_id: String,
+    },
+    /// Stop the agent's task `task_id` alone.
+    StopTask {
+        id: String,
+        task_id: String,
     },
     Kill {
         id: String,
@@ -498,6 +504,17 @@ impl Supervisor {
                     return;
                 }
                 (session_id, Cmd::Background { id, call_id })
+            }
+            HubFrame::SessionStopTask {
+                session_id,
+                task_id,
+            } => {
+                if !self.sessions.contains_key(&session_id) {
+                    // Nothing runs, nothing to stop.
+                    self.link.reply(&id, ack(None));
+                    return;
+                }
+                (session_id, Cmd::StopTask { id, task_id })
             }
             HubFrame::SessionKill { session_id } => {
                 if !self.sessions.contains_key(&session_id) {
@@ -999,6 +1016,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Input { id, .. }
         | Cmd::Stop { id }
         | Cmd::Background { id, .. }
+        | Cmd::StopTask { id, .. }
         | Cmd::Kill { id }
         | Cmd::PermissionMode { id, .. }
         | Cmd::Model { id, .. }
@@ -1241,6 +1259,19 @@ impl Session {
                 if self.state == ProcessState::Running {
                     if let Err(e) = self.adapter.background(&call_id).await {
                         tracing::warn!(session_id = %self.id, "background failed: {e:#}");
+                        self.link.reply(
+                            &id,
+                            wire_error(error_code::INTERNAL, format!("{e:#}"), false),
+                        );
+                        return;
+                    }
+                }
+                self.link.reply(&id, ack(None));
+            }
+            Cmd::StopTask { id, task_id } => {
+                if self.state == ProcessState::Running {
+                    if let Err(e) = self.adapter.stop_task(&task_id).await {
+                        tracing::warn!(session_id = %self.id, "stop_task failed: {e:#}");
                         self.link.reply(
                             &id,
                             wire_error(error_code::INTERNAL, format!("{e:#}"), false),

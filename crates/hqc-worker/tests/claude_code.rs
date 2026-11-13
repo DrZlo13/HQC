@@ -678,3 +678,81 @@ async fn without_session_secrets_nothing_is_given() {
     assert!(!r.to_string().contains("topsecret"));
     w.stop().await;
 }
+
+/// SPEC §4, §5.3: a background subagent goes to the hub in `subagents.live` as `stoppable`;
+/// `session.stop_task` with its `task_id` is acked and reaches the CLI as `control_request
+/// {subtype: stop_task, task_id}`.
+#[tokio::test]
+async fn a_subagent_is_stopped_alone() {
+    let env = Env::new();
+    let task = "a52af2b436ded4cea";
+    let claude = ScriptedClaude::new(&format!(
+        r#"{{"type":"system","subtype":"task_started","task_id":"{task}","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent"}}"#
+    ));
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": Uuid::now_v7(), "text": "sleep in a subagent",
+               "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    let agents = loop {
+        let f = c.expect("event").await;
+        if f["payload"]["event"]["type"] == "subagents.live" {
+            break f["payload"]["event"]["payload"]["agents"].clone();
+        }
+    };
+    assert_eq!(agents[0]["task_id"], task, "{agents}");
+    assert_eq!(agents[0]["stoppable"], true, "{agents}");
+    let id = c
+        .frame(
+            "session.stop_task",
+            json!({"session_id": sid, "task_id": task}),
+        )
+        .await;
+    loop {
+        let f = c.expect("ack").await;
+        if f["id"] == id.as_str() {
+            break;
+        }
+    }
+    // Written before the ack; the script records it on its own task.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let req = loop {
+        if let Some(r) = claude
+            .stdin()
+            .into_iter()
+            .find(|v| v["type"] == "control_request")
+        {
+            break r;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{:?}",
+            claude.stdin()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        req["request"],
+        json!({"subtype": "stop_task", "task_id": task})
+    );
+    assert!(req["request_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("hqc-stop-task-"));
+    w.stop().await;
+}

@@ -96,5 +96,8 @@ SPEC 0.125: `worker.session.state.json` carries `foreground_calls`, the calls th
 the foreground now; `api.session.json` and `client.session.summary.json` show them (absent:
 none). `hub.session.background.json` moves one of them to the background.
 
+SPEC 0.137: the subagents of `event.subagents.live.json` are `stoppable`, and
+`hub.session.stop_task.json` stops the first of them alone.
+
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.

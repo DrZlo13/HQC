@@ -1744,6 +1744,35 @@ pub(crate) async fn restart_agent(app: &AppState, s: &SessionRow) -> bool {
     true
 }
 
+/// Longest `task_id` of `POST .../tasks/{task_id}/stop`, in bytes.
+const MAX_TASK_ID: usize = 128;
+
+/// Stop the agent's task `task_id` alone (the client sends a `stoppable` row of the session's
+/// `subagents.live`; the id is not checked against it, the session is the user's own):
+/// `session.stop_task` to the worker, whose runtime's answer is only logged.
+pub async fn stop_task(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path((id, task_id)): Path<(Uuid, String)>,
+) -> ApiResult<Json<Value>> {
+    let s = session_for(&app, &user, id, Action::Write).await?;
+    not_system(&s)?;
+    if task_id.is_empty() || task_id.len() > MAX_TASK_ID || task_id.contains('\0') {
+        return Err(ApiError::BadRequest(format!(
+            "task_id must be 1 to {MAX_TASK_ID} bytes without NUL"
+        )));
+    }
+    let sent = send_to_worker(
+        &app,
+        &s,
+        HubFrame::SessionStopTask {
+            session_id: id,
+            task_id,
+        },
+    );
+    Ok(Json(json!({ "sent": sent })))
+}
+
 pub async fn retry(
     State(app): State<AppState>,
     user: CurrentUser,

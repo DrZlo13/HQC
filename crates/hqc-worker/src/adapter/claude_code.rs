@@ -1202,6 +1202,15 @@ impl Adapter for ClaudeCodeAdapter {
         p.io.run(vec![action]).await
     }
 
+    async fn stop_task(&mut self, task_id: &str) -> anyhow::Result<()> {
+        let Ok(p) = self.running() else {
+            return Ok(());
+        };
+        tracing::info!(session_id = %self.session_id, ?task_id, "stopping a task");
+        let action = lock(&p.core).stop_task(task_id);
+        p.io.run(vec![action]).await
+    }
+
     async fn answer_approval(
         &mut self,
         request_id: &str,

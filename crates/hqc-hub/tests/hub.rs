@@ -2224,6 +2224,70 @@ async fn a_foreground_call_goes_to_the_background() {
     hub.finish().await;
 }
 
+/// SPEC §5.3, §6: `POST .../tasks/{task_id}/stop` reaches the worker as `session.stop_task`; a
+/// `task_id` that is too long or has a NUL is refused, another user's session is not found,
+/// the worker's service session takes none, and with the worker away nothing is sent.
+#[tokio::test]
+async fn a_task_is_stopped_alone() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, hello) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Stop a task").await;
+    ack_start(&mut w, &sid).await;
+
+    let task = "a52af2b436ded4cea";
+    let path = |sid: &str, task: &str| format!("/api/sessions/{sid}/tasks/{task}/stop");
+    let (s, r) = hub.post(&path(&sid, task), json!({})).await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(true)), "{r}");
+    let f = w.expect("session.stop_task").await;
+    assert_eq!(f["payload"], json!({"session_id": sid, "task_id": task}));
+    let long = "x".repeat(129);
+    for bad in [long.as_str(), "a52af%00"] {
+        let (s, _) = hub.post(&path(&sid, bad), json!({})).await;
+        assert_eq!(s, 400, "{bad:?}");
+    }
+
+    let db = &hub.app.db;
+    let stranger = hqc_hub::db::ensure_user(db, "stranger-stop@example.com")
+        .await
+        .unwrap();
+    let project = hqc_hub::db::create_project(db, stranger.id, "Theirs", "")
+        .await
+        .unwrap();
+    let theirs = hqc_hub::db::create_session(
+        db,
+        hqc_hub::db::NewSession {
+            project_id: project.id,
+            owner_id: stranger.id,
+            workspace_id: None,
+            worker_id: None,
+            cwd: ".",
+            title: Some("Theirs"),
+            model: None,
+            auto_approve: false,
+            permission_mode: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (s, _) = hub.post(&path(&theirs.to_string(), task), json!({})).await;
+    assert_eq!(s, 404);
+    let service = hello["payload"]["system_session_id"].as_str().unwrap();
+    let (s, v) = hub.post(&path(service, task), json!({})).await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (409, Some("system_session")),
+        "{v}"
+    );
+
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (s, r) = hub.post(&path(&sid, task), json!({})).await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(false)), "{r}");
+    hub.finish().await;
+}
+
 /// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
 /// service sessions included, the newest `updated_at` first; another user's sessions are not in
 /// it.

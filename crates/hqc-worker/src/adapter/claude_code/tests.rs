@@ -3957,6 +3957,91 @@ fn background_asks_the_cli_to_move_the_call() {
     }
 }
 
+/// The stop button of a subagent's row: `control_request {subtype: stop_task, task_id}`; the
+/// CLI's answer, `{}` or an error, gives no action.
+#[test]
+fn stop_task_asks_the_cli_to_stop_the_task() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let Action::Write(v) = core.stop_task("a52af2b436ded4cea") else {
+        panic!("not a write");
+    };
+    assert_eq!(v["type"], "control_request");
+    assert_eq!(
+        v["request"],
+        json!({"subtype": "stop_task", "task_id": "a52af2b436ded4cea"})
+    );
+    let id = v["request_id"].as_str().unwrap();
+    assert!(id.starts_with("hqc-stop-task-"), "{id}");
+    for answer in [
+        json!({"subtype": "success", "request_id": id, "response": {}}),
+        json!({"subtype": "error", "request_id": id, "error": "stop_task: task_id must be a string"}),
+    ] {
+        let line = json!({"type": "control_response", "response": answer});
+        assert!(core.on_line(&line.to_string()).is_empty());
+    }
+}
+
+/// Only a subagent's row is `stoppable`, the agent's background command beside it is not; the
+/// subagent stopped alone ends as any end of it (the lines after the stop are made up after the
+/// CLI's code, 2.1.312: `task_updated` `killed`, the list without it, `task_notification`
+/// `stopped`): its row goes, the command's stays, and its "Background task" line comes.
+#[test]
+fn only_a_subagent_row_is_stoppable() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let lines = [
+        r#"{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent"}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a52af2b436ded4cea","task_type":"local_agent","description":"Sleep and reply with number"},{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b2st7oc3z","tool_use_id":"toolu_01Run","description":"Run the full pass over 1000 boards on cirunner","is_backgrounded":true,"task_type":"local_bash"}"#,
+    ];
+    let mut last = None;
+    for l in lines {
+        for a in core.on_line(l) {
+            if let Action::Emit(AdapterEvent::LiveSubagents(list)) = a {
+                last = Some(list);
+            }
+        }
+    }
+    let rows: Vec<(String, bool)> = last
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.task_id, s.stoppable))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("a52af2b436ded4cea".to_string(), true),
+            ("b2st7oc3z".to_string(), false)
+        ]
+    );
+
+    let stopped = [
+        r#"{"type":"system","subtype":"task_updated","task_id":"a52af2b436ded4cea","patch":{"status":"killed","end_time":1793889489540}}"#,
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b2st7oc3z","task_type":"local_bash","description":"Run the full pass over 1000 boards on cirunner"}]}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","status":"stopped","output_file":"","summary":"Sleep and reply with number","uuid":"0f6c1d2e-6666-4a55-9d0e-1a2b3c4d5e01"}"#,
+    ];
+    let mut out = Vec::new();
+    for l in stopped {
+        out.extend(core.on_line(l));
+    }
+    let lists: Vec<Vec<String>> = out
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::LiveSubagents(list)) => {
+                Some(list.iter().map(|s| s.task_id.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lists.last().unwrap(), &["b2st7oc3z".to_string()]);
+    assert_eq!(
+        system_events(&out),
+        [(
+            "task_notification".into(),
+            "Sleep and reply with number".into()
+        )]
+    );
+}
+
 /// `/compact` (lines of fixture `stream-resume-compact`, 2.1.308; the same `compact_boundary`
 /// came on 2.1.312): `system context_compacted` with the summary of the synthetic `user` line
 /// after it as its text, its id derived from the line's uuid, which is the transcript record's.

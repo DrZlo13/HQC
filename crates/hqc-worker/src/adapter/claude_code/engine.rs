@@ -37,8 +37,9 @@
 //! - the same subagents one by one → [`AdapterEvent::LiveSubagents`] when they or a title
 //!   change, and on every `system` `task_progress` of one of them: the title and the
 //!   `tool_use_id` (`call_id`) from its `task_started`, what it does now (`description`),
-//!   `total_tokens` and `tool_uses` from its latest `task_progress` (2.1.312); after them, in
-//!   the same list, the main agent's background shell commands of the latest
+//!   `total_tokens` and `tool_uses` from its latest `task_progress` (2.1.312), `stoppable`
+//!   ([`Core::stop_task`]); after them, in the same list, the main agent's background shell
+//!   commands of the latest
 //!   `background_tasks_changed` list (`task_type: local_bash`, not `ambient`, whose
 //!   `task_started` has come and was not a `Monitor` call's, of no subagent that counts), each
 //!   with its `description` and run time only, when they or a `description` change;
@@ -84,7 +85,7 @@
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
-//! - the CLI's answers to our `set_model` and `background_tasks` are only logged;
+//! - the CLI's answers to our `set_model`, `background_tasks` and `stop_task` are only logged;
 //! - the CLI's answer to our `initialize` ([`Core::initialize`]) and the other
 //!   `control_response` lines, the CLI's echo of ours, are skipped.
 //!
@@ -153,6 +154,8 @@ const MODE_REQUEST: &str = "hqc-mode-";
 const MODEL_REQUEST: &str = "hqc-model-";
 /// `request_id` prefix of our `background_tasks` control requests.
 const BACKGROUND_REQUEST: &str = "hqc-background-";
+/// `request_id` prefix of our `stop_task` control requests.
+const STOP_TASK_REQUEST: &str = "hqc-stop-task-";
 /// `patch.status` of a `task_updated` that ends a foreground call ([`Core::foreground`]).
 const CALL_ENDED: [&str; 3] = ["completed", "failed", "killed"];
 
@@ -602,6 +605,19 @@ impl Core {
         }))
     }
 
+    /// Stop task `task_id` alone, a subagent of [`AdapterEvent::LiveSubagents`]:
+    /// `control_request {subtype: stop_task, task_id}`. The CLI answers `success` with `{}`, also
+    /// for a task it does not know or one that has ended, or an error with the reason it did not
+    /// stop it; a stopped subagent then ends with `task_updated` and `task_notification`
+    /// `stopped`, as any end of it (by the 2.1.312 code, not checked live).
+    pub fn stop_task(&self, task_id: &str) -> Action {
+        Action::Write(json!({
+            "type": "control_request",
+            "request_id": format!("{STOP_TASK_REQUEST}{}", Uuid::now_v7()),
+            "request": {"subtype": "stop_task", "task_id": task_id},
+        }))
+    }
+
     /// `message`: the user's text with `deny` (T26); it goes to Claude Code as the reason of
     /// the denial, which the model gets as the tool result.
     pub fn answer_approval(
@@ -936,13 +952,21 @@ impl Core {
         vec![Action::Emit(AdapterEvent::PermissionMode(mode))]
     }
 
-    /// The CLI's answer to our `set_permission_mode`, `set_model` or `background_tasks` (the
-    /// latter two logged); the answer to our `initialize` (the CLI's commands, models and
-    /// account, or an error) and every other `control_response`, the echo of one of ours, are
-    /// skipped.
+    /// The CLI's answer to our `set_permission_mode`, `set_model`, `background_tasks` or
+    /// `stop_task` (the latter three logged); the answer to our `initialize` (the CLI's
+    /// commands, models and account, or an error) and every other `control_response`, the echo
+    /// of one of ours, are skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
+        if id.starts_with(STOP_TASK_REQUEST) {
+            if r["subtype"] == "success" {
+                tracing::info!(session_id = %self.session_id, request_id = id, "task stopped");
+            } else {
+                tracing::warn!(session_id = %self.session_id, request_id = id, error = %r["error"], "claude did not stop the task");
+            }
+            return vec![];
+        }
         if id.starts_with(BACKGROUND_REQUEST) {
             if r["subtype"] == "success" && r["response"]["backgrounded"] != false {
                 tracing::info!(session_id = %self.session_id, request_id = id, "call moved to the background");
@@ -1459,14 +1483,15 @@ impl Core {
         vec![self.live_list()]
     }
 
-    /// [`Core::live`], then [`Core::live_commands`], as sent: the run time of each counted now.
+    /// [`Core::live`], then [`Core::live_commands`], as sent: the run time of each counted now;
+    /// a subagent is `stoppable` ([`Core::stop_task`]), a command is not.
     fn live_list(&self) -> Action {
         Action::Emit(AdapterEvent::LiveSubagents(
             self.live
                 .iter()
-                .map(|a| (a, LiveKind::Agent))
-                .chain(self.live_commands.iter().map(|a| (a, LiveKind::Command)))
-                .map(|(a, kind)| LiveSubagent {
+                .map(|a| (a, LiveKind::Agent, true))
+                .chain(self.live_commands.iter().map(|c| (c, LiveKind::Command, false)))
+                .map(|(a, kind, stoppable)| LiveSubagent {
                     task_id: a.task_id.clone(),
                     description: a.title.clone(),
                     activity: a.activity.clone(),
@@ -1475,6 +1500,7 @@ impl Core {
                     duration_ms: u64::try_from(a.since.elapsed().as_millis()).unwrap_or(u64::MAX),
                     call_id: a.call_id.clone(),
                     kind: Some(kind),
+                    stoppable,
                 })
                 .collect(),
         ))

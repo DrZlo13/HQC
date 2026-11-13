@@ -532,7 +532,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?` and `kind` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
-| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
+| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.137: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12) | adapter |
@@ -545,7 +545,7 @@ the client renders only them. The "source" column is the component that produces
 | `attachment` | `artifact_id`, `kind`, `name`, `caption?` | the agent via `hqc_attach` (since 0.34, T31): the hub writes it, `author: {kind: agent, id: <session id>}`, `kind` and `name` of the artifact; the user's files go into `user.message.artifact_ids` (rule below) |
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input); `author` is `{kind: agent, id: <the sending session>}`, `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd` |
-| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
+| `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.137 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`) | hub or worker; codes below |
 
 `system` codes (the list is open; the client shows an unknown code as text):
@@ -571,6 +571,8 @@ the client renders only them. The "source" column is the component that produces
 | `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
 | `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
 | `browser_refused` | worker (adapter) | since 0.148: `session.start.browser` asks for the browser this worker does not give (no `browser = true` in its `worker.toml`, a session not of its owner or restricted); the agent starts without it (`--no-chrome`), and the text says why (§8.1, §14) |
+| `turn_interrupted` | worker (adapter) | since 0.137: an interrupt ended the turn — Stop, or "No" to a permission request (Claude Code: `result` with a `terminal_reason` `aborted_*`, §8.1); `text` "Interrupted"; one per turn, at its end, after its `usage` |
+| `turn_ended_early` | worker (adapter) | since 0.137: the runtime ended the turn early for another reason — an error, the limit of turns or of budget, a hook (Claude Code: an error `result`, or a `terminal_reason` other than `completed`, `background_requested` and `tool_deferred`, §8.1); `text` "Turn ended early: " and the reason; one per turn, at its end, after its `usage` |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
@@ -2997,6 +2999,18 @@ also `crossSessionInbound`, below), and the adapter's own policy (deny
 before asking, `policy_hint`) reads the same merged lists. In the process env: `MCP_TOOL_TIMEOUT` (§7.1): milliseconds, default
 1e8 ms, minimum 1000 ms (checked on 2.1.307).
 
+The first line the worker writes to the stdin of every process, new, resumed or forked (since
+0.137), before any input: `{"type": "control_request", "request_id": "hqc-init-<uuid>",
+"request": {"subtype": "initialize", "perTaskStopAffordance": true}}`, as the VS Code tab sends
+its `initialize` first; with the flag an interrupt stops the turn and spares the background
+subagents (below, "Interrupting a turn"). Every field of the request but `subtype` is optional,
+and the worker sends no other. By the 2.1.312 binary: a user message marks the process
+initialized, and an `initialize` after it is taken as another client's and does not set the
+flag, so it must come first; the CLI handles stdin one line at a time, so an input written right
+after it waits until the `initialize` is handled, and the worker does not wait for the answer.
+The CLI answers `control_response` `success` (its commands, agents, models, account, `pid`) or
+`error` (`initialize: …` for a malformed field); the adapter skips the answer.
+
 The hqc MCP server (since 0.33, T30): `--mcp-config '{"mcpServers": {"hqc": {"type": "stdio",
 "command": "<the worker's own binary>", "args": ["mcp", "--socket", "<$HQC_HOME/mcp.sock>"],
 "env": {"HQC_SESSION_TOKEN": "<session_token>"}}}}'`, built per process start with the
@@ -3120,8 +3134,9 @@ doesn't want to proceed with this tool use. The tool use was rejected (eg. if it
 the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell
 you how to proceed." with `interrupt: true`, so the CLI ends the turn at once: the `tool_result`
 with that text, a `user` text `[Request interrupted by user for tool use]` (mapped to nothing)
-and `result` `error_during_execution` (`terminal_reason: aborted_tools`), so the turn ends with
-`status idle` as after a stop, and the process takes the next input (checked live on 2.1.312);
+and `result` `error_during_execution` (`terminal_reason: aborted_tools`), so the turn ends as
+after a stop (since 0.137 `system turn_interrupted`, then `status idle`), and the process takes
+the next input (checked live on 2.1.312);
 since 0.71 `interrupt` is `false` for a request of a background subagent (one not started in
 the foreground), which outlives its turn: the call is denied, the turn running by then goes
 on; before 0.69 it was "The user denied this tool call." and the model went on; `always` → allow plus `updatedPermissions`; Claude Code itself writes the
@@ -3159,167 +3174,172 @@ transcripts; since 0.155 any call's input has its fields from the shortest value
 values of 3 KB or more counted as equally long, fields of the same length in sorted order (an
 Edit of two long strings keeps `new_string` before `old_string`), an `Agent` or `Task` call's
 `prompt` still last, so the cut falls in the longest values and a Write's `file_path` or a Bash
-call's `description` comes whole; the mirror builds it the same way, §9.1); `tool_result` →
-`tool.result`; `result` → `usage` and `status idle`. Since 0.121 a `system/init` while no
-turn of hqc's runs (a turn the CLI
-starts by itself, e.g. after a background task's end; the turn of an input of hqc's that the CLI
-carries over, §17.2, is hqc's) → `status running`, before anything else of that turn (§17.1). Since
-0.69 a `result` with `num_turns: 0`, no tokens and no cost (a local slash command, the empty
-second `result` the CLI sends after a turn it started by itself) gives no
-`usage`, which the feed would show as an empty `0 → 0 tokens` line; `/compact` has no tokens
-either but costs, and keeps its `usage`. Since 0.115 a `result` with `num_turns: 0` and no tokens
-whose total grew, with no `compact_boundary` in it, gives a `usage` with no tokens, no `cost_usd`
-and the total as `session_cost_usd`: the CLI closes such a turn on a background subagent's
-notification without calling the model, and the growth is what the subagent spent meanwhile. The
-client's header counts that total and the feed draws no line for it; the baseline of `cost_usd`
-stays, so the next `usage` of the same process with a `cost_usd` carries the growth (a process
-that ends first leaves it out of every `cost_usd`: the next one starts from the `cost-state` that
-has it).
-Since 0.69: an `assistant` text whose `message.model` is `<synthetic>` — a reply the
-CLI wrote itself (an API error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message`
-and the same `uuid` as the transcript record) — → `agent.message` with `runtime: true`, held
-and ended like any other text: the turn it ends has it as the final `agent.message`; `system`
-`task_notification` (`task_id`,
-`status`, `summary`, `output_file`; checked live on 2.1.312 with a `run_in_background` Bash: it
-comes when the task ends, after the `result` of the turn that started it and before the turn
-the CLI then starts by itself, which brings `system/init`, the answer and its own `result`) →
-`system task_notification` with its `summary`, "Background task" without one (since 0.135 with the
-notification's `status` and `task_id` as they are and, as `call_id`, its `tool_use_id`, else that of
-the task's latest `task_started`, which the adapter remembers until the task's end gives its line or
-none; and for a subagent that delivered its report through `SubagentHandback`, 2.1.312 in Auto with
-`handback` `send` or `flagged`, whose `summary` is then a note for the model, "This agent's report
-was delivered to you as a message from …", with the report instead: `handback_report.text`, its
-`warning`, when there is one, above it after a blank line), unless a subagent started the task (its
-`system` `task_started` has `owned_by_subagent: true`, also after a move to the background) or its
-`task_started` had `is_backgrounded: false` and no `system` `task_updated` with
-`patch.is_backgrounded: true` moved it to the background later (2.1.312 sends both lines for a
-foreground subagent, a foreground Bash call that runs for more than about 2 s and a subagent's Bash
-calls too, background ones included; a task the process did not see start counts as a background
-one); since 0.70 a subagent's `task_notification` without its report (no `handback` field) that
-comes while the latest `background_tasks_changed` list (below) holds the subagent or a task of it is
-no end: the adapter keeps the latest one and handles it (the line, the cancel of the subagent's open
-requests) when the subagent stops counting or the process exits; a notification with the report
-replaces it and is handled at once. 2.1.312 sends two for a subagent whose command it moved to the
-background: "This agent has not reported yet…" without `handback` while the list holds the subagent
-and its commands, and its real end, `handback: "send"` and `handback_report {text}`, after the
-subagent's `SubagentHandback` call. A notification with `handback` is the end at once, also while a
-command the subagent left running is still listed (live on 2.1.312: a subagent's wait loop
-that never ended). A task gives one line: a later `task_notification` of the same `task_id`
-only cancels the subagent's open requests (the CLI's own description of the field: any
-notification "can be followed by a later one for the same task_id when the agent is resumed or
-finishes its wait; the later one replaces what the earlier one showed"; checked live on 2.1.312:
-a subagent that reported while its 200 s `ping`, moved to the background, ran on is listed and
-started again when the `ping` ends, and sends a second notification with `handback: "send"` and
-the same summary); `system` `compact_boundary` (`compact_metadata.trigger: manual`
-after `/compact`, 2.1.308 and 2.1.312; an automatic compaction was not checked; its `uuid` is
-that of the transcript's `system compact_boundary` record) →
-`system context_compacted` with the `event_id` derived from that `uuid`, held until the summary:
-the main agent's next `user` line with `isSynthetic: true` (the transcript's `isCompactSummary`
-record; 2.1.308 sends it right after the boundary, a string `message.content`), whose content,
-a string or the text blocks of an array, is the `text` as is; a main agent's `user`,
-`assistant`, `stream_event` or `result` line that comes first, or the process's end, gives it
-the text "Context compacted", `system` lines and a subagent's lines in between keep it held; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
-→ `ack` of `session.input` (this field tells the echo from a `user` with `tool_result`).
-Since 0.70 every user message the adapter writes carries a fresh v4 `uuid` (not the input's
-`event_id`: 2.1.312 drops a line whose `uuid` it has seen, echo and all, without a turn); its
-echo and its `command_lifecycle {command_uuid, state}` lines carry it (2.1.312: `queued` when
-the line is read, `started` when the CLI takes it, right after the echo for one that went into a
-running turn, then `completed` or `cancelled`; a turn the CLI begins by itself has none). The
-input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a turn or comes
-during a turn the CLI began by itself (the first input of a process, and every input with a CLI
-that sends no such lines: the one written). At `result`
-an input written and not echoed is taken when its last line is `started` or `completed` (a
-local slash command), carried into the next turn, which the CLI then runs by itself, when it is
-only `queued`, and not taken when `cancelled`; without lifecycle lines it is carried when it was
-written during the turn, taken otherwise. A carried input whose line after that `result` is
-`cancelled` (a second Stop before it started) ends the turn it was carried into, for which no
-`result` comes: it is not taken, the other inputs carried with it stay carried, and with none
-left no turn runs. A carried local slash command has a `result` of its own, which takes it
-(`/name` without an echo, fixture of `local_command_without_echo_is_taken`; `/cost` on 2.1.312). `system` `task_started` with
-`task_type: local_agent` (a subagent in the background or not, a subagent's own too) counts as
-a running subagent until `task_notification`, or a `task_updated` whose `patch.status` is not
-`running`, of the same `task_id`; a foreground one (`is_backgrounded: false`, not moved to
-the background since) cannot outlive the main turn and stops counting at its `result` at the
-latest, as an interrupt, a denied call or `error_max_turns` during it may bring neither line;
-the count goes into `session.state.subagents` (§5.4). `system` `background_tasks_changed`
-(2.1.312) carries `tasks[]` (`task_id`, `task_type`, and `parent_task_id` for a task a subagent
-started, as in its `task_started`): the CLI's whole list of the session's running background
-tasks, subagents and shell commands, sent on every change and `[]` at the end. A subagent also
-counts while the latest list holds it (`task_type: local_agent`) or a task of the list has it
-as `parent_task_id`, the latter until a `task_notification` with its report (`handback`) and
-again from its next `task_started`: a command a subagent that reported left running is a
-background task of the session, not a running subagent. With `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312 moves a subagent's
-Bash call that runs for more than about 180 s to the background (the agent's own 240 s Bash
-call stays in the foreground) and reports the subagent ended (`task_updated` `completed`,
-`task_notification` "This agent has not reported yet: it is waiting on its own background
-work…") while the command still runs; when the command ends it lists the subagent again and
-starts the same `task_id` again (checked live on 2.1.312 with a background subagent's 240 s
-`ping`). With one such command the list goes `[]` first and holds the subagent again only on
-the next line **[verify]** (inferred from that capture, where a second task of the subagent, a
-Monitor waiting for the `ping`, kept the list from going empty), so a drop of the count that a
-`background_tasks_changed` alone brings is reported at the next line of another kind (at a
-`result` before the end of the turn). The
+call's `description` comes whole; the mirror builds it the same way, §9.1); `tool_result` → `tool.result`; `result` →
+`usage` and `status idle`. Since 0.137 the `result` also gives, after the `usage` and before `status
+idle`, one `system` line that says how the turn ended when it did not complete: `turn_interrupted`
+"Interrupted" for a `terminal_reason` `aborted_streaming` (during the reply) or `aborted_tools`
+(during a tool call); `turn_ended_early` for an error `result` (`subtype` other than `success`, or
+`is_error: true`) or a `terminal_reason` other than `completed`, `background_requested` (the model
+moved its work to the background) and `tool_deferred` — of the 19 values of 2.1.312
+(`TerminalReason` of the SDK) these three end a turn on purpose, and a local slash command has none
+—, with the text "Turn ended early: " and, joined by " · ", the `terminal_reason` (the `subtype`
+without one), "API status <n>" for an `api_error_status` and the non-empty `errors` joined by "; ",
+cut to 300 bytes (`max_turns · Reached maximum number of turns (2)`). Not the `result` text: with
+`is_error: true` it is the CLI's own reply, which came as an `agent.message` with `runtime: true`
+already. `status idle` carries no `detail` (before 0.137 it carried the subtype of an error
+`result`, which the client did not draw). The `user` text lines `[Request interrupted by user]` and
+`[Request interrupted by user for tool use]` stay mapped to nothing. An `assistant` text with
+`aborted: true` (an interrupt cut it off before the stream completed, 2.1.312) → `agent.message`
+with `interrupted: true` (since 0.137), held and ended like any other text. Since 0.121 a
+`system/init` while no turn of hqc's runs (a turn the CLI starts by itself, e.g. after a background
+task's end; the turn of an input of hqc's that the CLI carries over, §17.2, is hqc's) → `status
+running`, before anything else of that turn (§17.1). Since 0.69 a `result` with `num_turns: 0`, no
+tokens and no cost (a local slash command, the empty second `result` the CLI sends after a turn it
+started by itself) gives no `usage`, which the feed would show as an empty `0 → 0 tokens` line;
+`/compact` has no tokens either but costs, and keeps its `usage`. Since 0.115 a `result` with
+`num_turns: 0` and no tokens whose total grew, with no `compact_boundary` in it, gives a `usage`
+with no tokens, no `cost_usd` and the total as `session_cost_usd`: the CLI closes such a turn on a
+background subagent's notification without calling the model, and the growth is what the subagent
+spent meanwhile. The client's header counts that total and the feed draws no line for it; the
+baseline of `cost_usd` stays, so the next `usage` of the same process with a `cost_usd` carries the
+growth (a process that ends first leaves it out of every `cost_usd`: the next one starts from the
+`cost-state` that has it). Since 0.69: an `assistant` text whose `message.model` is `<synthetic>` —
+a reply the CLI wrote itself (an API error, "Credit balance is too low"; on 2.1.312 with
+`is_api_error_message` and the same `uuid` as the transcript record) — → `agent.message` with
+`runtime: true`, held and ended like any other text: the turn it ends has it as the final
+`agent.message`; `system` `task_notification` (`task_id`, `status`, `summary`, `output_file`;
+checked live on 2.1.312 with a `run_in_background` Bash: it comes when the task ends, after the
+`result` of the turn that started it and before the turn the CLI then starts by itself, which brings
+`system/init`, the answer and its own `result`) → `system task_notification` with its `summary`,
+"Background task" without one (since 0.135 with the notification's `status` and `task_id` as they
+are and, as `call_id`, its `tool_use_id`, else that of the task's latest `task_started`, which the
+adapter remembers until the task's end gives its line or none; and for a subagent that delivered its
+report through `SubagentHandback`, 2.1.312 in Auto with `handback` `send` or `flagged`, whose
+`summary` is then a note for the model, "This agent's report was delivered to you as a message from
+…", with the report instead: `handback_report.text`, its `warning`, when there is one, above it
+after a blank line), unless a subagent started the task (its `system` `task_started` has
+`owned_by_subagent: true`, also after a move to the background) or its `task_started` had
+`is_backgrounded: false` and no `system` `task_updated` with `patch.is_backgrounded: true` moved it
+to the background later (2.1.312 sends both lines for a foreground subagent, a foreground Bash call
+that runs for more than about 2 s and a subagent's Bash calls too, background ones included; a task
+the process did not see start counts as a background one); since 0.70 a subagent's
+`task_notification` without its report (no `handback` field) that comes while the latest
+`background_tasks_changed` list (below) holds the subagent or a task of it is no end: the adapter
+keeps the latest one and handles it (the line, the cancel of the subagent's open requests) when the
+subagent stops counting or the process exits; a notification with the report replaces it and is
+handled at once. 2.1.312 sends two for a subagent whose command it moved to the background: "This
+agent has not reported yet…" without `handback` while the list holds the subagent and its commands,
+and its real end, `handback: "send"` and `handback_report {text}`, after the subagent's
+`SubagentHandback` call. A notification with `handback` is the end at once, also while a command the
+subagent left running is still listed (live on 2.1.312: a subagent's wait loop that never ended). A
+task gives one line: a later `task_notification` of the same `task_id` only cancels the subagent's
+open requests (the CLI's own description of the field: any notification "can be followed by a later
+one for the same task_id when the agent is resumed or finishes its wait; the later one replaces what
+the earlier one showed"; checked live on 2.1.312: a subagent that reported while its 200 s `ping`,
+moved to the background, ran on is listed and started again when the `ping` ends, and sends a second
+notification with `handback: "send"` and the same summary); `system` `compact_boundary`
+(`compact_metadata.trigger: manual` after `/compact`, 2.1.308 and 2.1.312; an automatic compaction
+was not checked; its `uuid` is that of the transcript's `system compact_boundary` record) → `system
+context_compacted` with the `event_id` derived from that `uuid`, held until the summary: the main
+agent's next `user` line with `isSynthetic: true` (the transcript's `isCompactSummary` record;
+2.1.308 sends it right after the boundary, a string `message.content`), whose content, a string or
+the text blocks of an array, is the `text` as is; a main agent's `user`, `assistant`, `stream_event`
+or `result` line that comes first, or the process's end, gives it the text "Context compacted",
+`system` lines and a subagent's lines in between keep it held; the `--replay-user-messages` echo, a
+`user` message with `isReplay: true`, → `ack` of `session.input` (this field tells the echo from a
+`user` with `tool_result`). Since 0.70 every user message the adapter writes carries a fresh v4
+`uuid` (not the input's `event_id`: 2.1.312 drops a line whose `uuid` it has seen, echo and all,
+without a turn); its echo and its `command_lifecycle {command_uuid, state}` lines carry it (2.1.312:
+`queued` when the line is read, `started` when the CLI takes it, right after the echo for one that
+went into a running turn, then `completed` or `cancelled`; a turn the CLI begins by itself has
+none). The input of a turn, for `in_reply_to`, is the one whose `started` or echo begins a turn or
+comes during a turn the CLI began by itself (the first input of a process, and every input with a
+CLI that sends no such lines: the one written). At `result` an input written and not echoed is taken
+when its last line is `started` or `completed` (a local slash command), carried into the next turn,
+which the CLI then runs by itself, when it is only `queued`, and not taken when `cancelled`; without
+lifecycle lines it is carried when it was written during the turn, taken otherwise. A carried input
+whose line after that `result` is `cancelled` (a second Stop before it started) ends the turn it was
+carried into, for which no `result` comes: it is not taken, the other inputs carried with it stay
+carried, and with none left no turn runs. A carried local slash command has a `result` of its own,
+which takes it (`/name` without an echo, fixture of `local_command_without_echo_is_taken`; `/cost`
+on 2.1.312). `system` `task_started` with `task_type: local_agent` (a subagent in the background or
+not, a subagent's own too) counts as a running subagent until `task_notification`, or a
+`task_updated` whose `patch.status` is not `running`, of the same `task_id`; a foreground one
+(`is_backgrounded: false`, not moved to the background since) cannot outlive the main turn and stops
+counting at its `result` at the latest, as an interrupt, a denied call or `error_max_turns` during
+it may bring neither line; the count goes into `session.state.subagents` (§5.4). `system`
+`background_tasks_changed` (2.1.312) carries `tasks[]` (`task_id`, `task_type`, and `parent_task_id`
+for a task a subagent started, as in its `task_started`): the CLI's whole list of the session's
+running background tasks, subagents and shell commands, sent on every change and `[]` at the end. A
+subagent also counts while the latest list holds it (`task_type: local_agent`) or a task of the list
+has it as `parent_task_id`, the latter until a `task_notification` with its report (`handback`) and
+again from its next `task_started`: a command a subagent that reported left running is a background
+task of the session, not a running subagent. With `CLAUDE_CODE_ENTRYPOINT=claude-vscode` 2.1.312
+moves a subagent's Bash call that runs for more than about 180 s to the background (the agent's own
+240 s Bash call stays in the foreground) and reports the subagent ended (`task_updated` `completed`,
+`task_notification` "This agent has not reported yet: it is waiting on its own background work…")
+while the command still runs; when the command ends it lists the subagent again and starts the same
+`task_id` again (checked live on 2.1.312 with a background subagent's 240 s `ping`). With one such
+command the list goes `[]` first and holds the subagent again only on the next line **[verify]**
+(inferred from that capture, where a second task of the subagent, a Monitor waiting for the `ping`,
+kept the list from going empty), so a drop of the count that a `background_tasks_changed` alone
+brings is reported at the next line of another kind (at a `result` before the end of the turn). The
 number of tasks in the list goes into `session.state.background_tasks` (since 0.104, §5.4); the
 agent is not idle while it is above 0 (§17.3), and a move tells the agent how many it stopped
-(§5.3).
-Since 0.113 the adapter sends the subagents of that count one by one as `subagents.live` (§4),
-whenever they or a title change and on every `system` `task_progress` of one of them (2.1.312:
-`task_id`, `description` — what it does now, "Running Sleep for 6 seconds" —, `usage
-{total_tokens, tool_uses, duration_ms}`, `last_tool_name`, `summary?`). `description` of a row
-is that of the subagent's `task_started` (its task, "Sleep and reply with number"), empty while
-the CLI's list counts it before that line; `activity`, `total_tokens` and `tool_uses` are those
-of its latest `task_progress`; `duration_ms` is the worker's own time since it first saw the
-subagent's `task_started`, or the list that counted it before, counted when the list is sent.
-`call_id` (since 0.135) is the `tool_use_id` of the subagent's latest `task_started` (the
-`Agent` call that started it), absent while the CLI's list counts it before that line; a
-command's is that of its `task_started` too. A repeated `task_started` of the same `task_id`
-keeps the first time, and a `tool_use_id` that differs replaces the row's `call_id`; a subagent
-that stops counting is forgotten. Since 0.127 the list holds, after the subagents, the main
-agent's background shell commands: the entries of the latest `background_tasks_changed` list with
-`task_type: local_bash`, without `ambient: true` (tasks the SDK says hosts should leave out of
-activity indicators), whose `task_started` has come and was not that of a `Monitor` call, and
-whose `parent_task_id` is none or a subagent that has reported. 2.1.312 registers a Monitor's
-task as `local_bash` too, without `ambient`, and nothing in the list tells it from a command:
-the adapter remembers the ids of the `Monitor` `tool_use` blocks of every `assistant` line, the
-agent's and its subagents', and marks the task whose `task_started` names one as its
-`tool_use_id`. A background task joins the list before its `task_started` (SDK), so a
-command's row comes at its `task_started` and a Monitor never shows; a Bash call moved to the
-background later, whose `task_started` came while it ran in the foreground, gets its row when
-the list takes it. A task whose `task_started` this process did not see has no row, nor has one
-after its `task_notification`.
-A subagent's row stands for its own commands; a command that a subagent which reported left
-running gets its own row when that subagent's row goes. Other task types (`mcp_task`,
-`local_workflow`, …) are no rows. A command's row is its `task_id`, its `description` — the
-entry's, which 2.1.312 sets to the Bash call's `description`, or to the command without one,
-cut to 4096 bytes as `args_preview` — and `duration_ms`, the worker's own time since the
-command's first `task_started` (for a command a subagent left, since the command started, not
-since it got its row); no `activity`, `total_tokens` or `tool_uses`. Since 0.141 each row has `kind`:
-`agent` for a subagent's, `command` for a command's. Commands go in the order they became rows; the list is sent
-again when one comes, goes or its `description` changes. They never change
-`session.state.subagents`. The worker sends `subagents.live` directly, not through the outbox, as
-`agent.delta`, ignores a list read after the agent's process stopped and sends an empty list
-when it stops; after every reconnect it sends the last list it sent again, unless that one was
-empty, `duration_ms` grown by the time since it was sent, since a restarted hub has none and
-lists sent while disconnected are lost. Since 0.127 it also sends again an empty list that
-followed a non-empty one, on every reconnect until a non-empty list or the process's stop: the
-hub keeps the last non-empty list while a background task runs, and an empty one lost with the
-link would leave rows of work that has ended.
-Since 0.122 the adapter counts the session's token rate (`tokens.rate`, §4) every 2 s. The main
-agent's response counts while it is written: a redacted thinking delta at its
-`estimated_tokens` (the CLI's own estimate), any other `stream_event` delta (text, thinking
-summary, tool input) at four characters a token; its `message_delta` (one per response, at its
-end) adds what that missed of its `usage.output_tokens`. A subagent of `subagents.live`, and
-once more after it ends, gives the responses new in its transcript
-`<projects folder>/<CLI session id>/subagents/agent-<task_id>.jsonl` (each counts when its line
-is written, so a long one counts at its end; 2.1.312: each content block is a line, the lines
-of one response share `message.id` and its `usage`, counted once; lines written before the
-process started do not count). The rate is their sum over the last 20 s per second, rounded;
-it is sent when it changes, directly, not through the outbox, 0 when the agent's process stops,
-and again after a reconnect when it is above 0.
-The CLI repeats on stdout every `control_response` the adapter sent to stdin;
-the adapter skips those lines. `in_reply_to` = the `event_id` of the turn's input, as above,
-once its echo has come (since 0.69; before that, none); an input written into a running turn
-does not change it.
+(§5.3). Since 0.113 the adapter sends the subagents of that count one by one as `subagents.live`
+(§4), whenever they or a title change and on every `system` `task_progress` of one of them (2.1.312:
+`task_id`, `description` — what it does now, "Running Sleep for 6 seconds" —, `usage {total_tokens,
+tool_uses, duration_ms}`, `last_tool_name`, `summary?`). `description` of a row is that of the
+subagent's `task_started` (its task, "Sleep and reply with number"), empty while the CLI's list
+counts it before that line; `activity`, `total_tokens` and `tool_uses` are those of its latest
+`task_progress`; `duration_ms` is the worker's own time since it first saw the subagent's
+`task_started`, or the list that counted it before, counted when the list is sent. `call_id` (since
+0.135) is the `tool_use_id` of the subagent's latest `task_started` (the `Agent` call that started
+it), absent while the CLI's list counts it before that line; a command's is that of its
+`task_started` too. A repeated `task_started` of the same `task_id` keeps the first time, and a
+`tool_use_id` that differs replaces the row's `call_id`; a subagent that stops counting is
+forgotten. Since 0.127 the list holds, after the subagents, the main agent's background shell
+commands: the entries of the latest `background_tasks_changed` list with `task_type: local_bash`,
+without `ambient: true` (tasks the SDK says hosts should leave out of activity indicators), whose
+`task_started` has come and was not that of a `Monitor` call, and whose `parent_task_id` is none or
+a subagent that has reported. 2.1.312 registers a Monitor's task as `local_bash` too, without
+`ambient`, and nothing in the list tells it from a command: the adapter remembers the ids of the
+`Monitor` `tool_use` blocks of every `assistant` line, the agent's and its subagents', and marks the
+task whose `task_started` names one as its `tool_use_id`. A background task joins the list before
+its `task_started` (SDK), so a command's row comes at its `task_started` and a Monitor never shows;
+a Bash call moved to the background later, whose `task_started` came while it ran in the foreground,
+gets its row when the list takes it. A task whose `task_started` this process did not see has no
+row, nor has one after its `task_notification`. A subagent's row stands for its own commands; a
+command that a subagent which reported left running gets its own row when that subagent's row goes.
+Other task types (`mcp_task`, `local_workflow`, …) are no rows. A command's row is its `task_id`,
+its `description` — the entry's, which 2.1.312 sets to the Bash call's `description`, or to the
+command without one, cut to 4096 bytes as `args_preview` — and `duration_ms`, the worker's own time
+since the command's first `task_started` (for a command a subagent left, since the command started,
+not since it got its row); no `activity`, `total_tokens` or `tool_uses`. Since 0.141 each row has `kind`:
+`agent` for a subagent's, `command` for a command's. Commands go in the order
+they became rows; the list is sent again when one comes, goes or its `description` changes. They
+never change `session.state.subagents`. The worker sends `subagents.live` directly, not through the
+outbox, as `agent.delta`, ignores a list read after the agent's process stopped and sends an empty
+list when it stops; after every reconnect it sends the last list it sent again, unless that one was
+empty, `duration_ms` grown by the time since it was sent, since a restarted hub has none and lists
+sent while disconnected are lost. Since 0.127 it also sends again an empty list that followed a
+non-empty one, on every reconnect until a non-empty list or the process's stop: the hub keeps the
+last non-empty list while a background task runs, and an empty one lost with the link would leave
+rows of work that has ended. Since 0.122 the adapter counts the session's token rate (`tokens.rate`,
+§4) every 2 s. The main agent's response counts while it is written: a redacted thinking delta at
+its `estimated_tokens` (the CLI's own estimate), any other `stream_event` delta (text, thinking
+summary, tool input) at four characters a token; its `message_delta` (one per response, at its end)
+adds what that missed of its `usage.output_tokens`. A subagent of `subagents.live`, and once more
+after it ends, gives the responses new in its transcript `<projects folder>/<CLI session
+id>/subagents/agent-<task_id>.jsonl` (each counts when its line is written, so a long one counts at
+its end; 2.1.312: each content block is a line, the lines of one response share `message.id` and its
+`usage`, counted once; lines written before the process started do not count). The rate is their sum
+over the last 20 s per second, rounded; it is sent when it changes, directly, not through the
+outbox, 0 when the agent's process stops, and again after a reconnect when it is above 0. The CLI
+repeats on stdout every `control_response` the adapter sent to stdin; the adapter skips those lines,
+and (since 0.137) the CLI's answer to its `initialize`. `in_reply_to` = the `event_id` of the turn's
+input, as above, once its echo has come (since 0.69; before that, none); an input written into a
+running turn does not change it.
 
 Cost (since 0.28, T27; checked live on 2.1.308, fixtures `cost-turns`, `cost-resume`):
 `result.total_cost_usd` is the cumulative cost of the whole Claude Code session, not of the turn:
@@ -3486,6 +3506,16 @@ group gets SIGINT; the CLI exits on it, and the next input brings the process up
 Since 0.143, if the turn still runs 10 s after the SIGINT (a process stuck in a tool call that
 the signal does not end), the group gets SIGTERM, and SIGKILL 5 s later, as a kill does: Stop
 ends a stuck session together with the commands it started.
+Since 0.137, with `perTaskStopAffordance` in the process's `initialize` (above), the interrupt
+stops only the turn: background subagents and workflows go on, as in the VS Code tab (by the
+2.1.312 binary, "an interrupt on an open-input (interactive stream-json) session spares running
+background agents/workflows (Stop only aborts the turn)"; it still stops observer agents)
+**[verify]**. Without the flag 2.1.312 killed them, each with `task_notification` `stopped`
+(checked live with a subagent that `CLAUDE_CODE_ENTRYPOINT=claude-vscode` put in the background,
+then `result` `terminal_reason: aborted_tools`). hqc has no Stop of a single background task
+(the CLI's `stop_task`). The reply cut off is an `assistant` record with `aborted: true` and
+gives `agent.message` with `interrupted: true`; the turn ends with `system turn_interrupted`
+(above).
 
 Moving a call to the background (since 0.125, the VS Code tab's "Run in background", extension
 2.1.319). A call of the agent itself the CLI runs in the foreground is one whose `system`
@@ -5367,6 +5397,25 @@ call, the Running line, an approval card), so a cut command shows its first line
 count of the lines that follow reads "+N+ lines" when the preview is cut. 0.150–0.154 are taken
 by other pull requests.
 
+### 0.136 → 0.137 (Stop spares background subagents; an interrupted or early-ended turn says so)
+§8.1: Stop killed the agent's background subagents and workflows along with the turn: the worker
+sent no `initialize`, and without its `perTaskStopAffordance` the CLI's interrupt stops them. The
+worker now writes `control_request` `initialize` with only `perTaskStopAffordance: true` as the
+first stdin line of every process, new, resumed or forked, before any input (the CLI applies it
+only before the first user message), and skips the answer; the interrupt then stops the turn
+alone **[verify]**. hqc has no Stop of a single background task. §4, §8.1: a reply cut off by
+Stop looked finished, and a Stop during a tool call left nothing in the feed: an `assistant` text
+with `aborted: true` gives `agent.message` with the new `interrupted: true`, which the client
+shows muted with " · interrupted" after its time, and a `result` with a `terminal_reason`
+`aborted_*` gives one `system turn_interrupted` "Interrupted" line at the end of the turn, after
+its `usage`. A turn that ended early for another reason (an error, `max_turns`, the budget, a
+hook) just ended: the reason went into `status idle` `detail`, which the client draws only for
+`error`. Such a `result` (an error, or a `terminal_reason` other than `completed`,
+`background_requested` and `tool_deferred`) now gives one
+`system turn_ended_early` line in the same place, "Turn ended early: " with its `terminal_reason`
+(the subtype without one), the API's status and its `errors`, cut to 300 bytes, and `status
+idle` carries no `detail`.
+
 ### 0.148 → 0.149 (the browser marked in the lists)
 §6 client layout: a session given the browser has a ring in the browser's color and a globe in
 the session list, and its project a dashed ring of that color on the project bar and on a phone's
@@ -5533,16 +5582,6 @@ and the description of `hqc_rename` now say to rename this session always withou
 also when the agent thinks it knows the address, since an address of this session in a fork's
 history (an `hqc_rename` result, `current: true` in `hqc_list_sessions`) is the source's.
 0.129–0.132 are taken by open branches.
-
-### 0.128 → 0.132 (a quick call does not swap the activity line)
-§17.1: the line at the bottom of the feed turned into "Running <command or tool>" on every
-`tool.call` and back to "Agent is working" on its `tool.result`, so a turn of quick calls (a
-Read, a grep) made it flicker between the two. A call is now named on that line once it has run
-for 2 s; until then the line stays "Agent is working". The 2 s count from the call's `ts`, or from
-a later `approval.response` or `clarify.response` after it: a call that waited for a permission
-runs only after the answer, and its `ts` is from before the card. 0.129–0.131 are taken by open
-
-pull requests.
 
 ### 0.128 → 0.131 (Answer waits for an answer to every question)
 §4 `clarify.request`: the client sent the answers to the questions that had one and left the

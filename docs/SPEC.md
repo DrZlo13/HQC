@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.172, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
+Version 0.173, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -546,7 +546,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, §6, §8.1; `text` is then empty; absent when false) | adapter; transport only, not written to the database |
-| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
+| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?, retry?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.169) Monitor watchers, in the order they became rows, then (since 0.169) the wakeup the agent armed and its cron jobs, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.169) a Monitor's say, `retry` (since 0.173) `{attempt, max_retries, retry_delay_ms, error_status?}` while its request to the model API failed and waits to be retried (`error_status` absent: the attempt got no response; §8.1), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.169, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.169), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `schedules.live` | `schedules[{schedule_id, message, due_in_ms, cron?, at?, timezone}]` | hub (since 0.169); transport only, not written to the database: the session's enabled schedules (§16) that have a next run, the whole list each time, the next one first, empty when none. `due_in_ms` is the milliseconds until the next run when the list was sent, by the hub's clock, 0 when due; `cron` is the pattern of a recurring schedule and `at` the time of a one-off, `timezone` the zone of the schedule. A worker sending one is refused (`error invalid_frame`, §5.2) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.161: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time), `refusal?` (since 0.168: `true` for the runtime's reply to a model refusal, Claude Code's with `stop_reason: "refusal"`; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Under a `refusal` one, while no message of the user stands after it in the feed, the session is not archived and VS Code does not hold it (`locked_vscode`, whose chat has no input), a small "Switch model" opens a model menu: the aliases, the versions, "Another model…" and the providers the session's worker allows (§6), the session's model checked, without Claude Code's default, which a running agent is not switched to (it takes it at its next start, §5.3 `session.model`). The checked one only closes the menu; another switches the session as the "More" menu does, and once the hub took it the line says "Switched to <model>. Send the message again." in the button's place. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
@@ -563,7 +563,7 @@ the client renders only them. The "source" column is the component that produces
 | `peer.message` | `from_session_id`, `from?` (the sender's address `<project-slug>/<session-slug>` when it sent, since 0.35), `text`, `mode` (send/ask), `request_id?` (for ask: the `mcp.call`'s), `artifact_ids[]?` (since 0.46, T41: the files the sender gave with `files`, artifacts of the owner; absent when none; the target's worker downloads them like a user's attachments, §5.3, §12), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the message came; absent when false; §6), `room?` (since 0.172: `{session_id, seq}`, on an input from a room to its agent, the room and the `seq` there of the message it carries, §7.1.1), `joined?` (since 0.172, on such an input: as on a `user.message`, §17.2), `aside?` (since 0.172, on an agent's post in a room: `true` for the final message of a turn the CLI started itself, which moves no circle, §7.1.1; absent when false), `notice_seq?` (since 0.172, on a room's notice to a session that wrote in it: the room's last `seq` when the round ended, §7.1.1) | the hub on `hqc_send`/`hqc_ask`/`hqc_spawn` (since 0.37, the new session's first input) and, since 0.172, for a room (§7.1.1: the owner's message and a post to its agents, an agent's post in the room, a message of a session that is not one of its agents — `hqc_room`'s first message, an `hqc_send` to the room — and the room's notice to such a session when a round ends); `author` is `{kind: agent, id: <the sending session>}` (for the owner's message in a room, the room), `chain` is set (§7.1); `delivery: pending` in the input queue, none while in the send buffer (§7.1) or (since 0.47, T42) when it goes with the reply to the target's ask instead (§7.1); since 0.54 (T51) a buffered one gets `delivered_at` (still without `delivery`) when the input that carried it is acknowledged |
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
-| `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed) | hub or worker; codes below |
+| `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.173, only on `context_compacted`) | hub or worker; codes below |
 
 `system` codes (the list is open; the client shows an unknown code as text):
 
@@ -574,7 +574,8 @@ the client renders only them. The "source" column is the component that produces
 | `agent_exited` | worker | the agent process exited on its own with an error or mid-turn (§17.3) |
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
 | `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). The client folds any other into a "Background task ·" line with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends; opened, it shows all of it as Markdown |
-| `context_compacted` | worker (adapter; since 0.162 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.162 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider |
+| `context_compacted` | worker (adapter; since 0.162 mirror) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); since 0.162 the mirror gives the same line from the transcript's `compact_boundary` and its summary (§9.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider. Since 0.173 the adapter's carries, when the runtime said, `trigger` (`auto` \| `manual`), `pre_tokens` (the context's tokens before) and `post_tokens` (after; absent when the runtime did not count them) — the mirror's carries none of them —, and the client's line reads "Context compacted · auto · 153k tokens freed", leaving out what is absent |
+| `compaction_failed` | worker (adapter) | since 0.173: a compaction the runtime started failed; `text` is "Compaction failed: " and the runtime's error, "Compaction failed" without one (§8.1) |
 | `conversation_cleared` | worker (adapter) | since 0.162: `/clear` started a new conversation in the same agent process, with a new transcript (Claude Code: `conversation_reset`, §8.1); `text` "Conversation cleared"; the session goes on in the new transcript, and the agent no longer has what was before the line in its context |
 | `command_output` | worker (mirror) | since 0.162: what a slash command printed (`/context`, `/cost` and the like), from the transcript (Claude Code: `<local-command-stdout>` and `<local-command-stderr>`, §9.1); `text` is the output, at most 4096 bytes |
 | `agent_start_failed` | hub | the agent failed to start 3 times in a row (or non-retryably); `pending` inputs became `failed` (§5.2) |
@@ -1349,6 +1350,16 @@ MCP calls (worker → hub → worker):
   session's `foreground_calls` (§6), and drops it when the agent stops, its worker restarts or
   the session is deleted; it keeps at most 64 unique ids of 1 to 128 bytes without whitespace
   or control characters, in the worker's order, and drops the rest (§20).
+  `activity` (since 0.173) — what the agent waits on now, while no output of the model comes
+  (Claude Code: §8.1): `{kind: retrying, attempt, max_retries, retry_delay_ms, error_status?}`
+  — a request to the model API failed and is retried after `retry_delay_ms` (`error_status`
+  absent: the attempt got no response); `{kind: compacting}` — the runtime compacts the
+  context; `{kind: thinking, estimated_tokens}` — the model thinks, about that many tokens into
+  its thinking block. Absent — none, and like `subagents` every report says it; the worker
+  sends a `session.state` whenever it changes. The hub keeps it in memory, not in the
+  database, as the session's `activity` (§6), and drops it when an event ends the turn, the
+  turn times out or is lost (§17.3), the agent stops, its worker disconnects or says `hello`
+  again, and when the session or its project is deleted.
 - `mirror.event` {workspace_path, runtime_session_id, cwd, event, title?, recent, held_by?} — events
   from the mirror (§9.1, §9.2), through the outbox; the answer is `ack {event_id, seq}` as for
   `event` (a duplicate — the `seq` of the stored one; a folder not mirrored by this worker, a `cwd`
@@ -2330,16 +2341,18 @@ disallowed_tools[], restricted, start_failures}, auto_approve, wake_on_send, loc
 last_seq, archived, archived_at?, system?, held_by?, state, queue_len, last_read_seq, unread, created_at,
 updated_at, commands?, command_info?, spawned_by?, permission_mode?, effective_permission_mode?,
 permission_capped_by?, subagents?, background_tasks?, output_per_s?, foreground_calls?,
-paused_at?, room_mode?, room_id?}`. `room_mode` (since 0.172): present only on a room (§7.1.1),
-whose `worker_id` and `workspace_id` are absent and `agent.runtime` is `none`; `room_id` (since
-0.172): present only on a room's agent's session, the room's id.
+activity?, paused_at?, room_mode?, room_id?}`. `room_mode` (since 0.172): present only on a room
+(§7.1.1), whose `worker_id` and `workspace_id` are absent and `agent.runtime` is `none`; `room_id`
+(since 0.172): present only on a room's agent's session, the room's id.
 `subagents` (since 0.70): the subagents the agent runs now, from `session.state` (§5.4);
 absent — 0. The client shows "N agents" ("1 agent") next to the state in the chat header and in
 the session's row of the list while it is above 0; a background subagent keeps it up after the
 turn that started it has ended. Since 0.114, while it is above 0, the chat also shows the
 subagents of the latest `subagents.live` (§4) above the input, outside the feed's scroll, so they
 stay in view while the feed scrolls (the VS Code tab writes such lines into the chat, where they
-scroll away): a line each, `<task>: <what it does now>` (the task alone before any progress) and
+scroll away): a line each, `<task>: <what it does now>` (the task alone before any progress;
+since 0.173, while its request to the model API waits to be retried, `<task>: Retrying 2/10
+(529), next in 4 s`, "no response" in place of a status the attempt did not get) and
 at its right `<tokens> tokens · <n> tools · <run time>` (`155.3k tokens · 188 tools · 4m 13s`),
 what was not reported yet left out, the run time ticking every second from `duration_ms`; a long
 line is cut with an ellipsis. A subagent's line goes when it ends; a dropped socket, and a chat
@@ -2375,6 +2388,9 @@ in the hub's memory; absent — none. The chat offers "Run in background" for su
 `paused_at` (since 0.160): §3 Session, §17.3; absent — not paused. While it is set and the
 session is still `running` or `waiting`, the chat header and the session's row say "Pausing
 after this turn" instead of the state.
+`activity` (since 0.173): what the agent waits on now (`retrying`, `compacting`, `thinking`),
+from `session.state` (§5.4), kept in the hub's memory; absent — none. The chat's activity line
+shows it in place of "Agent is working" (§17.1); a client ignores a `kind` it does not know.
 `permission_mode` and `effective_permission_mode` (since 0.42, T38): §3 Session; absent —
 null. The client shows the mode in the chat header: `effective_permission_mode`, else
 `permission_mode`; "Auto" and (since 0.129) "Allow all" as a marked badge, "Ask" as plain
@@ -2506,10 +2522,11 @@ newer copy).
   `{type: session.summary, session}`: one session changed; an element is `{session_id,
   project_id, title, state, queue_len, unread, last_seq, last_read_seq, held_by?,
   permission_mode?, effective_permission_mode?, permission_capped_by?, subagents?,
-  background_tasks?, output_per_s?, foreground_calls?, paused_at?}` (the same as in the session
-  object; the modes since 0.42, so the header follows a switch the worker confirms, the cap since
-  0.43, `subagents` since 0.70, `background_tasks` since 0.104, `output_per_s` since 0.122,
-  `foreground_calls` since 0.125, `paused_at` since 0.160); `{type: requests, requests[]}` (since 0.41, T37,
+  background_tasks?, output_per_s?, foreground_calls?, activity?, paused_at?}` (the same as in
+  the session object; the modes since 0.42, so the header follows a switch the worker confirms,
+  the cap since 0.43, `subagents` since 0.70, `background_tasks` since 0.104, `output_per_s`
+  since 0.122, `foreground_calls` since 0.125, `activity` since 0.173, `paused_at` since 0.160);
+  `{type: requests, requests[]}` (since 0.41, T37,
   `client.requests.json`): the list of `GET /api/requests`, sent right after `summary` and then
   again, whole, whenever one of the user's requests opens or closes (an event of §4
   `approval.*`/`clarify.*`, a deleted session) or an `hqc_ask` between the user's sessions opens
@@ -3790,7 +3807,13 @@ the main agent's next `user` line with `isSynthetic: true` (the transcript's `is
 record; 2.1.308 sends it right after the boundary, a string `message.content`), whose content,
 a string or the text blocks of an array, is the `text` as is; a main agent's `user`,
 `assistant`, `stream_event` or `result` line that comes first, or the process's end, gives it
-the text "Context compacted", `system` lines and a subagent's lines in between keep it held; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
+the text "Context compacted", `system` lines and a subagent's lines in between keep it held;
+since 0.173 it carries `trigger`, `pre_tokens` and `post_tokens` of the boundary's
+`compact_metadata` (2.1.312: `trigger` `manual` | `auto`, `pre_tokens`, `post_tokens` when the
+CLI counted them; none of the three without `trigger` or `pre_tokens`); since 0.173 a `system`
+`status` with `compact_result: failed` (the end of a compaction that failed, `compact_error` its
+error; read in the CLI's code, not checked live) → `system compaction_failed` with "Compaction
+failed: <compact_error>", "Compaction failed" without one, after a text held before it; the `--replay-user-messages` echo, a `user` message with `isReplay: true`,
 → `ack` of `session.input` (this field tells the echo from a `user` with `tool_result`).
 Since 0.70 every user message the adapter writes carries a fresh v4 `uuid` (not the input's
 `event_id`: 2.1.312 drops a line whose `uuid` it has seen, echo and all, without a turn); its
@@ -3935,12 +3958,36 @@ id>/subagents/agent-<task_id>.jsonl` (each counts when its line is written, so a
 its end; 2.1.312: each content block is a line, the lines of one response share `message.id` and its
 `usage`, counted once; lines written before the process started do not count). The rate is their sum
 over the last 20 s per second, rounded; it is sent when it changes, directly, not through the
-outbox, 0 when the agent's process stops, and again after a reconnect when it is above 0. The CLI
-repeats on stdout every `control_response` the adapter sent to stdin; the adapter skips those lines,
-and (since 0.161) the CLI's answer to its `initialize`, which since 0.162 gives the slash commands
-(below). `in_reply_to` = the `event_id` of the turn's
-input, as above, once its echo has come (since 0.69; before that, none); an input written into a
-running turn does not change it.
+outbox, 0 when the agent's process stops, and again after a reconnect when it is above 0.
+Since 0.173 the worker reports what the main agent waits on as `session.state.activity` (§5.4),
+whenever it changes, and none when the agent's process stops. `system` `api_retry` (2.1.312:
+`attempt`, `max_retries`, `retry_delay_ms`, `error_status`, null when the attempt got no
+response, `error`; sent in the CLI's retry loop before it waits, and no `status requesting`
+comes before the retried request) → `retrying` with those numbers; `system` `status`
+`compacting` → `compacting`; `system` `thinking_tokens` (`estimated_tokens`, the CLI's estimate
+of the thinking block so far, from 0 at each block, `estimated_tokens_delta`; sent before each
+thinking delta) → `thinking` with its `estimated_tokens`. It ends at any other `system` `status`
+that does not report the permission mode (`requesting`, `null` at a compaction's end; one with
+`permissionMode` changes nothing), at the main agent's `stream_event` `message_start` (a
+response begins: a retry went through), `content_block_start` or `content_block_stop` (a
+thinking block ends, another block begins), at its `assistant` line and at `result`; the deltas
+of a block and `ping` leave it, as do a subagent's lines. A later `api_retry`, `compacting` or
+`thinking_tokens` replaces it. These lines were read in the CLI's code, not checked live.
+`tool_progress` (2.1.312, read in the CLI's code): while a tool call of the main agent runs, the
+CLI sends one every 30 s with `heartbeat: true`, `tool_use_id` `<call id>-heartbeat-<n>` and
+the call's id as `parent_tool_use_id`, none while the call waits on the user; at each the
+worker sends the session's `tokens.rate` again as it is, so that a call silent for longer than
+the hub's watchdog keeps its turn (§17.3). A `tool_progress` with `subagent_retry {agent_id,
+attempt, max_retries, retry_delay_ms, error_status, error_category}` (a subagent's request to
+the model API failed and is retried; `parent_tool_use_id` is the subagent's `Agent` call) puts
+`retry` on the row of the subagent whose `task_id` is `agent_id` (`subagents.live`, §4), and the
+next `tool_progress` of the same `parent_tool_use_id` without `subagent_retry` (the CLI's word
+that the retry went through) takes it off; the list is sent again at both.
+The CLI repeats on stdout every `control_response` the adapter sent to stdin; the adapter skips
+those lines, and (since 0.161) the CLI's answer to its `initialize`, which since 0.162 gives the
+slash commands (below). `in_reply_to` = the `event_id` of the turn's input, as above, once its
+echo has come (since 0.69; before that, none); an input written into a running turn does not
+change it.
 
 Cost (since 0.28, T27; checked live on 2.1.308, fixtures `cost-turns`, `cost-resume`):
 `result.total_cost_usd` is the cumulative cost of the whole Claude Code session, not of the turn:
@@ -4545,13 +4592,13 @@ at most 4096 bytes like other previews (§4), and no event when both are empty. 
 shows a bubble with the CLI's raw tags. A compaction — a `system` record with `subtype:
 compact_boundary` and the summary the CLI writes after it, a `user` record with
 `isCompactSummary` — → one `system context_compacted` with the summary's text (the text blocks
-joined by `\n`; "Context compacted" when it has none), as the adapter gives it (§8.1): the event
-takes its id from the boundary's `uuid` (the last boundary read in that file before the summary,
-kept in the worker's memory; the summary is not always the boundary's child in the record tree,
-it may hang on an attachment), or from the summary's own `uuid` when no boundary was read since
-the worker started; the boundary alone gives no event. Records that yield no events (other
-`attachment`s, snapshots, `api-request*`, `queue-operation`, empty `thinking`, images) are
-skipped.
+joined by `\n`; "Context compacted" when it has none), as the adapter gives it (§8.1) but
+without `trigger`, `pre_tokens` and `post_tokens` (§4): the event takes its id from the boundary's
+`uuid` (the last boundary read in that file before the summary, kept in the worker's memory; the
+summary is not always the boundary's child in the record tree, it may hang on an attachment), or
+from the summary's own `uuid` when no boundary was read since the worker started; the boundary alone
+gives no event. Records that yield no events (other `attachment`s, snapshots, `api-request*`,
+`queue-operation`, empty `thinking`, images) are skipped.
 
 For an unknown `runtime_session_id` of this worker the hub creates a session in the
 workspace's project: `cwd` is the record's path relative to the workspace, the title is the
@@ -5800,8 +5847,11 @@ question it, or a subagent it runs, waited for), since 0.161 only a call after t
 turn, §6; since 0.125, when that call is one
 of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
 which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
-goes once the worker reports the call moved or ended), `queued` — "Input queued", `paused` —
-"Paused" in the header and the session's row,
+goes once the worker reports the call moved or ended; since 0.173, with no such call, the
+session's `activity`, §6, stands in place of "Agent is working": "Retrying 3/10 (529), next in
+8 s" — "no response" in place of a status the attempt did not get, the delay rounded up to
+whole seconds —, "Compacting the conversation…", "Thinking · ~12k tokens"), `queued` — "Input
+queued", `paused` — "Paused" in the header and the session's row,
 `waiting` — "Waiting for approval" if the open request is not in the feed (otherwise its card is
 that line).
 A `status` event is not drawn as a feed line, except `error` with `detail`.
@@ -5933,6 +5983,9 @@ send from a session in a lower mode (§7.1).
   since 0.35) and the worker being offline (`worker_offline`) do not count. The hub keeps
   event times in memory; after a hub restart every open turn gets the full
   period. The hub sends nothing to the worker: the process and its input queue are left alone.
+  Since 0.173 the worker sends `tokens.rate` again at each heartbeat Claude Code sends every
+  30 s while a tool call of the main agent runs (§8.1), so a call that runs silent for longer
+  than the limit keeps its turn.
 
 ### 17.4 Archiving and deletion
 - Archiving: the hub sets `archived_at` (since 0.53; unarchiving clears it), sends `session.kill`, open requests get
@@ -6184,6 +6237,31 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.172 → 0.173 (what the agent is doing now: retries, compaction, thinking, long calls)
+§8.1, §5.4, §6, §17.1: while Claude Code retried a failed request to the model API, compacted
+the context or thought, the chat said only "Agent is working", the same as for a turn that had
+stopped answering. The worker now reports what the main agent waits on as
+`session.state.activity` — `retrying` from `system` `api_retry` (attempt, retries, delay,
+status), `compacting` from `system` `status` `compacting`, `thinking` from `system`
+`thinking_tokens` (the CLI's estimate) — until the model's next output, a tool call, another
+status or the end of the turn; the hub keeps it in memory (no migration) and drops it at the
+end of a turn, at the agent's stop, at its worker's disconnect or `hello` and at a deletion, and
+gives it as `activity` of the session object and `session.summary`; the activity line shows
+"Retrying 3/10 (529), next in 8 s", "Compacting the conversation…" or "Thinking · ~12k tokens"
+in place of "Agent is working". §4, §8.1: a subagent's retried request
+(`tool_progress` with `subagent_retry`) puts `retry` on its row of `subagents.live`, and the
+row reads "Retrying 2/10 (no response), next in 4 s" until the CLI says the retry went through.
+§4, §8.1: a compaction that failed (`system` `status` with `compact_result: failed`) was
+silent; it is now a `system compaction_failed` line with the CLI's error, and
+`context_compacted` carries `trigger`, `pre_tokens` and `post_tokens` of `compact_metadata`,
+shown as "Context compacted · auto · 153k tokens freed". §17.3: a tool call that ran silent for
+longer than the hub's watchdog lost its turn although Claude Code sent a heartbeat for it every
+30 s (`tool_progress` with `heartbeat: true`), which the worker dropped; at each heartbeat the
+worker now sends the session's `tokens.rate` again, an event the watchdog already counts, so
+the watchdog itself does not change. The CLI lines were read in its code (2.1.312), not checked live. An
+older worker sends neither field nor code, and older hubs and clients ignore the new fields; an
+older client shows `compaction_failed` as text.
 
 ### 0.171 → 0.172 (the agents' room)
 §7.1.1 (new), §3, §4, §6, §7, §7.1, §15, §16, §17.2: the owner could talk to one agent per chat,

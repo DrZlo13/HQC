@@ -6,8 +6,9 @@
 //! - `stream_event` `text_delta` → `agent.delta`; deltas (text, thinking, tool input at four
 //!   characters a token, redacted thinking at its `estimated_tokens`), then `message_delta`'s
 //!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
-//!   `message_start` after text deltas no assistant text took up → `agent.delta` with
-//!   `reset: true` ([`Core::live_text`]);
+//!   after text deltas no assistant text took up, a `message_start` or an `assistant` of
+//!   another `message.id` than the one streamed → `agent.delta` with `reset: true`
+//!   ([`Core::live_text`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`; an
 //!   input written during a turn the CLI started by itself leaves it held;
@@ -351,8 +352,10 @@ pub struct Core {
     streamed: u64,
     /// The main agent's text deltas were sent since its last assistant text: the hub and
     /// clients show text that no `agent.message` will cover if the CLI abandons the attempt
-    /// ([`Core::on_stream_event`]).
+    /// ([`Core::on_stream_event`], [`Core::on_assistant`]).
     live_text: bool,
+    /// `message.id` of the main agent's latest `message_start`: the response being streamed.
+    streamed_id: Option<String>,
     /// `session_id` of the latest `system/init`: its subagents' transcripts are in its folder.
     cli_session: Option<String>,
     /// The Bash calls and subagents of the agent itself the CLI runs in the foreground, by
@@ -413,6 +416,7 @@ impl Core {
             streamed_estimated: 0,
             streamed: 0,
             live_text: false,
+            streamed_id: None,
             cli_session: None,
             foreground: BTreeMap::new(),
             task_calls: HashMap::new(),
@@ -1053,6 +1057,7 @@ impl Core {
         match ev["type"].as_str() {
             Some("message_start") => {
                 (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
+                self.streamed_id = ev["message"]["id"].as_str().map(str::to_owned);
                 // A new request of the model after text no assistant text took up: the CLI
                 // abandoned the attempt that wrote it (a stream that broke, then a retry), as the
                 // VS Code tab takes it (`web:163707`); the hub and clients drop it.
@@ -1116,6 +1121,18 @@ impl Core {
         // Cut off by an interrupt before the stream completed (2.1.312).
         let aborted = v["aborted"] == true;
         let mut out = Vec::new();
+        // A response other than the one streamed while that one's text stands: the CLI gave up
+        // the stream and asked again without one ("Error streaming, falling back to
+        // non-streaming mode", 2.1.312), which brings no `message_start`; as the VS Code tab
+        // takes it (`web:171092`), the text so far is dropped first.
+        let id = v["message"]["id"].as_str();
+        if self.live_text && !synthetic && id.is_some() && id != self.streamed_id.as_deref() {
+            self.live_text = false;
+            out.push(self.emit_new(EventKind::AgentDelta {
+                text: String::new(),
+                reset: true,
+            }));
+        }
         for (i, block) in blocks(v).iter().enumerate() {
             let id = record_event_id(&uuid, i);
             match block["type"].as_str() {

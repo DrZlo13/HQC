@@ -2908,6 +2908,94 @@ fn a_new_request_drops_the_text_of_an_abandoned_attempt() {
     );
 }
 
+/// A stream broken after some text that the CLI retried without one (2.1.312: "Error
+/// streaming, falling back to non-streaming mode"): no `message_start` comes, the response
+/// arrives as an `assistant` of another `message.id`, and the text written so far is dropped
+/// before it, as the VS Code tab drops it (`web:171092`). None for the response streamed, a
+/// `<synthetic>` one, one without an id, after text an assistant text took up, or a subagent's.
+#[test]
+fn a_reply_without_a_stream_drops_the_text_of_an_abandoned_attempt() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let ev = |e: Value| {
+        json!({"type": "stream_event", "parent_tool_use_id": null, "event": e,
+            "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let start = |id: &str| ev(json!({"type": "message_start", "message": {"id": id}}));
+    let delta = |t: &str| {
+        ev(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": t}}))
+    };
+    let said = |id: &str, model: &str, t: &str| {
+        json!({"type": "assistant", "message": {"id": id, "model": model, "role": "assistant",
+            "content": [{"type": "text", "text": t}]},
+            "parent_tool_use_id": null, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let kinds = |a: Vec<Action>| -> Vec<String> {
+        events(&emitted(a))
+            .into_iter()
+            .map(|e| match &e.kind {
+                EventKind::AgentDelta { text, reset } => format!("delta {text:?} {reset}"),
+                EventKind::AgentMessage { text, .. } => format!("message {text:?}"),
+                _ => "other".into(),
+            })
+            .collect()
+    };
+    play(&mut core, &lines_of(&[start("msg_01"), delta("Let me")]));
+    let out = kinds(play(
+        &mut core,
+        &lines_of(&[
+            said("msg_02", "claude-haiku-5-5", "Here it is."),
+            result("success"),
+        ]),
+    ));
+    assert_eq!(
+        out[..2],
+        ["delta \"\" true", "message \"Here it is.\""],
+        "{out:?}"
+    );
+    started(&mut core, sid);
+    for (lines, why) in [
+        (
+            vec![
+                start("msg_03"),
+                delta("Sure"),
+                said("msg_03", "claude-haiku-5-5", "Sure."),
+            ],
+            "the response streamed",
+        ),
+        (
+            vec![said("msg_04", "claude-haiku-5-5", "More.")],
+            "an assistant text took it up",
+        ),
+        (
+            vec![
+                start("msg_05"),
+                delta("API"),
+                said("msg_06", "<synthetic>", "API Error"),
+            ],
+            "a synthetic one",
+        ),
+        (
+            vec![start("msg_07"), delta("No id"), reply("No id.")],
+            "one without an id",
+        ),
+    ] {
+        let out = kinds(play(&mut core, &lines_of(&lines)));
+        assert!(!out.iter().any(|k| k.ends_with("true")), "{why}: {out:?}");
+    }
+    play(&mut core, &lines_of(&[start("msg_08"), delta("Main")]));
+    let mut sub: Value = serde_json::from_str(&said("msg_09", "claude-haiku-5-5", "Sub.")).unwrap();
+    sub["parent_tool_use_id"] = json!("toolu_02");
+    assert!(
+        kinds(play(&mut core, &sub.to_string())).is_empty(),
+        "a subagent's"
+    );
+}
+
 #[test]
 fn control_response_echo_and_unknown_requests() {
     let mut core = Core::new(Uuid::now_v7(), false);

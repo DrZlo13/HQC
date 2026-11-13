@@ -577,6 +577,38 @@ describe('model', () => {
     expect(root.querySelector('.limits')).toBeNull();
   });
 
+  it('shows a bar above the input at 70 % of a window and when a limit is hit (SPEC 0.173)', async () => {
+    const { app, api } = setup('idle');
+    const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
+    let limits: object = { five_hour: { utilization: 0.39, resets_at: soon }, reported_at: '' };
+    (api as any).workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', limits }]);
+    await mount(app);
+    expect($('.limit-notice')).toBeNull();
+    // Each change of the session's state reads the limits again.
+    const state = async (s: SessionState) => {
+      const info = app.sessions.get('s1')!;
+      await act(async () =>
+        app.mergeSummary([
+          { session_id: 's1', project_id: 'p1', title: info.title, state: s, queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 },
+        ]),
+      );
+      await act(async () => new Promise((r) => setTimeout(r, 10)));
+    };
+    limits = {
+      five_hour: { utilization: 0.72, resets_at: soon },
+      seven_day: { utilization: 0.934, resets_at: soon + 3 * 86400 },
+      reported_at: '',
+    };
+    await state('running');
+    expect($('.limit-notice')!.textContent).toMatch(/^You've used 93% of your weekly limit · resets \S+ \d/);
+    limits = { ...limits, status: 'rejected', rate_limit_type: 'five_hour', resets_at: soon };
+    await state('idle');
+    expect($('.limit-notice')!.textContent).toMatch(/^You've hit your 5-hour limit · resets \d/);
+    expect($('.limit-notice-hit')).not.toBeNull();
+    // Above the subagents, which stay right above the input.
+    expect($('.limit-notice + .composer-wrap')).not.toBeNull();
+  });
+
   // SPEC 0.168: the versions under "Versions"; a name the menu does not list is typed.
   it('a version is chosen as an alias is, and shows as chosen; another name shows as typed', async () => {
     let { app, api } = setup('idle');

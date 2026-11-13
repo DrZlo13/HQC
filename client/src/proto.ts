@@ -342,6 +342,12 @@ export interface SystemNote {
   trigger?: string;
   pre_tokens?: number;
   post_tokens?: number;
+  /** For `code: model_not_switched` (SPEC 0.173): the model the runtime kept. */
+  model?: string;
+}
+/** Events of the session the runtime took back (SPEC 0.173): not shown. */
+export interface Retraction {
+  event_ids: string[];
 }
 
 export interface PayloadByType {
@@ -365,6 +371,7 @@ export interface PayloadByType {
   usage: Usage;
   status: Status;
   system: SystemNote;
+  retraction: Retraction;
 }
 export type EventType = keyof PayloadByType;
 
@@ -611,7 +618,9 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     trigger: optStr(p, 'trigger'),
     pre_tokens: optNum(p, 'pre_tokens'),
     post_tokens: optNum(p, 'post_tokens'),
+    model: optStr(p, 'model'),
   }),
+  retraction: (p) => ({ event_ids: strArr(p, 'event_ids') }),
 };
 
 function parseApiRetry(o: Obj): ApiRetry {
@@ -825,6 +834,9 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
       num(w, 'utilization');
       num(w, 'resets_at');
     }
+    optStr(p, 'status');
+    optStr(p, 'rate_limit_type');
+    optNum(p, 'resets_at');
   },
   'workspace.inspect': (p) => {
     str(p, 'request_id');

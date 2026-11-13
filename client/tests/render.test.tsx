@@ -111,7 +111,7 @@ const agentText = (seq: number, text: string, final: boolean) =>
 describe("every example event renders", () => {
   // Transport only: the stream text, the subagents and the schedules above the input
   // (chat.test.tsx), and the token rate, which reaches the client as the session's
-  // `output_per_s`.
+  // `output_per_s`; a retraction is stored but not drawn.
   const names = readdirSync(WIRE)
     .filter(
       (f) =>
@@ -120,6 +120,7 @@ describe("every example event renders", () => {
         f !== "event.agent.delta.reset.json" &&
         f !== "event.subagents.live.json" &&
         f !== "event.subagents.live.retry.json" &&
+        f !== "event.retraction.json" &&
         f !== "event.tokens.rate.json" &&
         f !== "event.schedules.live.json",
     )
@@ -2048,6 +2049,8 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     const retry = { kind: "retrying", attempt: 3, max_retries: 10, retry_delay_ms: 7400 } as const;
     expect(line({ ...retry, error_status: 529 })).toBe("Retrying 3/10 (529), next in 8 s");
     expect(line(retry)).toBe("Retrying 3/10 (no response), next in 8 s");
+    // The next attempt goes at once: no delay to count.
+    expect(line({ ...retry, retry_delay_ms: 0 })).toBe("Retrying 3/10 (no response)");
     expect(line({ kind: "compacting" })).toBe("Compacting the conversation…");
     expect(line({ kind: "thinking", estimated_tokens: 12345 })).toBe("Thinking · ~12k tokens");
     expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Thinking · ~840 tokens");
@@ -2546,6 +2549,38 @@ describe("the feed like the Claude Code tab", () => {
     expect(root.querySelector(".line.line-system-context_compacted")!.textContent).toBe(
       "Context compacted · manual",
     );
+  });
+
+  it("hides what a retraction takes back, also when it loads after the retraction (SPEC 0.173)", () => {
+    const refused = ev("event.agent.message", (e) => {
+      e.seq = 1;
+      e.event_id = "0199f3a2-7c10-7000-8000-0000000001aa";
+      e.payload = { text: "I can't help with that.", final: false };
+    });
+    const call1 = call(2, "toolu_r", "Bash", { command: "ls" });
+    const retraction = ev("event.retraction", (e) => {
+      e.seq = 4;
+      e.payload.event_ids = [refused.event_id, call1.event_id];
+    });
+    const t = new Timeline();
+    t.apply(refused);
+    t.apply(call1);
+    t.apply(ev("event.system", (e) => {
+      e.seq = 3;
+      e.payload = { code: "model_refusal_fallback", text: "claude-opus-5-5 → claude-sonnet-5" };
+    }));
+    t.apply(retraction);
+    t.apply(agentText(5, "Here it is.", true));
+    show(t);
+    expect(root.textContent).not.toContain("I can't help with that.");
+    expect(root.querySelector(".tool-group")).toBeNull();
+    expect(root.textContent).toContain("claude-opus-5-5 → claude-sonnet-5");
+    expect(root.textContent).toContain("Here it is.");
+    // An older page brought after the retraction: still hidden.
+    const late = new Timeline();
+    late.apply(retraction);
+    late.apply(refused);
+    expect(late.events().map((e) => e.seq)).toEqual([]);
   });
 
   it("shows a reply Claude Code wrote itself as an error-style service line, not a message", () => {

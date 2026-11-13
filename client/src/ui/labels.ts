@@ -208,10 +208,11 @@ export function formatTokens(n: number): string {
 }
 
 /** A retried API request (SPEC 0.173): `Retrying 3/10 (529), next in 8 s`, `(no response)`
- *  when the failed attempt got none. */
+ *  when the failed attempt got none; without the delay when the next attempt goes at once. */
 export function retryLabel(r: ApiRetry): string {
   const why = r.error_status ?? 'no response';
-  return `Retrying ${r.attempt}/${r.max_retries} (${why}), next in ${Math.ceil(r.retry_delay_ms / 1000)} s`;
+  const next = r.retry_delay_ms > 0 ? `, next in ${Math.ceil(r.retry_delay_ms / 1000)} s` : '';
+  return `Retrying ${r.attempt}/${r.max_retries} (${why})${next}`;
 }
 
 /** What the agent waits on, in the activity line instead of "Agent is working" (SPEC §17.1). */

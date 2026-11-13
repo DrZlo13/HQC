@@ -213,6 +213,13 @@ describe('examples/wire', () => {
     });
     const retry = parseEvent(load('event.subagents.live.retry.json'));
     expect(retry.type === 'subagents.live' && retry.payload.agents[0].retry).toEqual({ attempt: 2, max_retries: 10, retry_delay_ms: 4000 });
+    const kept = parseEvent(load('event.system.model_not_switched.json'));
+    expect(kept.type === 'system' && kept.payload.model).toBe('claude-opus-5-5');
+    const retraction = parseEvent(load('event.retraction.json'));
+    expect(retraction.type === 'retraction' && retraction.payload.event_ids).toEqual([
+      '0199f3a2-7c10-7000-8000-000000000113',
+      '0199f3a2-7c10-7000-8000-000000000114',
+    ]);
     const compacted = parseEvent(load('event.system.context_compacted.json'));
     expect(compacted.type === 'system' && [compacted.payload.trigger, compacted.payload.pre_tokens, compacted.payload.post_tokens]).toEqual([
       'auto',

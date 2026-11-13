@@ -198,6 +198,11 @@ export interface WorkerLimits {
   five_hour?: LimitWindow | null;
   /** The 7-day window of all models. */
   seven_day?: LimitWindow | null;
+  /** The state of the limit nearest (since SPEC 0.173): `allowed`, `allowed_warning`,
+   *  `rejected`; which limit it is (`five_hour`, `seven_day`, …) and when it resets. */
+  status?: string | null;
+  rate_limit_type?: string | null;
+  resets_at?: number | null;
   reported_at: string;
 }
 

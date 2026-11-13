@@ -9,7 +9,7 @@ import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelField, type ModelChoice } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
-import { Limits } from './limits';
+import { LimitBar, Limits } from './limits';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
 import { buildFeed } from './feed';
@@ -164,6 +164,9 @@ export function Chat({
     if (fetchCommands) void app.refreshSession(sessionId);
   }, [app, sessionId, fetchCommands]);
   const worker = app.workerName(info?.worker_id);
+  // The usage limits of the session's worker account (SPEC §6), for the bar above the input
+  // and the "More" menu.
+  const loadLimits = async () => (await app.api.workers()).find((w) => w.id === info?.worker_id)?.limits ?? undefined;
 
   // Read cursor: whatever is on screen while the tab is visible counts as read.
   useEffect(() => {
@@ -682,7 +685,7 @@ export function Chat({
             path={path}
             model={model}
             cost={cost}
-            loadLimits={() => app.api.workers().then((ws) => ws.find((w) => w.id === info.worker_id)?.limits ?? undefined)}
+            loadLimits={loadLimits}
             onRetry={showRetry && phone ? () => void act(() => chat.retry(), 'Retry failed') : undefined}
             onRename={() => renameByPrompt(app, info, setNotice)}
             onSchedules={() => setSchedules(true)}
@@ -765,6 +768,7 @@ export function Chat({
           {notice}
         </div>
       )}
+      {!system && info?.worker_id && <LimitBar load={loadLimits} refresh={`${info.worker_id} ${state}`} />}
       {/* The list also holds the agent's background commands, which only background_tasks counts. */}
       {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
       {((info?.subagents ?? 0) > 0 ||

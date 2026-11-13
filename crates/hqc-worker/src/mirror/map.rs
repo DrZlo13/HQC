@@ -46,6 +46,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use hqc_claude_jsonl::{Attachment, Message, Record};
 use hqc_proto::event::{Author, ClarifyAnswer, Delivery, Event, EventKind};
+use hqc_proto::frame::{MAX_SUBAGENT_HISTORY, MAX_SUBAGENT_HISTORY_BYTES};
 use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
@@ -223,6 +224,49 @@ fn command(t: &str) -> Option<String> {
         Some(args) => format!("{name} {args}"),
         None => name.to_string(),
     })
+}
+
+/// The events of a subagent's transcript (`subagents/agent-<task_id>.jsonl`, SPEC §8.1) for
+/// `session.subagent_history`, oldest first: the subagent's text, thinking and calls of its
+/// `assistant` records and the results of its calls of its `user` records (all of them
+/// `isSidechain`), as above. Its task, the text of its first `user` record, gives none, nor does
+/// any other text given to it or injected by the CLI. The newest of them, at most
+/// [`MAX_SUBAGENT_HISTORY`] that take at most [`MAX_SUBAGENT_HISTORY_BYTES`] as JSON together (an
+/// event over that alone is left out), and whether any was left out.
+pub fn subagent_events(transcript: &str) -> (Vec<Event>, bool) {
+    let mut out = Vec::new();
+    for line in transcript.lines() {
+        match hqc_claude_jsonl::parse_line(line) {
+            Ok(Record::User(m)) => out.extend(
+                user(&m)
+                    .into_iter()
+                    .filter(|e| matches!(e.kind, EventKind::ToolResult { .. })),
+            ),
+            Ok(Record::Assistant(m)) => out.extend(assistant(&m, None)),
+            _ => {}
+        }
+    }
+    // Newest first, while they fit: the reply must stay under the hub's 1 MiB per message.
+    let (mut kept, mut bytes, mut truncated) = (Vec::new(), 0, false);
+    for e in out.into_iter().rev() {
+        if kept.len() == MAX_SUBAGENT_HISTORY {
+            truncated = true;
+            break;
+        }
+        let n = serde_json::to_vec(&e).map_or(usize::MAX, |v| v.len());
+        if n > MAX_SUBAGENT_HISTORY_BYTES {
+            truncated = true;
+            continue;
+        }
+        if bytes + n > MAX_SUBAGENT_HISTORY_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += n;
+        kept.push(e);
+    }
+    kept.reverse();
+    (kept, truncated)
 }
 
 /// The `user.message` among `events`: a prompt typed by a person, the `in_reply_to` of the
@@ -863,6 +907,155 @@ mod tests {
                  \"subagent_type\":\"general-purpose\",\"prompt\":\"xxx"
             ),
             "{args_preview}"
+        );
+    }
+
+    /// A subagent's transcript in 2.1.312 shapes (every record `isSidechain`, each content block
+    /// a record of its own, the CLI's request records between them) as `session.subagent_history`
+    /// gives it: its thinking, its calls, their results and its text, with the ids of the
+    /// blocks; not its task, nor what the CLI injected, nor a text given to it later. The last
+    /// 200, `truncated` when there were more.
+    #[test]
+    fn a_subagents_transcript_is_its_history() {
+        let line = |uuid: Uuid, kind: &str, message: serde_json::Value, meta: bool| {
+            serde_json::json!({"parentUuid": Uuid::new_v4(), "isSidechain": true, "isMeta": meta,
+                "agentId": "a52af2b436ded4cea", "type": kind, "uuid": uuid,
+                "timestamp": "2026-11-13T10:00:00.000Z", "message": message})
+            .to_string()
+        };
+        let call = |i: usize| {
+            line(
+                Uuid::new_v4(),
+                "assistant",
+                serde_json::json!({"role": "assistant", "content": [{"type": "tool_use",
+                    "id": format!("toolu_{i}"), "name": "Bash", "input": {"command": "cargo test"}}]}),
+                false,
+            )
+        };
+        let prompt = line(
+            Uuid::new_v4(),
+            "user",
+            serde_json::json!({"role": "user", "content": "Fix the power nets of the import"}),
+            false,
+        );
+        let ids = [
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        ];
+        let transcript = [
+            prompt.clone(),
+            serde_json::json!({"type": "api-request", "agentId": "a52af2b436ded4cea"}).to_string(),
+            line(
+                ids[0],
+                "assistant",
+                serde_json::json!({"role": "assistant", "content": [{"type": "thinking",
+                    "thinking": "The nets come from the netlist.", "signature": "s"}]}),
+                false,
+            ),
+            line(
+                ids[1],
+                "assistant",
+                serde_json::json!({"role": "assistant", "content": [{"type": "tool_use",
+                    "id": "toolu_02", "name": "Bash", "input": {"command": "cargo test"}}]}),
+                false,
+            ),
+            line(
+                ids[2],
+                "user",
+                serde_json::json!({"role": "user", "content": [{"type": "tool_result",
+                    "tool_use_id": "toolu_02", "content": "test result: ok"}]}),
+                false,
+            ),
+            line(
+                Uuid::new_v4(),
+                "user",
+                serde_json::json!({"role": "user",
+                    "content": "<task-notification>\n<task-id>b1</task-id>\n</task-notification>"}),
+                true,
+            ),
+            line(
+                Uuid::new_v4(),
+                "user",
+                serde_json::json!({"role": "user", "content": "Check the ground net too"}),
+                false,
+            ),
+            line(
+                ids[3],
+                "assistant",
+                serde_json::json!({"role": "assistant", "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Fixed."}]}),
+                false,
+            ),
+        ]
+        .join("\n");
+        let (evs, truncated) = subagent_events(&transcript);
+        assert_eq!(
+            evs.iter().map(label).collect::<Vec<_>>(),
+            ["thinking", "call:Bash", "result:false", "agent:Fixed.:true"]
+        );
+        assert!(!truncated);
+        assert_eq!(
+            evs.iter().map(|e| e.event_id).collect::<Vec<_>>(),
+            ids.map(|u| Event::id_from_claude_block(&u, 0))
+        );
+        assert_eq!(subagent_events(""), (vec![], false));
+
+        let many: Vec<String> = std::iter::once(prompt).chain((0..205).map(call)).collect();
+        let (evs, truncated) = subagent_events(&many[..201].join("\n"));
+        assert_eq!((evs.len(), truncated), (200, false));
+        let (evs, truncated) = subagent_events(&many.join("\n"));
+        assert_eq!((evs.len(), truncated), (200, true));
+        let first = |evs: &[Event]| match &evs[0].kind {
+            EventKind::ToolCall { call_id, .. } => call_id.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(first(&evs), "toolu_5", "the last 200");
+    }
+
+    /// The history keeps its newest events that take at most 512 KiB as JSON together, so the
+    /// reply stays under the hub's 1 MiB per message; one over the budget alone is left out, the
+    /// ones before it stay.
+    #[test]
+    fn a_subagents_history_fits_its_budget() {
+        let said = |t: String| {
+            serde_json::json!({"parentUuid": Uuid::new_v4(), "isSidechain": true,
+                "type": "assistant", "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": t}]}})
+            .to_string()
+        };
+        // 200 texts of 4 KB: about 850 KB.
+        let lines: Vec<String> = (0..200)
+            .map(|i| said(format!("{i:03} {}", "x".repeat(4000))))
+            .collect();
+        let (evs, truncated) = subagent_events(&lines.join("\n"));
+        let size: usize = evs
+            .iter()
+            .map(|e| serde_json::to_vec(e).unwrap().len())
+            .sum();
+        assert!(
+            truncated && evs.len() < 200 && size <= MAX_SUBAGENT_HISTORY_BYTES,
+            "{} events, {size} bytes, truncated {truncated}",
+            evs.len()
+        );
+        let text = |e: &Event| match &e.kind {
+            EventKind::AgentMessage { text, .. } => text[..3].to_owned(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(text(evs.last().unwrap()), "199", "the newest");
+        assert_eq!(
+            text(&evs[0]),
+            format!("{:03}", 200 - evs.len()),
+            "none between left out"
+        );
+
+        let mut huge = lines[..3].to_vec();
+        huge.push(said("y".repeat(MAX_SUBAGENT_HISTORY_BYTES)));
+        let (evs, truncated) = subagent_events(&huge.join("\n"));
+        assert_eq!(
+            (evs.iter().map(text).collect::<Vec<_>>(), truncated),
+            (vec!["000".to_owned(), "001".into(), "002".into()], true)
         );
     }
 

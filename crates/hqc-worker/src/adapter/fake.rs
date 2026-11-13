@@ -64,6 +64,8 @@ struct State {
     injectable: bool,
     /// What [`Adapter::runs_own_turn`] answers; false by default.
     own_turn: bool,
+    /// The folder of [`Adapter::subagent_transcript`]; none by default.
+    subagents: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -97,6 +99,11 @@ impl FakeAdapters {
     /// does after a background task's end, until the test ends it with [`Self::end_turn`].
     pub fn set_own_turn(&self, own: bool) {
         self.lock().own_turn = own;
+    }
+
+    /// The agents' subagent transcripts are `agent-<task_id>.jsonl` in `dir` from now on.
+    pub fn set_subagents_dir(&self, dir: std::path::PathBuf) {
+        self.lock().subagents = Some(dir);
     }
 
     /// Make every following `start`/`resume` fail.
@@ -324,6 +331,11 @@ impl Adapter for FakeAdapter {
 
     fn pid(&self) -> Option<u32> {
         self.shared.lock().pid.unwrap_or(Some(std::process::id()))
+    }
+
+    fn subagent_transcript(&self, task_id: &str) -> Option<std::path::PathBuf> {
+        let dir = self.shared.lock().subagents.clone()?;
+        Some(dir.join(format!("agent-{task_id}.jsonl")))
     }
 
     async fn answer_approval(

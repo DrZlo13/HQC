@@ -102,8 +102,8 @@ use hqc_proto::event::{ArtifactKind, EventKind};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
     ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
-    SessionInput, SessionStart, StartMode, TitleRequest, TitleResult, WireError,
-    WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
+    SessionInput, SessionStart, StartMode, SubagentHistoryResult, TitleRequest, TitleResult,
+    WireError, WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
 };
 
 /// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
@@ -264,6 +264,12 @@ enum Cmd {
     /// Stop the agent's task `task_id` alone.
     StopTask {
         id: String,
+        task_id: String,
+    },
+    /// `session.subagent_history`: what subagent `task_id` has done.
+    SubagentHistory {
+        id: String,
+        request_id: String,
         task_id: String,
     },
     Kill {
@@ -515,6 +521,29 @@ impl Supervisor {
                     return;
                 }
                 (session_id, Cmd::StopTask { id, task_id })
+            }
+            HubFrame::SessionSubagentHistory(r) => {
+                // The id names a file: the hub is not trusted with paths (SPEC §2.1).
+                if !hqc_proto::frame::valid_history_task_id(&r.task_id) {
+                    let max = hqc_proto::frame::MAX_HISTORY_TASK_ID;
+                    self.link.reply(
+                        &id,
+                        wire_error(
+                            error_code::INVALID_FRAME,
+                            format!("task_id must be 1 to {max} bytes of [A-Za-z0-9_-]"),
+                            false,
+                        ),
+                    );
+                    return;
+                }
+                (
+                    r.session_id,
+                    Cmd::SubagentHistory {
+                        id,
+                        request_id: r.request_id,
+                        task_id: r.task_id,
+                    },
+                )
             }
             HubFrame::SessionKill { session_id } => {
                 if !self.sessions.contains_key(&session_id) {
@@ -1020,6 +1049,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Stop { id }
         | Cmd::Background { id, .. }
         | Cmd::StopTask { id, .. }
+        | Cmd::SubagentHistory { id, .. }
         | Cmd::Kill { id }
         | Cmd::PermissionMode { id, .. }
         | Cmd::Model { id, .. }
@@ -1028,6 +1058,19 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Secret { id, .. } => id.clone(),
         Cmd::Resync | Cmd::Release { .. } | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
     }
+}
+
+/// The answer to `session.subagent_history` from the subagent's transcript at `path`, its
+/// events in session `session` ([`crate::mirror::map::subagent_events`]); no file, no events.
+fn subagent_history(path: Option<PathBuf>, session: Uuid) -> SubagentHistoryResult {
+    let bytes = path.and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    let (mut events, truncated) =
+        crate::mirror::map::subagent_events(&String::from_utf8_lossy(&bytes));
+    for e in &mut events {
+        e.session_id = session;
+        e.author = hqc_proto::event::Author::Agent { id: session };
+    }
+    SubagentHistoryResult { events, truncated }
 }
 
 struct Queued {
@@ -1292,6 +1335,31 @@ impl Session {
                     }
                 }
                 self.link.reply(&id, ack(None));
+            }
+            Cmd::SubagentHistory {
+                id,
+                request_id,
+                task_id,
+            } => {
+                // Off the session's loop: a subagent's transcript runs to megabytes.
+                let path = self.adapter.subagent_transcript(&task_id);
+                let (link, session) = (self.link.clone(), self.id);
+                tokio::spawn(async move {
+                    let history =
+                        tokio::task::spawn_blocking(move || subagent_history(path, session))
+                            .await
+                            .unwrap_or_else(|_| SubagentHistoryResult {
+                                events: vec![],
+                                truncated: false,
+                            });
+                    link.reply(
+                        &id,
+                        WorkerFrame::Result(RequestResult {
+                            request_id,
+                            body: ResultBody::SubagentHistory(history),
+                        }),
+                    );
+                });
             }
             Cmd::Kill { id } => {
                 // Queued inputs stay `pending` in the hub and come again after `hello`.

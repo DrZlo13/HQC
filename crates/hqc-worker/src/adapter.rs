@@ -246,6 +246,13 @@ pub trait Adapter: Send {
         let _ = task_id;
         anyhow::bail!("this runtime cannot stop a task alone")
     }
+    /// The transcript of subagent `task_id` of [`AdapterEvent::LiveSubagents`], for
+    /// `session.subagent_history` (Claude Code: `subagents/agent-<task_id>.jsonl` beside the
+    /// session's transcript, SPEC §8.1); the file may not be there. By default none.
+    fn subagent_transcript(&self, task_id: &str) -> Option<std::path::PathBuf> {
+        let _ = task_id;
+        None
+    }
     /// `message`: the user's text with a deny option (T26), the reason the runtime sees.
     async fn answer_approval(
         &mut self,

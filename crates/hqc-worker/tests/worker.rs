@@ -3477,6 +3477,81 @@ async fn a_task_output_becomes_an_attachment() {
     w.stop().await;
 }
 
+// SPEC 0.175: `session.subagent_history` answers with the events of the subagent's transcript,
+// in the session and by its agent; a subagent without a transcript has none; a `task_id` that
+// could name another file is refused.
+#[tokio::test]
+async fn a_subagents_history_comes_from_its_transcript() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let dir = env.dir.path().join("subagents");
+    std::fs::create_dir_all(&dir).unwrap();
+    adapters.set_subagents_dir(dir.clone());
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let record = |kind: &str, content: Value| {
+        json!({"parentUuid": Uuid::new_v4(), "isSidechain": true, "agentId": "a52af2b436ded4cea",
+            "type": kind, "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+            "message": {"role": kind, "content": content}})
+        .to_string()
+    };
+    let transcript = [
+        record("user", json!("Fix the power nets of the import")),
+        record(
+            "assistant",
+            json!([{"type": "tool_use", "id": "toolu_02", "name": "Bash",
+                "input": {"command": "cargo test"}}]),
+        ),
+        record(
+            "user",
+            json!([{"type": "tool_result", "tool_use_id": "toolu_02", "content": "ok"}]),
+        ),
+    ];
+    std::fs::write(
+        dir.join("agent-a52af2b436ded4cea.jsonl"),
+        transcript.join("\n"),
+    )
+    .unwrap();
+    // Outside the folder, where `../` would lead.
+    std::fs::write(env.dir.path().join("agent-x.jsonl"), &transcript[1]).unwrap();
+
+    let ask = |task_id: &str| json!({"request_id": "r-1", "session_id": sid, "task_id": task_id});
+    let id = c
+        .frame("session.subagent_history", ask("a52af2b436ded4cea"))
+        .await;
+    let f = c.expect("result").await;
+    assert_eq!(f["id"], id.as_str());
+    let events = f["payload"]["events"].as_array().unwrap();
+    assert_eq!(
+        events.iter().map(|e| e["type"].clone()).collect::<Vec<_>>(),
+        ["tool.call", "tool.result"]
+    );
+    for e in events {
+        assert_eq!(e["session_id"], json!(sid));
+        assert_eq!(e["author"], json!({"kind": "agent", "id": sid}));
+        assert!(e.get("seq").is_none(), "{e}");
+    }
+    assert_eq!(f["payload"]["truncated"], false);
+
+    c.frame("session.subagent_history", ask("a55949578b136436b"))
+        .await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!([]));
+
+    let long = "a".repeat(65);
+    for bad in ["../agent-x", "a.b", "", long.as_str()] {
+        let id = c.frame("session.subagent_history", ask(bad)).await;
+        let f = reply_to(&mut c, &id).await;
+        assert_eq!(f["type"], "error", "{bad:?}: {f}");
+        assert_eq!(f["payload"]["code"], "invalid_frame");
+    }
+    w.stop().await;
+}
+
 // The token rate goes as `tokens.rate` when it changes; one above 0 is sent again on the next
 // connect (the hub dropped it with the link), a 0 is not; the agent stopped, it sends 0.
 #[tokio::test]

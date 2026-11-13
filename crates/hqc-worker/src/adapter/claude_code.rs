@@ -1255,6 +1255,20 @@ impl Adapter for ClaudeCodeAdapter {
         p.secrets.as_ref()?.upgrade()
     }
 
+    /// As the token rate reads it: `<CLI session id>/subagents` beside the session's
+    /// transcript, the id from the latest `system/init`.
+    fn subagent_transcript(&self, task_id: &str) -> Option<PathBuf> {
+        let p = self.proc.as_ref()?;
+        let session = lock(&p.core).cli_session()?.to_owned();
+        let transcript = p.io.transcript()?;
+        let dir = transcript.parent()?;
+        Some(
+            dir.join(session)
+                .join("subagents")
+                .join(format!("agent-{task_id}.jsonl")),
+        )
+    }
+
     async fn kill(&mut self) -> anyhow::Result<()> {
         let Some(mut p) = self.proc.take() else {
             return Ok(());

@@ -504,6 +504,10 @@ pub enum HubFrame {
     /// `ack`, also when no agent runs; what the runtime answers is the worker's log.
     #[serde(rename = "session.stop_task")]
     SessionStopTask { session_id: Uuid, task_id: String },
+    /// What subagent `task_id` of the session has done, read from its transcript on demand
+    /// (since SPEC 0.175): answered with `result` [`SubagentHistoryResult`].
+    #[serde(rename = "session.subagent_history")]
+    SessionSubagentHistory(SubagentHistory),
     /// Terminate the agent process.
     #[serde(rename = "session.kill")]
     SessionKill { session_id: Uuid },
@@ -855,6 +859,7 @@ pub enum ResultBody {
     Secret(SecretPutResult),
     WorkspaceKeys(WorkspaceKeysResult),
     WorkspaceKeyDeleted(WorkspaceKeyDeleteResult),
+    SubagentHistory(SubagentHistoryResult),
 }
 
 /// A value that is never printed: `Debug` shows its length only, so a frame that is logged
@@ -1371,6 +1376,43 @@ pub struct PermissionsInspect {
     pub tool: Option<String>,
 }
 
+/// `session.subagent_history {request_id, session_id, task_id}` -> `result`
+/// [`SubagentHistoryResult`] (since SPEC 0.175): `task_id` is a subagent's of `subagents.live`,
+/// `request_id` equals the frame `id`. A `task_id` that is not [`valid_history_task_id`] is
+/// answered with `error {invalid_frame}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentHistory {
+    pub request_id: String,
+    pub session_id: Uuid,
+    pub task_id: String,
+}
+
+/// Result of `session.subagent_history`: the newest events of the subagent's transcript, at most
+/// [`MAX_SUBAGENT_HISTORY`] and [`MAX_SUBAGENT_HISTORY_BYTES`], oldest first, without `seq`;
+/// `truncated` when any was left out. No transcript: no events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentHistoryResult {
+    pub events: Vec<Event>,
+    pub truncated: bool,
+}
+
+/// Most events of a [`SubagentHistoryResult`].
+pub const MAX_SUBAGENT_HISTORY: usize = 200;
+/// Most bytes the events of a [`SubagentHistoryResult`] take as JSON together: the reply stays
+/// well under the hub's limit of 1 MiB for a message from a worker, past which it drops the link.
+pub const MAX_SUBAGENT_HISTORY_BYTES: usize = 512 * 1024;
+/// Longest `task_id` of `session.subagent_history`, in bytes.
+pub const MAX_HISTORY_TASK_ID: usize = 64;
+
+/// A `task_id` of `session.subagent_history`: 1 to [`MAX_HISTORY_TASK_ID`] bytes of
+/// `[A-Za-z0-9_-]` (Claude Code: `a52af2b436ded4cea`). The worker reads a file by it.
+pub fn valid_history_task_id(id: &str) -> bool {
+    (1..=MAX_HISTORY_TASK_ID).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// Where a rule comes from (`InspectResult.sources[].source`, `CheckResult.source`).
 pub mod rule_source {
     pub const WORKER: &str = "worker.toml";
@@ -1525,6 +1567,7 @@ mod tests {
         "session.stop",
         "session.background",
         "session.stop_task",
+        "session.subagent_history",
         "session.kill",
         "session.permission_mode",
         "session.model",
@@ -1597,6 +1640,10 @@ mod tests {
         (
             "session.stop_task",
             include_str!("../examples/wire/hub.session.stop_task.json"),
+        ),
+        (
+            "session.subagent_history",
+            include_str!("../examples/wire/hub.session.subagent_history.json"),
         ),
         (
             "session.kill",
@@ -1798,6 +1845,10 @@ mod tests {
             include_str!("../examples/wire/worker.result.workspace.key_delete.json"),
         ),
         (
+            "result",
+            include_str!("../examples/wire/worker.result.subagent_history.json"),
+        ),
+        (
             "worker.approval.request",
             include_str!("../examples/wire/worker.worker.approval.request.json"),
         ),
@@ -1846,6 +1897,7 @@ mod tests {
             HubFrame::SessionStop { .. } => "session.stop",
             HubFrame::SessionBackground { .. } => "session.background",
             HubFrame::SessionStopTask { .. } => "session.stop_task",
+            HubFrame::SessionSubagentHistory(_) => "session.subagent_history",
             HubFrame::SessionKill { .. } => "session.kill",
             HubFrame::SessionPermissionMode { .. } => "session.permission_mode",
             HubFrame::SessionModel { .. } => "session.model",
@@ -2225,6 +2277,10 @@ mod tests {
                 include_str!("../examples/wire/hub.workspace.key_delete.json"),
                 include_str!("../examples/wire/worker.result.workspace.key_delete.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.session.subagent_history.json"),
+                include_str!("../examples/wire/worker.result.subagent_history.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -2240,6 +2296,7 @@ mod tests {
                 HubFrame::SecretPut(r) => (&r.request_id, 7),
                 HubFrame::WorkspaceKeys(r) => (&r.request_id, 8),
                 HubFrame::WorkspaceKeyDelete(r) => (&r.request_id, 9),
+                HubFrame::SessionSubagentHistory(r) => (&r.request_id, 10),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -2258,6 +2315,7 @@ mod tests {
                 ResultBody::Secret(_) => 7,
                 ResultBody::WorkspaceKeys(_) => 8,
                 ResultBody::WorkspaceKeyDeleted(_) => 9,
+                ResultBody::SubagentHistory(_) => 10,
             };
             assert_eq!(got, kind);
         }

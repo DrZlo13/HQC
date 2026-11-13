@@ -3377,6 +3377,64 @@ async fn a_silent_call_with_heartbeats_keeps_its_turn() {
     hub.finish().await;
 }
 
+/// SPEC §5.3, §6 (since 0.175): `GET .../subagents/{task_id}/history` asks the session's worker
+/// with `session.subagent_history` and answers with its `result` without `request_id`; a
+/// `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]` is refused and the worker not asked;
+/// the worker offline: `409 worker_offline`.
+#[tokio::test]
+async fn a_subagents_history_comes_from_the_worker() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Subagent history").await;
+    ack_start(&mut w, &sid).await;
+    let task = "a52af2b436ded4cea";
+    let url = format!("/api/sessions/{sid}/subagents/{task}/history");
+    let call = agent_event(
+        &sid,
+        "tool.call",
+        json!({"call_id": "toolu_02", "tool": "Bash", "args_preview": "{\"command\":\"cargo test\"}"}),
+    );
+    let answer = async {
+        let f = w.expect("session.subagent_history").await;
+        assert_eq!(
+            f["payload"],
+            json!({"request_id": f["id"], "session_id": sid, "task_id": task})
+        );
+        let result = json!({"request_id": f["id"], "events": [call], "truncated": true});
+        w.reply(&f["id"], "result", result).await;
+        w
+    };
+    let ((s, v), mut w) = tokio::join!(hub.get(&url), answer);
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v, json!({"events": [call], "truncated": true}));
+
+    let long = "a".repeat(65);
+    for bad in ["a.b", "a%2Fb", "a%20b", long.as_str()] {
+        let (s, v) = hub
+            .get(&format!("/api/sessions/{sid}/subagents/{bad}/history"))
+            .await;
+        assert_eq!(s, 400, "{bad:?}: {v}");
+    }
+    w.expect_silence(Duration::from_millis(200)).await;
+
+    w.close().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (s, v) = hub.get(&url).await;
+        if s == 409 {
+            assert_eq!(v["error"], "worker_offline");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "still online: {s} {v}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    hub.finish().await;
+}
+
 /// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
 /// service sessions included, the newest `updated_at` first; another user's sessions are not in
 /// it.

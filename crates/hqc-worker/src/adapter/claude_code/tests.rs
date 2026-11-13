@@ -442,6 +442,33 @@ async fn a_custom_title_is_reported_at_turn_end() {
     assert_eq!(titles_in(&evs), ["Mine"]);
 }
 
+/// SPEC 0.175: a subagent's transcript is `<CLI session id>/subagents/agent-<task_id>.jsonl`
+/// beside the session's transcript, the id from `system/init`; none before it came.
+#[tokio::test]
+async fn a_subagents_transcript_is_beside_the_sessions() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    assert_eq!(h.adapter.subagent_transcript("a1"), None);
+    let (work, config) = &h._dirs;
+    let transcript = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    h.turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    assert_eq!(
+        h.adapter.subagent_transcript("a52af2b436ded4cea"),
+        Some(
+            transcript
+                .parent()
+                .unwrap()
+                .join(fx.claude_session().to_string())
+                .join("subagents/agent-a52af2b436ded4cea.jsonl")
+        )
+    );
+}
+
 #[tokio::test]
 async fn permission_allow_once() {
     let fx = fixture!("permission-allow");

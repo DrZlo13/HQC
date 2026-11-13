@@ -1,0 +1,21 @@
+{
+  "events": [
+    {
+      "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+      "event_id": "0199f3a2-7c10-7000-8000-000000000132",
+      "ts": "2026-10-22T10:00:02Z",
+      "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+      "type": "tool.call",
+      "payload": { "call_id": "toolu_02", "tool": "Bash", "args_preview": "{\"command\":\"cargo test -p import\"}" }
+    },
+    {
+      "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+      "event_id": "0199f3a2-7c10-7000-8000-000000000133",
+      "ts": "2026-10-22T10:00:09Z",
+      "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+      "type": "tool.result",
+      "payload": { "call_id": "toolu_02", "result_preview": "test result: ok. 12 passed", "error": false }
+    }
+  ],
+  "truncated": false
+}

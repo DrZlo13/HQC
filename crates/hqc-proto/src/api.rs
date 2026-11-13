@@ -846,6 +846,10 @@ pub struct EventPage {
     pub last_seq: u64,
 }
 
+/// `GET /api/sessions/{id}/subagents/{task_id}/history` (since SPEC 0.175): the worker's
+/// `session.subagent_history`.
+pub type SubagentHistoryPage = crate::frame::SubagentHistoryResult;
+
 /// `GET /api/search` (SPEC §15): hits best first; `next_cursor` fetches the next page
 /// (`&cursor=`), absent on the last one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1327,6 +1331,9 @@ mod tests {
         assert_eq!(summary.favorite_at, s.favorite_at);
         assert!(s.favorite_at.is_some() && held.favorite_at.is_none());
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));
+        let h: SubagentHistoryPage =
+            roundtrip(include_str!("../examples/wire/api.subagent_history.json"));
+        assert!(h.events.iter().all(|e| e.seq.is_none()) && !h.truncated);
         let sp: SearchPage = roundtrip(include_str!("../examples/wire/api.search.json"));
         assert!(sp.results[0].seq.is_some() && sp.results[1].seq.is_none());
         assert!(sp.results[1].archived && sp.next_cursor.is_some());

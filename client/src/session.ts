@@ -1,7 +1,7 @@
 // One open chat: history over REST, live tail over /api/ws, actions over REST (SPEC §6).
 
 import type { Api, EventPage } from './api';
-import type { ClarifyAnswer, HqcEvent } from './proto';
+import type { ClarifyAction, ClarifyAnswer, HqcEvent } from './proto';
 import { Timeline, type PendingAttachment } from './timeline';
 import type { HubSocket } from './ws';
 
@@ -196,8 +196,8 @@ export class ChatSession {
     return this.api.approve(this.id, requestId, optionId, message);
   }
 
-  answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void> {
-    return this.api.clarify(this.id, requestId, answers);
+  answer(requestId: string, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction): Promise<void> {
+    return this.api.clarify(this.id, requestId, answers, action);
   }
 
   stop(): Promise<void> {

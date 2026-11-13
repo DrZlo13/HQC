@@ -8,7 +8,7 @@
 import type { SecretFields } from '../api';
 import type { ComponentChildren } from 'preact';
 import { useMemo, useState } from 'preact/hooks';
-import type { Activity, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
+import type { Activity, ClarifyAction, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import { modelMenuItems, type ModelChoice } from './agentSettings';
@@ -68,7 +68,7 @@ import {
   count,
 } from './labels';
 import { elapsed, stats } from './LiveSubagents';
-import { CodeBlock, CopyButton, Markdown, markdownLine } from './Markdown';
+import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
 import { PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
@@ -104,7 +104,8 @@ export interface RoomAgent {
 export interface ChatActions {
   timeline: Timeline;
   approve(requestId: string, optionId: string, message?: string): Promise<void>;
-  answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
+  /** `action`: the person's choice on an MCP server's request. */
+  answer(requestId: string, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction): Promise<void>;
   /** Sends `text` to the session as the user's message; absent where the card is shown away
    *  from its session and where the session takes no input. */
   send?(text: string): void;
@@ -1167,7 +1168,9 @@ interface OtherAnswer {
 
 /** The agent's questions (AskUserQuestion), as the tab asks them: a question's header, each
  *  option's description under its label, checkboxes for a multi question, and "Other" whose
- *  text is the answer (with multi, beside the checked labels). */
+ *  text is the answer (with multi, beside the checked labels). An MCP server's request
+ *  (`server`) is headed by the server, has its text above the questions, its link with Done in
+ *  place of questions, no "Other", and Decline. */
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
@@ -1175,8 +1178,11 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
   // offers an earlier question again (`web:161989`), until a message of the user stands after
   // the cancel: that message, when it is the answer (`web:162093`), says what was chosen; any
   // other closes the card. Any other cancel closes it at once.
+  // An MCP server's request is not: a message goes to the agent, not to the server.
   const earlier =
-    !fate.response && (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
+    p.server === undefined &&
+    !fate.response &&
+    (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
   const after = earlier ? actions.timeline.userMessageAfter(fate.cancelSeq!) : undefined;
   const replayed = after && earlierAnswers(after.text.trim(), p.questions);
   // An answer whose message failed to be sent is not given yet.
@@ -1187,6 +1193,8 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
   const [others, setOthers] = useState<Record<string, OtherAnswer>>({});
   const { busy, error, run } = useAction();
   const given = fate.response && 'answers' in fate.response ? fate.response.answers : replayed;
+  const declined = !!fate.response && 'action' in fate.response && fate.response.action === 'decline';
+  const href = p.url ? safeHref(p.url) : null;
 
   const set = (q: ClarifyQuestion, v: string, checked: boolean) => {
     setAnswers((a) => {
@@ -1249,10 +1257,25 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         if (later) {
           const text = earlierAnswer(p.questions, collect());
           if (complete && text !== undefined) actions.send!(text);
-        } else if (open && complete) run(() => actions.answer(p.request_id, toSend));
+        } else if (open && (complete || p.server !== undefined)) {
+          // An MCP server's form may have optional fields: the server checks it, not the card.
+          run(() => (p.server === undefined ? actions.answer(p.request_id, toSend) : actions.answer(p.request_id, toSend, 'accept')));
+        }
       }}
     >
-      <div class="card-title">Agent asks</div>
+      <div class="card-title">{p.server === undefined ? 'Agent asks' : `${p.server} asks`}</div>
+      {p.message && <div class="clarify-message">{p.message}</div>}
+      {p.url && (
+        <div class="clarify-link">
+          {href ? (
+            <a href={href} target="_blank" rel="noopener noreferrer">
+              {p.url}
+            </a>
+          ) : (
+            p.url
+          )}
+        </div>
+      )}
       {p.questions.map((q) => {
         const s = shown(q);
         const name = `${p.request_id}-${q.id}`;
@@ -1286,7 +1309,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
                 </label>
               );
             })}
-            {!!q.options?.length && (
+            {!!q.options?.length && p.server === undefined && (
               <div class="choice choice-other">
                 {q.multi ? <input type="checkbox" {...other} /> : <input type="radio" {...other} />}
                 {/* Typing into the field chooses Other, as in the tab. */}
@@ -1319,13 +1342,18 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           <button
             type="submit"
             class="btn btn-primary"
-            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || !complete}
+            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || (p.server === undefined && !complete)}
           >
-            Answer
+            {p.url ? 'Done' : 'Answer'}
           </button>
+          {p.server !== undefined && (
+            <button type="button" class="btn btn-ghost" disabled={busy} onClick={() => run(() => actions.answer(p.request_id, {}, 'decline'))}>
+              Decline
+            </button>
+          )}
         </div>
       )}
-      {(fate.response || answeredLater) && <div class="outcome">Answers sent</div>}
+      {(fate.response || answeredLater) && <div class="outcome">{declined ? 'Declined' : 'Answers sent'}</div>}
       {fate.cancel && !answeredLater && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>

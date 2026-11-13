@@ -37,8 +37,12 @@ export type ApprovalCanonical = (typeof CANONICALS)[number] | Unknown;
 export const POLICY_HINTS = ['allow', 'deny'] as const;
 export type PolicyHint = (typeof POLICY_HINTS)[number] | Unknown;
 
-export const CANCEL_REASONS = ['timeout', 'stopped', 'worker_restart', 'archived'] as const;
+export const CANCEL_REASONS = ['timeout', 'stopped', 'worker_restart', 'archived', 'withdrawn'] as const;
 export type CancelReason = (typeof CANCEL_REASONS)[number] | Unknown;
+
+/** What the person did with an MCP server's request (`clarify.response.action`, since 0.150). */
+export const CLARIFY_ACTIONS = ['accept', 'decline'] as const;
+export type ClarifyAction = (typeof CLARIFY_ACTIONS)[number] | Unknown;
 
 export const PEER_MODES = ['send', 'ask'] as const;
 export type PeerMode = (typeof PEER_MODES)[number] | Unknown;
@@ -250,6 +254,12 @@ export interface ApprovalRequest {
   rule_suggestions?: RuleSuggestion[];
   /** The hub's card of an agent's `hqc_secret` (SPEC 0.147): what it asks for. */
   secret?: SecretAsked;
+  /** Why the runtime asks (since 0.150). */
+  reason?: string;
+  /** The runtime's name of the tool (since 0.150). */
+  display_name?: string;
+  /** Only a person may answer it: no rule, no `auto_approve` (since 0.150). Absent = false. */
+  human_only?: boolean;
 }
 /** The secret an `hqc_secret` card asks for: its name and kind are the agent's, fixed. */
 export interface SecretAsked {
@@ -285,11 +295,19 @@ export interface ClarifyQuestion {
 export interface ClarifyRequest {
   request_id: string;
   questions: ClarifyQuestion[];
+  /** The MCP server that asks (since 0.150); absent: the agent asks. */
+  server?: string;
+  /** The server's text above the questions. */
+  message?: string;
+  /** The page the server sends the person to, with no questions. */
+  url?: string;
 }
 export type ClarifyAnswer = string | string[];
 export interface ClarifyResponse {
   request_id: string;
   answers: Record<string, ClarifyAnswer>;
+  /** Only for an MCP server's request (since 0.150). */
+  action?: ClarifyAction;
 }
 export interface Attachment {
   artifact_id: Uuid;
@@ -552,6 +570,9 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     policy_hint: present(p, 'policy_hint') ? tolerantEnum(p, 'policy_hint', POLICY_HINTS) : undefined,
     rule_suggestions: present(p, 'rule_suggestions') ? parseSuggestions(p, 'rule_suggestions') : undefined,
     secret: present(p, 'secret') ? parseSecretAsked(obj(p.secret, 'secret')) : undefined,
+    reason: optStr(p, 'reason'),
+    display_name: optStr(p, 'display_name'),
+    human_only: optBool(p, 'human_only'),
   }),
   'approval.response': (p) => ({
     request_id: str(p, 'request_id'),
@@ -573,10 +594,14 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         multi: optBool(q, 'multi'),
       };
     }),
+    server: optStr(p, 'server'),
+    message: optStr(p, 'message'),
+    url: optStr(p, 'url'),
   }),
   'clarify.response': (p) => ({
     request_id: str(p, 'request_id'),
     answers: parseAnswers(p),
+    action: present(p, 'action') ? tolerantEnum(p, 'action', CLARIFY_ACTIONS) : undefined,
   }),
   'clarify.cancel': cancel,
   attachment: (p) => ({
@@ -969,6 +994,7 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'request_id');
     parseAnswers(p);
+    if (present(p, 'action')) strictEnum(p, 'action', CLARIFY_ACTIONS);
   },
   'worker.approval.request': (p) => {
     str(p, 'request_id');

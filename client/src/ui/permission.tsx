@@ -125,7 +125,9 @@ export function PermissionBlock({
           {outcome.ok ? <IconCheck /> : <IconCross />}
         </span>
         <span class="perm-done-what mono">
-          {v.worker ? WORKER_REQUEST_LABELS[event.payload.tool] ?? event.payload.tool : `${v.shell ? '$ ' : ''}${v.what || event.payload.tool}`}
+          {v.worker
+            ? WORKER_REQUEST_LABELS[event.payload.tool] ?? event.payload.tool
+            : `${v.shell ? '$ ' : ''}${v.what || (event.payload.display_name ?? event.payload.tool)}`}
         </span>
         <span class="perm-done-outcome outcome">· {outcome.text}</span>
         <button type="button" class="btn-link" aria-expanded={again} onClick={() => setAgain(!again)}>
@@ -292,6 +294,8 @@ function PermissionCard({
     if (replying) field.current?.focus();
   }, [replying]);
   const v = requestView(event, call);
+  // The tool as the runtime names it.
+  const name = p.display_name ?? p.tool;
   // What an edit or a write changes, from the call's arguments (cut at 4 KB, SPEC §4).
   const change = call && !v.worker ? fileChange(p.tool, call.payload.args_preview) : undefined;
   const outside = outsidePath(v.paths, actions.workspaceRoot);
@@ -340,10 +344,10 @@ function PermissionCard({
         : 'The worker asks for permission'
     : sheet && p.tool === 'Bash'
       ? 'Run the command?'
-      : TITLES[p.tool] ?? `The agent wants to use ${p.tool}`;
+      : TITLES[p.tool] ?? `The agent wants to use ${name}`;
   const subtitle = v.worker
     ? WORKER_REQUEST_LABELS[p.tool] ?? p.tool
-    : [p.tool, v.description].filter(Boolean).join(' · ');
+    : [name, v.description].filter(Boolean).join(' · ');
   const outcome = outcomeText(event, actions);
   const others = p.options.filter((o) => o !== once && o !== deny);
   const sendReply = () => {
@@ -391,6 +395,8 @@ function PermissionCard({
         <div class="perm-titles">
           <div class="perm-title">{title}</div>
           <div class="perm-sub">{subtitle}</div>
+          {/* Why the runtime asks. */}
+          {p.reason && !v.worker && <div class="perm-sub perm-reason">{p.reason}</div>}
         </div>
         {live && (
           <span class="perm-timer" title="How long it has been waiting">

@@ -186,7 +186,7 @@ export function Chat({
   const actions: ChatActions = {
     timeline: t,
     approve: (r, o, m) => chat.approve(r, o, m),
-    answer: (r, a) => chat.answer(r, a),
+    answer: (r, a, x) => chat.answer(r, a, x),
     // Only where the input is: the hub refuses one of an archived session or one VS Code holds.
     send:
       !system && !info?.archived && state !== 'locked_vscode'

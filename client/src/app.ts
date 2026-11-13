@@ -5,6 +5,7 @@
 
 import { Api, ApiError, type NewRoom, type NewSessionOptions, type ProviderFields, type SessionPatch } from './api';
 import type {
+  ClarifyAction,
   ClarifyAnswer,
   ListMode,
   LookName,
@@ -481,8 +482,8 @@ export class AppState {
     return this.closing(r, this.api.approve(r.session_id, r.request_id, optionId, message));
   }
 
-  answerRequest(r: OpenRequest, answers: Record<string, ClarifyAnswer>): Promise<void> {
-    return this.closing(r, this.api.clarify(r.session_id, r.request_id, answers));
+  answerRequest(r: OpenRequest, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction): Promise<void> {
+    return this.closing(r, this.api.clarify(r.session_id, r.request_id, answers, action));
   }
 
   /** An answer taken, or the request closed elsewhere first (`409 request_closed`): it is

@@ -1092,6 +1092,117 @@ describe("clarify.request", () => {
   });
 });
 
+describe("requests of the CLI (SPEC 0.150)", () => {
+  it("names the tool as the runtime does and says why it asks", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request.human_only"));
+    show(t);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "The agent wants to use Fetch",
+    );
+    expect(root.querySelector(".perm-sub")!.textContent).toBe(
+      "Fetch · https://example.com/report",
+    );
+    expect(root.querySelector(".perm-reason")!.textContent).toBe(
+      "Permission rule 'mcp__web__fetch' from project settings requires approval",
+    );
+    // Only a person may answer: once and deny.
+    expect(optionButtons().map((b) => b.getAttribute("data-option"))).toEqual([
+      "once",
+      "deny",
+    ]);
+    // Without the fields: the tool's own name, no reason.
+    const plain = new Timeline();
+    plain.apply(
+      ev("event.approval.request", (e) => {
+        e.payload.tool = "mcp__web__fetch";
+      }),
+    );
+    show(plain);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "The agent wants to use mcp__web__fetch",
+    );
+    expect(root.querySelector(".perm-reason")).toBeNull();
+  });
+
+  it("says a request the agent withdrew was withdrawn", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request", withSeq(1)));
+    t.apply(
+      ev("event.approval.cancel", (e) => {
+        e.seq = 2;
+        e.payload = { request_id: "req-1", reason: "withdrawn" };
+      }),
+    );
+    t.apply(ev("event.clarify.request", withSeq(3)));
+    t.apply(
+      ev("event.clarify.cancel", (e) => {
+        e.seq = 4;
+        e.payload = { request_id: "req-2", reason: "withdrawn" };
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".perm-done-outcome")!.textContent).toBe(
+      "· cancelled: withdrawn by the agent",
+    );
+    expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe(
+      "Cancelled: withdrawn by the agent",
+    );
+  });
+
+  it("asks an MCP server's form: the server, its text, no Other, Decline", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request.elicitation"));
+    const { actions } = show(t);
+    const card = root.querySelector(".card-clarify")!;
+    expect(card.querySelector(".card-title")!.textContent).toBe("deploy asks");
+    expect(card.querySelector(".clarify-message")!.textContent).toBe(
+      "Where should the release go?",
+    );
+    expect(card.querySelector('input[aria-label="Other answer"]')).toBeNull();
+    const qs = card.querySelectorAll("fieldset");
+    expect(qs[2].querySelectorAll("input[type=radio]").length).toBe(2);
+    await act(async () => buttonByText("Decline")!.click());
+    expect(actions.answer).toHaveBeenLastCalledWith("req-4", {}, "decline");
+
+    const again = show(t);
+    await act(() => root.querySelector<HTMLInputElement>('input[value="us-east"]')!.click());
+    await act(async () =>
+      root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!.click(),
+    );
+    expect(again.actions.answer).toHaveBeenLastCalledWith("req-4", { "1": "us-east" }, "accept");
+  });
+
+  it("shows an MCP server's link with Done, and a declined one", async () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request.elicitation_url", withSeq(1)));
+    const { actions } = show(t);
+    const a = root.querySelector<HTMLAnchorElement>(".card-clarify .clarify-link a")!;
+    expect(a.getAttribute("href")).toBe("https://github.com/login/device");
+    expect(root.querySelector(".card-clarify fieldset")).toBeNull();
+    await act(async () => buttonByText("Done")!.click());
+    expect(actions.answer).toHaveBeenLastCalledWith("req-5", {}, "accept");
+
+    t.apply(ev("event.clarify.response.decline", withSeq(2)));
+    show(t);
+    expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe("Declined");
+    expect(buttonByText("Done")).toBeUndefined();
+
+    // A link that is no web page is shown as text.
+    const odd = new Timeline();
+    odd.apply(
+      ev("event.clarify.request.elicitation_url", (e) => {
+        e.payload.url = "javascript:alert(1)";
+      }),
+    );
+    show(odd);
+    expect(root.querySelector(".card-clarify .clarify-link a")).toBeNull();
+    expect(root.querySelector(".card-clarify .clarify-link")!.textContent).toBe(
+      "javascript:alert(1)",
+    );
+  });
+});
+
 describe("tool groups (T26)", () => {
   it("folds the result into the call row, collapsed, opened shows the result", async () => {
     const t = new Timeline();

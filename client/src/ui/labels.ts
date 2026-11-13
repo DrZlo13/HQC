@@ -115,6 +115,7 @@ export const CANCEL_LABELS: Record<CancelReason, string> = {
   stopped: 'turn stopped',
   worker_restart: 'worker restarted',
   archived: 'session archived',
+  withdrawn: 'withdrawn by the agent',
   unknown: 'cancelled',
 };
 

@@ -31,6 +31,7 @@ import {
   type ArtifactKind,
   type ArtifactUrl,
   type Candidate,
+  type ClarifyAction,
   type ClarifyAnswer,
   type DirEntry,
   type EnrollConfirmed,
@@ -623,8 +624,12 @@ export class Api {
     });
   }
 
-  async clarify(id: string, requestId: string, answers: Record<string, ClarifyAnswer>) {
-    await this.req('POST', `/api/sessions/${enc(id)}/requests/${enc(requestId)}`, { answers });
+  /** `action`: the person's choice on an MCP server's request (SPEC §6). */
+  async clarify(id: string, requestId: string, answers: Record<string, ClarifyAnswer>, action?: ClarifyAction) {
+    await this.req('POST', `/api/sessions/${enc(id)}/requests/${enc(requestId)}`, {
+      answers,
+      ...(action !== undefined ? { action } : {}),
+    });
   }
 
   async readCursor(id: string, lastReadSeq: number): Promise<void> {

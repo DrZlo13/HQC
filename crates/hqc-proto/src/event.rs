@@ -267,6 +267,10 @@ pub enum EventKind {
         /// balance is too low"; since SPEC 0.67); absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         runtime: bool,
+        /// An interrupt cut the reply off before the runtime finished it (Stop, "No" to a
+        /// permission request; since SPEC 0.137); absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interrupted: bool,
     },
     #[serde(rename = "agent.thinking")]
     AgentThinking { text: String },
@@ -763,6 +767,22 @@ mod tests {
         ));
         assert!(serde_json::to_value(&plain).unwrap()["payload"]
             .get("joined")
+            .is_none());
+    }
+
+    /// SPEC 0.137: a reply an interrupt cut off carries `interrupted: true`; any other leaves
+    /// it out.
+    #[test]
+    fn an_interrupted_agent_message_roundtrips() {
+        let src = include_str!("../examples/wire/event.agent.message.interrupted.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.agent.message.json"))
+                .unwrap();
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("interrupted")
             .is_none());
     }
 

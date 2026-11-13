@@ -2762,7 +2762,7 @@ The reply to an ask:
   turn that names no input, §8.1) fails nothing, and the ask waits for its timeout. The asking
   session's turn stays `running` while it waits; the turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
   waiting call as "Waiting for a reply from <session>" with its timer (the runtime's
-  `tool.call` of `hqc_ask`, no event of its own), since 0.132 once the call has waited 2 s
+  `tool.call` of `hqc_ask`, no event of its own), since 0.137 once the call has waited 2 s
   (§17.1).
 - Since 0.47 (T42; the 2026-10-31 run, where B sent a changed file back with `hqc_send`
   instead of `hqc_attach`, the reply had no file and the send waited in A's buffer): an

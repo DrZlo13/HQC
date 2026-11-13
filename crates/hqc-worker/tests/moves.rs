@@ -806,6 +806,7 @@ async fn the_answer_goes_before_the_stop() {
                 r#final: true,
                 in_reply_to: Some(e),
                 runtime: false,
+                interrupted: false,
             },
         );
         let answer_id = answer.event_id;

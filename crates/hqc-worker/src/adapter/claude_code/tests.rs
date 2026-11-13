@@ -318,7 +318,12 @@ fn check_ids(fx: &Fixture, evs: &[AdapterEvent], session_id: Uuid, input_id: Uui
     let mut from_records = HashSet::new();
     for e in events(evs) {
         assert_eq!(e.session_id, session_id);
-        assert_eq!(e.author, Author::Agent { id: session_id });
+        // A turn that ended early ends with the adapter's own `system` line.
+        let author = match e.kind {
+            EventKind::System { .. } => Author::System,
+            _ => Author::Agent { id: session_id },
+        };
+        assert_eq!(e.author, author);
         assert!(e.seq.is_none());
         match &e.kind {
             EventKind::ToolCall { .. }
@@ -595,15 +600,30 @@ async fn ask_user_question_becomes_clarify() {
     assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
 }
 
+/// A turn that hit `--max-turns` (`error_max_turns`, `terminal_reason: max_turns`) ends with
+/// a line that says why, after its `usage`; its `status idle` carries no reason of its own.
 #[tokio::test]
-async fn mcp_timeout_turn_ends_with_detail() {
+async fn mcp_timeout_turn_says_it_ended_early() {
     let fx = fixture!("mcp-timeout");
     let (h, evs, _) = run(&fx, "once", BTreeMap::new()).await;
     assert_eq!(without_uuids(h.claude.stdin()), lines(fx.stdin));
+    assert_eq!(
+        shape(&evs[evs.len() - 4..]),
+        ["usage", "system", "status", "turn_ended"]
+    );
     let evs = events(&evs);
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
-        EventKind::Status { state: SessionState::Idle, detail: Some(d), .. } if d == "error_max_turns"
+        EventKind::System { code, text, .. } if code == "turn_ended_early"
+            && text == "Turn ended early: max_turns · Reached maximum number of turns (2)"
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::Status {
+            state: SessionState::Idle,
+            detail: None,
+            ..
+        }
     )));
     assert!(evs.iter().any(|e| matches!(
         &e.kind,
@@ -1733,6 +1753,75 @@ async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
     assert_eq!(h.claude.signals(), [Sig::Interrupt, Sig::Terminate]);
 }
 
+/// SPEC §8.1: every process, a new one and a resumed one, gets `initialize` with only
+/// `perTaskStopAffordance: true` as the first line of its stdin, before the prompt: the CLI
+/// takes it only before the first user message, and with it Stop spares the background
+/// subagents.
+#[tokio::test]
+async fn every_process_gets_initialize_first() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    h.turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    h.adapter.kill().await.unwrap();
+    let (work, config) = &h._dirs;
+    let t = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+    std::fs::write(&t, fx.transcript).unwrap();
+    let s = spec(h.session_id, work.path(), fx.claude_session());
+    h.adapter.resume(&s).await.unwrap();
+    assert!(h.claude.commands()[1]
+        .args
+        .contains(&"--resume".to_string()));
+    let inits = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let i = h.claude.initialize();
+            if i.len() == 2 {
+                return i;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no initialize on the stdin of both processes");
+    // Before the first process's prompt, and before anything else of the second.
+    assert_eq!(inits[0].0, 0);
+    assert_eq!(inits[1].0, h.claude.stdin().len());
+    for (_, v) in &inits {
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(
+            v["request"],
+            json!({"subtype": "initialize", "perTaskStopAffordance": true})
+        );
+        assert!(v["request_id"].as_str().unwrap().starts_with("hqc-init-"));
+    }
+    assert_ne!(inits[0].1["request_id"], inits[1].1["request_id"]);
+    h.adapter.kill().await.unwrap();
+}
+
+/// The CLI's answer to `initialize`, a success (2.1.312: the commands, models and account) or
+/// an error, gives nothing.
+#[test]
+fn the_answer_to_initialize_is_skipped() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let init = writes(&[core.initialize()]);
+    let id = init[0]["request_id"].as_str().unwrap();
+    for answer in [
+        json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
+            "response": {"commands": [{"name": "compact", "description": "Clear conversation history but keep a summary in context", "argumentHint": ""}],
+                "agents": [], "output_style": "default", "models": [], "account": {}, "pid": 4242},
+            "pending_permission_requests": [], "pending_user_dialog_requests": []}}),
+        json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
+            "error": "initialize: skills must be an array of strings"}}),
+    ] {
+        assert!(core.on_line(&answer.to_string()).is_empty(), "{answer}");
+    }
+}
+
 #[tokio::test]
 async fn early_exit_fails_start() {
     let config = tempfile::tempdir().unwrap();
@@ -2238,14 +2327,20 @@ fn deny_is_the_tabs_no() {
             _ => None,
         })
         .collect();
+    // One "Interrupted" line for the turn; `[Request interrupted by user for tool use]` is none.
     assert_eq!(
         kinds,
         [
             "tool.result",
             "usage",
-            "status:Some(\"error_during_execution\")",
+            "system",
+            "status:None",
             "turn_ended"
         ]
+    );
+    assert_eq!(
+        system_events(&all),
+        [("turn_interrupted".into(), "Interrupted".into())]
     );
 }
 
@@ -2399,9 +2494,119 @@ fn end_of_turn_status_names_its_input() {
             .unwrap();
         assert_eq!(
             status["payload"],
-            json!({"state": "idle", "detail": "error_during_execution", "in_reply_to": input})
+            json!({"state": "idle", "in_reply_to": input})
         );
     }
+}
+
+/// Stop during the answer (2.1.312: the text cut off comes as `assistant` with `aborted:
+/// true`, then `[Request interrupted by user]`, then `result` with `terminal_reason:
+/// aborted_streaming`): the text is the final `agent.message` with `interrupted: true`, and
+/// the turn ends with one "Interrupted" line after its `usage`.
+#[test]
+fn an_interrupted_answer_is_marked_and_the_turn_says_so() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let input = started(&mut core, sid);
+    let a = play(
+        &mut core,
+        &format!(
+            r#"{{"type":"assistant","message":{{"model":"claude-haiku-5-5","content":[{{"type":"text","text":"The tests in crates/hqc-hub"}}]}},"parent_tool_use_id":null,"uuid":"{}","aborted":true}}
+{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":"[Request interrupted by user]"}}]}},"parent_tool_use_id":null,"uuid":"{}"}}
+{{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"stop_reason":null,"terminal_reason":"aborted_streaming","errors":["[ede_diagnostic] result_type=user last_content_type=text stop_reason=null"],"total_cost_usd":0.002,"usage":{{"input_tokens":4,"output_tokens":7}}}}"#,
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ),
+    );
+    let evs = emitted(a.clone());
+    assert_eq!(
+        shape(&evs),
+        [
+            "agent.message:true",
+            "usage",
+            "system",
+            "status",
+            "turn_ended"
+        ]
+    );
+    assert_eq!(
+        system_events(&a),
+        [("turn_interrupted".into(), "Interrupted".into())]
+    );
+    let wire: Vec<Value> = events(&evs)
+        .into_iter()
+        .map(|e| serde_json::to_value(&e.kind).unwrap())
+        .collect();
+    assert_eq!(
+        wire[0]["payload"],
+        json!({"text": "The tests in crates/hqc-hub", "final": true, "in_reply_to": input,
+            "interrupted": true})
+    );
+    assert_eq!(
+        wire[3]["payload"],
+        json!({"state": "idle", "in_reply_to": input})
+    );
+}
+
+/// A turn the CLI ended early for any reason but an interrupt ends with one line that says
+/// why, after its `usage`: the `terminal_reason` (the subtype without one), the API's status
+/// and `errors`, cut to 300 bytes; not the `result` text of `is_error: true`, which the CLI's
+/// own reply brought. A turn that completed, and a local command (no `terminal_reason`), have
+/// none.
+#[test]
+fn a_turn_that_ended_early_says_why() {
+    let sid = Uuid::now_v7();
+    let end = |fields: Value| {
+        let mut core = Core::new(sid, false);
+        started(&mut core, sid);
+        let mut r = json!({"type": "result", "num_turns": 1, "total_cost_usd": 0.001,
+            "usage": {"input_tokens": 4, "output_tokens": 2}});
+        r.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        system_events(&core.on_line(&r.to_string()))
+    };
+    let early = |t: &str| vec![("turn_ended_early".to_string(), t.to_string())];
+    assert_eq!(
+        end(
+            json!({"subtype": "error_max_budget_usd", "is_error": true, "terminal_reason": "budget_exhausted",
+            "errors": ["Reached maximum budget ($0.01)"]})
+        ),
+        early("Turn ended early: budget_exhausted · Reached maximum budget ($0.01)")
+    );
+    assert_eq!(
+        end(
+            json!({"subtype": "success", "is_error": true, "result": "API Error: 529 Overloaded",
+            "terminal_reason": "api_error", "api_error_status": 529})
+        ),
+        early("Turn ended early: api_error · API status 529")
+    );
+    assert_eq!(
+        end(
+            json!({"subtype": "success", "is_error": false, "result": "", "terminal_reason": "hook_stopped"})
+        ),
+        early("Turn ended early: hook_stopped")
+    );
+    assert_eq!(
+        end(
+            json!({"subtype": "error_during_execution", "is_error": true, "errors": ["boom", " ", "again"]})
+        ),
+        early("Turn ended early: error_during_execution · boom; again")
+    );
+    let long = end(
+        json!({"subtype": "error_during_execution", "is_error": true, "terminal_reason": "model_error",
+        "errors": ["x".repeat(1000)]}),
+    );
+    assert_eq!(long[0].1.len(), 300);
+    assert!(long[0].1.starts_with("Turn ended early: model_error · xxx"));
+    assert!(end(
+        json!({"subtype": "success", "is_error": false, "result": "OK", "terminal_reason": "completed"})
+    )
+    .is_empty());
+    assert!(
+        end(json!({"subtype": "success", "is_error": false, "result": "", "num_turns": 0}))
+            .is_empty()
+    );
 }
 
 /// Stop reaches a turn the CLI starts by itself after a background task's end (`init` with no
@@ -2653,6 +2858,7 @@ fn held_text_is_not_final_before_a_tool_call() {
                 r#final: false,
                 in_reply_to: Some(input),
                 runtime: false,
+                interrupted: false,
             }
         )
     );
@@ -3870,11 +4076,19 @@ fn synthetic_reply_is_a_runtime_agent_message() {
             "agent.message:false",
             "agent.message:true",
             "usage",
+            "system",
             "status",
             "turn_ended"
         ]
     );
-    assert!(system_events(&a).is_empty());
+    // The reason, not the reply's text again.
+    assert_eq!(
+        system_events(&a),
+        [(
+            "turn_ended_early".into(),
+            "Turn ended early: api_error".into()
+        )]
+    );
     let messages: Vec<(Uuid, &EventKind)> = events(&evs)
         .into_iter()
         .filter(|e| matches!(e.kind, EventKind::AgentMessage { .. }))
@@ -3893,6 +4107,7 @@ fn synthetic_reply_is_a_runtime_agent_message() {
                 r#final: true,
                 in_reply_to: Some(input),
                 runtime: true,
+                interrupted: false,
             }
         )
     );

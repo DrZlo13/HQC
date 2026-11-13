@@ -530,7 +530,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
-| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?` and `kind` |
+| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.137; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row says, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?` and `kind` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.137: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -1015,6 +1015,11 @@ MCP calls (worker → hub → worker):
   move. Like `session.kill` it is acked also when no agent runs, and so is an empty `call_id`,
   which Claude Code would take for every call in the foreground; what the runtime answers
   (moved, not moved, refused) is only in the worker's log.
+- `session.stop_task` {session_id, task_id} → `ack` (since 0.137) — stop the agent's task
+  `task_id` alone: the turn and the other tasks go on (Claude Code: the `stop_task` control
+  request, §8.1). The client sends a `stoppable` row of the session's `subagents.live` (§4).
+  Like `session.kill` it is acked also when no agent runs; what the runtime answers (stopped,
+  refused) is only in the worker's log, and the task's end comes as any end of it.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
 - `session.kill` {session_id} — terminate the agent process.
@@ -1634,6 +1639,13 @@ the rest is marked "later"):
   `foreground_calls`: Claude Code moves a foreground call of the session by its id, a
   subagent's too, and the session is the user's own. A `call_id` that is empty, longer than
   128 bytes or has U+0000: `400 bad_request`; service session: `409 system_session`
+- `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (since 0.137; `write` level, as
+  `/stop`): `session.stop_task` to the worker (§5.3), `sent: false` when the worker is not
+  connected; nothing comes back of what the runtime did, the task's row leaves
+  `subagents.live` when the worker reports it ended. The `task_id` is not checked against
+  `subagents.live`: Claude Code stops a task of the session by its id, and the session is the
+  user's own. A `task_id` longer than 128 bytes or with U+0000: `400 bad_request`; service
+  session: `409 system_session`
 - `POST /api/sessions/{id}/fork` {event_id} → `201` and the new session object (since 0.80;
   `manage` level): a new session in the same project, workspace, worker and `cwd`, with the
   source's model, `permission_mode` and `auto_approve`, titled "<title> (fork)", whose
@@ -2194,7 +2206,10 @@ closed, clear the lines until the next subscribe brings the hub's list. Since 0.
 holds the agent's background commands, which only `background_tasks` counts, so the chat shows it while
 either count is above 0; a command's line is its description and its run time. Since 0.141 a line
 starts with "Agent: " or "Command: " dimmed, as its `kind` says; a line without a known `kind`
-(from an older worker, or a value this client does not know) has neither.
+(from an older worker, or a value this client does not know) has neither. Since 0.137 a
+subagent's line (`stoppable`) ends with a small stop button, as in the VS Code tab: it sends
+`POST .../tasks/{task_id}/stop` and is disabled until the hub answers, a failure shown as a
+notice; the line goes when the subagent ends. A command's line has none.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
 keeps it up after the turn has ended.
@@ -3552,10 +3567,19 @@ stops only the turn: background subagents and workflows go on, as in the VS Code
 background agents/workflows (Stop only aborts the turn)"; it still stops observer agents)
 **[verify]**. Without the flag 2.1.312 killed them, each with `task_notification` `stopped`
 (checked live with a subagent that `CLAUDE_CODE_ENTRYPOINT=claude-vscode` put in the background,
-then `result` `terminal_reason: aborted_tools`). hqc has no Stop of a single background task
-(the CLI's `stop_task`). The reply cut off is an `assistant` record with `aborted: true` and
+then `result` `terminal_reason: aborted_tools`). One background task is stopped alone with the
+CLI's `stop_task` (below). The reply cut off is an `assistant` record with `aborted: true` and
 gives `agent.message` with `interrupted: true`; the turn ends with `system turn_interrupted`
 (above).
+
+Stopping one task (since 0.137, the VS Code tab's stop of a background task, which
+`perTaskStopAffordance` declares): the adapter marks the subagents of `subagents.live`
+`stoppable`, not the commands after them, and `session.stop_task` (§5.3) is `control_request
+{subtype: "stop_task", task_id: <task_id>}` (2.1.312). The CLI stops that task and answers
+`success` with `{}`, also for a task it does not know or one that has already ended, or an
+error with the reason it did not stop it; the subagent then ends as any end of it, with
+`task_updated` `killed` and `task_notification` `stopped` **[verify]**: its row goes and its
+"Background task" line comes (above). The adapter only logs the answer.
 
 Moving a call to the background (since 0.125, the VS Code tab's "Run in background", extension
 2.1.319). A call of the agent itself the CLI runs in the foreground is one whose `system`
@@ -5466,7 +5490,7 @@ sent no `initialize`, and without its `perTaskStopAffordance` the CLI's interrup
 worker now writes `control_request` `initialize` with only `perTaskStopAffordance: true` as the
 first stdin line of every process, new, resumed or forked, before any input (the CLI applies it
 only before the first user message), and skips the answer; the interrupt then stops the turn
-alone **[verify]**. hqc has no Stop of a single background task. §4, §8.1: a reply cut off by
+alone **[verify]**. A subagent is stopped alone from its line (below). §4, §8.1: a reply cut off by
 Stop looked finished, and a Stop during a tool call left nothing in the feed: an `assistant` text
 with `aborted: true` gives `agent.message` with the new `interrupted: true`, which the client
 shows muted with " · interrupted" after its time, and a `result` with a `terminal_reason`
@@ -5693,6 +5717,19 @@ mode after this turn"). Migration `0042_permission_allow_all` widens the checks 
 `session.permission_mode` with `allow_all`, and a `session.input` with `permission_cap:
 "allow_all"`, as an unreadable frame, so the workers go first, then the hub and the client.
 0.128 is taken by another pull request.
+
+§4, §5.3, §6, §8.1: with Stop sparing them, nothing in hqc stopped a runaway background subagent
+but archiving the session. As in the VS Code tab, a subagent's line above the input now ends
+with a small stop button: the adapter marks the subagents of `subagents.live` with the new
+`stoppable: true` (example `event.subagents.live.json`), not the agent's background commands;
+the button sends `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (`write` level, as
+`/stop`; a `task_id` longer than 128 bytes or with U+0000 → `400`), the hub sends the new frame
+`session.stop_task` {session_id, task_id} → `ack` (example `hub.session.stop_task.json`),
+fire-and-forget like `session.background`, and the worker writes `control_request` `stop_task`
+`{task_id}`, whose answer goes only to its log. The CLI's end of the stopped subagent removes its
+line and gives its "Background task" line, as before. An older worker sends no `stoppable`, so no
+button shows for its sessions, and answers `session.stop_task` with `error {invalid_frame}`;
+older hubs and clients ignore the new field.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

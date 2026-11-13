@@ -47,6 +47,8 @@ export type Item =
 export interface RequestFate {
   response?: ApprovalResponse | ClarifyResponse;
   cancel?: RequestCancel;
+  /** `seq` of the cancel. */
+  cancelSeq?: number;
 }
 
 export class Timeline {
@@ -190,9 +192,12 @@ export class Timeline {
         this.fate(ev.payload.request_id).response = ev.payload;
         break;
       case "approval.cancel":
-      case "clarify.cancel":
-        this.fate(ev.payload.request_id).cancel = ev.payload;
+      case "clarify.cancel": {
+        const f = this.fate(ev.payload.request_id);
+        f.cancel = ev.payload;
+        f.cancelSeq = ev.seq;
         break;
+      }
     }
   }
 
@@ -269,6 +274,16 @@ export class Timeline {
 
   requestFate(requestId: string): RequestFate {
     return this.fates.get(requestId) ?? {};
+  }
+
+  /** The first user's message after `seq`: a stored one, else one not stored yet (`failed`
+   *  when its POST failed); undefined when none stands after it. */
+  userMessageAfter(seq: number): { text: string; failed: boolean } | undefined {
+    for (const e of this.events()) {
+      if (e.seq! > seq && e.type === "user.message") return { text: e.payload.text, failed: false };
+    }
+    const [p] = this.pending.values();
+    return p && { text: p.text, failed: p.status === "failed" };
   }
 
   request(

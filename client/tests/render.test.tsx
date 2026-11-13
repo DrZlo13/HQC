@@ -966,23 +966,72 @@ describe("clarify.request", () => {
         .querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!
         .click(),
     );
+  const SEVERAL =
+    'Answering your earlier questions:\n- "Which area should I focus on first?": Worker\n- "Which checks should run?": clippy, test';
+  const submitButton = () => root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]");
+  const outcomes = () => [...root.querySelectorAll(".card-clarify .outcome")].map((o) => o.textContent);
+  const checked = (value: string) => root.querySelector<HTMLInputElement>(`input[value="${value}"]`)!.checked;
+  // The chat's `send`: the message stands in the feed at once, not stored yet.
+  const sending = (t: Timeline) => vi.fn((text: string) => t.addPending("op-1", text));
+  const userMessage = (seq: number, text: string) =>
+    ev("event.user.message", (e) => {
+      e.seq = seq;
+      e.payload = { text, artifact_ids: [] };
+      delete e.client_op_id;
+    });
   for (const reason of ["worker_restart", "stopped"]) {
     it(`a question cancelled with ${reason} is answered by a message`, async () => {
-      const send = vi.fn();
-      const { actions } = show(cancelled(reason), { send });
+      const t = cancelled(reason);
+      const send = sending(t);
+      const { actions, draw } = show(t, { send });
       expect(root.querySelector(".card-clarify")!.classList.contains("is-open")).toBe(true);
+      // Nothing chosen, nothing to send.
+      expect(submitButton()!.disabled).toBe(true);
       await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+      expect(submitButton()!.disabled).toBe(false);
       await act(() => root.querySelector<HTMLInputElement>('input[value="clippy"]')!.click());
       await act(() => root.querySelector<HTMLInputElement>('input[value="test"]')!.click());
       await submit();
-      expect(send).toHaveBeenCalledWith(
-        'Answering your earlier questions:\n- "Which area should I focus on first?": Worker\n- "Which checks should run?": clippy, test',
-      );
+      expect(send).toHaveBeenCalledWith(SEVERAL);
       expect(actions.answer).not.toHaveBeenCalled();
-      expect(root.querySelector(".card-clarify button[type=submit]")).toBeNull();
-      expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe("Answers sent");
+      draw();
+      expect(submitButton()).toBeNull();
+      expect(outcomes()).toEqual(["Answers sent"]);
+      expect([checked("Worker"), checked("clippy"), checked("test"), checked("Hub")]).toEqual([true, true, true, false]);
     });
   }
+
+  it("a later message of the user closes it", () => {
+    const t = cancelled("worker_restart");
+    t.apply(userMessage(3, "Never mind, look at the hub."));
+    show(t, { send: vi.fn() });
+    expect(submitButton()).toBeNull();
+    expect(root.querySelector(".card-clarify fieldset")!.hasAttribute("disabled")).toBe(true);
+    expect(outcomes()).toEqual(["Cancelled: worker restarted"]);
+  });
+
+  it("opened again after the answer, it shows what was answered", () => {
+    const t = cancelled("stopped");
+    t.apply(userMessage(3, SEVERAL));
+    show(t, { send: vi.fn() });
+    expect(submitButton()).toBeNull();
+    expect(outcomes()).toEqual(["Answers sent"]);
+    expect([checked("Worker"), checked("clippy"), checked("test"), checked("Hub")]).toEqual([true, true, true, false]);
+  });
+
+  it("a send that failed and was discarded leaves it to be answered", async () => {
+    const t = cancelled("worker_restart");
+    const { draw } = show(t, { send: sending(t) });
+    await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+    await submit();
+    t.failPending("op-1", "offline");
+    draw();
+    expect(submitButton()).toBeNull();
+    expect(outcomes()).toEqual(["Cancelled: worker restarted"]);
+    t.dropPending("op-1");
+    draw();
+    expect(submitButton()).not.toBeNull();
+  });
 
   it("one answered question goes in the tab's words for one", async () => {
     const send = vi.fn();

@@ -907,6 +907,40 @@ describe('the VS Code strip instead of the composer (SPEC §9.3)', () => {
   });
 });
 
+// SPEC 0.137: a question a worker restart cancelled is answered by a message, so only where the
+// session takes one (§10.1).
+describe('an earlier question of the agent', () => {
+  const history = [
+    ev('event.clarify.request', 1),
+    ev('event.clarify.cancel', 2, (e) => (e.payload.reason = 'worker_restart')),
+  ];
+  const answer = () => $('.card-clarify button[type=submit]');
+  // The first chat of a run may take longer than `mount` waits to show its feed.
+  const card = () => vi.waitFor(() => expect($('.card-clarify')).not.toBeNull());
+
+  it('is answered where the composer is', async () => {
+    const { app } = setup('idle', { history });
+    await mount(app);
+    await card();
+    expect(answer()).not.toBeNull();
+  });
+
+  it('is not in a session VS Code holds', async () => {
+    const { app } = setup('locked_vscode', { history });
+    await mount(app);
+    await card();
+    expect(answer()).toBeNull();
+  });
+
+  it('is not in an archived session', async () => {
+    const { app } = setup('idle', { history });
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, archived: true, state: 'archived' });
+    await mount(app);
+    await card();
+    expect(answer()).toBeNull();
+  });
+});
+
 describe('composer', () => {
   it('is one row: attach, the field with the hint, send; the field grows with its lines', async () => {
     const { app } = setup('idle', { history: HISTORY.slice(0, 3) });

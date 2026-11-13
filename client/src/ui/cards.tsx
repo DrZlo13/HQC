@@ -82,7 +82,7 @@ export interface ChatActions {
   approve(requestId: string, optionId: string, message?: string): Promise<void>;
   answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
   /** Sends `text` to the session as the user's message; absent where the card is shown away
-   *  from its session. */
+   *  from its session and where the session takes no input. */
   send?(text: string): void;
   resend(clientOpId: string): void;
   discard(clientOpId: string): void;
@@ -1016,19 +1016,22 @@ interface OtherAnswer {
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
-  const [sent, setSent] = useState(false);
   // Questions a worker restart or Stop cancelled are answered by a message, as the VS Code tab
-  // answers an earlier question it shows again; any other cancel closes the card.
-  const later =
-    !!actions.send &&
-    !fate.response &&
-    !sent &&
-    (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
+  // offers an earlier question again (`web:161989`), until a message of the user stands after
+  // the cancel: that message, when it is the answer (`web:162093`), says what was chosen; any
+  // other closes the card. Any other cancel closes it at once.
+  const earlier =
+    !fate.response && (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
+  const after = earlier ? actions.timeline.userMessageAfter(fate.cancelSeq!) : undefined;
+  const replayed = after && earlierAnswers(after.text.trim(), p.questions);
+  // An answer whose message failed to be sent is not given yet.
+  const answeredLater = !!replayed && !after!.failed;
+  const later = earlier && !after && !!actions.send;
   const open = (!fate.response && !fate.cancel) || later;
   const [answers, setAnswers] = useState<Record<string, ClarifyAnswer>>({});
   const [others, setOthers] = useState<Record<string, OtherAnswer>>({});
   const { busy, error, run } = useAction();
-  const given = fate.response && 'answers' in fate.response ? fate.response.answers : undefined;
+  const given = fate.response && 'answers' in fate.response ? fate.response.answers : replayed;
 
   const set = (q: ClarifyQuestion, v: string, checked: boolean) => {
     setAnswers((a) => {
@@ -1090,9 +1093,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         e.preventDefault();
         if (later) {
           const text = earlierAnswer(p.questions, collect());
-          if (text === undefined) return;
-          actions.send!(text);
-          setSent(true);
+          if (complete && text !== undefined) actions.send!(text);
         } else if (open && complete) run(() => actions.answer(p.request_id, toSend));
       }}
     >
@@ -1160,13 +1161,17 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       })}
       {open && (
         <div class="actions">
-          <button type="submit" class="btn btn-primary" disabled={busy || !complete}>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            disabled={busy || (later && earlierAnswer(p.questions, collect()) === undefined) || !complete}
+          >
             Answer
           </button>
         </div>
       )}
-      {(fate.response || sent) && <div class="outcome">Answers sent</div>}
-      {fate.cancel && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
+      {(fate.response || answeredLater) && <div class="outcome">Answers sent</div>}
+      {fate.cancel && !answeredLater && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>
   );
@@ -1182,8 +1187,49 @@ function earlierAnswer(questions: ClarifyQuestion[], answers: Record<string, Cla
     return text ? [{ question: q.text, answer: text }] : [];
   });
   if (given.length === 0) return undefined;
-  if (given.length === 1) return `Answering your earlier question "${given[0].question}": ${given[0].answer}`;
-  return ['Answering your earlier questions:', ...given.map((g) => `- "${g.question}": ${g.answer}`)].join('\n');
+  if (given.length === 1) return `${EARLIER_ONE}${given[0].question}": ${given[0].answer}`;
+  return [EARLIER_SEVERAL, ...given.map((g) => `- "${g.question}": ${g.answer}`)].join('\n');
+}
+
+const EARLIER_ONE = 'Answering your earlier question "';
+const EARLIER_SEVERAL = 'Answering your earlier questions:';
+
+/** The answers a message in those words gives, read by the card's question texts as the tab
+ *  reads them (`web:162093`), the items of a `multi` answer split at ", "; undefined when the
+ *  message answers none of them. */
+function earlierAnswers(text: string, questions: ClarifyQuestion[]): Record<string, ClarifyAnswer> | undefined {
+  const texts = questions.map((q) => q.text);
+  const found = new Map<string, string>();
+  if (text.startsWith(EARLIER_ONE)) {
+    // The longest question that fits: one may begin with another.
+    let best: { question: string; marker: string } | undefined;
+    for (const q of texts) {
+      const marker = `${EARLIER_ONE}${q}": `;
+      if (text.startsWith(marker) && (!best || marker.length > best.marker.length)) best = { question: q, marker };
+    }
+    if (best) found.set(best.question, text.slice(best.marker.length));
+  } else if (text.startsWith(`${EARLIER_SEVERAL}\n`)) {
+    const lines = text.slice(EARLIER_SEVERAL.length + 1);
+    let at = 0;
+    for (let i = 0; i < texts.length; i++) {
+      const marker = `- "${texts[i]}": `;
+      if (!lines.startsWith(marker, at)) continue;
+      const from = at + marker.length;
+      let to = lines.length;
+      for (let j = i + 1; j < texts.length; j++) {
+        const next = lines.indexOf(`\n- "${texts[j]}": `, from);
+        if (next !== -1 && next < to) to = next;
+      }
+      found.set(texts[i], lines.slice(from, to));
+      at = to + 1;
+    }
+  }
+  const out: Record<string, ClarifyAnswer> = {};
+  for (const q of questions) {
+    const a = found.get(q.text);
+    if (a !== undefined) out[q.id] = q.multi ? a.split(', ') : a;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function InvalidCard({ invalid }: { invalid: InvalidEvent }) {

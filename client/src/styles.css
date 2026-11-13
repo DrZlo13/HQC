@@ -3506,6 +3506,12 @@ select.input {
   font-style: italic;
   color: color-mix(in srgb, var(--muted) 60%, transparent);
 }
+/* What a task spent, after its text: never cut. */
+.fold-stats {
+  flex: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .fold-text {
   margin: 6px 0 0 6px;
   padding-left: 12px;

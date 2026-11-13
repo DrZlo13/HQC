@@ -70,7 +70,7 @@ import {
 } from './labels';
 import { elapsed, stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine, safeHref } from './Markdown';
-import { PermissionBlock } from './permission';
+import { asker, PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
 
 /** The session's model, for the offer under the runtime's reply to a model refusal (SPEC
@@ -492,7 +492,7 @@ export function EventView({ event, actions, queued }: { event: HqcEvent; actions
 function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => number }) {
   const p = event.payload;
   if (p.code === 'worker_log') return <WorkerLogLine event={event} />;
-  if (p.code === 'task_notification') return <TaskNotification text={p.text} />;
+  if (p.code === 'task_notification') return <TaskNotification note={p} />;
   // A compaction with the runtime's summary folds it; one without (older events carry the
   // fixed text) is text as is. Either says how it came and what it freed when the runtime did.
   if (p.code === 'context_compacted') {
@@ -529,11 +529,21 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
   );
 }
 
-/** A background task's notification, folded: "Background task ·" and its whole text on one
- *  line, without Markdown marks, cut where the line ends (a first line alone, often a heading
- *  like "### Summary", read as the whole message), dimmed in italics like the Thinking line's
- *  start of its text; open, the text as Markdown. */
-function TaskNotification({ text }: { text: string }) {
+/** How a background task ended, in its line's label (SPEC §6, since 0.175): `status` as the
+ *  runtime says it; a task that completed, or says nothing, is only "Background task". */
+const TASK_END_LABELS = new Map([
+  ['failed', 'Background task failed ·'],
+  ['stopped', 'Background task stopped ·'],
+]);
+
+/** A background task's notification, folded: "Background task ·" ("Background task failed ·",
+ *  "… stopped ·" by its `status`) and its whole text on one line, without Markdown marks, cut
+ *  where the line ends (a first line alone, often a heading like "### Summary", read as the
+ *  whole message), dimmed in italics like the Thinking line's start of its text, then what it
+ *  spent, when the runtime says, as the subagents' row above the input has it; open, the text
+ *  as Markdown. */
+function TaskNotification({ note }: { note: EventOf<'system'>['payload'] }) {
+  const { text, usage } = note;
   // The feed renders again on every streamed piece; the text is parsed once. A report runs to
   // tens of KB, and its first 2000 characters are wider than any window.
   const peek = useMemo(() => markdownLine(text.slice(0, 2000)), [text]);
@@ -541,8 +551,9 @@ function TaskNotification({ text }: { text: string }) {
     <details class="line-fold line-system-task_notification">
       <summary>
         <IconChevron size={12} />
-        <span class="fold-label">Background task ·</span>
+        <span class="fold-label">{TASK_END_LABELS.get(note.status ?? '') ?? 'Background task ·'}</span>
         <span class="fold-peek">{peek}</span>
+        {usage && <span class="fold-stats">· {stats(usage, usage.duration_ms)}</span>}
       </summary>
       <Markdown class="fold-text" text={text} />
     </details>
@@ -1189,12 +1200,14 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
 
 /** Where a subagent ended (its notification, or the result of one that ran in the
  *  foreground): a lighter card of the start card's family, two lines that never wrap. The
- *  head: the state's mark, "Agent finished:", the task, "done", "failed" or "stopped" and, on
- *  the call's first end, the run time from the call; under it the end's text on one line,
- *  without Markdown marks; the head opens the whole text as Markdown. */
+ *  head: the state's mark, "Agent finished:", the task, "done", "failed" or "stopped", the
+ *  tokens and tool calls its notification's `usage` says (since 0.175) and, on the call's first
+ *  end, the run time from the call; under it the end's text on one line, without Markdown
+ *  marks; the head opens the whole text as Markdown. */
 function SubagentEndCard({ block }: { block: Extract<Block, { kind: 'subagent-end' }> }) {
   const [open, setOpen] = useState(false);
   const e = subagentEnd(block.call, block.end);
+  const spent = stats((block.end.type === 'system' && block.end.payload.usage) || {}, block.first ? e.ms : undefined);
   const args = callArgs(block.call.payload.args_preview);
   const task = typeof args.description === 'string' ? args.description : '';
   // A report runs to tens of KB; its first 2000 characters are wider than any window.
@@ -1214,7 +1227,7 @@ function SubagentEndCard({ block }: { block: Extract<Block, { kind: 'subagent-en
         <span class="subagent-label">Agent finished:</span>
         {task && <span class="subagent-task">{task}</span>}
         <span class="subagent-state">{e.state}</span>
-        {block.first && e.ms !== undefined && <span class="subagent-stats">{elapsed(e.ms)}</span>}
+        {spent && <span class="subagent-stats">{spent}</span>}
         <span class="chevron">
           <IconChevron />
         </span>
@@ -1338,7 +1351,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         }
       }}
     >
-      <div class="card-title">{p.server === undefined ? 'Agent asks' : `${p.server} asks`}</div>
+      <div class="card-title">{p.server === undefined ? `${asker(p.subagent, 'Agent')} asks` : `${p.server} asks`}</div>
       {p.message && <div class="clarify-message">{p.message}</div>}
       {p.url && (
         <div class="clarify-link">

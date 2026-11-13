@@ -2,11 +2,11 @@
 // `schedules.live`, SPEC §6), pinned above the input while the feed scrolls: one line each,
 // led by "Agent:", "Command:" (when the worker says which), "Monitor:", "Wakeup:", "Cron:" or
 // "Scheduled:". A subagent has its task and what it does now (that it retries a request to the
-// model API, while it does), then its tokens, tool calls and run time, which ticks here between
-// the lists the hub sends; a command or a watcher has only its description and run time. A
-// timer, a wakeup or a cron job of the agent and a message scheduled by the hub, has "in 12m
-// 34s" instead, counting down to "due"; a scheduled message opens the schedules of the chat. A
-// `stoppable` line ends with a stop button.
+// model API, while it does, or that it waits for permission), then its tokens, tool calls and
+// run time, which ticks here between the lists the hub sends; a command or a watcher has only
+// its description and run time. A timer, a wakeup or a cron job of the agent and a message
+// scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
+// opens the schedules of the chat. A `stoppable` line ends with a stop button.
 
 import { useState } from 'preact/hooks';
 import type { LiveKind, LiveSchedule, LiveSubagent } from '../proto';
@@ -39,15 +39,18 @@ interface Row {
 
 /** `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `schedules`: the
  *  latest `schedules.live`, which came at `schedulesAt`; `onSchedules` opens the schedules;
- *  `now`: the clock (tests). Nothing when both lists are empty. A `stoppable` row (a
- *  subagent's, a command's or a Monitor's) gets a stop button, which calls `onStop` with its
- *  `task_id` and stays disabled until that settles; the row goes when the task ends. */
+ *  `asking`: the `task_id`s an open permission request names (since 0.175), whose row says it
+ *  waits for it instead of what it does; `now`: the clock (tests). Nothing when both lists are
+ *  empty. A `stoppable` row (a subagent's, a command's or a Monitor's) gets a stop button,
+ *  which calls `onStop` with its `task_id` and stays disabled until that settles; the row goes
+ *  when the task ends. */
 export function LiveSubagents({
   agents,
   receivedAt,
   schedules,
   schedulesAt,
   onSchedules,
+  asking,
   now,
   onStop,
 }: {
@@ -56,12 +59,13 @@ export function LiveSubagents({
   schedules: LiveSchedule[];
   schedulesAt: number;
   onSchedules: () => void;
+  asking?: ReadonlySet<string>;
   now?: () => number;
   onStop?: (taskId: string) => Promise<void>;
 }) {
   const t = useNow(1000, agents.length + schedules.length > 0, now);
   const rows: Row[] = [
-    ...agents.map((a) => agentRow(a, t - receivedAt)),
+    ...agents.map((a) => agentRow(a, t - receivedAt, asking)),
     ...schedules.map((s) => scheduleRow(s, t - schedulesAt, onSchedules)),
   ];
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set());
@@ -124,19 +128,21 @@ function RowText({ row }: { row: Row }) {
   );
 }
 
-/** `age`: how long the list has been here. */
-function agentRow(a: LiveSubagent, age: number): Row {
+/** `age`: how long the list has been here; `asking`: as for `LiveSubagents`. */
+function agentRow(a: LiveSubagent, age: number, asking?: ReadonlySet<string>): Row {
   const waits = a.kind === 'wakeup' || a.kind === 'cron';
   return {
     key: a.task_id,
     prefix: a.kind ? PREFIX[a.kind] : '',
     task: a.description,
     // A cron job's schedule is a part of what it is, not what it does now.
-    after: a.retry
-      ? `: ${retryLabel(a.retry)}`
-      : a.activity
-        ? `${a.kind === 'cron' ? ' · ' : ': '}${a.activity}`
-        : '',
+    after: asking?.has(a.task_id)
+      ? ': waiting for permission'
+      : a.retry
+        ? `: ${retryLabel(a.retry)}`
+        : a.activity
+          ? `${a.kind === 'cron' ? ' · ' : ': '}${a.activity}`
+          : '',
     right: waits ? countdown(a.due_in_ms, age) : stats(a, a.duration_ms + Math.max(0, age)),
     timer: waits,
     stop: a.stoppable ? a.task_id : undefined,
@@ -162,13 +168,14 @@ function countdown(dueInMs: number | undefined, age: number): string {
   return left > 0 ? `in ${elapsed(left)}` : 'due';
 }
 
-/** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out.
- *  Also the status line of its card in the feed (cards.tsx). */
-export function stats(a: LiveSubagent, ms: number): string {
+/** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out,
+ *  and the run time without `ms`. Also the status line of its card in the feed, its end card
+ *  and the end of a task's line (cards.tsx). */
+export function stats(a: Pick<LiveSubagent, 'total_tokens' | 'tool_uses'>, ms?: number): string {
   const parts: string[] = [];
   if (a.total_tokens !== undefined) parts.push(`${tokens(a.total_tokens)} tokens`);
   if (a.tool_uses !== undefined) parts.push(count(a.tool_uses, 'tool'));
-  parts.push(elapsed(ms));
+  if (ms !== undefined) parts.push(elapsed(ms));
   return parts.join(' · ');
 }
 

@@ -5,7 +5,7 @@
 // request is a bottom sheet in place of the composer.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { ApprovalOption, EventOf, RuleSuggestion } from '../proto';
+import type { ApprovalOption, EventOf, RequestSubagent, RuleSuggestion } from '../proto';
 import { ruleError } from '../rules';
 import type { ChatActions, FolderActions } from './cards';
 import { callArgs, callLine, callPaths, fileChange, outsidePath, toolLabel } from './feed';
@@ -23,16 +23,22 @@ import {
   optionLabel,
 } from './labels';
 
+/** What the card says the agent, or (since 0.175) the subagent that asks, wants to do. */
 const TITLES: Record<string, string> = {
-  Bash: 'The agent wants to run a command',
-  Edit: 'The agent wants to edit a file',
-  MultiEdit: 'The agent wants to edit a file',
-  Write: 'The agent wants to write a file',
-  NotebookEdit: 'The agent wants to edit a notebook',
-  Read: 'The agent wants to read a file',
-  WebFetch: 'The agent wants to open a page',
-  WebSearch: 'The agent wants to search the web',
+  Bash: 'wants to run a command',
+  Edit: 'wants to edit a file',
+  MultiEdit: 'wants to edit a file',
+  Write: 'wants to write a file',
+  NotebookEdit: 'wants to edit a notebook',
+  Read: 'wants to read a file',
+  WebFetch: 'wants to open a page',
+  WebSearch: 'wants to search the web',
 };
+
+/** Who asks, as a card names it: the agent, or the subagent the request names. */
+export function asker(subagent: RequestSubagent | undefined, agent: string): string {
+  return subagent ? `Subagent “${subagent.description}”` : agent;
+}
 
 /** What a request is about: the command or path, the CLI's description, the paths touched. */
 export function requestView(event: EventOf<'approval.request'>, call?: EventOf<'tool.call'>) {
@@ -342,8 +348,10 @@ function PermissionCard({
         ? 'Move this session after its transcript?'
         : 'The worker asks for permission'
     : sheet && p.tool === 'Bash'
-      ? 'Run the command?'
-      : TITLES[p.tool] ?? `The agent wants to use ${name}`;
+      ? p.subagent
+        ? `${asker(p.subagent, '')}: run the command?`
+        : 'Run the command?'
+      : `${asker(p.subagent, 'The agent')} ${TITLES[p.tool] ?? `wants to use ${name}`}`;
   const subtitle = v.worker
     ? WORKER_REQUEST_LABELS[p.tool] ?? p.tool
     : [name, v.description].filter(Boolean).join(' · ');

@@ -263,11 +263,18 @@ export interface ApprovalRequest {
   display_name?: string;
   /** Only a person may answer it: no rule, no `auto_approve` (since 0.174). Absent = false. */
   human_only?: boolean;
+  /** The subagent whose call it is (since 0.175); absent for the agent itself. */
+  subagent?: RequestSubagent;
 }
 /** The secret an `hqc_secret` card asks for: its name and kind are the agent's, fixed. */
 export interface SecretAsked {
   name: string;
   kind: 'secret' | 'ssh_key';
+}
+/** The subagent that asks: its `task_id`, as `subagents.live` names it, and its task. */
+export interface RequestSubagent {
+  task_id: string;
+  description: string;
 }
 /** A simple part of a command and the hqc rule suggested for it (none: no pattern). */
 export interface RuleSuggestion {
@@ -311,6 +318,8 @@ export interface ClarifyRequest {
   message?: string;
   /** The page the server sends the person to, with no questions. */
   url?: string;
+  /** As in `approval.request` (since 0.175). */
+  subagent?: RequestSubagent;
 }
 export type ClarifyAnswer = string | string[];
 export interface ClarifyResponse {
@@ -372,6 +381,13 @@ export interface SystemNote {
   post_tokens?: number;
   /** For `code: model_not_switched` (SPEC 0.173): the model the runtime kept. */
   model?: string;
+  /** For `code: task_notification` (since 0.175): what the task spent, when the runtime says. */
+  usage?: TaskUsage;
+}
+export interface TaskUsage {
+  total_tokens: number;
+  tool_uses: number;
+  duration_ms: number;
 }
 /** Events of the session the runtime took back (SPEC 0.173): not shown. */
 export interface Retraction {
@@ -584,6 +600,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     reason: optStr(p, 'reason'),
     display_name: optStr(p, 'display_name'),
     human_only: optBool(p, 'human_only'),
+    subagent: parseSubagent(p),
   }),
   'approval.response': (p) => ({
     request_id: str(p, 'request_id'),
@@ -610,6 +627,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     server: optStr(p, 'server'),
     message: optStr(p, 'message'),
     url: optStr(p, 'url'),
+    subagent: parseSubagent(p),
   }),
   'clarify.response': (p) => ({
     request_id: str(p, 'request_id'),
@@ -657,6 +675,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     pre_tokens: optNum(p, 'pre_tokens'),
     post_tokens: optNum(p, 'post_tokens'),
     model: optStr(p, 'model'),
+    usage: present(p, 'usage') ? parseTaskUsage(obj(p.usage, 'usage')) : undefined,
   }),
   retraction: (p) => ({ event_ids: strArr(p, 'event_ids') }),
 };
@@ -684,6 +703,16 @@ function optActivity(o: Obj): Activity | undefined {
     default:
       return undefined;
   }
+}
+
+function parseSubagent(p: Obj): RequestSubagent | undefined {
+  if (!present(p, 'subagent')) return undefined;
+  const s = obj(p.subagent, 'subagent');
+  return { task_id: str(s, 'task_id'), description: str(s, 'description') };
+}
+
+function parseTaskUsage(u: Obj): TaskUsage {
+  return { total_tokens: num(u, 'total_tokens'), tool_uses: num(u, 'tool_uses'), duration_ms: num(u, 'duration_ms') };
 }
 
 function parseAnswers(p: Obj): Record<string, ClarifyAnswer> {

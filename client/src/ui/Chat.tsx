@@ -785,6 +785,7 @@ export function Chat({
           schedulesAt={t.liveSchedulesAt}
           onSchedules={() => setSchedules(true)}
           onStop={stopTask}
+          asking={new Set(open.flatMap((r) => (r.type === 'approval.request' && r.payload.subagent ? [r.payload.subagent.task_id] : [])))}
         />
       )}
       {locked && (

@@ -7,8 +7,9 @@ import { render } from "preact";
 import { act } from "preact/test-utils";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseEvent, parseServerFrame, type Activity, type HqcEvent } from "../src/proto";
+import { parseEvent, parseServerFrame, type Activity, type EventOf, type HqcEvent } from "../src/proto";
 import { Timeline } from "../src/timeline";
+import { PermissionBlock } from "../src/ui/permission";
 import {
   ActivityLine,
   ChatItems,
@@ -664,6 +665,39 @@ describe("approval.request (T26 card)", () => {
     );
   });
 
+  it("names the subagent that asks", () => {
+    const t = new Timeline();
+    t.apply(ev("event.approval.request.subagent"));
+    show(t);
+    expect(root.querySelector(".perm-title")!.textContent).toBe(
+      "Subagent “Fix schematic power nets in import” wants to run a command",
+    );
+  });
+
+  it("names the subagent on a phone's sheet too", () => {
+    const sheet = (e: HqcEvent) => {
+      const t = new Timeline();
+      t.apply(e);
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      const actions: ChatActions = {
+        timeline: t,
+        approve: vi.fn(async () => {}),
+        answer: vi.fn(async () => {}),
+        resend: vi.fn(),
+        discard: vi.fn(),
+        openArtifact: vi.fn(),
+      };
+      act(() => render(<PermissionBlock event={e as EventOf<"approval.request">} actions={actions} sheet />, root));
+      return root.querySelector(".perm-sheet .perm-title")!.textContent;
+    };
+    expect(sheet(ev("event.approval.request.subagent"))).toBe(
+      "Subagent “Fix schematic power nets in import”: run the command?",
+    );
+    render(null, root);
+    expect(sheet(ev("event.approval.request"))).toBe("Run the command?");
+  });
+
   it("explains policy_hint allow and a path outside the workspace, nothing otherwise", () => {
     const req = (seq: number, id: string, description: string, hint?: string) =>
       ev("event.approval.request", (e) => {
@@ -947,6 +981,26 @@ describe("clarify.request", () => {
     // A text of spaces is not.
     await type("  ");
     expect(submit().disabled).toBe(true);
+  });
+
+  it("names the subagent that asks, else the agent", () => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request", withSeq(1)));
+    t.apply(
+      ev("event.clarify.request", (e) => {
+        e.seq = 2;
+        e.event_id = "0199f3a2-7c10-7000-8000-0000000001c2";
+        e.payload.request_id = "req-9";
+        e.payload.subagent = {
+          task_id: "a52af2b436ded4cea",
+          description: "Fix schematic power nets in import",
+        };
+      }),
+    );
+    show(t);
+    expect(
+      [...root.querySelectorAll(".card-clarify .card-title")].map((c) => c.textContent),
+    ).toEqual(["Agent asks", "Subagent “Fix schematic power nets in import” asks"]);
   });
 
   it("closes after clarify.response", () => {
@@ -1961,6 +2015,23 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     expect(again.querySelector(".subagent-stats")).toBeNull();
   });
 
+  it("says what the subagent spent at its end, when its notification says (SPEC 0.175)", () => {
+    const spent = (e: HqcEvent) => {
+      (e.payload as any).usage = { total_tokens: 155300, tool_uses: 188, duration_ms: 253000 };
+      return e;
+    };
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", { ...AGENT, run_in_background: true }));
+    t.apply(answer(2, "ag", "Async agent launched successfully.\nagentId: a1 (internal ID)"));
+    t.apply(spent(notification(61, "ag", "completed", "a1", "Fixed")));
+    t.apply(spent(notification(8041, undefined, "completed", "a1", "Fixed again")));
+    show(t);
+    const [first, again] = root.querySelectorAll(".subagent-end");
+    expect(first.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools · 1m 0s");
+    // A later end has no run time from the call.
+    expect(again.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools");
+  });
+
   it("a request for a call of the same batch keeps its call across a subagent's end card", () => {
     // Ask mode: the CLI runs the batch's calls together, so the request comes after the
     // subagent's result.
@@ -2723,6 +2794,38 @@ describe("the feed like the Claude Code tab", () => {
       'Background command "npm test" completed (exit code 0)All 12 suites passed',
     );
     expect(root.querySelector(".msg-agent")).toBeNull();
+  });
+
+  it("says how a task ended and what it spent", () => {
+    const t = new Timeline();
+    t.apply(ev("event.system.task_notification", withSeq(1)));
+    t.apply(
+      ev("event.system.task_notification", (e) => {
+        e.seq = 2;
+        e.event_id = "0199f3a2-7c10-7000-8000-0000000001d2";
+        e.payload.status = "stopped";
+        delete e.payload.usage;
+      }),
+    );
+    t.apply(
+      ev("event.system.task_notification", (e) => {
+        e.seq = 3;
+        e.event_id = "0199f3a2-7c10-7000-8000-0000000001d3";
+        e.payload.status = "completed";
+      }),
+    );
+    show(t);
+    const folds = [...root.querySelectorAll("details.line-system-task_notification")];
+    expect(folds.map((f) => f.querySelector(".fold-label")!.textContent)).toEqual([
+      "Background task failed ·",
+      "Background task stopped ·",
+      "Background task ·",
+    ]);
+    expect(folds.map((f) => f.querySelector(".fold-stats")?.textContent ?? null)).toEqual([
+      "· 155.3k tokens · 188 tools · 4m 13s",
+      null,
+      "· 155.3k tokens · 188 tools · 4m 13s",
+    ]);
   });
 
   it("peeks at a subagent's Markdown report without its marks and shows it open as Markdown", () => {

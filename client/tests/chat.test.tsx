@@ -1396,6 +1396,26 @@ describe('live subagents', () => {
     await act(async () => subscriber!.onEvent(ev('event.subagents.live.retry', 0, (e) => delete e.seq)));
     expect(rows()).toEqual([['Reply with number: Retrying 2/10 (no response), next in 4 s', '9s']]);
   });
+
+  it('says a subagent waits for permission while a request names it', async () => {
+    const { app } = setup('waiting', {
+      subagents: 2,
+      history: [...HISTORY.slice(0, 3), ev('event.approval.request.subagent', 4)],
+    });
+    await mount(app);
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = e.payload.agents.slice(0, 2)))));
+    expect(rows().map((r) => r[0])).toEqual([
+      'Agent: Fix schematic power nets in import: waiting for permission',
+      'Agent: Reply with number',
+    ]);
+    await act(async () =>
+      subscriber!.onEvent(ev('event.approval.response', 5, (e) => (e.payload.request_id = 'req-3'))),
+    );
+    expect(rows().map((r) => r[0])).toEqual([
+      'Agent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
+      'Agent: Reply with number',
+    ]);
+  });
 });
 
 describe('the request card through the chat', () => {

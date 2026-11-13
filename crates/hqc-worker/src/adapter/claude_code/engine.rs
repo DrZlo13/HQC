@@ -127,7 +127,12 @@
 //! - `control_request` `can_use_tool` → `approval.request` (with `policy_hint` and the hqc
 //!   rules suggested for the call) / `clarify.request`, an immediate allow by a `session`
 //!   rule or by the folder's hqc rules (T48), or an immediate deny plus `system
-//!   policy_denied` when a deny rule of `[permissions]` matches (checked first);
+//!   policy_denied` when a deny rule of `[permissions]` matches (checked first); a request
+//!   only a person may answer gets no allow by a rule and only `once` / `deny`;
+//! - `control_request` `elicitation` (an MCP server asks the person) → `clarify.request` with
+//!   `server`, or `cancel` plus `system elicitation_unsupported` for a form it cannot ask;
+//! - `control_cancel_request` (the CLI withdrew its request) → `approval.cancel` /
+//!   `clarify.cancel` `withdrawn`;
 //! - `system` `permission_denied` (the CLI refused a call by its rules, no request) →
 //!   `system policy_denied`;
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
@@ -151,9 +156,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
-    ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer,
-    ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
-    MODEL_NOT_SWITCHED,
+    ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAction,
+    ClarifyAnswer, ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent,
+    SessionState, MODEL_NOT_SWITCHED,
 };
 use hqc_proto::frame::{Activity, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -240,6 +245,11 @@ pub const PLUGIN_ERRORS: &str = "plugin_errors";
 /// How often a new estimate of the thinking goes as [`AdapterEvent::Activity`], as the token
 /// rate (SPEC §8.1).
 const THINKING_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+/// `system.code` of an MCP server's request for input the card cannot ask (SPEC §4, §8.1).
+pub const ELICITATION_UNSUPPORTED: &str = "elicitation_unsupported";
+/// `approval.request.reason` and `display_name` limits, in bytes (SPEC §4).
+pub const REASON_LIMIT: usize = 1024;
+pub const DISPLAY_NAME_LIMIT: usize = 256;
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
@@ -288,7 +298,21 @@ enum Pending {
         /// The subagent that asked ([`agent_of`]); `None`: the main agent.
         agent_id: Option<String>,
     },
+    /// An MCP server's request (`elicitation`): its properties by position, as the questions.
+    Elicitation { fields: Fields },
 }
+
+/// The type of a property of an MCP server's form, by which its answer goes back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Field {
+    Text,
+    Integer,
+    Number,
+    Boolean,
+}
+
+/// The properties of an MCP server's form by position: each one's name and type.
+type Fields = Vec<(String, Field)>;
 
 /// A user message written to stdin whose `--replay-user-messages` echo has not come yet.
 #[derive(Debug)]
@@ -368,6 +392,7 @@ impl Pending {
             Pending::Approval { agent_id, .. } | Pending::Clarify { agent_id, .. } => {
                 agent_id.as_deref()
             }
+            Pending::Elicitation { .. } => None,
         }
     }
 }
@@ -441,6 +466,12 @@ pub struct Core {
     /// A turn the CLI started by itself (`system/init` while no turn of ours runs, e.g. after
     /// a background task's `task_notification`), until its `result`: Stop interrupts it too.
     self_turn: bool,
+    /// The turn is being ended on purpose, by Stop ([`Core::interrupt`]) or by "No" that
+    /// interrupts, until the turn ends — its `result`, a carried input's `cancelled` that ends
+    /// it with none ([`Core::on_lifecycle`]), or the process's exit: the
+    /// `control_cancel_request` the CLI then writes for each request of the turn is the turn's
+    /// end, not a withdrawal ([`Core::on_cancel_request`]).
+    stopping: bool,
     turn: u64,
     pending: HashMap<String, Pending>,
     rules: SessionRules,
@@ -581,6 +612,7 @@ impl Core {
             background: Vec::new(),
             in_turn: false,
             self_turn: false,
+            stopping: false,
             turn: 0,
             pending: HashMap::new(),
             rules: SessionRules::default(),
@@ -798,6 +830,7 @@ impl Core {
         if !self.in_turn && !self.self_turn {
             return None;
         }
+        self.stopping = true;
         let req = json!({
             "type": "control_request",
             "request_id": format!("hqc-interrupt-{}", Uuid::now_v7()),
@@ -894,22 +927,23 @@ impl Core {
                     CLARIFY_CANCEL_MESSAGE,
                 ))]);
             }
-            p @ Pending::Clarify { .. } => {
+            p @ (Pending::Clarify { .. } | Pending::Elicitation { .. }) => {
                 self.pending.insert(request_id.into(), p);
                 bail!("request {request_id} is a clarify request");
             }
         };
         // A background subagent's request outlives the main turn's `result` (`on_result`): its
         // "No" must not interrupt a turn that runs by then for something else.
-        let foreground = agent_id
-            .as_deref()
-            .is_none_or(|a| self.quiet_tasks.get(a) == Some(&false));
+        let foreground = ends_with_main_turn(&self.quiet_tasks, agent_id.as_deref());
         let resp = match option_id {
             "once" => allow(request_id, &input, None),
             // As the VS Code tab: "No" stops the turn, a text answer lets it go on.
             "deny" => match message {
                 Some(m) => deny_with(request_id, &format!("{DENY_WITH_TEXT}{m}"), false),
-                None => deny_with(request_id, DENY_MESSAGE, foreground),
+                None => {
+                    self.stopping |= foreground;
+                    deny_with(request_id, DENY_MESSAGE, foreground)
+                }
             },
             "always" if !self.restricted && !local_rules.is_empty() => {
                 allow(request_id, &input, Some(local_rules))
@@ -939,15 +973,22 @@ impl Core {
     }
 
     /// Empty `answers`: the hub cancelled the request; the tool call is denied (SPEC §5.3).
+    /// `action`: the person's choice on an MCP server's request.
     pub fn answer_clarify(
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
     ) -> anyhow::Result<Vec<Action>> {
         let (input, questions) = match self.pending.remove(request_id) {
             Some(Pending::Clarify {
                 input, questions, ..
             }) => (input, questions),
+            Some(Pending::Elicitation { fields }) => {
+                return Ok(vec![
+                    self.answer_elicitation(request_id, &fields, answers, action)
+                ]);
+            }
             Some(p) => {
                 self.pending.insert(request_id.into(), p);
                 bail!("request {request_id} is an approval request");
@@ -984,6 +1025,32 @@ impl Core {
         Ok(vec![Action::Write(allow(request_id, &updated, None))])
     }
 
+    /// The answer to an MCP server's request: `accept` with the answers typed by its schema (a
+    /// Yes/No as a boolean, a number's text as a number when it reads as one, an empty answer
+    /// left out; no `content` without questions, as for a link), `decline`, or, for empty
+    /// `answers` without `action` (the hub cancelled the card), `cancel`.
+    fn answer_elicitation(
+        &self,
+        request_id: &str,
+        fields: &[(String, Field)],
+        answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
+    ) -> Action {
+        let accept = match action {
+            Some(ClarifyAction::Accept) => true,
+            None => !answers.is_empty(),
+            Some(_) => false,
+        };
+        let response = match action {
+            Some(ClarifyAction::Decline) => json!({"action": "decline"}),
+            _ if accept && fields.is_empty() => json!({"action": "accept"}),
+            _ if accept => json!({"action": "accept", "content": content(fields, answers)}),
+            _ => json!({"action": "cancel"}),
+        };
+        tracing::info!(session_id = %self.session_id, action = %response["action"], "elicitation answered");
+        Action::Write(control_response(request_id, response))
+    }
+
     /// The process is gone: a held compaction and a held text are sent as they are, open
     /// requests are dropped.
     pub fn on_exit(&mut self) -> Vec<Action> {
@@ -991,6 +1058,7 @@ impl Core {
         self.awaiting_echo.clear();
         self.in_turn = false;
         self.self_turn = false;
+        self.stopping = false;
         let mut out: Vec<Action> = self.release_compaction(None).into_iter().collect();
         out.extend(self.flush(false));
         // A subagent end held while the subagent still counted ([`Core::held_ends`]) is its
@@ -1091,6 +1159,7 @@ impl Core {
                 .collect(),
             "result" => self.on_result(&v),
             "control_request" => self.on_control_request(&v),
+            "control_cancel_request" => self.on_cancel_request(&v),
             "control_response" => self.on_control_response(&v),
             // `/clear` (2.1.312): the CLI goes on in a new conversation, whose transcript the
             // next `system/init` names, and counts `total_cost_usd` from 0 again.
@@ -1683,7 +1752,8 @@ impl Core {
             .filter(|w| w.carried)
             .map(|w| w.event_id)
             .collect();
-        // As at `result`: the CLI goes on with the other carried inputs.
+        // As at `result`: the CLI goes on with the other carried inputs, in a turn nobody stops.
+        self.stopping = false;
         self.in_turn = !carried.is_empty();
         if self.in_turn {
             self.turn += 1;
@@ -2277,6 +2347,7 @@ impl Core {
 
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
         self.self_turn = false;
+        self.stopping = false;
         // The turn of `/clear` ended without an `init` naming the new transcript: the folder is
         // not held for it any longer.
         self.clearing = false;
@@ -2293,12 +2364,10 @@ impl Core {
         // That is a request of the main agent or of a foreground subagent (in `quiet_tasks`
         // with `false`), which cannot outlive the main turn. Any other subagent's request stays
         // open: a background subagent's outlives the main turn's `result`, and the CLI still
-        // waits for its answer (checked live on 2.1.312).
+        // waits for its answer (checked live on 2.1.312). An MCP server's request names no
+        // agent: it stays open until answered or withdrawn.
         let quiet = self.quiet_tasks.clone();
-        let cancels = self.cancel_pending(|p| match p.agent_id() {
-            None => true,
-            Some(agent) => quiet.get(agent) == Some(&false),
-        });
+        let cancels = self.cancel_pending(|p| ends_with_main_turn_request(&quiet, p));
         if !cancels.is_empty() {
             tracing::info!(session_id = %self.session_id, open = cancels.len(), "turn ended with open requests; cancelled");
         }
@@ -2452,6 +2521,7 @@ impl Core {
         let req = &v["request"];
         match req["subtype"].as_str() {
             Some("can_use_tool") => self.can_use_tool(request_id, req),
+            Some("elicitation") => self.elicitation(request_id, req),
             other => {
                 tracing::warn!(session_id = %self.session_id, subtype = ?other, "unsupported control_request");
                 vec![Action::Write(json!({
@@ -2484,6 +2554,9 @@ impl Core {
                 return vec![self.emit_new(EventKind::ClarifyRequest {
                     request_id,
                     questions,
+                    server: None,
+                    message: None,
+                    url: None,
                 })];
             }
             tracing::warn!(session_id = %self.session_id, "AskUserQuestion without questions; asking as an approval");
@@ -2510,13 +2583,18 @@ impl Core {
             ];
         }
 
-        if self.rules.matches(&tool, &input) {
+        // Only a person may answer (SPEC §8.1): the CLI says no stored grant or automatic
+        // approval may, a user's ask rule forced the prompt, or no standing rule may be offered.
+        let human_only = req["requires_user_interaction"] == true
+            || !req["matched_ask_rule"].is_null()
+            || req["suppress_always_allow_rule"] == true;
+        if !human_only && self.rules.matches(&tool, &input) {
             tracing::info!(session_id = %self.session_id, %tool, "allowed by a session rule");
             return vec![Action::Write(allow(&request_id, &input, None))];
         }
         // hqc's rules of the folder (T48), read at every call, so a change reaches a running
         // session at once; every part of a compound command must be covered.
-        if let Some((rules, root)) = &self.folder {
+        if let Some((rules, root)) = self.folder.as_ref().filter(|_| !human_only) {
             if let Some(rule) = self.policy.folder_allows(rules, root, &tool, &input) {
                 tracing::info!(session_id = %self.session_id, %tool, %rule, "allowed by a folder rule");
                 return vec![Action::Write(allow(&request_id, &input, None))];
@@ -2526,6 +2604,7 @@ impl Core {
         let rule_suggestions = self
             .folder
             .as_ref()
+            .filter(|_| !human_only)
             .and_then(|(_, root)| crate::permissions::suggest(&tool, &input, root));
 
         let suggestions = req["permission_suggestions"]
@@ -2544,21 +2623,27 @@ impl Core {
             .flat_map(|s| s["rules"].as_array().cloned().unwrap_or_default())
             .collect();
 
-        let mut options = vec![
-            option("once", "Allow once", ApprovalCanonical::Once),
-            option(
+        let mut options = vec![option("once", "Allow once", ApprovalCanonical::Once)];
+        if !human_only {
+            options.push(option(
                 "session",
                 "Allow for this session",
                 ApprovalCanonical::Session,
-            ),
-        ];
-        if !local_rules.is_empty() && !self.restricted {
+            ));
+        }
+        if !human_only && !local_rules.is_empty() && !self.restricted {
             options.push(option("always", "Always allow", ApprovalCanonical::Always));
         }
         options.push(option("deny", "Deny", ApprovalCanonical::Deny));
 
         let description = describe(req, &input, &tool);
-        tracing::info!(session_id = %self.session_id, %tool, "approval requested");
+        let field = |k: &str, limit: usize| {
+            req[k]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| preview(s, limit))
+        };
+        tracing::info!(session_id = %self.session_id, %tool, human_only, "approval requested");
         self.pending.insert(
             request_id.clone(),
             Pending::Approval {
@@ -2578,7 +2663,71 @@ impl Core {
             policy_hint,
             rule_suggestions,
             secret: None,
+            reason: field("decision_reason", REASON_LIMIT),
+            display_name: field("display_name", DISPLAY_NAME_LIMIT),
+            human_only,
         })]
+    }
+
+    /// `control_request` `elicitation`: an MCP server asks the person for input (SPEC §8.1) →
+    /// `clarify.request` with `server` and `message`, the questions of its form or, with `mode:
+    /// url`, its `url` and none. A form the card cannot ask, or a link without a URL, is
+    /// answered `cancel` at once, with a `system` line.
+    fn elicitation(&mut self, request_id: String, req: &Value) -> Vec<Action> {
+        let server = text(req["mcp_server_name"].as_str().unwrap_or(""));
+        let link = req["mode"] == "url";
+        let url = req["url"]
+            .as_str()
+            .filter(|u| link && !u.is_empty())
+            .map(text);
+        let form = if link {
+            url.is_some().then(|| (vec![], vec![]))
+        } else {
+            form_fields(req)
+        };
+        let Some((questions, fields)) = form else {
+            tracing::warn!(session_id = %self.session_id, %server, "MCP server's request the card cannot ask; cancelled");
+            return vec![
+                Action::Write(control_response(&request_id, json!({"action": "cancel"}))),
+                self.emit_system(
+                    ELICITATION_UNSUPPORTED,
+                    format!("The MCP server {server} asked for input that hqc cannot show; its request was cancelled."),
+                ),
+            ];
+        };
+        tracing::info!(session_id = %self.session_id, %server, questions = questions.len(), link, "MCP server's request");
+        self.pending
+            .insert(request_id.clone(), Pending::Elicitation { fields });
+        vec![self.emit_new(EventKind::ClarifyRequest {
+            request_id,
+            questions,
+            server: Some(server),
+            message: req["message"]
+                .as_str()
+                .filter(|m| !m.trim().is_empty())
+                .map(text),
+            url,
+        })]
+    }
+
+    /// `control_cancel_request {request_id}`: the CLI withdrew a request of its own (it stopped
+    /// waiting, SPEC §8.1). An open one is forgotten, so a later answer writes nothing, and its
+    /// card is closed `withdrawn`. While the turn is being ended on purpose ([`Core::stopping`])
+    /// the CLI writes it for every request of the turn it aborts: one the turn's `result` would
+    /// cancel is closed `stopped`, as that cancel would, so that a question can be answered by
+    /// a message (SPEC §10.1).
+    fn on_cancel_request(&mut self, v: &Value) -> Vec<Action> {
+        let id = v["request_id"].as_str().unwrap_or("");
+        let Some(p) = self.pending.remove(id) else {
+            return vec![];
+        };
+        let reason = if self.stopping && ends_with_main_turn_request(&self.quiet_tasks, &p) {
+            CancelReason::Stopped
+        } else {
+            CancelReason::Withdrawn
+        };
+        tracing::info!(session_id = %self.session_id, request_id = id, ?reason, "the CLI withdrew its request");
+        vec![self.cancel_event(id.to_owned(), &p, reason)]
     }
 
     /// `system/permission_denied`: the CLI refused a call without asking. In this adapter's
@@ -2685,19 +2834,23 @@ impl Core {
         self.pending.extend(kept);
         open.sort_by(|a, b| a.0.cmp(&b.0));
         open.into_iter()
-            .map(|(request_id, p)| {
-                let reason = CancelReason::Stopped;
-                let kind = match p {
-                    Pending::Approval { .. } => EventKind::ApprovalCancel { request_id, reason },
-                    Pending::Clarify { .. } => EventKind::ClarifyCancel { request_id, reason },
-                };
-                Action::Emit(AdapterEvent::Event(new_event(
-                    self.session_id,
-                    Author::System,
-                    kind,
-                )))
-            })
+            .map(|(request_id, p)| self.cancel_event(request_id, &p, CancelReason::Stopped))
             .collect()
+    }
+
+    /// `approval.cancel` or `clarify.cancel` of `request_id`, so the hub closes its card.
+    fn cancel_event(&self, request_id: String, p: &Pending, reason: CancelReason) -> Action {
+        let kind = match p {
+            Pending::Approval { .. } => EventKind::ApprovalCancel { request_id, reason },
+            Pending::Clarify { .. } | Pending::Elicitation { .. } => {
+                EventKind::ClarifyCancel { request_id, reason }
+            }
+        };
+        Action::Emit(AdapterEvent::Event(new_event(
+            self.session_id,
+            Author::System,
+            kind,
+        )))
     }
 
     // ---- helpers -----------------------------------------------------------------------
@@ -3014,6 +3167,19 @@ fn allow(request_id: &str, input: &Value, permissions: Option<Vec<Value>>) -> Va
     control_response(request_id, r)
 }
 
+/// An agent's request ends with the main turn when it is the main agent's or a foreground
+/// subagent's (in `quiet_tasks` with `false`): a background subagent's outlives the turn.
+fn ends_with_main_turn(quiet_tasks: &HashMap<String, bool>, agent_id: Option<&str>) -> bool {
+    agent_id.is_none_or(|a| quiet_tasks.get(a) == Some(&false))
+}
+
+/// Whether the main turn's end, or its being ended, cancels `p`: an agent's request that
+/// [`ends_with_main_turn`]. An MCP server's request names no agent and stays open until
+/// answered or withdrawn.
+fn ends_with_main_turn_request(quiet_tasks: &HashMap<String, bool>, p: &Pending) -> bool {
+    !matches!(p, Pending::Elicitation { .. }) && ends_with_main_turn(quiet_tasks, p.agent_id())
+}
+
 fn deny(request_id: &str, message: &str) -> Value {
     control_response(request_id, json!({"behavior": "deny", "message": message}))
 }
@@ -3092,6 +3258,91 @@ pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Ve
         texts.push(raw.to_owned());
     }
     Some((questions, texts))
+}
+
+/// The questions of an MCP server's form (`elicitation` `requested_schema.properties`, in
+/// `property_order`, then any it leaves out), with each one's type: an `enum` gives its values
+/// as options, a boolean Yes and No, a string, number or integer free text; `title` is the
+/// question's header and `description` its text (the title, or the name, without one). `None`:
+/// a property of another type (an object, an array), which the card cannot ask.
+fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
+    let props = match &req["requested_schema"]["properties"] {
+        Value::Null => return Some((vec![], vec![])),
+        Value::Object(p) => p,
+        _ => return None,
+    };
+    let mut names: Vec<&str> = req["property_order"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|n| props.contains_key(*n))
+        .collect();
+    for n in props.keys() {
+        if !names.contains(&n.as_str()) {
+            names.push(n);
+        }
+    }
+    let mut questions = Vec::new();
+    let mut fields = Vec::new();
+    for (i, name) in names.into_iter().enumerate() {
+        let p = &props[name];
+        let (field, options) = match p["type"].as_str()? {
+            "boolean" => (Field::Boolean, Some(vec!["Yes".into(), "No".into()])),
+            "integer" => (Field::Integer, None),
+            "number" => (Field::Number, None),
+            "string" if p["enum"].is_null() => (Field::Text, None),
+            "string" => {
+                let values = p["enum"].as_array()?.iter().map(|v| v.as_str().map(text));
+                (Field::Text, Some(values.collect::<Option<Vec<_>>>()?))
+            }
+            _ => return None,
+        };
+        let title = p["title"].as_str().filter(|s| !s.trim().is_empty());
+        let description = p["description"].as_str().filter(|s| !s.trim().is_empty());
+        questions.push(ClarifyQuestion {
+            id: (i + 1).to_string(),
+            text: text(description.or(title).unwrap_or(name)),
+            header: title.filter(|_| description.is_some()).map(text),
+            options,
+            option_descriptions: None,
+            multi: None,
+        });
+        fields.push((name.to_owned(), field));
+    }
+    Some((questions, fields))
+}
+
+/// `content` of an accepted MCP server's request ([`Core::answer_elicitation`]).
+fn content(
+    fields: &[(String, Field)],
+    answers: &BTreeMap<String, ClarifyAnswer>,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for (i, (name, field)) in fields.iter().enumerate() {
+        let s = match answers.get(&(i + 1).to_string()) {
+            Some(ClarifyAnswer::One(s)) => s.clone(),
+            Some(ClarifyAnswer::Many(v)) => v.join(", "),
+            None => continue,
+        };
+        let t = s.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let v = match field {
+            Field::Boolean if t == "Yes" => Value::Bool(true),
+            Field::Boolean if t == "No" => Value::Bool(false),
+            Field::Integer => t.parse::<i64>().map_or(Value::String(s), Value::from),
+            Field::Number => t
+                .parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map_or(Value::String(s), Value::Number),
+            _ => Value::String(s),
+        };
+        out.insert(name.clone(), v);
+    }
+    out
 }
 
 /// The text of a `tool_result` block's `content` (a string or text parts).

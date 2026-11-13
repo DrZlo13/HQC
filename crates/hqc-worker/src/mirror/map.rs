@@ -472,6 +472,9 @@ fn answered(m: &Message, index: usize, request_id: &str) -> Vec<Event> {
             EventKind::ClarifyRequest {
                 request_id: request_id.into(),
                 questions,
+                server: None,
+                message: None,
+                url: None,
             },
         ),
         part(
@@ -480,6 +483,7 @@ fn answered(m: &Message, index: usize, request_id: &str) -> Vec<Event> {
             EventKind::ClarifyResponse {
                 request_id: request_id.into(),
                 answers,
+                action: None,
             },
         ),
     ]
@@ -968,6 +972,7 @@ mod tests {
         let EventKind::ClarifyRequest {
             request_id,
             questions,
+            ..
         } = &request.kind
         else {
             panic!("{request:?}")
@@ -1013,6 +1018,7 @@ mod tests {
                     ),
                 ]
                 .into(),
+                action: None,
             }
         );
         assert_eq!(

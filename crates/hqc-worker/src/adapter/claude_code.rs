@@ -54,7 +54,7 @@ pub const BROWSER_DISALLOWED: &[&str] = &[
 
 use anyhow::Context;
 use async_trait::async_trait;
-use hqc_proto::event::{Author, ClarifyAnswer, EventKind};
+use hqc_proto::event::{Author, ClarifyAction, ClarifyAnswer, EventKind};
 use hqc_proto::frame::{ForkFrom, Runtime, SessionInput};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
@@ -1330,9 +1330,10 @@ impl Adapter for ClaudeCodeAdapter {
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
     ) -> anyhow::Result<()> {
         let p = self.running()?;
-        let actions = lock(&p.core).answer_clarify(request_id, answers)?;
+        let actions = lock(&p.core).answer_clarify(request_id, answers, action)?;
         p.io.run(actions).await
     }
 }

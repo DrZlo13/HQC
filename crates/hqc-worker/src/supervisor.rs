@@ -285,6 +285,7 @@ enum Cmd {
         id: String,
         request_id: String,
         answers: std::collections::BTreeMap<String, hqc_proto::event::ClarifyAnswer>,
+        action: Option<hqc_proto::event::ClarifyAction>,
     },
     /// A secret or a key for the running agent (SPEC 0.147).
     Secret {
@@ -564,12 +565,14 @@ impl Supervisor {
                 session_id,
                 request_id,
                 answers,
+                action,
             } => (
                 session_id,
                 Cmd::Clarify {
                     id,
                     request_id,
                     answers,
+                    action,
                 },
             ),
             HubFrame::WorkerApprovalResponse {
@@ -1317,8 +1320,12 @@ impl Session {
                 id,
                 request_id,
                 answers,
+                action,
             } => {
-                let r = self.adapter.answer_clarify(&request_id, &answers).await;
+                let r = self
+                    .adapter
+                    .answer_clarify(&request_id, &answers, action)
+                    .await;
                 self.reply_result(&id, r);
                 self.pump().await;
             }

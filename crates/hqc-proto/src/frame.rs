@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::event::{ClarifyAnswer, Event};
+use crate::event::{ClarifyAction, ClarifyAnswer, Event};
 
 /// `{id, type, payload}`; `body` supplies `type` and `payload`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -534,13 +534,16 @@ pub enum HubFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-    /// Empty `answers` means the hub cancelled the request; the adapter answers the
-    /// runtime with `deny` and the turn goes on without answers.
+    /// Empty `answers` without `action` means the hub cancelled the request; the adapter
+    /// answers the runtime with `deny` and the turn goes on without answers.
     #[serde(rename = "clarify.response")]
     ClarifyResponse {
         session_id: Uuid,
         request_id: String,
         answers: BTreeMap<String, ClarifyAnswer>,
+        /// The person's choice on an MCP server's request (since SPEC 0.150).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ClarifyAction>,
     },
     /// Check a folder before it becomes a workspace (SPEC §5.3, §13.1).
     #[serde(rename = "fs.stat")]
@@ -1626,6 +1629,10 @@ mod tests {
         (
             "clarify.response",
             include_str!("../examples/wire/hub.clarify.response.cancel.json"),
+        ),
+        (
+            "clarify.response",
+            include_str!("../examples/wire/hub.clarify.response.decline.json"),
         ),
         ("fs.stat", include_str!("../examples/wire/hub.fs.stat.json")),
         (

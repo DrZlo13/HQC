@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use hqc_proto::event::{Author, ClarifyAnswer, Event, EventKind};
+use hqc_proto::event::{Author, ClarifyAction, ClarifyAnswer, Event, EventKind};
 use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -224,11 +224,12 @@ pub trait Adapter: Send {
         option_id: &str,
         message: Option<&str>,
     ) -> anyhow::Result<()>;
-    /// Empty `answers`: the hub cancelled the request (SPEC §5.3).
+    /// Empty `answers` without `action`: the hub cancelled the request (SPEC §5.3).
     async fn answer_clarify(
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        action: Option<ClarifyAction>,
     ) -> anyhow::Result<()>;
 }
 

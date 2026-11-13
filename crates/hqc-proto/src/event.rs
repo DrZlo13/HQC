@@ -127,6 +127,21 @@ pub enum CancelReason {
     Stopped,
     WorkerRestart,
     Archived,
+    /// The runtime withdrew its request (Claude Code: `control_cancel_request`, since SPEC
+    /// 0.150).
+    Withdrawn,
+    #[serde(other)]
+    Unknown,
+}
+
+/// `clarify.response.action` (since SPEC 0.150): what the person did with an MCP server's
+/// request (`clarify.request.server`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClarifyAction {
+    /// The answers are the input, also none (the link's Done).
+    Accept,
+    Decline,
     #[serde(other)]
     Unknown,
 }
@@ -388,6 +403,16 @@ pub enum EventKind {
         /// the owner for a secret.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<SecretAsk>,
+        /// Why the runtime asks (Claude Code: `decision_reason`, since SPEC 0.150).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// The runtime's name of the tool (Claude Code: `display_name`, since SPEC 0.150).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        /// Only a person may answer it (since SPEC 0.150): no stored rule and no
+        /// `auto_approve`; absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        human_only: bool,
     },
     #[serde(rename = "approval.response")]
     ApprovalResponse {
@@ -409,12 +434,25 @@ pub enum EventKind {
     ClarifyRequest {
         request_id: String,
         questions: Vec<ClarifyQuestion>,
+        /// The MCP server that asks (Claude Code: `elicitation`, since SPEC 0.150); absent: the
+        /// agent asks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server: Option<String>,
+        /// The server's text above the questions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// The page the server sends the person to, with no questions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
     },
     /// `answers` is keyed by `ClarifyQuestion::id`.
     #[serde(rename = "clarify.response")]
     ClarifyResponse {
         request_id: String,
         answers: BTreeMap<String, ClarifyAnswer>,
+        /// Only for an MCP server's request (since SPEC 0.150).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<ClarifyAction>,
     },
     #[serde(rename = "clarify.cancel")]
     ClarifyCancel {
@@ -819,6 +857,54 @@ mod tests {
         assert_eq!(serde_json::to_value(&e).unwrap(), wire);
     }
 
+    /// SPEC 0.150: a request only a person may answer, with the runtime's reason and tool
+    /// name; an MCP server's form and link; a declined one. Without the fields they are absent.
+    #[test]
+    fn request_variants_roundtrip() {
+        for src in [
+            include_str!("../examples/wire/event.approval.request.human_only.json"),
+            include_str!("../examples/wire/event.clarify.request.elicitation.json"),
+            include_str!("../examples/wire/event.clarify.request.elicitation_url.json"),
+            include_str!("../examples/wire/event.clarify.response.decline.json"),
+        ] {
+            let wire: Value = serde_json::from_str(src).unwrap();
+            let e: Event = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        }
+        let e: Event = serde_json::from_str(include_str!(
+            "../examples/wire/event.approval.request.human_only.json"
+        ))
+        .unwrap();
+        let EventKind::ApprovalRequest {
+            reason,
+            display_name,
+            human_only,
+            ..
+        } = &e.kind
+        else {
+            panic!("{:?}", e.kind);
+        };
+        assert!(*human_only);
+        assert_eq!(display_name.as_deref(), Some("Fetch"));
+        assert!(reason.is_some());
+        let e: Event = serde_json::from_str(include_str!(
+            "../examples/wire/event.clarify.response.decline.json"
+        ))
+        .unwrap();
+        assert!(matches!(
+            e.kind,
+            EventKind::ClarifyResponse {
+                action: Some(ClarifyAction::Decline),
+                ..
+            }
+        ));
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.approval.request.json"))
+                .unwrap();
+        let p = &serde_json::to_value(&plain).unwrap()["payload"];
+        assert!(p.get("human_only").is_none() && p.get("reason").is_none());
+    }
+
     #[test]
     fn known_types_match_spec() {
         assert_eq!(EventKind::TYPES, SPEC_EVENT_TYPES);
@@ -1052,6 +1138,10 @@ mod tests {
             CancelReason::Unknown
         );
         assert_eq!(
+            serde_json::from_value::<ClarifyAction>(v("snooze")).unwrap(),
+            ClarifyAction::Unknown
+        );
+        assert_eq!(
             serde_json::from_value::<PeerMode>(v("broadcast")).unwrap(),
             PeerMode::Unknown
         );
@@ -1086,9 +1176,16 @@ mod tests {
             (CancelReason::Stopped, "stopped"),
             (CancelReason::WorkerRestart, "worker_restart"),
             (CancelReason::Archived, "archived"),
+            (CancelReason::Withdrawn, "withdrawn"),
         ];
         for (r, n) in reasons {
             assert_eq!(serde_json::to_value(r).unwrap(), n);
+        }
+        for (a, n) in [
+            (ClarifyAction::Accept, "accept"),
+            (ClarifyAction::Decline, "decline"),
+        ] {
+            assert_eq!(serde_json::to_value(a).unwrap(), n);
         }
         let canon = [
             (ApprovalCanonical::Once, "once"),

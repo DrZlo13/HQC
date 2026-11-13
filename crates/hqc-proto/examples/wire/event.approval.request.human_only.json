@@ -1,0 +1,13 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000110",
+  "seq": 42,
+  "ts": "2026-10-22T10:00:00Z",
+  "author": { "kind": "agent", "id": "0199f3a2-7c10-7000-8000-000000000001" },
+  "type": "approval.request",
+  "payload": { "request_id": "req-3", "tool": "mcp__web__fetch", "description": "https://example.com/report", "options": [
+    { "id": "once", "label": "Allow once", "canonical": "once" },
+    { "id": "deny", "label": "Deny", "canonical": "deny" }
+  ], "reason": "Permission rule 'mcp__web__fetch' from project settings requires approval", "display_name": "Fetch",
+    "human_only": true }
+}

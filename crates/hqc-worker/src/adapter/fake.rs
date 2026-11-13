@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hqc_proto::event::{Author, ClarifyAnswer, Event, EventKind};
+use hqc_proto::event::{Author, ClarifyAction, ClarifyAnswer, Event, EventKind};
 use hqc_proto::frame::{PermissionMode, Runtime, SessionInput};
 use uuid::Uuid;
 
@@ -344,6 +344,7 @@ impl Adapter for FakeAdapter {
         &mut self,
         request_id: &str,
         answers: &BTreeMap<String, ClarifyAnswer>,
+        _action: Option<ClarifyAction>,
     ) -> anyhow::Result<()> {
         self.record(FakeCall::Clarify {
             request_id: request_id.into(),

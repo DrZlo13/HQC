@@ -1163,6 +1163,7 @@ async fn only_the_owner_answers_a_move() {
         option_id: Some("once".into()),
         answers: None,
         message: None,
+        action: None,
     };
     let r = hqc_hub::requests::answer(&hub.app, &user, &s, &rid, body).await;
     assert!(

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hqc_proto::event::{
-    ApiRetry, ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion,
-    ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
+    ApiRetry, ApprovalCanonical, Author, CancelReason, ClarifyAction, ClarifyAnswer,
+    ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
 };
 use hqc_proto::frame::{Activity, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -254,7 +254,7 @@ impl Harness {
                         .unwrap(),
                     EventKind::ClarifyRequest { request_id, .. } => self
                         .adapter
-                        .answer_clarify(request_id, &clarify)
+                        .answer_clarify(request_id, &clarify, None)
                         .await
                         .unwrap(),
                     _ => {}
@@ -2444,9 +2444,9 @@ fn clarify_cancel_and_multi() {
     core.on_line(&req.to_string());
     let rid = req["request_id"].as_str().unwrap();
     // The hub cancelled: empty answers → deny.
-    let w = writes(&core.answer_clarify(rid, &BTreeMap::new()).unwrap());
+    let w = writes(&core.answer_clarify(rid, &BTreeMap::new(), None).unwrap());
     assert_eq!(w[0]["response"]["response"]["behavior"], "deny");
-    assert!(core.answer_clarify(rid, &BTreeMap::new()).is_err());
+    assert!(core.answer_clarify(rid, &BTreeMap::new(), None).is_err());
 
     core.on_line(&req.to_string());
     let answers = BTreeMap::from([
@@ -2456,7 +2456,7 @@ fn clarify_cancel_and_multi() {
         ),
         ("7".to_string(), ClarifyAnswer::One("ignored".into())),
     ]);
-    let w = writes(&core.answer_clarify(rid, &answers).unwrap());
+    let w = writes(&core.answer_clarify(rid, &answers, None).unwrap());
     assert_eq!(
         w[0]["response"]["response"]["updatedInput"]["answers"],
         json!({"Which area should I focus on first?": "Hub (Recommended), Worker"})
@@ -2506,7 +2506,7 @@ fn clarify_question_in_full_and_free_text() {
             ClarifyAnswer::Many(vec!["fmt".into(), "clippy".into()]),
         ),
     ]);
-    let w = writes(&core.answer_clarify("q1", &answers).unwrap());
+    let w = writes(&core.answer_clarify("q1", &answers, None).unwrap());
     let r = &w[0]["response"]["response"];
     assert_eq!(r["behavior"], "allow");
     assert_eq!(
@@ -2517,6 +2517,431 @@ fn clarify_question_in_full_and_free_text() {
         r["updatedInput"]["questions"],
         req["request"]["input"]["questions"]
     );
+}
+
+/// `can_use_tool_line` with `patch` applied to its `request`.
+fn patched(fx: &Fixture, request_id: &str, patch: impl FnOnce(&mut Value)) -> String {
+    let mut v: Value = serde_json::from_str(&can_use_tool_line(fx, request_id, None)).unwrap();
+    patch(&mut v["request"]);
+    v.to_string()
+}
+
+/// The `approval.request` of `actions` as on the wire.
+fn approval_wire(actions: &[Action]) -> Value {
+    actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e))
+                if matches!(e.kind, EventKind::ApprovalRequest { .. }) =>
+            {
+                Some(serde_json::to_value(e).unwrap()["payload"].clone())
+            }
+            _ => None,
+        })
+        .expect("approval.request")
+}
+
+/// SPEC 0.150: a request the CLI gives only to a person (`requires_user_interaction`,
+/// `matched_ask_rule`, `suppress_always_allow_rule`) reaches the card although a session rule
+/// or a folder rule covers the call, with `human_only`, only `once` and `deny`, and no rule
+/// suggested; the others go as before.
+#[test]
+fn a_request_only_a_person_may_answer_reaches_the_card() {
+    let fx = fixture!("permission-allow");
+    let only: [(&str, Value); 3] = [
+        ("requires_user_interaction", json!(true)),
+        (
+            "matched_ask_rule",
+            json!({"source": "projectSettings", "tool_name": "Bash"}),
+        ),
+        ("suppress_always_allow_rule", json!(true)),
+    ];
+
+    // A session rule.
+    let mut core = Core::new(Uuid::now_v7(), false);
+    core.on_line(&can_use_tool_line(&fx, "r0", None));
+    core.answer_approval("r0", "session", None).unwrap();
+    assert_eq!(
+        approvals(&core.on_line(&can_use_tool_line(&fx, "r1", None))),
+        0
+    );
+    for (i, (k, v)) in only.iter().enumerate() {
+        let a = core.on_line(&patched(&fx, &format!("s{i}"), |r| r[*k] = v.clone()));
+        assert_eq!((approvals(&a), writes(&a).len()), (1, 0), "{k}");
+        let p = approval_wire(&a);
+        assert_eq!(p["human_only"], true, "{k}");
+        let ids: Vec<&str> = p["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["once", "deny"], "{k}");
+    }
+
+    // A folder rule.
+    let rules = crate::permissions::FolderRules::default();
+    rules.set(&["Bash(touch *)".into()]);
+    let mut core =
+        Core::new(Uuid::now_v7(), false).with_folder(rules, std::path::PathBuf::from("/w/proj"));
+    let a = core.on_line(&can_use_tool_line(&fx, "f0", None));
+    assert_eq!((approvals(&a), writes(&a).len()), (0, 1));
+    for (i, (k, v)) in only.iter().enumerate() {
+        let a = core.on_line(&patched(&fx, &format!("f{}", i + 1), |r| r[*k] = v.clone()));
+        assert_eq!((approvals(&a), writes(&a).len()), (1, 0), "{k}");
+        let p = approval_wire(&a);
+        assert_eq!(p["human_only"], true, "{k}");
+        assert!(p.get("rule_suggestions").is_none(), "{k}: {p}");
+    }
+    // Any other request is no person's only.
+    let mut plain = Core::new(Uuid::now_v7(), false);
+    let p = approval_wire(&plain.on_line(&can_use_tool_line(&fx, "p1", None)));
+    assert!(p.get("human_only").is_none(), "{p}");
+}
+
+/// SPEC 0.150: the card carries why the CLI asks (`decision_reason`) and its name of the tool
+/// (`display_name`), cut to 1024 and 256 bytes; blank ones are left out.
+#[test]
+fn approval_carries_the_reason_and_the_tools_name() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let p = approval_wire(&core.on_line(&patched(&fx, "r1", |r| {
+        r["decision_reason"] = json!("Permission rule 'Bash(touch:*)' requires approval");
+        r["display_name"] = json!("Shell");
+    })));
+    assert_eq!(
+        (&p["reason"], &p["display_name"]),
+        (
+            &json!("Permission rule 'Bash(touch:*)' requires approval"),
+            &json!("Shell")
+        )
+    );
+    let p = approval_wire(&core.on_line(&patched(&fx, "r2", |r| {
+        r["decision_reason"] = json!("é".repeat(1000));
+        r["display_name"] = json!("x".repeat(300));
+    })));
+    assert_eq!(p["reason"].as_str().unwrap().len(), 1024);
+    assert_eq!(p["display_name"].as_str().unwrap().len(), 256);
+    let p = approval_wire(&core.on_line(&patched(&fx, "r3", |r| {
+        r["decision_reason"] = json!(" ");
+        r.as_object_mut().unwrap().remove("display_name");
+    })));
+    assert!(
+        p.get("reason").is_none() && p.get("display_name").is_none(),
+        "{p}"
+    );
+}
+
+/// `approval.cancel` / `clarify.cancel` events of `actions`: kind, request id, reason.
+fn cancels(actions: &[Action]) -> Vec<(&'static str, String, CancelReason)> {
+    actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+                EventKind::ApprovalCancel { request_id, reason } => {
+                    Some(("approval", request_id.clone(), *reason))
+                }
+                EventKind::ClarifyCancel { request_id, reason } => {
+                    Some(("clarify", request_id.clone(), *reason))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn withdraw(request_id: &str) -> String {
+    json!({"type": "control_cancel_request", "request_id": request_id}).to_string()
+}
+
+/// SPEC 0.150: `control_cancel_request` closes the card of the request it names, `withdrawn`
+/// (an approval, a question, an MCP server's request), and an answer that comes later writes
+/// nothing to the CLI; an id not open here gives nothing.
+#[test]
+fn a_withdrawn_request_closes_its_card() {
+    let fx = fixture!("permission-allow");
+    let mut core = Core::new(Uuid::now_v7(), false);
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    let a = core.on_line(&withdraw("r1"));
+    assert_eq!(
+        cancels(&a),
+        [("approval", "r1".to_string(), CancelReason::Withdrawn)]
+    );
+    assert!(writes(&a).is_empty());
+    assert!(core.answer_approval("r1", "once", None).is_err());
+
+    let ask = json!({"type": "control_request", "request_id": "q1", "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]}}});
+    core.on_line(&ask.to_string());
+    let a = core.on_line(&withdraw("q1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "q1".to_string(), CancelReason::Withdrawn)]
+    );
+    let answers = BTreeMap::from([("1".to_string(), ClarifyAnswer::One("A".into()))]);
+    assert!(core.answer_clarify("q1", &answers, None).is_err());
+
+    core.on_line(&elicitation("e1", json!({})));
+    let a = core.on_line(&withdraw("e1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "e1".to_string(), CancelReason::Withdrawn)]
+    );
+    assert!(core
+        .answer_clarify("e1", &BTreeMap::new(), Some(ClarifyAction::Accept))
+        .is_err());
+
+    assert!(core.on_line(&withdraw("e1")).is_empty());
+    assert!(core.on_line(&withdraw("nope")).is_empty());
+}
+
+/// An open AskUserQuestion `request_id` of the main agent.
+fn ask_line(request_id: &str) -> String {
+    json!({"type": "control_request", "request_id": request_id, "request": {
+        "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]}}})
+    .to_string()
+}
+
+/// SPEC 0.174: Stop makes the CLI withdraw every request of the turn it aborts; for an
+/// approval and a question of the main agent that is the turn's end, `stopped` (a question is
+/// then answered by a message, §10.1), not `withdrawn`; an MCP server's request stays open
+/// until answered or withdrawn as it was.
+#[test]
+fn a_request_withdrawn_by_stop_is_stopped() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    core.on_line(&ask_line("q1"));
+    core.on_line(&elicitation("e1", json!({})));
+    core.interrupt().expect("a turn runs");
+    let a = core.on_line(&withdraw("q1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "q1".to_string(), CancelReason::Stopped)]
+    );
+    let a = core.on_line(&withdraw("r1"));
+    assert_eq!(
+        cancels(&a),
+        [("approval", "r1".to_string(), CancelReason::Stopped)]
+    );
+    let a = core.on_line(&withdraw("e1"));
+    assert_eq!(
+        cancels(&a),
+        [("clarify", "e1".to_string(), CancelReason::Withdrawn)]
+    );
+}
+
+/// A request of a background subagent outlives the aborted turn: the CLI withdrawing it under
+/// Stop is a withdrawal, as the turn's `result` would leave it open.
+#[test]
+fn a_background_subagents_request_withdrawn_under_stop_is_withdrawn() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    play(
+        &mut core,
+        r#"{"type":"system","subtype":"task_started","task_id":"a8b8fdc3b4a031d4f","tool_use_id":"toolu_01BR8iav6ZtPUAhpuCWdQPCt","description":"Touch hqc-live-check file","is_backgrounded":true,"task_type":"local_agent","uuid":"0f6c1d2e-1111-4a55-9d0e-1a2b3c4d5e13"}"#,
+    );
+    let mut v: Value =
+        serde_json::from_str(&can_use_tool_line(&fx, "bg", Some("touch x"))).unwrap();
+    v["request"]["agent_id"] = json!("a8b8fdc3b4a031d4f");
+    core.on_line(&v.to_string());
+    core.interrupt().expect("a turn runs");
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("bg"))),
+        [("approval", "bg".to_string(), CancelReason::Withdrawn)]
+    );
+}
+
+/// "No" that interrupts the turn (the main agent's call) makes the CLI withdraw the other
+/// requests of the turn too: a parallel question is `stopped`. After the turn's `result` the
+/// turn is not being ended any more, and a withdrawal is `withdrawn` again.
+#[test]
+fn a_request_withdrawn_after_no_is_stopped_until_the_result() {
+    let fx = fixture!("permission-allow");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    core.on_line(&can_use_tool_line(&fx, "r1", None));
+    core.on_line(&ask_line("q1"));
+    core.answer_approval("r1", "deny", None).unwrap();
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("q1"))),
+        [("clarify", "q1".to_string(), CancelReason::Stopped)]
+    );
+    core.on_line(
+        r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"terminal_reason":"aborted_tools","total_cost_usd":0.001,"usage":{"input_tokens":4,"output_tokens":2}}"#,
+    );
+    started(&mut core, sid);
+    core.on_line(&ask_line("q2"));
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("q2"))),
+        [("clarify", "q2".to_string(), CancelReason::Withdrawn)]
+    );
+}
+
+/// An `elicitation` of the MCP server `deploy`, with `extra` in its request.
+fn elicitation(request_id: &str, extra: Value) -> String {
+    let mut r = json!({"subtype": "elicitation", "mcp_server_name": "deploy",
+        "message": "Where should the release go?"});
+    for (k, v) in extra.as_object().unwrap() {
+        r[k] = v.clone();
+    }
+    json!({"type": "control_request", "request_id": request_id, "request": r}).to_string()
+}
+
+/// The `clarify.request` of `actions` as on the wire.
+fn clarify_wire(actions: &[Action]) -> Value {
+    actions
+        .iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e))
+                if matches!(e.kind, EventKind::ClarifyRequest { .. }) =>
+            {
+                Some(serde_json::to_value(e).unwrap()["payload"].clone())
+            }
+            _ => None,
+        })
+        .expect("clarify.request")
+}
+
+/// SPEC 0.150: an MCP server's form is a question card of the server: its properties in
+/// `property_order` (an enum's values as options, a boolean as Yes/No, the rest free text), the
+/// title as the header and the description as the text; the answer goes back typed as
+/// `accept`, Decline as `decline`, the hub's cancel as `cancel`. The turn's end leaves it open.
+#[test]
+fn an_mcp_servers_form_is_a_question_card() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let form = json!({
+        "requested_schema": {"type": "object", "required": ["region"], "properties": {
+            "keep": {"type": "boolean", "description": "Keep the old release"},
+            "note": {"type": "string"},
+            "ratio": {"type": "number", "title": "Ratio"},
+            "region": {"type": "string", "title": "Region", "description": "The region to deploy to",
+                "enum": ["eu-west", "us-east"]},
+            "replicas": {"type": "integer", "title": "Replicas"}}},
+        "property_order": ["region", "replicas", "keep", "note", "ratio"]});
+    let a = core.on_line(&elicitation("e1", form.clone()));
+    assert!(writes(&a).is_empty());
+    let p = clarify_wire(&a);
+    let example: Value = serde_json::from_str(include_str!(
+        "../../../../hqc-proto/examples/wire/event.clarify.request.elicitation.json"
+    ))
+    .unwrap();
+    let mut first = p.clone();
+    first["questions"] = json!(p["questions"].as_array().unwrap()[..3]);
+    first["request_id"] = json!("req-4");
+    assert_eq!(first, example["payload"]);
+    assert_eq!(
+        p["questions"].as_array().unwrap()[3..],
+        [
+            json!({"id": "4", "text": "note"}),
+            json!({"id": "5", "text": "Ratio"})
+        ]
+    );
+
+    let answers = BTreeMap::from([
+        ("1".to_string(), ClarifyAnswer::One("us-east".into())),
+        ("2".to_string(), ClarifyAnswer::One(" 3 ".into())),
+        ("3".to_string(), ClarifyAnswer::One("No".into())),
+        ("4".to_string(), ClarifyAnswer::One("  ".into())),
+        ("5".to_string(), ClarifyAnswer::One("0.5".into())),
+    ]);
+    let w = writes(
+        &core
+            .answer_clarify("e1", &answers, Some(ClarifyAction::Accept))
+            .unwrap(),
+    );
+    assert_eq!(
+        w,
+        [
+            json!({"type": "control_response", "response": {"subtype": "success",
+            "request_id": "e1", "response": {"action": "accept", "content":
+                {"region": "us-east", "replicas": 3, "keep": false, "ratio": 0.5}}}})
+        ]
+    );
+
+    core.on_line(&elicitation("e2", form.clone()));
+    let w = writes(
+        &core
+            .answer_clarify("e2", &BTreeMap::new(), Some(ClarifyAction::Decline))
+            .unwrap(),
+    );
+    assert_eq!(w[0]["response"]["response"], json!({"action": "decline"}));
+
+    core.on_line(&elicitation("e3", form.clone()));
+    // A turn's end does not close it: no agent asked it.
+    let a = core.on_line(
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"usage":{"input_tokens":1,"output_tokens":1}}"#,
+    );
+    assert!(cancels(&a).is_empty(), "{a:?}");
+    let w = writes(&core.answer_clarify("e3", &BTreeMap::new(), None).unwrap());
+    assert_eq!(w[0]["response"]["response"], json!({"action": "cancel"}));
+}
+
+/// SPEC 0.150: an MCP server's link is a card with its `url` and no questions, Done is `accept`
+/// without `content`; a form the card cannot ask (a nested object, an array) and a link without
+/// a URL are answered `cancel` at once, with a `system elicitation_unsupported` line.
+#[test]
+fn an_mcp_servers_link_and_a_form_hqc_cannot_ask() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let a = core.on_line(&elicitation(
+        "e1",
+        json!({"mode": "url", "url": "https://github.com/login/device", "elicitation_id": "x"}),
+    ));
+    let p = clarify_wire(&a);
+    assert_eq!(
+        (&p["questions"], &p["url"], &p["server"]),
+        (
+            &json!([]),
+            &json!("https://github.com/login/device"),
+            &json!("deploy")
+        )
+    );
+    let w = writes(
+        &core
+            .answer_clarify("e1", &BTreeMap::new(), Some(ClarifyAction::Accept))
+            .unwrap(),
+    );
+    assert_eq!(w[0]["response"]["response"], json!({"action": "accept"}));
+
+    for (id, extra) in [
+        (
+            "n1",
+            json!({"requested_schema": {"type": "object", "properties": {
+                "name": {"type": "string"}, "address": {"type": "object"}}}}),
+        ),
+        (
+            "n2",
+            json!({"requested_schema": {"type": "object", "properties": {
+                "tags": {"type": "array", "items": {"type": "string"}}}}}),
+        ),
+        ("n3", json!({"mode": "url"})),
+    ] {
+        let a = core.on_line(&elicitation(id, extra));
+        assert_eq!(approvals(&a), 0);
+        assert!(!a
+            .iter()
+            .any(|a| matches!(a, Action::Emit(AdapterEvent::Event(e))
+            if matches!(e.kind, EventKind::ClarifyRequest { .. }))));
+        let w = writes(&a);
+        assert_eq!(w.len(), 1, "{id}");
+        assert_eq!(w[0]["response"]["request_id"], id);
+        assert_eq!(w[0]["response"]["response"], json!({"action": "cancel"}));
+        let sys = system_events(&a);
+        assert_eq!(sys.len(), 1, "{id}");
+        assert_eq!(sys[0].0, "elicitation_unsupported");
+        assert!(sys[0].1.contains("deploy"), "{}", sys[0].1);
+        assert!(core
+            .answer_clarify(id, &BTreeMap::new(), Some(ClarifyAction::Decline))
+            .is_err());
+    }
 }
 
 /// A denial is the VS Code tab's (cc_remote docs/SPEC.md §2.12): "No" stops the turn
@@ -5942,6 +6367,14 @@ fn carried_messages_cancelled_after_the_result_end_their_turn() {
             "turn_ended [] dropped [D]"
         ]
     );
+    // The second Stop's turn ended without a `result`: the next turn is not being stopped, and
+    // a request the CLI withdraws in it is withdrawn.
+    started(&mut core, sid);
+    core.on_line(&ask_line("q1"));
+    assert_eq!(
+        cancels(&core.on_line(&withdraw("q1"))),
+        [("clarify", "q1".to_string(), CancelReason::Withdrawn)]
+    );
 }
 
 /// A message carried past an interrupt that the CLI runs as a local command (`started` and
@@ -7861,11 +8294,11 @@ async fn a_cleared_folder_is_marked_until_init() {
     .unwrap();
     let q1 = first(&mut events, question).await;
     assert!(own.is_clearing(&folder), "after conversation_reset");
-    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    a.answer_clarify(&q1, &BTreeMap::new(), None).await.unwrap();
     let q2 = first(&mut events, question).await;
     assert!(!own.is_clearing(&folder), "the init named it");
     assert!(own.is_live(new));
-    a.answer_clarify(&q2, &BTreeMap::new()).await.unwrap();
+    a.answer_clarify(&q2, &BTreeMap::new(), None).await.unwrap();
     first(&mut events, question).await;
     assert!(own.is_clearing(&folder), "cleared again");
     a.kill().await.unwrap();
@@ -7918,7 +8351,7 @@ async fn a_cleared_folder_is_unmarked_when_the_turn_of_clear_ends() {
     })
     .await;
     assert!(own.is_clearing(&folder), "after conversation_reset");
-    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    a.answer_clarify(&q1, &BTreeMap::new(), None).await.unwrap();
     first(&mut events, |ev| {
         matches!(ev, AdapterEvent::TurnEnded { .. }).then_some(())
     })
@@ -8247,7 +8680,7 @@ async fn a_large_transcript_is_read_for_its_title_only_at_the_turns_end() {
         );
     }
     h.adapter
-        .answer_clarify(&q1, &BTreeMap::new())
+        .answer_clarify(&q1, &BTreeMap::new(), None)
         .await
         .unwrap();
     let title = first(&mut h.events, |ev| match ev {

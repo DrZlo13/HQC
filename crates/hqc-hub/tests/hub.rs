@@ -703,6 +703,129 @@ async fn clarify_answer_and_cancel_after_stop() {
     hub.finish().await;
 }
 
+/// SPEC 0.150: `auto_approve` leaves a request only a person may answer (`human_only`) open
+/// for the owner, and answers an ordinary one as before.
+#[tokio::test]
+async fn auto_approve_leaves_a_request_only_a_person_may_answer() {
+    let hub = TestHub::start().await;
+    let (_, me) = hub.get("/api/me").await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("human only").await;
+    ack_start(&mut w, &sid).await;
+    let (s, r) = hub
+        .patch(
+            &format!("/api/sessions/{sid}"),
+            json!({"auto_approve": true}),
+        )
+        .await;
+    assert_eq!(s, 200, "{r}");
+
+    let mut only = approval_payload("req-h", "2099-01-01T00:00:00Z");
+    only["human_only"] = json!(true);
+    w.event(agent_event(&sid, "approval.request", only)).await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    hub.wait_session(&sid, "waiting", |v| v["state"] == "waiting")
+        .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/req-h"),
+            json!({"option_id": "allow"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("approval.response").await;
+    assert_eq!(f["payload"]["request_id"], "req-h");
+    w.reply(&f["id"], "ack", json!({})).await;
+    let events = hub.events(&sid).await;
+    assert_eq!(events.last().unwrap()["payload"]["by"], me["id"]);
+
+    // An ordinary request: answered by the hub before the event's `ack`.
+    w.send(
+        "event",
+        json!({"event": agent_event(
+            &sid,
+            "approval.request",
+            approval_payload("req-a", "2099-01-01T00:00:00Z"),
+        )}),
+    )
+    .await;
+    let mut frames = [w.recv().await, w.recv().await];
+    frames.sort_by_key(|f| f["type"].as_str().unwrap_or("").to_string());
+    assert_eq!(frames[0]["type"], "ack");
+    assert_eq!(frames[1]["type"], "approval.response");
+    assert_eq!(frames[1]["payload"]["option_id"], "allow");
+    w.reply(&frames[1]["id"], "ack", json!({})).await;
+    let events = hub.events(&sid).await;
+    assert_eq!(events.last().unwrap()["payload"]["by"], "auto");
+    hub.finish().await;
+}
+
+/// SPEC 0.150: an MCP server's request takes `action`: `decline` with no answers, `accept`
+/// with none (a link's Done) or with answers; the frame and the event carry it. The agent's own
+/// question takes none.
+#[tokio::test]
+async fn an_mcp_servers_request_is_declined_or_done() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("mcp server asks").await;
+    ack_start(&mut w, &sid).await;
+    let path = |r: &str| format!("/api/sessions/{sid}/requests/{r}");
+
+    let q = json!({"request_id": "c-1", "questions": [{"id": "q1", "text": "Which?", "options": ["Hub", "Worker"]}]});
+    w.event(agent_event(&sid, "clarify.request", q)).await;
+    for bad in [
+        json!({"answers": {"q1": "Hub"}, "action": "accept"}),
+        json!({"action": "decline"}),
+    ] {
+        let (s, r) = hub.post(&path("c-1"), bad).await;
+        assert_eq!(s, 400, "{r}");
+    }
+
+    let link = |r: &str| {
+        json!({"request_id": r, "questions": [], "server": "github",
+               "message": "Sign in to GitHub", "url": "https://github.com/login/device"})
+    };
+    w.event(agent_event(&sid, "clarify.request", link("c-2")))
+        .await;
+    for bad in [
+        json!({"action": "decline", "answers": {"1": "x"}}),
+        json!({"action": "snooze"}),
+        json!({"answers": {}}),
+    ] {
+        let (s, r) = hub.post(&path("c-2"), bad).await;
+        assert_eq!(s, 400, "{r}");
+    }
+    let (s, r) = hub.post(&path("c-2"), json!({"action": "decline"})).await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("clarify.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "request_id": "c-2", "answers": {}, "action": "decline"})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    let events = hub.events(&sid).await;
+    let resp = events.last().unwrap();
+    assert_eq!(resp["type"], "clarify.response");
+    assert_eq!(
+        resp["payload"],
+        json!({"request_id": "c-2", "answers": {}, "action": "decline"})
+    );
+
+    w.event(agent_event(&sid, "clarify.request", link("c-3")))
+        .await;
+    let (s, r) = hub.post(&path("c-3"), json!({"action": "accept"})).await;
+    assert_eq!(s, 200, "{r}");
+    let f = w.expect("clarify.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "request_id": "c-3", "answers": {}, "action": "accept"})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    hub.finish().await;
+}
+
 /// A worker's cancel (the Claude Code adapter's for a request still open when the turn ends)
 /// closes its request; sent again, it gets its `seq`. One for a request the hub closed already
 /// (a stopped process's, which the hub cancels) is not stored a second time.

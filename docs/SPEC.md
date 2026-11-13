@@ -3259,25 +3259,30 @@ the stand). Since 0.137 a main agent's `stream_event` `message_start` (a new req
 after text deltas that no `assistant` text took up (the CLI abandoned the attempt that wrote them: a
 stream that broke, then a retry) → `agent.delta` with `reset: true` and an empty `text`, on which
 the hub and the client drop the text written so far (§4, §6), as the VS Code tab drops the rows of
-such an attempt at the next `message_start` (`retireAbandonedStreamedRows`, extension 2.1.319); none
-when no text delta came since the last `assistant` text, and none for a subagent's (by the code of
-the tab and of 2.1.312; a broken stream was not reproduced). Since 0.69 a `result` with `num_turns:
-0`, no tokens and no cost (a local slash command, the empty second `result` the CLI sends after a
-turn it started by itself) gives no `usage`, which the feed would show as an empty `0 → 0 tokens`
-line; `/compact` has no tokens either but costs, and keeps its `usage`. Since 0.115 a `result` with
-`num_turns: 0` and no tokens whose total grew, with no `compact_boundary` in it, gives a `usage`
-with no tokens, no `cost_usd` and the total as `session_cost_usd`: the CLI closes such a turn on a
-background subagent's notification without calling the model, and the growth is what the subagent
-spent meanwhile. The client's header counts that total and the feed draws no line for it; the
-baseline of `cost_usd` stays, so the next `usage` of the same process with a `cost_usd` carries the
-growth (a process that ends first leaves it out of every `cost_usd`: the next one starts from the
-`cost-state` that has it). Since 0.137 the same holds for any `result` with no tokens, whatever its
-`num_turns`: a turn interrupted while its reply streamed can end with no tokens though its total
-grew (2.1.312, seen live), and gave an empty `0 → 0 tokens` line under the interrupted reply. Since
-0.69: an `assistant` text whose `message.model` is `<synthetic>` — a reply the CLI wrote itself (an
-API error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message` and the same `uuid`
-as the transcript record) — → `agent.message` with `runtime: true`, held and ended like any other
-text: the turn it ends has it as the final `agent.message`; `system` `task_notification` (`task_id`,
+such an attempt at the next `message_start` (`retireAbandonedStreamedRows`, extension 2.1.319). The
+same reset comes, while such text stands, before a main agent's `assistant` that is not
+`<synthetic>` and whose `message.id` is not that of the latest `message_start`: 2.1.312 retries a
+stream that broke after its first event mostly without a stream ("Error streaming, falling back to
+non-streaming mode"), and that response brings no `message_start`; the tab drops the rows at such an
+`assistant` too. None when no text delta came since the last `assistant` text, none before an
+`assistant` without `message.id`, and none for a subagent's (by the code of the tab and of 2.1.312;
+a broken stream was not reproduced). Since 0.69 a `result` with `num_turns: 0`, no tokens and no
+cost (a local slash command, the empty second `result` the CLI sends after a turn it started by
+itself) gives no `usage`, which the feed would show as an empty `0 → 0 tokens` line; `/compact` has
+no tokens either but costs, and keeps its `usage`. Since 0.115 a `result` with `num_turns: 0` and no
+tokens whose total grew, with no `compact_boundary` in it, gives a `usage` with no tokens, no
+`cost_usd` and the total as `session_cost_usd`: the CLI closes such a turn on a background
+subagent's notification without calling the model, and the growth is what the subagent spent
+meanwhile. The client's header counts that total and the feed draws no line for it; the baseline of
+`cost_usd` stays, so the next `usage` of the same process with a `cost_usd` carries the growth (a
+process that ends first leaves it out of every `cost_usd`: the next one starts from the `cost-state`
+that has it). Since 0.137 the same holds for any `result` with no tokens, whatever its `num_turns`:
+a turn interrupted while its reply streamed can end with no tokens though its total grew (2.1.312,
+seen live), and gave an empty `0 → 0 tokens` line under the interrupted reply. Since 0.69: an
+`assistant` text whose `message.model` is `<synthetic>` — a reply the CLI wrote itself (an API
+error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message` and the same `uuid` as
+the transcript record) — → `agent.message` with `runtime: true`, held and ended like any other text:
+the turn it ends has it as the final `agent.message`; `system` `task_notification` (`task_id`,
 `status`, `summary`, `output_file`; checked live on 2.1.312 with a `run_in_background` Bash: it
 comes when the task ends, after the `result` of the turn that started it and before the turn the CLI
 then starts by itself, which brings `system/init`, the answer and its own `result`) → `system
@@ -4229,14 +4234,20 @@ cancel that fails to be stored leaves the request open for the worker's resend: 
 already (`stop`, an answer that crossed the cancel) keeps its own event. The hub cancels an open `clarify` the same way: a
 `clarify.cancel` event and a `clarify.response` frame with `answers: {}`; the adapter answers
 the runtime `deny`, and the turn continues without answers. Since 0.137 a `clarify` cancelled
-with `worker_restart` or `stopped` keeps its card open in its session's feed: the runtime no
-longer waits for the answer, so Answer sends it as the user's ordinary message (`POST /input`,
-§6) in the words of the VS Code tab for an earlier question it shows again (extension 2.1.319):
-`Answering your earlier question "<question>": <answer>` for one answered question,
-`Answering your earlier questions:` and a line `- "<question>": <answer>` for each of several,
-in their order, the items of a `multi` answer joined by ", "; with nothing answered nothing is
-sent. The card then shows "Answers sent" while the chat stays open: the message in the feed is
-what records the answer. A `clarify` cancelled otherwise (expiry, archiving) stays closed.
+with `worker_restart` or `stopped` keeps its card open in its session's feed while no
+`user.message`, stored or not stored yet, stands after its `clarify.cancel`, and while the
+session takes input (not archived, not held by VS Code, §9.3): the runtime no longer waits for
+the answer, so Answer sends it as the user's ordinary message (`POST /input`, §6) in the words
+of the VS Code tab for an earlier question it shows again (extension 2.1.319): `Answering your
+earlier question "<question>": <answer>` for one answered question, `Answering your earlier
+questions:` and a line `- "<question>": <answer>` for each of several, in their order, the
+items of a `multi` answer joined by ", "; Answer is disabled while nothing is answered. The
+first `user.message` after the cancel decides the card, as the tab reads its history: one that
+begins with `Answering your earlier question "<question>": ` or `Answering your earlier
+questions:` and a line `- "<question>": ` of the card's questions shows those answers and
+"Answers sent", "Cancelled: …" instead while its `POST /input` has failed (discarded, the
+message leaves the card open again); any other closes the card with "Cancelled: …". A
+`clarify` cancelled otherwise (expiry, archiving) stays closed.
 **Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
 own feed:
 - In every session that waits on its session through an open `hqc_ask` (§7.1), directly or
@@ -5770,12 +5781,17 @@ marked `during_text`. A main agent's `message_start` after text deltas that no `
 took up now gives `agent.delta` with the new `reset: true` and an empty `text` (example
 `event.agent.delta.reset.json`): the hub drops its copy of the text, so a later input is not
 marked `during_text` and a later subscriber gets no copy, and the client drops the text it shows
-live, as the VS Code tab drops the rows of an abandoned attempt. Older hubs and clients ignore
+live, as the VS Code tab drops the rows of an abandoned attempt. The same reset comes before a
+main agent's `assistant` (not `<synthetic>`) of another `message.id` than the latest
+`message_start`'s while such text stands: 2.1.312 mostly retries a broken stream without one,
+and that response has no `message_start`. Older hubs and clients ignore
 the field and keep the text, as before. §10.1: a question of the agent that a worker restart or
 Stop cancelled could not be answered: its card closed with its options grey. Such a card
-(`clarify.cancel` `worker_restart` or `stopped`) now stays open, and Answer sends the answers as
-the user's message in the words of the VS Code tab for an earlier question, `Answering your
-earlier question "<question>": <answer>`; a card cancelled otherwise stays closed.
+(`clarify.cancel` `worker_restart` or `stopped`) now stays open while no message of the user
+stands after the cancel and the session takes input, and Answer sends the answers as the user's
+message in the words of the VS Code tab for an earlier question, `Answering your earlier
+question "<question>": <answer>`; the first message of the user after the cancel, read as the
+tab reads it, shows the card answered or closes it; a card cancelled otherwise stays closed.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

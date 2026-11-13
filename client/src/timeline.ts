@@ -277,10 +277,13 @@ export class Timeline {
   }
 
   /** The first user's message after `seq`: a stored one, else one not stored yet (`failed`
-   *  when its POST failed); undefined when none stands after it. */
+   *  when its POST failed); undefined when none stands after it. Another session's message,
+   *  which the agent takes as input too, counts as one with no text: it answers nothing. */
   userMessageAfter(seq: number): { text: string; failed: boolean } | undefined {
     for (const e of this.events()) {
-      if (e.seq! > seq && e.type === "user.message") return { text: e.payload.text, failed: false };
+      if (e.seq! <= seq) continue;
+      if (e.type === "user.message") return { text: e.payload.text, failed: false };
+      if (e.type === "peer.message") return { text: "", failed: false };
     }
     const [p] = this.pending.values();
     return p && { text: p.text, failed: p.status === "failed" };

@@ -1010,6 +1010,14 @@ describe("clarify.request", () => {
     expect(outcomes()).toEqual(["Cancelled: worker restarted"]);
   });
 
+  it("another session's message after it closes it too", () => {
+    const t = cancelled("stopped");
+    t.apply(ev("event.peer.message", withSeq(3)));
+    show(t, { send: vi.fn() });
+    expect(submitButton()).toBeNull();
+    expect(outcomes()).toEqual(["Cancelled: turn stopped"]);
+  });
+
   it("opened again after the answer, it shows what was answered", () => {
     const t = cancelled("stopped");
     t.apply(userMessage(3, SEVERAL));

@@ -4246,8 +4246,9 @@ first `user.message` after the cancel decides the card, as the tab reads its his
 begins with `Answering your earlier question "<question>": ` or `Answering your earlier
 questions:` and a line `- "<question>": ` of the card's questions shows those answers and
 "Answers sent", "Cancelled: …" instead while its `POST /input` has failed (discarded, the
-message leaves the card open again); any other closes the card with "Cancelled: …". A
-`clarify` cancelled otherwise (expiry, archiving) stays closed.
+message leaves the card open again); any other closes the card with "Cancelled: …", and so does
+a `peer.message` after the cancel. A `clarify` cancelled otherwise (expiry, archiving) stays
+closed.
 **Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
 own feed:
 - In every session that waits on its session through an open `hqc_ask` (§7.1), directly or

@@ -37,9 +37,8 @@
 //!   per 2 s: `system` `api_retry` → retrying, `system` `status` `compacting` → compacting,
 //!   `system` `thinking_tokens` → thinking with its `estimated_tokens`; any other `system`
 //!   `status` that does not report the permission mode (`requesting`, `null` at a
-//!   compaction's end), a main agent's `stream_event`
-//!   `message_start`, `content_block_start` or `content_block_stop`, its `assistant` line and
-//!   `result` → none ([`activity_of`]);
+//!   compaction's end), a main agent's `stream_event` `message_start`, `content_block_start`
+//!   or `content_block_stop`, its `assistant` line and `result` → none ([`activity_of`]);
 //! - `tool_progress` with `heartbeat: true` (a long call of the main agent, every 30 s) →
 //!   [`AdapterEvent::Heartbeat`]; with `subagent_retry` → `retry` of the subagent's row of
 //!   [`AdapterEvent::LiveSubagents`] (`agent_id` is its `task_id`), until a `tool_progress` of

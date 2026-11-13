@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.133, 2026-11-13. Status: the architecture agreed after six reviews and a survey of
+Version 0.136, 2026-11-13. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1879,7 +1879,13 @@ input takes the caret when the chat opens, once its newest page is in, unless a 
 for an answer (an open approval in the feed, or the session `waiting`), another field has the
 focus, or a menu or the slid-out column is open; on a phone only when the chat replaces a new
 session's window. An open chat stays at its bottom while its images load: only a scroll up lets
-go of the bottom.
+go of the bottom. In WebKit outside Chromium (Safari, the macOS app), while the user's own wheel
+or trackpad scroll of the feed goes on, momentum included, until 400 ms after its last wheel
+event, the chat sets no scroll position of its own: it neither follows the bottom nor renders
+older blocks, so a scroll up stops at the top of the rendered blocks until the gesture settles.
+Once it settles, the chat follows the bottom if the feed still holds it and something moved it
+meanwhile, and renders the 60 older blocks if the feed is still within 400 px of its top (since
+0.136).
 
 Messages between sessions in the feed (since 0.54, T51; mockups `Session`, `AskingSession`,
 `MSession2`): violet blocks (`--relay`) with an arrow, ↗ for what left this session and ↙
@@ -4852,6 +4858,19 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.128 → 0.136 (a chat scrolled with a trackpad stays where the user scrolled it)
+§12 Client: in Safari and the macOS app (WebKit) a chat whose rendered feed was short, as a chat
+kept in memory often opens, jumped screens up under the first trackpad scroll. The feed was
+within its top 400 px, so the gesture's first step made the chat render 60 older blocks and set
+the position that kept the view in place, and WebKit, which scrolls on its own thread, applied
+the gesture's next step to the position before that one: the feed landed some 3700 px above
+where it was, the chat took the jump for a scroll up and let go of the bottom, and a second
+render of older blocks went the same way.
+There, while the user's own wheel or trackpad gesture goes on, momentum included, until 400 ms
+after its last wheel event, the chat now sets no scroll position: following the bottom and
+rendering older blocks wait until it settles. Chromium applies the next step to the position the
+page set, so there nothing changes. 0.129–0.135 are taken by open pull requests.
 
 ### 0.128 → 0.133 (an agent renames its own session without `session`)
 §7.2: an agent in a copy of a session, asked to rename itself, called `hqc_rename` with the

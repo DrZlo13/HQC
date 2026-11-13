@@ -1,7 +1,7 @@
 // One open chat: history over REST, live tail over /api/ws, actions over REST (SPEC §6).
 
 import type { Api, EventPage } from './api';
-import type { ClarifyAnswer } from './proto';
+import type { ClarifyAnswer, HqcEvent } from './proto';
 import { Timeline, type PendingAttachment } from './timeline';
 import type { HubSocket } from './ws';
 
@@ -40,6 +40,8 @@ export class ChatSession {
 
   /** Called with the text of each message once the hub stored it. */
   onStored?: (text: string) => void;
+  /** Called with each event the subscription brings. */
+  onEvent?: (ev: HqcEvent) => void;
 
   constructor(
     private readonly api: Api,
@@ -80,7 +82,10 @@ export class ChatSession {
     if (run !== this.run) return;
     this.unsubscribe = this.socket.subscribe(this.id, {
       afterSeq: () => t.resumeSeq(),
-      onEvent: (ev) => t.apply(ev),
+      onEvent: (ev) => {
+        t.apply(ev);
+        this.onEvent?.(ev);
+      },
       onDelivery: (d) => t.applyDelivery(d),
       onInvalid: (raw, err) => t.addInvalid(raw, err),
       onReset: () => t.reset(),

@@ -34,20 +34,23 @@ const LIMIT_NAMES: Record<string, string> = {
   seven_day: 'weekly limit',
   seven_day_opus: 'weekly Opus limit',
   seven_day_sonnet: 'weekly Sonnet limit',
+  seven_day_overage_included: 'Fable limit',
   overage: 'usage credit limit',
 };
 
 /** The bar's text, as the VS Code tab words it: "You've hit your 5-hour limit · resets 18:00"
  *  once the account is `rejected`, else "You've used 82% of your weekly limit · resets …" for
- *  the fuller window at 70 % or more; nothing below. */
+ *  the fuller window at 70 % or more; nothing below, and nothing for a limit or a window that
+ *  has reset since it was reported (one without a reset time counts as current). */
 export function limitNotice(l: WorkerLimits, now = Date.now()): string | undefined {
-  if (l.status === 'rejected') {
+  const current = (resetsAt?: number | null) => !resetsAt || resetsAt * 1000 > now;
+  if (l.status === 'rejected' && current(l.resets_at)) {
     const name = (l.rate_limit_type && LIMIT_NAMES[l.rate_limit_type]) || 'usage limit';
     return `You've hit your ${name}${l.resets_at ? ` · resets ${resetsLabel(l.resets_at, now)}` : ''}`;
   }
   const windows = (['five_hour', 'seven_day'] as const).flatMap((k) => {
     const w = l[k];
-    return w && w.utilization >= 0.7 ? [{ k, w }] : [];
+    return w && w.utilization >= 0.7 && current(w.resets_at) ? [{ k, w }] : [];
   });
   const top = windows.sort((a, b) => b.w.utilization - a.w.utilization)[0];
   if (!top) return undefined;

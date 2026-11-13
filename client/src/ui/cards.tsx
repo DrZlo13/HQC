@@ -586,17 +586,31 @@ function RefusalLine({ event, actions }: { event: EventOf<'agent.message'>; acti
   const ms = actions.modelSwitch;
   const phone = useIsPhone();
   const [open, setOpen] = useState<{ x: number; y: number; anchor: HTMLElement; custom?: boolean } | null>(null);
-  const [switched, setSwitched] = useState<string | null>(null);
+  // The model switched to, and the last `seq` in the feed when it was picked.
+  const [switched, setSwitched] = useState<{ to: string; after: number } | null>(null);
   // By the place in the feed, not by `seq`: an input that waited through this turn stands under
   // the line though it came before it.
   const items = actions.timeline.items();
   const at = items.findIndex((i) => i.kind === 'event' && i.event.seq === event.seq);
   const answered = items.slice(at + 1).some((i) => i.kind === 'event' && i.event.type === 'user.message');
+  // A switch the runtime then refused (SPEC 0.173: `system model_not_switched`) offers again.
+  const shown =
+    switched &&
+    !items.some(
+      (i) =>
+        i.kind === 'event' &&
+        i.event.type === 'system' &&
+        i.event.payload.code === 'model_not_switched' &&
+        (i.event.seq ?? 0) > switched.after,
+    )
+      ? switched.to
+      : null;
   if (!ms || answered) return <Line kind="system line-runtime">{event.payload.text}</Line>;
   const pick = (c: ModelChoice) => {
     if ('provider' in c ? c.provider === ms.provider : !ms.provider && c.model === ms.model) return;
     const to = 'provider' in c ? ms.providers.find((p) => p.id === c.provider)!.label : modelName(c.model!);
-    void ms.to(c).then((ok) => ok && setSwitched(to));
+    const after = items.reduce((m, i) => (i.kind === 'event' && (i.event.seq ?? 0) > m ? i.event.seq! : m), 0);
+    void ms.to(c).then((ok) => ok && setSwitched({ to, after }));
   };
   let menu: ComponentChildren = null;
   if (open) {
@@ -641,8 +655,8 @@ function RefusalLine({ event, actions }: { event: EventOf<'agent.message'>; acti
       <Line kind="system line-runtime line-refusal">
         {event.payload.text}
         <span class="refusal-offer" role="status">
-          {switched ? (
-            `Switched to ${switched}. Send the message again.`
+          {shown ? (
+            `Switched to ${shown}. Send the message again.`
           ) : (
             <button
               type="button"

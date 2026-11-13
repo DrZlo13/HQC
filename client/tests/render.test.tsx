@@ -154,6 +154,15 @@ describe("every example event renders", () => {
     expect(t.streaming).toBe("Retried");
   });
 
+  it("a retraction ends the text being written, which no message ends then (SPEC 0.173)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.agent.delta", (e) => (e.payload.text = "I can't help")));
+    t.apply(ev("event.retraction"));
+    expect(t.streaming).toBe("");
+    t.apply(ev("event.agent.delta", (e) => (e.payload.text = "Here it is.")));
+    expect(t.streaming).toBe("Here it is.");
+  });
+
   it("an older page loaded behind the live tail ends no stream", () => {
     const t = new Timeline();
     t.apply(ev("event.agent.message", withSeq(50)));

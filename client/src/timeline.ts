@@ -212,6 +212,8 @@ export class Timeline {
       }
       case "retraction":
         for (const id of ev.payload.event_ids) this.retracted.add(id);
+        // The answer being written was taken back too: no message ends it (SPEC 0.173).
+        if (fresh) this.streaming = "";
         break;
     }
   }

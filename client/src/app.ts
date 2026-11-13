@@ -267,6 +267,11 @@ export class AppState {
       c.onStored = (text) => {
         if (/^\/model\s+\S/.test(text.trim())) void this.refreshSession(id);
       };
+      // So does a switch the runtime refused, after which the hub has the model it kept
+      // (SPEC 0.173).
+      c.onEvent = (ev) => {
+        if (ev.type === 'system' && ev.payload.code === 'model_not_switched') void this.refreshSession(id);
+      };
     }
     this.chats.set(id, c);
     for (const [old, o] of this.chats) {

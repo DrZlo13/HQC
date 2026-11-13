@@ -23,6 +23,7 @@ import {
   type SpawnedBy,
 } from '../src/proto';
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
+import { limitNotice } from '../src/ui/limits';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
 import { LiveSubagents } from '../src/ui/LiveSubagents';
@@ -537,6 +538,21 @@ describe('model', () => {
     expect(modelName('qwen3.8-27b:q4_K')).toBe('qwen3.8-27b:q4_K');
   });
 
+  it('shows the model the runtime kept once it refused a switch (SPEC 0.173)', async () => {
+    const { app, api } = setup('idle', { model: 'claude-nope' });
+    await mount(app);
+    expect($('.chat-model')!.textContent).toBe('claude-nope');
+    // GET /api/sessions/{id}: the model the hub took from the line.
+    api.session.mockImplementation(async () => ({ ...app.sessions.get('s1')!, model: 'claude-opus-5-5', commands: undefined }));
+    const fetched = api.session.mock.calls.length;
+    await act(async () => {
+      subscriber!.onEvent(ev('event.system.model_not_switched', 8));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(api.session).toHaveBeenCalledTimes(fetched + 1);
+    expect($('.chat-model')!.textContent).toBe('Opus 5.5');
+  });
+
   it('shows the usage limits of the session\'s worker under the model', async () => {
     const { app, api } = setup('idle');
     const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
@@ -609,6 +625,21 @@ describe('model', () => {
     expect($('.limit-notice + .composer-wrap')).not.toBeNull();
   });
 
+  it('says nothing of a limit or a window that has reset since it was reported (SPEC 0.173)', () => {
+    const now = Date.UTC(2026, 10, 13, 12);
+    const past = now / 1000 - 60;
+    const soon = now / 1000 + 3600;
+    expect(limitNotice({ status: 'rejected', rate_limit_type: 'five_hour', resets_at: past, reported_at: '' }, now)).toBeUndefined();
+    expect(limitNotice({ five_hour: { utilization: 0.95, resets_at: past }, reported_at: '' }, now)).toBeUndefined();
+    expect(
+      limitNotice({ five_hour: { utilization: 0.95, resets_at: past }, seven_day: { utilization: 0.8, resets_at: soon }, reported_at: '' }, now),
+    ).toMatch(/^You've used 80% of your weekly limit · resets /);
+    // Without a reset time the limit is as current as its report.
+    expect(limitNotice({ status: 'rejected', rate_limit_type: 'seven_day_overage_included', reported_at: '' }, now)).toBe(
+      "You've hit your Fable limit",
+    );
+  });
+
   // SPEC 0.168: the versions under "Versions"; a name the menu does not list is typed.
   it('a version is chosen as an alias is, and shows as chosen; another name shows as typed', async () => {
     let { app, api } = setup('idle');
@@ -673,6 +704,23 @@ describe('a refusal of the model', () => {
     expect($('.ctx-menu')).toBeNull();
     expect(offer()).toBeNull();
     expect($('.line-refusal .refusal-offer')!.textContent).toBe('Switched to Opus 4.8. Send the message again.');
+  });
+
+  it('a switch the runtime refused brings the offer back (SPEC 0.173)', async () => {
+    const { app } = setup('idle', { history: [HISTORY[0], reply(2)] });
+    await mount(app);
+    await act(async () => offer()!.click());
+    await act(async () => {
+      root.querySelector<HTMLButtonElement>('.ctx-menu .btn-model-claude-opus-4-8')!.click();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect($('.line-refusal .refusal-offer')!.textContent).toBe('Switched to Opus 4.8. Send the message again.');
+    // The CLI kept its model: the line says so, and the refusal offers another one again.
+    await act(async () => {
+      subscriber!.onEvent(ev('event.system.model_not_switched', 3));
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(offer()).not.toBeNull();
   });
 
   it('a refused switch keeps the offer', async () => {

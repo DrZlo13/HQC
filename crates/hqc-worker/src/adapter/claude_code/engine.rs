@@ -6,8 +6,11 @@
 //! - `stream_event` `text_delta` → `agent.delta`; deltas (text, thinking, tool input at four
 //!   characters a token, redacted thinking at its `estimated_tokens`), then `message_delta`'s
 //!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
+//!   `message_start` after text deltas no assistant text took up → `agent.delta` with
+//!   `reset: true` ([`Core::live_text`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
-//!   block or a tool result makes it `final: false`, `result` makes it `final: true`;
+//!   block or a tool result makes it `final: false`, `result` makes it `final: true`; an
+//!   input written during a turn the CLI started by itself leaves it held;
 //! - `assistant` `tool_use` → `tool.call` ([`args_preview`]: an `Agent` call's `prompt`
 //!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
@@ -346,6 +349,10 @@ pub struct Core {
     streamed_chars: u64,
     streamed_estimated: u64,
     streamed: u64,
+    /// The main agent's text deltas were sent since its last assistant text: the hub and
+    /// clients show text that no `agent.message` will cover if the CLI abandons the attempt
+    /// ([`Core::on_stream_event`]).
+    live_text: bool,
     /// `session_id` of the latest `system/init`: its subagents' transcripts are in its folder.
     cli_session: Option<String>,
     /// The Bash calls and subagents of the agent itself the CLI runs in the foreground, by
@@ -405,6 +412,7 @@ impl Core {
             streamed_chars: 0,
             streamed_estimated: 0,
             streamed: 0,
+            live_text: false,
             cli_session: None,
             foreground: BTreeMap::new(),
             task_calls: HashMap::new(),
@@ -484,7 +492,13 @@ impl Core {
         }
         self.in_turn = true;
         self.turn += 1;
-        self.held = None;
+        // The last text of a turn the CLI started by itself stays held, as an input written
+        // into a turn of hqc's leaves it ([`Core::inject_with_images`]): that turn's next line,
+        // its `result`, ends it. Dropped here, it was lost when the input came between the
+        // text and the `result` (SPEC §8.1).
+        if !self.self_turn {
+            self.held = None;
+        }
         vec![self.write(input, images, false)]
     }
 
@@ -1038,7 +1052,16 @@ impl Core {
         let ev = &v["event"];
         match ev["type"].as_str() {
             Some("message_start") => {
-                (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0)
+                (self.streamed_chars, self.streamed_estimated, self.streamed) = (0, 0, 0);
+                // A new request of the model after text no assistant text took up: the CLI
+                // abandoned the attempt that wrote it (a stream that broke, then a retry), as the
+                // VS Code tab takes it (`web:163707`); the hub and clients drop it.
+                if std::mem::take(&mut self.live_text) {
+                    return vec![self.emit_new(EventKind::AgentDelta {
+                        text: String::new(),
+                        reset: true,
+                    })];
+                }
             }
             // The exact count comes once per response, at its end: it adds what the estimate
             // of its deltas missed.
@@ -1072,7 +1095,11 @@ impl Core {
         self.streamed = estimate;
         if delta["type"] == "text_delta" {
             if let Some(t) = delta["text"].as_str().filter(|t| !t.is_empty()) {
-                return vec![self.emit_new(EventKind::AgentDelta { text: text(t) })];
+                self.live_text = true;
+                return vec![self.emit_new(EventKind::AgentDelta {
+                    text: text(t),
+                    reset: false,
+                })];
             }
         }
         vec![]
@@ -1102,6 +1129,7 @@ impl Core {
                         tracing::info!(session_id = %self.session_id, "runtime message");
                     }
                     self.held = Some((id, text(t), synthetic, aborted));
+                    self.live_text = false;
                 }
                 Some("tool_use") => {
                     out.extend(self.flush(false));

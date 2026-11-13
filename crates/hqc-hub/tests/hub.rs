@@ -1217,6 +1217,45 @@ async fn an_input_during_the_answer_text_is_marked() {
     hub.finish().await;
 }
 
+/// SPEC §4, §6 (0.137): an `agent.delta` with `reset: true` (the runtime abandoned the attempt
+/// that wrote the text) drops the text so far: the subscriber gets it, a client that subscribes
+/// after it gets no copy, and an input stored after it is not marked `during_text`.
+#[tokio::test]
+async fn a_reset_delta_drops_the_text_so_far() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("reset").await;
+    ack_start(&mut w, &sid).await;
+    let mut c = FakeClient::connect(&hub).await;
+    c.subscribe(&sid, 0).await;
+    w.event(agent_event(&sid, "agent.delta", json!({"text": "Let me"})))
+        .await;
+    assert_eq!(c.until("event").await["event"]["payload"]["text"], "Let me");
+    let reset = agent_event(&sid, "agent.delta", json!({"text": "", "reset": true}));
+    w.event(reset.clone()).await;
+    assert_eq!(c.until("event").await["event"], reset);
+
+    let mut late = FakeClient::connect(&hub).await;
+    let backlog = late.subscribe(&sid, 0).await;
+    assert!(
+        backlog.iter().all(|e| e["type"] != "agent.delta"),
+        "{backlog:?}"
+    );
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "meanwhile"}),
+        )
+        .await;
+    assert_eq!(s, 201);
+    let input = r["event"]["event_id"].clone();
+    let events = hub.events(&sid).await;
+    let stored = events.iter().find(|e| e["event_id"] == input).unwrap();
+    assert!(stored["payload"].get("during_text").is_none(), "{stored}");
+    hub.finish().await;
+}
+
 /// Web Push on approval.request when nobody watches; no push while a client is subscribed.
 #[tokio::test]
 async fn push_only_without_live_subscription() {

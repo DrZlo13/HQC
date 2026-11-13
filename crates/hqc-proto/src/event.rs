@@ -248,7 +248,13 @@ pub enum EventKind {
     },
     /// Transport only, never stored (SPEC §4, §5.2).
     #[serde(rename = "agent.delta")]
-    AgentDelta { text: String },
+    AgentDelta {
+        text: String,
+        /// The runtime abandoned the attempt that wrote the text so far (since SPEC 0.137): the
+        /// hub and clients drop that text; `text` is empty. Absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reset: bool,
+    },
     /// The subagents the agent runs now, the whole list in the order they started, then (since
     /// SPEC 0.127) its background shell commands; empty: none (since SPEC 0.101). Transport
     /// only, never stored (SPEC §4, §5.2).
@@ -787,6 +793,21 @@ mod tests {
                 .unwrap();
         assert!(serde_json::to_value(&plain).unwrap()["payload"]
             .get("interrupted")
+            .is_none());
+    }
+
+    /// SPEC 0.137: a delta that drops the text so far carries `reset: true`; any other leaves it
+    /// out.
+    #[test]
+    fn a_reset_agent_delta_roundtrips() {
+        let src = include_str!("../examples/wire/event.agent.delta.reset.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.agent.delta.json")).unwrap();
+        assert!(serde_json::to_value(&plain).unwrap()["payload"]
+            .get("reset")
             .is_none());
     }
 

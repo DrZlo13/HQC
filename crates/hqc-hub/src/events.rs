@@ -148,9 +148,9 @@ pub async fn ingest_worker_event(
         return Ok(dropped);
     }
     app.worker_activity(s.id);
-    if let EventKind::AgentDelta { text } = &ev.kind {
+    if let EventKind::AgentDelta { text, reset } = &ev.kind {
         // Transport only: to clients without seq, never stored (SPEC §4).
-        app.delta(s.id, raw, text);
+        app.delta(s.id, raw, text, *reset);
         return Ok(dropped);
     }
     if ends_live_text(&ev.kind) {

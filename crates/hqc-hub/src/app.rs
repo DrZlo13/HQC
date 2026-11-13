@@ -190,21 +190,26 @@ impl AppState {
         let _ = self.bus.send(Arc::new(n));
     }
 
-    /// Fan an `agent.delta` out to clients and add it to the session's text. Under the lock
-    /// of the text, so the bus carries deltas in the order of their numbers.
-    pub fn delta(&self, session_id: Uuid, event: Value, text: &str) {
+    /// Fan an `agent.delta` out to clients and add it to the session's text; one with `reset`
+    /// (the runtime abandoned the attempt that wrote it, SPEC §4) drops the text instead. Under
+    /// the lock of the text, so the bus carries deltas in the order of their numbers.
+    pub fn delta(&self, session_id: Uuid, event: Value, text: &str, reset: bool) {
         let mut live = self.live.lock().unwrap();
         let at = live.next;
         live.next += 1;
-        let slot = live
-            .texts
-            .entry(session_id)
-            .or_insert_with(|| Some((event.clone(), String::new())));
-        if let Some((_, t)) = slot {
-            if t.len() + text.len() > MAX_LIVE_TEXT {
-                *slot = None;
-            } else {
-                t.push_str(text);
+        if reset {
+            live.texts.remove(&session_id);
+        } else {
+            let slot = live
+                .texts
+                .entry(session_id)
+                .or_insert_with(|| Some((event.clone(), String::new())));
+            if let Some((_, t)) = slot {
+                if t.len() + text.len() > MAX_LIVE_TEXT {
+                    *slot = None;
+                } else {
+                    t.push_str(text);
+                }
             }
         }
         self.notify(Notice::Delta {

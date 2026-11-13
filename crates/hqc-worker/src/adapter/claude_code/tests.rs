@@ -2784,6 +2784,130 @@ fn a_turn_the_cli_starts_by_itself_names_no_input() {
     );
 }
 
+/// An input written while the CLI runs a turn it started by itself, after that turn's last text
+/// and before its `result` (9–100 ms apart on the stand): the text stays held, as for an input
+/// written into a turn of hqc's, and that `result` ends it `final: true`; the input runs next.
+#[test]
+fn an_input_during_a_turn_the_cli_starts_by_itself_keeps_its_last_text() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let a = user_input(sid, "Run `sleep 5` in the background.");
+    let b = user_input(sid, "Reply with the single word PONG.");
+    let init = json!({"type": "system", "subtype": "init", "model": "claude-haiku-5-5",
+        "permissionMode": "default", "session_id": CLI_SESSION})
+    .to_string();
+    let ua = line_uuid(&core.input(&a));
+    play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ua, "queued"),
+            lifecycle(&ua, "started"),
+            echo(&ua, &a.text),
+            reply("LAUNCHED"),
+            result("success"),
+            lifecycle(&ua, "completed"),
+            r#"{"type":"system","subtype":"task_notification","task_id":"abd6ecd27912266e5","tool_use_id":"toolu_018foiN3RMuTb1fmFn53JffP","status":"completed","summary":"done","uuid":"614bde30-70d7-46cc-9ff9-9e22f9bdc118"}"#.into(),
+            init.clone(),
+            reply("The background command finished."),
+        ]),
+    );
+    let ub = line_uuid(&core.input(&b));
+    let out = play(
+        &mut core,
+        &lines_of(&[
+            lifecycle(&ub, "queued"),
+            result("success"),
+            init,
+            lifecycle(&ub, "started"),
+            echo(&ub, &b.text),
+            reply("PONG"),
+            result("success"),
+            lifecycle(&ub, "completed"),
+        ]),
+    );
+    let names = [(a.event_id, "A"), (b.event_id, "B")];
+    assert_eq!(
+        trace(&out, &names),
+        [
+            "message \"The background command finished.\" to A",
+            "status to A",
+            "turn_ended [B]",
+            "accepted B",
+            "message \"PONG\" to B",
+            "status to B",
+            "turn_ended []"
+        ]
+    );
+    let finals: Vec<bool> = events(&emitted(out))
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::AgentMessage { r#final, .. } => Some(*r#final),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finals, [true, true]);
+}
+
+/// A request whose stream broke after some text, then retried by the CLI: the main agent's
+/// next `message_start` drops the text written so far (`agent.delta` with `reset: true` and an
+/// empty `text`), as the VS Code tab drops the rows of an abandoned attempt. No reset before any
+/// text, after text an assistant text took up, or on a subagent's `message_start`.
+#[test]
+fn a_new_request_drops_the_text_of_an_abandoned_attempt() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let ev = |e: Value| {
+        json!({"type": "stream_event", "parent_tool_use_id": null, "event": e,
+            "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+    };
+    let start = ev(json!({"type": "message_start", "message": {"id": "msg_01"}})).to_string();
+    let delta = |t: &str| {
+        ev(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": t}}))
+        .to_string()
+    };
+    let deltas = |a: Vec<Action>| -> Vec<(String, bool)> {
+        events(&emitted(a))
+            .into_iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::AgentDelta { text, reset } => Some((text.clone(), *reset)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(
+        deltas(play(&mut core, &start)).is_empty(),
+        "nothing written"
+    );
+    assert_eq!(
+        deltas(play(&mut core, &delta("Let me"))),
+        [("Let me".into(), false)]
+    );
+    assert_eq!(deltas(play(&mut core, &start)), [(String::new(), true)]);
+    assert!(deltas(play(&mut core, &start)).is_empty(), "dropped once");
+    play(
+        &mut core,
+        &lines_of(&[
+            delta("Let me look."),
+            reply("Let me look."),
+            bash("toolu_01", "ls"),
+            tool_result("toolu_01"),
+        ]),
+    );
+    assert!(
+        deltas(play(&mut core, &start)).is_empty(),
+        "an assistant text took it up"
+    );
+    play(&mut core, &delta("Now"));
+    let mut sub: Value = serde_json::from_str(&start).unwrap();
+    sub["parent_tool_use_id"] = json!("toolu_02");
+    assert!(
+        deltas(play(&mut core, &sub.to_string())).is_empty(),
+        "a subagent's"
+    );
+}
+
 #[test]
 fn control_response_echo_and_unknown_requests() {
     let mut core = Core::new(Uuid::now_v7(), false);
@@ -2954,7 +3078,8 @@ fn nul_never_reaches_an_event() {
         }
     }
     assert!(kinds.contains(&EventKind::AgentDelta {
-        text: "d\u{FFFD}".into()
+        text: "d\u{FFFD}".into(),
+        reset: false,
     }));
     let mut seen = 0;
     for k in &kinds {

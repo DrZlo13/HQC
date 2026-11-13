@@ -233,7 +233,13 @@ async fn outbox_survives_reconnect_and_restart() {
     let evs: Vec<_> = (0..4)
         .map(|i| agent_message(sid, &format!("m{i}")))
         .collect();
-    let delta = agent_event(sid, EventKind::AgentDelta { text: "par".into() });
+    let delta = agent_event(
+        sid,
+        EventKind::AgentDelta {
+            text: "par".into(),
+            reset: false,
+        },
+    );
     adapters.emit(sid, AdapterEvent::Event(delta.clone())).await;
     for e in &evs[..3] {
         adapters.emit(sid, AdapterEvent::Event(e.clone())).await;

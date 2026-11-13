@@ -521,7 +521,7 @@ the client renders only them. The "source" column is the component that produces
 | `ask_cancelled` | hub | in the asking session: a deferred `hqc_ask` was closed by `mcp.cancel` from the worker (§5.2), since 0.35 |
 | `peer_evicted` | hub | in the target session: the send buffer was over its limit and its oldest messages were dropped unread (§7.1), since 0.35 |
 | `session_taken_over` | hub | the session was taken over (`POST /takeover`, §9.3) |
-| `forked_from` | hub | since 0.80: the end of a forked session's copied history (§6 `POST /api/sessions/{id}/fork`); `text` "Forked from <address> before the message of <time>" |
+| `forked_from` | hub | since 0.80: the end of a forked session's copied history (§6 `POST /api/sessions/{id}/fork`); `text` "Forked from <address> before the message of <time>"; since 0.134 the hub also puts it in front of the first input after it, for the agent (§6) |
 | `session_moved` | hub | since 0.75: the session moved to another folder and project (`POST /api/sessions/{id}/move`, §6, or `hqc_move`, §7; since 0.95 also after its transcript, §9.2); `text` names the old project, the new one and the folder |
 | `session_not_moved` | hub | since 0.95: the owner allowed a move after the transcript (§9.2), and the session could not move then; `text` names the folder and why |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
@@ -914,7 +914,9 @@ MCP calls (worker → hub → worker):
   500 MB per input (§20) counting them together with the input's own; a file the hub does not
   give fails the input as for its own files. `peer?` {from, mode, request_id?} (since 0.35) — only for a
   `peer.message`: the sender's address, `send`/`ask` and the ask's `request_id`, from which
-  the worker writes the header (§7.1); `text` is the message's text without it.
+  the worker writes the header (§7.1); `text` is the message's text without it. Since 0.134
+  the `text` of a fork's first input after the cut begins with the hub's note naming the
+  session it was copied from (§6).
   `permission_cap?` (since 0.43, T39) — `ask` | `auto`, the cap of the input's chain (§7.1): with
   `ask`, the worker runs this input's turn in `ask` whatever the session's mode. It only ever
   lowers: a session in `ask` stays in `ask` under an `auto` cap, and the worker's own rules
@@ -1507,7 +1509,15 @@ the rest is marked "later"):
   first message) or were deleted (§17.4). Since 0.108 a fork before a message with
   `during_text` keeps the `agent.message` the client shows above it (below, the WebSocket
   paragraph) as the newest cut and the last copied event. The agent starts at once. The client puts the message's text into the new
-  session's input as its draft and opens it.
+  session's input as its draft and opens it. Since 0.134 the agent of a fork with copied
+  history is told it is a copy: the first input after `system forked_from` goes with
+  `session.input.text` beginning `[hqc fork] <the forked_from text>. The conversation above
+  was copied from that session; this session is <its address>, separate from it from here
+  on.` and an empty line, the address the session has at delivery; a slash command does not
+  carry it (the next input does) and a failed input does not count; in a `peer.message` the
+  note stands after the worker's sender header (§7.1). An input sent again before its `ack`
+  carries it again. The feed keeps the text as typed. A fork before the first message has no
+  copied history and no note.
 - `POST /api/sessions/{id}/move` {path, project?, create?} → the session object (since 0.75;
   `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
   folder's project (§3 Session). The hub checks the folder with `fs.stat` as `POST
@@ -4871,6 +4881,19 @@ There, while the user's own wheel or trackpad gesture goes on, momentum included
 after its last wheel event, the chat now sets no scroll position: following the bottom and
 rendering older blocks wait until it settles. Chromium applies the next step to the position the
 page set, so there nothing changes. 0.129–0.135 are taken by open pull requests.
+
+### 0.128 → 0.134 (a fork's agent is told it is a copy)
+§4 `forked_from`, §5.3 `session.input`, §6 `POST /api/sessions/{id}/fork`: a fork's agent got
+the source's conversation and nothing else; `system forked_from` was only in the feed. Asked
+to rename itself, an agent of a fork took the source's address from the copied history and
+renamed the source. The first input after the cut of a fork with copied history now goes to the
+worker with `text` beginning `[hqc fork] <the forked_from text>. The conversation above was
+copied from that session; this session is <its address>, separate from it from here on.` and an
+empty line; a slash command does not carry it (the next input does), a failed input does not
+count, and in a `peer.message` the note stands after the worker's sender header. The address is
+the session's at delivery, an input sent again before its `ack` carries the note again, and the
+feed keeps the text as typed. Inputs after the one that carried it, a fork before the first
+message (no copied history) and other sessions get no note.
 
 ### 0.128 → 0.133 (an agent renames its own session without `session`)
 §7.2: an agent in a copy of a session, asked to rename itself, called `hqc_rename` with the

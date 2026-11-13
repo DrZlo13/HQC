@@ -267,6 +267,7 @@ fn forks(out: &[Output]) -> Vec<(Uuid, String, u32, String)> {
                     text,
                     code,
                     fork: Some(f),
+                    ..
                 } if code == hqc_proto::event::SESSION_FORKED => Some((
                     f.at_uuid,
                     f.branch_from.clone(),
@@ -793,6 +794,9 @@ fn task_notification_is_the_adapters_while_it_runs() {
                    code 0)"
                 .into(),
             code: "task_notification".into(),
+            call_id: Some("toolu_01DNPTCZTgycgC11D8VMjfaD".into()),
+            status: Some("completed".into()),
+            task_id: Some("b1b20u6dl".into()),
             fork: None,
         }
     );

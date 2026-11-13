@@ -239,6 +239,9 @@ pub fn event(session_id: Uuid, line: &LogLine) -> serde_json::Value {
         EventKind::System {
             text,
             code: CODE.into(),
+            call_id: None,
+            status: None,
+            task_id: None,
             fork: None,
         },
     );

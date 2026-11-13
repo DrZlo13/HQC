@@ -8,15 +8,17 @@
 //!   `usage.output_tokens` for the token rate ([`Core::take_output_tokens`], [`super::rate`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`;
-//! - `assistant` `tool_use` → `tool.call`; non-empty `thinking` → `agent.thinking`;
+//! - `assistant` `tool_use` → `tool.call` ([`args_preview`]: an `Agent` call's `prompt`
+//!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
 //!   balance is too low") → `agent.message` with `runtime: true`, held and flushed as any;
-//! - `system` `task_notification` (a background task ended) → `system task_notification`,
-//!   except for a task that a subagent started or whose `task_started` said it runs in the
-//!   foreground, until a `task_updated` moves it to the background; one without the
-//!   subagent's report (`handback`) while the latest `background_tasks_changed` still holds the
-//!   subagent, or a task of it, is no end: the latest one is handled when the subagent stops
-//!   counting (below); a task gives one line, a later notification of it none;
+//! - `system` `task_notification` (a background task ended) → `system task_notification`
+//!   with its `status`, its `task_id` and the task's `tool_use_id` as `call_id`, except for a
+//!   task that a subagent started or whose `task_started` said it runs in the foreground,
+//!   until a `task_updated` moves it to the background; one without the subagent's report
+//!   (`handback`) while the latest `background_tasks_changed` still holds the subagent, or a
+//!   task of it, is no end: the latest one is handled when the subagent stops counting
+//!   (below); a task gives one line, a later notification of it none;
 //!   `system` `compact_boundary` → `system context_compacted`, held until the summary the CLI
 //!   writes after it, the main agent's `user` line with `isSynthetic: true`, which gives its
 //!   text; another main agent's `user`, `assistant`, `stream_event` or `result` line first, or
@@ -31,13 +33,13 @@
 //!   subagent ended while it waits for a command moved to the background, and lists and
 //!   starts its `task_id` again when the command ends (2.1.312);
 //! - the same subagents one by one → [`AdapterEvent::LiveSubagents`] when they or a title
-//!   change, and on every `system` `task_progress` of one of them: the title from its
-//!   `task_started`, what it does now (`description`), `total_tokens` and `tool_uses` from its
-//!   latest `task_progress` (2.1.312); after them, in the same list, the main agent's
-//!   background shell commands of the latest `background_tasks_changed` list (`task_type:
-//!   local_bash`, not `ambient`, whose `task_started` has come and was not a `Monitor` call's,
-//!   of no subagent that counts), each with its `description` and run time only, when they or
-//!   a `description` change;
+//!   change, and on every `system` `task_progress` of one of them: the title and the
+//!   `tool_use_id` (`call_id`) from its `task_started`, what it does now (`description`),
+//!   `total_tokens` and `tool_uses` from its latest `task_progress` (2.1.312); after them, in
+//!   the same list, the main agent's background shell commands of the latest
+//!   `background_tasks_changed` list (`task_type: local_bash`, not `ambient`, whose
+//!   `task_started` has come and was not a `Monitor` call's, of no subagent that counts), each
+//!   with its `description` and run time only, when they or a `description` change;
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
@@ -200,10 +202,12 @@ struct LiveAgent {
     activity: Option<String>,
     total_tokens: Option<u64>,
     tool_uses: Option<u64>,
+    /// `tool_use_id` of its latest `task_started` ([`Core::task_calls`]); none before that.
+    call_id: Option<String>,
 }
 
 impl LiveAgent {
-    fn new(task_id: &str, title: &str) -> Self {
+    fn new(task_id: &str, title: &str, call_id: Option<&str>) -> Self {
         Self {
             task_id: task_id.to_owned(),
             title: text(title),
@@ -211,6 +215,7 @@ impl LiveAgent {
             activity: None,
             total_tokens: None,
             tool_uses: None,
+            call_id: call_id.map(str::to_owned),
         }
     }
 }
@@ -329,6 +334,10 @@ pub struct Core {
     /// `task_id`: their `tool_use_id`, which `background_tasks` takes
     /// ([`AdapterEvent::ForegroundCalls`]).
     foreground: BTreeMap<String, String>,
+    /// `tool_use_id` of each task's latest `task_started`, by `task_id`, until its end gives
+    /// its line or none ([`Core::on_task_ended`]): the `call_id` of its row above the input and
+    /// of its `task_notification` line when the notification names none.
+    task_calls: HashMap<String, String>,
 }
 
 impl Core {
@@ -380,6 +389,7 @@ impl Core {
             streamed: 0,
             cli_session: None,
             foreground: BTreeMap::new(),
+            task_calls: HashMap::new(),
         }
     }
 
@@ -791,10 +801,14 @@ impl Core {
                     {
                         self.quiet_tasks.insert(id.to_owned(), subagent);
                     }
+                    let call = v["tool_use_id"].as_str();
+                    if let (Some(id), Some(call)) = (v["task_id"].as_str(), call) {
+                        self.task_calls.insert(id.to_owned(), call.to_owned());
+                    }
                     let agent = v["task_type"] == "local_agent";
                     if let Some(id) = v["task_id"].as_str().filter(|_| agent) {
                         self.reported.remove(id);
-                        self.live_started(id, v["description"].as_str().unwrap_or(""));
+                        self.live_started(id, v["description"].as_str().unwrap_or(""), call);
                     }
                     let mut out =
                         self.count_subagent(v["task_id"].as_str().filter(|_| agent), true);
@@ -1040,7 +1054,10 @@ impl Core {
                         EventKind::ToolCall {
                             call_id: block["id"].as_str().unwrap_or("").into(),
                             tool: block["name"].as_str().unwrap_or("").into(),
-                            args_preview: preview(&compact(&block["input"]), PREVIEW_LIMIT),
+                            args_preview: args_preview(
+                                block["name"].as_str().unwrap_or(""),
+                                &block["input"],
+                            ),
                         },
                     ));
                 }
@@ -1307,7 +1324,8 @@ impl Core {
             .collect();
         new.sort();
         for id in new {
-            self.live.push(LiveAgent::new(id, ""));
+            let call = self.task_calls.get(id).map(String::as_str);
+            self.live.push(LiveAgent::new(id, "", call));
             changed = true;
         }
         changed |= self.update_live_commands();
@@ -1358,7 +1376,8 @@ impl Core {
                 None => {
                     // Its run time counts from its `task_started`, also for a command that
                     // becomes a row only when the subagent that left it reports.
-                    let mut c = LiveAgent::new(&id, "");
+                    let call = self.task_calls.get(&id).map(String::as_str);
+                    let mut c = LiveAgent::new(&id, "", call);
                     c.title = title;
                     c.since = started;
                     self.live_commands.push(c);
@@ -1369,18 +1388,23 @@ impl Core {
         changed
     }
 
-    /// Subagent `id`'s `task_started` with `title` (its `description`): a repeated one keeps
-    /// the first start; one the CLI's list counted before gets its title.
-    fn live_started(&mut self, id: &str, title: &str) {
+    /// Subagent `id`'s `task_started` with `title` (its `description`) and `call` (its
+    /// `tool_use_id`): a repeated one keeps the first start; one the CLI's list counted before
+    /// gets its title; either takes a call that differs.
+    fn live_started(&mut self, id: &str, title: &str, call: Option<&str>) {
         match self.live.iter_mut().find(|a| a.task_id == id) {
             Some(a) => {
                 if a.title.is_empty() && !title.is_empty() {
                     a.title = text(title);
                     self.live_changed = true;
                 }
+                if call.is_some() && a.call_id.as_deref() != call {
+                    a.call_id = call.map(str::to_owned);
+                    self.live_changed = true;
+                }
             }
             None => {
-                self.live.push(LiveAgent::new(id, title));
+                self.live.push(LiveAgent::new(id, title, call));
                 self.live_changed = true;
             }
         }
@@ -1416,6 +1440,7 @@ impl Core {
                     total_tokens: a.total_tokens,
                     tool_uses: a.tool_uses,
                     duration_ms: u64::try_from(a.since.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    call_id: a.call_id.clone(),
                 })
                 .collect(),
         ))
@@ -1763,9 +1788,13 @@ impl Core {
         self.on_task_ended(v)
     }
 
-    /// The end of the task of `task_notification` `v` ([`Core::on_task_notification`]).
+    /// The end of the task of `task_notification` `v` ([`Core::on_task_notification`]). The
+    /// line carries the task's `tool_use_id` (the notification's, else that of its
+    /// `task_started`, [`Core::task_calls`]) as `call_id`, and the notification's `status` and
+    /// `task_id`.
     fn on_task_ended(&mut self, v: &Value) -> Vec<Action> {
         let id = v["task_id"].as_str();
+        let started = id.and_then(|id| self.task_calls.remove(id));
         // A subagent that ended asks nothing any more: its requests still open are cancelled
         // here, whichever comes first, this or the main turn's `result`.
         let mut out = match id {
@@ -1784,7 +1813,18 @@ impl Core {
             .filter(|s| !s.is_empty())
             .map_or_else(|| "Background task".into(), text);
         tracing::info!(session_id = %self.session_id, task_id = ?v["task_id"].as_str(), status = ?v["status"].as_str(), "background task notification");
-        out.push(self.emit_system(TASK_NOTIFICATION, t));
+        out.push(Action::Emit(AdapterEvent::Event(new_event(
+            self.session_id,
+            Author::System,
+            EventKind::System {
+                text: t,
+                code: TASK_NOTIFICATION.into(),
+                call_id: v["tool_use_id"].as_str().map(str::to_owned).or(started),
+                status: v["status"].as_str().map(str::to_owned),
+                task_id: id.map(str::to_owned),
+                fork: None,
+            },
+        ))));
         out
     }
 
@@ -1880,6 +1920,9 @@ impl Core {
             EventKind::System {
                 text,
                 code: code.into(),
+                call_id: None,
+                status: None,
+                task_id: None,
                 fork: None,
             },
         );
@@ -2050,6 +2093,34 @@ pub fn result_text(content: &Value) -> String {
 
 fn compact(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_default()
+}
+
+/// `args_preview` of a `tool_use` with `input` (SPEC §4): the input as JSON, cut to
+/// [`PREVIEW_LIMIT`]. An `Agent` (`Task` in older Claude Code) input has its `prompt` last: the
+/// keys come sorted, and a long prompt cut at 4 KB took `subagent_type` and `run_in_background`,
+/// which the subagent's card shows, with it. The adapter and the mirror both use it.
+pub fn args_preview(tool: &str, input: &Value) -> String {
+    let json = match input.as_object() {
+        Some(o) if (tool == "Agent" || tool == "Task") && o.contains_key("prompt") => {
+            let rest: serde_json::Map<String, Value> = o
+                .iter()
+                .filter(|(k, _)| k.as_str() != "prompt")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            // `{…}` of the other fields, then `"prompt":…` before its `}`.
+            let mut s = compact(&Value::Object(rest));
+            s.pop();
+            if s.len() > 1 {
+                s.push(',');
+            }
+            s.push_str("\"prompt\":");
+            s.push_str(&compact(&o["prompt"]));
+            s.push('}');
+            s
+        }
+        _ => compact(input),
+    };
+    preview(&json, PREVIEW_LIMIT)
 }
 
 /// Event text: U+0000 (binary tool output) becomes U+FFFD, which the hub can store

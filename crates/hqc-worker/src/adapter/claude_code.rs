@@ -727,6 +727,9 @@ impl ClaudeCodeAdapter {
                 EventKind::System {
                     text: TRANSCRIPT_MISSING_TEXT.into(),
                     code: TRANSCRIPT_MISSING.into(),
+                    call_id: None,
+                    status: None,
+                    task_id: None,
                     fork: None,
                 },
             );

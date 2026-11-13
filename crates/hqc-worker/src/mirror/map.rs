@@ -16,9 +16,13 @@
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply) → `agent.message`
 //!   with `runtime: true`;
 //! - `user` with `origin.kind` `task-notification` (a background task ended; the CLI writes
-//!   `<task-notification>…<summary>…</summary>` as its text) → `system task_notification`
-//!   with the summary. While the worker's own process runs the session the mirror does not
-//!   emit it: the adapter reported the stream-json line, whose uuid differs.
+//!   `<task-notification>…<summary>…</summary>` as its text), and an `attachment`
+//!   `queued_command` with `commandMode: task-notification` (one that came while a turn ran,
+//!   only a task's end, with `<status>`: a Monitor's event gives none) → `system
+//!   task_notification` with the summary, and `<tool-use-id>`, `<status>` and `<task-id>` of
+//!   the text before `<summary>` as `call_id`, `status` and `task_id`. While the worker's own
+//!   process runs the session the mirror does not emit it: the adapter reported the
+//!   stream-json line, whose uuid differs.
 //!
 //! Empty thinking (2.1.308 writes only a signature), images and unknown blocks give no event.
 //! `session_id` and the author ids are nil: the worker does not know the hqc session, the
@@ -32,16 +36,47 @@ use hqc_proto::event::{Author, ClarifyAnswer, Delivery, Event, EventKind};
 use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
-    parse_questions, preview, result_text, text, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, SYNTHETIC_MODEL,
-    TASK_NOTIFICATION,
+    args_preview, parse_questions, preview, result_text, text, ERROR_TEXT_LIMIT, PREVIEW_LIMIT,
+    SYNTHETIC_MODEL, TASK_NOTIFICATION,
 };
 
-/// `origin.kind` of the `user` record of a background task's notification (2.1.312).
+/// `origin.kind` of the `user` record of a background task's notification (2.1.312), and
+/// `commandMode` of the `queued_command` of one that came while a turn ran.
 const TASK_NOTIFICATION_ORIGIN: &str = "task-notification";
 
-/// A main-chain record of a background task's notification.
+/// A main-chain record of a background task's notification: a `user` record, or an
+/// `attachment` of a task's end that came while a turn ran ([`queued_notification`]).
 pub fn is_task_notification(record: &Record) -> bool {
-    matches!(record, Record::User(m) if m.is_main() && m.origin_kind() == Some(TASK_NOTIFICATION_ORIGIN))
+    match record {
+        Record::User(m) => m.is_main() && m.origin_kind() == Some(TASK_NOTIFICATION_ORIGIN),
+        Record::Attachment(a) => queued_notification(a).is_some(),
+        _ => false,
+    }
+}
+
+/// The content blocks of a background task's end that came while a turn ran: a main-chain
+/// `attachment` `queued_command` with `commandMode: task-notification` (2.1.312, `prompt` a
+/// string, as one `text` block) whose text has `<status>` before `<summary>`; `None` for any
+/// other attachment, a Monitor's event among them (it has no `<status>` there).
+fn queued_notification(a: &Attachment) -> Option<Vec<serde_json::Value>> {
+    let q = &a.attachment;
+    if a.is_sidechain
+        || q["type"] != "queued_command"
+        || q["commandMode"] != TASK_NOTIFICATION_ORIGIN
+    {
+        return None;
+    }
+    let blocks = match &q["prompt"] {
+        serde_json::Value::String(s) => vec![serde_json::json!({"type": "text", "text": s})],
+        serde_json::Value::Array(b) => b.clone(),
+        _ => return None,
+    };
+    let body = blocks
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .find_map(|b| b["text"].as_str())
+        .unwrap_or("");
+    tag(head(body), "status").is_some().then_some(blocks)
 }
 
 /// A message a person typed while a turn ran ([`Attachment::queued_prompt`]).
@@ -54,7 +89,16 @@ pub fn record_events(record: &Record, in_reply_to: Option<Uuid>) -> Vec<Event> {
     match record {
         Record::User(m) if m.is_main() => user(m),
         Record::Assistant(m) if m.is_main() => assistant(m, in_reply_to),
-        Record::Attachment(a) => queued(a),
+        Record::Attachment(a) => match (a.uuid, queued_notification(a)) {
+            (Some(uuid), Some(blocks)) => {
+                vec![notification(
+                    uuid,
+                    parse_ts(a.timestamp.as_deref()),
+                    &blocks,
+                )]
+            }
+            _ => queued(a),
+        },
         _ => vec![],
     }
 }
@@ -105,19 +149,6 @@ fn agent() -> Author {
     Author::Agent { id: Uuid::nil() }
 }
 
-fn system(m: &Message, index: usize, code: &str, text: String) -> Event {
-    event(
-        m,
-        index,
-        Author::System,
-        EventKind::System {
-            text,
-            code: code.into(),
-            fork: None,
-        },
-    )
-}
-
 /// The text of `<tag>…</tag>` in a notification, trimmed; `None` when absent or empty.
 fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     let (open, close) = (format!("<{name}>"), format!("</{name}>"));
@@ -125,17 +156,44 @@ fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     Some(rest[..rest.find(&close)?].trim()).filter(|t| !t.is_empty())
 }
 
+/// The text of a notification before its `<summary>`, where the CLI puts the task's tags.
+fn head(body: &str) -> &str {
+    &body[..body.find("<summary>").unwrap_or(body.len())]
+}
+
+/// `system task_notification` of a notification's content `blocks`, of record `uuid` written
+/// at `ts`, with the id of its first text block: the text is its `<summary>`, else "Background
+/// task"; `call_id`, `status` and `task_id` are `<tool-use-id>`, `<status>` and `<task-id>` of
+/// the text before `<summary>`. A Monitor's event has no `<tool-use-id>` nor `<status>`, and
+/// its `<event>`, after the summary, holds the watched command's output, any tag included.
+fn notification(uuid: Uuid, ts: DateTime<Utc>, blocks: &[serde_json::Value]) -> Event {
+    let (i, body) = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b["type"] == "text")
+        .find_map(|(i, b)| Some((i, b["text"].as_str()?)))
+        .unwrap_or((0, ""));
+    let head = head(body);
+    let field = |name: &str| tag(head, name).map(str::to_owned);
+    event_at(
+        uuid,
+        ts,
+        i,
+        Author::System,
+        EventKind::System {
+            text: text(tag(body, "summary").unwrap_or("Background task")),
+            code: TASK_NOTIFICATION.into(),
+            call_id: field("tool-use-id"),
+            status: field("status"),
+            task_id: field("task-id"),
+            fork: None,
+        },
+    )
+}
+
 fn user(m: &Message) -> Vec<Event> {
     if m.origin_kind() == Some(TASK_NOTIFICATION_ORIGIN) {
-        let blocks = m.blocks();
-        let (i, body) = blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| b["type"] == "text")
-            .find_map(|(i, b)| Some((i, b["text"].as_str()?)))
-            .unwrap_or((0, ""));
-        let t = tag(body, "summary").unwrap_or("Background task");
-        return vec![system(m, i, TASK_NOTIFICATION, text(t))];
+        return vec![notification(m.uuid, ts(m), &m.blocks())];
     }
     let mut out = Vec::new();
     for (i, b) in m.blocks().iter().enumerate() {
@@ -312,10 +370,7 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
             Some("tool_use") => EventKind::ToolCall {
                 call_id: b["id"].as_str().unwrap_or("").into(),
                 tool: b["name"].as_str().unwrap_or("").into(),
-                args_preview: preview(
-                    &serde_json::to_string(&b["input"]).unwrap_or_default(),
-                    PREVIEW_LIMIT,
-                ),
+                args_preview: args_preview(b["name"].as_str().unwrap_or(""), &b["input"]),
             },
             Some("thinking") => {
                 let t = b["thinking"].as_str().unwrap_or("");
@@ -467,7 +522,8 @@ mod tests {
     }
 
     /// A background task's notification is `system task_notification` with its summary (else
-    /// "Background task"), not a prompt; the CLI's own reply (`<synthetic>`, the record of a live run
+    /// "Background task"), its `<tool-use-id>`, `<status>` and `<task-id>` as `call_id`,
+    /// `status` and `task_id`, not a prompt; the CLI's own reply (`<synthetic>`, the record of a live run
     /// on 2.1.312 with a model the API does not know) is `agent.message` with `runtime: true`
     /// and the adapter's id for the block.
     #[test]
@@ -482,6 +538,9 @@ mod tests {
                        (exit code 0)"
                     .into(),
                 code: "task_notification".into(),
+                call_id: Some("toolu_01DNPTCZTgycgC11D8VMjfaD".into()),
+                status: Some("completed".into()),
+                task_id: Some("b1b20u6dl".into()),
                 fork: None,
             }]
         );
@@ -526,9 +585,83 @@ mod tests {
         );
     }
 
+    /// A Monitor's event names its task but no call nor status, even when the watched output
+    /// in its `<event>` holds such tags.
+    #[test]
+    fn a_monitor_event_has_no_call_nor_status() {
+        let text = "<task-notification>\n<task-id>blyhf7ajv</task-id>\n<summary>Monitor event: \
+                    \"build log\"</summary>\n<event><tool-use-id>toolu_01X</tool-use-id>\
+                    <status>failed</status></event>\n</task-notification>";
+        let line = serde_json::json!({"parentUuid": null, "isSidechain": false, "type": "user",
+            "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+            "origin": {"kind": "task-notification"},
+            "message": {"role": "user", "content": text}});
+        let rec = hqc_claude_jsonl::parse_line(&line.to_string()).unwrap();
+        let evs = record_events(&rec, None);
+        assert_eq!(
+            evs.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+            [EventKind::System {
+                text: "Monitor event: \"build log\"".into(),
+                code: "task_notification".into(),
+                call_id: None,
+                status: None,
+                task_id: Some("blyhf7ajv".into()),
+                fork: None,
+            }]
+        );
+    }
+
+    /// A Monitor's event that came while a turn ran, the `attachment` form, is no task's end:
+    /// no `<status>` before `<summary>`, no events, as any other attachment.
+    #[test]
+    fn a_monitor_event_during_a_turn_gives_no_events() {
+        let line = serde_json::json!({"parentUuid": Uuid::new_v4(), "isSidechain": false,
+            "type": "attachment", "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+            "attachment": {"type": "queued_command",
+                "prompt": "<task-notification>\n<task-id>blyhf7ajv</task-id>\n<summary>Monitor \
+                           event: \"build log\"</summary>\n<event>PASSED</event>\n\
+                           </task-notification>",
+                "commandMode": "task-notification", "origin": {"kind": "task-notification"}},
+            "version": "2.1.319"});
+        let rec = hqc_claude_jsonl::parse_line(&line.to_string()).unwrap();
+        assert!(!is_task_notification(&rec));
+        assert!(record_events(&rec, None).is_empty(), "{rec:?}");
+        assert_eq!((typed_text(&rec), counted_uuid(&rec)), (None, None));
+    }
+
+    /// An `Agent` call's prompt goes last in its preview: a long one does not push its
+    /// `subagent_type` and `run_in_background` out (SPEC §8.1).
+    #[test]
+    fn an_agent_calls_prompt_goes_last_in_its_preview() {
+        let line = serde_json::json!({"parentUuid": null, "isSidechain": false,
+            "type": "assistant", "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01A",
+                "name": "Agent", "input": {"description": "Fix the nets",
+                    "prompt": "x".repeat(5000), "subagent_type": "general-purpose",
+                    "run_in_background": true}}]}});
+        let rec = hqc_claude_jsonl::parse_line(&line.to_string()).unwrap();
+        let evs = record_events(&rec, None);
+        let [Event {
+            kind: EventKind::ToolCall { args_preview, .. },
+            ..
+        }] = &evs[..]
+        else {
+            panic!("{evs:?}")
+        };
+        assert_eq!(args_preview.len(), PREVIEW_LIMIT);
+        assert!(
+            args_preview.starts_with(
+                "{\"description\":\"Fix the nets\",\"run_in_background\":true,\
+                 \"subagent_type\":\"general-purpose\",\"prompt\":\"xxx"
+            ),
+            "{args_preview}"
+        );
+    }
+
     /// A message typed while a turn ran and an answered `AskUserQuestion`, in 2.1.318 shapes.
     /// The message is the user's, at the time it was typed, one event per text block with the
-    /// block's id; a peer's message and a task's notification stay without events. The answer
+    /// block's id; a peer's message stays without events, a task's notification is its `system
+    /// task_notification` with the record's id. The answer
     /// is the tool result, then the question card and its answers with ids of their own, a
     /// multi-select answer split by its labels; a declined question is the error result only.
     #[test]
@@ -568,17 +701,39 @@ mod tests {
         assert_eq!(evs[0].delivery, Some(Delivery::Delivered));
         assert_eq!(typed_text(&typed).as_deref(), Some("Skip the tests folder"));
         assert_eq!(counted_uuid(&typed), Some(uuid));
-        for other in [
-            json!({"type": "queued_command",
-                "prompt": "<cross-session-message>hi</cross-session-message>",
-                "commandMode": "prompt", "origin": {"kind": "peer"}, "isMeta": true}),
-            json!({"type": "queued_command", "prompt": "<task-notification></task-notification>",
-                "commandMode": "task-notification", "origin": {"kind": "task-notification"}}),
-        ] {
-            let (r, _) = queued_command(other);
-            assert!(record_events(&r, None).is_empty(), "{r:?}");
-            assert_eq!((typed_text(&r), counted_uuid(&r)), (None, None));
-        }
+        let (peer, _) = queued_command(json!({"type": "queued_command",
+            "prompt": "<cross-session-message>hi</cross-session-message>",
+            "commandMode": "prompt", "origin": {"kind": "peer"}, "isMeta": true}));
+        assert!(record_events(&peer, None).is_empty(), "{peer:?}");
+        assert_eq!((typed_text(&peer), counted_uuid(&peer)), (None, None));
+        let (notified, uuid) = queued_command(json!({"type": "queued_command",
+            "prompt": "<task-notification>\n<task-id>a52af2b436ded4cea</task-id>\n\
+                <tool-use-id>toolu_01B2anRdzK42h65tA2gdwhb2</tool-use-id>\n\
+                <output-file>/tmp/a52af2b436ded4cea.output</output-file>\n\
+                <status>completed</status>\n\
+                <summary>Agent \"Fix the nets\" completed</summary>\n\
+                <result>Done</result>\n</task-notification>",
+            "commandMode": "task-notification", "origin": {"kind": "task-notification"}}));
+        assert!(is_task_notification(&notified));
+        let evs = record_events(&notified, None);
+        assert_eq!(
+            evs.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+            [EventKind::System {
+                text: "Agent \"Fix the nets\" completed".into(),
+                code: "task_notification".into(),
+                call_id: Some("toolu_01B2anRdzK42h65tA2gdwhb2".into()),
+                status: Some("completed".into()),
+                task_id: Some("a52af2b436ded4cea".into()),
+                fork: None,
+            }]
+        );
+        assert_eq!(evs[0].event_id, Event::id_from_claude_block(&uuid, 0));
+        assert_eq!(evs[0].ts.to_rfc3339(), "2026-11-08T20:56:46.218+00:00");
+        assert_eq!((&evs[0].author, evs[0].delivery), (&Author::System, None));
+        assert_eq!(
+            (typed_text(&notified), counted_uuid(&notified)),
+            (None, Some(uuid))
+        );
 
         let answer = |content: &str, error: bool, result: serde_json::Value| {
             let block = json!({"type": "tool_result", "content": content, "is_error": error,

@@ -3381,6 +3381,78 @@ fn only_a_background_task_is_a_notification() {
     );
 }
 
+/// A `task_notification` line carries the notification's `tool_use_id` as `call_id`, else that
+/// of the task's `task_started`, its `status` and its `task_id` (made up after the lines of
+/// `only_a_background_task_is_a_notification`).
+#[test]
+fn a_task_notification_carries_its_call_status_and_task() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let stream = r#"{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent"}
+{"type":"system","subtype":"task_notification","task_id":"a52af2b436ded4cea","status":"failed","summary":"4"}
+{"type":"system","subtype":"task_notification","task_id":"bnx80r4bg","tool_use_id":"toolu_01LkxBZReUQu4HTFtoWqC3Nb","status":"stopped","summary":"Sleep for 20 seconds"}"#;
+    type Line = (Option<String>, Option<String>, Option<String>);
+    let lines: Vec<Line> = play(&mut core, stream)
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match e.kind {
+                EventKind::System {
+                    call_id,
+                    status,
+                    task_id,
+                    ..
+                } => Some((call_id, status, task_id)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let line = |call: &str, status: &str, task: &str| -> Line {
+        (Some(call.into()), Some(status.into()), Some(task.into()))
+    };
+    assert_eq!(
+        lines,
+        [
+            line(
+                "toolu_01B2anRdzK42h65tA2gdwhb2",
+                "failed",
+                "a52af2b436ded4cea"
+            ),
+            line("toolu_01LkxBZReUQu4HTFtoWqC3Nb", "stopped", "bnx80r4bg")
+        ]
+    );
+}
+
+/// An `Agent` call's `args_preview` has its `prompt` last: with a prompt past the 4 KB cut the
+/// sorted keys lost `subagent_type` and `run_in_background`, which the subagent's card shows.
+#[test]
+fn an_agent_calls_prompt_goes_last_in_its_preview() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let input = json!({"description": "Fix the nets", "prompt": "x".repeat(5000),
+        "subagent_type": "general-purpose", "run_in_background": true});
+    let line = json!({"type": "assistant", "parent_tool_use_id": null,
+        "uuid": "6f1d0c3e-3c2f-4a55-9d0e-1a2b3c4d5e70",
+        "message": {"model": "claude-haiku-5-5", "role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_A1", "name": "Agent", "input": input}]}});
+    let preview = emitted(core.on_line(&line.to_string()))
+        .into_iter()
+        .find_map(|e| match e {
+            AdapterEvent::Event(Event {
+                kind: EventKind::ToolCall { args_preview, .. },
+                ..
+            }) => Some(args_preview),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(preview.len(), super::engine::PREVIEW_LIMIT);
+    assert!(
+        preview.starts_with(
+            r#"{"description":"Fix the nets","run_in_background":true,"subagent_type":"general-purpose","prompt":"xxx"#
+        ),
+        "{}",
+        &preview[..120]
+    );
+}
+
 /// The rule of the VS Code tab's "Run in background" (extension 2.1.319; the first lines are of
 /// live runs on 2.1.312, the `killed` one, the nested subagent, the task started in the
 /// background, the ones with `skip_transcript` or `monitor_mcp` and the task started again are
@@ -4369,6 +4441,45 @@ fn live_subagents_are_listed() {
             vec![],
             vec![vec![]]
         ]
+    );
+}
+
+/// The rows above the input carry the `tool_use_id` of each subagent's `task_started` as
+/// `call_id`, also a subagent the CLI's list counted before that start (the last two lines
+/// made up after [`MOVED_SUBAGENT`]).
+#[test]
+fn live_subagents_carry_their_call() {
+    let calls = |lines: &[&str]| -> Vec<Vec<Vec<Option<String>>>> {
+        let mut core = Core::new(Uuid::now_v7(), false);
+        lines
+            .iter()
+            .map(|l| {
+                core.on_line(l)
+                    .into_iter()
+                    .filter_map(|a| match a {
+                        Action::Emit(AdapterEvent::LiveSubagents(list)) => {
+                            Some(list.into_iter().map(|s| s.call_id).collect())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let fg = || Some("toolu_01Ti9wrYYVp7kqsruhoHEsLf".to_string());
+    let bg = || Some("toolu_01B2anRdzK42h65tA2gdwhb2".to_string());
+    let lines: Vec<&str> = TWO_SUBAGENTS.lines().collect();
+    assert_eq!(
+        calls(&lines[..2]),
+        [vec![vec![fg()]], vec![vec![fg(), bg()]]]
+    );
+    let listed_first = [
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"}]}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_A1","description":"Fix the build","is_backgrounded":true,"task_type":"local_agent"}"#,
+    ];
+    assert_eq!(
+        calls(&listed_first),
+        [vec![vec![None]], vec![vec![Some("toolu_A1".to_string())]]]
     );
 }
 

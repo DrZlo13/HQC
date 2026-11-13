@@ -2130,6 +2130,9 @@ impl Session {
             EventKind::System {
                 text: text.into(),
                 code: code.into(),
+                call_id: None,
+                status: None,
+                task_id: None,
                 fork: None,
             },
         );

@@ -327,6 +327,9 @@ impl Mirror {
             kind: EventKind::System {
                 text: fork::fork_text(hqc, f.orphaned_turns),
                 code: SESSION_FORKED.into(),
+                call_id: None,
+                status: None,
+                task_id: None,
                 fork: Some(SessionForked {
                     at_uuid: f.at,
                     branch_from: if hqc { "hqc" } else { "vscode" }.into(),

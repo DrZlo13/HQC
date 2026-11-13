@@ -185,6 +185,10 @@ pub struct LiveSubagent {
     pub tool_uses: Option<u64>,
     /// How long it has run when the list was sent, by the worker's clock.
     pub duration_ms: u64,
+    /// `call_id` of the `tool.call` that started it (Claude Code: `tool_use_id` of its
+    /// `task_started`; since SPEC 0.135); absent before that comes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
@@ -373,6 +377,18 @@ pub enum EventKind {
     System {
         text: String,
         code: String,
+        /// Only with `task_notification`: `call_id` of the `tool.call` that started the task
+        /// (since SPEC 0.135); absent when the runtime does not name it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        /// Only with `task_notification`: how the task ended, as the runtime says it
+        /// (Claude Code: `completed`, `failed`, `stopped`; since SPEC 0.135).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        /// Only with `task_notification`: the runtime's id of the task (Claude Code: its
+        /// `task_id`, a subagent's `agentId`; since SPEC 0.135).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
         /// Only with [`SESSION_FORKED`]: its fields sit next to `text` and `code`.
         #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
         fork: Option<SessionForked>,
@@ -832,6 +848,9 @@ mod tests {
             EventKind::System {
                 text: "t".into(),
                 code: "c".into(),
+                call_id: None,
+                status: None,
+                task_id: None,
                 fork: None
             }
         );

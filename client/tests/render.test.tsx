@@ -15,7 +15,7 @@ import {
   onlyRequests,
   type ChatActions,
 } from "../src/ui/cards";
-import { CANONICAL_LABELS } from "../src/ui/labels";
+import { CANONICAL_LABELS, formatTime } from "../src/ui/labels";
 import { argsText, buildFeed, cutJson, relativePaths, subagentState } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
@@ -247,6 +247,173 @@ describe("an input that came while the agent's text was being written (SPEC §6)
     expect(blocks.map((b) => b.kind)).toEqual(["agent", "item"]);
     const [first] = blocks;
     expect(first.kind === "agent" ? first.usage?.seq : undefined).toBe(3);
+  });
+});
+
+describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
+  const at = (seq: number) =>
+    new Date(Date.parse("2026-10-22T10:00:00Z") + seq * 1000).toISOString();
+  const id = (seq: number) =>
+    `0199f3a2-7c10-7000-8000-${String(seq).padStart(12, "0")}`;
+  /** The user's message stored at `seq`: delivered at `seq` `delivered` (the worker's ack),
+   *  else pending. */
+  const input = (seq: number, delivered?: number, patch: (e: any) => void = () => {}) =>
+    ev("event.user.message", (e) => {
+      e.seq = seq;
+      e.event_id = id(seq);
+      e.ts = at(seq);
+      e.payload = { text: `input ${seq}`, artifact_ids: [] };
+      if (delivered === undefined) {
+        e.delivery = "pending";
+        delete e.delivered_at;
+      } else e.delivered_at = at(delivered);
+      patch(e);
+    });
+  const final = (seq: number, inReplyTo: number) =>
+    ev("event.agent.message", (e) => {
+      e.seq = seq;
+      e.ts = at(seq);
+      e.payload = { text: `answer to ${inReplyTo}`, final: true, in_reply_to: id(inReplyTo) };
+    });
+  const idle = (seq: number, inReplyTo: number) =>
+    ev("event.status", (e) => {
+      e.seq = seq;
+      e.ts = at(seq);
+      e.payload = { state: "idle", in_reply_to: id(inReplyTo) };
+    });
+  const order = (t: Timeline) => t.items().map((i) => i.key);
+  const time = (seq: number) =>
+    [...root.querySelectorAll(".msg-user")]
+      .find((m) => m.textContent?.includes(`input ${seq}`))!
+      .querySelector(".msg-time")!.textContent;
+
+  it("stands at the bottom while the turn runs, queued for the next turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      call(5, "b", "Bash", { command: "make test" }),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e3"]);
+    show(t);
+    expect(time(3)).toBe(`${formatTime(at(3))} · queued for the next turn`);
+  });
+
+  it("delivered, stands after the turn it waited through and before the work of its own", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      final(5, 1),
+      ev("event.usage", withSeq(6)),
+      idle(7, 1),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3"]);
+    t.applyDelivery({
+      session_id: "s",
+      event_id: id(3),
+      seq: 3,
+      delivery: "delivered",
+      delivered_at: at(7.1),
+    });
+    t.applyAll([call(8, "b", "Read", { file_path: "a.rs" }), result(9, "b"), final(10, 3)]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e7", "e3", "e8", "e9", "e10"]);
+    show(t);
+    expect(time(3)).toBe(formatTime(at(3)));
+    // The answer it waited through keeps its usage line.
+    expect(root.querySelectorAll(".msg-final > .meta .usage")).toHaveLength(1);
+  });
+
+  it("one whose turn has no work (a slash command) stands before the end of its own turn", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.1, (e) => (e.payload.text = "/cost")),
+      result(4, "a"),
+      final(5, 1),
+      idle(6, 1),
+      idle(7, 3),
+      input(8, 8.1),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e6", "e3", "e7", "e8"]);
+  });
+
+  it("inputs waiting one behind another take the turns in order", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 6.1),
+      input(4),
+      result(5, "a"),
+      final(6, 1),
+      call(7, "b", "Bash", { command: "ls" }),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e5", "e6", "e3", "e7", "e4"]);
+    const queued = t.items().filter((i) => i.kind === "event" && i.queued);
+    expect(queued.map((i) => i.key)).toEqual(["e3", "e4"]);
+  });
+
+  it("stands under the inputs written during the text, live and once the text is stored", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3),
+      result(4, "a"),
+      input(5, undefined, (e) => (e.payload.during_text = true)),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e5", "e3"]);
+    t.applyAll([final(6, 1), ev("event.usage", withSeq(7))]);
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e6", "e7", "e5", "e3"]);
+  });
+
+  it("a question from another session waits too, and says so", () => {
+    const t = new Timeline();
+    t.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      ev("event.peer.message", withSeq(3)),
+    ]);
+    expect(order(t)).toEqual(["e1", "e2", "e3"]);
+    t.apply(result(4, "a"));
+    expect(order(t)).toEqual(["e1", "e2", "e4", "e3"]);
+    show(t);
+    expect(root.querySelector(".relay-when")!.textContent).toBe(
+      `${formatTime("2026-10-22T10:00:00Z")} · queued for the next turn`,
+    );
+  });
+
+  it("keeps its place: sent while no turn ran, joined to the turn, or mirrored", () => {
+    const t = new Timeline();
+    t.applyAll([input(1, 1.2), final(2, 1), input(3)]);
+    expect(order(t)).toEqual(["e1", "e2", "e3"]);
+    show(t);
+    expect(time(3)).toBe(`${formatTime(at(3))} · awaiting delivery`);
+    const joined = new Timeline();
+    joined.applyAll([
+      input(1, 1.2),
+      call(2, "a", "Bash", { command: "make" }),
+      input(3, 4.1, (e) => (e.payload.joined = true)),
+      result(4, "a"),
+      final(5, 1),
+    ]);
+    expect(order(joined)).toEqual(["e1", "e2", "e3", "e4", "e5"]);
+    // A message typed in VS Code during a turn, mirrored where the CLI took it (SPEC §9.1).
+    const mirrored = new Timeline();
+    mirrored.applyAll([
+      input(1, 1),
+      call(2, "a", "Bash", { command: "make" }),
+      result(3, "a"),
+      input(4, 4),
+      final(5, 1),
+    ]);
+    expect(order(mirrored)).toEqual(["e1", "e2", "e3", "e4", "e5"]);
   });
 });
 
@@ -858,6 +1025,32 @@ describe("tool groups (T26)", () => {
     expect(groups).toHaveLength(2);
     expect(root.querySelector(".msg-agent")!.textContent).toContain("Looking further.");
     expect(groups[1].classList.contains("tool-running")).toBe(true);
+  });
+
+  it("a call its turn left without a result is not finished; a call of the turn going on runs", async () => {
+    const t = new Timeline();
+    t.applyAll([
+      call(1, "a", "Bash", { command: "sleep 600" }),
+      ev("event.system", (e) => {
+        e.seq = 2;
+        e.payload = { code: "turn_lost", text: "The agent process stopped during a turn; the turn was lost" };
+      }),
+      ev("event.user.message", withSeq(3)),
+      call(4, "b", "Bash", { command: "make" }),
+    ]);
+    show(t);
+    const [lost, now] = [...root.querySelectorAll(".tool-group")];
+    expect(lost.classList.contains("tool-unfinished")).toBe(true);
+    expect(lost.querySelector(".pulse-dot")).toBeNull();
+    expect(lost.querySelector(".tool-group-head .mark-error")!.getAttribute("aria-label")).toBe("not finished");
+    // The one-column gutter marks it as a failed call.
+    expect(lost.parentElement!.querySelector(".feed-mark-error")).not.toBeNull();
+    await act(async () => lost.querySelector<HTMLButtonElement>(".tool-group-head")!.click());
+    const row = lost.querySelector(".tool-row")!;
+    expect(row.classList.contains("tool-unfinished")).toBe(true);
+    expect(row.querySelector(".mark-error")!.getAttribute("aria-label")).toBe("not finished");
+    expect(now.classList.contains("tool-running")).toBe(true);
+    expect(now.querySelector(".tool-group-head .pulse-dot")).not.toBeNull();
   });
 });
 
@@ -1602,6 +1795,19 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
       render(null, root);
       vi.useRealTimers();
     }
+  });
+
+  it("a call before the last end of a turn is not the running one", () => {
+    const t = new Timeline();
+    t.applyAll([
+      call(1, "a", "Bash", { command: "sleep 600" }),
+      agentText(2, "Stopped.", true),
+      ev("event.user.message", withSeq(3)),
+    ]);
+    expect(draw("running", t)!.textContent).toBe("Agent is working");
+    render(null, root);
+    t.apply(call(4, "b", "Bash", { command: "make" }));
+    expect(draw("running", t)!.querySelector(".activity-what")!.textContent).toBe("make");
   });
 
   it('a waiting hqc_ask (T32): "Waiting for a reply from <session> <time>"', () => {

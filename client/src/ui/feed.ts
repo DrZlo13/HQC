@@ -14,7 +14,8 @@ import type { Item, Timeline } from '../timeline';
 import { oneLine } from './labels';
 
 export type ToolRow =
-  | { kind: 'call'; key: string; call?: EventOf<'tool.call'>; result?: EventOf<'tool.result'> }
+  /** `unfinished`: a call without a result whose turn ended after it (SPEC §6). */
+  | { kind: 'call'; key: string; call?: EventOf<'tool.call'>; result?: EventOf<'tool.result'>; unfinished?: boolean }
   | { kind: 'thinking'; key: string; event: EventOf<'agent.thinking'> };
 
 /** An `hqc_send` / `hqc_ask` call of this session's agent and its result (T51). */
@@ -137,6 +138,7 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
     out.push({ kind: 'subagent-end', key, call, end: e, first: !ended.has(call.payload.call_id) });
     ended.add(call.payload.call_id);
   };
+  const turnEnd = timeline.lastTurnEnd();
 
   for (const it of items) {
     if (it.kind !== 'event') {
@@ -179,11 +181,10 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
           group = { kind: 'tools', key: it.key, rows: [] };
           out.push(group);
         }
-        group.rows.push(
-          e.type === 'tool.call'
-            ? { kind: 'call', key: it.key, call: e, result: timeline.resultFor(e.payload.call_id) }
-            : { kind: 'call', key: it.key, result: e },
-        );
+        if (e.type === 'tool.call') {
+          const result = timeline.resultFor(e.payload.call_id);
+          group.rows.push({ kind: 'call', key: it.key, call: e, result, unfinished: !result && e.seq! < turnEnd });
+        } else group.rows.push({ kind: 'call', key: it.key, result: e });
         continue;
       }
       case 'agent.thinking':
@@ -262,11 +263,14 @@ export function callRows(rows: ToolRow[]): Extract<ToolRow, { kind: 'call' }>[] 
   return rows.filter((r): r is Extract<ToolRow, { kind: 'call' }> => r.kind === 'call');
 }
 
-/** `running` while a call has no result, else `error` or `ok` by the last call. */
-export function groupState(rows: ToolRow[]): 'running' | 'error' | 'ok' {
+/** `running` while a call has no result and its turn goes on, else by the last call:
+ *  `unfinished` without a result, `error` or `ok`. */
+export function groupState(rows: ToolRow[]): 'running' | 'unfinished' | 'error' | 'ok' {
   const calls = callRows(rows);
-  if (calls.some((r) => !r.result)) return 'running';
-  return calls.at(-1)?.result!.payload.error ? 'error' : 'ok';
+  if (calls.some((r) => !r.result && !r.unfinished)) return 'running';
+  const last = calls.at(-1);
+  if (last && !last.result) return 'unfinished';
+  return last?.result!.payload.error ? 'error' : 'ok';
 }
 
 /** From the first call to the last result; the sum of `duration_ms` if the times say nothing. */

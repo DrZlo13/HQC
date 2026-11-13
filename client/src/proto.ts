@@ -274,6 +274,8 @@ export interface Usage {
 export interface Status {
   state: SessionState;
   detail?: string;
+  /** On the `idle` that ends a turn: the turn's input, as on `agent.message` (SPEC §4). */
+  in_reply_to?: Uuid;
 }
 export interface SystemNote {
   text: string;
@@ -522,7 +524,11 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     session_cost_usd: optNum(p, 'session_cost_usd'),
     model: optStr(p, 'model'),
   }),
-  status: (p) => ({ state: tolerantEnum(p, 'state', SESSION_STATES), detail: optStr(p, 'detail') }),
+  status: (p) => ({
+    state: tolerantEnum(p, 'state', SESSION_STATES),
+    detail: optStr(p, 'detail'),
+    in_reply_to: optStr(p, 'in_reply_to'),
+  }),
   system: (p) => ({
     text: str(p, 'text'),
     code: str(p, 'code'),

@@ -1407,8 +1407,8 @@ function firstShown(blocks: ReturnType<typeof buildFeed>, from: number): number 
 }
 
 /** Index of the first of the last blocks that are inputs come while the text being written now
- *  was (`during_text`, stored after the last event that ended a text) or messages not stored
- *  yet. */
+ *  was (`during_text`, stored after the last event that ended a text), inputs waiting for a turn
+ *  of their own (`queued`, still `pending`) or messages not stored yet. */
 function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
   const evs = t.events();
   let ended = 0;
@@ -1424,7 +1424,8 @@ function underText(blocks: ReturnType<typeof buildFeed>, t: Timeline): number {
     const b = blocks[i - 1];
     if (b.kind !== 'item') break;
     const it = b.item;
-    if (!(it.kind === 'pending' || (it.kind === 'event' && duringText(it) && it.event.seq! > ended))) break;
+    const queued = it.kind === 'event' && it.queued && it.event.delivery === 'pending';
+    if (!(it.kind === 'pending' || queued || (it.kind === 'event' && duringText(it) && it.event.seq! > ended))) break;
     i--;
   }
   return i;

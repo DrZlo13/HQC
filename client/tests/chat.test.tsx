@@ -1492,6 +1492,21 @@ describe('an input that came while the agent writes (SPEC §6)', () => {
     expect(under($('.msg-pending')!)).toBe(true);
   });
 
+  it('one queued for the next turn stands under the text and under the inputs written during it', async () => {
+    const { push } = await writing([first]);
+    const queued = ev('event.user.message', 2, (e) => {
+      e.event_id = '0199f3a2-7c10-7000-8000-000000000320';
+      e.payload = { text: 'queued meanwhile', artifact_ids: [] };
+      e.delivery = 'pending';
+      delete e.delivered_at;
+    });
+    await act(async () => push(queued));
+    await act(async () => push(meanwhile(3)));
+    expect(under(block('queued meanwhile'))).toBe(true);
+    expect(block('written meanwhile').compareDocumentPosition(block('queued meanwhile')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(block('queued meanwhile').querySelector('.msg-time')!.textContent).toContain('· queued for the next turn');
+  });
+
   it('one that came during an earlier text stays above it', async () => {
     const answer = ev('event.agent.message', 3, (e) => (e.payload = { text: 'the earlier answer', final: true }));
     const idle = ev('event.status', 4, (e) => (e.payload = { state: 'idle' }));

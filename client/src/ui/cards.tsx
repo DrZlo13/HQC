@@ -168,7 +168,8 @@ function gutter(b: Block, timeline: Timeline): Gutter {
     case 'tools': {
       const state = groupState(b.rows);
       if (state === 'running') return { mark: mark('running', <span class="pulse-dot" />) };
-      return { mark: mark(state, state === 'ok' ? <IconCheck size={13} /> : <IconCross size={13} />) };
+      // A call its turn left without a result is marked as a failed one, as the VS Code tab does.
+      return { mark: state === 'ok' ? mark('ok', <IconCheck size={13} />) : mark('error', <IconCross size={13} />) };
     }
     case 'subagent': {
       const { state } = subagentState(b.call, b.result, timeline);
@@ -269,7 +270,7 @@ function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
       const it = block.item;
       switch (it.kind) {
         case 'event':
-          return <EventView event={it.event} actions={actions} />;
+          return <EventView event={it.event} actions={actions} queued={it.queued} />;
         case 'invalid':
           return <InvalidCard invalid={it.invalid} />;
         case 'pending':
@@ -352,10 +353,11 @@ export function ActivityLine({
   );
 }
 
-export function EventView({ event, actions }: { event: HqcEvent; actions: ChatActions }) {
+/** `queued`: an input waiting for a turn of its own (`Item.queued`). */
+export function EventView({ event, actions, queued }: { event: HqcEvent; actions: ChatActions; queued?: boolean }) {
   switch (event.type) {
     case 'user.message':
-      return <UserMessage event={event} actions={actions} />;
+      return <UserMessage event={event} actions={actions} queued={queued} />;
     case 'agent.delta':
       return <StreamingMessage text={event.payload.text} />;
     case 'subagents.live':
@@ -407,7 +409,7 @@ export function EventView({ event, actions }: { event: HqcEvent; actions: ChatAc
         />
       );
     case 'peer.message':
-      return <PeerMessageBlock event={event} actions={actions} />;
+      return <PeerMessageBlock event={event} actions={actions} queued={queued} />;
     case 'usage':
       return (
         <div class="line line-usage">
@@ -575,7 +577,7 @@ function MessageActions({ children }: { children: ComponentChildren }) {
   return <div class="msg-actions">{children}</div>;
 }
 
-function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actions: ChatActions }) {
+function UserMessage({ event, actions, queued }: { event: EventOf<'user.message'>; actions: ChatActions; queued?: boolean }) {
   const d = event.delivery;
   const ids = event.payload.artifact_ids;
   const fork = actions.fork && event.author.kind === 'user' && d !== 'pending' && d !== 'failed';
@@ -606,7 +608,7 @@ function UserMessage({ event, actions }: { event: EventOf<'user.message'>; actio
         note={event.payload.joined ? 'joined the turn' : undefined}
         time={[
           event.payload.schedule_id && <span class="scheduled"> · scheduled</span>,
-          d === 'pending' && <span class="delivery"> · awaiting delivery</span>,
+          d === 'pending' && <span class="delivery"> · {queued ? 'queued for the next turn' : 'awaiting delivery'}</span>,
           d === 'failed' && <span class="delivery delivery-failed"> · not delivered</span>,
           forking && (
             <span class="forking" role="status">
@@ -783,8 +785,14 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
   );
 }
 
-function StateMark({ state }: { state: 'running' | 'error' | 'ok' }) {
+function StateMark({ state }: { state: 'running' | 'unfinished' | 'error' | 'ok' }) {
   if (state === 'running') return <span class="pulse-dot" role="img" aria-label="running" />;
+  if (state === 'unfinished')
+    return (
+      <span class="mark mark-error" role="img" aria-label="not finished">
+        <IconCross size={13} />
+      </span>
+    );
   return (
     <span class={`mark mark-${state}`} role="img" aria-label={state === 'ok' ? 'done' : 'error'}>
       {state === 'ok' ? <IconCheck size={13} /> : <IconCross size={13} />}
@@ -800,7 +808,7 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   const { call } = row;
   const result = call ? actions.timeline.resultFor(call.payload.call_id) ?? row.result : row.result;
   const r = result?.payload;
-  const state = !r ? 'running' : r.error ? 'error' : 'ok';
+  const state = !r ? (row.unfinished ? 'unfinished' : 'running') : r.error ? 'error' : 'ok';
   const line = call ? callLine(call.payload.tool, call.payload.args_preview) : undefined;
   return (
     <details class={`tool-row tool-${state}`}>

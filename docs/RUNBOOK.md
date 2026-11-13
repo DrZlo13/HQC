@@ -575,6 +575,7 @@ these containers are on, in the services and at the top level:
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_SCOPE: openid email profile offline_access
       OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST: "true"
       OAUTH2_PROXY_COOKIE_EXPIRE: 720h
       OAUTH2_PROXY_COOKIE_REFRESH: 4m
       OAUTH2_PROXY_COOKIE_SAMESITE: lax
@@ -628,6 +629,11 @@ networks:
   `HQC_ARTIFACT_PUBLIC_BASE`). Without the router and the variable, signed links go to the hub's
   domain behind the sign-in and HTML attachments can only be downloaded.
 - `OAUTH2_PROXY_COOKIE_REFRESH` shorter than the ID token lifetime, see `HQC_OIDC_ISSUER` in §1.2.
+- `OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST`: a CSRF cookie of its own for every sign-in attempt
+  (`_oauth2_proxy_<random>_csrf`). Without it there is one `_oauth2_proxy_csrf`, which also holds
+  the PKCE verifier, and several tabs that start signing in at once (the session expired, or
+  Keycloak was restarted) overwrite each other's: Keycloak refuses the code with
+  `pkce_verification_failed` `Code mismatch`, and the sign-in ends in `500`.
 - Without `OAUTH2_PROXY_WHITELIST_DOMAINS` oauth2-proxy refuses to return to the requested page
   after sign-in (`Rejecting invalid redirect … domain not in whitelist` in its log).
 - `upstreams static://202`: oauth2-proxy only answers the forwardAuth check and proxies nothing.

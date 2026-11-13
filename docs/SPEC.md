@@ -2248,8 +2248,10 @@ or `peer.message` that came while that text was being written stands under it in
 (after the text, before the activity line, with the messages not stored yet) and once the text
 is stored: the `agent.message` goes above the inputs with `during_text` right before it in `seq`
 order, never above the input it answers (`in_reply_to`) and, since 0.138, never above one that
-waited for a turn of its own and stands after the turns it waited through (below). The client
-takes this from the hub's `payload.during_text`, never guesses it from times. Since 0.138 an
+waited for a turn of its own and stands after the turns it waited through (below); a final one
+takes along its `usage` and, since 0.137, the `system turn_interrupted` or `turn_ended_early`
+line after it. The client takes this from the hub's `payload.during_text`, never guesses it
+from times. Since 0.138 an
 input with a `delivery` (`user.message`, `peer.message`) that came while a turn ran (with
 `during_text` too, not failed, and not delivered at its own `ts` as a mirrored one is, §9.2)
 stands at the bottom of the feed until the agent takes it, under everything live (after the

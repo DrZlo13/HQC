@@ -2607,6 +2607,13 @@ fn a_turn_that_ended_early_says_why() {
         end(json!({"subtype": "success", "is_error": false, "result": "", "num_turns": 0}))
             .is_empty()
     );
+    // The model moved its work to the background, or a tool call was deferred: on purpose.
+    for reason in ["background_requested", "tool_deferred"] {
+        assert!(end(
+            json!({"subtype": "success", "is_error": false, "result": "", "terminal_reason": reason})
+        )
+        .is_empty());
+    }
 }
 
 /// Stop reaches a turn the CLI starts by itself after a background task's end (`init` with no

@@ -248,6 +248,22 @@ describe("an input that came while the agent's text was being written (SPEC §6)
     const [first] = blocks;
     expect(first.kind === "agent" ? first.usage?.seq : undefined).toBe(3);
   });
+
+  it("a final answer takes the line that says how its turn ended along", () => {
+    const t = new Timeline();
+    const end = (code: string) =>
+      ev("event.system", (e) => {
+        e.seq = 4;
+        e.payload = { code, text: code === "turn_interrupted" ? "Interrupted" : "Turn ended early: max_turns" };
+      });
+    for (const code of ["turn_interrupted", "turn_ended_early"]) {
+      const t = new Timeline();
+      t.applyAll([input(1, true), answer(2), ev("event.usage", withSeq(3)), end(code)]);
+      expect(order(t)).toEqual(["e2", "e3", "e4", "e1"]);
+    }
+    t.applyAll([input(1, true), answer(2), ev("event.usage", withSeq(3)), end("worker_log")]);
+    expect(order(t)).toEqual(["e2", "e3", "e1", "e4"]);
+  });
 });
 
 describe("an input that waits for a turn of its own (SPEC §6, §17.2)", () => {
@@ -2293,7 +2309,7 @@ describe("the feed like the Claude Code tab", () => {
     expect(root.querySelector(".msg-agent")).toBeNull();
   });
 
-  it("shows an answer an interrupt cut off muted, marked Interrupted after its time", () => {
+  it("shows an answer an interrupt cut off muted, marked interrupted after its time", () => {
     const t = new Timeline();
     t.apply(ev("event.agent.message.interrupted"));
     t.apply(agentText(44, "All done.", true));

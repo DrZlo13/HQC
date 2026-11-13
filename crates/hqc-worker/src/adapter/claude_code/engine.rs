@@ -60,8 +60,9 @@
 //! - `result` → `usage` (one with `num_turns: 0`, no tokens and no `compact_boundary` in it
 //!   gives none, or, when the total grew, one with no tokens, no `cost_usd` and the total),
 //!   then `system turn_interrupted` for a `terminal_reason` `aborted_*`, or `system
-//!   turn_ended_early` for an error or a `terminal_reason` other than `completed`
-//!   ([`turn_end_line`]), then `status idle`, end of turn;
+//!   turn_ended_early` for an error or a `terminal_reason` other than `completed`,
+//!   `background_requested` and `tool_deferred` ([`turn_end_line`]), then `status idle`, end
+//!   of turn;
 //!   `usage.cost_usd` is the growth of the CLI's cumulative `total_cost_usd` since the previous
 //!   `usage` with a `cost_usd` (or since the transcript's last `cost-state` after `--resume`),
 //!   `session_cost_usd` the total itself;
@@ -139,7 +140,8 @@ pub const CONTEXT_COMPACTED_TEXT: &str = "Context compacted";
 pub const TURN_INTERRUPTED: &str = "turn_interrupted";
 pub const TURN_INTERRUPTED_TEXT: &str = "Interrupted";
 /// `system.code` of a turn the CLI ended early for another reason: an error `result`, or a
-/// `terminal_reason` other than `completed` (SPEC §4, §8.1).
+/// `terminal_reason` other than `completed`, `background_requested` and `tool_deferred` (SPEC
+/// §4, §8.1).
 pub const TURN_ENDED_EARLY: &str = "turn_ended_early";
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
@@ -2009,9 +2011,9 @@ fn limits(w: &Value) -> Option<hqc_proto::frame::Limits> {
 }
 
 /// The `system` line a `result` ends its turn with (SPEC §8.1), by its `terminal_reason`
-/// (2.1.312: 19 values, `completed` the one normal end; a local command has none):
-/// `aborted_streaming` or `aborted_tools` → [`TURN_INTERRUPTED`]; any other but `completed`,
-/// or an error result (`subtype` other than `success`, `is_error: true`) → [`TURN_ENDED_EARLY`]
+/// (2.1.312: 19 values, of which `completed`, `background_requested` and `tool_deferred` end a
+/// turn on purpose; a local command has none): `aborted_streaming` or `aborted_tools` →
+/// [`TURN_INTERRUPTED`]; any other but those three, or an error result (`subtype` other than `success`, `is_error: true`) → [`TURN_ENDED_EARLY`]
 /// "Turn ended early: " with the reason (the subtype without one), `api_error_status` and
 /// `errors`. Not the `result` text: with `is_error: true` it is the CLI's own reply, which
 /// came as its `assistant` line already.
@@ -2025,7 +2027,8 @@ fn turn_end_line(v: &Value) -> Option<(&'static str, String)> {
     // `background_requested` (the model moved its work to the background) and `tool_deferred`
     // end a turn on purpose, not because something failed.
     if !error
-        && reason.is_none_or(|r| matches!(r, "completed" | "background_requested" | "tool_deferred"))
+        && reason
+            .is_none_or(|r| matches!(r, "completed" | "background_requested" | "tool_deferred"))
     {
         return None;
     }

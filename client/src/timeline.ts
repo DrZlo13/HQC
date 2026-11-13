@@ -415,14 +415,21 @@ export class Timeline {
     // An input that came while the agent's text was being written stands under that text
     // (SPEC §6): the `agent.message` goes above the inputs with `during_text` right before it
     // in `seq` order, never above the input it answers. A final one takes the `usage` right
-    // after it along, which the feed draws in its block. An input `placeQueued` moved after the
-    // turn it waited through is no longer there: its own turn's text stays under it.
+    // after it along, which the feed draws in its block, and the line that says how the turn
+    // ended (`turn_interrupted`, `turn_ended_early`), which the worker sends after that `usage`.
+    // An input `placeQueued` moved after the turn it waited through is no longer there: its own
+    // turn's text stays under it.
     let floor = 0;
     for (let i = 0; i < out.length; i++) {
       const a = out[i];
       if (a.kind !== "event" || a.event.type !== "agent.message") continue;
-      const next = out[i + 1];
-      const n = a.event.payload.final && next?.kind === "event" && next.event.type === "usage" ? 2 : 1;
+      let n = 1;
+      if (a.event.payload.final) {
+        const u = out[i + n];
+        if (u?.kind === "event" && u.event.type === "usage") n++;
+        const end = out[i + n];
+        if (end?.kind === "event" && isTurnEndLine(end.event)) n++;
+      }
       const answers = a.event.payload.in_reply_to;
       let at = i;
       while (at > floor) {
@@ -455,6 +462,11 @@ export function duringText(it: Item): boolean {
     (it.event.type === "user.message" || it.event.type === "peer.message") &&
     it.event.payload.during_text === true
   );
+}
+
+/** The line the worker sends after a turn's `usage` when the turn did not complete (SPEC §4). */
+function isTurnEndLine(e: HqcEvent): boolean {
+  return e.type === "system" && (e.payload.code === "turn_interrupted" || e.payload.code === "turn_ended_early");
 }
 
 /** The event ends a turn (SPEC §17.1): the final `agent.message`, `status` `idle` or `error`,

@@ -4239,16 +4239,16 @@ with `worker_restart` or `stopped` keeps its card open in its session's feed whi
 session takes input (not archived, not held by VS Code, §9.3): the runtime no longer waits for
 the answer, so Answer sends it as the user's ordinary message (`POST /input`, §6) in the words
 of the VS Code tab for an earlier question it shows again (extension 2.1.319): `Answering your
-earlier question "<question>": <answer>` for one answered question, `Answering your earlier
-questions:` and a line `- "<question>": <answer>` for each of several, in their order, the
-items of a `multi` answer joined by ", "; Answer is disabled while nothing is answered. The
-first `user.message` after the cancel decides the card, as the tab reads its history: one that
-begins with `Answering your earlier question "<question>": ` or `Answering your earlier
-questions:` and a line `- "<question>": ` of the card's questions shows those answers and
-"Answers sent", "Cancelled: …" instead while its `POST /input` has failed (discarded, the
-message leaves the card open again); any other closes the card with "Cancelled: …", and so does
-a `peer.message` after the cancel. A `clarify` cancelled otherwise (expiry, archiving) stays
-closed.
+earlier question "<question>": <answer>` for one question, `Answering your earlier questions:`
+and a line `- "<question>": <answer>` for each of several, in their order, the items of a
+`multi` answer joined by ", "; as on an open card, Answer waits for an answer to every
+question (0.131). The first `user.message` after the cancel decides the card, as the tab reads
+its history: one that begins with `Answering your earlier question "<question>": ` or
+`Answering your earlier questions:` and a line `- "<question>": ` of the card's questions shows
+those answers and "Answers sent", "Cancelled: …" instead while its `POST /input` has failed
+(discarded, the message leaves the card open again); any other closes the card with
+"Cancelled: …", and so does a `peer.message` after the cancel. A `clarify` cancelled otherwise
+(expiry, archiving) stays closed.
 **Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
 own feed:
 - In every session that waits on its session through an open `hqc_ask` (§7.1), directly or
@@ -5789,10 +5789,11 @@ and that response has no `message_start`. Older hubs and clients ignore
 the field and keep the text, as before. §10.1: a question of the agent that a worker restart or
 Stop cancelled could not be answered: its card closed with its options grey. Such a card
 (`clarify.cancel` `worker_restart` or `stopped`) now stays open while no message of the user
-stands after the cancel and the session takes input, and Answer sends the answers as the user's
-message in the words of the VS Code tab for an earlier question, `Answering your earlier
-question "<question>": <answer>`; the first message of the user after the cancel, read as the
-tab reads it, shows the card answered or closes it; a card cancelled otherwise stays closed.
+stands after the cancel and the session takes input, and Answer, once every question has an
+answer, sends the answers as the user's message in the words of the VS Code tab for an earlier
+question, `Answering your earlier question "<question>": <answer>`; the first message of the user
+after the cancel, read as the tab reads it, shows the card answered or closes it; a card cancelled
+otherwise stays closed.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

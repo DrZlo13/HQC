@@ -949,9 +949,14 @@ describe("clarify.request", () => {
 
   // SPEC 0.137: the CLI no longer waits for the answer, so it goes as the user's message, in the
   // words of the VS Code tab for an earlier question (web:162062–162070).
-  const cancelled = (reason: string) => {
+  const cancelled = (reason: string, only?: number) => {
     const t = new Timeline();
-    t.apply(ev("event.clarify.request", withSeq(1)));
+    t.apply(
+      ev("event.clarify.request", (e) => {
+        e.seq = 1;
+        if (only !== undefined) e.payload.questions = [e.payload.questions[only]];
+      }),
+    );
     t.apply(
       ev("event.clarify.cancel", (e) => {
         e.seq = 2;
@@ -967,8 +972,20 @@ describe("clarify.request", () => {
         .click(),
     );
   const SEVERAL =
-    'Answering your earlier questions:\n- "Which area should I focus on first?": Worker\n- "Which checks should run?": clippy, test';
+    'Answering your earlier questions:\n- "Which area should I focus on first?": Worker\n- "Which checks should run?": clippy, test\n- "Anything else?": no';
   const submitButton = () => root.querySelector<HTMLButtonElement>(".card-clarify button[type=submit]");
+  const typeOther = (q: number, value: string) =>
+    act(() => {
+      const text = root.querySelectorAll(".card-clarify fieldset")[q].querySelector<HTMLInputElement>("input[type=text]")!;
+      text.value = value;
+      text.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  const answerAll = async () => {
+    await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+    await act(() => root.querySelector<HTMLInputElement>('input[value="clippy"]')!.click());
+    await act(() => root.querySelector<HTMLInputElement>('input[value="test"]')!.click());
+    await typeOther(2, "no");
+  };
   const outcomes = () => [...root.querySelectorAll(".card-clarify .outcome")].map((o) => o.textContent);
   const checked = (value: string) => root.querySelector<HTMLInputElement>(`input[value="${value}"]`)!.checked;
   // The chat's `send`: the message stands in the feed at once, not stored yet.
@@ -985,12 +1002,18 @@ describe("clarify.request", () => {
       const send = sending(t);
       const { actions, draw } = show(t, { send });
       expect(root.querySelector(".card-clarify")!.classList.contains("is-open")).toBe(true);
-      // Nothing chosen, nothing to send.
+      // Nothing chosen, nothing to send; as on an open card, Answer waits for every question.
       expect(submitButton()!.disabled).toBe(true);
       await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
-      expect(submitButton()!.disabled).toBe(false);
       await act(() => root.querySelector<HTMLInputElement>('input[value="clippy"]')!.click());
       await act(() => root.querySelector<HTMLInputElement>('input[value="test"]')!.click());
+      expect(submitButton()!.disabled).toBe(true);
+      await act(async () => {
+        root.querySelector("form.card-clarify")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      expect(send).not.toHaveBeenCalled();
+      await typeOther(2, "no");
+      expect(submitButton()!.disabled).toBe(false);
       await submit();
       expect(send).toHaveBeenCalledWith(SEVERAL);
       expect(actions.answer).not.toHaveBeenCalled();
@@ -1030,7 +1053,7 @@ describe("clarify.request", () => {
   it("a send that failed and was discarded leaves it to be answered", async () => {
     const t = cancelled("worker_restart");
     const { draw } = show(t, { send: sending(t) });
-    await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+    await answerAll();
     await submit();
     t.failPending("op-1", "offline");
     draw();
@@ -1041,14 +1064,10 @@ describe("clarify.request", () => {
     expect(submitButton()).not.toBeNull();
   });
 
-  it("one answered question goes in the tab's words for one", async () => {
+  it("the answer to one question goes in the tab's words for one", async () => {
     const send = vi.fn();
-    show(cancelled("worker_restart"), { send });
-    const text = root.querySelectorAll(".card-clarify fieldset")[2].querySelector<HTMLInputElement>("input[type=text]")!;
-    await act(() => {
-      text.value = "no";
-      text.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    show(cancelled("worker_restart", 2), { send });
+    await typeOther(0, "no");
     await submit();
     expect(send).toHaveBeenCalledWith('Answering your earlier question "Anything else?": no');
   });

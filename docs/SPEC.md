@@ -2458,7 +2458,8 @@ The reply to an ask:
   turn that names no input, §8.1) fails nothing, and the ask waits for its timeout. The asking
   session's turn stays `running` while it waits; the turn watchdog (§17.3) leaves it alone. In the asking session's feed the client shows the
   waiting call as "Waiting for a reply from <session>" with its timer (the runtime's
-  `tool.call` of `hqc_ask`, no event of its own).
+  `tool.call` of `hqc_ask`, no event of its own), since 0.132 once the call has waited 2 s
+  (§17.1).
 - Since 0.47 (T42; the 2026-10-31 run, where B sent a changed file back with `hqc_send`
   instead of `hqc_attach`, the reply had no file and the send waited in A's buffer): an
   `hqc_send` from the target to the asker, made from the target's turn on the question (the
@@ -4513,7 +4514,9 @@ The `status.state` event uses the same set.
 The client shows the turn from `state` (from `summary`/`session.summary` and the session object),
 with no separate events: `running` — a pulsing "Running" pill in the header and an "Agent is
 working" line at the bottom of the feed ("Running <command or tool> <time since the call's
-`ts`>" while the last `tool.call` has no `tool.result`, T26; since 0.125, when that call is one
+`ts`>" while the last `tool.call` has no `tool.result`, T26, since 0.132 once that call has run
+for 2 s, counted from its `ts` or from a later answer to a request after it (a permission or a
+question it, or a subagent it runs, waited for); since 0.125, when that call is one
 of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
 which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
 goes once the worker reports the call moved or ended), `queued` — "Input queued",
@@ -4858,12 +4861,21 @@ also when the agent thinks it knows the address, since an address of this sessio
 history (an `hqc_rename` result, `current: true` in `hqc_list_sessions`) is the source's.
 0.129–0.132 are taken by open branches.
 
+### 0.128 → 0.132 (a quick call does not swap the activity line)
+§17.1: the line at the bottom of the feed turned into "Running <command or tool>" on every
+`tool.call` and back to "Agent is working" on its `tool.result`, so a turn of quick calls (a
+Read, a grep) made it flicker between the two. A call is now named on that line once it has run
+for 2 s; until then the line stays "Agent is working". The 2 s count from the call's `ts`, or from
+a later `approval.response` or `clarify.response` after it: a call that waited for a permission
+runs only after the answer, and its `ts` is from before the card. 0.129–0.131 are taken by open
+
+pull requests.
+
 ### 0.128 → 0.131 (Answer waits for an answer to every question)
 §4 `clarify.request`: the client sent the answers to the questions that had one and left the
 rest out, so an owner who answered one question of four sent it and the agent took the other
 three as skipped. "Answer" now stays disabled until every question has an answer, as in the
 VS Code tab; "Other" chosen with nothing typed counts as one. 0.129 and 0.130 are taken by open
-pull requests.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

@@ -65,6 +65,13 @@ describe('examples/wire', () => {
     expect(() => parseFrame({ id: 'x', type: 'session.model', payload: { session_id: 's' } })).toThrow();
   });
 
+  it('reads a reply an interrupt cut off (SPEC 0.137)', () => {
+    const ev = parseEvent(load('event.agent.message.interrupted.json'));
+    expect(ev.type === 'agent.message' && ev.payload.interrupted).toBe(true);
+    const plain = parseEvent(load('event.agent.message.json'));
+    expect(plain.type === 'agent.message' && plain.payload.interrupted).toBeUndefined();
+  });
+
   it('reads the text answer of approval.response (T26)', () => {
     const ev = parseEvent(load('event.approval.response.message.json'));
     expect(ev.type === 'approval.response' && ev.payload.message).toBe('Leave the root alone, look only at ~/work/hqc');

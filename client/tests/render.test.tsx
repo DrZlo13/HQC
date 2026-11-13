@@ -1955,6 +1955,18 @@ describe("the feed like the Claude Code tab", () => {
     expect(root.querySelector(".msg-agent")).toBeNull();
   });
 
+  it("shows an answer an interrupt cut off muted, marked Interrupted after its time", () => {
+    const t = new Timeline();
+    t.apply(ev("event.agent.message.interrupted"));
+    t.apply(agentText(44, "All done.", true));
+    show(t);
+    const [cut, whole] = [...root.querySelectorAll(".msg-agent")];
+    expect(cut.classList.contains("msg-interrupted")).toBe(true);
+    expect(cut.querySelector(".msg-time .interrupted")!.textContent).toBe(" · interrupted");
+    expect(whole.classList.contains("msg-interrupted")).toBe(false);
+    expect(whole.querySelector(".interrupted")).toBeNull();
+  });
+
   const clarify = () =>
     ev("event.clarify.request", (e) => {
       e.seq = 1;

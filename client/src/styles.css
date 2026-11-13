@@ -2982,6 +2982,12 @@ select.input {
   color: var(--text);
 }
 
+/* A reply an interrupt cut off: muted; " · Interrupted" after its time. */
+.msg-agent.msg-interrupted,
+.msg-agent.msg-interrupted strong {
+  color: var(--muted);
+}
+
 .msg-agent > .meta {
   margin-top: 8px;
 }

@@ -164,6 +164,9 @@ export interface AgentMessage {
    *  too low"; since SPEC 0.67): a service line of the feed, not the agent's text. Absent =
    *  false. */
   runtime?: boolean;
+  /** An interrupt cut the reply off before the runtime finished it (Stop, "No" to a permission
+   *  request; since SPEC 0.137): shown muted and marked. Absent = false. */
+  interrupted?: boolean;
 }
 export interface AgentThinking {
   text: string;
@@ -436,6 +439,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     final: bool(p, 'final'),
     in_reply_to: optStr(p, 'in_reply_to'),
     runtime: optBool(p, 'runtime'),
+    interrupted: optBool(p, 'interrupted'),
   }),
   'agent.thinking': (p) => ({ text: str(p, 'text') }),
   'tool.call': (p) => ({

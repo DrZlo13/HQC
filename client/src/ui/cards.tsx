@@ -703,9 +703,11 @@ export function UsageParts({ usage }: { usage: EventOf<'usage'> }) {
 }
 
 function AgentMessage({ event, usage }: { event: EventOf<'agent.message'>; usage?: EventOf<'usage'> }) {
+  // An interrupt cut it off: muted, marked after its time.
+  const interrupted = event.payload.interrupted;
   return (
-    <article class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}`}>
-      <MessageTime ts={event.ts} />
+    <article class={`msg-agent ${event.payload.final ? 'msg-final' : 'msg-interim'}${interrupted ? ' msg-interrupted' : ''}`}>
+      <MessageTime ts={event.ts}>{interrupted && <span class="interrupted"> · interrupted</span>}</MessageTime>
       <Markdown class="text" text={event.payload.text} />
       {usage && (
         <div class="meta">

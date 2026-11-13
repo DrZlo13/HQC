@@ -522,7 +522,7 @@ the client renders only them. The "source" column is the component that produces
 | `turn_lost` | hub | the turn was lost: the agent process stopped mid-turn, the worker restarted, or there have been no turn events from the worker for a long time (watchdog, "no events for N s"; §17.3) |
 | `agent_exited` | worker | the agent process exited on its own with an error or mid-turn (§17.3) |
 | `policy_denied` | worker | a tool call was rejected by a `deny` rule from the worker's `[permissions]`, without asking the owner (§8.1, §14); the client shows "Blocked by worker policy" |
-| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it (§6). The client folds it into a "Background task ·" line with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends; opened, it shows all of it as Markdown |
+| `task_notification` | worker (adapter; mirror) | since 0.69: a background task of the agent (a shell command, a subagent) finished or stopped; `text` is the runtime's summary of it (§8.1, §9.1). It comes when the task ends, before the answer of the turn the runtime then starts by itself. Since 0.135 `call_id` is the `call_id` of the `tool.call` that started the task, `status` how it ended as the runtime says it (Claude Code: `completed`, `failed`, `stopped`) and `task_id` the runtime's id of the task (Claude Code: a subagent's `agentId`), each absent when the runtime does not say; the card of a subagent's `Agent` call takes its end from it, and a subagent's notification (by `call_id` or by the `agentId` of its background launch, with a `status` that ends it) stands in the feed as the subagent's end card (§6). The client folds any other into a "Background task ·" line with the whole text on one line, without its Markdown marks, dimmed in italics like the start of a thinking, cut with an ellipsis where the line ends; opened, it shows all of it as Markdown |
 | `context_compacted` | worker (adapter) | since 0.69: the runtime compacted the session's context (`/compact`); since 0.118 `text` is the summary the runtime wrote, "Context compacted" without one (§8.1); the client folds the summary into a "Context compacted" line that opens to all of it as Markdown, and draws one with the fixed text as a divider |
 | `agent_start_failed` | hub | the agent failed to start 3 times in a row (or non-retryably); `pending` inputs became `failed` (§5.2) |
 | `input_rejected` | hub | the worker rejected an input other than as a failed start; the input became `failed` (§5.2) |
@@ -1911,38 +1911,51 @@ margin left of the feed, on a phone under the message. A run of tool calls is "N
 time" and the call's line when it is one, else the tools it called, each once, in the order
 first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
 `<server>/<tool>`); a Skill call's line names its skill; thinking and tool lines are fainter
-than the text, and an open thinking block is prose in the feed's font. Since 0.135 a call of
-`Agent` (`Task` in older Claude Code), which starts a subagent, is no row of a run: it ends the
-run before it and is a card of its own in the project's colour (tinted background and border),
-its result inside it. Its head is a small agent icon, "Subagent", the call's `subagent_type`
-dimmed and a "background" chip when its `run_in_background` is true; under it the call's
-`description` in full and the subagent's state: while the latest `subagents.live` (§4) has a
-row with the call's `call_id`, a pulsing dot, what it does now ("Running" before any progress:
-the CLI's text often starts "Running …" itself) and the row's `<tokens> tokens · <n> tools ·
-<run time>`, ticking every second as above the input; else as the latest `system
-task_notification` of the call says it ended — the latest with its `call_id`, else, after a
-background launch whose result names the subagent `agentId: <id>`, the latest with that
-`task_id` (after a restart the CLI reports a subagent cut off by it without the call's id):
-`completed` "Done · <run time>", `failed` "Failed", `stopped` "Stopped", the run time from the
-call to the notification; any other `status`, or none, leaves it to the result —; else by the
-call's result: the CLI's answer for a subagent the user stopped (an error that starts
-"[Request interrupted", whose notification is no line, §8.1) is "Stopped", another error
-"Failed" with its `error_text`, a subagent sent or moved to the background
-(`run_in_background`, or a result that starts "Async agent launched", the CLI's answer then)
-"In background", without an end seen, any other "Done · <run time>", from the call to the
-result (its `duration_ms` when the times say nothing); with none of them "Running" and the
-time since the call. "Done" has a check mark, "Failed" a cross. A click on the head opens
-the call's arguments and result as a call's row shows them. In the Compact look its mark is a
-pulsing dot while it runs, a check when done, a cross when it failed or stopped and a grey dot
-in the background. Quote (since 0.74): on a computer a right click on text selected in the feed
-opens the client's menu with "Quote" (into the input as `> ` lines) and "Copy"; on a phone a "Quote"
-button under the selection's end. The input is one row: the paperclip, the field growing with its
-lines up to 200 px, send; on a computer its placeholder says "Enter to send, Shift+Enter for a new
-line". On a computer the input takes the caret when the chat opens, once its newest page is in,
-unless a request waits for an answer (an open approval in the feed, or the session `waiting`),
-another field has the focus, or a menu or the slid-out column is open; on a phone only when the chat
-replaces a new session's window. An open chat stays at its bottom while its images load: only a
-scroll up lets go of the bottom.
+than the text, and an open thinking block is prose in the feed's font. Since 0.135 a subagent has
+two cards in the project's colour, two lines each at any width, which never wrap: a long text is cut
+with an ellipsis. Its start: a call of `Agent` (`Task` in older Claude Code) is no row of a run: it
+ends the run before it and is a card of its own (tinted background and border), its result inside
+it. Its first line is a small agent icon, the call's `description`, the call's `subagent_type`
+dimmed and a "background" chip when its `run_in_background` is true (the word "Subagent" is only the
+card's label for a screen reader); its second the subagent's state: while the latest
+`subagents.live` (§4) has a row with the call's `call_id`, a pulsing dot, what it does now
+("Running" before any progress: the CLI's text often starts "Running …" itself) and, at the right,
+the row's `<tokens> tokens · <n> tools · <run time>`, ticking every second as above the input; else
+as the first `system task_notification` of the call says it ended — the first with its `call_id`,
+else, after a background launch whose result names the subagent `agentId: <id>`, the first with that
+`task_id` (after a restart the CLI reports a subagent cut off by it without the call's id; a later
+one, that of a SendMessage which continued the subagent, is no end of the call, though the CLI
+describes a later notification of a task as replacing the earlier one, §8.1): `completed` "Done ·
+<run time>", `failed` "Failed", `stopped` "Stopped", the run time from the call to the notification;
+any other `status`, or none, leaves it to the result —; else by the call's result: the CLI's answer
+for a subagent the user stopped (an error that starts "[Request interrupted", whose notification is
+no line, §8.1) is "Stopped", another error "Failed" with its `error_text`, a subagent sent or moved
+to the background (`run_in_background`, or a result that starts "Async agent launched", the CLI's
+answer then) "In background", without an end seen, any other "Done · <run time>", from the call to
+the result (its `duration_ms` when the times say nothing); with none of them "Running" and the time
+since the call. "Done" has a check mark, "Failed" a cross. A click on the head opens the call's
+arguments and result as a call's row shows them. Its end, a lighter card of the same kind, stands
+where the subagent ended: at a `system task_notification` with `status` `completed`, `failed` or
+`stopped` whose `call_id` is an `Agent` or `Task` call's, or whose `task_id` is the `agentId` of
+such a call's background launch, in place of the notification's "Background task ·" line (a
+command's or a Monitor's notification keeps its line); and at the result of a subagent that ran in
+the foreground, any result of the call but a background launch's. Its first line is the state's mark
+(a check, a cross, a square when stopped), the task, "done", "failed" or "stopped" and, on the
+call's first end only, the run time from the call to the end (a later one, a SendMessage that
+continued the subagent, would count from the call); its second the end's text, the notification's or
+the result's (an error's `error_text`; a done one's without the CLI's trailer, from the last
+`agentId: <id> (use SendMessage …)` line that the `<usage>` block follows), on one line without its
+Markdown marks; a click on the head opens the whole text as Markdown. In the Compact look the
+start's mark is a pulsing dot while it runs, a check when done, a cross when it failed or stopped
+and a grey dot in the background; the end's a check when done, else a cross. Quote (since 0.74): on
+a computer a right click on text selected in the feed opens the client's menu with "Quote" (into the
+input as `> ` lines) and "Copy"; on a phone a "Quote" button under the selection's end. The input is
+one row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
+placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
+caret when the chat opens, once its newest page is in, unless a request waits for an answer (an open
+approval in the feed, or the session `waiting`), another field has the focus, or a menu or the
+slid-out column is open; on a phone only when the chat replaces a new session's window. An open chat
+stays at its bottom while its images load: only a scroll up lets go of the bottom.
 
 than the text, and an open thinking block is prose in the feed's font. Quote (since 0.74): on a
 computer a right click on text selected in the feed opens the client's menu with "Quote" (into
@@ -2944,23 +2957,26 @@ and ended like any other text: the turn it ends has it as the final `agent.messa
 `status`, `summary`, `output_file`; checked live on 2.1.312 with a `run_in_background` Bash: it
 comes when the task ends, after the `result` of the turn that started it and before the turn
 the CLI then starts by itself, which brings `system/init`, the answer and its own `result`) →
-`system task_notification` with its `summary`, "Background task" without one (since 0.135 with
-the notification's `status` and `task_id` as they are and, as `call_id`, its `tool_use_id`, else
-that of the task's latest `task_started`, which the adapter remembers until the task's end gives
-its line or none), unless a subagent started the task (its `system` `task_started` has
-`owned_by_subagent: true`, also after a move to the background) or its `task_started` had
-`is_backgrounded: false` and no `system` `task_updated` with `patch.is_backgrounded: true` moved it
-to the background later (2.1.312 sends both lines for a foreground subagent, a foreground Bash call
-that runs for more than about 2 s and a subagent's Bash calls too, background ones included; a task
-the process did not see start counts as a background one); since 0.70 a subagent's
-`task_notification` without its report (no `handback` field) that comes while the latest
-`background_tasks_changed` list (below) holds the subagent or a task of it is no end: the adapter
-keeps the latest one and handles it (the line, the cancel of the subagent's open requests) when the
-subagent stops counting or the process exits; a notification with the report replaces it and is
-handled at once. 2.1.312 sends two for a subagent whose command it moved to the background: "This
-agent has not reported yet…" without `handback` while the list holds the subagent and its commands,
-and its real end, `handback: "send"` and `handback_report {text}`, after the subagent's
-`SubagentHandback` call. A notification with `handback` is the end at once, also while a
+`system task_notification` with its `summary`, "Background task" without one (since 0.135 with the
+notification's `status` and `task_id` as they are and, as `call_id`, its `tool_use_id`, else that of
+the task's latest `task_started`, which the adapter remembers until the task's end gives its line or
+none; and for a subagent that delivered its report through `SubagentHandback`, 2.1.312 in Auto with
+`handback` `send` or `flagged`, whose `summary` is then a note for the model, "This agent's report
+was delivered to you as a message from …", with the report instead: `handback_report.text`, its
+`warning`, when there is one, above it after a blank line), unless a subagent started the task (its
+`system` `task_started` has `owned_by_subagent: true`, also after a move to the background) or its
+`task_started` had `is_backgrounded: false` and no `system` `task_updated` with
+`patch.is_backgrounded: true` moved it to the background later (2.1.312 sends both lines for a
+foreground subagent, a foreground Bash call that runs for more than about 2 s and a subagent's Bash
+calls too, background ones included; a task the process did not see start counts as a background
+one); since 0.70 a subagent's `task_notification` without its report (no `handback` field) that
+comes while the latest `background_tasks_changed` list (below) holds the subagent or a task of it is
+no end: the adapter keeps the latest one and handles it (the line, the cancel of the subagent's open
+requests) when the subagent stops counting or the process exits; a notification with the report
+replaces it and is handled at once. 2.1.312 sends two for a subagent whose command it moved to the
+background: "This agent has not reported yet…" without `handback` while the list holds the subagent
+and its commands, and its real end, `handback: "send"` and `handback_report {text}`, after the
+subagent's `SubagentHandback` call. A notification with `handback` is the end at once, also while a
 command the subagent left running is still listed (live on 2.1.312: a subagent's wait loop
 that never ended). A task gives one line: a later `task_notification` of the same `task_id`
 only cancels the subagent's open requests (the CLI's own description of the field: any
@@ -5044,27 +5060,32 @@ after its last wheel event, the chat now sets no scroll position: following the 
 rendering older blocks wait until it settles. Chromium applies the next step to the position the
 page set, so there nothing changes. 0.129–0.135 are taken by open pull requests.
 
-### 0.128 → 0.135 (a subagent's card in the feed)
+### 0.128 → 0.135 (a subagent's start and end cards in the feed)
 §6: a subagent the agent started was one row of a folded "N tool calls" group, next to the
-thinking, and what it did was seen only in the list above the input. Its `Agent` call is now a
-card of its own in the feed, in the project's colour, with the subagent's type, its task in full
-and its state: running with what it does now, its counts and run time, in the background, done
-with its run time, failed or stopped. §4, §8.1, §9.1: to tie the list's rows and the task's end
-to the call, a row of `subagents.live` carries `call_id` (Claude Code: the `tool_use_id` of the
-subagent's latest `task_started`), and `system task_notification` carries `call_id` (the
-notification's `tool_use_id`, else that of the task's `task_started`; the mirror: the record's
-`<tool-use-id>`), `status` (as the runtime says it; the mirror: `<status>`) and `task_id` (the
-mirror: `<task-id>`), which ties a subagent cut off by a restart, reported without the call, to
-the call by the `agentId` of its background launch. The mirror reads those tags only before
-`<summary>`: a Monitor's `<event>` after it holds a command's output. §9.1: the mirror missed a
-notification that came while a turn ran, an `attachment` `queued_command` with `commandMode:
-task-notification`; it now gives the same `system task_notification`, and like a `user` one it is
-own while the session's hqc process is alive (§9.2). §8.1, §9.1: an `Agent` call's
-`args_preview` had its keys sorted, and a long `prompt` pushed `subagent_type` and
-`run_in_background` past the 4 KB cut; the prompt now goes last. All the new fields are
-optional: under an older worker the card takes the subagent's state from the call's result
-alone. The list above the input and the "Background task ·" line stay as they were. No frame
-changes, no migration. 0.129–0.134 are taken by other pull requests.
+thinking, and what it did was seen only in the list above the input. Its `Agent` call is now a card
+of its own in the feed, in the project's colour, two lines that never wrap: its task, the subagent's
+type and its state, running with what it does now, its counts and run time, in the background, done
+with its run time, failed or stopped; and where it ended, at its notification or at the result of
+one that ran in the foreground, a lighter card says how it ended, after how long, and the end's
+text, which opens as Markdown. §4, §8.1, §9.1: to tie the list's rows and the task's end to the
+call, a row of `subagents.live` carries `call_id` (Claude Code: the `tool_use_id` of the subagent's
+latest `task_started`), and `system task_notification` carries `call_id` (the notification's
+`tool_use_id`, else that of the task's `task_started`; the mirror: the record's `<tool-use-id>`),
+`status` (as the runtime says it; the mirror: `<status>`) and `task_id` (the mirror: `<task-id>`),
+which ties a subagent cut off by a restart, reported without the call, to the call by the `agentId`
+of its background launch. The mirror reads those tags only before `<summary>`: a Monitor's `<event>`
+after it holds a command's output. §9.1: the mirror missed a notification that came while a turn
+ran, an `attachment` `queued_command` with `commandMode: task-notification`; it now gives the same
+`system task_notification`, and like a `user` one it is own while the session's hqc process is alive
+(§9.2). §8.1, §9.1: an `Agent` call's `args_preview` had its keys sorted, and a long `prompt` pushed
+`subagent_type` and `run_in_background` past the 4 KB cut; the prompt now goes last. §8.1: in Auto a
+background subagent delivers its report through `SubagentHandback`, and its line carried the
+notification's `summary`, the CLI's note for the model ("This agent's report was delivered to you as
+a message from …"), not the report; it now carries `handback_report.text`, its `warning` above it.
+All the new fields are optional: under an older worker the card takes the subagent's state from the
+call's result alone. The list above the input stays as it was, and so does the "Background task ·"
+line of a command's or a Monitor's notification. No frame changes, no migration. 0.129–0.134 are
+taken by other pull requests.
 
 ### 0.128 → 0.134 (a fork's agent is told it is a copy)
 §4 `forked_from`, §5.3 `session.input`, §6 `POST /api/sessions/{id}/fork`: a fork's agent got

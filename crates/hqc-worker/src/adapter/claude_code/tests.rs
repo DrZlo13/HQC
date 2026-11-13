@@ -5002,6 +5002,36 @@ fn a_subagent_waiting_on_its_background_command_ends_in_one_line() {
     assert_eq!(system_lines(lines.iter().map(String::as_str)), end(18));
 }
 
+/// [`MOVED_SUBAGENT`] with the subagent's report as 2.1.312 sends it in Auto: the real end's
+/// `summary` is a note for the model, the report is `handback_report`, which the line carries
+/// instead, its `warning` (`handback: flagged`) above its text; an empty report leaves the
+/// `summary`.
+#[test]
+fn a_subagents_end_with_its_report_carries_the_report() {
+    let with = |report: &str| {
+        let lines = MOVED_SUBAGENT.replace(
+            r#""handback":"send","#,
+            &format!(r#""handback":"send","handback_report":{report},"#),
+        );
+        system_lines(lines.lines())
+            .into_iter()
+            .map(|(_, _, t)| t)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        with(r#"{"text":"PING-DONE: 240 packets\n"}"#),
+        ["PING-DONE: 240 packets"]
+    );
+    assert_eq!(
+        with(r#"{"warning":"The report may be incomplete.","text":"PING-DONE"}"#),
+        ["The report may be incomplete.\n\nPING-DONE"]
+    );
+    assert_eq!(
+        with(r#"{"text":"  "}"#),
+        ["This agent's report was delivered to you as a message from \"a739e2460001cfdc1\" (its SubagentHandback call). Read it there; it is not repeated here."]
+    );
+}
+
 /// [`MOVED_SUBAGENT`] up to the list after the "has not reported yet" end, then the commands
 /// leave the list with no restart and no other end: the held end gives its line at the next
 /// line of another kind, the `init`, and the `result` gives none.

@@ -1760,7 +1760,10 @@ impl Core {
 
     /// `system/task_notification`: a background task ended (checked live on 2.1.312: it comes
     /// as soon as the task ends, before the turn the CLI then starts by itself). The text is
-    /// its `summary`, or "Background task" without one. Not a flush: a held text keeps
+    /// its `summary`, or "Background task" without one; for a subagent that delivered its
+    /// report through `SubagentHandback` (2.1.312, `handback` `send` or `flagged`), whose
+    /// `summary` is then a note for the model, the report: `handback_report.text`, its
+    /// `warning` above it after a blank line. Not a flush: a held text keeps
     /// waiting for what decides whether it is final. First the task's open requests (a
     /// subagent's, by `agent_id`) are cancelled; a task in [`Core::quiet_tasks`] gets no line,
     /// nor one in [`Core::announced`];
@@ -1807,11 +1810,15 @@ impl Core {
         if id.is_some_and(|id| !self.announced.insert(id.to_owned())) {
             return out;
         }
-        let t = v["summary"]
-            .as_str()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map_or_else(|| "Background task".into(), text);
+        fn field(v: &Value) -> Option<&str> {
+            v.as_str().map(str::trim).filter(|s| !s.is_empty())
+        }
+        let report = &v["handback_report"];
+        let t = match (field(&report["text"]), field(&report["warning"])) {
+            (Some(r), Some(w)) => text(&format!("{w}\n\n{r}")),
+            (Some(r), None) => text(r),
+            (None, _) => field(&v["summary"]).map_or_else(|| "Background task".into(), text),
+        };
         tracing::info!(session_id = %self.session_id, task_id = ?v["task_id"].as_str(), status = ?v["status"].as_str(), "background task notification");
         out.push(Action::Emit(AdapterEvent::Event(new_event(
             self.session_id,

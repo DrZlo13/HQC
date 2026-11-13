@@ -1,17 +1,18 @@
 // The subagents, the background commands and the timers of the session (`subagents.live` and
 // `schedules.live`, SPEC §6), pinned above the input while the feed scrolls: one line each,
 // led by "Agent:", "Command:" (when the worker says which), "Monitor:", "Wakeup:", "Cron:" or
-// "Scheduled:". A subagent has its task and what it does now, then its tokens, tool calls and
-// run time, which ticks here between the lists the hub sends; a command or a watcher has only
-// its description and run time. A timer, a wakeup or a cron job of the agent and a message
-// scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
-// opens the schedules of the chat. A `stoppable` line ends with a stop button.
+// "Scheduled:". A subagent has its task and what it does now (that it retries a request to the
+// model API, while it does), then its tokens, tool calls and run time, which ticks here between
+// the lists the hub sends; a command or a watcher has only its description and run time. A
+// timer, a wakeup or a cron job of the agent and a message scheduled by the hub, has "in 12m
+// 34s" instead, counting down to "due"; a scheduled message opens the schedules of the chat. A
+// `stoppable` line ends with a stop button.
 
 import { useState } from 'preact/hooks';
 import type { LiveKind, LiveSchedule, LiveSubagent } from '../proto';
 import { useNow } from './hooks';
 import { IconStop } from './icons';
-import { count } from './labels';
+import { count, retryLabel } from './labels';
 
 const PREFIX: Record<LiveKind, string> = {
   agent: 'Agent: ',
@@ -131,7 +132,11 @@ function agentRow(a: LiveSubagent, age: number): Row {
     prefix: a.kind ? PREFIX[a.kind] : '',
     task: a.description,
     // A cron job's schedule is a part of what it is, not what it does now.
-    after: a.activity ? `${a.kind === 'cron' ? ' · ' : ': '}${a.activity}` : '',
+    after: a.retry
+      ? `: ${retryLabel(a.retry)}`
+      : a.activity
+        ? `${a.kind === 'cron' ? ' · ' : ': '}${a.activity}`
+        : '',
     right: waits ? countdown(a.due_in_ms, age) : stats(a, a.duration_ms + Math.max(0, age)),
     timer: waits,
     stop: a.stoppable ? a.task_id : undefined,

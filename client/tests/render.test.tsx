@@ -7,7 +7,7 @@ import { render } from "preact";
 import { act } from "preact/test-utils";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseEvent, parseServerFrame, type HqcEvent } from "../src/proto";
+import { parseEvent, parseServerFrame, type Activity, type HqcEvent } from "../src/proto";
 import { Timeline } from "../src/timeline";
 import {
   ActivityLine,
@@ -119,6 +119,7 @@ describe("every example event renders", () => {
         f !== "event.agent.delta.json" &&
         f !== "event.agent.delta.reset.json" &&
         f !== "event.subagents.live.json" &&
+        f !== "event.subagents.live.retry.json" &&
         f !== "event.tokens.rate.json" &&
         f !== "event.schedules.live.json",
     )
@@ -2030,6 +2031,33 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     expect(line.querySelector(".pulse-dot")).not.toBeNull();
   });
 
+  it("running with an activity (SPEC 0.173): what the agent waits on instead", () => {
+    const line = (activity: Activity, state: any = "running", t = new Timeline()) => {
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      act(() =>
+        render(
+          <ActivityLine state={state} timeline={t} now={() => NOW} activity={activity} />,
+          root,
+        ),
+      );
+      const text = root.querySelector(".activity")?.textContent;
+      render(null, root);
+      return text;
+    };
+    const retry = { kind: "retrying", attempt: 3, max_retries: 10, retry_delay_ms: 7400 } as const;
+    expect(line({ ...retry, error_status: 529 })).toBe("Retrying 3/10 (529), next in 8 s");
+    expect(line(retry)).toBe("Retrying 3/10 (no response), next in 8 s");
+    expect(line({ kind: "compacting" })).toBe("Compacting the conversation…");
+    expect(line({ kind: "thinking", estimated_tokens: 12345 })).toBe("Thinking · ~12k tokens");
+    expect(line({ kind: "thinking", estimated_tokens: 840 })).toBe("Thinking · ~840 tokens");
+    // A running command keeps its own line; other states keep theirs.
+    const t = new Timeline();
+    t.apply(call(1, "b", "Bash", { command: "sleep 30" }));
+    expect(line({ kind: "compacting" }, "running", t)).toContain("sleep 30");
+    expect(line({ kind: "compacting" }, "queued")).toBe("Input queued");
+  });
+
   it('running with the last tool.call unanswered: "Running <command> <time>"', () => {
     const t = new Timeline();
     t.apply(call(1, "a", "Read", { file_path: "a.rs" }));
@@ -2500,6 +2528,24 @@ describe("the feed like the Claude Code tab", () => {
     ]);
     expect(body.querySelector("ol li")!.textContent).toBe("Tests pass");
     expect(root.querySelector(".line.line-system-context_compacted")).toBeNull();
+  });
+
+  it("says how a compaction came and what it freed when the runtime did (SPEC 0.173)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.system.context_compacted"));
+    t.apply(
+      ev("event.system.context_compacted", (e) => {
+        e.seq = 45;
+        e.payload = { code: "context_compacted", text: "Context compacted", trigger: "manual", pre_tokens: 9000 };
+      }),
+    );
+    show(t);
+    expect(
+      root.querySelector("details.line-system-context_compacted summary .fold-label")!.textContent,
+    ).toBe("Context compacted · auto · 153k tokens freed");
+    expect(root.querySelector(".line.line-system-context_compacted")!.textContent).toBe(
+      "Context compacted · manual",
+    );
   });
 
   it("shows a reply Claude Code wrote itself as an error-style service line, not a message", () => {

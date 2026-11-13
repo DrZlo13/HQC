@@ -837,6 +837,23 @@ describe('header', () => {
     expect(button('Run in background')).toBeUndefined();
   });
 
+  it("shows what the agent waits on from the session's summary, until a summary without it", async () => {
+    // SPEC 0.173: `activity` comes and goes with the summaries the hub pushes.
+    const { app } = setup('running', { history: [] });
+    await mount(app);
+    expect($('.activity')!.textContent).toBe('Agent is working');
+    const s = app.sessions.get('s1')!;
+    const summary = { session_id: 's1', project_id: 'p1', title: s.title, state: 'running' as const, queue_len: 0, unread: 0, last_seq: 7, last_read_seq: 7 };
+    await act(async () =>
+      app.mergeSummary([
+        { ...summary, activity: { kind: 'retrying', attempt: 2, max_retries: 10, retry_delay_ms: 4000, error_status: 529 } },
+      ]),
+    );
+    expect($('.activity')!.textContent).toBe('Retrying 2/10 (529), next in 4 s');
+    await act(async () => app.mergeSummary([summary]));
+    expect($('.activity')!.textContent).toBe('Agent is working');
+  });
+
   it('shows the state, worker, path, model and cost of the session, "Stop" and "More"', async () => {
     const { app } = setup('waiting');
     await mount(app);
@@ -1279,6 +1296,13 @@ describe('live subagents', () => {
     expect(await at(0)).toEqual(['in 4m 30s', '', '1s', 'in 41s']);
     expect(await at(41_000)).toEqual(['in 3m 49s', '', '42s', 'due']);
     expect(await at(300_000)).toEqual(['due', '', '5m 1s', 'due']);
+  });
+
+  it('says on its row that a subagent retries a request to the model API (SPEC 0.173)', async () => {
+    const { app } = setup('running', { subagents: 1 });
+    await mount(app);
+    await act(async () => subscriber!.onEvent(ev('event.subagents.live.retry', 0, (e) => delete e.seq)));
+    expect(rows()).toEqual([['Reply with number: Retrying 2/10 (no response), next in 4 s', '9s']]);
   });
 });
 

@@ -1,4 +1,14 @@
-import type { ApprovalCanonical, ApprovalOption, CancelReason, PermissionMode, RoomMode, SessionState } from '../proto';
+import type {
+  Activity,
+  ApiRetry,
+  ApprovalCanonical,
+  ApprovalOption,
+  CancelReason,
+  PermissionMode,
+  RoomMode,
+  SessionState,
+  SystemNote,
+} from '../proto';
 
 /** Button captions by `canonical` (SPEC §10.1); an unknown canonical keeps the agent's label. */
 export const CANONICAL_LABELS: Record<Exclude<ApprovalCanonical, 'unknown'>, string> = {
@@ -195,6 +205,36 @@ export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   const [v, unit] = n < 1_000_000 ? [n / 1000, 'k'] : [n / 1_000_000, 'M'];
   return `${v.toFixed(v < 10 ? 1 : 0).replace(/\.0$/, '')}${unit}`;
+}
+
+/** A retried API request (SPEC 0.173): `Retrying 3/10 (529), next in 8 s`, `(no response)`
+ *  when the failed attempt got none. */
+export function retryLabel(r: ApiRetry): string {
+  const why = r.error_status ?? 'no response';
+  return `Retrying ${r.attempt}/${r.max_retries} (${why}), next in ${Math.ceil(r.retry_delay_ms / 1000)} s`;
+}
+
+/** What the agent waits on, in the activity line instead of "Agent is working" (SPEC §17.1). */
+export function activityLabel(a: Activity): string {
+  switch (a.kind) {
+    case 'retrying':
+      return retryLabel(a);
+    case 'compacting':
+      return 'Compacting the conversation…';
+    case 'thinking':
+      return `Thinking · ~${formatTokens(a.estimated_tokens)} tokens`;
+  }
+}
+
+/** After "Context compacted" (SPEC 0.173): ` · auto · 153k tokens freed`; what the runtime did
+ *  not say is left out. */
+export function compactionNote(p: SystemNote): string {
+  const parts: string[] = [];
+  if (p.trigger) parts.push(p.trigger);
+  if (p.pre_tokens !== undefined && p.post_tokens !== undefined) {
+    parts.push(`${formatTokens(p.pre_tokens - p.post_tokens)} tokens freed`);
+  }
+  return parts.map((x) => ` · ${x}`).join('');
 }
 
 /** Cost in dollars: `$0.07` (from a cent up; below it three digits), `precise`: always three,

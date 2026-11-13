@@ -8,7 +8,7 @@
 import type { SecretFields } from '../api';
 import type { ComponentChildren } from 'preact';
 import { useMemo, useState } from 'preact/hooks';
-import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
+import type { Activity, ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, ModelProvider, SessionState } from '../proto';
 import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import { modelMenuItems, type ModelChoice } from './agentSettings';
@@ -54,6 +54,8 @@ import {
   STATE_LABELS,
   SYSTEM_CODE_LABELS,
   SYSTEM_WARNING_CODES,
+  activityLabel,
+  compactionNote,
   formatClock,
   formatCost,
   formatDay,
@@ -329,14 +331,16 @@ const CALL_SHOWN_AFTER_MS = 2000;
 /** The last line of the feed while a turn is on or input waits (SPEC §17.1): the running
  *  command with its timer, or what the session is doing. A command or subagent the runtime
  *  runs in the foreground (`foreground`, the session's `foreground_calls`) gets "Run in
- *  background", which calls `onBackground` with its `call_id`. In a room each working agent
- *  has a line of its own, led by its `name`. */
+ *  background", which calls `onBackground` with its `call_id`. With no command running, what
+ *  the agent waits on (`activity`, the session's) stands instead of "Agent is working". In a
+ *  room each working agent has a line of its own, led by its `name`. */
 export function ActivityLine({
   state,
   timeline,
   name,
   now,
   foreground,
+  activity,
   onBackground,
 }: {
   state: SessionState;
@@ -344,6 +348,7 @@ export function ActivityLine({
   name?: string;
   now?: () => number;
   foreground?: string[];
+  activity?: Activity;
   onBackground?: (callId: string) => void;
 }) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
@@ -381,7 +386,7 @@ export function ActivityLine({
     );
   }
   let label: string | null = null;
-  if (state === 'running') label = name ? `${name} is working` : 'Agent is working';
+  if (state === 'running') label = activity ? activityLabel(activity) : name ? `${name} is working` : 'Agent is working';
   else if (state === 'queued') label = 'Input queued';
   else if (state === 'waiting' && timeline.openRequests().length === 0) label = 'Waiting for approval';
   if (!label) return null;
@@ -487,10 +492,16 @@ function SystemLine({ event, now }: { event: EventOf<'system'>; now?: () => numb
   if (p.code === 'worker_log') return <WorkerLogLine event={event} />;
   if (p.code === 'task_notification') return <TaskNotification text={p.text} />;
   // A compaction with the runtime's summary folds it; one without (older events carry the
-  // fixed text) is text as is.
+  // fixed text) is text as is. Either says how it came and what it freed when the runtime did.
   if (p.code === 'context_compacted') {
-    if (p.text && p.text !== 'Context compacted') return <CompactionSummary text={p.text} />;
-    return <Line kind={`system line-system-${p.code}`}>{p.text || 'Context compacted'}</Line>;
+    const note = compactionNote(p);
+    if (p.text && p.text !== 'Context compacted') return <CompactionSummary text={p.text} note={note} />;
+    return (
+      <Line kind={`system line-system-${p.code}`}>
+        {p.text || 'Context compacted'}
+        {note}
+      </Line>
+    );
   }
   const caption = SYSTEM_CODE_LABELS[p.code];
   const warning = SYSTEM_WARNING_CODES.has(p.code);
@@ -536,14 +547,14 @@ function TaskNotification({ text }: { text: string }) {
   );
 }
 
-/** A compaction of the context, folded like a background task: "Context compacted"; open, the
- *  summary the runtime wrote, as Markdown. */
-function CompactionSummary({ text }: { text: string }) {
+/** A compaction of the context, folded like a background task: "Context compacted" and `note`
+ *  (` · auto · 153k tokens freed`); open, the summary the runtime wrote, as Markdown. */
+function CompactionSummary({ text, note }: { text: string; note: string }) {
   return (
     <details class="line-fold line-system-context_compacted">
       <summary>
         <IconChevron size={12} />
-        <span class="fold-label">Context compacted</span>
+        <span class="fold-label">Context compacted{note}</span>
       </summary>
       <Markdown class="fold-text" text={text} />
     </details>

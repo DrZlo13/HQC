@@ -38,8 +38,9 @@ export function LiveSubagents({
   );
 }
 
-/** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out. */
-function stats(a: LiveSubagent, ms: number): string {
+/** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out.
+ *  Also the status line of its card in the feed (cards.tsx). */
+export function stats(a: LiveSubagent, ms: number): string {
   const parts: string[] = [];
   if (a.total_tokens !== undefined) parts.push(`${tokens(a.total_tokens)} tokens`);
   if (a.tool_uses !== undefined) parts.push(count(a.tool_uses, 'tool'));
@@ -54,7 +55,7 @@ function tokens(n: number): string {
 }
 
 /** `13s`, `4m 13s`, `1h 4m 13s`. */
-function elapsed(ms: number): string {
+export function elapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);

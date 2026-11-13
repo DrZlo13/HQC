@@ -304,6 +304,14 @@ export const IconArrowIn = ({ size = 14 }: { size?: number }) => (
   </Svg>
 );
 
+/** A subagent the agent started, on its card in the feed: a robot's head. */
+export const IconAgent = ({ size = 14 }: { size?: number }) => (
+  <Svg size={size}>
+    <rect x="4" y="7" width="12" height="9" rx="2.5" />
+    <path d="M10 4v3M7.5 11.5v.5M12.5 11.5v.5" />
+  </Svg>
+);
+
 /** The chips of a new session: its workspace (a screen), folder and model (a clock). */
 export const IconWorkspace = ({ size = 14 }: { size?: number }) => (
   <Svg size={size}>

@@ -5,9 +5,10 @@
 // `approval.request` for it is shown by the request card, not as a row of its own. Messages
 // between sessions (T51) are blocks of their own: the agent's `hqc_send` / `hqc_ask` call and
 // the ask's result, and the final message answering a question with the attachments and sends
-// of its turn. Pure logic, no DOM.
+// of its turn. A subagent the agent starts (its `Agent` call) is a block of its own too, with
+// its result and its state. Pure logic, no DOM.
 
-import type { EventOf, HqcEvent } from '../proto';
+import type { EventOf, HqcEvent, LiveSubagent } from '../proto';
 import type { Item, Timeline } from '../timeline';
 import { oneLine } from './labels';
 
@@ -26,6 +27,8 @@ export type Block =
   | { kind: 'agent'; key: string; event: EventOf<'agent.message'>; usage?: EventOf<'usage'> }
   | { kind: 'tools'; key: string; rows: ToolRow[] }
   | { kind: 'approval'; key: string; event: EventOf<'approval.request'>; call?: EventOf<'tool.call'> }
+  /** A subagent: a call of `Agent` (`Task` in older Claude Code) and its result. */
+  | { kind: 'subagent'; key: string; call: EventOf<'tool.call'>; result?: EventOf<'tool.result'> }
   /** "↗ Sent to X": a call of `hqc_send` / `hqc_ask`. */
   | ({ kind: 'sent'; key: string } & PeerCall)
   /** "↙ Reply from X": the result of an `hqc_ask`. */
@@ -125,6 +128,11 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
           out.push({ kind: 'sent', key: it.key, call: e, result: timeline.resultFor(e.payload.call_id) });
           continue;
         }
+        if (e.type === 'tool.call' && subagentTool(e.payload.tool)) {
+          close();
+          out.push({ kind: 'subagent', key: it.key, call: e, result: timeline.resultFor(e.payload.call_id) });
+          continue;
+        }
         if (e.type === 'tool.result') {
           const call = timeline.callFor(e.payload.call_id);
           if (call && hqcTool(call.payload.tool) === 'ask' && !e.payload.error) {
@@ -215,6 +223,69 @@ export function groupDuration(rows: ToolRow[]): number | undefined {
   return sum || undefined;
 }
 
+/** `Agent` (`Task` in older Claude Code): the tool that starts a subagent. */
+export function subagentTool(tool: string): boolean {
+  return tool === 'Agent' || tool === 'Task';
+}
+
+/** Where a subagent is: `running` (`live`: its row above the input, when the runtime lists
+ *  it), `background` (sent or moved to the background, no end seen), `done`, `failed` or
+ *  `stopped`; `ms`: how long it ran, when known. */
+export interface SubagentState {
+  state: 'running' | 'background' | 'done' | 'failed' | 'stopped';
+  live?: LiveSubagent;
+  ms?: number;
+}
+
+/** The `status` of a `task_notification` (SPEC §4) as the state it ends a subagent in; any
+ *  other leaves the state to the call's result. */
+const SUBAGENT_ENDS = new Map<string, SubagentState['state']>([
+  ['completed', 'done'],
+  ['failed', 'failed'],
+  ['stopped', 'stopped'],
+]);
+
+/** The state of the subagent of `call`: running while `subagents.live` lists it; else as the
+ *  latest `system task_notification` of the call says it ended (one of the call by its
+ *  `call_id`, else one with the `task_id` that the result of a background launch names as
+ *  `agentId`: after a restart the CLI reports the subagent without the call), after the call
+ *  for as long as between them; else by its result: the CLI's answer for a subagent the user
+ *  stopped ("[Request interrupted…") is stopped, another error failed, `run_in_background`
+ *  or the CLI's answer for a subagent sent or moved to the background ("Async agent
+ *  launched…") is in the background, any other is done, after the call for as long as between
+ *  them (else the result's `duration_ms`); running without one. */
+export function subagentState(
+  call: EventOf<'tool.call'>,
+  result: EventOf<'tool.result'> | undefined,
+  timeline: Timeline,
+): SubagentState {
+  const id = call.payload.call_id;
+  const live = timeline.liveAgents.find((a) => a.call_id === id);
+  if (live) return { state: 'running', live };
+  // Only a background launch's: the CLI names a finished foreground subagent too, and a later
+  // SendMessage that continues it ends with the same `task_id`.
+  const launched = result?.payload.result_preview.startsWith('Async agent launched');
+  const agentId = launched ? /^agentId: (\S+)/m.exec(result!.payload.result_preview)?.[1] : undefined;
+  const end = timeline.taskEnd(id, agentId);
+  const ended = end && SUBAGENT_ENDS.get(end.payload.status ?? '');
+  if (end && ended) return { state: ended, ms: between(call.ts, end.ts) };
+  if (!result) return { state: 'running' };
+  const r = result.payload;
+  if (r.error) {
+    const stopped = [r.error_text ?? '', r.result_preview].some((t) => t.startsWith('[Request interrupted'));
+    return { state: stopped ? 'stopped' : 'failed' };
+  }
+  if (callArgs(call.payload.args_preview).run_in_background === true || r.result_preview.startsWith('Async agent launched'))
+    return { state: 'background' };
+  return { state: 'done', ms: between(call.ts, result.ts) ?? r.duration_ms };
+}
+
+/** From `from` to `to`; undefined when the times say nothing. */
+function between(from: string, to: string): number | undefined {
+  const ms = Date.parse(to) - Date.parse(from);
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
 /** The interim message as a one-line caption. */
 /** The arguments of a call: `args_preview` is the input as JSON, cut at 4 KB (SPEC §4), so a
  *  long one may not parse. */
@@ -232,6 +303,16 @@ export function callArgs(argsPreview: string): Record<string, unknown> {
         out[m[1]] = m[2];
       }
     }
+    // An `Agent` or `Task` call's `prompt` comes last (SPEC §8.1): the head before it, whole,
+    // adds the fields that are not strings. In a string value a quote is escaped, so an
+    // unescaped `,"prompt":` is the key.
+    const at = argsPreview.indexOf(',"prompt":');
+    if (at > 0)
+      try {
+        Object.assign(out, JSON.parse(argsPreview.slice(0, at) + '}'));
+      } catch {
+        // Not a whole head: the string fields only.
+      }
     return out;
   }
   return {};

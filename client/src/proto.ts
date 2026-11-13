@@ -137,6 +137,9 @@ export interface LiveSubagent {
   tool_uses?: number;
   /** How long it had run when the list was sent. */
   duration_ms: number;
+  /** `call_id` of the `tool.call` that started it (since 0.135); absent before the runtime
+   *  names it. */
+  call_id?: string;
 }
 /** The whole list: the subagents in the order they started, then (since 0.127) the agent's
  *  background commands; empty: none. Transport only. */
@@ -262,6 +265,12 @@ export interface SystemNote {
   code: string;
   /** `warn` | `error` for `code: worker_log`, a log line of the worker (SPEC §10.2). */
   level?: string;
+  /** For `code: task_notification` (since 0.135): `call_id` of the `tool.call` that started
+   *  the task, how it ended as the runtime says it (`completed`, `failed`, `stopped`), and the
+   *  runtime's id of the task (a subagent's `agentId`). */
+  call_id?: string;
+  status?: string;
+  task_id?: string;
 }
 
 export interface PayloadByType {
@@ -404,6 +413,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         total_tokens: optNum(a, 'total_tokens'),
         tool_uses: optNum(a, 'tool_uses'),
         duration_ms: num(a, 'duration_ms'),
+        call_id: optStr(a, 'call_id'),
       };
     }),
   }),
@@ -495,7 +505,14 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     model: optStr(p, 'model'),
   }),
   status: (p) => ({ state: tolerantEnum(p, 'state', SESSION_STATES), detail: optStr(p, 'detail') }),
-  system: (p) => ({ text: str(p, 'text'), code: str(p, 'code'), level: optStr(p, 'level') }),
+  system: (p) => ({
+    text: str(p, 'text'),
+    code: str(p, 'code'),
+    level: optStr(p, 'level'),
+    call_id: optStr(p, 'call_id'),
+    status: optStr(p, 'status'),
+    task_id: optStr(p, 'task_id'),
+  }),
 };
 
 function parseAnswers(p: Obj): Record<string, ClarifyAnswer> {

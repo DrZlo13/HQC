@@ -14,6 +14,7 @@ import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attac
 import {
   askTarget,
   buildFeed,
+  callArgs,
   callLine,
   callPeek,
   callRows,
@@ -21,6 +22,7 @@ import {
   groupDuration,
   groupState,
   relativePaths,
+  subagentState,
   toolKind,
   toolLabel,
   type Block,
@@ -28,6 +30,7 @@ import {
 } from './feed';
 import { useAction, useIsPhone, useNow } from './hooks';
 import {
+  IconAgent,
   IconArrowIn,
   IconArrowOut,
   IconAttach,
@@ -55,6 +58,7 @@ import {
   oneLine,
   count,
 } from './labels';
+import { elapsed, stats } from './LiveSubagents';
 import { CodeBlock, CopyButton, Markdown, markdownLine } from './Markdown';
 import { PermissionBlock } from './permission';
 import { PeerMessageBlock, ReplyFromBlock, ReplyToBlock, SentBlock } from './relay';
@@ -116,7 +120,8 @@ export function FeedBlocks({ blocks, actions }: { blocks: Block[]; actions: Chat
     <>
       {blocks.map((b) => {
         // The request on a phone's bottom sheet is not drawn here, nor its mark.
-        const g: Gutter = b.kind === 'approval' && b.event.payload.request_id === actions.sheetRequest ? {} : gutter(b);
+        const g: Gutter =
+          b.kind === 'approval' && b.event.payload.request_id === actions.sheetRequest ? {} : gutter(b, actions.timeline);
         return (
           <div key={b.key} class={g.full ? 'feed-block feed-full' : 'feed-block'} data-seq={blockSeq(b)}>
             <BlockView block={b} actions={actions} />
@@ -142,10 +147,11 @@ const mark = (kind: string, icon: ComponentChildren) => (
 
 /** The block's mark in the gutter of the one-column feed (the Compact look,
  *  shown by styles.css only there): a grey dot for the agent's text, the state of a run of
- *  tools, an arrow for a message between sessions, a shield for a permission request, a
- *  question for the agent's questions, a clip for a file, a chevron for what folds. The user's
- *  messages and the service lines between hairlines have none and span the feed (`full`). */
-function gutter(b: Block): Gutter {
+ *  tools or of a subagent (a grey dot for one in the background), an arrow for a message
+ *  between sessions, a shield for a permission request, a question for the agent's questions,
+ *  a clip for a file, a chevron for what folds. The user's messages and the service lines
+ *  between hairlines have none and span the feed (`full`). */
+function gutter(b: Block, timeline: Timeline): Gutter {
   switch (b.kind) {
     case 'agent':
       return { mark: mark('dot', <span class="feed-dot" />) };
@@ -153,6 +159,13 @@ function gutter(b: Block): Gutter {
       const state = groupState(b.rows);
       if (state === 'running') return { mark: mark('running', <span class="pulse-dot" />) };
       return { mark: mark(state, state === 'ok' ? <IconCheck size={13} /> : <IconCross size={13} />) };
+    }
+    case 'subagent': {
+      const { state } = subagentState(b.call, b.result, timeline);
+      if (state === 'running') return { mark: mark('running', <span class="pulse-dot" />) };
+      if (state === 'background') return { mark: mark('dot', <span class="feed-dot" />) };
+      if (state === 'done') return { mark: mark('ok', <IconCheck size={13} />) };
+      return { mark: mark('error', <IconCross size={13} />) };
     }
     case 'sent':
     case 'reply-to':
@@ -205,6 +218,8 @@ export function blockSeq(b: Block): number | undefined {
     case 'sent':
     case 'reply-from':
       return (b.kind === 'sent' ? b.call : b.result).seq;
+    case 'subagent':
+      return b.call.seq;
     case 'tools': {
       const first = b.rows[0];
       const row = first?.kind === 'call' ? (first.call ?? first.result) : first?.event;
@@ -221,6 +236,8 @@ function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
       return <AgentMessage event={block.event} usage={block.usage} />;
     case 'tools':
       return <ToolGroup block={block} actions={actions} />;
+    case 'subagent':
+      return <SubagentCard block={block} actions={actions} />;
     case 'sent':
       return <SentBlock block={block} actions={actions} />;
     case 'reply-from':
@@ -757,8 +774,6 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
   const r = result?.payload;
   const state = !r ? 'running' : r.error ? 'error' : 'ok';
   const line = call ? callLine(call.payload.tool, call.payload.args_preview) : undefined;
-  // An Edit, a MultiEdit or a Write shows its change, as its permission card does (SPEC §10.1).
-  const change = call ? fileChange(call.payload.tool, call.payload.args_preview) : undefined;
   return (
     <details class={`tool-row tool-${state}`}>
       <summary>
@@ -774,37 +789,134 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
         {r?.duration_ms !== undefined && <span class="tool-time">{formatDuration(r.duration_ms)}</span>}
         <StateMark state={state} />
       </summary>
-      <div class="tool-row-body">
-        {change ? (
-          <div class="tool-change">
-            {change.parts.map((c, i) => (
-              <CodeBlock key={i} code={c.code} lang={c.diff ? 'diff' : ''} title={c.title} />
-            ))}
-            {change.cut && <div class="tool-cut muted">The preview is cut at 4 KB: the rest of the change is not shown.</div>}
-          </div>
-        ) : (
-          call && (
-            <>
-              <div class="label">Arguments</div>
-              <pre class="pre">{call.payload.args_preview}</pre>
-            </>
-          )
-        )}
-        {/* A change that went through says only that it did: its result is not shown. */}
-        {r && (r.error || !change) && (
-          <>
-            <div class="label">{r.error ? 'Error' : 'Result'}</div>
-            {r.error_text && <div class="error-text">{r.error_text}</div>}
-            {r.result_preview && <pre class="pre">{r.result_preview}</pre>}
-            {r.artifact_id && (
-              <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(r.artifact_id!)}>
-                Full result
-              </button>
-            )}
-          </>
-        )}
-      </div>
+      <ToolCallBody call={call} result={result} actions={actions} />
     </details>
+  );
+}
+
+/** An opened call, in its row of a group or on a subagent's card: the change of an Edit, a
+ *  MultiEdit or a Write (its result only if it failed), else the arguments and the result. */
+function ToolCallBody({
+  call,
+  result,
+  actions,
+}: {
+  call?: EventOf<'tool.call'>;
+  result?: EventOf<'tool.result'>;
+  actions: ChatActions;
+}) {
+  const r = result?.payload;
+  // An Edit, a MultiEdit or a Write shows its change, as its permission card does (SPEC §10.1).
+  const change = call ? fileChange(call.payload.tool, call.payload.args_preview) : undefined;
+  return (
+    <div class="tool-row-body">
+      {change ? (
+        <div class="tool-change">
+          {change.parts.map((c, i) => (
+            <CodeBlock key={i} code={c.code} lang={c.diff ? 'diff' : ''} title={c.title} />
+          ))}
+          {change.cut && <div class="tool-cut muted">The preview is cut at 4 KB: the rest of the change is not shown.</div>}
+        </div>
+      ) : (
+        call && (
+          <>
+            <div class="label">Arguments</div>
+            <pre class="pre">{call.payload.args_preview}</pre>
+          </>
+        )
+      )}
+      {/* A change that went through says only that it did: its result is not shown. */}
+      {r && (r.error || !change) && (
+        <>
+          <div class="label">{r.error ? 'Error' : 'Result'}</div>
+          {r.error_text && <div class="error-text">{r.error_text}</div>}
+          {r.result_preview && <pre class="pre">{r.result_preview}</pre>}
+          {r.artifact_id && (
+            <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(r.artifact_id!)}>
+              Full result
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** A subagent the agent started (its `Agent` call): a card of its own in the project's colour,
+ *  not a row of a tool group. The head says it is a subagent, of which type and whether it was
+ *  sent to the background; under it the task in full and the subagent's state: running
+ *  ("Running", or what it does now) with its tokens, tool calls and run time (ticking), in the
+ *  background, done with its run time, failed with the error, stopped. The head opens the
+ *  call's arguments and result. */
+function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subagent' }>; actions: ChatActions }) {
+  const [open, setOpen] = useState(false);
+  const { call, result } = block;
+  const s = subagentState(call, result, actions.timeline);
+  const t = useNow(1000, s.state === 'running', actions.now);
+  const args = callArgs(call.payload.args_preview);
+  const type = typeof args.subagent_type === 'string' ? args.subagent_type : '';
+  const task = typeof args.description === 'string' ? args.description : '';
+  let status: ComponentChildren;
+  switch (s.state) {
+    case 'running':
+      status = (
+        <>
+          <span class="pulse-dot" aria-hidden="true" />
+          {/* What it does now says it runs: the CLI's often starts "Running …" itself. */}
+          {s.live?.activity ? (
+            <span class="subagent-activity">{s.live.activity}</span>
+          ) : (
+            <span class="subagent-state">Running</span>
+          )}
+          <span class="subagent-stats">
+            {s.live
+              ? stats(s.live, s.live.duration_ms + Math.max(0, t - actions.timeline.liveAgentsAt))
+              : elapsed(t - Date.parse(call.ts))}
+          </span>
+        </>
+      );
+      break;
+    case 'background':
+      status = <span class="subagent-state">In background</span>;
+      break;
+    case 'done':
+      status = (
+        <>
+          <StateMark state="ok" />
+          <span class="subagent-state">{s.ms !== undefined ? `Done · ${elapsed(s.ms)}` : 'Done'}</span>
+        </>
+      );
+      break;
+    case 'failed':
+      status = (
+        <>
+          <StateMark state="error" />
+          <span class="subagent-state">Failed</span>
+          {result?.payload.error_text && <span class="subagent-error">{result.payload.error_text}</span>}
+        </>
+      );
+      break;
+    case 'stopped':
+      status = <span class="subagent-state">Stopped</span>;
+      break;
+  }
+  return (
+    <section class={`subagent subagent-${s.state} ${open ? 'is-open' : ''}`} aria-label="Subagent">
+      <button type="button" class="subagent-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span class="subagent-icon">
+          <IconAgent />
+        </span>
+        <span class="subagent-label">Subagent</span>
+        {type && <span class="subagent-type">{type}</span>}
+        {args.run_in_background === true && <span class="subagent-chip">background</span>}
+        <span class="chevron">
+          <IconChevron />
+        </span>
+      </button>
+      {task && <div class="subagent-task">{task}</div>}
+      <div class="subagent-status">{status}</div>
+      {open && <ToolCallBody call={call} result={result} actions={actions} />}
+    </section>
   );
 }
 

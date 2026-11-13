@@ -2883,7 +2883,7 @@ select.input {
 :root.feed-column .feed-block > .card ~ .feed-mark {
   top: 13px;
 }
-:root.feed-column .feed-block > :is(.relay, .perm-card) ~ .feed-mark {
+:root.feed-column .feed-block > :is(.relay, .perm-card, .subagent) ~ .feed-mark {
   top: 15px;
 }
 :root.feed-column .feed-block > details[open] ~ .feed-mark .icon {
@@ -3767,6 +3767,109 @@ a.relay-peer {
 .layout-phone .relay-arrow {
   flex-basis: 20px;
   height: 20px;
+}
+
+/* ---- a subagent the agent started (its `Agent` call): a card in the project's colour ---- */
+
+.subagent {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid var(--accent-line);
+  overflow-wrap: anywhere;
+}
+
+.subagent-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: 12.5px var(--sans);
+  color: var(--accent-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.subagent-icon {
+  flex: 0 0 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.subagent-label {
+  font-weight: 600;
+}
+
+.subagent-type {
+  color: var(--muted);
+}
+
+.subagent-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  font-size: 11.5px;
+}
+
+.subagent-head .chevron {
+  margin-left: auto;
+  color: var(--muted);
+}
+.subagent.is-open > .subagent-head .chevron {
+  transform: rotate(90deg);
+}
+
+.subagent-task {
+  color: var(--text);
+}
+
+.subagent-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text2);
+}
+
+.subagent-state {
+  color: var(--accent-text);
+  font-weight: 500;
+}
+.subagent:is(.subagent-done, .subagent-background, .subagent-stopped) .subagent-state {
+  color: var(--text2);
+}
+.subagent-failed .subagent-state,
+.subagent-error {
+  color: var(--danger);
+}
+
+.subagent-activity {
+  min-width: 0;
+}
+
+.subagent-stats {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.layout-phone .subagent {
+  padding: 10px 12px;
+  gap: 6px;
 }
 
 .card-unknown {

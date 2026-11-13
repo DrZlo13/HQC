@@ -285,6 +285,10 @@ describe('joined the turn', () => {
 describe('the one-column gutter', () => {
   it('a mark for every item but the user plates and the service lines, which span the feed', () => {
     const seq = (s: number) => (e: any) => ((e.seq = s), (e.ts = at(s)));
+    const agentCall = (s: number, call_id: string, args: object) =>
+      ev('event.tool.call', (e) => (seq(s)(e), (e.event_id = id(s)), (e.payload = { call_id, tool: 'Agent', args_preview: JSON.stringify(args) })));
+    const agentResult = (s: number, call_id: string, error: boolean, result_preview: string) =>
+      ev('event.tool.result', (e) => (seq(s)(e), (e.event_id = id(s)), (e.payload = { call_id, error, result_preview, duration_ms: 5 })));
     show([
       user(1, 'Run the tests'),
       ev('event.agent.thinking', seq(2)),
@@ -296,6 +300,14 @@ describe('the one-column gutter', () => {
       ev('event.clarify.request', seq(8)),
       ev('event.system', seq(9)),
       ev('event.approval.request', seq(10)),
+      // Subagents: done, failed, in the background, running.
+      agentCall(11, 'a1', { description: 'Fix' }),
+      agentResult(12, 'a1', false, 'Fixed'),
+      agentCall(13, 'a2', { description: 'Fix' }),
+      agentResult(14, 'a2', true, 'Crashed'),
+      agentCall(15, 'a3', { description: 'Fix', run_in_background: true }),
+      agentResult(16, 'a3', false, 'Async agent launched successfully.\nagentId: a3'),
+      agentCall(17, 'a4', { description: 'Fix' }),
     ]);
     const blocks = [...root.querySelectorAll<HTMLElement>('.feed-block')].map((b) => {
       const m = [...b.children].find((c) => c.classList.contains('feed-mark'));
@@ -311,6 +323,10 @@ describe('the one-column gutter', () => {
       [false, 'ask'],
       [true, null],
       [false, 'perm'],
+      [false, 'ok'],
+      [false, 'error'],
+      [false, 'dot'],
+      [false, 'running'],
     ]);
     // A mark is decoration: the block says what it is in words.
     expect(root.querySelector('.feed-mark:not([aria-hidden=true])')).toBeNull();

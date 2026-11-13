@@ -16,7 +16,7 @@ import {
   type ChatActions,
 } from "../src/ui/cards";
 import { CANONICAL_LABELS } from "../src/ui/labels";
-import { buildFeed, cutJson, relativePaths } from "../src/ui/feed";
+import { buildFeed, cutJson, relativePaths, subagentState } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
 const raw = (name: string): any =>
@@ -820,6 +820,260 @@ describe("tool groups (T26)", () => {
     expect(groups).toHaveLength(2);
     expect(root.querySelector(".msg-agent")!.textContent).toContain("Looking further.");
     expect(groups[1].classList.contains("tool-running")).toBe(true);
+  });
+});
+
+describe("a subagent's card (SPEC §6, since 0.135)", () => {
+  const AGENT = {
+    description: "Fix schematic power nets in import",
+    prompt: "Fix the nets.",
+    subagent_type: "general-purpose",
+  };
+  const at = (seq: number) =>
+    new Date(Date.parse("2026-10-22T10:00:00Z") + seq * 1000).toISOString();
+  const answer = (seq: number, call_id: string, result_preview: string, ts = at(seq)) =>
+    ev("event.tool.result", (e) => {
+      e.seq = seq;
+      e.ts = ts;
+      e.payload = { call_id, result_preview, error: false, duration_ms: 4200 };
+    });
+  const notification = (seq: number, call_id: string | undefined, status: string, task_id?: string) =>
+    ev("event.system", (e) => {
+      e.seq = seq;
+      e.ts = at(seq);
+      e.payload = { text: "4", code: "task_notification", call_id, status, task_id };
+    });
+  const failure = (seq: number, call_id: string, result_preview: string, error_text?: string) =>
+    ev("event.tool.result", (e) => {
+      e.seq = seq;
+      e.ts = at(seq);
+      e.payload = { call_id, result_preview, error: true, error_text, duration_ms: 4200 };
+    });
+  const live = (agents: object[]) =>
+    ev("event.subagents.live", (e) => {
+      e.payload.agents = agents;
+    });
+  const state = (t: Timeline, id: string) => {
+    const b = buildFeed(t.items(), t).find(
+      (x) => x.kind === "subagent" && x.call.payload.call_id === id,
+    );
+    return b?.kind === "subagent" ? subagentState(b.call, b.result, t) : undefined;
+  };
+
+  it("an Agent or Task call is a block of its own that ends the group before it, its result in it", () => {
+    const t = new Timeline();
+    t.apply(call(1, "a", "Bash", { command: "ls" }));
+    t.apply(result(2, "a"));
+    t.apply(call(3, "ag", "Agent", AGENT));
+    t.apply(call(4, "b", "Read", { file_path: "a.txt" }));
+    t.apply(result(5, "b"));
+    t.apply(result(6, "ag"));
+    t.apply(call(7, "tk", "Task", AGENT));
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "subagent", "tools", "subagent"]);
+    const [bash, ag, read, tk] = blocks;
+    expect(bash.kind === "tools" && bash.rows.length).toBe(1);
+    expect(ag.kind === "subagent" && [ag.call.seq, ag.result?.seq]).toEqual([3, 6]);
+    expect(read.kind === "tools" && read.rows.length).toBe(1);
+    expect(tk.kind === "subagent" && tk.result).toBeUndefined();
+  });
+
+  it("is running while the live list has its call, then as the latest notification of the call says", () => {
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", AGENT));
+    expect(state(t, "ag")).toEqual({ state: "running" });
+    t.apply(live([{ task_id: "a1", description: "Fix", duration_ms: 1000, call_id: "ag" }]));
+    expect(state(t, "ag")).toMatchObject({ state: "running", live: { task_id: "a1" } });
+    // The CLI's answer for a subagent moved to the background, its row gone: no end seen.
+    t.apply(answer(2, "ag", "Async agent launched successfully.\nagentId: a1"));
+    t.apply(live([]));
+    expect(state(t, "ag")).toEqual({ state: "background" });
+    t.apply(notification(31, "other", "failed"));
+    t.apply(notification(61, "ag", "completed"));
+    expect(state(t, "ag")).toEqual({ state: "done", ms: 60_000 });
+    t.apply(notification(62, "ag", "stopped"));
+    expect(state(t, "ag")).toEqual({ state: "stopped", ms: 61_000 });
+    t.apply(notification(63, "ag", "failed"));
+    expect(state(t, "ag")).toEqual({ state: "failed", ms: 62_000 });
+  });
+
+  it("without a row or an end takes its state from its result: failed, in the background, done", () => {
+    const t = new Timeline();
+    t.apply(call(1, "e", "Agent", AGENT));
+    t.apply(result(5, "e", true));
+    t.apply(call(6, "bg", "Agent", { ...AGENT, run_in_background: true }));
+    t.apply(result(7, "bg"));
+    t.apply(call(8, "ok", "Agent", AGENT));
+    t.apply(result(18, "ok"));
+    t.apply(call(19, "same", "Agent", AGENT));
+    t.apply(answer(20, "same", "4", at(19)));
+    expect(state(t, "e")).toEqual({ state: "failed" });
+    expect(state(t, "bg")).toEqual({ state: "background" });
+    expect(state(t, "ok")).toEqual({ state: "done", ms: 10_000 });
+    // Times that say nothing: the result's `duration_ms`.
+    expect(state(t, "same")).toEqual({ state: "done", ms: 4200 });
+  });
+
+  it("stopped by Stop: an error result that says the request was interrupted", () => {
+    const t = new Timeline();
+    const stop = "[Request interrupted by user for tool use]";
+    t.apply(call(1, "text", "Agent", AGENT));
+    t.apply(failure(2, "text", "4", stop));
+    t.apply(call(3, "preview", "Agent", AGENT));
+    t.apply(failure(4, "preview", stop));
+    t.apply(call(5, "other", "Agent", AGENT));
+    t.apply(failure(6, "other", "4", "The subagent crashed"));
+    expect(state(t, "text")).toEqual({ state: "stopped" });
+    expect(state(t, "preview")).toEqual({ state: "stopped" });
+    expect(state(t, "other")).toEqual({ state: "failed" });
+  });
+
+  it("in the background, ends with a notification that names only its task: the agentId of its result", () => {
+    const t = new Timeline();
+    t.apply(call(1, "bg", "Agent", { ...AGENT, run_in_background: true }));
+    t.apply(
+      answer(
+        2,
+        "bg",
+        "Async agent launched successfully. (The agent works in the background.)\n" +
+          "agentId: a52af2b436ded4cea (internal ID - do not mention to user.)",
+      ),
+    );
+    expect(state(t, "bg")).toEqual({ state: "background" });
+    t.apply(notification(31, undefined, "failed", "b0ther"));
+    expect(state(t, "bg")).toEqual({ state: "background" });
+    t.apply(notification(61, undefined, "completed", "a52af2b436ded4cea"));
+    expect(state(t, "bg")).toEqual({ state: "done", ms: 60_000 });
+  });
+
+  it("running: its type, the background chip, its task, what it does and its counts, ticking", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const t = new Timeline();
+      t.apply(call(1, "ag", "Agent", { ...AGENT, run_in_background: true }));
+      t.apply(
+        live([
+          {
+            task_id: "a1",
+            description: "Fix",
+            activity: "Running Verify the samples",
+            total_tokens: 155_300,
+            tool_uses: 188,
+            duration_ms: 253_000,
+            call_id: "ag",
+          },
+        ]),
+      );
+      t.liveAgentsAt = NOW;
+      let clock = NOW;
+      show(t, { now: () => clock });
+      expect(root.querySelector(".tool-group")).toBeNull();
+      const card = root.querySelector(".subagent")!;
+      expect(card.classList.contains("subagent-running")).toBe(true);
+      expect(card.querySelector(".subagent-label")!.textContent).toBe("Subagent");
+      expect(card.querySelector(".subagent-type")!.textContent).toBe("general-purpose");
+      expect(card.querySelector(".subagent-chip")!.textContent).toBe("background");
+      expect(card.querySelector(".subagent-task")!.textContent).toBe(AGENT.description);
+      expect(card.querySelector(".subagent-status .pulse-dot")).not.toBeNull();
+      // What it does alone: the CLI's text often starts "Running …" itself.
+      expect(card.querySelector(".subagent-state")).toBeNull();
+      expect(card.querySelector(".subagent-activity")!.textContent).toBe("Running Verify the samples");
+      expect(card.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools · 4m 13s");
+      await act(async () => {
+        clock += 2000;
+        vi.advanceTimersByTime(1000);
+      });
+      expect(card.querySelector(".subagent-stats")!.textContent).toBe("155.3k tokens · 188 tools · 4m 15s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a foreground subagent stays done: a later notification of the agentId its result names is no end of it", () => {
+    const t = new Timeline();
+    t.apply(call(1, "fg", "Agent", AGENT));
+    t.apply(
+      answer(
+        11,
+        "fg",
+        "Fixed.\nagentId: a1 (use SendMessage with to: 'a1', summary: '<5-10 word recap>' to continue this agent)",
+      ),
+    );
+    // A SendMessage that continued it, ended much later.
+    t.apply(notification(2831, undefined, "failed", "a1"));
+    expect(state(t, "fg")).toEqual({ state: "done", ms: 10_000 });
+  });
+
+  it("a background launch whose preview is cut in its prompt keeps its type and the chip", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.tool.call", (e) => {
+        e.seq = 1;
+        e.ts = at(1);
+        e.payload = {
+          call_id: "ag",
+          tool: "Agent",
+          args_preview:
+            '{"description":"Fix the nets","run_in_background":true,"subagent_type":"general-purpose","prompt":"' +
+            "x".repeat(4000),
+        };
+      }),
+    );
+    show(t);
+    const card = root.querySelector(".subagent")!;
+    expect(card.querySelector(".subagent-type")!.textContent).toBe("general-purpose");
+    expect(card.querySelector(".subagent-chip")!.textContent).toBe("background");
+    expect(card.querySelector(".subagent-task")!.textContent).toBe("Fix the nets");
+  });
+
+  it("running without what it does: Running and the time since its call", () => {
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", AGENT));
+    show(t, { now: () => Date.parse(at(1)) + 5000 });
+    const card = root.querySelector(".subagent")!;
+    expect(card.querySelector(".subagent-status .pulse-dot")).not.toBeNull();
+    expect(card.querySelector(".subagent-state")!.textContent).toBe("Running");
+    expect(card.querySelector(".subagent-activity")).toBeNull();
+    expect(card.querySelector(".subagent-stats")!.textContent).toBe("5s");
+  });
+
+  it("failed with its error, stopped, in the background", () => {
+    const t = new Timeline();
+    t.apply(call(1, "e", "Agent", AGENT));
+    t.apply(failure(2, "e", "4", "The subagent crashed"));
+    t.apply(call(3, "st", "Agent", AGENT));
+    t.apply(failure(4, "st", "[Request interrupted by user for tool use]"));
+    t.apply(call(5, "bg", "Agent", { ...AGENT, run_in_background: true }));
+    t.apply(answer(6, "bg", "Async agent launched successfully.\nagentId: a1"));
+    show(t);
+    const [failed, stopped, background] = root.querySelectorAll(".subagent");
+    expect(failed.classList.contains("subagent-failed")).toBe(true);
+    expect(failed.querySelector(".subagent-status .mark-error")).not.toBeNull();
+    expect(failed.querySelector(".subagent-state")!.textContent).toBe("Failed");
+    expect(failed.querySelector(".subagent-error")!.textContent).toBe("The subagent crashed");
+    expect(stopped.classList.contains("subagent-stopped")).toBe(true);
+    expect(stopped.querySelector(".subagent-status")!.textContent).toBe("Stopped");
+    expect(background.classList.contains("subagent-background")).toBe(true);
+    expect(background.querySelector(".subagent-status")!.textContent).toBe("In background");
+    expect(background.querySelector(".subagent-chip")!.textContent).toBe("background");
+  });
+
+  it("done: a check and its run time; the head opens the call's arguments and result", async () => {
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", AGENT));
+    t.apply(result(254, "ag"));
+    show(t);
+    const card = root.querySelector(".subagent")!;
+    expect(card.classList.contains("subagent-done")).toBe(true);
+    expect(card.querySelector(".subagent-status .mark-ok")).not.toBeNull();
+    expect(card.querySelector(".subagent-state")!.textContent).toBe("Done · 4m 13s");
+    expect(card.querySelector(".subagent-chip")).toBeNull();
+    expect(card.querySelector(".tool-row-body")).toBeNull();
+    const head = card.querySelector<HTMLButtonElement>(".subagent-head")!;
+    await act(async () => head.click());
+    expect(head.getAttribute("aria-expanded")).toBe("true");
+    expect([...card.querySelectorAll(".label")].map((l) => l.textContent)).toEqual(["Arguments", "Result"]);
+    expect(card.querySelector(".tool-row-body")!.textContent).toContain("out ag");
   });
 });
 

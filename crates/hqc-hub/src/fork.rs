@@ -135,6 +135,24 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     db::session(&app.db, id).await?.ok_or(ApiError::NotFound)
 }
 
+/// What the fork's agent is told in front of the first input after the cut (SPEC §6): the
+/// session it was copied from and its own address. `None` for any other input and for a
+/// session with no copied history.
+pub async fn note(
+    app: &AppState,
+    s: &SessionRow,
+    input_seq: i64,
+) -> anyhow::Result<Option<String>> {
+    let Some(from) = db::fork_cut_before_input(&app.db, s.id, input_seq, FORKED_FROM).await? else {
+        return Ok(None);
+    };
+    let own = crate::peers::address(app, s).await?;
+    Ok(Some(format!(
+        "[hqc fork] {from}. The conversation above was copied from that session; this session \
+         is {own}, separate from it from here on."
+    )))
+}
+
 /// The agent's `agent.message` the client shows above `at`, an input that came while the
 /// agent's text was being written (SPEC §6): the first event after `at` and the inputs like it
 /// that follow, when it is the agent's message and answers none of them.

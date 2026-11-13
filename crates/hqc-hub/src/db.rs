@@ -3111,6 +3111,32 @@ pub async fn set_session_fork(db: &PgPool, id: Uuid, fork: &Value) -> sqlx::Resu
     Ok(())
 }
 
+/// The text of the session's own `system` event `code` (not one copied from its source), when
+/// session `id` is a fork with copied history and its input at `seq` is the first input after
+/// that event: no input lies between them but a failed one or a slash command (SPEC §6).
+pub async fn fork_cut_before_input(
+    db: &PgPool,
+    id: Uuid,
+    seq: i64,
+    code: &str,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT f.payload ->> 'text' FROM sessions s JOIN events f ON f.session_id = s.id
+         WHERE s.id = $1 AND s.fork IS NOT NULL AND f.type = 'system'
+           AND f.payload ->> 'code' = $3 AND f.origin_id IS NULL AND f.seq < $2
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id
+                             AND e.delivery IN ('pending', 'delivered')
+                             AND COALESCE(e.payload ->> 'text', '') !~ '^\\s*/'
+                             AND e.seq > f.seq AND e.seq < $2)",
+    )
+    .bind(id)
+    .bind(seq)
+    .bind(code)
+    .fetch_optional(db)
+    .await
+    .map(Option::flatten)
+}
+
 /// The `agent.message` events of session `id` before `seq`, newest first, at most `limit`:
 /// where a fork before that message may cut the conversation (SPEC §6). Each as the record it
 /// stands for: the id it got from the runtime and the transcript it was written in, a copy's

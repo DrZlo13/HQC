@@ -75,6 +75,14 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
                 if prefix.capped_by.is_some() {
                     frame.permission_cap = Some(PermissionMode::Ask);
                 }
+                // A fork's agent learns it is a copy with its first input (SPEC §6), unless it is
+                // a slash command, which text in front of it would turn into a plain message; the
+                // feed keeps the text as typed.
+                if !frame.text.trim_start().starts_with('/') {
+                    if let Some(note) = crate::fork::note(app, &s, p.seq).await? {
+                        frame.text = format!("{note}\n\n{}", frame.text);
+                    }
+                }
                 sc.inflight.insert(p.event_id);
                 let id = conn.send(HubFrame::SessionInput(frame));
                 replies.insert(

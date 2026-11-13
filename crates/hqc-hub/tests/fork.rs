@@ -319,5 +319,154 @@ async fn a_fork_of_a_fork_cuts_where_the_records_are() {
         s3["payload"]["fork"],
         json!({"runtime_session_id": runtime_of(&s2), "at_event_ids": [own["event_id"]]})
     );
+    // Its note names the fork it was made from, not the copied `forked_from` of that fork.
+    let middle = hub.session(&f2).await["slug"].as_str().unwrap().to_string();
+    let text = sent_text(&hub, &mut w, &f3, "Remember FIG.").await;
+    assert!(
+        text.as_str().unwrap().starts_with(&format!(
+            "[hqc fork] Forked from personal/{middle} before the message of "
+        )),
+        "{text}"
+    );
+    hub.finish().await;
+}
+
+/// The text the worker gets for a person's input, acknowledged.
+async fn sent_text(hub: &TestHub, w: &mut FakeWorker, sid: &str, text: &str) -> Value {
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": text}))
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": r["event"]["event_id"]}),
+    )
+    .await;
+    si["payload"]["text"].clone()
+}
+
+/// SPEC §6: the agent of a fork with copied history is told it is a copy with the first input
+/// after the cut, also when that input is sent again after a reconnect; the feed keeps the
+/// text as typed, and a later input, the source and a fork before the first message get none.
+#[tokio::test]
+async fn the_first_input_of_a_fork_tells_its_agent_it_is_a_copy() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    let m1 = input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    reply(&mut w, &sid, "OK, APPLE.").await;
+    let m2 = input(&hub, &mut w, &sid, "Remember BANANA.").await;
+    reply(&mut w, &sid, "OK, BANANA.").await;
+
+    let f = fork(&hub, &sid, &m2).await;
+    ack_start(&mut w, &f).await;
+    // The source's inputs go as typed.
+    assert_eq!(
+        sent_text(&hub, &mut w, &sid, "Remember CHERRY.").await,
+        "Remember CHERRY."
+    );
+
+    let own = format!(
+        "personal/{}",
+        hub.session(&f).await["slug"].as_str().unwrap()
+    );
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{f}/input"),
+            json!({"text": "the typed text"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let eid = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    assert_eq!(si["payload"]["event_id"], eid);
+    let text = si["payload"]["text"].as_str().unwrap().to_string();
+    assert!(
+        text.starts_with("[hqc fork] Forked from personal/words before the message of "),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("; this session is {own}, separate from it")),
+        "{text}"
+    );
+    assert!(text.ends_with("\n\nthe typed text"), "{text}");
+
+    // Not acknowledged: sent again after a reconnect, with the note again.
+    w.close().await;
+    hub.wait_session(&f, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    ack_start(&mut w, &f).await;
+    let again = w.expect("session.input").await;
+    assert_eq!(again["payload"]["event_id"], eid);
+    assert_eq!(again["payload"]["text"], text.as_str());
+    w.reply(&again["id"], "ack", json!({"event_id": eid})).await;
+
+    // The feed shows what was typed.
+    let events = hub.events(&f).await;
+    let stored = events.iter().find(|e| e["event_id"] == eid).unwrap();
+    assert_eq!(stored["payload"]["text"], "the typed text");
+
+    // The fork's next input goes as typed.
+    reply(&mut w, &f, "OK.").await;
+    assert_eq!(sent_text(&hub, &mut w, &f, "And then?").await, "And then?");
+
+    // A fork before the first message has no copied history and no note.
+    let f0 = fork(&hub, &sid, &m1).await;
+    ack_start(&mut w, &f0).await;
+    assert_eq!(sent_text(&hub, &mut w, &f0, "Hello.").await, "Hello.");
+    hub.finish().await;
+}
+
+/// SPEC §6: a slash command first in a fork goes as typed, and a failed first input does not
+/// count: the next input carries the note.
+#[tokio::test]
+async fn a_command_or_a_failed_input_leaves_the_note_to_the_next_input() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    reply(&mut w, &sid, "OK, APPLE.").await;
+    let m2 = input(&hub, &mut w, &sid, "Remember BANANA.").await;
+    let note = "[hqc fork] Forked from personal/words before the message of ";
+
+    let f = fork(&hub, &sid, &m2).await;
+    ack_start(&mut w, &f).await;
+    assert_eq!(sent_text(&hub, &mut w, &f, "/compact").await, "/compact");
+    let text = sent_text(&hub, &mut w, &f, "Go on.").await;
+    assert!(text.as_str().unwrap().starts_with(note), "{text}");
+
+    let f = fork(&hub, &sid, &m2).await;
+    ack_start(&mut w, &f).await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{f}/input"),
+            json!({"text": "Go on."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let si = w.expect("session.input").await;
+    assert!(
+        si["payload"]["text"].as_str().unwrap().starts_with(note),
+        "{si}"
+    );
+    w.reply(
+        &si["id"],
+        "error",
+        json!({"code": "internal", "message": "the inbox is gone", "retryable": false}),
+    )
+    .await;
+    hub.wait_events(&f, "input_rejected", |e| {
+        e.iter().any(|e| e["payload"]["code"] == "input_rejected")
+    })
+    .await;
+    let text = sent_text(&hub, &mut w, &f, "Go on, then.").await;
+    assert!(text.as_str().unwrap().starts_with(note), "{text}");
     hub.finish().await;
 }

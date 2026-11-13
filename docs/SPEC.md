@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.131, 2026-11-13. Status: the architecture agreed after six reviews and a survey of
+Version 0.133, 2026-11-13. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2555,14 +2555,18 @@ Chains:
   requirements: in every session the agent calls `hqc_rename` without `session` (its own
   session) with a short title the moment it understands what the work is, usually on the first
   message and before it answers, and again whenever the work turns to something substantially
-  different; and every file it makes for the user to look at (images, charts, reports, diffs)
+  different, always without `session`, also when it thinks it knows its address (since 0.133;
+  the description of `hqc_rename` says the same): a fork (§6) carries the history of its
+  source, and an agent in a fork passed the source's address it saw there and renamed the
+  source; and
+  every file it makes for the user to look at (images, charts, reports, diffs)
   goes into the chat with `hqc_attach` in the same answer, also unasked, with a file made
   outside the workspace (a scratchpad in `/tmp`) copied first into `.hqc/out/` of the
   workspace, since `hqc_attach` takes only workspace files and the worker adds `.hqc/` to
   `info/exclude` (§8.1), so the copy does not end up in a commit. Said softly the agent skips them: with
   Claude Code 2.1.312 and Opus 5.5, a one-line question from another session got no rename when
   the rule ended the tool list or opened with "Name this session" (one session each), and an
-  agent gave paths of images in its scratchpad until asked to attach them; worded as now, the
+  agent gave paths of images in its scratchpad until asked to attach them; worded as in 0.126, the
   agent renamed on the first message and again on a different second task, and an agent asked
   only to make a chart wrote it into `.hqc/out/` and attached it (checked on 2026-11-12).
   Claude Code keeps
@@ -4845,6 +4849,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.128 → 0.133 (an agent renames its own session without `session`)
+§7.2: an agent in a copy of a session, asked to rename itself, called `hqc_rename` with the
+address of the source it saw in the copied history, and the source was renamed. `INSTRUCTIONS`
+and the description of `hqc_rename` now say to rename this session always without `session`,
+also when the agent thinks it knows the address, since an address of this session in a fork's
+history (an `hqc_rename` result, `current: true` in `hqc_list_sessions`) is the source's.
+0.129–0.132 are taken by open branches.
 
 ### 0.128 → 0.131 (Answer waits for an answer to every question)
 §4 `clarify.request`: the client sent the answers to the questions that had one and left the

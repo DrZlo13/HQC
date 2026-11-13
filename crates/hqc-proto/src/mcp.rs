@@ -42,7 +42,10 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     and a task from another session: the moment you understand what the work in this session \
     is, usually on the first message and before you answer, call hqc_rename without `session` \
     with a short title for that work; call it again whenever the work turns to something \
-    substantially different. Required as well: every file you make for the user to look at (an \
+    substantially different. Rename this session always without `session`, also when you think \
+    you know its address: a copied session carries the history of its source, and an address of \
+    this session seen there (an hqc_rename result, `current: true` in hqc_list_sessions) is the \
+    source's. Required as well: every file you make for the user to look at (an \
     image, a chart, a report, a diff) goes into the chat with hqc_attach in the same answer, also \
     when the user did not ask to see it; a path alone is not enough. hqc_attach takes only a file \
     inside the session's workspace, so copy a file you made elsewhere (a scratchpad in /tmp) into \
@@ -327,7 +330,11 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: RENAME,
         description: "Rename an hqc session of your owner: this one when `session` is absent, \
-            otherwise the session at that address (<project-slug>/<session-slug>) or id. The \
+            otherwise the session at that address (<project-slug>/<session-slug>) or id. Leave \
+            `session` out to rename this one, also when you think you know its address: a \
+            copied session carries the history of its source, and an address of this session \
+            seen there (an hqc_rename result, `current: true` in hqc_list_sessions) is the \
+            source's. The \
             title is set as the user sets it in the client: the session list and the chat show \
             it, and the session's automatic title no longer replaces it. The address does not \
             change. One line, at most 200 characters.",
@@ -338,7 +345,7 @@ pub const TOOLS: &[Tool] = &[
                     "title": {"type": "string", "description": "The new title."},
                     "session": {
                         "type": "string",
-                        "description": "The session to rename: <project-slug>/<session-slug> or its id; this session when absent."
+                        "description": "Another session to rename: <project-slug>/<session-slug> or its id. Leave it out to rename this session."
                     }
                 },
                 "required": ["title"],

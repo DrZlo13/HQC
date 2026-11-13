@@ -251,15 +251,19 @@ describe("an input that came while the agent's text was being written (SPEC §6)
 
   it("a final answer takes the line that says how its turn ended along", () => {
     const t = new Timeline();
-    const end = (code: string) =>
+    const end = (code: string, seq = 4) =>
       ev("event.system", (e) => {
-        e.seq = 4;
+        e.seq = seq;
         e.payload = { code, text: code === "turn_interrupted" ? "Interrupted" : "Turn ended early: max_turns" };
       });
     for (const code of ["turn_interrupted", "turn_ended_early"]) {
       const t = new Timeline();
       t.applyAll([input(1, true), answer(2), ev("event.usage", withSeq(3)), end(code)]);
       expect(order(t)).toEqual(["e2", "e3", "e4", "e1"]);
+      // A turn that ends on an API error or an interrupt mid-reply has no `usage` line.
+      const bare = new Timeline();
+      bare.applyAll([input(1, true), answer(2), end(code, 3)]);
+      expect(order(bare)).toEqual(["e2", "e3", "e1"]);
     }
     t.applyAll([input(1, true), answer(2), ev("event.usage", withSeq(3)), end("worker_log")]);
     expect(order(t)).toEqual(["e2", "e3", "e1", "e4"]);

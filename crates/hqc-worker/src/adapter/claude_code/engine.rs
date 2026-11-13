@@ -1595,7 +1595,8 @@ impl Core {
                 model,
             }));
         } else if spent {
-            // The total grew by what background subagents spent meanwhile: a `usage` with the
+            // The total grew with no tokens in the result: what background subagents spent
+            // meanwhile, or a reply an interrupt cut off before its end. A `usage` with the
             // total only, which the client counts for the session and draws no line for. The
             // baseline stays, so the next turn's `cost_usd` carries it.
             out.push(self.emit_new(EventKind::Usage {

@@ -5,7 +5,7 @@ import { ProjectGlyph, projectName, tileBackground } from './Appearance';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
 import { useSubscription } from './hooks';
 import { IconArchive, IconCheck, IconCross, IconPlus, IconReorder, IconSearch, IconSettings, IconStar } from './icons';
-import { newProject, prefetchOn, projectMenu } from './SessionList';
+import { SESSION_DRAG, draggedSession, dropSession, newProject, prefetchOn, projectMenu } from './SessionList';
 import { moveTo, reopenedSession } from './sessions';
 
 /** A tile and the gap under it: how far a drag moves a project by one place. */
@@ -68,7 +68,8 @@ export function onMac(): boolean {
  *  corner. "+ project", the order menu (Custom, Name, Recent, and Reorder…: drag the tiles or
  *  move a focused one with ↑/↓, then Done, which makes the order Custom, or Cancel), settings
  *  and who is signed in. A project's right click opens its menu (`projectMenu`); archiving one
- *  shows "Archived «…» · Undo" at the bottom. The search
+ *  shows "Archived «…» · Undo" at the bottom. A session row dragged from the column onto
+ *  another project, ringed while it is over it, moves the session there. The search
  *  (its magnifier, or ⌘K / Ctrl+K) finds projects by name, archived ones too: with the names
  *  on (the Compact look) the field takes the place of "HQC" and the list shrinks to
  *  the matches; with tiles the bar opens 290 px wide over the column, with the names. */
@@ -84,6 +85,8 @@ export function ProjectRail({ app }: { app: AppState }) {
   const drag = useRef<{ id: string; y: number; base: string[] } | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const focusTile = useRef<string | null>(null);
+  // The project a session row from the column is dragged over: where it would move.
+  const [dropId, setDropId] = useState<string | null>(null);
   const nav = useRef<HTMLElement>(null);
   // A project's context menu, where it was opened.
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -179,6 +182,28 @@ export function ProjectRail({ app }: { app: AppState }) {
       setOrder(moveTo(order, id, order.indexOf(id) + dir));
     },
   });
+  // A session row of the column dropped on a project moves the session there (`dropSession`);
+  // its own project does not take it, nor does any project take a row dragged in another tab.
+  const dropOn = (id: string) => {
+    const over = (e: DragEvent) => {
+      const row = draggedSession();
+      if (!row || row.project_id === id || !e.dataTransfer?.types.includes(SESSION_DRAG)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDropId(id);
+    };
+    return {
+      onDragEnter: over,
+      onDragOver: over,
+      onDragLeave: () => setDropId(null),
+      onDrop: (e: DragEvent) => {
+        e.preventDefault();
+        setDropId(null);
+        const sid = e.dataTransfer?.getData(SESSION_DRAG);
+        if (sid && sid === draggedSession()?.id) void dropSession(app, sid, id);
+      },
+    };
+  };
   // The order arranged is the user's own: the bar shows it from now on.
   const done = () => {
     if (order) {
@@ -403,7 +428,7 @@ export function ProjectRail({ app }: { app: AppState }) {
             const background = on || names ? undefined : { background: tileBackground(p) };
             const cls = `project-row rail-project ${on ? 'is-current' : ''} ${unread ? 'has-unread' : ''}`;
             return (
-              <div key={p.id} class={`rail-item ${dragId === p.id ? 'is-dragging' : ''}`}>
+              <div key={p.id} class={`rail-item ${dragId === p.id ? 'is-dragging' : ''} ${dropId === p.id ? 'is-drop' : ''}`}>
                 {on && <span class="rail-pill" aria-hidden="true" />}
                 {order ? (
                   <span
@@ -430,6 +455,7 @@ export function ProjectRail({ app }: { app: AppState }) {
                       if (id) app.prefetchChat(id);
                     })}
                     onContextMenu={menuOn(p.id)}
+                    {...dropOn(p.id)}
                   >
                     {face}
                   </a>

@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Api } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
-import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState } from '../src/proto';
+import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState, type Workspace } from '../src/proto';
 import { trackHistory } from '../src/nav';
 import { applyLook } from '../src/theme';
 import { Timeline } from '../src/timeline';
@@ -25,7 +25,7 @@ import { Chat } from '../src/ui/Chat';
 import { PhoneHome } from '../src/ui/PhoneHome';
 import { ProjectRail, onMac, runSpeed, runningTitle } from '../src/ui/ProjectRail';
 import { ProjectSettings } from '../src/ui/ProjectSettings';
-import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SessionList, WidthGrip } from '../src/ui/SessionList';
+import { LIST_WIDTH_MAX, LIST_WIDTH_MIN, LIST_WIDTH_STEP, SESSION_DRAG, SessionList, WidthGrip } from '../src/ui/SessionList';
 import { ALLOW_ALL_CONFIRM } from '../src/ui/labels';
 import {
   arrange,
@@ -833,6 +833,149 @@ describe('archive from the row (T50)', () => {
     });
     expect(api.moveSession).toHaveBeenCalledWith('net', { path: '/Users/me/work/games/phys-mp/netcode', project: undefined, create: undefined });
     expect(root.querySelector('.move-panel')).toBeNull();
+  });
+});
+
+describe('a session row dragged onto the project bar', () => {
+  /** A folder of the project "kiln" (p2). */
+  const folder = (id: string, worker: string, path: string, state: 'ready' | 'creating' = 'ready'): Workspace => ({
+    id,
+    project_id: 'p2',
+    worker_id: worker,
+    path,
+    label: '',
+    environment: 'default',
+    kind: 'dir',
+    ephemeral: false,
+    marked_for_deletion: false,
+    created_by_hqc: false,
+    mirror_enabled: true,
+    hqc_rules: 0,
+    state,
+    created_at: at(80),
+  });
+  const moved = async (id: string) => sess(id, 'Network sync', 'idle', at(0), { project_id: 'p2' });
+  /** The bar and the column of physics-mp, with the project "kiln" whose folders are `folders`. */
+  async function mountBoth(folders: Workspace[], move: (id: string, body: { path: string; project?: string }) => Promise<SessionInfo> = moved) {
+    const api = {
+      ...hubApi(),
+      workspaces: vi.fn(async (projectId: string) => (projectId === 'p2' ? folders : [])),
+      workerDirs: vi.fn(async () => []),
+      moveSession: vi.fn(move),
+    };
+    const app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+    app.projects.set('p2', { id: 'p2', name: 'kiln', slug: 'kiln', description: '', is_personal: false, color: 'moss', created_at: at(80) });
+    await mount(
+      <>
+        <ProjectRail app={app} />
+        <SessionList app={app} />
+      </>,
+    );
+    return Object.assign(api, { app });
+  }
+  /** A drag's data as a browser has it; happy-dom has no drag image. */
+  const transfer = () => Object.assign(new DataTransfer(), { setDragImage: vi.fn() });
+  /** A drag event on `el` with `dt` (happy-dom's DragEvent is a plain Event), and the hub's
+   *  (mocked) replies it waits for. */
+  async function drag(el: Element, type: string, dt: DataTransfer): Promise<Event> {
+    const e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: 30, clientY: 12 });
+    Object.defineProperty(e, 'dataTransfer', { value: dt });
+    await act(async () => {
+      el.dispatchEvent(e);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+    return e;
+  }
+  const row = () => rowOf('Network sync').querySelector('a.session-row')!;
+  const tile = (projectId: string) => root.querySelector(`a.rail-project[href="#/p/${projectId}"]`)!;
+  const marked = () => [...root.querySelectorAll('.rail-item.is-drop .rail-project')].map((t) => t.getAttribute('aria-label'));
+
+  it('onto a project with one ready folder on its worker: the session moves into that folder', async () => {
+    // One on another worker and one still being made do not count.
+    const api = await mountBoth([
+      folder('k1', 'wk1', '/Users/me/work/kiln'),
+      folder('k2', 'wk2', '/Users/me/work/kiln-det'),
+      folder('k3', 'wk1', '/Users/me/work/kiln-clone', 'creating'),
+    ]);
+    const dt = transfer();
+    const a = row();
+    await drag(a, 'dragstart', dt);
+    expect([dt.getData(SESSION_DRAG), dt.effectAllowed]).toEqual(['net', 'move']);
+    expect(dt.setDragImage).toHaveBeenCalledWith(a, 30, 12);
+    expect((await drag(tile('p2'), 'dragenter', dt)).defaultPrevented).toBe(true);
+    expect((await drag(tile('p2'), 'dragover', dt)).defaultPrevented).toBe(true);
+    expect([dt.dropEffect, marked()]).toEqual(['move', ['kiln']]);
+    await drag(tile('p2'), 'drop', dt);
+    await drag(a, 'dragend', dt);
+    expect(marked()).toEqual([]);
+    expect(api.moveSession).toHaveBeenCalledWith('net', { path: '/Users/me/work/kiln', project: 'p2' });
+    expect(titles()).not.toContain('Network sync');
+    expect(root.querySelector('.move-panel')).toBeNull();
+  });
+
+  it('onto a project with two ready folders there: no move, "Move to project…" opens with that project', async () => {
+    const api = await mountBoth([folder('k1', 'wk1', '/Users/me/work/kiln'), folder('k2', 'wk1', '/Users/me/work/kiln-glaze')]);
+    const dt = transfer();
+    const a = row();
+    await drag(a, 'dragstart', dt);
+    await drag(tile('p2'), 'dragover', dt);
+    await drag(tile('p2'), 'drop', dt);
+    await drag(a, 'dragend', dt);
+    expect(api.moveSession).not.toHaveBeenCalled();
+    const form = root.querySelector('.move-panel form.move-session')!;
+    expect(form.querySelector<HTMLSelectElement>('select[name=project]')!.value).toBe('p2');
+    expect(form.querySelectorAll('.move-folders li')).toHaveLength(2);
+    // The form belongs to the list it opened over: the archive in its place and back, and it is
+    // gone.
+    await act(async () => api.app.setArchiveMode(true));
+    await act(async () => api.app.setArchiveMode(false));
+    expect(root.querySelector('.move-panel')).toBeNull();
+  });
+
+  it('a drag that is no row of this page — a link, a row of another tab — no project takes', async () => {
+    const api = await mountBoth([folder('k1', 'wk1', '/Users/me/work/kiln')]);
+    const link = transfer();
+    link.setData('text/uri-list', 'https://example.com/');
+    const tab = transfer();
+    tab.setData(SESSION_DRAG, 'net');
+    for (const dt of [link, tab]) {
+      expect((await drag(tile('p2'), 'dragenter', dt)).defaultPrevented).toBe(false);
+      expect((await drag(tile('p2'), 'dragover', dt)).defaultPrevented).toBe(false);
+      await drag(tile('p2'), 'drop', dt);
+    }
+    expect(marked()).toEqual([]);
+    expect(api.moveSession).not.toHaveBeenCalled();
+    expect(root.querySelector('.move-panel')).toBeNull();
+  });
+
+  it('onto its own project: the tile does not take it and a drop there moves nothing; another one takes it', async () => {
+    const api = await mountBoth([folder('k1', 'wk1', '/Users/me/work/kiln')]);
+    const dt = transfer();
+    const a = row();
+    await drag(a, 'dragstart', dt);
+    expect((await drag(tile('p1'), 'dragenter', dt)).defaultPrevented).toBe(false);
+    expect((await drag(tile('p1'), 'dragover', dt)).defaultPrevented).toBe(false);
+    expect(marked()).toEqual([]);
+    await drag(tile('p1'), 'drop', dt);
+    expect(api.moveSession).not.toHaveBeenCalled();
+    expect(root.querySelector('.move-panel')).toBeNull();
+    expect((await drag(tile('p2'), 'dragover', dt)).defaultPrevented).toBe(true);
+    await drag(a, 'dragend', dt);
+  });
+
+  it('a refused move: the list says why, and the session stays', async () => {
+    const api = await mountBoth([folder('k1', 'wk1', '/Users/me/work/kiln')], async () => {
+      throw new Error('the session is driven from VS Code');
+    });
+    const dt = transfer();
+    const a = row();
+    await drag(a, 'dragstart', dt);
+    await drag(tile('p2'), 'dragover', dt);
+    await drag(tile('p2'), 'drop', dt);
+    await drag(a, 'dragend', dt);
+    expect(api.moveSession).toHaveBeenCalledTimes(1);
+    expect(root.querySelector('.notice[role=alert]')!.textContent).toBe('Not moved «Network sync»: the session is driven from VS Code');
+    expect(titles()).toContain('Network sync');
   });
 });
 

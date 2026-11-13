@@ -85,6 +85,8 @@ fn ends_turn(kind: &EventKind) -> bool {
 fn ends_live_text(kind: &EventKind) -> bool {
     match kind {
         EventKind::AgentMessage { .. } => true,
+        // The runtime took the answer being written back (SPEC 0.173): no message ends it.
+        EventKind::Retraction { .. } => true,
         EventKind::Status { state, .. } => *state != SessionState::Running,
         _ => false,
     }
@@ -437,6 +439,22 @@ async fn after_store(
     kind: &EventKind,
     source: Source,
 ) -> anyhow::Result<()> {
+    // The runtime refused a model switch and kept this model: the session's again (SPEC §4,
+    // §8.1), before the event goes out, since a client reads the session again on it. A name
+    // hqc would not take from the user is not taken from it.
+    if let EventKind::System {
+        code,
+        model: Some(m),
+        ..
+    } = kind
+    {
+        if source == Source::Worker
+            && code == hqc_proto::event::MODEL_NOT_SWITCHED
+            && crate::api::valid_model(m)
+        {
+            db::set_model(&app.db, s.id, Some(m)).await?;
+        }
+    }
     // Publish first so that clients see events in seq order even when side effects below
     // store further events.
     app.notify(Notice::Event {
@@ -541,18 +559,6 @@ async fn after_store(
             }
             _ => {}
         },
-        // The runtime refused a model switch and kept this model: the session's again
-        // (SPEC §4, §8.1). A name hqc would not take from the user is not taken from it.
-        EventKind::System {
-            code,
-            model: Some(m),
-            ..
-        } if source == Source::Worker
-            && code == hqc_proto::event::MODEL_NOT_SWITCHED
-            && crate::api::valid_model(m) =>
-        {
-            db::set_model(&app.db, s.id, Some(m)).await?;
-        }
         _ => {}
     }
     // An import brings hundreds of old answers; what VS Code does live is the user's own

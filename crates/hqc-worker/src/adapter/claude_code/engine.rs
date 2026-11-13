@@ -35,8 +35,9 @@
 //!   `compact_error`;
 //! - [`AdapterEvent::Activity`] when it changes, a new estimate of the thinking at most once
 //!   per 2 s: `system` `api_retry` → retrying, `system` `status` `compacting` → compacting,
-//!   `system` `thinking_tokens` → thinking with its `estimated_tokens`; any other `system` `status` that does not report the permission mode
-//!   (`requesting`, `null` at a compaction's end), a main agent's `stream_event`
+//!   `system` `thinking_tokens` → thinking with its `estimated_tokens`; any other `system`
+//!   `status` that does not report the permission mode (`requesting`, `null` at a
+//!   compaction's end), a main agent's `stream_event`
 //!   `message_start`, `content_block_start` or `content_block_stop`, its `assistant` line and
 //!   `result` → none ([`activity_of`]);
 //! - `tool_progress` with `heartbeat: true` (a long call of the main agent, every 30 s) →
@@ -84,7 +85,8 @@
 //!   turn's `usage`; `model_refusal_no_fallback` → `system model_refusal`; an `assistant` with
 //!   `supersedes` and `model_refusal_fallback` (its `retracted_message_uuids`) → `retraction`
 //!   of the events of those records of this turn not retracted yet ([`Core::retract`]), the
-//!   latter then `system model_refusal_fallback`;
+//!   latter then `system model_refusal_fallback`, its fallback the model of this turn's `usage`
+//!   unless its `scope` is `local`;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
@@ -111,9 +113,9 @@
 //!   their descriptions and argument hints, else the names of `slash_commands`, without
 //!   `terminal_slash_commands` ([`Core::report_commands`]); the answer and
 //!   `commands_changed` report them too; one `init` while no turn of ours runs (a turn the CLI
-//!   starts by itself) → `status running` first; its MCP servers not `connected` →
-//!   `system mcp_not_connected`, its `plugin_errors` → `system plugin_errors`, each when it
-//!   differs from the one given last;
+//!   starts by itself) → `status running` first; its MCP servers neither `connected` nor
+//!   `disabled` → `system mcp_not_connected`, its `plugin_errors` → `system plugin_errors`, each
+//!   when it differs from the one given last;
 //! - `conversation_reset` (`/clear`) → `system conversation_cleared`, and the cost baseline,
 //!   token sums with it, starts from 0 again; the next `system` `init` with another
 //!   `session_id` → [`AdapterEvent::RuntimeSessionId`] with it, the transcript the CLI writes
@@ -132,9 +134,9 @@
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
-//! - an `error` answer to our `set_model` → `system model_not_switched` with the reason and the
-//!   model the CLI kept, and [`AdapterEvent::ModelKept`]; the other answers to our `set_model`,
-//!   and those to `background_tasks` and `stop_task`, are only logged;
+//! - an `error` answer to our latest `set_model` → `system model_not_switched` with the reason
+//!   and the model the CLI kept, and [`AdapterEvent::ModelKept`]; the other answers to our
+//!   `set_model`, and those to `background_tasks` and `stop_task`, are only logged;
 //! - the other `control_response` lines, the CLI's echo of ours, are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
@@ -449,6 +451,8 @@ pub struct Core {
     /// hqc's allow rules of the session's workspace and its path (T48); `None` without one.
     folder: Option<(FolderRules, std::path::PathBuf)>,
     model: Option<String>,
+    /// `request_id` of the latest `set_model` sent ([`Core::set_model`]).
+    model_request: Option<String>,
     /// The session's cumulative cost and `modelUsage` token sums as of the last `usage` with a
     /// `cost_usd` (or the transcript's last `cost-state` when resumed, none after `/clear`):
     /// the baseline of the next turn's cost and of a compaction's tokens, one value so that
@@ -583,6 +587,7 @@ impl Core {
             policy: Arc::default(),
             folder: None,
             model: None,
+            model_request: None,
             cost_base: None,
             compacted: false,
             commands: None,
@@ -821,10 +826,12 @@ impl Core {
     /// Switch the running process to `model`: `control_request {subtype: set_model}`. The CLI
     /// answers `success` with the model it resolved the name to, and its next model call uses
     /// it, the next one of a running turn too (checked on 2.1.312).
-    pub fn set_model(&self, model: &str) -> Action {
+    pub fn set_model(&mut self, model: &str) -> Action {
+        let id = format!("{MODEL_REQUEST}{}", Uuid::now_v7());
+        self.model_request = Some(id.clone());
         Action::Write(json!({
             "type": "control_request",
-            "request_id": format!("{MODEL_REQUEST}{}", Uuid::now_v7()),
+            "request_id": id,
             "request": {"subtype": "set_model", "model": model},
         }))
     }
@@ -1262,6 +1269,13 @@ impl Core {
                     vec![self.emit_system(MODEL_FALLBACK, switch_line(&v))]
                 }
                 Some("model_refusal_fallback") => {
+                    // `scope` `session` (or none): the session's model is swapped; `local`:
+                    // only a subagent's or a side question's answer came from it (2.1.312).
+                    if v["scope"] != "local" {
+                        if let Some(m) = v["fallback_model"].as_str() {
+                            self.model = Some(m.to_owned());
+                        }
+                    }
                     let mut out = self.retract(&v["retracted_message_uuids"]);
                     out.push(self.emit_system(MODEL_REFUSAL_FALLBACK, switch_line(&v)));
                     out
@@ -1304,9 +1318,10 @@ impl Core {
     }
 
     /// The CLI's answer to our `initialize` (its slash commands with their descriptions, its
-    /// models and account, or an error), `set_permission_mode`, `set_model` (a refusal is a line
-    /// and the model kept, another answer logged), `background_tasks` or `stop_task` (both
-    /// logged); every other `control_response`, the echo of one of ours, is skipped.
+    /// models and account, or an error), `set_permission_mode`, `set_model` (a refusal of the
+    /// latest one is a line and the model kept, another answer logged), `background_tasks` or
+    /// `stop_task` (both logged); every other `control_response`, the echo of one of ours, is
+    /// skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
@@ -1342,6 +1357,15 @@ impl Core {
                 return vec![];
             }
             tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the model switch");
+            // A refusal of a switch the user made again since: the model it names is not the
+            // one asked for last, so it gives neither a line nor the model kept.
+            if self
+                .model_request
+                .as_deref()
+                .is_some_and(|latest| latest != id)
+            {
+                return vec![];
+            }
             // The error names the model the CLI kept (2.1.312): the session's again.
             let kept = r["model"].as_str().map(text);
             let why = r["error"].as_str().map_or_else(|| "refused".into(), text);
@@ -2043,15 +2067,15 @@ impl Core {
         vec![self.emit_new(EventKind::Retraction { event_ids: ids })]
     }
 
-    /// A line for `system/init`'s MCP servers whose `status` is not `connected` and one for
-    /// its `plugin_errors`, each when it differs from the one given last: the CLI sends `init`
-    /// before every turn.
+    /// A line for `system/init`'s MCP servers whose `status` is not `connected` nor `disabled`
+    /// (turned off by the user) and one for its `plugin_errors`, each when it differs from the
+    /// one given last: the CLI sends `init` before every turn.
     fn on_init_problems(&mut self, v: &Value) -> Vec<Action> {
         let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
         let s = |x: &Value| text(x.as_str().unwrap_or(""));
         let servers: Vec<String> = list("mcp_servers")
             .iter()
-            .filter(|m| m["status"] != "connected")
+            .filter(|m| !matches!(m["status"].as_str(), Some("connected" | "disabled")))
             .map(|m| format!("{} ({})", s(&m["name"]), s(&m["status"])))
             .collect();
         let plugins: Vec<String> = list("plugin_errors")

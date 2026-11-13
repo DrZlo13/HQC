@@ -1386,6 +1386,38 @@ async fn a_reset_delta_drops_the_text_so_far() {
     hub.finish().await;
 }
 
+/// SPEC §6 (0.173): a `retraction` ends the text being written, as a stored answer does: the
+/// runtime took back the answer it was streaming, and no `agent.message` comes for it.
+#[tokio::test]
+async fn a_retraction_ends_the_answer_text() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("retracted").await;
+    ack_start(&mut w, &sid).await;
+    w.event(agent_event(
+        &sid,
+        "agent.delta",
+        json!({"text": "I can't help"}),
+    ))
+    .await;
+    w.event(agent_event(
+        &sid,
+        "retraction",
+        json!({"event_ids": [Uuid::now_v7()]}),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "after"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    assert!(r["event"]["payload"].get("during_text").is_none(), "{r}");
+    hub.finish().await;
+}
+
 /// Web Push on approval.request when nobody watches; no push while a client is subscribed.
 #[tokio::test]
 async fn push_only_without_live_subscription() {

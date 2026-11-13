@@ -1269,7 +1269,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
         <div class="clarify-link">
           {href ? (
             <a href={href} target="_blank" rel="noopener noreferrer">
-              {p.url}
+              {href}
             </a>
           ) : (
             p.url
@@ -1353,7 +1353,7 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           )}
         </div>
       )}
-      {(fate.response || answeredLater) && <div class="outcome">{declined ? 'Declined' : 'Answers sent'}</div>}
+      {(fate.response || answeredLater) && <div class="outcome">{declined ? 'Declined' : p.url ? 'Done' : 'Answers sent'}</div>}
       {fate.cancel && !answeredLater && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>

@@ -1098,10 +1098,11 @@ describe("requests of the CLI (SPEC 0.150)", () => {
     t.apply(ev("event.approval.request.human_only"));
     show(t);
     expect(root.querySelector(".perm-title")!.textContent).toBe(
-      "The agent wants to use Fetch",
+      "The agent wants to use fetch (web)",
     );
     expect(root.querySelector(".perm-sub")!.textContent).toBe(
-      "Fetch · https://example.com/report",
+      // The CLI's `display_name` of an MCP tool ("Fetch") drops its server.
+      "fetch (web) · https://example.com/report",
     );
     expect(root.querySelector(".perm-reason")!.textContent).toBe(
       "Permission rule 'mcp__web__fetch' from project settings requires approval",
@@ -1143,10 +1144,10 @@ describe("requests of the CLI (SPEC 0.150)", () => {
     );
     show(t);
     expect(root.querySelector(".perm-done-outcome")!.textContent).toBe(
-      "· cancelled: withdrawn by the agent",
+      "· cancelled: withdrawn",
     );
     expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe(
-      "Cancelled: withdrawn by the agent",
+      "Cancelled: withdrawn",
     );
   });
 
@@ -1182,11 +1183,33 @@ describe("requests of the CLI (SPEC 0.150)", () => {
     expect(root.querySelector(".card-clarify fieldset")).toBeNull();
     await act(async () => buttonByText("Done")!.click());
     expect(actions.answer).toHaveBeenLastCalledWith("req-5", {}, "accept");
-
-    t.apply(ev("event.clarify.response.decline", withSeq(2)));
+    t.apply(
+      ev("event.clarify.response", (e) => {
+        e.seq = 2;
+        e.payload = { request_id: "req-5", answers: {}, action: "accept" };
+      }),
+    );
     show(t);
+    expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe("Done");
+
+    const declined = new Timeline();
+    declined.apply(ev("event.clarify.request.elicitation_url", withSeq(1)));
+    declined.apply(ev("event.clarify.response.decline", withSeq(2)));
+    show(declined);
     expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe("Declined");
     expect(buttonByText("Done")).toBeUndefined();
+
+    // The label is the address the link opens, a look-alike host in its punycode form.
+    const lookalike = new Timeline();
+    lookalike.apply(
+      ev("event.clarify.request.elicitation_url", (e) => {
+        e.payload.url = "https://gith\u0430b.com/login";
+      }),
+    );
+    show(lookalike);
+    expect(root.querySelector(".card-clarify .clarify-link a")!.textContent).toBe(
+      "https://xn--githb-7ve.com/login",
+    );
 
     // A link that is no web page is shown as text.
     const odd = new Timeline();

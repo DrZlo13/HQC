@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ApprovalOption, EventOf, RuleSuggestion } from '../proto';
 import { ruleError } from '../rules';
 import type { ChatActions, FolderActions } from './cards';
-import { callArgs, callLine, callPaths, fileChange, outsidePath } from './feed';
+import { callArgs, callLine, callPaths, fileChange, outsidePath, toolLabel } from './feed';
 import { CodeBlock } from './Markdown';
 import { useAction, useNow } from './hooks';
 import { IconCheck, IconCross, IconInfo, IconKey, IconShield } from './icons';
@@ -127,7 +127,7 @@ export function PermissionBlock({
         <span class="perm-done-what mono">
           {v.worker
             ? WORKER_REQUEST_LABELS[event.payload.tool] ?? event.payload.tool
-            : `${v.shell ? '$ ' : ''}${v.what || (event.payload.display_name ?? event.payload.tool)}`}
+            : `${v.shell ? '$ ' : ''}${v.what || toolName(event.payload.tool, event.payload.display_name)}`}
         </span>
         <span class="perm-done-outcome outcome">· {outcome.text}</span>
         <button type="button" class="btn-link" aria-expanded={again} onClick={() => setAgain(!again)}>
@@ -294,8 +294,7 @@ function PermissionCard({
     if (replying) field.current?.focus();
   }, [replying]);
   const v = requestView(event, call);
-  // The tool as the runtime names it.
-  const name = p.display_name ?? p.tool;
+  const name = toolName(p.tool, p.display_name);
   // What an edit or a write changes, from the call's arguments (cut at 4 KB, SPEC §4).
   const change = call && !v.worker ? fileChange(p.tool, call.payload.args_preview) : undefined;
   const outside = outsidePath(v.paths, actions.workspaceRoot);
@@ -604,4 +603,11 @@ function SecretCard({ event, actions, sheet }: { event: EventOf<'approval.reques
       {error && <div class="error-text">{error}</div>}
     </section>
   );
+}
+
+/** The tool as the runtime names it (`display_name`), an MCP server's tool as `<tool> (<server>)`:
+ *  the CLI's `display_name` of one drops its server, so `mcp__prod-db__query` and
+ *  `mcp__staging-db__query` would both be "Query". */
+function toolName(tool: string, displayName?: string): string {
+  return tool.startsWith('mcp__') ? toolLabel(tool) : (displayName ?? tool);
 }

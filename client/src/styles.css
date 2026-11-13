@@ -4086,6 +4086,14 @@ a.relay-peer {
   font-weight: 600;
   color: var(--text);
 }
+.card-clarify .clarify-message {
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+.card-clarify .clarify-link {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
 
 .question {
   border: none;

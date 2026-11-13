@@ -159,6 +159,9 @@ export class AppState {
   private projectArchiving: Promise<unknown> = Promise.resolve();
   /** A list action the hub refused (archive, restore, delete, rename, order). */
   listNotice: string | null = null;
+  /** The session whose "Move to project…" form is open over the list, with the project it
+   *  starts with: one a row was dropped on in the project bar. */
+  moving: { session: string; project?: string } | null = null;
   /** The new session open in the main column, one at a time; gone when it is left unsent. */
   newSession: NewSessionDraft | null = null;
   /** The view a phone's first screen shows, picked from its title's menu; kept while the page
@@ -857,6 +860,11 @@ export class AppState {
 
   setListNotice(notice: string | null): void {
     this.listNotice = notice;
+    this.changed();
+  }
+
+  setMoving(moving: { session: string; project?: string } | null): void {
+    this.moving = moving;
     this.changed();
   }
 

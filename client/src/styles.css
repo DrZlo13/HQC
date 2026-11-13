@@ -3858,6 +3858,8 @@ a.relay-peer {
 }
 
 .subagent-activity {
+  /* The rest of the line beside the dot, wrapping inside, not a line of its own. */
+  flex: 1 1 0;
   min-width: 0;
 }
 

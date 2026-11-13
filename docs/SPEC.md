@@ -1082,6 +1082,16 @@ MCP calls (worker → hub → worker):
   request, §8.1). The client sends a `stoppable` row of the session's `subagents.live` (§4).
   Like `session.kill` it is acked also when no agent runs; what the runtime answers (stopped,
   refused) is only in the worker's log, and the task's end comes as any end of it.
+- `session.subagent_history` {request_id, session_id, task_id} → `result {request_id, events[],
+  truncated}` (since 0.175) — what subagent `task_id` of `subagents.live` (§4) has done, for the
+  history the client opens under its line (§6); nothing is stored. `task_id` is 1 to 64 bytes of
+  `[A-Za-z0-9_-]`, since the worker reads a file by it, else `error {invalid_frame}`. The worker
+  reads the subagent's transcript (Claude Code: §8.1) and answers with the newest events it maps
+  from it, at most 200 that take at most 512 KiB as JSON together (an event over that alone is
+  left out), so the reply stays under the hub's 1 MiB per message (§20), oldest first, without
+  `seq`, in the session and by its agent, and `truncated` when any was left out; a subagent
+  without a transcript, and a runtime that keeps none, has no events. A session the worker has not started is `error {unknown_session}`. As for `fs.stat`,
+  `request_id` equals the frame's `id` and the hub waits 10 s for the answer.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
   runtime supports it (Hermes: `/steer`, §8.2.1); otherwise `error`.
 - `session.kill` {session_id} — terminate the agent process.
@@ -1774,6 +1784,12 @@ the rest is marked "later"):
   `subagents.live`: Claude Code stops a task of the session by its id, and the session is the
   user's own. A `task_id` longer than 128 bytes or with U+0000: `400 bad_request`; service
   session: `409 system_session`
+- `GET /api/sessions/{id}/subagents/{task_id}/history` → `{events[], truncated}` (since 0.175;
+  `read` level, as `GET .../events`; `api.subagent_history.json`): the worker's
+  `session.subagent_history` result without `request_id` (§5.3), asked for each time and stored
+  nowhere. A `task_id` that is not 1 to 64 bytes of `[A-Za-z0-9_-]`: `400 bad_request`, the worker
+  not asked; worker offline `409 worker_offline`, no answer `504 worker_timeout`, refused by the
+  worker `400 invalid_path`
 - `POST /api/sessions/{id}/fork` {event_id} → `201` and the new session object (since 0.80;
   `manage` level): a new session in the same project, workspace, worker and `cwd`, with the
   source's model, `permission_mode` and `auto_approve`, titled "<title> (fork)", whose
@@ -2425,6 +2441,15 @@ message opens the schedules of the chat ("Schedules" in the menu), and goes when
 is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
 ellipsis as the other lines, on a computer and on a
 phone; a dropped socket clears these lines too until the next subscribe.
+Since 0.175 a subagent's line (its `call_id` names an `Agent` or `Task` call of the feed; a
+command's line is none) is, but for its stop button, a button that opens under it what the
+subagent has done (`GET .../subagents/{task_id}/history`), drawn with the feed's own rows
+(thinking, tool calls with their results, text), newest at the bottom, in a box at most 40 % of
+the window's height that scrolls, opens at its bottom and stays there while the user has not
+scrolled up; "Earlier steps are not shown." above it when `truncated`. While it is open it is
+fetched again 2 s after each answer; a second click closes it, one is open at a time, and it goes
+with its line when the subagent ends.
+The same on a phone, as wide as the block.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
 keeps it up after the turn has ended.
@@ -4104,6 +4129,15 @@ its end; 2.1.312: each content block is a line, the lines of one response share 
 `usage`, counted once; lines written before the process started do not count). The rate is their sum
 over the last 20 s per second, rounded; it is sent when it changes, directly, not through the
 outbox, 0 when the agent's process stops, and again after a reconnect when it is above 0.
+Since 0.175 `session.subagent_history` (§5.3) reads the same transcript of the subagent (the CLI
+session id from the latest `system/init`; before one, or with no process, there is none), off the
+session's loop, and maps it as the mirror maps a transcript (§9.1): the subagent's text, thinking
+and tool calls of its `assistant` records and the results of its calls of its `user` records (all
+`isSidechain`), with the event ids of §3 and the mirror's caps on previews. Its task, the text of
+its first `user` record, gives none, nor does a text given to it later (a SendMessage that
+continues it) or injected by the CLI, nor the CLI's request records; a file that is not there
+gives none. The reply keeps the newest of them, at most 200 that take at most 512 KiB as JSON
+together; one over that alone is left out, and the ones before it are kept.
 Since 0.173 the worker reports what the main agent waits on as `session.state.activity` (§5.4),
 whenever it changes, a new thinking estimate at most once per 2 s (the CLI sends one with every
 piece of a thinking, about ten a second), and none when the agent's process stops. `system`
@@ -6443,7 +6477,7 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.174 → 0.175 (a background task's end, the CLI's own tasks, a subagent's request)
+### 0.174 → 0.175 (a background task's end, the CLI's own tasks, a subagent's request and history)
 §5.4, §8.1, §17.3: a subagent the CLI marks `ambient: true` (no activity, the SDK says) was counted
 in `subagents`, so it kept a session Running and its agent from being idle; it is now left out of
 the count and of the live list, an `ambient` task is no subagent as the `parent_task_id` of another
@@ -6464,7 +6498,16 @@ permission card said "The agent wants to …", as the main agent's; `approval.re
 adapter knows, the card says "Subagent “<description>” wants to …" ("… asks" on the questions'
 card, "Subagent “<description>”: run the command?" on a phone's sheet), and the subagent's line
 above the input says "waiting for permission" while the approval is open. All the new fields are
-optional; no frame changes, no migration.
+optional.
+
+§5.3, §6, §8.1: what a subagent did was not in the chat at all (the VS Code tab writes its steps
+into the feed, where they scroll away). A subagent's line above the input now opens, under it,
+its steps drawn with the feed's rows, fetched when asked and again every 2 s while it is open: the
+new `GET /api/sessions/{id}/subagents/{task_id}/history` asks the worker with the new frame
+`session.subagent_history`, which reads the subagent's transcript and answers with its newest
+events (`{events[], truncated}`), at most 200 and 512 KiB as JSON, so that the reply never
+reaches the hub's 1 MiB per message, past which the hub drops the worker's link; stored nowhere. A worker before 0.175 does not know the frame
+(`error {invalid_frame}`, `400 invalid_path` to the client). No migration.
 
 ### 0.173 → 0.174 (the CLI's requests: only a person's, the reason, a withdrawal, an MCP server's; its results)
 §8.1: the Claude Code adapter answered a `can_use_tool` from a `session` rule or the folder's hqc

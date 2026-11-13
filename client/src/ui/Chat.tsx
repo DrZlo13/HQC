@@ -393,6 +393,7 @@ export function Chat({
 
   const stop = () => act(() => chat.stop(), 'Not stopped');
   const toBackground = (callId: string) => void act(() => chat.background(callId), 'Not moved to the background');
+  const stopTask = (taskId: string) => act(() => chat.stopTask(taskId), 'Not stopped');
   // T38: Ask at once, Auto and Allow all after a one-line confirmation.
   const setMode = (mode: PermissionMode) => {
     const line = modeConfirm(mode);
@@ -666,7 +667,7 @@ export function Chat({
       )}
       {/* The list also holds the agent's background commands, which only background_tasks counts. */}
       {((info?.subagents ?? 0) > 0 || (info?.background_tasks ?? 0) > 0) && (
-        <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} />
+        <LiveSubagents agents={t.liveAgents} receivedAt={t.liveAgentsAt} onStop={stopTask} />
       )}
       {locked && (
         <div class="composer-wrap">

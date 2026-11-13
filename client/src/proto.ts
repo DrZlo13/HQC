@@ -143,6 +143,9 @@ export interface LiveSubagent {
   call_id?: string;
   /** A subagent or a background command (since 0.141); absent from an older worker. */
   kind?: LiveKind;
+  /** Since 0.137: it can be stopped alone (`POST .../tasks/{task_id}/stop`), a subagent's row;
+   *  absent on a command's row and from an older worker. */
+  stoppable?: boolean;
 }
 export const LIVE_KINDS = ['agent', 'command'] as const;
 export type LiveKind = (typeof LIVE_KINDS)[number];
@@ -432,6 +435,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         duration_ms: num(a, 'duration_ms'),
         call_id: optStr(a, 'call_id'),
         kind: oneOf(a, 'kind', LIVE_KINDS),
+        stoppable: optBool(a, 'stoppable'),
       };
     }),
   }),
@@ -828,6 +832,10 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   'session.background': (p) => {
     str(p, 'session_id');
     str(p, 'call_id');
+  },
+  'session.stop_task': (p) => {
+    str(p, 'session_id');
+    str(p, 'task_id');
   },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {

@@ -4565,6 +4565,14 @@ a.relay-peer {
   font-variant-numeric: tabular-nums;
 }
 
+/* A subagent's stop, small at the end of its line. */
+.live-agents-stop {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  align-self: center;
+}
+
 /* The new screen: the subagents and the composer are one panel under the feed, each line led by
    the running dot of the feed's tools; the task in the text colour, what it does now dimmer. */
 .live-agents + .composer-wrap {

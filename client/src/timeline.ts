@@ -70,7 +70,7 @@ export class Timeline {
   /** Events before this `seq` are not loaded yet (`ChatSession` loads the newest page first);
    *  0 once the history is in. */
   olderFrom = 0;
-  /** Text of `agent.delta` since the last `agent.message`. */
+  /** Text of `agent.delta` since the last `agent.message` or `reset`. */
   streaming = "";
   /** The subagents of the latest `subagents.live`. */
   liveAgents: LiveSubagent[] = [];
@@ -107,7 +107,8 @@ export class Timeline {
 
   private applyQuiet(ev: HqcEvent, advance = true): void {
     if (ev.type === "agent.delta") {
-      this.streaming += ev.payload.text;
+      // `reset`: the runtime abandoned the attempt that wrote the text so far (SPEC §4).
+      this.streaming = ev.payload.reset ? "" : this.streaming + ev.payload.text;
       return;
     }
     if (ev.type === "subagents.live") {

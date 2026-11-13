@@ -81,6 +81,9 @@ export interface ChatActions {
   timeline: Timeline;
   approve(requestId: string, optionId: string, message?: string): Promise<void>;
   answer(requestId: string, answers: Record<string, ClarifyAnswer>): Promise<void>;
+  /** Sends `text` to the session as the user's message; absent where the card is shown away
+   *  from its session. */
+  send?(text: string): void;
   resend(clientOpId: string): void;
   discard(clientOpId: string): void;
   /** Opens the artifact in a new tab; `download`: as an attachment. */
@@ -1013,7 +1016,15 @@ interface OtherAnswer {
 export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.request'>; actions: ChatActions }) {
   const p = event.payload;
   const fate = actions.timeline.requestFate(p.request_id);
-  const open = !fate.response && !fate.cancel;
+  const [sent, setSent] = useState(false);
+  // Questions a worker restart or Stop cancelled are answered by a message, as the VS Code tab
+  // answers an earlier question it shows again; any other cancel closes the card.
+  const later =
+    !!actions.send &&
+    !fate.response &&
+    !sent &&
+    (fate.cancel?.reason === 'worker_restart' || fate.cancel?.reason === 'stopped');
+  const open = (!fate.response && !fate.cancel) || later;
   const [answers, setAnswers] = useState<Record<string, ClarifyAnswer>>({});
   const [others, setOthers] = useState<Record<string, OtherAnswer>>({});
   const { busy, error, run } = useAction();
@@ -1077,7 +1088,12 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
       class={`card card-clarify ${open ? 'is-open' : 'is-closed'}`}
       onSubmit={(e) => {
         e.preventDefault();
-        if (open && complete) run(() => actions.answer(p.request_id, toSend));
+        if (later) {
+          const text = earlierAnswer(p.questions, collect());
+          if (text === undefined) return;
+          actions.send!(text);
+          setSent(true);
+        } else if (open && complete) run(() => actions.answer(p.request_id, toSend));
       }}
     >
       <div class="card-title">Agent asks</div>
@@ -1149,11 +1165,25 @@ export function ClarifyCard({ event, actions }: { event: EventOf<'clarify.reques
           </button>
         </div>
       )}
-      {fate.response && <div class="outcome">Answers sent</div>}
+      {(fate.response || sent) && <div class="outcome">Answers sent</div>}
       {fate.cancel && <div class="outcome">Cancelled: {CANCEL_LABELS[fate.cancel.reason]}</div>}
       {error && <div class="error-text">{error}</div>}
     </form>
   );
+}
+
+/** The message the VS Code tab sends for an earlier question it shows again (`web:162062`):
+ *  the questions answered, in their order, the items of a multi answer joined by ", ";
+ *  undefined when none is, as the tab then sends nothing. */
+function earlierAnswer(questions: ClarifyQuestion[], answers: Record<string, ClarifyAnswer>): string | undefined {
+  const given = questions.flatMap((q) => {
+    const a = answers[q.id];
+    const text = Array.isArray(a) ? a.join(', ') : a;
+    return text ? [{ question: q.text, answer: text }] : [];
+  });
+  if (given.length === 0) return undefined;
+  if (given.length === 1) return `Answering your earlier question "${given[0].question}": ${given[0].answer}`;
+  return ['Answering your earlier questions:', ...given.map((g) => `- "${g.question}": ${g.answer}`)].join('\n');
 }
 
 function InvalidCard({ invalid }: { invalid: InvalidEvent }) {

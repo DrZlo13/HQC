@@ -124,6 +124,9 @@ export interface UserMessage {
 }
 export interface AgentDelta {
   text: string;
+  /** Since 0.137: the runtime abandoned the attempt that wrote the text so far, which the client
+   *  drops; `text` is empty. Absent = false. */
+  reset?: boolean;
 }
 /** One subagent the agent runs now (SPEC §4, since 0.101), or (since 0.127) one background
  *  shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
@@ -422,7 +425,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     during_text: optBool(p, 'during_text'),
     joined: optBool(p, 'joined'),
   }),
-  'agent.delta': (p) => ({ text: str(p, 'text') }),
+  'agent.delta': (p) => ({ text: str(p, 'text'), reset: optBool(p, 'reset') }),
   'subagents.live': (p) => ({
     agents: arr(p, 'agents').map((v, i) => {
       const a = obj(v, `agents[${i}]`);

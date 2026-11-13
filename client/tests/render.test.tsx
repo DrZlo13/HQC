@@ -116,6 +116,7 @@ describe("every example event renders", () => {
       (f) =>
         f.startsWith("event.") &&
         f !== "event.agent.delta.json" &&
+        f !== "event.agent.delta.reset.json" &&
         f !== "event.subagents.live.json" &&
         f !== "event.tokens.rate.json",
     )
@@ -138,6 +139,15 @@ describe("every example event renders", () => {
     expect(t.items()).toEqual([]);
     t.apply(ev("event.agent.message"));
     expect(t.streaming).toBe("");
+  });
+
+  it("agent.delta with reset drops the text of an abandoned attempt (SPEC 0.137)", () => {
+    const t = new Timeline();
+    t.apply(ev("event.agent.delta"));
+    t.apply(ev("event.agent.delta.reset"));
+    expect(t.streaming).toBe("");
+    t.apply(ev("event.agent.delta", (e) => (e.payload.text = "Retried")));
+    expect(t.streaming).toBe("Retried");
   });
 
   it("an older page loaded behind the live tail ends no stream", () => {
@@ -935,6 +945,61 @@ describe("clarify.request", () => {
     expect(
       root.querySelector<HTMLInputElement>('input[value="Hub"]')!.checked,
     ).toBe(true);
+  });
+
+  // SPEC 0.137: the CLI no longer waits for the answer, so it goes as the user's message, in the
+  // words of the VS Code tab for an earlier question (web:162062–162070).
+  const cancelled = (reason: string) => {
+    const t = new Timeline();
+    t.apply(ev("event.clarify.request", withSeq(1)));
+    t.apply(
+      ev("event.clarify.cancel", (e) => {
+        e.seq = 2;
+        e.payload.reason = reason;
+      }),
+    );
+    return t;
+  };
+  const submit = () =>
+    act(async () =>
+      root
+        .querySelector<HTMLButtonElement>(".card-clarify button[type=submit]")!
+        .click(),
+    );
+  for (const reason of ["worker_restart", "stopped"]) {
+    it(`a question cancelled with ${reason} is answered by a message`, async () => {
+      const send = vi.fn();
+      const { actions } = show(cancelled(reason), { send });
+      expect(root.querySelector(".card-clarify")!.classList.contains("is-open")).toBe(true);
+      await act(() => root.querySelector<HTMLInputElement>('input[value="Worker"]')!.click());
+      await act(() => root.querySelector<HTMLInputElement>('input[value="clippy"]')!.click());
+      await act(() => root.querySelector<HTMLInputElement>('input[value="test"]')!.click());
+      await submit();
+      expect(send).toHaveBeenCalledWith(
+        'Answering your earlier questions:\n- "Which area should I focus on first?": Worker\n- "Which checks should run?": clippy, test',
+      );
+      expect(actions.answer).not.toHaveBeenCalled();
+      expect(root.querySelector(".card-clarify button[type=submit]")).toBeNull();
+      expect(root.querySelector(".card-clarify .outcome")!.textContent).toBe("Answers sent");
+    });
+  }
+
+  it("one answered question goes in the tab's words for one", async () => {
+    const send = vi.fn();
+    show(cancelled("worker_restart"), { send });
+    const text = root.querySelectorAll(".card-clarify fieldset")[2].querySelector<HTMLInputElement>("input[type=text]")!;
+    await act(() => {
+      text.value = "no";
+      text.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await submit();
+    expect(send).toHaveBeenCalledWith('Answering your earlier question "Anything else?": no');
+  });
+
+  it("a question that timed out stays closed", () => {
+    show(cancelled("timeout"), { send: vi.fn() });
+    expect(root.querySelector(".card-clarify button")).toBeNull();
+    expect(root.querySelector(".card-clarify fieldset")!.hasAttribute("disabled")).toBe(true);
   });
 });
 

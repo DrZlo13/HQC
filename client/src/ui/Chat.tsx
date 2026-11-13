@@ -166,6 +166,9 @@ export function Chat({
     timeline: t,
     approve: (r, o, m) => chat.approve(r, o, m),
     answer: (r, a) => chat.answer(r, a),
+    send: (text) => {
+      chat.send(text);
+    },
     resend: (op) => chat.resend(op),
     discard: (op) => chat.discard(op),
     artifacts,

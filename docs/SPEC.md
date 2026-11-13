@@ -1655,7 +1655,12 @@ the rest is marked "later"):
   the worker when the sessions between never ran (the CLI writes a fork's transcript at its
   first message) or were deleted (§17.4). Since 0.108 a fork before a message with
   `during_text` keeps the `agent.message` the client shows above it (below, the WebSocket
-  paragraph) as the newest cut and the last copied event. The agent starts at once. The client puts the message's text into the new
+  paragraph) as the newest cut and the last copied event. Since 0.138 a fork before a message
+  the client shows after the turns it waited through (the same paragraph; one with
+  `during_text` too) cuts after them: the
+  newest cut is the last `agent.message` before the place the client shows the message at, and
+  the feed also gets the events after the message and before that place but its inputs. The
+  agent starts at once. The client puts the message's text into the new
   session's input as its draft and opens it. Since 0.134 the agent of a fork with copied
   history is told it is a copy: the first input after `system forked_from` goes with
   `session.input.text` beginning `[hqc fork] <the forked_from text>. The conversation above
@@ -2067,10 +2072,10 @@ from here." while it is held, else "VS Code was the last to run this session." w
 here" (§9.3). "Retry" of a failed session is a filled button. In the feed a message's time
 stands at the right end of its first line, inside the bubble or plate for the user's, after a
 note on that line ("joined the turn", §17.2; "instead of the request", §10.1) and before "·
-scheduled", "· awaiting delivery", "· queued for the next turn" (since 0.138, an input waiting
-for a turn of its own, see the WebSocket below), "· not delivered" or "· forking…"; its buttons show on
-hover: the user's copy and "Fork from here" inside the bubble left of the time, an agent
-message's copy in the margin left of the feed, on a phone under the message. Since 0.156, until the hub answers
+scheduled", "· awaiting delivery", "· queued" (since 0.138, an input that came while a turn
+ran, see the WebSocket below), "· not delivered" or "· forking…"; its buttons show on hover: the user's copy
+and "Fork from here" inside the bubble left of the time, an agent message's copy in the margin
+left of the feed, on a phone under the message. Since 0.156, until the hub answers
 a fork (it copies the source's history first, seconds for a long session) the message says "·
 forking…" and its "Fork from here" is disabled; the client asks for no second fork before the
 same message meanwhile. A run of tool calls is "N tool calls ·
@@ -2242,23 +2247,33 @@ or an empty one when none is kept, with the history it catches up. Since 0.108 a
 or `peer.message` that came while that text was being written stands under it in the feed, live
 (after the text, before the activity line, with the messages not stored yet) and once the text
 is stored: the `agent.message` goes above the inputs with `during_text` right before it in `seq`
-order, never above the input it answers (`in_reply_to`). The client takes this from the hub's
-`payload.during_text`, never guesses it from times. Since 0.138 an input with a `delivery`
-(`user.message`, `peer.message`) that came while a turn ran and did not join it (no `joined`,
-no `during_text`, not failed, and not delivered at its own `ts` as a mirrored one is, §9.2)
-waits for a turn of its own, §17.2: until its turn starts it stands at the bottom of the feed,
-under everything live (after the text being written and the inputs under it, before the
-messages not stored yet and the activity line), its time followed by "· queued for the next
-turn" while it is `pending` ("· awaiting delivery" stays for an input that came while no turn
-ran); once delivered (`delivered_at`, by the `delivery` frame) it stands where the agent took
-it: after the events of the turns it waited through, before the first event of its own turn.
-The client reads the turns from the events in `seq` order: a turn runs from an input that does
-not wait, or from the agent's first event of work (any event of the agent but its `usage` and
-a `status` other than `running`), to its end (the final `agent.message`, `status` `idle` or
-`error`, `system turn_lost`); a delivered input waited only if the first end after it is not
-its own (`in_reply_to`); inputs waiting one behind another take the turns in `seq` order, the
-first delivered one starting at the agent's first event of work after the end of the turn
-before, or before the end of its own turn when it has none. On open
+order, never above the input it answers (`in_reply_to`) and, since 0.138, never above one that
+waited for a turn of its own and stands after the turns it waited through (below). The client
+takes this from the hub's `payload.during_text`, never guesses it from times. Since 0.138 an
+input with a `delivery` (`user.message`, `peer.message`) that came while a turn ran (with
+`during_text` too, not failed, and not delivered at its own `ts` as a mirrored one is, §9.2)
+stands at the bottom of the feed until the agent takes it, under everything live (after the
+text being written, before the messages not stored yet and the activity line), its time
+followed by "· queued" while it is `pending` ("· awaiting delivery" stays for an input that came
+while no turn ran), as the VS Code tab holds what is typed during a turn. Meanwhile the worker
+may write it into the running turn (§17.2: a person's input, at once or after an answer to a
+permission request): once the agent takes it after its current calls (`joined`) it stands at
+its `seq` with "joined the turn", one with `during_text` under that text as above. Otherwise it
+waits for a turn of its own and, delivered (`delivered_at`, by the `delivery` frame), stands
+where the agent took it: after the events of the turns it waited through, the text it came
+during among them, before the first event of its own turn. The client reads the turns from the
+events in `seq` order: a turn runs from an input that does not wait, or from the agent's first
+event of work (any event of the agent but its `usage` and a `status` other than `running`, and
+`system context_compacted`, with which a `/compact` starts), to its end (the final
+`agent.message`, `status` `idle` or `error`, `system turn_lost`); a delivered input waited only
+if the first end after it is not its own (`in_reply_to`). Inputs waiting one behind another
+take the turns in `seq` order: the first delivered one starts at the agent's first event of
+work after the end of the turn before, or before the end of its own turn when that comes
+first, an end that names it or, with no turn opened since the end before, one that names no
+input and is no `status` (a `status` there closes the same turn as the end before it). A
+`joined` input stored behind a waiting one joined one of the later turns: it stays right
+behind the one it follows. The hub follows this order where it cuts by `seq`: a fork before
+such an input (above) and the files of a reply to a question (§7.1). On open
 the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
 older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
 each time the user scrolls to the top, and while the feed is shorter than its window (which
@@ -2756,8 +2771,10 @@ The reply to an ask:
 - Since 0.35 (T32): the reply counts from any final `agent.message` the worker or its
   mirror stores in the target; it closes the ask with `{from, reply}` (§7). Since 0.46 (T41)
   the reply also carries the files of the answering turn: the artifacts of the target's
-  `attachment` events between the question (the `peer.message`) and that final message,
-  oldest first, each once, at most 32, only artifacts of the session's owner (a worker can
+  `attachment` events between the question (the `peer.message`) and that final message (since
+  0.138 also after the last end of a turn before that final message, §6: a question that came
+  while a turn ran waits for a turn of its own, and the attachments of the turn it waited
+  through are not the answer's), oldest first, each once, at most 32, only artifacts of the session's owner (a worker can
   write an `attachment` event itself, and another owner's id in one is left out), as
   `files: [{artifact_id, name, kind}]` in the stored `mcp.result`; the hub links them to the
   asking session so that its worker may download them, and that worker answers the agent with
@@ -5420,15 +5437,23 @@ count of the lines that follow reads "+N+ lines" when the preview is cut. 0.150�
 by other pull requests.
 
 ### 0.137 → 0.138 (an input queued behind a turn stands after it, and a call its turn left without a result)
-§6: a message written while a turn ran that waited for a turn of its own (while a permission
-request was open, in the seconds before the final answer, a slash command, a run of a
-schedule, another session's message) stood in the feed at its `seq`, above the rest of that
-turn and its answer, which never saw it, with "· awaiting delivery" as if the worker were
-off. Such an input now stands at the bottom of the feed while it waits, "· queued for the next
-turn" while `pending`, and once delivered where the agent took it: after the turn it waited
-through, before the work of its own. An input that joined the turn and one written during the
-agent's text (0.108) keep their place. §6, §17.1: a tool call without a result stayed
-"running" for good when its turn was lost (the worker restarted, the agent died), and the
+§6: a message written while a turn ran that waited for a turn of its own (one written in the
+seconds before the final answer, an answer to a permission request that ended the turn, a
+slash command, a run of a schedule, another session's message, a person's input while another
+session's question runs) stood in the feed at its `seq`, above the rest of that turn and its
+answer, which never saw it, with "· awaiting delivery" as if the worker were off. An input
+that came while a turn ran now stands at the bottom of the feed until the agent takes it, "·
+queued" while `pending`; one the agent took into that turn (`joined`) then stands at its `seq`
+as before, one that waited for a turn of its own where the agent took it: after the turns it
+waited through, before the work of its own, a `joined` one behind it right after it. One
+written during the agent's text (0.108) and taken only after that turn stood under that text,
+above the rest of the turn, though the agent answered it in a turn of its own: it now stands
+after that turn too, with the text of its own turn under it; one the agent took into that turn
+keeps its place under the text. §6, §7.1 hub: a fork before such an
+input cuts after the turns it waited through, and the files of a reply to a question that
+waited are those of its own turn, not of the turn it waited through. §6, §17.1: a tool call
+without a result stayed "running" for good when its turn was lost (the worker restarted, the
+agent died), and the
 activity line of a later turn showed "Running $ <that command>" with its time growing until the
 agent called a tool. A call with an end of a turn after it is now not finished, marked as a
 failed call, and the activity line looks only at the calls after the last end of a turn.

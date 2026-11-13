@@ -1138,6 +1138,116 @@ describe('history', () => {
     await next(452);
     expect(scroller.scrollTop).toBe(4000);
   });
+
+  it('while a wheel gesture goes on, the feed neither follows its bottom nor renders older blocks; both come once it settles', async () => {
+    // Every block 100 px high, the window 600 px.
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? this.querySelectorAll('.feed-block').length * 100 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 600 : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    await settle();
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    expect(blocks().length).toBe(60);
+    expect(scroller.scrollTop).toBe(6000);
+    const wheel = () =>
+      act(async () => {
+        scroller.dispatchEvent(new Event('wheel'));
+      });
+    const gestureEnds = () => act(async () => new Promise((r) => setTimeout(r, 450)));
+    // At the bottom: an answer comes in while the trackpad moves; the feed follows it after.
+    await wheel();
+    await act(async () => subscriber!.onEvent(ev('event.agent.message', 451, (e) => (e.payload.text = 'more 451'))));
+    expect(scroller.scrollTop).toBe(6000);
+    await gestureEnds();
+    expect(scroller.scrollTop).toBe(6100);
+    // The browser's scroll event for that move (happy-dom sends none).
+    await act(async () => {
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    // A gesture that held nothing up leaves the feed where it took it, a little above the bottom.
+    await wheel();
+    await act(async () => {
+      scroller.scrollTop = 6050;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    await gestureEnds();
+    expect(scroller.scrollTop).toBe(6050);
+    // Scrolled near the top by the gesture: the older blocks wait for its end, then come in
+    // above with what is on screen kept in place.
+    await wheel();
+    await act(async () => {
+      scroller.scrollTop = 300;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(blocks().length).toBe(61);
+    expect(scroller.scrollTop).toBe(300);
+    await gestureEnds();
+    expect(blocks().length).toBe(121);
+    expect(scroller.scrollTop).toBe(6300);
+  });
+
+  it('while a wheel gesture goes on, a resize does not pull the feed to its bottom; it follows once the gesture settles', async () => {
+    const watched = new Map<Element, () => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        cb: () => void;
+        constructor(cb: () => void) {
+          this.cb = cb;
+        }
+        observe(el: Element) {
+          watched.set(el, this.cb);
+        }
+        disconnect() {}
+      },
+    );
+    let win = 600;
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 5000 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? win : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    expect(scroller.scrollTop).toBe(5000);
+    await act(async () => {
+      scroller.dispatchEvent(new Event('wheel'));
+    });
+    win = 500;
+    scroller.scrollTop = 4400;
+    await act(async () => watched.get(scroller)?.());
+    expect(scroller.scrollTop).toBe(4400);
+    await act(async () => new Promise((r) => setTimeout(r, 450)));
+    expect(scroller.scrollTop).toBe(5000);
+  });
+
+  it('in Chromium a wheel gesture holds nothing back', async () => {
+    vi.spyOn(Object.getPrototypeOf(navigator), 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+    );
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? this.querySelectorAll('.feed-block').length * 100 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('timeline') ? 600 : 0;
+    });
+    const { app } = setup('idle', { history: long });
+    await mount(app);
+    await settle();
+    const scroller = root.querySelector<HTMLElement>('.timeline')!;
+    await act(async () => {
+      scroller.dispatchEvent(new Event('wheel'));
+      scroller.scrollTop = 300;
+      scroller.dispatchEvent(new Event('scroll'));
+    });
+    expect(blocks().length).toBe(120);
+  });
 });
 
 describe('read cursor', () => {

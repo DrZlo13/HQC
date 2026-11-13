@@ -529,7 +529,7 @@ the client renders only them. The "source" column is the component that produces
 | type | payload | source |
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
-| `agent.delta` | `text` | adapter; transport only, not written to the database |
+| `agent.delta` | `text`, `reset?` (since 0.137: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, §6, §8.1; `text` is then empty; absent when false) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.137; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row says, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?` and `kind` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.137: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
@@ -597,9 +597,9 @@ Rules:
 - `*_preview` fields are cut by the worker to 4 KB; the full tool result is not sent to the hub,
   except diffs and results saved as artifacts.
 - `agent.delta` goes to clients over WebSocket and is not saved; `agent.message` is saved. The
-  hub keeps the text of a session's deltas in memory until its `agent.message` or a `status`
-  other than `running` (up to 512 KiB, and not past the worker's disconnect), so a client that
-  subscribes mid-answer gets all of it (§6, since 0.72).
+  hub keeps the text of a session's deltas in memory until its `agent.message`, a `status`
+  other than `running` or (since 0.137) a delta with `reset` (up to 512 KiB, and not past the
+  worker's disconnect), so a client that subscribes mid-answer gets all of it (§6, since 0.72).
 - `subagents.live` (since 0.113) goes to clients the same way and is not saved either. The hub
   keeps a session's latest list in memory while it is not empty, so a client that subscribes
   or falls behind the stream gets it (§6), its `duration_ms` grown by the time the hub has kept
@@ -2255,7 +2255,10 @@ Esc closes, a click or tap inserts. No list — no popup; only commands from the
 WebSocket `/api/ws` (upgrade only with the hub's `Origin`, §20; messages up to 1 MiB): the client sends `subscribe {session_id, after_seq}` and receives
 events with `seq > after_seq`, then the live stream; `agent.delta` has no `seq`. Since 0.72
 the answer being written comes right after those events, before `subscribed`, as one
-`agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.113
+`agent.delta` with its text so far, and the stream carries only the deltas after it. Since 0.137
+a delta with `reset` (the runtime abandoned the attempt that wrote the text, §8.1) ends that
+text as an `agent.message` does: the hub drops its copy, so an input after it is not marked
+`during_text` (below), and the client drops the text it shows live. Since 0.113
 the session's latest `subagents.live` follows it when its list is not empty, and the stream
 carries each new one; a client whose part of the hub's event stream fell behind gets it again,
 or an empty one when none is kept, with the history it catches up. Since 0.108 a `user.message`
@@ -3248,10 +3251,20 @@ already. `status idle` carries no `detail` (before 0.137 it carried the subtype 
 with `interrupted: true` (since 0.137), held and ended like any other text. Since 0.121 a
 `system/init` while no turn of hqc's runs (a turn the CLI starts by itself, e.g. after a background
 task's end; the turn of an input of hqc's that the CLI carries over, §17.2, is hqc's) → `status
-running`, before anything else of that turn (§17.1). Since 0.69 a `result` with `num_turns: 0`, no
-tokens and no cost (a local slash command, the empty second `result` the CLI sends after a turn it
-started by itself) gives no `usage`, which the feed would show as an empty `0 → 0 tokens` line;
-`/compact` has no tokens either but costs, and keeps its `usage`. Since 0.115 a `result` with
+running`, before anything else of that turn (§17.1). Since 0.137 an input written while such a turn
+runs leaves that turn's last text held, as an input written into a turn of hqc's does (§17.2), and
+the turn's `result` ends it `final: true`: before, the input dropped the held text, and the last
+answer of such a turn was lost when the input came between it and the `result` (9–100 ms apart on
+the stand). Since 0.137 a main agent's `stream_event` `message_start` (a new request to the model)
+after text deltas that no `assistant` text took up (the CLI abandoned the attempt that wrote them: a
+stream that broke, then a retry) → `agent.delta` with `reset: true` and an empty `text`, on which
+the hub and the client drop the text written so far (§4, §6), as the VS Code tab drops the rows of
+such an attempt at the next `message_start` (`retireAbandonedStreamedRows`, extension 2.1.319); none
+when no text delta came since the last `assistant` text, and none for a subagent's (by the code of
+the tab and of 2.1.312; a broken stream was not reproduced). Since 0.69 a `result` with `num_turns:
+0`, no tokens and no cost (a local slash command, the empty second `result` the CLI sends after a
+turn it started by itself) gives no `usage`, which the feed would show as an empty `0 → 0 tokens`
+line; `/compact` has no tokens either but costs, and keeps its `usage`. Since 0.115 a `result` with
 `num_turns: 0` and no tokens whose total grew, with no `compact_boundary` in it, gives a `usage`
 with no tokens, no `cost_usd` and the total as `session_cost_usd`: the CLI closes such a turn on a
 background subagent's notification without calling the model, and the growth is what the subagent
@@ -4215,7 +4228,15 @@ a worker's cancel only if it closes an open request, in the transaction that clo
 cancel that fails to be stored leaves the request open for the worker's resend: one it closed
 already (`stop`, an answer that crossed the cancel) keeps its own event. The hub cancels an open `clarify` the same way: a
 `clarify.cancel` event and a `clarify.response` frame with `answers: {}`; the adapter answers
-the runtime `deny`, and the turn continues without answers.
+the runtime `deny`, and the turn continues without answers. Since 0.137 a `clarify` cancelled
+with `worker_restart` or `stopped` keeps its card open in its session's feed: the runtime no
+longer waits for the answer, so Answer sends it as the user's ordinary message (`POST /input`,
+§6) in the words of the VS Code tab for an earlier question it shows again (extension 2.1.319):
+`Answering your earlier question "<question>": <answer>` for one answered question,
+`Answering your earlier questions:` and a line `- "<question>": <answer>` for each of several,
+in their order, the items of a `multi` answer joined by ", "; with nothing answered nothing is
+sent. The card then shows "Answers sent" while the chat stays open: the message in the feed is
+what records the answer. A `clarify` cancelled otherwise (expiry, archiving) stays closed.
 **Where requests are shown** (since 0.41, T37). A request is shown and answered not only in its
 own feed:
 - In every session that waits on its session through an open `hqc_ask` (§7.1), directly or
@@ -5139,7 +5160,8 @@ as the next turn by itself (§8.1): the first such input becomes that turn, its 
 plain `ack`; the others stay written into it and are acked with `joined: true` when the CLI
 takes them (that turn's `in_reply_to` is then the last of them the CLI took; such inputs are a
 person's, which nothing answers by `in_reply_to`). The same holds for an input sent during a
-turn the CLI began by itself after a background task; since 0.71 `session.stop` interrupts such
+turn the CLI began by itself after a background task (since 0.137 it leaves that turn's last
+text held for its `result`, §8.1); since 0.71 `session.stop` interrupts such
 a turn too (the adapter knows it from the CLI's `system/init` with no input of hqc's). An input
 the CLI cancels after a `session.stop` (a carried input on a second Stop) fails, not retryable,
 instead of going back to the queue: the person cancelled it. The "interrupt and send" button does
@@ -5736,6 +5758,24 @@ agent died), and the
 activity line of a later turn showed "Running $ <that command>" with its time growing until the
 agent called a tool. A call with an end of a turn after it is now not finished, marked as a
 failed call, and the activity line looks only at the calls after the last end of a turn.
+
+§8.1, §17.2: the last answer of a turn the CLI started by itself (after a background task's
+end) was lost now and then: an input that came between that text and the turn's `result` (9–100
+ms apart on the stand) dropped the text the adapter held for the `result`. The input now leaves
+it held, as an input written into a turn of hqc's does, and the `result` ends it `final: true`.
+§4, §6, §8.1: when the CLI abandoned a request whose stream broke and retried it, the live text
+showed the start of the abandoned attempt with the retry after it; a retry that came back with a
+tool call only left the abandoned text up until the turn ended, and every input of that time was
+marked `during_text`. A main agent's `message_start` after text deltas that no `assistant` text
+took up now gives `agent.delta` with the new `reset: true` and an empty `text` (example
+`event.agent.delta.reset.json`): the hub drops its copy of the text, so a later input is not
+marked `during_text` and a later subscriber gets no copy, and the client drops the text it shows
+live, as the VS Code tab drops the rows of an abandoned attempt. Older hubs and clients ignore
+the field and keep the text, as before. §10.1: a question of the agent that a worker restart or
+Stop cancelled could not be answered: its card closed with its options grey. Such a card
+(`clarify.cancel` `worker_restart` or `stopped`) now stays open, and Answer sends the answers as
+the user's message in the words of the VS Code tab for an earlier question, `Answering your
+earlier question "<question>": <answer>`; a card cancelled otherwise stays closed.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

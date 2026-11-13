@@ -347,6 +347,7 @@ impl Mirror {
                     orphaned_turns: f.orphaned_turns,
                 }),
                 compaction: None,
+                model: None,
             },
             chain: None,
             client_op_id: None,

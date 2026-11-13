@@ -541,6 +541,18 @@ async fn after_store(
             }
             _ => {}
         },
+        // The runtime refused a model switch and kept this model: the session's again
+        // (SPEC §4, §8.1). A name hqc would not take from the user is not taken from it.
+        EventKind::System {
+            code,
+            model: Some(m),
+            ..
+        } if source == Source::Worker
+            && code == hqc_proto::event::MODEL_NOT_SWITCHED
+            && crate::api::valid_model(m) =>
+        {
+            db::set_model(&app.db, s.id, Some(m)).await?;
+        }
         _ => {}
     }
     // An import brings hundreds of old answers; what VS Code does live is the user's own

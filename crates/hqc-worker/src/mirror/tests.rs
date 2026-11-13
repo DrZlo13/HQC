@@ -800,6 +800,7 @@ fn task_notification_is_the_adapters_while_it_runs() {
             from_session_id: None,
             fork: None,
             compaction: None,
+            model: None,
         }
     );
     // `PONG` answers the person's prompt, not the notification.
@@ -1242,6 +1243,7 @@ fn a_compaction_is_one_line_with_its_summary() {
             from_session_id: None,
             fork: None,
             compaction: None,
+            model: None,
         }
     );
 }

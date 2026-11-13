@@ -57,6 +57,7 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::ForegroundCalls(c) => format!("foreground_calls:{}", c.len()),
         AdapterEvent::Activity(a) => format!("activity:{a:?}"),
         AdapterEvent::Heartbeat => "heartbeat".into(),
+        AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
     }
 }
 

@@ -2932,6 +2932,53 @@ async fn a_task_is_stopped_alone() {
     hub.finish().await;
 }
 
+/// SPEC §4, §8.1: `system model_not_switched` from the worker names the model the runtime
+/// kept, and the session's model becomes it; a name hqc would not take from the user stays a
+/// line. A `retraction` is stored like any event.
+#[tokio::test]
+async fn a_refused_model_switch_corrects_the_session() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Model").await;
+    ack_start(&mut w, &sid).await;
+    let (s, v) = hub
+        .patch(
+            &format!("/api/sessions/{sid}"),
+            json!({"model": "claude-nope"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    w.expect("session.model").await;
+    assert_eq!(hub.session(&sid).await["agent"]["model"], "claude-nope");
+    let line = |model: &str| {
+        let mut e = agent_event(
+            &sid,
+            "system",
+            json!({"code": "model_not_switched", "model": model,
+                "text": "Model not switched: not available. The agent stays on claude-opus-5-5"}),
+        );
+        e["author"] = json!({"kind": "system"});
+        e
+    };
+    w.event(line("claude opus")).await;
+    assert_eq!(hub.session(&sid).await["agent"]["model"], "claude-nope");
+    w.event(line("claude-opus-5-5")).await;
+    assert_eq!(hub.session(&sid).await["agent"]["model"], "claude-opus-5-5");
+    let gone = Uuid::now_v7();
+    w.event(agent_event(
+        &sid,
+        "retraction",
+        json!({"event_ids": [gone]}),
+    ))
+    .await;
+    let (_, page) = hub.get(&format!("/api/sessions/{sid}/events")).await;
+    let last = page["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["type"], "retraction", "{page}");
+    assert_eq!(last["payload"]["event_ids"], json!([gone]));
+    hub.finish().await;
+}
+
 /// SPEC §5.4, §6: `session.state.activity` is kept on the session, in the session object and
 /// its summary; a report without it, the end of the turn, the agent's stop, the worker's new
 /// `hello` and its disconnect drop it.

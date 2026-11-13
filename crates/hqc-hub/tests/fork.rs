@@ -178,6 +178,46 @@ async fn a_forks_copy_is_indexed_later_and_adds_no_words_to_the_vocabulary() {
     hub.finish().await;
 }
 
+/// SPEC 0.173: a fork leaves out the answer the runtime took back with a `retraction`, and the
+/// retraction itself.
+#[tokio::test]
+async fn a_fork_leaves_out_a_retracted_answer() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Words").await;
+    ack_start(&mut w, &sid).await;
+    input(&hub, &mut w, &sid, "Remember APPLE.").await;
+    let refused = reply(&mut w, &sid, "I can't help with that.").await;
+    w.event(agent_event(
+        &sid,
+        "retraction",
+        json!({"event_ids": [refused["event_id"]]}),
+    ))
+    .await;
+    reply(&mut w, &sid, "OK, APPLE.").await;
+    let m2 = input(&hub, &mut w, &sid, "Remember BANANA.").await;
+
+    let fid = fork(&hub, &sid, &m2).await;
+    ack_start(&mut w, &fid).await;
+    let shown: Vec<(Value, Value)> = hub
+        .events(&fid)
+        .await
+        .iter()
+        .map(|e| (e["type"].clone(), e["payload"]["text"].clone()))
+        .collect();
+    assert_eq!(
+        shown[..3],
+        [
+            (json!("system"), json!("Session created")),
+            (json!("user.message"), json!("Remember APPLE.")),
+            (json!("agent.message"), json!("OK, APPLE.")),
+        ]
+    );
+    assert_eq!(shown.len(), 4, "{shown:?}");
+    hub.finish().await;
+}
+
 /// The runtime session id a `session.start` names.
 fn runtime_of(start: &Value) -> String {
     start["payload"]["runtime_session_id"]

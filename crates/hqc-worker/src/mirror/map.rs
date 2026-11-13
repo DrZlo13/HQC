@@ -286,6 +286,7 @@ fn system_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, code: &str, text: Stri
             from_session_id: None,
             fork: None,
             compaction: None,
+            model: None,
         },
     )
 }
@@ -330,6 +331,7 @@ fn notification(uuid: Uuid, ts: DateTime<Utc>, blocks: &[serde_json::Value]) -> 
             from_session_id: None,
             fork: None,
             compaction: None,
+            model: None,
         },
     )
 }
@@ -699,6 +701,7 @@ mod tests {
                 from_session_id: None,
                 fork: None,
                 compaction: None,
+                model: None,
             }]
         );
         assert_eq!((&evs[0].author, evs[0].delivery), (&Author::System, None));
@@ -793,6 +796,7 @@ mod tests {
                 from_session_id: None,
                 fork: None,
                 compaction: None,
+                model: None,
             }]
         );
     }
@@ -913,6 +917,7 @@ mod tests {
                 from_session_id: None,
                 fork: None,
                 compaction: None,
+                model: None,
             }]
         );
         assert_eq!(evs[0].event_id, Event::id_from_claude_block(&uuid, 0));

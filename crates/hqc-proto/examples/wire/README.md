@@ -114,7 +114,11 @@ SPEC 0.173: `worker.session.state.json` carries `activity`, what the agent waits
 API request retried); `api.session.json` and `client.session.summary.json` show it (absent:
 none). `event.subagents.live.retry.json` — a subagent whose API request failed with no response
 and is retried (`retry`). `event.system.context_compacted.json` — a compaction with its
-`trigger`, `pre_tokens` and `post_tokens`.
+`trigger`, `pre_tokens` and `post_tokens`. `event.system.model_not_switched.json` — the runtime
+refused a model switch and kept `model`, which the hub makes the session's.
+`event.retraction.json` — events the runtime took back (a refused model's answer), which clients
+do not show. `worker.worker.limits.json` carries the `status`, `rate_limit_type` and `resets_at`
+of the limit nearest.
 
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.

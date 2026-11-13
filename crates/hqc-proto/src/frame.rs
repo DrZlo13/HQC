@@ -1311,6 +1311,16 @@ pub struct Limits {
     /// The 7-day window of all models ("Current week").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seven_day: Option<LimitWindow>,
+    /// The state of the limit the account is nearest to (since SPEC 0.173): `allowed`,
+    /// `allowed_warning` or `rejected` (Claude Code: `rate_limit_info.status`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Which limit that is: `five_hour`, `seven_day`, `seven_day_opus`, … (`rateLimitType`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_type: Option<String>,
+    /// When it resets, Unix seconds (`resetsAt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

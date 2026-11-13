@@ -67,8 +67,9 @@
 //! - Model: `session.model` switches a running agent at once, mid-turn too
 //!   ([`Adapter::set_model`]); `null` (the runtime's default) reaches it at its next start,
 //!   as any model reaches a stopped one. A `session.start` for a running agent with another
-//!   model does the same. A session on a provider (SPEC 0.144) keeps the provider's model:
-//!   the hub changes a provider with a restart.
+//!   model does the same. A switch the runtime refuses leaves the model it kept
+//!   ([`AdapterEvent::ModelKept`]). A session on a provider (SPEC 0.144) keeps the provider's
+//!   model: the hub changes a provider with a restart.
 //! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
 //!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`]) is killed, the
 //!   next input resumes it; one whose agent armed a wakeup ([`AdapterEvent::Wakeup`]) is idle
@@ -2044,6 +2045,9 @@ impl Session {
                     self.tokens_rate(self.token_rate);
                 }
             }
+            // The hub makes it the session's model too, by the `system model_not_switched`
+            // the adapter sends with it (SPEC §8.1).
+            AdapterEvent::ModelKept(m) => self.spec.model = Some(m),
             AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
             AdapterEvent::RuntimeSessionId(r) => {
                 // A start of this task resumes it, as the hub's next `session.start` will
@@ -2404,6 +2408,7 @@ impl Session {
                 from_session_id: None,
                 fork: None,
                 compaction: None,
+                model: None,
             },
         );
         if let Err(e) = self.link.event(ev) {

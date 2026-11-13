@@ -441,6 +441,78 @@ async fn activity_and_heartbeats_reach_the_hub() {
     w.stop().await;
 }
 
+/// SPEC §4, §8.1: a model switch the CLI refuses (`error` with the `model` it kept) reaches the
+/// hub as `system model_not_switched` with that model, and the worker keeps it as the
+/// session's: a `session.model` naming it switches nothing, another model is asked for.
+#[tokio::test]
+async fn a_refused_model_switch_keeps_the_model() {
+    let env = Env::new();
+    let claude = ScriptedClaude::new(
+        r#"{"type":"control_response","response":{"subtype":"error","request_id":"hqc-model-0199f3a2-7c10-7000-8000-000000000001","error":"Model claude-nope is not available","error_code":"not_found","model":"claude-opus-5-5"}}"#,
+    );
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": Uuid::now_v7(), "text": "hi",
+               "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    let mut seq = 0;
+    loop {
+        let f = c.expect("event").await;
+        seq += 1;
+        c.ack_event(&f, seq).await;
+        let p = &f["payload"]["event"]["payload"];
+        if p["code"] == "model_not_switched" {
+            assert_eq!(p["model"], "claude-opus-5-5", "{f}");
+            break;
+        }
+    }
+    for model in ["claude-opus-5-5", "claude-sonnet-5"] {
+        let id = c
+            .frame("session.model", json!({"session_id": sid, "model": model}))
+            .await;
+        loop {
+            let f = c.expect("ack").await;
+            if f["id"] == id.as_str() {
+                break;
+            }
+        }
+    }
+    let switches = || -> Vec<Value> {
+        claude
+            .stdin()
+            .into_iter()
+            .filter(|v| v["request"]["subtype"] == "set_model")
+            .map(|v| v["request"]["model"].clone())
+            .collect()
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while switches().is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{:?}",
+            claude.stdin()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(switches(), [json!("claude-sonnet-5")]);
+    w.stop().await;
+}
+
 /// SPEC §5.3, §5.4: a Bash call the CLI runs in the foreground goes to the hub in
 /// `session.state.foreground_calls`; `session.background` with its id is acked and reaches the
 /// CLI as `control_request {subtype: background_tasks, tool_use_id}`.

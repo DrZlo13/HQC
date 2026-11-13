@@ -2224,9 +2224,11 @@ pub async fn workers(
         .into_iter()
         .map(|w| {
             // The account's usage limits as the worker last reported them (SPEC §6).
-            let limits = limits
-                .get(&w.id)
-                .map(|(l, at)| json!({"five_hour": l.five_hour, "seven_day": l.seven_day, "reported_at": at}));
+            let limits = limits.get(&w.id).map(|(l, at)| {
+                json!({"five_hour": l.five_hour, "seven_day": l.seven_day,
+                    "status": l.status, "rate_limit_type": l.rate_limit_type,
+                    "resets_at": l.resets_at, "reported_at": at})
+            });
             json!({
                 "limits": limits,
                 "id": w.id,

@@ -1,0 +1,13 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000122",
+  "seq": 47,
+  "ts": "2026-10-22T10:00:06Z",
+  "author": { "kind": "system" },
+  "type": "system",
+  "payload": {
+    "text": "Model not switched: Model claude-nope is not available. The agent stays on claude-opus-5-5",
+    "code": "model_not_switched",
+    "model": "claude-opus-5-5"
+  }
+}

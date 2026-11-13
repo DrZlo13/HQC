@@ -3552,7 +3552,8 @@ pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
 /// input) whose type is in `types`, copied in order into the empty session `to` under new ids,
 /// at `seq` 1.. (SPEC §6 fork): what its feed shows of the conversation it forks. Each keeps its
 /// origin: a copy's, else its own id in `runtime`, the transcript of `from`. Copied inputs are no
-/// inputs to deliver. The number copied.
+/// inputs to deliver; events a `retraction` of `from` names are left out (SPEC 0.173). The number
+/// copied.
 pub async fn copy_events(
     db: &PgPool,
     from: Uuid,
@@ -3568,9 +3569,11 @@ pub async fn copy_events(
            (event_id, session_id, seq, ts, author, type, payload, origin_id, origin_runtime)
          SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type,
                 payload, COALESCE(origin_id, event_id), COALESCE(origin_runtime, $5)
-         FROM events WHERE session_id = $1 AND type = ANY($4)
+         FROM events e WHERE session_id = $1 AND type = ANY($4)
            AND (seq < $3 OR (seq > $3 AND seq < $6
-                             AND type NOT IN ('user.message', 'peer.message')))",
+                             AND type NOT IN ('user.message', 'peer.message')))
+           AND NOT EXISTS (SELECT 1 FROM events r WHERE r.session_id = $1
+                             AND r.type = 'retraction' AND r.payload->'event_ids' ? e.event_id::text)",
     )
     .bind(from)
     .bind(to)

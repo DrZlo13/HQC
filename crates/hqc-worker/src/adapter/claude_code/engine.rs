@@ -33,9 +33,9 @@
 //!   the process's end, gives it "Context compacted";
 //! - `system` `status` with `compact_result: failed` → `system compaction_failed` with its
 //!   `compact_error`;
-//! - [`AdapterEvent::Activity`] when it changes: `system` `api_retry` → retrying, `system`
-//!   `status` `compacting` → compacting, `system` `thinking_tokens` → thinking with its
-//!   `estimated_tokens`; any other `system` `status` that does not report the permission mode
+//! - [`AdapterEvent::Activity`] when it changes, a new estimate of the thinking at most once
+//!   per 2 s: `system` `api_retry` → retrying, `system` `status` `compacting` → compacting,
+//!   `system` `thinking_tokens` → thinking with its `estimated_tokens`; any other `system` `status` that does not report the permission mode
 //!   (`requesting`, `null` at a compaction's end), a main agent's `stream_event`
 //!   `message_start`, `content_block_start` or `content_block_stop`, its `assistant` line and
 //!   `result` → none ([`activity_of`]);
@@ -76,7 +76,15 @@
 //!   `failed` or `killed`, or its `task_notification` → [`AdapterEvent::ForegroundCalls`]
 //!   with their `tool_use_id`s when they change (the rule of the VS Code tab's "Run in background", extension 2.1.319);
 //! - `rate_limit_event` → [`AdapterEvent::Limits`] with the 5-hour and 7-day windows of its
-//!   `rate_limit_info.unifiedWindows` (2.1.310: one before each turn's answer);
+//!   `rate_limit_info.unifiedWindows` (2.1.310: one before each turn's answer), its `status`,
+//!   `rateLimitType` and `resetsAt`;
+//! - `system` `informational` of a level other than `info` and `system` `notification` →
+//!   `system runtime_notice` with the text; `model_fallback` and `model_consent_fallback` →
+//!   `system model_fallback` "<model> → <fallback>: <content>", the fallback the model of this
+//!   turn's `usage`; `model_refusal_no_fallback` → `system model_refusal`; an `assistant` with
+//!   `supersedes` and `model_refusal_fallback` (its `retracted_message_uuids`) → `retraction`
+//!   of the events of those records of this turn not retracted yet ([`Core::retract`]), the
+//!   latter then `system model_refusal_fallback`;
 //! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
@@ -103,7 +111,9 @@
 //!   their descriptions and argument hints, else the names of `slash_commands`, without
 //!   `terminal_slash_commands` ([`Core::report_commands`]); the answer and
 //!   `commands_changed` report them too; one `init` while no turn of ours runs (a turn the CLI
-//!   starts by itself) → `status running` first;
+//!   starts by itself) → `status running` first; its MCP servers not `connected` →
+//!   `system mcp_not_connected`, its `plugin_errors` → `system plugin_errors`, each when it
+//!   differs from the one given last;
 //! - `conversation_reset` (`/clear`) → `system conversation_cleared`, and the cost baseline,
 //!   token sums with it, starts from 0 again; the next `system` `init` with another
 //!   `session_id` → [`AdapterEvent::RuntimeSessionId`] with it, the transcript the CLI writes
@@ -122,7 +132,9 @@
 //! - `permissionMode` of `system` `init` and `system` `status`, and the CLI's answer to our
 //!   `set_permission_mode` → [`AdapterEvent::PermissionMode`] when it changes (T38), and
 //!   on every success of our `set_permission_mode` (T39);
-//! - the CLI's answers to our `set_model`, `background_tasks` and `stop_task` are only logged;
+//! - an `error` answer to our `set_model` → `system model_not_switched` with the reason and the
+//!   model the CLI kept, and [`AdapterEvent::ModelKept`]; the other answers to our `set_model`,
+//!   and those to `background_tasks` and `stop_task`, are only logged;
 //! - the other `control_response` lines, the CLI's echo of ours, are skipped.
 //!
 //! U+0000 in any text taken from the CLI (binary tool output) becomes U+FFFD ([`text`],
@@ -140,6 +152,7 @@ use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
     ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer,
     ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
+    MODEL_NOT_SWITCHED,
 };
 use hqc_proto::frame::{Activity, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
@@ -209,6 +222,23 @@ pub const COMMANDS_LIMIT: usize = 500;
 pub const COMMAND_NAME_LIMIT: usize = 100;
 /// `system.code` of stream-json `system` `status` with `compact_result: failed` (SPEC §4, §8.1).
 pub const COMPACTION_FAILED: &str = "compaction_failed";
+/// `system.code` of a `system/informational` of a level other than `info` and of a
+/// `system/notification` (SPEC §4, §8.1): the CLI's or a hook's message, as text.
+pub const RUNTIME_NOTICE: &str = "runtime_notice";
+/// `system.code` of `system/model_fallback` and `system/model_consent_fallback`: the CLI went
+/// on with another model.
+pub const MODEL_FALLBACK: &str = "model_fallback";
+/// `system.code` of `system/model_refusal_fallback`: the model refused, another one answered.
+pub const MODEL_REFUSAL_FALLBACK: &str = "model_refusal_fallback";
+/// `system.code` of `system/model_refusal_no_fallback`: the model refused, none answered.
+pub const MODEL_REFUSAL: &str = "model_refusal";
+/// `system.code` of the MCP servers of `system/init` that are not connected.
+pub const MCP_NOT_CONNECTED: &str = "mcp_not_connected";
+/// `system.code` of the `plugin_errors` of `system/init`.
+pub const PLUGIN_ERRORS: &str = "plugin_errors";
+/// How often a new estimate of the thinking goes as [`AdapterEvent::Activity`], as the token
+/// rate (SPEC §8.1).
+const THINKING_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
@@ -351,8 +381,9 @@ pub struct Core {
     /// Event id of the `context_compacted` of a `compact_boundary`, and its `compact_metadata`,
     /// held for the summary that follows it ([`Core::release_compaction`]).
     compaction: Option<(Uuid, Option<ContextCompacted>)>,
-    /// What the main agent waits on, as last reported ([`AdapterEvent::Activity`]).
+    /// What the main agent waits on, as last reported ([`AdapterEvent::Activity`]), and when.
     activity: Option<Activity>,
+    activity_at: Option<Instant>,
     /// `event_id` of the input of the turn: `in_reply_to` of agent messages once its echo has
     /// come ([`Core::reply_to`]).
     last_input: Option<Uuid>,
@@ -443,6 +474,14 @@ pub struct Core {
     /// The conversation is new (a new session, `/clear`) and its first model turn has not
     /// ended: the CLI writes its `ai-title` then.
     fresh: bool,
+    /// The lines last given for `system/init`'s MCP servers that are not connected and its
+    /// plugin errors ([`Core::on_init_problems`]): a later `init` with the same gives none.
+    init_problems: (Option<String>, Option<String>),
+    /// The main agent's records of this turn and how many content blocks each had: the
+    /// events a retraction names come from them ([`Core::retract`]).
+    turn_records: HashMap<Uuid, usize>,
+    /// Events retracted in this turn.
+    retracted: HashSet<Uuid>,
     /// The permission mode last reported by this process.
     permission_mode: Option<PermissionMode>,
     /// Message uuids read since the last [`Core::take_seen`].
@@ -515,6 +554,7 @@ impl Core {
             held: None,
             compaction: None,
             activity: None,
+            activity_at: None,
             last_input: None,
             awaiting_echo: VecDeque::new(),
             wrote: false,
@@ -552,6 +592,9 @@ impl Core {
             cleared: false,
             clearing: false,
             fresh: false,
+            init_problems: (None, None),
+            turn_records: HashMap::new(),
+            retracted: HashSet::new(),
             permission_mode: None,
             seen: Vec::new(),
             quiet_tasks: HashMap::new(),
@@ -971,6 +1014,7 @@ impl Core {
         if matches!(ty, "user" | "assistant") && !sub {
             if let Some(u) = record_uuid(&v) {
                 self.seen.push(u);
+                self.turn_records.insert(u, blocks(&v).len());
             }
         }
         // A Monitor's task is listed as a command ([`Core::bash_tasks`]), a subagent's too. A
@@ -1032,7 +1076,7 @@ impl Core {
             "user" if v["isReplay"] == true => self.on_echo(&v),
             "user" if !sub => self.on_user(&v),
             "command_lifecycle" => self.on_lifecycle(&v),
-            "rate_limit_event" => limits(&v["rate_limit_info"]["unifiedWindows"])
+            "rate_limit_event" => limits(&v["rate_limit_info"])
                 .map(|l| Action::Emit(AdapterEvent::Limits(l)))
                 .into_iter()
                 .collect(),
@@ -1079,6 +1123,7 @@ impl Core {
                     self.cli_session = id.map(str::to_owned);
                     out.extend(self.on_mode(&v["permissionMode"], false));
                     out.extend(self.on_init(&v));
+                    out.extend(self.on_init_problems(&v));
                     out
                 }
                 Some("status") => {
@@ -1199,6 +1244,31 @@ impl Core {
                     }
                     None => vec![],
                 },
+                Some("informational") => match v["content"].as_str() {
+                    Some(t) if v["level"] != "info" && !t.trim().is_empty() => {
+                        vec![self.emit_system(RUNTIME_NOTICE, text(t))]
+                    }
+                    _ => vec![],
+                },
+                Some("notification") => match v["text"].as_str() {
+                    Some(t) if !t.trim().is_empty() => vec![self.emit_system(RUNTIME_NOTICE, text(t))],
+                    _ => vec![],
+                },
+                Some("model_fallback" | "model_consent_fallback") => {
+                    // The model of this turn's `usage` from now on.
+                    if let Some(m) = v["fallback_model"].as_str() {
+                        self.model = Some(m.to_owned());
+                    }
+                    vec![self.emit_system(MODEL_FALLBACK, switch_line(&v))]
+                }
+                Some("model_refusal_fallback") => {
+                    let mut out = self.retract(&v["retracted_message_uuids"]);
+                    out.push(self.emit_system(MODEL_REFUSAL_FALLBACK, switch_line(&v)));
+                    out
+                }
+                Some("model_refusal_no_fallback") => {
+                    vec![self.emit_system(MODEL_REFUSAL, refusal_line(&v))]
+                }
                 _ => vec![],
             },
             _ => vec![],
@@ -1234,9 +1304,9 @@ impl Core {
     }
 
     /// The CLI's answer to our `initialize` (its slash commands with their descriptions, its
-    /// models and account, or an error), `set_permission_mode`, `set_model`,
-    /// `background_tasks` or `stop_task` (the latter three logged); every other
-    /// `control_response`, the echo of one of ours, is skipped.
+    /// models and account, or an error), `set_permission_mode`, `set_model` (a refusal is a line
+    /// and the model kept, another answer logged), `background_tasks` or `stop_task` (both
+    /// logged); every other `control_response`, the echo of one of ours, is skipped.
     fn on_control_response(&mut self, v: &Value) -> Vec<Action> {
         let r = &v["response"];
         let id = r["request_id"].as_str().unwrap_or("");
@@ -1269,10 +1339,29 @@ impl Core {
         if id.starts_with(MODEL_REQUEST) {
             if r["subtype"] == "success" {
                 tracing::info!(session_id = %self.session_id, model = ?r["response"]["model"].as_str(), "model switched");
-            } else {
-                tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the model switch");
+                return vec![];
             }
-            return vec![];
+            tracing::warn!(session_id = %self.session_id, error = %r["error"], "claude refused the model switch");
+            // The error names the model the CLI kept (2.1.312): the session's again.
+            let kept = r["model"].as_str().map(text);
+            let why = r["error"].as_str().map_or_else(|| "refused".into(), text);
+            let t = match &kept {
+                Some(m) => format!("Model not switched: {why}. The agent stays on {m}"),
+                None => format!("Model not switched: {why}"),
+            };
+            let mut out = vec![self.emit_new(EventKind::System {
+                text: t,
+                code: MODEL_NOT_SWITCHED.into(),
+                call_id: None,
+                status: None,
+                task_id: None,
+                from_session_id: None,
+                fork: None,
+                compaction: None,
+                model: kept.clone(),
+            })];
+            out.extend(kept.map(|m| Action::Emit(AdapterEvent::ModelKept(m))));
+            return out;
         }
         if !id.starts_with(MODE_REQUEST) {
             return vec![];
@@ -1428,7 +1517,8 @@ impl Core {
         // Cut off by an interrupt before the stream completed (2.1.312).
         let aborted = v["aborted"] == true;
         let refusal = synthetic && v["message"]["stop_reason"] == REFUSAL;
-        let mut out = Vec::new();
+        // Another model's answer in place of a refused one: what it replaces goes first.
+        let mut out = self.retract(&v["supersedes"]);
         // A response other than the one streamed while that one's text stands: the CLI gave up
         // the stream and asked again without one ("Error streaming, falling back to
         // non-streaming mode", 2.1.312), which brings no `message_start`; as the VS Code tab
@@ -1905,13 +1995,83 @@ impl Core {
         }
     }
 
-    /// [`AdapterEvent::Activity`] when `a` differs from what was reported last.
+    /// [`AdapterEvent::Activity`] when `a` differs from what was reported last. A new
+    /// estimate of the thinking reported goes at most once per [`THINKING_EVERY`]: the CLI
+    /// sends one with every piece of a thinking, and each report is a `session.state`.
     fn set_activity(&mut self, a: Option<Activity>) -> Option<Action> {
         if self.activity == a {
             return None;
         }
+        let thinking = |a: &Option<Activity>| matches!(a, Some(Activity::Thinking { .. }));
+        if thinking(&self.activity)
+            && thinking(&a)
+            && self
+                .activity_at
+                .is_some_and(|t| t.elapsed() < THINKING_EVERY)
+        {
+            return None;
+        }
         self.activity = a.clone();
+        self.activity_at = Some(Instant::now());
         Some(Action::Emit(AdapterEvent::Activity(a)))
+    }
+
+    /// `retraction` of the events of this turn's records named in `uuids` (the CLI's wire
+    /// uuids of `supersedes` and `retracted_message_uuids`) not retracted yet; a held text
+    /// among them is dropped. Nothing for none.
+    fn retract(&mut self, uuids: &Value) -> Vec<Action> {
+        let mut ids = Vec::new();
+        for u in uuids.as_array().into_iter().flatten() {
+            let Some(u) = u.as_str().and_then(|u| u.parse::<Uuid>().ok()) else {
+                continue;
+            };
+            let n = self.turn_records.get(&u).copied().unwrap_or(0);
+            for i in 0..n {
+                let id = record_event_id(&u, i);
+                if self.retracted.insert(id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            return vec![];
+        }
+        if self.held.as_ref().is_some_and(|(id, ..)| ids.contains(id)) {
+            self.held = None;
+        }
+        tracing::info!(session_id = %self.session_id, events = ids.len(), "events retracted");
+        vec![self.emit_new(EventKind::Retraction { event_ids: ids })]
+    }
+
+    /// A line for `system/init`'s MCP servers whose `status` is not `connected` and one for
+    /// its `plugin_errors`, each when it differs from the one given last: the CLI sends `init`
+    /// before every turn.
+    fn on_init_problems(&mut self, v: &Value) -> Vec<Action> {
+        let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+        let s = |x: &Value| text(x.as_str().unwrap_or(""));
+        let servers: Vec<String> = list("mcp_servers")
+            .iter()
+            .filter(|m| m["status"] != "connected")
+            .map(|m| format!("{} ({})", s(&m["name"]), s(&m["status"])))
+            .collect();
+        let plugins: Vec<String> = list("plugin_errors")
+            .iter()
+            .map(|e| format!("{}: {}", s(&e["plugin"]), s(&e["message"])))
+            .collect();
+        let mcp = (!servers.is_empty())
+            .then(|| format!("MCP servers not connected: {}", servers.join(", ")));
+        let plugin =
+            (!plugins.is_empty()).then(|| format!("Plugin errors: {}", plugins.join("; ")));
+        let mut out = Vec::new();
+        if mcp != self.init_problems.0 {
+            out.extend(mcp.clone().map(|t| self.emit_system(MCP_NOT_CONNECTED, t)));
+            self.init_problems.0 = mcp;
+        }
+        if plugin != self.init_problems.1 {
+            out.extend(plugin.clone().map(|t| self.emit_system(PLUGIN_ERRORS, t)));
+            self.init_problems.1 = plugin;
+        }
+        out
     }
 
     /// [`Core::live`], [`Core::live_commands`], [`Core::wakeup_row`], then [`Core::cron_jobs`],
@@ -2094,6 +2254,8 @@ impl Core {
         if v["local_command"].is_null() {
             self.fresh = false;
         }
+        self.turn_records.clear();
+        self.retracted.clear();
         let mut out: Vec<Action> = self.flush(true).into_iter().collect();
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open
@@ -2479,6 +2641,7 @@ impl Core {
                 from_session_id: None,
                 fork: None,
                 compaction: None,
+                model: None,
             },
         ))));
         out
@@ -2590,6 +2753,7 @@ impl Core {
                 from_session_id: None,
                 fork: None,
                 compaction,
+                model: None,
             },
         );
         if let Some(id) = event_id {
@@ -2612,9 +2776,10 @@ impl Core {
 /// Event id of content block `index` of a jsonl record. Claude Code writes one block per
 /// record, so this is `Event::id_from_claude_record(uuid)`; a further block of the same
 /// record (not seen on 2.1.307/2.1.308) gets v5 of `"<uuid>/<index>"`.
-/// The 5-hour and 7-day windows of a `rate_limit_event`'s `unifiedWindows`; `None` when it
-/// names neither.
-fn limits(w: &Value) -> Option<hqc_proto::frame::Limits> {
+/// The 5-hour and 7-day windows of a `rate_limit_event`'s `rate_limit_info.unifiedWindows`,
+/// with its `status`, `rateLimitType` and `resetsAt`; `None` when it names neither window.
+fn limits(info: &Value) -> Option<hqc_proto::frame::Limits> {
+    let w = &info["unifiedWindows"];
     let window = |name: &str| {
         let v = &w[name];
         Some(hqc_proto::frame::LimitWindow {
@@ -2625,6 +2790,9 @@ fn limits(w: &Value) -> Option<hqc_proto::frame::Limits> {
     let l = hqc_proto::frame::Limits {
         five_hour: window("five_hour"),
         seven_day: window("seven_day"),
+        status: info["status"].as_str().map(text),
+        rate_limit_type: info["rateLimitType"].as_str().map(text),
+        resets_at: info["resetsAt"].as_i64(),
     };
     (l.five_hour.is_some() || l.seven_day.is_some()).then_some(l)
 }
@@ -2748,6 +2916,33 @@ fn activity_of(ty: &str, sub: bool, v: &Value) -> Option<Option<Activity>> {
         ("assistant", _) if !sub => Some(None),
         ("result", _) => Some(None),
         _ => None,
+    }
+}
+
+/// `<original model> → <fallback model>` of a `model_*fallback` line, with its `content`, the
+/// CLI's own words, after a colon.
+fn switch_line(v: &Value) -> String {
+    let s = |k: &str| text(v[k].as_str().unwrap_or(""));
+    let line = format!("{} → {}", s("original_model"), s("fallback_model"));
+    match v["content"].as_str().filter(|c| !c.trim().is_empty()) {
+        Some(c) => format!("{line}: {}", text(c)),
+        None => line,
+    }
+}
+
+/// The text of `model_refusal_no_fallback`: its `content`; the CLI sends it empty, then the
+/// model that refused and the API's explanation.
+fn refusal_line(v: &Value) -> String {
+    if let Some(c) = v["content"].as_str().filter(|c| !c.trim().is_empty()) {
+        return text(c);
+    }
+    let line = format!(
+        "{} refused to answer",
+        text(v["original_model"].as_str().unwrap_or("The model"))
+    );
+    match v["api_refusal_explanation"].as_str() {
+        Some(e) => format!("{line}: {}", text(e)),
+        None => line,
     }
 }
 

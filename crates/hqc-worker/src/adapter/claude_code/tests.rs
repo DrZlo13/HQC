@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::engine::{
-    next_cron_fire, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED,
-    CONVERSATION_CLEARED_TEXT,
+    next_cron_fire, record_event_id, resurrected_cron_jobs, Action, Core, COMMAND_TEXT_LIMIT,
+    CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT,
 };
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
@@ -291,6 +291,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::ForegroundCalls(_) => continue,
             // `the_activity_follows_the_stream` and `a_heartbeat_is_reported` look at them.
             AdapterEvent::Activity(_) | AdapterEvent::Heartbeat => continue,
+            AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -1444,7 +1445,7 @@ async fn adapter_switches_a_running_process() {
 
 /// `set_model` on the adapter writes the control request to a running process (2.1.312
 /// answers `success` with the model it resolved the name to) and does nothing without one.
-/// The answer is no permission mode.
+/// The answer is no permission mode; a refusal is a line (SPEC 0.173).
 #[tokio::test]
 async fn adapter_switches_the_model_of_a_running_process() {
     let mut h = Harness::start("", Uuid::new_v4()).await;
@@ -1477,12 +1478,20 @@ async fn adapter_switches_the_model_of_a_running_process() {
     h.adapter.set_model("haiku").await.unwrap();
 
     let mut core = Core::new(Uuid::now_v7(), false);
-    for answer in [
-        r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-model-1","response":{"model":"claude-sonnet-5-5"}}}"#,
+    let ok = r#"{"type":"control_response","response":{"subtype":"success","request_id":"hqc-model-1","response":{"model":"claude-sonnet-5-5"}}}"#;
+    assert!(core.on_line(ok).is_empty(), "{ok}");
+    let a = core.on_line(
         r#"{"type":"control_response","response":{"subtype":"error","request_id":"hqc-model-2","error":"Unknown model"}}"#,
-    ] {
-        assert!(core.on_line(answer).is_empty(), "{answer}");
-    }
+    );
+    let [Action::Emit(AdapterEvent::Event(e))] = a.as_slice() else {
+        panic!("{a:?}");
+    };
+    assert!(
+        matches!(&e.kind, EventKind::System { code, text, model: None, .. }
+            if code == "model_not_switched" && text == "Model not switched: Unknown model"),
+        "{:?}",
+        e.kind
+    );
 }
 
 /// The agent gets a cleared environment with only the allowed variables (SPEC §14).
@@ -3628,7 +3637,8 @@ async fn a_model_switch_record_is_own() {
 }
 
 /// SPEC §8.1: a `rate_limit_event` (2.1.310) gives the 5-hour and 7-day windows of its
-/// `unifiedWindows`; one that names neither gives nothing.
+/// `unifiedWindows` and (since 0.173) its `status`, `rateLimitType` and `resetsAt`; one that
+/// names neither window gives nothing.
 #[test]
 fn limits_of_a_rate_limit_event() {
     let mut core = Core::new(Uuid::now_v7(), false);
@@ -3640,7 +3650,8 @@ fn limits_of_a_rate_limit_event() {
     assert_eq!(
         serde_json::to_value(l).unwrap(),
         json!({"five_hour": {"utilization": 0.39, "resets_at": 1794150000},
-               "seven_day": {"utilization": 0.23, "resets_at": 1794283200}})
+               "seven_day": {"utilization": 0.23, "resets_at": 1794283200},
+               "status": "allowed", "rate_limit_type": "five_hour", "resets_at": 1794150000})
     );
     assert!(core
         .on_line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#)
@@ -4922,10 +4933,11 @@ fn the_activity_follows_the_stream() {
             vec![],
         ),
         (main(json!({"type": "ping"})), vec![]),
+        // A new estimate within 2 s of the last one reported waits.
         (
             json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 40,
                 "estimated_tokens_delta": 28}),
-            vec![thinking(40)],
+            vec![],
         ),
         (
             main(json!({"type": "content_block_stop", "index": 0})),
@@ -4988,6 +5000,310 @@ fn the_activity_follows_the_stream() {
             .collect();
         assert_eq!(got, want, "{line}");
     }
+}
+
+/// SPEC §4, §8.1: the CLI's and its hooks' messages (`system/informational`, fields after
+/// cli:108274, levels `info`, `notice`, `suggestion`, `warning`; `system/notification`,
+/// cli:768716) are `system runtime_notice` lines with their text; `info` (shown only in the
+/// transcript view of the terminal) and an empty text give none.
+#[test]
+fn cli_notices_are_lines() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        concat!(
+            r#"{"type":"system","subtype":"informational","content":"Stop hook says: run the tests first","level":"warning","prevent_continuation":true}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"Loaded 3 skills","level":"info"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"  ","level":"notice"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"informational","content":"Settings applied in part","level":"notice"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"notification","key":"account-plugins-not-reloaded","text":"Couldn't finish reloading your plugins","priority":"medium","color":"warning"}"#,
+        ),
+    );
+    assert_eq!(
+        system_events(&a),
+        [
+            (
+                "runtime_notice".into(),
+                "Stop hook says: run the tests first".into()
+            ),
+            ("runtime_notice".into(), "Settings applied in part".into()),
+            (
+                "runtime_notice".into(),
+                "Couldn't finish reloading your plugins".into()
+            ),
+        ]
+    );
+}
+
+/// SPEC §4, §8.1: the CLI went on with another model (`model_fallback`, `model_consent_fallback`,
+/// fields after cli:108527): a line "<model> → <fallback>: <the CLI's words>", and the turn's
+/// `usage` names the model that answered; a refusal with no other model
+/// (`model_refusal_no_fallback`, sent with an empty `content`, cli:760131) is a line too.
+#[test]
+fn a_model_fallback_is_a_line_and_names_the_usage() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        concat!(
+            r#"{"type":"system","subtype":"init","model":"claude-opus-5-5","permissionMode":"default","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"model_fallback","trigger":"overloaded","original_model":"claude-opus-5-5","fallback_model":"claude-sonnet-5","content":"Switched to Sonnet 5 due to high demand for Opus 5.5"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"model_refusal_no_fallback","original_model":"claude-sonnet-5","request_id":null,"api_refusal_category":null,"api_refusal_explanation":"policy","refused_user_message_uuid":null,"content":""}"#,
+            "\n",
+            r#"{"type":"system","subtype":"model_refusal_no_fallback","original_model":"claude-sonnet-5","content":"Sonnet 5 declined this request."}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":3,"output_tokens":4}}"#,
+        ),
+    );
+    assert_eq!(
+        system_events(&a),
+        [
+            (
+                "model_fallback".into(),
+                "claude-opus-5-5 → claude-sonnet-5: Switched to Sonnet 5 due to high demand for Opus 5.5".into()
+            ),
+            (
+                "model_refusal".into(),
+                "claude-sonnet-5 refused to answer: policy".into()
+            ),
+            ("model_refusal".into(), "Sonnet 5 declined this request.".into()),
+        ]
+    );
+    let model = a.iter().find_map(|a| match a {
+        Action::Emit(AdapterEvent::Event(e)) => match &e.kind {
+            EventKind::Usage { model, .. } => Some(model.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(model, Some(Some("claude-sonnet-5".into())));
+}
+
+/// SPEC §4, §8.1: a model refused and another answered (2.1.312: the new answer's `assistant`
+/// names in `supersedes` the wire uuids of what it replaces, cli:107172; the turn's
+/// `model_refusal_fallback` repeats them in `retracted_message_uuids`, cli:760380): one
+/// `retraction` of the events of those records, before the new answer, a held text among them
+/// never sent; the notice retracts nothing again and is a line.
+#[test]
+fn a_refused_answer_is_retracted() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let [t, c, r, h, n] = std::array::from_fn::<Uuid, 5, _>(|_| Uuid::new_v4());
+    let assistant = |u: Uuid, content: Value, supersedes: &[Uuid]| {
+        let mut v = json!({"type": "assistant", "parent_tool_use_id": null, "uuid": u,
+            "message": {"model": "claude-opus-5-5", "role": "assistant", "content": content}});
+        if !supersedes.is_empty() {
+            v["supersedes"] = json!(supersedes);
+        }
+        v.to_string()
+    };
+    let mut a = play(
+        &mut core,
+        &[
+            assistant(t, json!([{"type": "text", "text": "Let me check."}]), &[]),
+            assistant(
+                c,
+                json!([{"type": "tool_use", "id": "toolu_r", "name": "Bash", "input": {}}]),
+                &[],
+            ),
+            json!({"type": "user", "parent_tool_use_id": null, "uuid": r,
+                "message": {"role": "user", "content": [{"type": "tool_result",
+                    "tool_use_id": "toolu_r", "content": "ok"}]}})
+            .to_string(),
+            assistant(
+                h,
+                json!([{"type": "text", "text": "I can't help with that."}]),
+                &[],
+            ),
+        ]
+        .join("\n"),
+    );
+    let refused: Vec<Uuid> = a
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => Some(e.event_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        [
+            record_event_id(&t, 0),
+            record_event_id(&c, 0),
+            record_event_id(&r, 0)
+        ]
+    );
+    a = play(
+        &mut core,
+        &[
+            assistant(n, json!([{"type": "text", "text": "Here it is."}]), &[t, c, r, h]),
+            json!({"type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal",
+                "direction": "retry", "original_model": "claude-opus-5-5",
+                "fallback_model": "claude-sonnet-5", "request_id": null,
+                "retracted_message_uuids": [t, c, r, h],
+                "content": "Opus 5.5 declined. This response was generated by Sonnet 5 instead."})
+            .to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"","total_cost_usd":0.01,"usage":{"input_tokens":3,"output_tokens":4}}"#.into(),
+        ]
+        .join("\n"),
+    );
+    let got: Vec<String> = a
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => Some(match &e.kind {
+                EventKind::Retraction { event_ids } => format!("retraction {event_ids:?}"),
+                EventKind::AgentMessage { text, r#final, .. } => format!("{text} {final}"),
+                EventKind::System { code, text, .. } => format!("{code}: {text}"),
+                k => serde_json::to_value(k).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let ids = [
+        record_event_id(&t, 0),
+        record_event_id(&c, 0),
+        record_event_id(&r, 0),
+        record_event_id(&h, 0),
+    ];
+    assert_eq!(
+        got,
+        [
+            format!("retraction {ids:?}"),
+            "model_refusal_fallback: claude-opus-5-5 → claude-sonnet-5: Opus 5.5 declined. This response was generated by Sonnet 5 instead.".into(),
+            "Here it is. true".into(),
+            "usage".into(),
+            "status".into(),
+        ]
+    );
+}
+
+/// SPEC §4, §8.1: the CLI refused a model switch of ours (2.1.312: `error` with `error_code`
+/// and `model`, the model it kept, cli:1509084): a `system model_not_switched` line with the
+/// reason and that `model`, and the supervisor keeps it as the session's model.
+#[test]
+fn a_refused_model_switch_is_a_line_and_the_kept_model() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let line = json!({"type": "control_response", "response": {"subtype": "error",
+        "request_id": "hqc-model-0199f3a2-7c10-7000-8000-000000000001",
+        "error": "Model claude-nope is not available", "error_code": "not_found",
+        "model": "claude-opus-5-5"}});
+    let a = core.on_line(&line.to_string());
+    let [Action::Emit(AdapterEvent::Event(e)), Action::Emit(AdapterEvent::ModelKept(kept))] =
+        a.as_slice()
+    else {
+        panic!("{a:?}");
+    };
+    assert_eq!(kept, "claude-opus-5-5");
+    assert_eq!(
+        e.kind,
+        EventKind::System {
+            text: "Model not switched: Model claude-nope is not available. The agent stays on claude-opus-5-5".into(),
+            code: "model_not_switched".into(),
+            call_id: None,
+            status: None,
+            task_id: None,
+            from_session_id: None,
+            fork: None,
+            compaction: None,
+            model: Some("claude-opus-5-5".into()),
+        }
+    );
+}
+
+/// SPEC §4, §8.1: `system/init`'s MCP servers that are not connected (live on 2.1.312, a server
+/// that did not connect in time: `status: failed`) and its `plugin_errors` are a line each; the
+/// CLI sends `init` before every turn, and the same set again gives none.
+#[test]
+fn init_problems_are_lines_when_they_change() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let init = |servers: Value, errors: Option<Value>| {
+        let mut v = json!({"type": "system", "subtype": "init", "model": "claude-opus-5-5",
+            "permissionMode": "default", "session_id": "s", "mcp_servers": servers});
+        if let Some(e) = errors {
+            v["plugin_errors"] = e;
+        }
+        v.to_string()
+    };
+    let failed = json!([{"name": "hqc", "status": "connected"},
+        {"name": "slow", "status": "failed"}, {"name": "docs", "status": "needs-auth"}]);
+    let errors = json!([{"plugin": "lint@acme", "type": "hook-load-failed",
+        "message": "hooks.json is not valid JSON"}]);
+    let lines = |core: &mut Core, line: String| system_events(&core.on_line(&line));
+    assert_eq!(
+        lines(&mut core, init(failed.clone(), Some(errors.clone()))),
+        [
+            (
+                "mcp_not_connected".into(),
+                "MCP servers not connected: slow (failed), docs (needs-auth)".into()
+            ),
+            (
+                "plugin_errors".into(),
+                "Plugin errors: lint@acme: hooks.json is not valid JSON".into()
+            ),
+        ]
+    );
+    assert_eq!(lines(&mut core, init(failed.clone(), Some(errors))), []);
+    assert_eq!(
+        lines(
+            &mut core,
+            init(json!([{"name": "hqc", "status": "connected"}]), None)
+        ),
+        []
+    );
+    assert_eq!(
+        lines(&mut core, init(failed, None)),
+        [(
+            "mcp_not_connected".into(),
+            "MCP servers not connected: slow (failed), docs (needs-auth)".into()
+        )]
+    );
+}
+
+/// SPEC §8.1: the CLI sends a thinking estimate with every piece of a thinking, about ten a
+/// second; a new estimate goes at most once per 2 s, the end of the thinking at once.
+#[test]
+fn a_thinking_estimate_goes_at_most_once_per_two_seconds() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let activities = |core: &mut Core, line: Value| -> Vec<Option<Activity>> {
+        core.on_line(&line.to_string())
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::Activity(a)) => Some(a),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut got = Vec::new();
+    for n in 1..=10u64 {
+        got.extend(activities(
+            &mut core,
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": n * 10,
+                "estimated_tokens_delta": 10}),
+        ));
+    }
+    assert_eq!(
+        got,
+        [Some(Activity::Thinking {
+            estimated_tokens: 10
+        })]
+    );
+    let stop = json!({"type": "stream_event", "parent_tool_use_id": null,
+        "event": {"type": "content_block_stop", "index": 0}});
+    assert_eq!(activities(&mut core, stop), [None]);
 }
 
 /// SPEC §8.1, §17.3: the CLI's beat of a long call of the main agent (`tool_progress` with

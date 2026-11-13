@@ -78,6 +78,9 @@ pub enum AdapterEvent {
     /// `heartbeat: true`, every 30 s); `tokens.rate` goes again, which keeps the hub's turn
     /// watchdog off a silent call (SPEC §17.3).
     Heartbeat,
+    /// The runtime refused a model switch and kept this model (Claude Code: the `error`
+    /// answer to `set_model`, its `model`): the session's model from now on.
+    ModelKept(String),
     /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
     /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
     Limits(hqc_proto::frame::Limits),

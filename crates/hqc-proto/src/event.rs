@@ -504,7 +504,16 @@ pub enum EventKind {
         /// sit next to `text` and `code`.
         #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
         compaction: Option<ContextCompacted>,
+        /// Only with `model_not_switched` (since SPEC 0.173): the model the runtime kept, which
+        /// the hub makes the session's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
+    /// Events of the session the runtime took back (since SPEC 0.173; Claude Code: the
+    /// answer of a model that refused, replaced by another model's): clients do not show
+    /// them. Nothing is deleted.
+    #[serde(rename = "retraction")]
+    Retraction { event_ids: Vec<Uuid> },
     /// An event type this build does not know; stored and passed on as is, not rendered.
     /// Never matches a known type: a known type with a bad payload is an error.
     #[serde(untagged)]
@@ -539,6 +548,7 @@ impl EventKind {
         "usage",
         "status",
         "system",
+        "retraction",
     ];
 }
 
@@ -587,6 +597,10 @@ pub struct Event {
 /// `system.code` of a fork in a Claude Code transcript (SPEC §4, §9.3). The payload carries,
 /// besides `text` and `code`, the fields of [`SessionForked`].
 pub const SESSION_FORKED: &str = "session_forked";
+
+/// `system.code` of a model switch the runtime refused (SPEC §4, since 0.173). The payload
+/// carries `model`, the model the runtime kept, which the hub makes the session's.
+pub const MODEL_NOT_SWITCHED: &str = "model_not_switched";
 
 /// Extra payload of `system session_forked` (SPEC §4, §9.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -677,6 +691,7 @@ mod tests {
         "usage",
         "status",
         "system",
+        "retraction",
     ];
 
     /// Wire examples shared with the TS client (`examples/wire/event.<type>.json`).
@@ -752,6 +767,10 @@ mod tests {
         ("usage", include_str!("../examples/wire/event.usage.json")),
         ("status", include_str!("../examples/wire/event.status.json")),
         ("system", include_str!("../examples/wire/event.system.json")),
+        (
+            "retraction",
+            include_str!("../examples/wire/event.retraction.json"),
+        ),
     ];
 
     const UNKNOWN_EXAMPLE: &str = include_str!("../examples/wire/event.unknown.json");
@@ -779,6 +798,7 @@ mod tests {
             EventKind::Usage { .. } => "usage",
             EventKind::Status { .. } => "status",
             EventKind::System { .. } => "system",
+            EventKind::Retraction { .. } => "retraction",
             EventKind::Unknown { .. } => return None,
         })
     }
@@ -1133,9 +1153,28 @@ mod tests {
                 task_id: None,
                 from_session_id: None,
                 fork: None,
-                compaction: None
+                compaction: None,
+                model: None
             }
         );
+    }
+
+    /// SPEC §4 (0.173): `system model_not_switched` names the model the runtime kept; other
+    /// lines name none.
+    #[test]
+    fn a_refused_model_switch_names_the_model() {
+        let src = include_str!("../examples/wire/event.system.model_not_switched.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { code, model, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(code, MODEL_NOT_SWITCHED);
+        assert_eq!(model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
+        assert!(matches!(plain.kind, EventKind::System { model: None, .. }));
     }
 
     #[test]

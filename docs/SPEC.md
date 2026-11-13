@@ -2067,9 +2067,10 @@ from here." while it is held, else "VS Code was the last to run this session." w
 here" (§9.3). "Retry" of a failed session is a filled button. In the feed a message's time
 stands at the right end of its first line, inside the bubble or plate for the user's, after a
 note on that line ("joined the turn", §17.2; "instead of the request", §10.1) and before "·
-scheduled", "· awaiting delivery", "· not delivered" or "· forking…"; its buttons show on hover:
-the user's copy and "Fork from here" inside the bubble left of the time, an agent message's copy
-in the margin left of the feed, on a phone under the message. Since 0.156, until the hub answers
+scheduled", "· awaiting delivery", "· queued for the next turn" (since 0.138, an input waiting
+for a turn of its own, see the WebSocket below), "· not delivered" or "· forking…"; its buttons show on
+hover: the user's copy and "Fork from here" inside the bubble left of the time, an agent
+message's copy in the margin left of the feed, on a phone under the message. Since 0.156, until the hub answers
 a fork (it copies the source's history first, seconds for a long session) the message says "·
 forking…" and its "Fork from here" is disabled; the client asks for no second fork before the
 same message meanwhile. A run of tool calls is "N tool calls ·
@@ -2126,7 +2127,12 @@ approval in the feed, or the session `waiting`), another field has the focus, or
 slid-out column is open; on a phone only when the chat replaces a new session's window. An open chat
 stays at its bottom while its images load: only a scroll up lets go of the bottom.
 
-than the text, and an open thinking block is prose in the feed's font. Quote (since 0.74): on a
+than the text, and an open thinking block is prose in the feed's font. A call without a
+`tool.result` is running (a pulsing dot) until its turn ends; since 0.138 one with an end of a
+turn after it in `seq` order (the final `agent.message`, `status` `idle` or `error`, `system
+turn_lost`) is not finished, marked with the cross of a failed call, as the VS Code tab marks a
+call without a result once the session is not busy; a run is running while one of its calls
+is, else it takes the mark of its last call. Quote (since 0.74): on a
 computer a right click on text selected in the feed opens the client's menu with "Quote" (into
 the input as `> ` lines), "Copy" and (since 0.142) "Search in <the search picked in Settings>",
 which opens its results for the text in a new tab; on a phone a "Quote" button under the selection's end. The
@@ -2237,7 +2243,22 @@ or `peer.message` that came while that text was being written stands under it in
 (after the text, before the activity line, with the messages not stored yet) and once the text
 is stored: the `agent.message` goes above the inputs with `during_text` right before it in `seq`
 order, never above the input it answers (`in_reply_to`). The client takes this from the hub's
-`payload.during_text`, never guesses it from times. On open
+`payload.during_text`, never guesses it from times. Since 0.138 an input with a `delivery`
+(`user.message`, `peer.message`) that came while a turn ran and did not join it (no `joined`,
+no `during_text`, not failed, and not delivered at its own `ts` as a mirrored one is, §9.2)
+waits for a turn of its own, §17.2: until its turn starts it stands at the bottom of the feed,
+under everything live (after the text being written and the inputs under it, before the
+messages not stored yet and the activity line), its time followed by "· queued for the next
+turn" while it is `pending` ("· awaiting delivery" stays for an input that came while no turn
+ran); once delivered (`delivered_at`, by the `delivery` frame) it stands where the agent took
+it: after the events of the turns it waited through, before the first event of its own turn.
+The client reads the turns from the events in `seq` order: a turn runs from an input that does
+not wait, or from the agent's first event of work (any event of the agent but its `usage` and
+a `status` other than `running`), to its end (the final `agent.message`, `status` `idle` or
+`error`, `system turn_lost`); a delivered input waited only if the first end after it is not
+its own (`in_reply_to`); inputs waiting one behind another take the turns in `seq` order, the
+first delivered one starting at the agent's first event of work after the end of the turn
+before, or before the end of its own turn when it has none. On open
 the chat loads the newest 100 events (`before_seq`), shows them and subscribes, then loads the
 older history behind them, newest first; it renders the last 60 blocks of the feed and 60 more
 each time the user scrolls to the top, and while the feed is shorter than its window (which
@@ -5020,7 +5041,8 @@ with no separate events: `running` — a pulsing "Running" pill in the header an
 working" line at the bottom of the feed ("Running <command or tool> <time since the call's
 `ts`>" while the last `tool.call` has no `tool.result`, T26, since 0.132 once that call has run
 for 2 s, counted from its `ts` or from a later answer to a request after it (a permission or a
-question it, or a subagent it runs, waited for); since 0.125, when that call is one
+question it, or a subagent it runs, waited for), since 0.138 only a call after the last end of a
+turn, §6; since 0.125, when that call is one
 of the session's `foreground_calls`, §6, the line ends with a small "Run in background" button,
 which sends `POST .../background` with its `call_id`, a failure shown as a notice; the button
 goes once the worker reports the call moved or ended), `queued` — "Input queued",
@@ -5396,6 +5418,20 @@ reads a cut preview as far as it goes for a call's line (its row, the header of 
 call, the Running line, an approval card), so a cut command shows its first line, and a row's
 count of the lines that follow reads "+N+ lines" when the preview is cut. 0.150–0.154 are taken
 by other pull requests.
+
+### 0.137 → 0.138 (an input queued behind a turn stands after it, and a call its turn left without a result)
+§6: a message written while a turn ran that waited for a turn of its own (while a permission
+request was open, in the seconds before the final answer, a slash command, a run of a
+schedule, another session's message) stood in the feed at its `seq`, above the rest of that
+turn and its answer, which never saw it, with "· awaiting delivery" as if the worker were
+off. Such an input now stands at the bottom of the feed while it waits, "· queued for the next
+turn" while `pending`, and once delivered where the agent took it: after the turn it waited
+through, before the work of its own. An input that joined the turn and one written during the
+agent's text (0.108) keep their place. §6, §17.1: a tool call without a result stayed
+"running" for good when its turn was lost (the worker restarted, the agent died), and the
+activity line of a later turn showed "Running $ <that command>" with its time growing until the
+agent called a tool. A call with an end of a turn after it is now not finished, marked as a
+failed call, and the activity line looks only at the calls after the last end of a turn.
 
 ### 0.136 → 0.137 (Stop spares background subagents; an interrupted or early-ended turn says so)
 §8.1: Stop killed the agent's background subagents and workflows along with the turn: the worker

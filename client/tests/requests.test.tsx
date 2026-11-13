@@ -59,14 +59,14 @@ function info(id: string, title: string, more: Partial<SessionInfo> = {}): Sessi
   };
 }
 
-// A's feed: its turn called hqc_ask and waits for the reply.
+// A's feed: its turn called hqc_ask a minute ago and waits for the reply.
 const HISTORY = [
   parseEvent({ ...(load('event.user.message.json') as object), session_id: A, seq: 1 }),
   parseEvent({
     ...(load('event.tool.call.json') as object),
     session_id: A,
     seq: 2,
-    ts: new Date().toISOString(),
+    ts: new Date(Date.now() - 60_000).toISOString(),
     payload: { call_id: 'ask-1', tool: 'mcp__hqc__hqc_ask', args_preview: '{"session":"hqc/helper","text":"build?"}' },
   }),
 ];

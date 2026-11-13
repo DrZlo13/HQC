@@ -252,6 +252,10 @@ export function onlyRequests(items: Item[]): Item[] {
   );
 }
 
+/** How long a call runs (`Timeline.runSince`) before the activity line names it (SPEC §17.1):
+ *  the agent's quick calls (a Read, a grep) would swap the line for a moment each. */
+const CALL_SHOWN_AFTER_MS = 2000;
+
 /** The last line of the feed while a turn is on or input waits (SPEC §17.1): the running
  *  command with its timer, or what the session is doing. A command or subagent the runtime
  *  runs in the foreground (`foreground`, the session's `foreground_calls`) gets "Run in
@@ -271,7 +275,7 @@ export function ActivityLine({
 }) {
   const call = state === 'running' ? timeline.runningCall() : undefined;
   const t = useNow(1000, !!call, now);
-  if (call) {
+  if (call && t - timeline.runSince(call) >= CALL_SHOWN_AFTER_MS) {
     const asked = askTarget(call.payload.tool, call.payload.args_preview);
     if (asked !== undefined) {
       // `hqc_ask` waits for another session's final answer (SPEC §7.1).

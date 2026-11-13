@@ -1062,6 +1062,102 @@ describe("turn indicator (T13, T26): from the session state, no events of its ow
     expect(draw("running", t)!.textContent).toBe("Agent is working");
   });
 
+  it('a call younger than 2 s leaves the line at "Agent is working"', () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.tool.call", (e) => {
+        e.seq = 1;
+        e.ts = new Date(NOW - 500).toISOString();
+        e.payload = {
+          call_id: "a",
+          tool: "Bash",
+          args_preview: '{"command":"git status"}',
+        };
+      }),
+    );
+    const line = (at: number) => {
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      act(() =>
+        render(
+          <ActivityLine
+            state="running"
+            timeline={t}
+            now={() => at}
+            foreground={["a"]}
+            onBackground={vi.fn()}
+          />,
+          root,
+        ),
+      );
+      return root.querySelector(".activity")!;
+    };
+    expect(line(NOW).textContent).toBe("Agent is working");
+    render(null, root);
+    const later = line(NOW + 1500);
+    expect(later.querySelector(".activity-label")!.textContent).toBe("Running");
+    expect(later.querySelector(".activity-what")!.textContent).toBe("git status");
+    expect(later.querySelector(".activity-timer")!.textContent).toBe("0:02");
+  });
+
+  it("a call that waited for a permission or an answer counts its 2 s from the answer", () => {
+    for (const kind of ["approval", "clarify"]) {
+      const t = new Timeline();
+      t.apply(
+        ev("event.tool.call", (e) => {
+          e.seq = 1;
+          e.ts = new Date(NOW - 60_000).toISOString();
+          e.payload = {
+            call_id: "a",
+            tool: "Bash",
+            args_preview: '{"command":"git status"}',
+          };
+        }),
+      );
+      t.apply(ev(`event.${kind}.request`, withSeq(2)));
+      t.apply(
+        ev(`event.${kind}.response`, (e) => {
+          e.seq = 3;
+          e.ts = new Date(NOW - 500).toISOString();
+        }),
+      );
+      expect(draw("running", t)!.textContent).toBe("Agent is working");
+      render(null, root);
+    }
+  });
+
+  it("names the call on a tick of its own, with no new event", () => {
+    const t = new Timeline();
+    t.apply(
+      ev("event.tool.call", (e) => {
+        e.seq = 1;
+        e.ts = new Date(NOW - 500).toISOString();
+        e.payload = {
+          call_id: "a",
+          tool: "Bash",
+          args_preview: '{"command":"cargo build"}',
+        };
+      }),
+    );
+    try {
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+      vi.setSystemTime(NOW);
+      root = document.createElement("div");
+      document.body.appendChild(root);
+      act(() => render(<ActivityLine state="running" timeline={t} />, root));
+      expect(root.querySelector(".activity")!.textContent).toBe(
+        "Agent is working",
+      );
+      act(() => void vi.advanceTimersByTime(2000));
+      expect(root.querySelector(".activity-what")!.textContent).toBe(
+        "cargo build",
+      );
+    } finally {
+      render(null, root);
+      vi.useRealTimers();
+    }
+  });
+
   it('a waiting hqc_ask (T32): "Waiting for a reply from <session> <time>"', () => {
     const t = new Timeline();
     t.apply(

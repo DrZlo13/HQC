@@ -280,6 +280,20 @@ export class Timeline {
     return undefined;
   }
 
+  /** From when `call` counts as running, in ms: its `ts`, or the `ts` of the last answer to a
+   *  request after it if later (a permission or a question it, or a subagent it runs, waited
+   *  for). */
+  runSince(call: EventOf<"tool.call">): number {
+    const evs = this.events();
+    const since = Date.parse(call.ts);
+    for (let i = evs.length - 1; i >= 0 && evs[i].seq! > call.seq!; i--) {
+      const e = evs[i];
+      if (e.type === "approval.response" || e.type === "clarify.response")
+        return Math.max(since, Date.parse(e.ts));
+    }
+    return since;
+  }
+
   /** Requests with neither an answer nor a cancellation, oldest first. */
   openRequests(): EventOf<"approval.request" | "clarify.request">[] {
     return [...this.requests.values()]

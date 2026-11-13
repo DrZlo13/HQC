@@ -379,6 +379,68 @@ async fn background_tasks_go_in_session_state() {
     w.stop().await;
 }
 
+/// SPEC §5.4, §8.1, §17.3: a retried API request goes to the hub in `session.state.activity`,
+/// and the response that comes ends it; each beat of a long call (`tool_progress` with
+/// `heartbeat: true`) sends `tokens.rate` again, the rate unchanged, which keeps the hub's
+/// turn watchdog off a call that prints nothing.
+#[tokio::test]
+async fn activity_and_heartbeats_reach_the_hub() {
+    let env = Env::new();
+    let claude = ScriptedClaude::new(concat!(
+        r#"{"type":"system","subtype":"api_retry","attempt":3,"max_retries":10,"retry_delay_ms":8000,"error_status":529,"error":"overloaded","uuid":"0f6c1d2e-8888-4a55-9d0e-1a2b3c4d5e01","session_id":"s"}"#,
+        "\n",
+        r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{}},"uuid":"0f6c1d2e-8888-4a55-9d0e-1a2b3c4d5e02","session_id":"s"}"#,
+        "\n",
+        r#"{"type":"tool_progress","tool_use_id":"toolu_01Hb-heartbeat-0","tool_name":"mcp__slow__run","parent_tool_use_id":"toolu_01Hb","elapsed_time_seconds":30,"heartbeat":true,"uuid":"0f6c1d2e-8888-4a55-9d0e-1a2b3c4d5e03","session_id":"s"}"#,
+        "\n",
+        r#"{"type":"tool_progress","tool_use_id":"toolu_01Hb-heartbeat-1","tool_name":"mcp__slow__run","parent_tool_use_id":"toolu_01Hb","elapsed_time_seconds":60,"heartbeat":true,"uuid":"0f6c1d2e-8888-4a55-9d0e-1a2b3c4d5e04","session_id":"s"}"#,
+    ));
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": Uuid::now_v7(), "text": "run the slow tool",
+               "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    // The states from the first with an activity on, and the rates sent.
+    let mut states: Vec<Option<Value>> = vec![];
+    let mut rates = vec![];
+    while states.len() < 2 || rates.len() < 2 {
+        let f = c.recv().await;
+        if f["type"] == "session.state" {
+            let a = f["payload"].get("activity").cloned();
+            if a.is_some() || !states.is_empty() {
+                states.push(a);
+            }
+        } else if f["type"] == "event" && f["payload"]["event"]["type"] == "tokens.rate" {
+            rates.push(f["payload"]["event"]["payload"]["output_per_s"].clone());
+        }
+    }
+    assert_eq!(
+        states,
+        [
+            Some(json!({"kind": "retrying", "attempt": 3, "max_retries": 10,
+                "retry_delay_ms": 8000, "error_status": 529})),
+            None
+        ]
+    );
+    assert_eq!(rates, [json!(0), json!(0)]);
+    w.stop().await;
+}
+
 /// SPEC §5.3, §5.4: a Bash call the CLI runs in the foreground goes to the hub in
 /// `session.state.foreground_calls`; `session.background` with its id is acked and reaches the
 /// CLI as `control_request {subtype: background_tasks, tool_use_id}`.

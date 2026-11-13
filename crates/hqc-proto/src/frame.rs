@@ -69,6 +69,19 @@ pub(crate) fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+/// `session.state.activity` (since SPEC 0.173): what the agent waits on now, shown in the
+/// chat's activity line instead of "Agent is working" (SPEC §5.4, §17.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Activity {
+    /// A request to the model API failed and will be retried.
+    Retrying(crate::event::ApiRetry),
+    /// The runtime compacts the conversation.
+    Compacting,
+    /// The model thinks, `estimated_tokens` so far by the runtime's estimate.
+    Thinking { estimated_tokens: u64 },
+}
+
 /// `error {code, message, retryable, details?}` (SPEC §5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WireError {
@@ -162,6 +175,11 @@ pub enum WorkerFrame {
         /// stopped. Absent — none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         foreground_calls: Vec<String>,
+        /// What the agent waits on now that its output does not show (since SPEC 0.173,
+        /// Claude Code: SPEC §8.1). Repeated in every following `session.state`, none when
+        /// the agent is stopped. Absent — none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activity: Option<Activity>,
     },
     /// Reply to a hub request (`fs.stat`, `fs.list_dirs`, `title.request`, ...): same `id` as
     /// the request.
@@ -2414,6 +2432,21 @@ mod tests {
         };
         assert_eq!(background_tasks(&old), 1);
         assert_eq!(background_tasks(&held), 0);
+        // `activity` (SPEC 0.173): absent is none.
+        let activity = |f: &Envelope<WorkerFrame>| match &f.body {
+            WorkerFrame::SessionState { activity, .. } => activity.clone(),
+            other => panic!("not session.state: {other:?}"),
+        };
+        assert_eq!(
+            activity(&old),
+            Some(Activity::Retrying(crate::event::ApiRetry {
+                attempt: 3,
+                max_retries: 10,
+                retry_delay_ms: 8000,
+                error_status: Some(529),
+            }))
+        );
+        assert_eq!(activity(&held), None);
         assert_eq!(
             of(&held),
             Some(Some(HeldBy {

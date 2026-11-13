@@ -33,7 +33,8 @@
 //! - `system` `local_command` (a slash command's output, 2.1.312) → `system command_output`
 //!   the same way;
 //! - the summary record after a `system` `compact_boundary` → `system context_compacted` with
-//!   the summary ([`compaction`]), as from the adapter.
+//!   the summary ([`compaction`]), as from the adapter but without its `trigger` and token
+//!   counts.
 //!
 //! Empty thinking (2.1.308 writes only a signature), images and unknown blocks give no event.
 //! `session_id` and the author ids are nil: the worker does not know the hqc session, the
@@ -284,6 +285,7 @@ fn system_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, code: &str, text: Stri
             task_id: None,
             from_session_id: None,
             fork: None,
+            compaction: None,
         },
     )
 }
@@ -327,6 +329,7 @@ fn notification(uuid: Uuid, ts: DateTime<Utc>, blocks: &[serde_json::Value]) -> 
             task_id: field("task-id"),
             from_session_id: None,
             fork: None,
+            compaction: None,
         },
     )
 }
@@ -695,6 +698,7 @@ mod tests {
                 task_id: Some("b1b20u6dl".into()),
                 from_session_id: None,
                 fork: None,
+                compaction: None,
             }]
         );
         assert_eq!((&evs[0].author, evs[0].delivery), (&Author::System, None));
@@ -788,6 +792,7 @@ mod tests {
                 task_id: Some("blyhf7ajv".into()),
                 from_session_id: None,
                 fork: None,
+                compaction: None,
             }]
         );
     }
@@ -907,6 +912,7 @@ mod tests {
                 task_id: Some("a52af2b436ded4cea".into()),
                 from_session_id: None,
                 fork: None,
+                compaction: None,
             }]
         );
         assert_eq!(evs[0].event_id, Event::id_from_claude_block(&uuid, 0));

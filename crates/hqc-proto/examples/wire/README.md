@@ -110,5 +110,11 @@ with three agents (the second on a model provider, the last one on the runtime's
 `api.session.room.member.json` — one of its agents (`room_id`, `spawned_by` the room, its model
 and system prompt).
 
+SPEC 0.173: `worker.session.state.json` carries `activity`, what the agent waits on now (here an
+API request retried); `api.session.json` and `client.session.summary.json` show it (absent:
+none). `event.subagents.live.retry.json` — a subagent whose API request failed with no response
+and is retried (`retry`). `event.system.context_compacted.json` — a compaction with its
+`trigger`, `pre_tokens` and `post_tokens`.
+
 Archived projects (§3 Project): `api.projects.archived.json` — `GET /api/projects?archived=1`, the
 projects with `archived_at`, which `api.projects.json` (the project bar) leaves out.

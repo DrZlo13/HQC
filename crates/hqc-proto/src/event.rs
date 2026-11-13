@@ -217,6 +217,11 @@ pub struct LiveSubagent {
     /// its next fire is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_in_ms: Option<u64>,
+    /// Its request to the model API failed and will be retried (since SPEC 0.173; Claude
+    /// Code: the `subagent_retry` of its `tool_progress`, until the one that says the retry
+    /// resolved); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ApiRetry>,
 }
 
 /// One schedule of `schedules.live` (SPEC §4, since 0.169): an enabled schedule of the session
@@ -250,6 +255,19 @@ pub enum LiveKind {
     Cron,
     #[serde(other)]
     Unknown,
+}
+
+/// A request to the model API that failed and will be retried (SPEC §4, §5.4; Claude Code:
+/// `system/api_retry`, a subagent's `subagent_retry`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiRetry {
+    pub attempt: u32,
+    pub max_retries: u32,
+    /// How long the runtime waits before the next attempt.
+    pub retry_delay_ms: u64,
+    /// The HTTP status of the failed attempt; absent when it got no response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_status: Option<u16>,
 }
 
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
@@ -482,6 +500,10 @@ pub enum EventKind {
         /// Only with [`SESSION_FORKED`]: its fields sit next to `text` and `code`.
         #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
         fork: Option<SessionForked>,
+        /// Only with `context_compacted`, when the runtime said (since SPEC 0.173): its fields
+        /// sit next to `text` and `code`.
+        #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<ContextCompacted>,
     },
     /// An event type this build does not know; stored and passed on as is, not rendered.
     /// Never matches a known type: a known type with a bad payload is an error.
@@ -575,6 +597,19 @@ pub struct SessionForked {
     pub branch_from: String,
     /// Turns (prompts) of the other line, missing from the context of the new one.
     pub orphaned_turns: u32,
+}
+
+/// Extra payload of `system context_compacted` (SPEC §4, since 0.173; Claude Code: the
+/// `compact_metadata` of `system/compact_boundary`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCompacted {
+    /// `auto` | `manual` (`/compact`).
+    pub trigger: String,
+    /// The context's tokens before the compaction.
+    pub pre_tokens: u64,
+    /// And after it; absent when the runtime did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
 }
 
 impl Event {
@@ -898,6 +933,65 @@ mod tests {
             .is_none());
     }
 
+    /// SPEC 0.173: a subagent's row carries its API retry, `error_status` absent without a
+    /// response; a row without one has none.
+    #[test]
+    fn a_subagent_retry_roundtrips() {
+        let src = include_str!("../examples/wire/event.subagents.live.retry.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::SubagentsLive { agents } = &e.kind else {
+            panic!("not subagents.live: {:?}", e.kind);
+        };
+        assert_eq!(
+            agents[0].retry,
+            Some(ApiRetry {
+                attempt: 2,
+                max_retries: 10,
+                retry_delay_ms: 4000,
+                error_status: None,
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.subagents.live.json"))
+                .unwrap();
+        let EventKind::SubagentsLive { agents } = &plain.kind else {
+            panic!("not subagents.live");
+        };
+        assert!(agents.iter().all(|a| a.retry.is_none()));
+    }
+
+    /// SPEC 0.173: a compaction carries its `trigger`, `pre_tokens` and `post_tokens` next to
+    /// `text` and `code`; a `system` event without them has none.
+    #[test]
+    fn a_compaction_carries_its_tokens() {
+        let src = include_str!("../examples/wire/event.system.context_compacted.json");
+        let wire: Value = serde_json::from_str(src).unwrap();
+        let e: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::System { compaction, .. } = &e.kind else {
+            panic!("not system: {:?}", e.kind);
+        };
+        assert_eq!(
+            compaction,
+            &Some(ContextCompacted {
+                trigger: "auto".into(),
+                pre_tokens: 165000,
+                post_tokens: Some(12400),
+            })
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), wire);
+        let plain: Event =
+            serde_json::from_str(include_str!("../examples/wire/event.system.json")).unwrap();
+        assert!(matches!(
+            plain.kind,
+            EventKind::System {
+                compaction: None,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn unknown_type_is_kept_as_is() {
         let wire: Value = serde_json::from_str(UNKNOWN_EXAMPLE).unwrap();
@@ -1038,7 +1132,8 @@ mod tests {
                 status: None,
                 task_id: None,
                 from_session_id: None,
-                fork: None
+                fork: None,
+                compaction: None
             }
         );
     }

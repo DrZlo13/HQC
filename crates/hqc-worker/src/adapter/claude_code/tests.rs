@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hqc_proto::event::{
-    ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
-    LiveKind, LiveSubagent, SessionState,
+    ApiRetry, ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion,
+    ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
 };
-use hqc_proto::frame::{Runtime, SessionInput, SlashCommand};
+use hqc_proto::frame::{Activity, Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -289,6 +289,8 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::TokenRate(_) => continue,
             // `foreground_calls_are_reported` looks at it.
             AdapterEvent::ForegroundCalls(_) => continue,
+            // `the_activity_follows_the_stream` and `a_heartbeat_is_reported` look at them.
+            AdapterEvent::Activity(_) | AdapterEvent::Heartbeat => continue,
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -4797,6 +4799,256 @@ fn a_subagent_line_does_not_release_a_held_compaction() {
         .collect();
     let summary = all[at]["message"]["content"].as_str().unwrap().to_owned();
     assert_eq!(system_events(&a), [("context_compacted".into(), summary)]);
+}
+
+/// `/compact` (fixture `stream-resume-compact`, 2.1.308): `system context_compacted` carries
+/// the `trigger`, `pre_tokens` and `post_tokens` of the boundary's `compact_metadata`.
+#[test]
+fn a_compaction_carries_its_trigger_and_tokens() {
+    let fx = fixture!("resume-compact", "2.1.308");
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let compaction = play(&mut core, fx.stream)
+        .into_iter()
+        .find_map(|a| match a {
+            Action::Emit(AdapterEvent::Event(e)) => match e.kind {
+                EventKind::System {
+                    code, compaction, ..
+                } if code == "context_compacted" => Some(compaction),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        compaction,
+        Some(ContextCompacted {
+            trigger: "manual".into(),
+            pre_tokens: 22240,
+            post_tokens: Some(4507),
+        })
+    );
+}
+
+/// SPEC §4, §8.1: a compaction that failed (`status` with `compact_result: failed`; live on
+/// 2.1.312 at 165 % of the window it came with `compact_error: too_few_groups`) is `system
+/// compaction_failed` "Compaction failed: <error>", "Compaction failed" without the error; one
+/// that went through gives no line of its own.
+#[test]
+fn a_failed_compaction_is_a_line() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let a = play(
+        &mut core,
+        concat!(
+            r#"{"type":"system","subtype":"status","status":"compacting"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"too_few_groups"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed"}"#,
+            "\n",
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"success"}"#,
+        ),
+    );
+    assert_eq!(
+        system_events(&a),
+        [
+            (
+                "compaction_failed".into(),
+                "Compaction failed: too_few_groups".into()
+            ),
+            ("compaction_failed".into(), "Compaction failed".into())
+        ]
+    );
+}
+
+/// SPEC §8.1: what the agent waits on, line by line (lines after the CLI's code, 2.1.312:
+/// `api_retry` cli:768796, `thinking_tokens` before each thinking delta cli:768702, `status`
+/// cli:768731): set by `api_retry`, `status compacting` and `thinking_tokens`, ended by a
+/// response that starts, a block that starts or ends, another `status` that is no report of
+/// the permission mode, the agent's `assistant` line and `result`. A thinking delta, `ping`, a
+/// subagent's line and a report of the mode leave it.
+#[test]
+fn the_activity_follows_the_stream() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let retry = |attempt, error_status| {
+        Some(Activity::Retrying(ApiRetry {
+            attempt,
+            max_retries: 10,
+            retry_delay_ms: 8000,
+            error_status,
+        }))
+    };
+    let thinking = |estimated_tokens| Some(Activity::Thinking { estimated_tokens });
+    let main =
+        |event: Value| json!({"type": "stream_event", "parent_tool_use_id": null, "event": event});
+    let steps: Vec<(Value, Vec<Option<Activity>>)> = vec![
+        (
+            json!({"type": "system", "subtype": "api_retry", "attempt": 3, "max_retries": 10,
+                "retry_delay_ms": 8000, "error_status": 529, "error": "overloaded"}),
+            vec![retry(3, Some(529))],
+        ),
+        (
+            json!({"type": "system", "subtype": "api_retry", "attempt": 4, "max_retries": 10,
+                "retry_delay_ms": 8000, "error_status": null, "error": "unknown"}),
+            vec![retry(4, None)],
+        ),
+        (
+            json!({"type": "stream_event", "parent_tool_use_id": "toolu_sub",
+                "event": {"type": "message_start", "message": {}}}),
+            vec![],
+        ),
+        (
+            main(json!({"type": "message_start", "message": {}})),
+            vec![None],
+        ),
+        (
+            main(json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}})),
+            vec![],
+        ),
+        (
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 12,
+                "estimated_tokens_delta": 12}),
+            vec![thinking(12)],
+        ),
+        (
+            main(json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "Let me look"}})),
+            vec![],
+        ),
+        (main(json!({"type": "ping"})), vec![]),
+        (
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 40,
+                "estimated_tokens_delta": 28}),
+            vec![thinking(40)],
+        ),
+        (
+            main(json!({"type": "content_block_stop", "index": 0})),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 5,
+                "estimated_tokens_delta": 5}),
+            vec![thinking(5)],
+        ),
+        (
+            json!({"type": "assistant", "parent_tool_use_id": null,
+                "uuid": "0f6c1d2e-9999-4a55-9d0e-1a2b3c4d5e01",
+                "message": {"model": "claude-opus-5-5", "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": "Done.", "signature": "s"}]}}),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            vec![Some(Activity::Compacting)],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": null,
+                "permissionMode": "default"}),
+            vec![],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": null,
+                "compact_result": "success"}),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            vec![Some(Activity::Compacting)],
+        ),
+        (
+            json!({"type": "system", "subtype": "status", "status": "requesting"}),
+            vec![None],
+        ),
+        (
+            json!({"type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10,
+                "retry_delay_ms": 8000, "error_status": 529, "error": "overloaded"}),
+            vec![retry(1, Some(529))],
+        ),
+        (
+            json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+                "result": "", "total_cost_usd": 0.01,
+                "usage": {"input_tokens": 1, "output_tokens": 1}}),
+            vec![None],
+        ),
+    ];
+    for (line, want) in steps {
+        let got: Vec<Option<Activity>> = core
+            .on_line(&line.to_string())
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::Activity(a)) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, want, "{line}");
+    }
+}
+
+/// SPEC §8.1, §17.3: the CLI's beat of a long call of the main agent (`tool_progress` with
+/// `heartbeat: true` every 30 s; live on 2.1.312 its `tool_use_id` is `<call>-heartbeat-N` and
+/// its `parent_tool_use_id` the call's own) is a heartbeat, not a subagent's line.
+#[test]
+fn a_heartbeat_is_reported() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let line = json!({"type": "tool_progress", "tool_use_id": "toolu_01Hb-heartbeat-0",
+        "tool_name": "Bash", "parent_tool_use_id": "toolu_01Hb", "elapsed_time_seconds": 30,
+        "heartbeat": true, "session_id": "s", "uuid": "0f6c1d2e-7777-4a55-9d0e-1a2b3c4d5e01"});
+    assert_eq!(
+        core.on_line(&line.to_string()),
+        [Action::Emit(AdapterEvent::Heartbeat)]
+    );
+}
+
+/// SPEC §4, §8.1: a subagent's API retry (`tool_progress` with `subagent_retry`, after the
+/// CLI's code, cli:723779: its `agent_id` is the subagent's `task_id`, its `parent_tool_use_id`
+/// the subagent's `Agent` call) is on the subagent's row until a line of the same call without
+/// it, which says the retry resolved; one of a subagent not in the list changes nothing.
+#[test]
+fn a_subagent_retry_is_on_its_row() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    // Subagent a55949578b136436b of call toolu_01Ti9wrYYVp7kqsruhoHEsLf.
+    core.on_line(TWO_SUBAGENTS.lines().next().unwrap());
+    let progress = |retry: Option<&str>| {
+        let mut v = json!({"type": "tool_progress", "tool_use_id": "agent_msg_01",
+            "tool_name": "Agent", "parent_tool_use_id": "toolu_01Ti9wrYYVp7kqsruhoHEsLf",
+            "elapsed_time_seconds": 0, "subagent_type": "general-purpose", "session_id": "s",
+            "uuid": Uuid::new_v4().to_string()});
+        if let Some(agent) = retry {
+            v["subagent_retry"] = json!({"agent_id": agent, "attempt": 2, "max_retries": 10,
+                "retry_delay_ms": 4000, "error_status": 529, "error_category": "overloaded"});
+        }
+        v.to_string()
+    };
+    let mut rows = |line: String| -> Vec<Vec<Option<ApiRetry>>> {
+        core.on_line(&line)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::LiveSubagents(list)) => {
+                    Some(list.into_iter().map(|s| s.retry).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let retrying = ApiRetry {
+        attempt: 2,
+        max_retries: 10,
+        retry_delay_ms: 4000,
+        error_status: Some(529),
+    };
+    assert_eq!(
+        rows(progress(Some("a55949578b136436b"))),
+        [vec![Some(retrying)]]
+    );
+    assert_eq!(rows(progress(None)), [vec![None]]);
+    assert!(rows(progress(Some("a0000000000000000"))).is_empty());
+    assert!(rows(progress(None)).is_empty());
 }
 
 /// The CLI's own reply (`model` `<synthetic>`; the lines of a live run on 2.1.312 with a model

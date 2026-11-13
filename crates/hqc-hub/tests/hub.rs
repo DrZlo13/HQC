@@ -2932,6 +2932,129 @@ async fn a_task_is_stopped_alone() {
     hub.finish().await;
 }
 
+/// SPEC §5.4, §6: `session.state.activity` is kept on the session, in the session object and
+/// its summary; a report without it, the end of the turn, the agent's stop, the worker's new
+/// `hello` and its disconnect drop it.
+#[tokio::test]
+async fn the_activity_lasts_until_the_turn_ends() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Activity").await;
+    ack_start(&mut w, &sid).await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+    let mut c = FakeClient::connect(&hub).await;
+    c.send(json!({"type": "subscribe_summary"})).await;
+    c.until("summary").await;
+
+    let retrying = json!({"kind": "retrying", "attempt": 3, "max_retries": 10,
+        "retry_delay_ms": 8000, "error_status": 529});
+    let thinking = json!({"kind": "thinking", "estimated_tokens": 1200});
+    let with = |a: &Value| json!({"session_id": sid, "process_state": "running", "locked_by": "hqc", "activity": a});
+    w.send("session.state", with(&retrying)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], retrying);
+    loop {
+        let u = c.until("session.summary").await;
+        if u["session"]["activity"] == retrying {
+            break;
+        }
+    }
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc"}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // The end of the turn.
+    w.send("session.state", with(&json!({"kind": "compacting"})))
+        .await;
+    w.expect("ack").await;
+    assert_eq!(
+        hub.session(&sid).await["activity"],
+        json!({"kind": "compacting"})
+    );
+    w.event(agent_event(&sid, "status", json!({"state": "idle"})))
+        .await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // The agent's stop.
+    w.send("session.state", with(&thinking)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], thinking);
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none",
+            "activity": thinking}),
+    )
+    .await;
+    w.expect("ack").await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // A new `hello` of the worker: it reports the activity again.
+    w.send("session.state", with(&thinking)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], thinking);
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    assert!(hub.session(&sid).await.get("activity").is_none());
+
+    // Its disconnect.
+    w.send("session.state", with(&thinking)).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["activity"], thinking);
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline, no activity", |v| {
+        v["state"] == "worker_offline" && v.get("activity").is_none()
+    })
+    .await;
+    hub.finish().await;
+}
+
+/// SPEC §17.3: a long call that prints nothing keeps its turn past the watchdog's limit while
+/// the worker sends the session's `tokens.rate` again, unchanged, on each beat of the call
+/// (§8.1).
+#[tokio::test]
+async fn a_silent_call_with_heartbeats_keeps_its_turn() {
+    let limit = Duration::from_millis(2500);
+    let hub = TestHub::start_timing(hqc_hub::config::Timing {
+        expiry_interval: Duration::from_millis(50),
+        turn_watchdog: Some(limit),
+        ..test_timing()
+    })
+    .await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("silent call").await;
+    ack_start(&mut w, &sid).await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/input"), json!({"text": "go"}))
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let si = w.expect("session.input").await;
+    w.reply(
+        &si["id"],
+        "ack",
+        json!({"event_id": r["event"]["event_id"]}),
+    )
+    .await;
+    hub.wait_session(&sid, "running", |v| v["state"] == "running")
+        .await;
+    for _ in 0..5 {
+        tokio::time::sleep(limit / 2).await;
+        w.event(agent_event(&sid, "tokens.rate", json!({"output_per_s": 0})))
+            .await;
+    }
+    assert_eq!(hub.session(&sid).await["state"], "running");
+    assert!(hub
+        .events(&sid)
+        .await
+        .iter()
+        .all(|e| e["payload"]["code"] != "turn_lost"));
+    hub.finish().await;
+}
+
 /// SPEC §6: `GET /api/sessions` is the union of the lists of the user's projects, archived and
 /// service sessions included, the newest `updated_at` first; another user's sessions are not in
 /// it.

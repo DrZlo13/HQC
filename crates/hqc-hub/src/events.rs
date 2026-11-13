@@ -548,6 +548,10 @@ async fn after_store(
     if source != Source::Mirror {
         push::on_event(app, s, row, kind);
     }
+    // What the agent waited on in the turn is over with it (SPEC §5.4).
+    if ends_turn(kind) {
+        app.drop_activity(s.id);
+    }
     app.session_changed(s.id);
     if matches!(
         kind,
@@ -594,6 +598,7 @@ pub async fn turn_timed_out(
         requests::cancel(app, &p, hqc_proto::event::CancelReason::Timeout).await?;
     }
     db::set_turn(&app.db, session_id, false, true).await?;
+    app.drop_activity(session_id);
     let why = format!("no events for {} s", idle.as_secs());
     system(app, &s, "turn_lost", &why).await?;
     // The speaker of a conversation room: the room stops (SPEC §7.1.1).
@@ -611,6 +616,7 @@ pub async fn turn_lost(app: &AppState, session_id: Uuid) -> anyhow::Result<()> {
         return Ok(());
     }
     db::set_turn(&app.db, session_id, false, false).await?;
+    app.drop_activity(session_id);
     system(
         app,
         &s,

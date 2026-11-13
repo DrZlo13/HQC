@@ -173,6 +173,7 @@ impl HubLink {
             subagents: 0,
             background_tasks: 0,
             foreground_calls: vec![],
+            activity: None,
         };
         let payload = serde_json::to_value(&frame)?["payload"].take();
         self.outbox

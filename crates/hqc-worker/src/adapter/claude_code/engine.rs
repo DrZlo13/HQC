@@ -26,10 +26,23 @@
 //!   (`handback`) while the latest `background_tasks_changed` still holds the subagent, or a
 //!   task of it, is no end: the latest one is handled when the subagent stops counting
 //!   (below); a task gives one line, a later notification of it none;
-//!   `system` `compact_boundary` → `system context_compacted`, held until the summary the CLI
+//!   `system` `compact_boundary` → `system context_compacted` with the `trigger`, `pre_tokens`
+//!   and `post_tokens` of its `compact_metadata`, held until the summary the CLI
 //!   writes after it, the main agent's `user` line with `isSynthetic: true`, which gives its
 //!   text; another main agent's `user`, `assistant`, `stream_event` or `result` line first, or
 //!   the process's end, gives it "Context compacted";
+//! - `system` `status` with `compact_result: failed` → `system compaction_failed` with its
+//!   `compact_error`;
+//! - [`AdapterEvent::Activity`] when it changes: `system` `api_retry` → retrying, `system`
+//!   `status` `compacting` → compacting, `system` `thinking_tokens` → thinking with its
+//!   `estimated_tokens`; any other `system` `status` that does not report the permission mode
+//!   (`requesting`, `null` at a compaction's end), a main agent's `stream_event`
+//!   `message_start`, `content_block_start` or `content_block_stop`, its `assistant` line and
+//!   `result` → none ([`activity_of`]);
+//! - `tool_progress` with `heartbeat: true` (a long call of the main agent, every 30 s) →
+//!   [`AdapterEvent::Heartbeat`]; with `subagent_retry` → `retry` of the subagent's row of
+//!   [`AdapterEvent::LiveSubagents`] (`agent_id` is its `task_id`), until a `tool_progress` of
+//!   the same `parent_tool_use_id` without it, which says the retry resolved;
 //! - `system` `task_started` with `task_type: local_agent` (a subagent, in the background or
 //!   not, a subagent's own too) until `task_notification` or a `task_updated` status other
 //!   than `running` of the same `task_id`, a foreground one at the latest until the `result`,
@@ -125,10 +138,10 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail};
 use hqc_claude_jsonl::{model_usage_tokens, CostState, TokenSums};
 use hqc_proto::event::{
-    ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event,
-    EventKind, LiveKind, LiveSubagent, SessionState,
+    ApiRetry, ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer,
+    ClarifyQuestion, ContextCompacted, Event, EventKind, LiveKind, LiveSubagent, SessionState,
 };
-use hqc_proto::frame::{PermissionMode, SessionInput, SlashCommand};
+use hqc_proto::frame::{Activity, PermissionMode, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -194,6 +207,8 @@ pub const COMMAND_TEXT_LIMIT: usize = 200;
 /// [`COMMAND_NAME_LIMIT`] characters: what the hub keeps (SPEC §5.4).
 pub const COMMANDS_LIMIT: usize = 500;
 pub const COMMAND_NAME_LIMIT: usize = 100;
+/// `system.code` of stream-json `system` `status` with `compact_result: failed` (SPEC §4, §8.1).
+pub const COMPACTION_FAILED: &str = "compaction_failed";
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
@@ -279,6 +294,9 @@ struct LiveAgent {
     tool_uses: Option<u64>,
     /// `tool_use_id` of its latest `task_started` ([`Core::task_calls`]); none before that.
     call_id: Option<String>,
+    /// Its API retry of a `tool_progress` `subagent_retry`, with that line's
+    /// `parent_tool_use_id`, until the line of the same call that says it resolved.
+    retry: Option<(String, ApiRetry)>,
 }
 
 impl LiveAgent {
@@ -292,6 +310,7 @@ impl LiveAgent {
             total_tokens: None,
             tool_uses: None,
             call_id: call_id.map(str::to_owned),
+            retry: None,
         }
     }
 }
@@ -329,9 +348,11 @@ pub struct Core {
     /// The last assistant text: event id, text, whether the CLI wrote it itself, whether an
     /// interrupt cut it off, and whether it is the CLI's reply to a model refusal.
     held: Option<(Uuid, String, bool, bool, bool)>,
-    /// Event id of the `context_compacted` of a `compact_boundary`, held for the summary that
-    /// follows it ([`Core::release_compaction`]).
-    compaction: Option<Uuid>,
+    /// Event id of the `context_compacted` of a `compact_boundary`, and its `compact_metadata`,
+    /// held for the summary that follows it ([`Core::release_compaction`]).
+    compaction: Option<(Uuid, Option<ContextCompacted>)>,
+    /// What the main agent waits on, as last reported ([`AdapterEvent::Activity`]).
+    activity: Option<Activity>,
     /// `event_id` of the input of the turn: `in_reply_to` of agent messages once its echo has
     /// come ([`Core::reply_to`]).
     last_input: Option<Uuid>,
@@ -493,6 +514,7 @@ impl Core {
             restricted,
             held: None,
             compaction: None,
+            activity: None,
             last_input: None,
             awaiting_echo: VecDeque::new(),
             wrote: false,
@@ -999,7 +1021,12 @@ impl Core {
         }
         .into_iter()
         .collect();
+        // What the agent waited on ends with its next output, before that output's events.
+        if let Some(a) = activity_of(ty, sub, &v) {
+            out.extend(self.set_activity(a));
+        }
         out.extend(match ty {
+            "tool_progress" => self.on_tool_progress(&v),
             "stream_event" if !sub => self.on_stream_event(&v),
             "assistant" if !sub => self.on_assistant(&v),
             "user" if v["isReplay"] == true => self.on_echo(&v),
@@ -1054,7 +1081,19 @@ impl Core {
                     out.extend(self.on_init(&v));
                     out
                 }
-                Some("status") => self.on_mode(&v["permissionMode"], false),
+                Some("status") => {
+                    let mut out = self.on_mode(&v["permissionMode"], false);
+                    if v["compact_result"] == "failed" {
+                        // After a text held before it, as the other lines of a turn.
+                        out.extend(self.flush(false));
+                        let t = match v["compact_error"].as_str() {
+                            Some(e) => format!("Compaction failed: {}", text(e)),
+                            None => "Compaction failed".into(),
+                        };
+                        out.push(self.emit_system(COMPACTION_FAILED, t));
+                    }
+                    out
+                }
                 Some("permission_denied") => {
                     let mut out: Vec<Action> = self.flush(false).into_iter().collect();
                     out.extend(self.on_permission_denied(&v));
@@ -1136,9 +1175,10 @@ impl Core {
                 Some("compact_boundary") => {
                     self.compacted = true;
                     tracing::info!(session_id = %self.session_id, trigger = ?v["compact_metadata"]["trigger"].as_str(), "context compacted");
-                    self.compaction = Some(
+                    self.compaction = Some((
                         record_uuid(&v).map_or_else(Uuid::now_v7, |u| record_event_id(&u, 0)),
-                    );
+                        compact_metadata(&v["compact_metadata"]),
+                    ));
                     vec![]
                 }
                 // A person gave the session a title (`/rename`), at once. The CLI's own title
@@ -1836,6 +1876,44 @@ impl Core {
         vec![self.live_list()]
     }
 
+    /// `tool_progress` (2.1.312): `heartbeat: true` comes every 30 s of a long call of the main
+    /// agent (its `parent_tool_use_id` is the call's own id, not a subagent's) →
+    /// [`AdapterEvent::Heartbeat`]; `subagent_retry` (`agent_id`, `attempt`, `max_retries`,
+    /// `retry_delay_ms`, `error_status`) is an API retry of a subagent of [`Core::live`], whose
+    /// row carries it until a line of the same `parent_tool_use_id` (the subagent's `Agent`
+    /// call) without it says the retry resolved: the list again.
+    fn on_tool_progress(&mut self, v: &Value) -> Vec<Action> {
+        if v["heartbeat"] == true {
+            return vec![Action::Emit(AdapterEvent::Heartbeat)];
+        }
+        let call = v["parent_tool_use_id"].as_str().unwrap_or("");
+        let r = &v["subagent_retry"];
+        let mut changed = false;
+        for a in &mut self.live {
+            if r.is_object() && r["agent_id"] == a.task_id.as_str() {
+                a.retry = Some((call.to_owned(), api_retry(r)));
+                changed = true;
+            } else if !r.is_object() && a.retry.as_ref().is_some_and(|(c, _)| c == call) {
+                a.retry = None;
+                changed = true;
+            }
+        }
+        if changed {
+            vec![self.live_list()]
+        } else {
+            vec![]
+        }
+    }
+
+    /// [`AdapterEvent::Activity`] when `a` differs from what was reported last.
+    fn set_activity(&mut self, a: Option<Activity>) -> Option<Action> {
+        if self.activity == a {
+            return None;
+        }
+        self.activity = a.clone();
+        Some(Action::Emit(AdapterEvent::Activity(a)))
+    }
+
     /// [`Core::live`], [`Core::live_commands`], [`Core::wakeup_row`], then [`Core::cron_jobs`],
     /// as sent: the run time of each, and the time to the fire of a wakeup and a job, counted
     /// now; a subagent, a command and a Monitor are `stoppable` ([`Core::stop_task`]), a wakeup
@@ -1865,6 +1943,7 @@ impl Core {
                         a.kind,
                         LiveKind::Agent | LiveKind::Command | LiveKind::Monitor
                     ),
+                    retry: a.retry.as_ref().map(|(_, r)| r.clone()),
                 })
                 .collect(),
         ))
@@ -2399,6 +2478,7 @@ impl Core {
                 task_id: id.map(str::to_owned),
                 from_session_id: None,
                 fork: None,
+                compaction: None,
             },
         ))));
         out
@@ -2448,7 +2528,7 @@ impl Core {
     /// `message.content` (a string, or the text blocks of an array), "Context compacted"
     /// without one.
     fn release_compaction(&mut self, summary: Option<&Value>) -> Option<Action> {
-        let id = self.compaction.take()?;
+        let (id, compaction) = self.compaction.take()?;
         let t = match summary {
             Some(Value::String(s)) => text(s),
             Some(c) => text(
@@ -2462,7 +2542,7 @@ impl Core {
             ),
             None => CONTEXT_COMPACTED_TEXT.into(),
         };
-        Some(self.emit_system_as(Some(id), CONTEXT_COMPACTED, t))
+        Some(self.emit_system_as(Some(id), CONTEXT_COMPACTED, t, compaction))
     }
 
     /// The input the running turn answers ([`Core::last_input`]), once its echo has come. Until
@@ -2487,11 +2567,17 @@ impl Core {
 
     /// `system {code, text}` authored by the worker (SPEC §4), fresh v7 id.
     fn emit_system(&self, code: &str, text: String) -> Action {
-        self.emit_system_as(None, code, text)
+        self.emit_system_as(None, code, text, None)
     }
 
-    /// [`Self::emit_system`] with `event_id`, when given.
-    fn emit_system_as(&self, event_id: Option<Uuid>, code: &str, text: String) -> Action {
+    /// [`Self::emit_system`] with `event_id`, when given, and a compaction's fields.
+    fn emit_system_as(
+        &self,
+        event_id: Option<Uuid>,
+        code: &str,
+        text: String,
+        compaction: Option<ContextCompacted>,
+    ) -> Action {
         let mut e = new_event(
             self.session_id,
             Author::System,
@@ -2503,6 +2589,7 @@ impl Core {
                 task_id: None,
                 from_session_id: None,
                 fork: None,
+                compaction,
             },
         );
         if let Some(id) = event_id {
@@ -2627,6 +2714,64 @@ fn command_list(v: &Value) -> Option<Vec<SlashCommand>> {
             })
             .collect(),
     )
+}
+
+/// What the main agent waits on after stdout line `v` of type `ty` (`sub`: it has a
+/// `parent_tool_use_id`), `None` when the line changes nothing: `system` `api_retry` (2.1.312:
+/// `attempt`, `max_retries`, `retry_delay_ms`, `error_status`, `null` without a response) →
+/// retrying; `system` `status` `compacting` → compacting; `system` `thinking_tokens` → thinking
+/// with its `estimated_tokens`, the estimate of the thinking block being written. It ends with
+/// any other `system` `status` that does not report the permission mode (`requesting` before a
+/// request, `null` at a compaction's end), with a main agent's `stream_event` `message_start`
+/// (a response begins: a retry went through), `content_block_start` or `content_block_stop` (a
+/// thinking block ends, another block begins), with its `assistant` line and with `result`.
+/// The deltas of a block and `ping` leave it: the CLI sends `thinking_tokens` before each
+/// thinking delta.
+fn activity_of(ty: &str, sub: bool, v: &Value) -> Option<Option<Activity>> {
+    match (ty, v["subtype"].as_str()) {
+        ("system", Some("api_retry")) => Some(Some(Activity::Retrying(api_retry(v)))),
+        ("system", Some("status")) if v["permissionMode"].is_null() => {
+            Some((v["status"] == "compacting").then_some(Activity::Compacting))
+        }
+        ("system", Some("thinking_tokens")) => Some(Some(Activity::Thinking {
+            estimated_tokens: v["estimated_tokens"].as_u64().unwrap_or(0),
+        })),
+        ("stream_event", _)
+            if !sub
+                && matches!(
+                    v["event"]["type"].as_str(),
+                    Some("message_start" | "content_block_start" | "content_block_stop")
+                ) =>
+        {
+            Some(None)
+        }
+        ("assistant", _) if !sub => Some(None),
+        ("result", _) => Some(None),
+        _ => None,
+    }
+}
+
+/// An `api_retry` line or a `subagent_retry` object.
+fn api_retry(v: &Value) -> ApiRetry {
+    let n = |k: &str| v[k].as_u64().unwrap_or(0);
+    ApiRetry {
+        attempt: u32::try_from(n("attempt")).unwrap_or(u32::MAX),
+        max_retries: u32::try_from(n("max_retries")).unwrap_or(u32::MAX),
+        retry_delay_ms: n("retry_delay_ms"),
+        error_status: v["error_status"]
+            .as_u64()
+            .and_then(|s| u16::try_from(s).ok()),
+    }
+}
+
+/// `compact_metadata` of `compact_boundary` (2.1.312: `trigger` `auto` | `manual`,
+/// `pre_tokens`, `post_tokens?`); `None` without `trigger` or `pre_tokens`.
+fn compact_metadata(m: &Value) -> Option<ContextCompacted> {
+    Some(ContextCompacted {
+        trigger: text(m["trigger"].as_str()?),
+        pre_tokens: m["pre_tokens"].as_u64()?,
+        post_tokens: m["post_tokens"].as_u64(),
+    })
 }
 
 /// The subagent a `can_use_tool` request comes from: its `agent_id`, the `task_id` of the

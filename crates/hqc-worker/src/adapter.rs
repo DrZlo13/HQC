@@ -70,6 +70,14 @@ pub enum AdapterEvent {
     /// subagents of `system/task_started` with `is_backgrounded: false`, SPEC §8.1); sent as
     /// `session.state.foreground_calls`. Reported when they change.
     ForegroundCalls(Vec<String>),
+    /// What the agent waits on now that its output does not show, `None` once it does not
+    /// (Claude Code: `system/api_retry`, `system/status`, `system/thinking_tokens`, SPEC
+    /// §8.1); sent as `session.state.activity`. Reported when it changes.
+    Activity(Option<hqc_proto::frame::Activity>),
+    /// A long call of the agent is still running (Claude Code: `tool_progress` with
+    /// `heartbeat: true`, every 30 s); `tokens.rate` goes again, which keeps the hub's turn
+    /// watchdog off a silent call (SPEC §17.3).
+    Heartbeat,
     /// The usage limits of the account the runtime runs on (Claude Code: `rate_limit_event`,
     /// SPEC §8.1); sent as `worker.limits`, the account being the worker's.
     Limits(hqc_proto::frame::Limits),

@@ -244,6 +244,7 @@ pub fn event(session_id: Uuid, line: &LogLine) -> serde_json::Value {
             task_id: None,
             from_session_id: None,
             fork: None,
+            compaction: None,
         },
     );
     ev.ts = line.ts;

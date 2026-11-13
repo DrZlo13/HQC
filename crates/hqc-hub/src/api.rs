@@ -388,6 +388,7 @@ pub async fn delete_project(
         app.drop_live_agents(*session_id);
         app.token_rate_changed(*session_id, 0);
         app.drop_foreground_calls(*session_id);
+        app.drop_activity(*session_id);
         app.session_changed(*session_id);
     }
     for (worker_id, f) in cleanups {
@@ -1602,6 +1603,7 @@ async fn remove_session(app: &AppState, s: &SessionRow) -> ApiResult<()> {
     app.drop_live_agents(id);
     app.token_rate_changed(id, 0);
     app.drop_foreground_calls(id);
+    app.drop_activity(id);
     app.session_changed(id);
     Ok(())
 }

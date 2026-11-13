@@ -55,6 +55,8 @@ fn label(ev: &AdapterEvent) -> String {
         AdapterEvent::BackgroundTasks(n) => format!("background_tasks:{n}"),
         AdapterEvent::TokenRate(n) => format!("token_rate:{n}"),
         AdapterEvent::ForegroundCalls(c) => format!("foreground_calls:{}", c.len()),
+        AdapterEvent::Activity(a) => format!("activity:{a:?}"),
+        AdapterEvent::Heartbeat => "heartbeat".into(),
     }
 }
 

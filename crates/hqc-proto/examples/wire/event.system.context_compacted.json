@@ -1,0 +1,9 @@
+{
+  "session_id": "0199f3a2-7c10-7000-8000-000000000001",
+  "event_id": "0199f3a2-7c10-7000-8000-000000000131",
+  "seq": 44,
+  "ts": "2026-10-22T10:05:00Z",
+  "author": { "kind": "system" },
+  "type": "system",
+  "payload": { "text": "This session is being continued from a previous conversation that ran out of context.", "code": "context_compacted", "trigger": "auto", "pre_tokens": 165000, "post_tokens": 12400 }
+}

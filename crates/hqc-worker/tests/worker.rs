@@ -3332,6 +3332,7 @@ async fn live_subagents_are_sent_again_on_connect() {
         kind: None,
         stoppable: true,
         due_in_ms: None,
+        retry: None,
     };
     let wakeup = LiveSubagent {
         task_id: "toolu_01Wake".into(),

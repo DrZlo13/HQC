@@ -942,6 +942,7 @@ impl ClaudeCodeAdapter {
                     task_id: None,
                     from_session_id: None,
                     fork: None,
+                    compaction: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -959,6 +960,7 @@ impl ClaudeCodeAdapter {
                     task_id: None,
                     from_session_id: None,
                     fork: None,
+                    compaction: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;
@@ -979,6 +981,7 @@ impl ClaudeCodeAdapter {
                     task_id: None,
                     from_session_id: None,
                     fork: None,
+                    compaction: None,
                 },
             );
             let _ = self.events.send(AdapterEvent::Event(ev)).await;

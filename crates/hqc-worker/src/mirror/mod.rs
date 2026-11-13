@@ -346,6 +346,7 @@ impl Mirror {
                     branch_from: if hqc { "hqc" } else { "vscode" }.into(),
                     orphaned_turns: f.orphaned_turns,
                 }),
+                compaction: None,
             },
             chain: None,
             client_op_id: None,

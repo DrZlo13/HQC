@@ -21,10 +21,10 @@ import { count, retryLabel } from './labels';
 /** How often an open history is fetched again. */
 const REFRESH_MS = 2000;
 
-/** What a subagent's line needs to open its history (since 0.175): `opens` tells a subagent's
- *  line from a command's, `load` fetches the history, `actions` draw it as the feed does. */
+/** What a subagent's line needs to open its history (since 0.175): `load` fetches the history,
+ *  `actions` draw it as the feed does. A command's line (`kind: command`), a Monitor's, a
+ *  wakeup's and a cron job's open none. */
 export interface SubagentHistoryOpener {
-  opens(a: LiveSubagent): boolean;
   load(taskId: string): Promise<SubagentHistory>;
   actions: ChatActions;
 }
@@ -85,7 +85,12 @@ export function LiveSubagents({
 }) {
   const t = useNow(1000, agents.length + schedules.length > 0, now);
   const rows: Row[] = [
-    ...agents.map((a) => ({ ...agentRow(a, t - receivedAt, asking), history: !!history?.opens(a) })),
+    // A subagent's line: `kind` `agent`, or none (an older worker, a value this client does not
+    // know); a command's, a Monitor's, a wakeup's and a cron job's are not.
+    ...agents.map((a) => ({
+      ...agentRow(a, t - receivedAt, asking),
+      history: !!history && (a.kind === undefined || a.kind === 'agent'),
+    })),
     ...schedules.map((s) => scheduleRow(s, t - schedulesAt, onSchedules)),
   ];
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set());
@@ -218,7 +223,8 @@ function countdown(dueInMs: number | undefined, age: number): string {
 }
 
 /** What subagent `taskId` has done, newest at the bottom, fetched again `REFRESH_MS` after each
- *  answer while it is open; it stays at the bottom while the user has not scrolled up. */
+ *  answer while it is open and the page is not hidden, and at once when the page is shown again;
+ *  it stays at the bottom while the user has not scrolled up. */
 function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHistoryOpener }) {
   const [page, setPage] = useState<SubagentHistory | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -227,9 +233,12 @@ function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHi
   load.current = history.load;
   useEffect(() => {
     let alive = true;
+    let busy = false;
     let next: ReturnType<typeof setTimeout> | undefined;
-    const get = () =>
-      load
+    const get = () => {
+      clearTimeout(next);
+      busy = true;
+      void load
         .current(taskId)
         .then(
           (p) => {
@@ -242,12 +251,20 @@ function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHi
           },
         )
         .finally(() => {
-          if (alive) next = setTimeout(get, REFRESH_MS);
+          busy = false;
+          // Not while the page is hidden: shown again, it is fetched at once.
+          if (alive) next = setTimeout(() => !document.hidden && get(), REFRESH_MS);
         });
-    void get();
+    };
+    const shown = () => {
+      if (!document.hidden && !busy) get();
+    };
+    get();
+    document.addEventListener('visibilitychange', shown);
     return () => {
       alive = false;
       clearTimeout(next);
+      document.removeEventListener('visibilitychange', shown);
     };
   }, [taskId]);
   // Its own timeline: the calls find their results in it. The events come without `seq`; their

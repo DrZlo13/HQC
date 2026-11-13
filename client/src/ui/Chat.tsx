@@ -12,7 +12,7 @@ import { ArtifactViewer, type ViewedArtifact } from './attachments';
 import { LimitBar, Limits } from './limits';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
 import { peerMessages } from './relay';
-import { buildFeed, subagentTool } from './feed';
+import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { copyText } from '../clipboard';
 import { ContextMenu } from './ContextMenu';
@@ -787,8 +787,6 @@ export function Chat({
           onStop={stopTask}
           asking={new Set(open.flatMap((r) => (r.type === 'approval.request' && r.payload.subagent ? [r.payload.subagent.task_id] : [])))}
           history={{
-            // A subagent's line, by the `Agent` call that started it; a command's is not one.
-            opens: (a) => a.call_id !== undefined && subagentTool(t.callFor(a.call_id)?.payload.tool ?? ''),
             load: (taskId) => app.api.subagentHistory(sessionId, taskId),
             actions,
           }}

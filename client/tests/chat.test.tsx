@@ -1345,6 +1345,8 @@ describe('live subagents', () => {
     // The watcher is a task the CLI stops alone; a timer is none.
     const stops = [...root.querySelectorAll('.live-agents-row')].map((r) => r.querySelector('.live-agents-stop') !== null);
     expect(stops).toEqual([true, false, false]);
+    // Only a subagent's row opens its history: these are none.
+    expect(root.querySelectorAll('button.live-agents-opens')).toHaveLength(0);
   });
 
   it('shows the block for the session\'s schedules alone: "Scheduled:", the message, the countdown; a click opens the schedules', async () => {
@@ -1363,6 +1365,7 @@ describe('live subagents', () => {
     await act(async () => $('.live-agents-open')!.click());
     expect($('.schedules')).not.toBeNull();
     expect(api.schedules).toHaveBeenCalledWith('s1');
+    expect(api.subagentHistory).not.toHaveBeenCalled();
     // The list emptied: the block goes.
     await act(async () => subscriber!.onEvent(schedulesLive((e) => (e.payload.schedules = []))));
     expect($('.live-agents')).toBeNull();
@@ -1421,11 +1424,9 @@ describe('live subagents', () => {
 
   // Since 0.175: what the subagent has done, under its line, as the feed draws it.
   it("opens a subagent's history under its line, fetches it again, closes it, and it goes with the line", async () => {
-    const started = ev('event.tool.call', 8, (e) => {
-      e.event_id = '0199f3a2-7c10-7000-8000-0000000001d8';
-      e.payload = { call_id: 'toolu_ag', tool: 'Agent', args_preview: '{"description":"Fix the nets","prompt":"Fix"}' };
-    });
-    const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: [...HISTORY.slice(0, 3), started] });
+    // Its `Agent` call is not among the loaded events (a subagent's subagent, or one started
+    // long ago): its line opens all the same.
+    const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: HISTORY.slice(0, 3) });
     await mount(app);
     const step = (name: string, id: string, payload: unknown) =>
       ev(name, 0, (e) => {
@@ -1444,7 +1445,7 @@ describe('live subagents', () => {
     // A new body each time, as parsed from the hub's answer.
     api.subagentHistory.mockImplementation(async () => ({ ...page }));
     const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' };
-    const command = { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards', duration_ms: 65_000, call_id: 'toolu_bg' };
+    const command = { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards', duration_ms: 65_000, call_id: 'toolu_bg', kind: 'command' as const };
     await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent, command]))));
     // The subagent's line opens; the command's is no button.
     const opens = [...root.querySelectorAll<HTMLButtonElement>('button.live-agents-opens')];
@@ -1490,6 +1491,38 @@ describe('live subagents', () => {
       expect(panel()).toBeNull();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('fetches an open history again only while the page is shown, and at once when it is shown again', async () => {
+    const { api, app } = setup('running', { subagents: 1 });
+    await mount(app);
+    api.subagentHistory.mockImplementation(async () => ({ events: [], truncated: false }));
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000 };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent]))));
+    let hidden = false;
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    const visibility = (h: boolean) => {
+      hidden = h;
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => root.querySelector<HTMLButtonElement>('button.live-agents-opens')!.click());
+      await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(1);
+      await act(async () => visibility(true));
+      await act(async () => void (await vi.advanceTimersByTimeAsync(10_000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(1);
+      await act(async () => visibility(false));
+      await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(2);
+      // And on every 2 s again.
+      await act(async () => void (await vi.advanceTimersByTimeAsync(2000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+      delete (document as { hidden?: boolean }).hidden;
     }
   });
 });

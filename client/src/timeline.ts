@@ -55,7 +55,7 @@ export class Timeline {
   private readonly fates = new Map<string, RequestFate>();
   private readonly results = new Map<string, EventOf<"tool.result">>();
   private readonly calls = new Map<string, EventOf<"tool.call">>();
-  /** The latest `system task_notification` by its `call_id`, and by its `task_id`. */
+  /** The first `system task_notification` by its `call_id`, and by its `task_id`. */
   private readonly endsByCall = new Map<string, EventOf<"system">>();
   private readonly endsByTask = new Map<string, EventOf<"system">>();
   private readonly requests = new Map<
@@ -174,8 +174,8 @@ export class Timeline {
         break;
       case "system":
         if (ev.payload.code === "task_notification") {
-          latest(this.endsByCall, ev.payload.call_id, ev);
-          latest(this.endsByTask, ev.payload.task_id, ev);
+          earliest(this.endsByCall, ev.payload.call_id, ev);
+          earliest(this.endsByTask, ev.payload.task_id, ev);
         }
         break;
       case "approval.request":
@@ -278,8 +278,9 @@ export class Timeline {
     return this.results.get(callId);
   }
 
-  /** The latest `system task_notification` of the task the call `callId` started: by its
-   *  `call_id`, else by its `task_id` when `taskId` (the runtime's id of the task) is given. */
+  /** The first `system task_notification` of the task the call `callId` started: by its
+   *  `call_id`, else by its `task_id` when `taskId` (the runtime's id of the task) is given. A
+   *  later one, a SendMessage that continued a subagent, is not the end of the call. */
   taskEnd(callId: string, taskId?: string): EventOf<"system"> | undefined {
     return this.endsByCall.get(callId) ?? (taskId === undefined ? undefined : this.endsByTask.get(taskId));
   }
@@ -463,10 +464,10 @@ function withJoined(e: HqcEvent, on: boolean): HqcEvent {
     : e;
 }
 
-/** `ev` under `key` in `m` unless a later one (by `seq`) is there: an older page may load
+/** `ev` under `key` in `m` unless an earlier one (by `seq`) is there: an older page may load
  *  after it. No key, no entry. */
-function latest(m: Map<string, EventOf<"system">>, key: string | undefined, ev: EventOf<"system">): void {
+function earliest(m: Map<string, EventOf<"system">>, key: string | undefined, ev: EventOf<"system">): void {
   if (key === undefined) return;
   const had = m.get(key);
-  if (!had || had.seq! < ev.seq!) m.set(key, ev);
+  if (!had || had.seq! > ev.seq!) m.set(key, ev);
 }

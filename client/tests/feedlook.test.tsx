@@ -323,7 +323,10 @@ describe('the one-column gutter', () => {
       [false, 'ask'],
       [true, null],
       [false, 'perm'],
+      // A subagent's start and, for one that ran in the foreground, its end.
       [false, 'ok'],
+      [false, 'ok'],
+      [false, 'error'],
       [false, 'error'],
       [false, 'dot'],
       [false, 'running'],

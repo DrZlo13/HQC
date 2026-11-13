@@ -22,6 +22,7 @@ import {
   groupDuration,
   groupState,
   relativePaths,
+  subagentEnd,
   subagentState,
   toolKind,
   toolLabel,
@@ -40,6 +41,7 @@ import {
   IconFork,
   IconQuestion,
   IconShield,
+  IconStop,
   IconWarn,
 } from './icons';
 import {
@@ -167,6 +169,10 @@ function gutter(b: Block, timeline: Timeline): Gutter {
       if (state === 'done') return { mark: mark('ok', <IconCheck size={13} />) };
       return { mark: mark('error', <IconCross size={13} />) };
     }
+    case 'subagent-end':
+      return subagentEnd(b.call, b.end).state === 'done'
+        ? { mark: mark('ok', <IconCheck size={13} />) }
+        : { mark: mark('error', <IconCross size={13} />) };
     case 'sent':
     case 'reply-to':
       return { mark: mark('relay', <IconArrowOut />) };
@@ -220,6 +226,8 @@ export function blockSeq(b: Block): number | undefined {
       return (b.kind === 'sent' ? b.call : b.result).seq;
     case 'subagent':
       return b.call.seq;
+    case 'subagent-end':
+      return b.end.seq;
     case 'tools': {
       const first = b.rows[0];
       const row = first?.kind === 'call' ? (first.call ?? first.result) : first?.event;
@@ -238,6 +246,8 @@ function BlockView({ block, actions }: { block: Block; actions: ChatActions }) {
       return <ToolGroup block={block} actions={actions} />;
     case 'subagent':
       return <SubagentCard block={block} actions={actions} />;
+    case 'subagent-end':
+      return <SubagentEndCard block={block} />;
     case 'sent':
       return <SentBlock block={block} actions={actions} />;
     case 'reply-from':
@@ -843,11 +853,11 @@ function ToolCallBody({
 }
 
 /** A subagent the agent started (its `Agent` call): a card of its own in the project's colour,
- *  not a row of a tool group. The head says it is a subagent, of which type and whether it was
- *  sent to the background; under it the task in full and the subagent's state: running
- *  ("Running", or what it does now) with its tokens, tool calls and run time (ticking), in the
- *  background, done with its run time, failed with the error, stopped. The head opens the
- *  call's arguments and result. */
+ *  not a row of a tool group, two lines that never wrap, a long text cut. The head: the agent
+ *  icon, the task, the subagent's type and whether it was sent to the background; under it the
+ *  subagent's state: running ("Running", or what it does now) with its tokens, tool calls and
+ *  run time (ticking), in the background, done with its run time, failed with the error,
+ *  stopped. The head opens the call's arguments and result. */
 function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subagent' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const { call, result } = block;
@@ -906,16 +916,51 @@ function SubagentCard({ block, actions }: { block: Extract<Block, { kind: 'subag
         <span class="subagent-icon">
           <IconAgent />
         </span>
-        <span class="subagent-label">Subagent</span>
+        {task && <span class="subagent-task">{task}</span>}
         {type && <span class="subagent-type">{type}</span>}
         {args.run_in_background === true && <span class="subagent-chip">background</span>}
         <span class="chevron">
           <IconChevron />
         </span>
       </button>
-      {task && <div class="subagent-task">{task}</div>}
       <div class="subagent-status">{status}</div>
       {open && <ToolCallBody call={call} result={result} actions={actions} />}
+    </section>
+  );
+}
+
+/** Where a subagent ended (its notification, or the result of one that ran in the
+ *  foreground): a lighter card of the start card's family, two lines that never wrap. The
+ *  head: the state's mark, the task, "done", "failed" or "stopped" and, on the call's first
+ *  end, the run time from the call; under it the end's text on one line, without Markdown
+ *  marks; the head opens the whole text as Markdown. */
+function SubagentEndCard({ block }: { block: Extract<Block, { kind: 'subagent-end' }> }) {
+  const [open, setOpen] = useState(false);
+  const e = subagentEnd(block.call, block.end);
+  const args = callArgs(block.call.payload.args_preview);
+  const task = typeof args.description === 'string' ? args.description : '';
+  // A report runs to tens of KB; its first 2000 characters are wider than any window.
+  const peek = useMemo(() => markdownLine(e.text.slice(0, 2000)), [e.text]);
+  return (
+    <section class={`subagent subagent-end subagent-${e.state} ${open ? 'is-open' : ''}`} aria-label="Subagent ended">
+      <button type="button" class="subagent-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span class="subagent-icon">
+          {e.state === 'stopped' ? (
+            <span class="mark mark-no" role="img" aria-label="stopped">
+              <IconStop size={10} />
+            </span>
+          ) : (
+            <StateMark state={e.state === 'done' ? 'ok' : 'error'} />
+          )}
+        </span>
+        {task && <span class="subagent-task">{task}</span>}
+        <span class="subagent-state">{e.state}</span>
+        {block.first && e.ms !== undefined && <span class="subagent-stats">{elapsed(e.ms)}</span>}
+        <span class="chevron">
+          <IconChevron />
+        </span>
+      </button>
+      {open ? <Markdown class="subagent-end-text" text={e.text} /> : <div class="subagent-end-peek">{peek}</div>}
     </section>
   );
 }

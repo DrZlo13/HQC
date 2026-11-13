@@ -6,7 +6,8 @@
 // between sessions (T51) are blocks of their own: the agent's `hqc_send` / `hqc_ask` call and
 // the ask's result, and the final message answering a question with the attachments and sends
 // of its turn. A subagent the agent starts (its `Agent` call) is a block of its own too, with
-// its result and its state. Pure logic, no DOM.
+// its result and its state, and so is its end: its notification, or its result when it ran in
+// the foreground. Pure logic, no DOM.
 
 import type { EventOf, HqcEvent, LiveSubagent } from '../proto';
 import type { Item, Timeline } from '../timeline';
@@ -29,6 +30,16 @@ export type Block =
   | { kind: 'approval'; key: string; event: EventOf<'approval.request'>; call?: EventOf<'tool.call'> }
   /** A subagent: a call of `Agent` (`Task` in older Claude Code) and its result. */
   | { kind: 'subagent'; key: string; call: EventOf<'tool.call'>; result?: EventOf<'tool.result'> }
+  /** Where a subagent ended: its `task_notification`, or the result of one that ran in the
+   *  foreground (`subagentEnd`); `first`: the call's first end, the only one that shows the run
+   *  time (a later one, a SendMessage that continued the subagent, would count from the call). */
+  | {
+      kind: 'subagent-end';
+      key: string;
+      call: EventOf<'tool.call'>;
+      end: EventOf<'system'> | EventOf<'tool.result'>;
+      first: boolean;
+    }
   /** "↗ Sent to X": a call of `hqc_send` / `hqc_ask`. */
   | ({ kind: 'sent'; key: string } & PeerCall)
   /** "↙ Reply from X": the result of an `hqc_ask`. */
@@ -111,6 +122,21 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
   let group: Extract<Block, { kind: 'tools' }> | null = null;
   const close = () => (group = null);
   const rel = relays(items, timeline);
+  // The `Agent` calls of background launches by the `agentId` their results name.
+  const launches = new Map<string, EventOf<'tool.call'>>();
+  for (const it of items) {
+    if (it.kind !== 'event' || it.event.type !== 'tool.result') continue;
+    const call = timeline.callFor(it.event.payload.call_id);
+    const agentId = launchedAgent(it.event);
+    if (call && subagentTool(call.payload.tool) && agentId) launches.set(agentId, call);
+  }
+  // The calls whose subagent has an end card already.
+  const ended = new Set<string>();
+  const end = (key: string, call: EventOf<'tool.call'>, e: EventOf<'system'> | EventOf<'tool.result'>) => {
+    close();
+    out.push({ kind: 'subagent-end', key, call, end: e, first: !ended.has(call.payload.call_id) });
+    ended.add(call.payload.call_id);
+  };
 
   for (const it of items) {
     if (it.kind !== 'event') {
@@ -140,6 +166,12 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
             out.push({ kind: 'reply-from', key: it.key, call, result: e });
             continue;
           }
+          // A subagent that ran in the foreground ends here; a background launch's ends with
+          // its notification.
+          if (call && subagentTool(call.payload.tool) && !e.payload.result_preview.startsWith(LAUNCHED)) {
+            end(it.key, call, e);
+            continue;
+          }
           // A result is drawn in its call's row.
           if (call) continue;
         }
@@ -161,10 +193,23 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         }
         break;
       case 'approval.request': {
-        const g = group as Extract<Block, { kind: 'tools' }> | null;
+        let g = group as Extract<Block, { kind: 'tools' }> | null;
+        // The calls of one batch run together: a subagent's card or the card of a subagent's end
+        // may stand between a call and its request; the group before them.
+        for (let i = out.length - 1; !g && i >= 0; i--) {
+          const b = out[i];
+          if (b.kind === 'tools') g = b;
+          else if (b.kind !== 'subagent' && b.kind !== 'subagent-end') break;
+        }
         const last = g?.rows.at(-1);
         let call: EventOf<'tool.call'> | undefined;
-        if (g && last?.kind === 'call' && last.call?.payload.tool === e.payload.tool) {
+        // Not a call whose result came before the request: the request is another's, such as
+        // a subagent's (its calls are not in the feed, its requests are).
+        const fits =
+          last?.kind === 'call' &&
+          last.call?.payload.tool === e.payload.tool &&
+          !(last.result && last.result.seq! < e.seq!);
+        if (g && last?.kind === 'call' && fits) {
           call = last.call;
           g.rows.pop();
           if (!g.rows.some((r) => r.kind === 'call')) out.splice(out.indexOf(g), 1);
@@ -191,6 +236,18 @@ export function buildFeed(items: Item[], timeline: Timeline): Block[] {
         if (e.payload.runtime && !reply) break;
         close();
         out.push(reply ?? { kind: 'agent', key: it.key, event: e });
+        continue;
+      }
+      case 'system': {
+        // A subagent's end, by its call or by the `agentId` of its background launch; any other
+        // task's stays a "Background task" line.
+        const p = e.payload;
+        if (p.code !== 'task_notification' || !SUBAGENT_ENDS.has(p.status ?? '')) break;
+        const byCall = p.call_id === undefined ? undefined : timeline.callFor(p.call_id);
+        const call =
+          byCall && subagentTool(byCall.payload.tool) ? byCall : p.task_id === undefined ? undefined : launches.get(p.task_id);
+        if (!call) break;
+        end(it.key, call, e);
         continue;
       }
     }
@@ -246,10 +303,11 @@ const SUBAGENT_ENDS = new Map<string, SubagentState['state']>([
 ]);
 
 /** The state of the subagent of `call`: running while `subagents.live` lists it; else as the
- *  latest `system task_notification` of the call says it ended (one of the call by its
+ *  first `system task_notification` of the call says it ended (one of the call by its
  *  `call_id`, else one with the `task_id` that the result of a background launch names as
- *  `agentId`: after a restart the CLI reports the subagent without the call), after the call
- *  for as long as between them; else by its result: the CLI's answer for a subagent the user
+ *  `agentId`: after a restart the CLI reports the subagent without the call; a later one, a
+ *  SendMessage that continued the subagent, is not its end), after the call for as long as
+ *  between them; else by its result: the CLI's answer for a subagent the user
  *  stopped ("[Request interrupted…") is stopped, another error failed, `run_in_background`
  *  or the CLI's answer for a subagent sent or moved to the background ("Async agent
  *  launched…") is in the background, any other is done, after the call for as long as between
@@ -262,22 +320,57 @@ export function subagentState(
   const id = call.payload.call_id;
   const live = timeline.liveAgents.find((a) => a.call_id === id);
   if (live) return { state: 'running', live };
-  // Only a background launch's: the CLI names a finished foreground subagent too, and a later
-  // SendMessage that continues it ends with the same `task_id`.
-  const launched = result?.payload.result_preview.startsWith('Async agent launched');
-  const agentId = launched ? /^agentId: (\S+)/m.exec(result!.payload.result_preview)?.[1] : undefined;
-  const end = timeline.taskEnd(id, agentId);
+  const end = timeline.taskEnd(id, launchedAgent(result));
   const ended = end && SUBAGENT_ENDS.get(end.payload.status ?? '');
   if (end && ended) return { state: ended, ms: between(call.ts, end.ts) };
   if (!result) return { state: 'running' };
   const r = result.payload;
-  if (r.error) {
-    const stopped = [r.error_text ?? '', r.result_preview].some((t) => t.startsWith('[Request interrupted'));
-    return { state: stopped ? 'stopped' : 'failed' };
-  }
-  if (callArgs(call.payload.args_preview).run_in_background === true || r.result_preview.startsWith('Async agent launched'))
+  if (r.error) return { state: interrupted(r) ? 'stopped' : 'failed' };
+  if (callArgs(call.payload.args_preview).run_in_background === true || r.result_preview.startsWith(LAUNCHED))
     return { state: 'background' };
   return { state: 'done', ms: between(call.ts, result.ts) ?? r.duration_ms };
+}
+
+/** The start of the CLI's answer for a subagent sent or moved to the background. */
+const LAUNCHED = 'Async agent launched';
+
+/** The `agentId` that the result of a background launch names. Only a launch's: the CLI names
+ *  a finished foreground subagent too, and a later SendMessage that continues it ends with the
+ *  same `task_id`. */
+function launchedAgent(result: EventOf<'tool.result'> | undefined): string | undefined {
+  const t = result?.payload.result_preview;
+  return t?.startsWith(LAUNCHED) ? /^agentId: (\S+)/m.exec(t)?.[1] : undefined;
+}
+
+/** A finished foreground subagent's result without the trailer the CLI adds (2.1.312): from the
+ *  last `agentId: <id> (use SendMessage …)` line that the `<usage>` block follows. */
+function withoutTrailer(t: string): string {
+  let at = -1;
+  for (const m of t.matchAll(/(?:^|\n)agentId: [^\n]*\n<usage>/g)) at = m.index!;
+  return at < 0 ? t : t.slice(0, at);
+}
+
+/** The CLI's answer for a subagent the user stopped. */
+function interrupted(r: EventOf<'tool.result'>['payload']): boolean {
+  return [r.error_text ?? '', r.result_preview].some((t) => t.startsWith('[Request interrupted'));
+}
+
+/** How a subagent ended at `end`: by its notification's `status`, or by its result (an error
+ *  that says the request was interrupted is stopped, another failed, else done); `ms`: from
+ *  the call to the end; `text`: the notification's text, or the result's (an error's
+ *  `error_text`). */
+export function subagentEnd(
+  call: EventOf<'tool.call'>,
+  end: EventOf<'system'> | EventOf<'tool.result'>,
+): { state: 'done' | 'failed' | 'stopped'; ms?: number; text: string } {
+  const ms = between(call.ts, end.ts);
+  if (end.type === 'system') {
+    const state = SUBAGENT_ENDS.get(end.payload.status ?? '');
+    return { state: state === 'failed' || state === 'stopped' ? state : 'done', ms, text: end.payload.text };
+  }
+  const r = end.payload;
+  if (!r.error) return { state: 'done', ms: ms ?? r.duration_ms, text: withoutTrailer(r.result_preview) };
+  return { state: interrupted(r) ? 'stopped' : 'failed', ms: ms ?? r.duration_ms, text: r.error_text ?? r.result_preview };
 }
 
 /** From `from` to `to`; undefined when the times say nothing. */

@@ -837,11 +837,11 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
       e.ts = ts;
       e.payload = { call_id, result_preview, error: false, duration_ms: 4200 };
     });
-  const notification = (seq: number, call_id: string | undefined, status: string, task_id?: string) =>
+  const notification = (seq: number, call_id: string | undefined, status: string, task_id?: string, text = "4") =>
     ev("event.system", (e) => {
       e.seq = seq;
       e.ts = at(seq);
-      e.payload = { text: "4", code: "task_notification", call_id, status, task_id };
+      e.payload = { text, code: "task_notification", call_id, status, task_id };
     });
   const failure = (seq: number, call_id: string, result_preview: string, error_text?: string) =>
     ev("event.tool.result", (e) => {
@@ -860,7 +860,7 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     return b?.kind === "subagent" ? subagentState(b.call, b.result, t) : undefined;
   };
 
-  it("an Agent or Task call is a block of its own that ends the group before it, its result in it", () => {
+  it("an Agent or Task call is a block of its own that ends the group before it, its result in it and at its place", () => {
     const t = new Timeline();
     t.apply(call(1, "a", "Bash", { command: "ls" }));
     t.apply(result(2, "a"));
@@ -870,15 +870,16 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     t.apply(result(6, "ag"));
     t.apply(call(7, "tk", "Task", AGENT));
     const blocks = buildFeed(t.items(), t);
-    expect(blocks.map((b) => b.kind)).toEqual(["tools", "subagent", "tools", "subagent"]);
-    const [bash, ag, read, tk] = blocks;
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "subagent", "tools", "subagent-end", "subagent"]);
+    const [bash, ag, read, end, tk] = blocks;
     expect(bash.kind === "tools" && bash.rows.length).toBe(1);
     expect(ag.kind === "subagent" && [ag.call.seq, ag.result?.seq]).toEqual([3, 6]);
     expect(read.kind === "tools" && read.rows.length).toBe(1);
+    expect(end.kind === "subagent-end" && [end.call.seq, end.end.seq]).toEqual([3, 6]);
     expect(tk.kind === "subagent" && tk.result).toBeUndefined();
   });
 
-  it("is running while the live list has its call, then as the latest notification of the call says", () => {
+  it("is running while the live list has its call, then as the first notification of the call says", () => {
     const t = new Timeline();
     t.apply(call(1, "ag", "Agent", AGENT));
     expect(state(t, "ag")).toEqual({ state: "running" });
@@ -891,10 +892,10 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     t.apply(notification(31, "other", "failed"));
     t.apply(notification(61, "ag", "completed"));
     expect(state(t, "ag")).toEqual({ state: "done", ms: 60_000 });
-    t.apply(notification(62, "ag", "stopped"));
-    expect(state(t, "ag")).toEqual({ state: "stopped", ms: 61_000 });
-    t.apply(notification(63, "ag", "failed"));
-    expect(state(t, "ag")).toEqual({ state: "failed", ms: 62_000 });
+    // A later end of the call, a SendMessage that continued the subagent, is not its end.
+    t.apply(notification(8041, "ag", "failed"));
+    t.apply(notification(8042, undefined, "stopped", "a1"));
+    expect(state(t, "ag")).toEqual({ state: "done", ms: 60_000 });
   });
 
   it("without a row or an end takes its state from its result: failed, in the background, done", () => {
@@ -970,7 +971,9 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
       expect(root.querySelector(".tool-group")).toBeNull();
       const card = root.querySelector(".subagent")!;
       expect(card.classList.contains("subagent-running")).toBe(true);
-      expect(card.querySelector(".subagent-label")!.textContent).toBe("Subagent");
+      // The icon and the card say it is a subagent; the word is for a screen reader only.
+      expect(card.getAttribute("aria-label")).toBe("Subagent");
+      expect(card.querySelector(".subagent-head")!.textContent).not.toContain("Subagent");
       expect(card.querySelector(".subagent-type")!.textContent).toBe("general-purpose");
       expect(card.querySelector(".subagent-chip")!.textContent).toBe("background");
       expect(card.querySelector(".subagent-task")!.textContent).toBe(AGENT.description);
@@ -1046,7 +1049,7 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     t.apply(call(5, "bg", "Agent", { ...AGENT, run_in_background: true }));
     t.apply(answer(6, "bg", "Async agent launched successfully.\nagentId: a1"));
     show(t);
-    const [failed, stopped, background] = root.querySelectorAll(".subagent");
+    const [failed, stopped, background] = root.querySelectorAll(".subagent:not(.subagent-end)");
     expect(failed.classList.contains("subagent-failed")).toBe(true);
     expect(failed.querySelector(".subagent-status .mark-error")).not.toBeNull();
     expect(failed.querySelector(".subagent-state")!.textContent).toBe("Failed");
@@ -1074,6 +1077,156 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     expect(head.getAttribute("aria-expanded")).toBe("true");
     expect([...card.querySelectorAll(".label")].map((l) => l.textContent)).toEqual(["Arguments", "Result"]);
     expect(card.querySelector(".tool-row-body")!.textContent).toContain("out ag");
+  });
+
+  it("ends with a card at its notification, by its call or by the agentId of its launch, not at the launch's result", async () => {
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", { ...AGENT, run_in_background: true }));
+    t.apply(answer(2, "ag", "Async agent launched successfully.\nagentId: a52af2b436ded4cea (internal ID)"));
+    t.apply(call(3, "rs", "Agent", { ...AGENT, description: "Check the board", run_in_background: true }));
+    t.apply(answer(4, "rs", "Async agent launched successfully.\nagentId: b11 (internal ID)"));
+    t.apply(notification(61, "ag", "completed", "a52af2b436ded4cea", "## Report\n\nThe nets are **fixed**."));
+    // After a restart the CLI reports a subagent cut off by it without its call.
+    t.apply(notification(124, undefined, "failed", "b11", "Agent \"Check the board\" failed"));
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => (b.kind === "subagent-end" ? [b.kind, b.call.payload.call_id, b.end.seq] : b.kind))).toEqual([
+      "subagent",
+      "subagent",
+      ["subagent-end", "ag", 61],
+      ["subagent-end", "rs", 124],
+    ]);
+    show(t);
+    const [done, failed] = root.querySelectorAll(".subagent-end");
+    expect(done.classList.contains("subagent-done")).toBe(true);
+    expect(done.getAttribute("aria-label")).toBe("Subagent ended");
+    expect(done.querySelector(".subagent-icon .mark-ok")).not.toBeNull();
+    expect(done.querySelector(".subagent-task")!.textContent).toBe(AGENT.description);
+    expect(done.querySelector(".subagent-state")!.textContent).toBe("done");
+    expect(done.querySelector(".subagent-stats")!.textContent).toBe("1m 0s");
+    expect(done.querySelector(".subagent-end-peek")!.textContent).toBe("Report The nets are fixed.");
+    expect(failed.classList.contains("subagent-failed")).toBe(true);
+    expect(failed.querySelector(".subagent-icon .mark-error")).not.toBeNull();
+    expect(failed.querySelector(".subagent-task")!.textContent).toBe("Check the board");
+    expect(failed.querySelector(".subagent-state")!.textContent).toBe("failed");
+    expect(failed.querySelector(".subagent-stats")!.textContent).toBe("2m 1s");
+    // Not a "Background task" line as well.
+    expect(root.querySelector(".line-system-task_notification")).toBeNull();
+    // The head opens the whole text as Markdown.
+    const head = done.querySelector<HTMLButtonElement>(".subagent-head")!;
+    await act(async () => head.click());
+    expect(head.getAttribute("aria-expanded")).toBe("true");
+    expect(done.querySelector(".subagent-end-text h2")!.textContent).toBe("Report");
+    expect(done.querySelector(".subagent-end-text strong")!.textContent).toBe("fixed");
+    expect(done.querySelector(".subagent-end-peek")).toBeNull();
+  });
+
+  it("one that ran in the foreground ends with a card at its result: done with its text, failed with the error, stopped", () => {
+    const t = new Timeline();
+    t.apply(call(1, "ok", "Agent", AGENT));
+    // The CLI's trailer after the subagent's report: its id and what it spent.
+    t.apply(
+      answer(
+        254,
+        "ok",
+        "Fixed the nets.\nagentId: a1 (use SendMessage with to: 'a1', summary: '<5-10 word recap>' to continue this agent)\n" +
+          "<usage>subagent_tokens: 158597\ntool_uses: 12\nduration_ms: 253000</usage>",
+      ),
+    );
+    t.apply(call(255, "e", "Agent", AGENT));
+    t.apply(failure(256, "e", "4", "The subagent crashed"));
+    t.apply(call(257, "st", "Agent", AGENT));
+    t.apply(failure(258, "st", "[Request interrupted by user for tool use]"));
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => (b.kind === "subagent-end" ? [b.kind, b.end.seq] : b.kind))).toEqual([
+      "subagent",
+      ["subagent-end", 254],
+      "subagent",
+      ["subagent-end", 256],
+      "subagent",
+      ["subagent-end", 258],
+    ]);
+    show(t);
+    const [done, failed, stopped] = root.querySelectorAll(".subagent-end");
+    expect(done.classList.contains("subagent-done")).toBe(true);
+    expect(done.querySelector(".subagent-stats")!.textContent).toBe("4m 13s");
+    expect(done.querySelector(".subagent-end-peek")!.textContent).toBe("Fixed the nets.");
+    expect(failed.classList.contains("subagent-failed")).toBe(true);
+    expect(failed.querySelector(".subagent-state")!.textContent).toBe("failed");
+    expect(failed.querySelector(".subagent-end-peek")!.textContent).toBe("The subagent crashed");
+    expect(stopped.classList.contains("subagent-stopped")).toBe(true);
+    expect(stopped.querySelector(".subagent-state")!.textContent).toBe("stopped");
+    expect(stopped.querySelector('.subagent-icon [aria-label="stopped"]')).not.toBeNull();
+  });
+
+  it("a later end of the same call, a SendMessage that continued it, has no run time", () => {
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", { ...AGENT, run_in_background: true }));
+    t.apply(answer(2, "ag", "Async agent launched successfully.\nagentId: a1 (internal ID)"));
+    t.apply(notification(61, "ag", "completed", "a1", "Fixed"));
+    t.apply(notification(8041, undefined, "completed", "a1", "Fixed again"));
+    show(t);
+    const [first, again] = root.querySelectorAll(".subagent-end");
+    // The start card, too, by the first end.
+    expect(root.querySelector(".subagent:not(.subagent-end) .subagent-state")!.textContent).toBe("Done · 1m 0s");
+    expect(first.querySelector(".subagent-stats")!.textContent).toBe("1m 0s");
+    expect(again.querySelector(".subagent-end-peek")!.textContent).toBe("Fixed again");
+    expect(again.querySelector(".subagent-stats")).toBeNull();
+  });
+
+  it("a request for a call of the same batch keeps its call across a subagent's end card", () => {
+    // Ask mode: the CLI runs the batch's calls together, so the request comes after the
+    // subagent's result.
+    const t = new Timeline();
+    t.apply(call(1, "ag", "Agent", AGENT));
+    t.apply(call(2, "sh", "Bash", { command: "cargo test" }));
+    t.apply(answer(3, "ag", "Fixed."));
+    t.apply(
+      ev("event.approval.request", (e) => {
+        e.seq = 4;
+        e.ts = at(4);
+      }),
+    );
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["subagent", "subagent-end", "approval"]);
+    const request = blocks[2];
+    expect(request.kind === "approval" && request.call?.payload.call_id).toBe("sh");
+  });
+
+  it("a request does not take a call whose result came before it: a subagent's own request", () => {
+    // Ask mode: a subagent's request is in the feed, its call is not.
+    const t = new Timeline();
+    t.apply(call(1, "ls", "Bash", { command: "ls" }));
+    t.apply(result(2, "ls"));
+    t.apply(call(3, "ag", "Agent", AGENT));
+    t.apply(
+      ev("event.approval.request", (e) => {
+        e.seq = 4;
+        e.ts = at(4);
+      }),
+    );
+    const blocks = buildFeed(t.items(), t);
+    expect(blocks.map((b) => b.kind)).toEqual(["tools", "subagent", "approval"]);
+    const [group, , request] = blocks;
+    expect(group.kind === "tools" && group.rows.length).toBe(1);
+    expect(request.kind === "approval" && request.call).toBeUndefined();
+  });
+
+  it("a command's or a Monitor's notification stays a Background task line", () => {
+    const t = new Timeline();
+    t.apply(call(1, "sh", "Bash", { command: "sleep 60", run_in_background: true }));
+    t.apply(result(2, "sh"));
+    t.apply(notification(61, "sh", "completed", "b1", 'Background command "sleep 60" completed (exit code 0)'));
+    // A Monitor's event: its task only, no call nor status.
+    t.apply(
+      ev("event.system", (e) => {
+        e.seq = 62;
+        e.ts = at(62);
+        e.payload = { text: 'Monitor event: "build log"', code: "task_notification", task_id: "bm1" };
+      }),
+    );
+    show(t);
+    expect(root.querySelector(".subagent-end")).toBeNull();
+    expect(root.querySelectorAll("details.line-system-task_notification")).toHaveLength(2);
   });
 });
 

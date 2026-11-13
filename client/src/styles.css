@@ -3769,12 +3769,13 @@ a.relay-peer {
   height: 20px;
 }
 
-/* ---- a subagent the agent started (its `Agent` call): a card in the project's colour ---- */
+/* ---- a subagent the agent started (its `Agent` call): a card in the project's colour, and
+   where it ended, a lighter one; two lines each that never wrap, a long text cut ---- */
 
 .subagent {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   padding: 12px 14px;
   border-radius: 12px;
@@ -3782,19 +3783,24 @@ a.relay-peer {
   border: 1px solid var(--accent-line);
   overflow-wrap: anywhere;
 }
+.subagent-end {
+  background: color-mix(in srgb, var(--accent) 3%, transparent);
+  border-color: color-mix(in srgb, var(--accent-line) 55%, transparent);
+}
 
 .subagent-head {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  width: 100%;
   padding: 0;
   border: 0;
   background: transparent;
   font: 12.5px var(--sans);
   color: var(--accent-text);
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -3808,15 +3814,31 @@ a.relay-peer {
   justify-content: center;
 }
 
-.subagent-label {
-  font-weight: 600;
+/* The task takes the room left; the type cuts first, down to a few letters. */
+.subagent-task {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.subagent-end .subagent-task {
+  flex-grow: 1;
 }
 
 .subagent-type {
+  flex: 0 1000 auto;
+  min-width: 3em;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted);
 }
 
 .subagent-chip {
+  flex: none;
   padding: 1px 8px;
   border-radius: 999px;
   background: var(--accent-soft);
@@ -3824,28 +3846,38 @@ a.relay-peer {
 }
 
 .subagent-head .chevron {
+  flex: none;
   margin-left: auto;
   color: var(--muted);
+}
+.subagent-end .subagent-head .chevron {
+  margin-left: 0;
 }
 .subagent.is-open > .subagent-head .chevron {
   transform: rotate(90deg);
 }
 
-.subagent-task {
-  color: var(--text);
-}
-
-.subagent-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
+/* The second line, under the task. */
+.subagent-status,
+.subagent-end-peek,
+.subagent-end-text {
+  margin-left: 30px;
   min-width: 0;
   font-size: 12.5px;
   color: var(--text2);
 }
+.subagent-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.subagent-status > * {
+  flex: none;
+}
 
 .subagent-state {
+  flex: none;
   color: var(--accent-text);
   font-weight: 500;
 }
@@ -3857,21 +3889,43 @@ a.relay-peer {
   color: var(--danger);
 }
 
-.subagent-activity {
-  /* The rest of the line beside the dot, wrapping inside, not a line of its own. */
-  flex: 1 1 0;
+.subagent-status > :is(.subagent-activity, .subagent-error) {
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .subagent-stats {
+  flex: none;
   margin-left: auto;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+.subagent-head .subagent-stats {
+  margin-left: 0;
+}
+
+/* The end's text: its start dimmed in italics, as a background task's line shows it; open, as
+   Markdown. */
+.subagent-end-peek {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: italic;
+  color: var(--muted);
+}
+.subagent-end-text {
+  font-size: 13px;
+}
 
 .layout-phone .subagent {
   padding: 10px 12px;
-  gap: 6px;
+  gap: 4px;
+}
+/* A phone: the second line from the card's edge, for the room. */
+.layout-phone :is(.subagent-status, .subagent-end-peek, .subagent-end-text) {
+  margin-left: 0;
 }
 
 .card-unknown {

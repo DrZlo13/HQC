@@ -6,13 +6,28 @@
 // run time, which ticks here between the lists the hub sends; a command or a watcher has only
 // its description and run time. A timer, a wakeup or a cron job of the agent and a message
 // scheduled by the hub, has "in 12m 34s" instead, counting down to "due"; a scheduled message
-// opens the schedules of the chat. A `stoppable` line ends with a stop button.
+// opens the schedules of the chat. A `stoppable` line ends with a stop button. A subagent's
+// line opens what it has done under it, drawn as the feed draws the agent's own steps.
 
-import { useState } from 'preact/hooks';
-import type { LiveKind, LiveSchedule, LiveSubagent } from '../proto';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import type { LiveKind, LiveSchedule, LiveSubagent, SubagentHistory } from '../proto';
+import { Timeline, type Item } from '../timeline';
+import { FeedBlocks, type ChatActions } from './cards';
+import { buildFeed } from './feed';
 import { useNow } from './hooks';
 import { IconStop } from './icons';
 import { count, retryLabel } from './labels';
+
+/** How often an open history is fetched again. */
+const REFRESH_MS = 2000;
+
+/** What a subagent's line needs to open its history (since 0.175): `opens` tells a subagent's
+ *  line from a command's, `load` fetches the history, `actions` draw it as the feed does. */
+export interface SubagentHistoryOpener {
+  opens(a: LiveSubagent): boolean;
+  load(taskId: string): Promise<SubagentHistory>;
+  actions: ChatActions;
+}
 
 const PREFIX: Record<LiveKind, string> = {
   agent: 'Agent: ',
@@ -33,6 +48,8 @@ interface Row {
   right: string;
   timer: boolean;
   open?: () => void;
+  /** The line opens what its subagent has done under it (since 0.175). */
+  history?: boolean;
   /** The `task_id` its stop button stops: a `stoppable` row's. */
   stop?: string;
 }
@@ -40,10 +57,11 @@ interface Row {
 /** `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `schedules`: the
  *  latest `schedules.live`, which came at `schedulesAt`; `onSchedules` opens the schedules;
  *  `asking`: the `task_id`s an open permission request names (since 0.175), whose row says it
- *  waits for it instead of what it does; `now`: the clock (tests). Nothing when both lists are
- *  empty. A `stoppable` row (a subagent's, a command's or a Monitor's) gets a stop button,
- *  which calls `onStop` with its `task_id` and stays disabled until that settles; the row goes
- *  when the task ends. */
+ *  waits for it instead of what it does; `history`: the lines that open what their subagent has
+ *  done (one at a time; it goes with its line); `now`: the clock (tests). Nothing when both
+ *  lists are empty. A `stoppable` row (a subagent's, a command's or a Monitor's) gets a stop
+ *  button, which calls `onStop` with its `task_id` and stays disabled until that settles; the
+ *  row goes when the task ends. */
 export function LiveSubagents({
   agents,
   receivedAt,
@@ -51,6 +69,7 @@ export function LiveSubagents({
   schedulesAt,
   onSchedules,
   asking,
+  history,
   now,
   onStop,
 }: {
@@ -60,15 +79,22 @@ export function LiveSubagents({
   schedulesAt: number;
   onSchedules: () => void;
   asking?: ReadonlySet<string>;
+  history?: SubagentHistoryOpener;
   now?: () => number;
   onStop?: (taskId: string) => Promise<void>;
 }) {
   const t = useNow(1000, agents.length + schedules.length > 0, now);
   const rows: Row[] = [
-    ...agents.map((a) => agentRow(a, t - receivedAt, asking)),
+    ...agents.map((a) => ({ ...agentRow(a, t - receivedAt, asking), history: !!history?.opens(a) })),
     ...schedules.map((s) => scheduleRow(s, t - schedulesAt, onSchedules)),
   ];
   const [stopping, setStopping] = useState<ReadonlySet<string>>(new Set());
+  const [open, setOpen] = useState<string | null>(null);
+  const shown = open !== null && history && rows.some((r) => r.key === open && r.history) ? open : null;
+  // The subagent ended: its history goes with its line, and does not open again by itself.
+  useEffect(() => {
+    if (open !== null && shown === null) setOpen(null);
+  }, [open, shown]);
   if (!rows.length) return null;
   const stop = (id: string) => {
     setStopping((s) => new Set(s).add(id));
@@ -82,35 +108,58 @@ export function LiveSubagents({
   };
   return (
     <section class="live-agents" aria-label="Running subagents and commands, and timers">
-      <ul class="live-agents-list">
-        {rows.map((r) => (
-          <li key={r.key} class="live-agents-row">
-            <span class={`pulse-dot live-agents-dot ${r.timer ? 'live-agents-dot-still' : ''}`} aria-hidden="true" />
-            {r.open ? (
-              <button type="button" class="live-agents-what live-agents-open" title="Open the schedules" onClick={r.open}>
-                <RowText row={r} />
-              </button>
-            ) : (
-              <span class="live-agents-what">
-                <RowText row={r} />
-              </span>
-            )}
-            <span class="live-agents-stats">{r.right}</span>
-            {r.stop && onStop && (
-              <button
-                type="button"
-                class="icon-btn live-agents-stop"
-                aria-label="Stop this task"
-                aria-describedby={`live-task-${r.key}`}
-                title="Stop this task"
-                disabled={stopping.has(r.stop)}
-                onClick={() => stop(r.stop!)}
-              >
-                <IconStop size={10} />
-              </button>
-            )}
-          </li>
-        ))}
+      <ul class={shown ? 'live-agents-list live-agents-list-open' : 'live-agents-list'}>
+        {rows.map((r) => {
+          const line = (
+            <>
+              <span class={`pulse-dot live-agents-dot ${r.timer ? 'live-agents-dot-still' : ''}`} aria-hidden="true" />
+              {r.open ? (
+                <button type="button" class="live-agents-what live-agents-open" title="Open the schedules" onClick={r.open}>
+                  <RowText row={r} />
+                </button>
+              ) : (
+                <span class="live-agents-what">
+                  <RowText row={r} />
+                </span>
+              )}
+              <span class="live-agents-stats">{r.right}</span>
+            </>
+          );
+          // Beside the line that opens the history, not in it: a button holds no other.
+          const stopButton = r.stop && onStop && (
+            <button
+              type="button"
+              class="icon-btn live-agents-stop"
+              aria-label="Stop this task"
+              aria-describedby={`live-task-${r.key}`}
+              title="Stop this task"
+              disabled={stopping.has(r.stop)}
+              onClick={() => stop(r.stop!)}
+            >
+              <IconStop size={10} />
+            </button>
+          );
+          return (
+            <li key={r.key}>
+              <div class="live-agents-row">
+                {r.history ? (
+                  <button
+                    type="button"
+                    class="live-agents-opens"
+                    aria-expanded={shown === r.key}
+                    onClick={() => setOpen((o) => (o === r.key ? null : r.key))}
+                  >
+                    {line}
+                  </button>
+                ) : (
+                  line
+                )}
+                {stopButton}
+              </div>
+              {shown === r.key && history && <HistoryPanel taskId={r.key} history={history} />}
+            </li>
+          );
+        })}
       </ul>
     </section>
   );
@@ -166,6 +215,80 @@ function countdown(dueInMs: number | undefined, age: number): string {
   if (dueInMs === undefined) return '';
   const left = dueInMs - Math.max(0, age);
   return left > 0 ? `in ${elapsed(left)}` : 'due';
+}
+
+/** What subagent `taskId` has done, newest at the bottom, fetched again `REFRESH_MS` after each
+ *  answer while it is open; it stays at the bottom while the user has not scrolled up. */
+function HistoryPanel({ taskId, history }: { taskId: string; history: SubagentHistoryOpener }) {
+  const [page, setPage] = useState<SubagentHistory | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // The chat makes a new opener on every render: the fetches follow the line, not it.
+  const load = useRef(history.load);
+  load.current = history.load;
+  useEffect(() => {
+    let alive = true;
+    let next: ReturnType<typeof setTimeout> | undefined;
+    const get = () =>
+      load
+        .current(taskId)
+        .then(
+          (p) => {
+            if (!alive) return;
+            setPage(p);
+            setError(null);
+          },
+          (e: Error) => {
+            if (alive) setError(e.message);
+          },
+        )
+        .finally(() => {
+          if (alive) next = setTimeout(get, REFRESH_MS);
+        });
+    void get();
+    return () => {
+      alive = false;
+      clearTimeout(next);
+    };
+  }, [taskId]);
+  // Its own timeline: the calls find their results in it. The events come without `seq`; their
+  // order is it, and their ids keep the rows in place as the window moves.
+  const feed = useMemo(() => {
+    const tl = new Timeline();
+    const events = (page?.events ?? []).map((e, i) => ({ ...e, seq: i + 1 }));
+    tl.applyAll(events);
+    const items = events.map((e): Item => ({ kind: 'event', key: e.event_id, event: e }));
+    return { timeline: tl, blocks: buildFeed(items, tl) };
+  }, [page]);
+  const box = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const lastTop = useRef(0);
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  });
+  return (
+    <div
+      class="live-agents-history"
+      ref={box}
+      role="region"
+      aria-label="What the subagent has done"
+      onScroll={(e) => {
+        // As the feed: only a move up lets go of the bottom.
+        const el = e.currentTarget as HTMLDivElement;
+        const near = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+        if (near || el.scrollTop < lastTop.current) stick.current = near;
+        lastTop.current = el.scrollTop;
+      }}
+    >
+      {page?.truncated && <div class="live-agents-note">Earlier steps are not shown.</div>}
+      {page && !page.events.length && <div class="live-agents-note">Nothing yet.</div>}
+      {!page && !error && <div class="live-agents-note">Loading…</div>}
+      {error && <div class="live-agents-note">{error}</div>}
+      <div class="feed live-agents-feed">
+        <FeedBlocks blocks={feed.blocks} actions={{ ...history.actions, timeline: feed.timeline }} />
+      </div>
+    </div>
+  );
 }
 
 /** `155.3k tokens · 188 tools · 4m 13s`; what the subagent has not reported yet is left out,

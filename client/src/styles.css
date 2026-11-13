@@ -4740,6 +4740,51 @@ a.relay-peer {
   padding: 6px 12px 4px;
 }
 
+/* A subagent's line opens what it has done under it, as wide as the block, with the feed's rows;
+   while it is open the list does not cut it. The opener is all of the line but its stop button. */
+.live-agents-opens {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.live-agents-opens:hover .live-agents-task,
+.live-agents-opens[aria-expanded='true'] .live-agents-task {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.live-agents-list-open {
+  max-height: none;
+}
+.live-agents-history {
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 4px 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.live-agents-history > .feed.live-agents-feed {
+  max-width: none;
+  gap: 12px;
+}
+.live-agents-note {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .composer-wrap {
   flex: none;
   padding: 12px 28px 18px;

@@ -127,6 +127,8 @@ function setup(
     stopTask: vi.fn(async () => {}),
     // POST /api/sessions/{id}/stop.
     stop: vi.fn(async () => {}),
+    // GET /api/sessions/{id}/subagents/{task_id}/history: nothing done yet unless a test says.
+    subagentHistory: vi.fn(async (_id: string, _task: string) => ({ events: [] as HqcEvent[], truncated: false })),
     sessions: vi.fn(async () => []),
     projects: vi.fn(async () => []),
     workspaces: vi.fn(async () => [
@@ -1415,6 +1417,80 @@ describe('live subagents', () => {
       'Agent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
       'Agent: Reply with number',
     ]);
+  });
+
+  // Since 0.175: what the subagent has done, under its line, as the feed draws it.
+  it("opens a subagent's history under its line, fetches it again, closes it, and it goes with the line", async () => {
+    const started = ev('event.tool.call', 8, (e) => {
+      e.event_id = '0199f3a2-7c10-7000-8000-0000000001d8';
+      e.payload = { call_id: 'toolu_ag', tool: 'Agent', args_preview: '{"description":"Fix the nets","prompt":"Fix"}' };
+    });
+    const { api, app } = setup('running', { subagents: 1, background_tasks: 1, history: [...HISTORY.slice(0, 3), started] });
+    await mount(app);
+    const step = (name: string, id: string, payload: unknown) =>
+      ev(name, 0, (e) => {
+        delete e.seq;
+        e.event_id = `0199f3a2-7c10-7000-8000-0000000002${id}`;
+        e.payload = payload;
+      });
+    const page = {
+      events: [
+        step('event.agent.thinking', 'e1', { text: 'The nets come from the netlist.' }),
+        step('event.tool.call', 'e2', { call_id: 'toolu_s1', tool: 'Bash', args_preview: '{"command":"cargo test -p import"}' }),
+        step('event.tool.result', 'e3', { call_id: 'toolu_s1', result_preview: 'test result: ok', error: false }),
+      ],
+      truncated: false,
+    };
+    // A new body each time, as parsed from the hub's answer.
+    api.subagentHistory.mockImplementation(async () => ({ ...page }));
+    const subagent = { task_id: 'a52af2b436ded4cea', description: 'Fix the nets', duration_ms: 1000, call_id: 'toolu_ag' };
+    const command = { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards', duration_ms: 65_000, call_id: 'toolu_bg' };
+    await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent, command]))));
+    // The subagent's line opens; the command's is no button.
+    const opens = [...root.querySelectorAll<HTMLButtonElement>('button.live-agents-opens')];
+    expect(opens.map((b) => b.querySelector('.live-agents-task')!.textContent)).toEqual(['Fix the nets']);
+    expect(rows()).toHaveLength(2);
+    const panel = () => $('.live-agents li .live-agents-history');
+    const flush = () => act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => opens[0].click());
+      await flush();
+      expect(api.subagentHistory).toHaveBeenCalledWith('s1', 'a52af2b436ded4cea');
+      expect(opens[0].getAttribute('aria-expanded')).toBe('true');
+      expect(panel()!.querySelector('.thinking summary')!.textContent).toContain('The nets come from the netlist.');
+      expect(panel()!.querySelector('.tool-group.tool-ok .tool-peek')!.textContent).toContain('cargo test -p import');
+      expect(panel()!.querySelector('.msg-agent')).toBeNull();
+
+      // Fetched again 2 s after the answer, the new step at the bottom.
+      page.events = [...page.events, step('event.agent.message', 'e4', { text: 'The import keeps the power nets.', final: false })];
+      await act(async () => void (await vi.advanceTimersByTimeAsync(2000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(2);
+      expect(panel()!.querySelector('.feed-block:last-child .msg-agent')!.textContent).toContain('The import keeps the power nets.');
+
+      // A second click closes it, and nothing is fetched any more.
+      await act(async () => opens[0].click());
+      expect(panel()).toBeNull();
+      await act(async () => void (await vi.advanceTimersByTimeAsync(6000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(2);
+
+      // Open again: the subagent ends, its line goes and the history with it.
+      await act(async () => opens[0].click());
+      await flush();
+      expect(panel()).not.toBeNull();
+      await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [command]))));
+      expect(panel()).toBeNull();
+      expect(rows().map((r) => r[0])).toEqual(['Command: Full run over 1000 boards']);
+      const calls = api.subagentHistory.mock.calls.length;
+      await act(async () => void (await vi.advanceTimersByTimeAsync(6000)));
+      expect(api.subagentHistory).toHaveBeenCalledTimes(calls);
+      // Continued later under the same id, its line comes back closed.
+      await act(async () => subscriber!.onEvent(live((e) => (e.payload.agents = [subagent, command]))));
+      expect(root.querySelector('button.live-agents-opens')!.getAttribute('aria-expanded')).toBe('false');
+      expect(panel()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

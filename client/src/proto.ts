@@ -1012,6 +1012,11 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'session_id');
     str(p, 'task_id');
   },
+  'session.subagent_history': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    str(p, 'task_id');
+  },
   'session.kill': (p) => void str(p, 'session_id'),
   'session.permission_mode': (p) => {
     str(p, 'session_id');
@@ -1851,6 +1856,19 @@ export function parseWorkspaceConflict(v: unknown): WorkspaceConflict | null {
     existing_project_id: str(o, 'existing_project_id'),
     existing_path: str(o, 'existing_path'),
   };
+}
+
+/** `GET /api/sessions/{id}/subagents/{task_id}/history` (since 0.175): what a subagent has
+ *  done, from its transcript on the worker: its last 200 events, oldest first, without `seq`;
+ *  `truncated` when it did more. */
+export interface SubagentHistory {
+  events: HqcEvent[];
+  truncated: boolean;
+}
+
+export function parseSubagentHistory(v: unknown): SubagentHistory {
+  const o = obj(v, 'subagent history');
+  return { events: arr(o, 'events').map(parseEvent), truncated: bool(o, 'truncated') };
 }
 
 /** `{events: [...], last_seq}` of `GET /api/sessions/{id}/events`; events stay raw so that

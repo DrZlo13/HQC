@@ -23,6 +23,7 @@ import {
   parseServerFrame,
   parseSessionInfo,
   parseSessionOrder,
+  parseSubagentHistory,
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceConflict,
@@ -264,6 +265,12 @@ describe('examples/wire', () => {
 
   it('reads the other REST bodies', () => {
     expect(parseEventPage(load('api.events.json')).last_seq).toBe(43);
+    const h = parseSubagentHistory(load('api.subagent_history.json'));
+    expect(h.events.map((e) => [e.type, e.seq])).toEqual([
+      ['tool.call', undefined],
+      ['tool.result', undefined],
+    ]);
+    expect(h.truncated).toBe(false);
     const sp = parseSearchPage(load('api.search.json'));
     expect(sp.results.map((h) => [h.address, h.seq, h.archived])).toEqual([
       ['hqc/hqc-run-the-tests', 42, false],

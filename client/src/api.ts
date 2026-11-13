@@ -21,6 +21,7 @@ import {
   parseSessionInfo,
   parseSessionList,
   parseSessionOrder,
+  parseSubagentHistory,
   parseVapidKey,
   parseWorkspace,
   parseWorkspaceInspection,
@@ -52,6 +53,7 @@ import {
   type RoomMode,
   type SessionInfo,
   type SessionOrder,
+  type SubagentHistory,
   type Theme,
   type Workspace,
   type WorkspaceInspection,
@@ -596,6 +598,12 @@ export class Api {
   /** Stops the agent's task `taskId` alone, a `stoppable` row of its `subagents.live`. */
   async stopTask(id: string, taskId: string): Promise<void> {
     await this.req('POST', `/api/sessions/${enc(id)}/tasks/${enc(taskId)}/stop`);
+  }
+
+  /** What subagent `taskId` (a `task_id` of `subagents.live`) has done, read from its
+   *  transcript on the worker; `409 worker_offline`, `504 worker_timeout`. */
+  async subagentHistory(id: string, taskId: string): Promise<SubagentHistory> {
+    return parseSubagentHistory(await this.req('GET', `/api/sessions/${enc(id)}/subagents/${enc(taskId)}/history`));
   }
 
   async retry(id: string): Promise<void> {

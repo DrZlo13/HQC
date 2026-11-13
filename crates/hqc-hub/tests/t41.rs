@@ -298,6 +298,84 @@ async fn a_reply_without_files_and_files_before_the_question() {
     );
 }
 
+/// SPEC §7.1, §6: a question that came while the target's turn ran waits for a turn of its
+/// own; the reply carries the files of that turn, not one the turn before attached after the
+/// question came.
+#[tokio::test]
+async fn a_question_that_waited_for_its_turn_gets_the_files_of_its_own_turn() {
+    let hub = TestHub::start().await;
+    let (mut w1, mut w2, _t1, t2, (_a, ta, b, tb)) = two_workers(&hub).await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{b}/input"),
+            json!({"text": "Build it."}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let own = w2.expect("session.input").await;
+    ack_input(&mut w2, &own).await;
+    let rid = Uuid::now_v7().to_string();
+    call(
+        &mut w1,
+        &ta,
+        "hqc_ask",
+        json!({"text": "Is it built?", "session": "personal/helper"}),
+        &rid,
+    )
+    .await;
+    w1.expect("ack").await;
+    let question = w2.expect("session.input").await;
+    // The running turn attaches a file after the question came.
+    let log = upload(&hub, &t2, &b, "build.log", b"log").await;
+    let r = fast(
+        &mut w2,
+        &tb,
+        "hqc_attach",
+        json!({"artifact_id": log}),
+        &Uuid::now_v7().to_string(),
+    )
+    .await;
+    assert!(r.get("result").is_some(), "{r}");
+    w2.event(agent_event(
+        &b,
+        "agent.message",
+        json!({"text": "Built.", "final": true, "in_reply_to": own["payload"]["event_id"]}),
+    ))
+    .await;
+    w2.event(agent_event(
+        &b,
+        "status",
+        json!({"state": "idle", "in_reply_to": own["payload"]["event_id"]}),
+    ))
+    .await;
+    // The question's own turn.
+    ack_input(&mut w2, &question).await;
+    let answer = upload(&hub, &t2, &b, "answer.txt", b"yes").await;
+    let r = fast(
+        &mut w2,
+        &tb,
+        "hqc_attach",
+        json!({"artifact_id": answer}),
+        &Uuid::now_v7().to_string(),
+    )
+    .await;
+    assert!(r.get("result").is_some(), "{r}");
+    w2.event(agent_event(
+        &b,
+        "agent.message",
+        json!({"text": "Yes.", "final": true, "in_reply_to": question["payload"]["event_id"]}),
+    ))
+    .await;
+    let r = w1.expect("mcp.result").await;
+    let names: Vec<Value> = r["payload"]["result"]["files"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .iter()
+        .map(|f| f["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("answer.txt")]);
+}
+
 #[tokio::test]
 async fn files_must_be_the_owners_and_this_sessions() {
     let hub = TestHub::start().await;

@@ -1067,8 +1067,10 @@ pub async fn on_final(
 }
 
 /// The files of a reply (T41, SPEC §7.1): the artifacts of the `attachment` events of
-/// session `s` between the question `question` and the final message at `seq`, oldest first,
-/// once each, at most [`MAX_FILES`]. Only artifacts of the session's owner count: a worker
+/// session `s` in the answering turn, after the question `question` and after the last end of a
+/// turn before the final message at `seq` (a question that came while a turn ran waited for a
+/// turn of its own, SPEC §6), oldest first, once each, at most [`MAX_FILES`]. Only artifacts of
+/// the session's owner count: a worker
 /// may write `attachment` events of its own, and the id of another owner's artifact in one
 /// must not reach the asking worker. Then `sent`, the files of the messages the turn sent to
 /// the asker (T42), in order. They are linked to the asking session `asker`, so its worker may
@@ -1082,12 +1084,21 @@ pub async fn reply_files(
     sent: &[Uuid],
 ) -> anyhow::Result<Vec<ReplyArtifact>> {
     let mut rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT a.id, a.name, a.kind FROM events e
+        r#"WITH q AS (SELECT seq FROM events WHERE event_id = $3 AND session_id = $1)
+         SELECT a.id, a.name, a.kind FROM events e
          JOIN artifacts a ON a.id::text = e.payload ->> 'artifact_id'
          WHERE e.session_id = $1 AND e.type = 'attachment' AND a.owner_id = $2
-           AND e.seq > (SELECT q.seq FROM events q WHERE q.event_id = $3 AND q.session_id = $1)
+           AND e.seq > (SELECT seq FROM q)
+           AND e.seq > COALESCE((SELECT max(t.seq) FROM events t
+                                 WHERE t.session_id = $1 AND t.seq > (SELECT seq FROM q)
+                                   AND t.seq < $4
+                                   AND ((t.type = 'agent.message' AND t.payload @> '{"final": true}')
+                                        OR (t.type = 'status'
+                                            AND t.payload ->> 'state' IN ('idle', 'error'))
+                                        OR (t.type = 'system'
+                                            AND t.payload ->> 'code' = 'turn_lost'))), 0)
            AND e.seq < $4
-         ORDER BY e.seq",
+         ORDER BY e.seq"#,
     )
     .bind(s.id)
     .bind(s.owner_id)

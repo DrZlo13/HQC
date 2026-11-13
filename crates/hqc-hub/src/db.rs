@@ -3367,17 +3367,51 @@ pub async fn first_after_inputs_during_text(
     .await
 }
 
-/// The events of session `from` before `seq` (and the one at `also`) whose type is in `types`,
-/// copied in order into the empty session `to` under new ids, at `seq` 1.. (SPEC §6 fork): what
-/// its feed shows of the conversation it forks. Each keeps its origin: a copy's, else its own id
-/// in `runtime`, the transcript of `from`. Copied inputs are no inputs to deliver. The number
-/// copied.
+/// An event of a session as the order of its feed needs it (SPEC §6): what tells inputs, the
+/// ends of turns and the agent's work apart ([`crate::fork`]).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct TurnMark {
+    pub seq: i64,
+    pub event_id: Uuid,
+    pub ts: DateTime<Utc>,
+    pub kind: String,
+    pub author_kind: Option<String>,
+    pub is_final: bool,
+    pub state: Option<String>,
+    pub code: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub joined: bool,
+    pub delivery: Option<String>,
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+/// The events of session `id` in `seq` order, as [`TurnMark`]s.
+pub async fn turn_marks(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<TurnMark>> {
+    sqlx::query_as(
+        r#"SELECT seq, event_id, ts, type AS kind, author ->> 'kind' AS author_kind,
+                  COALESCE(payload @> '{"final": true}', false) AS is_final,
+                  payload ->> 'state' AS state, payload ->> 'code' AS code,
+                  payload ->> 'in_reply_to' AS in_reply_to,
+                  COALESCE(payload @> '{"joined": true}', false) AS joined,
+                  delivery, delivered_at
+           FROM events WHERE session_id = $1 ORDER BY seq"#,
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+}
+
+/// The events of session `from` before `seq` (and those after it and before `until` that are no
+/// input) whose type is in `types`, copied in order into the empty session `to` under new ids,
+/// at `seq` 1.. (SPEC §6 fork): what its feed shows of the conversation it forks. Each keeps its
+/// origin: a copy's, else its own id in `runtime`, the transcript of `from`. Copied inputs are no
+/// inputs to deliver. The number copied.
 pub async fn copy_events(
     db: &PgPool,
     from: Uuid,
     to: Uuid,
     seq: i64,
-    also: Option<i64>,
+    until: Option<i64>,
     types: &[&str],
     runtime: &str,
 ) -> sqlx::Result<i64> {
@@ -3387,14 +3421,16 @@ pub async fn copy_events(
            (event_id, session_id, seq, ts, author, type, payload, origin_id, origin_runtime)
          SELECT gen_random_uuid(), $2, row_number() OVER (ORDER BY seq), ts, author, type,
                 payload, COALESCE(origin_id, event_id), COALESCE(origin_runtime, $5)
-         FROM events WHERE session_id = $1 AND (seq < $3 OR seq = $6) AND type = ANY($4)",
+         FROM events WHERE session_id = $1 AND type = ANY($4)
+           AND (seq < $3 OR (seq > $3 AND seq < $6
+                             AND type NOT IN ('user.message', 'peer.message')))",
     )
     .bind(from)
     .bind(to)
     .bind(seq)
     .bind(types)
     .bind(runtime)
-    .bind(also)
+    .bind(until)
     .execute(&mut *tx)
     .await?
     .rows_affected() as i64;

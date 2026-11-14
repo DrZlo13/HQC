@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.136, 2026-11-13. Status: the architecture agreed after six reviews and a survey of
+Version 0.140, 2026-11-14. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1583,7 +1583,10 @@ the rest is marked "later"):
   of that project's folders on the session's worker, the folder tree or a typed path, and
   "Create the folder and move" after `path_not_found`, as when a workspace is added; after the
   move the session leaves the old project's list and opens in the new one, which joins the rail.
-  A `session.summary` with another `project_id` (a move made elsewhere) does the same.
+  A `session.summary` with another `project_id` (a move made elsewhere) does the same. A desktop
+  row of the session list dragged onto another project on the bar moves the session there
+  without the form when that project has exactly one `ready` folder on the session's worker;
+  otherwise the form opens over the list with that project chosen.
 - `POST /api/sessions/{id}/requests/{request_id}` {option_id, message? | answers} → `{event_id, seq}`
   of the stored answer; closed request: `409 request_closed` (§10.1). The same call answers a
   request wherever the client shows it (its own feed, the feed of a session waiting on it, the
@@ -1811,7 +1814,11 @@ click on a row (the menu key; on a phone a long press or a right click) opens it
 new tab, Add to (Remove from) favorites, Rename, Move to project…, Folder rules (with a
 workspace), Restart session (§17.3; not for an archived, a service, a VS Code-driven session or
 one whose worker is offline), Archive, and Delete…, which asks in a second step of the menu with the focus on
-Cancel. At the bottom of a desktop column: "Requests" while one is open (§10.1), then the
+Cancel. A desktop row (not in Reorder) can also be dragged onto another project on the bar, whose
+tile or row is ringed while the row is over it: dropped there, the session moves
+(`POST /api/sessions/{id}/move`) into that project's one `ready` folder on the session's worker,
+or, with none or several, "Move to project…" opens over the list with that project chosen; a
+refusal is the list's notice. At the bottom of a desktop column: "Requests" while one is open (§10.1), then the
 workers line — "N workers online", the open session's worker with "N running" (its sessions in
 every project, by the rule of the list's Running group), "offline" while the socket is down —
 whose click opens the "Workers" list above it (§10.2). A phone's project screen (`#/p/<id>`) has
@@ -5046,6 +5053,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.136 → 0.140 (a session dragged onto a project moves there)
+§6: a session moved to another project only through "Move to project…", in its row's menu or the
+chat's "More" menu, and the form always asked for the project and the folder. A desktop row of
+the session list (the favorites too, not in Reorder) can now be dragged onto another project on
+the bar; the project's tile, or its row with the name in Compact, is ringed while the row is over
+it, and the session's own project does not take it. Dropped there, the session moves into that
+project's folder when it has exactly one `ready` folder on the session's worker; with none or
+several, "Move to project…" opens over the list with that project chosen; a refusal shows in the
+list's notice, "Not moved «…»: …". Only the client changes: the move is `POST
+/api/sessions/{id}/move` as before. 0.137–0.139 are taken by pull requests in preparation.
 
 ### 0.128 → 0.136 (a chat scrolled with a trackpad stays where the user scrolled it)
 §12 Client: in Safari and the macOS app (WebKit) a chat whose rendered feed was short, as a chat

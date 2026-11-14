@@ -117,6 +117,34 @@ function restart(app: AppState, s: SessionInfo): void {
   app.api.restartSession(s.id).catch((e: Error) => app.setListNotice(`Not restarted: ${e.message}`));
 }
 
+/** The `dataTransfer` type of a desktop row dragged onto a project of the bar; its data is the
+ *  session's id. */
+export const SESSION_DRAG = 'application/x-hqc-session';
+
+/** The row being dragged, until its drag ends: a tile under it reads its project, as the data
+ *  is not readable before the drop. */
+let dragged: { id: string; project_id: string } | null = null;
+export function draggedSession(): { id: string; project_id: string } | null {
+  return dragged;
+}
+
+/** A session dropped on a project of the bar moves there: into that project's one ready folder
+ *  on the session's worker, or, with none or several, by "Move to project…" over the list with
+ *  that project chosen. Dropped on its own project, nothing; a refusal goes to the list's
+ *  notice. */
+export async function dropSession(app: AppState, id: string, projectId: string): Promise<void> {
+  const s = app.sessions.get(id);
+  if (!s || s.project_id === projectId) return;
+  try {
+    const folders = await app.loadWorkspaces(projectId);
+    const here = folders.filter((w) => w.worker_id === s.worker_id && (w.state ?? 'ready') === 'ready');
+    if (here.length === 1) await app.moveSession(id, { path: here[0].path, project: projectId });
+    else app.setMoving({ session: id, project: projectId });
+  } catch (e) {
+    app.setListNotice(`Not moved «${titleOf(s)}»: ${(e as Error).message}`);
+  }
+}
+
 /** Deletes a session; the one open goes back to its project. */
 function remove(app: AppState, s: SessionInfo, current?: string): void {
   app.deleteSession(s.id).then(
@@ -158,8 +186,6 @@ export function SessionList({
 }
 
 function LiveList({ app, current, phone, requests }: { app: AppState; current?: string; phone?: boolean; requests?: boolean }) {
-  // The session whose "Move to project…" form is open.
-  const [moving, setMoving] = useState<string | null>(null);
   // Reorder mode: the order being arranged; Done stores it, Cancel drops it.
   const [reorder, setReorder] = useState<string[] | null>(null);
   // A row's menu (a right click; a long press on a phone): the session, where it was opened,
@@ -183,6 +209,15 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
 
   useEffect(() => setReorder(null), [pid]);
   useEffect(() => () => clearTimeout(leaveTimer.current), []);
+  // "Move to project…" is open over this list only: left (the archive, a phone's projects, the
+  // search page), it does not come back with the list. Nothing shows it meanwhile, so no change
+  // is announced.
+  useEffect(
+    () => () => {
+      app.moving = null;
+    },
+    [app],
+  );
   const now = Date.now();
   // The project's favorites above its groups.
   const favorites = reorder ? [] : app.favoriteSessions(pid);
@@ -341,6 +376,8 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       dragging={dragId === s.id}
       menuOpen={menu?.id === s.id}
       hover={phone || reorder ? undefined : hoverOn(s.id)}
+      // A desktop row is dragged onto a project of the bar to move it there; its buttons go.
+      onDragStart={phone || reorder ? undefined : hideRowButtons}
       onPrefetch={() => app.prefetchChat(s.id)}
       onMenu={(x, y) => openMenu(s.id, x, y)}
     />
@@ -363,7 +400,8 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   // menu whose session was deleted elsewhere is not shown and does not keep the buttons away.
   const hovered = rowHover && app.sessions.get(rowHover.id);
   const buttonsFor = hovered && !hovered.archived && hovered.id !== app.pendingArchive?.id && !menuFor && !reorder ? hovered : undefined;
-  const moveFor = moving && app.sessions.get(moving);
+  const moving = app.moving;
+  const moveFor = moving && app.sessions.get(moving.session);
 
   return (
     <section class={`sessions ${phone ? 'sessions-phone' : ''} ${reorder ? 'is-reordering' : ''}`}>
@@ -404,7 +442,14 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
       )}
       {moveFor && (
         <div class="move-panel" role="region" aria-label="Move to project">
-          <MoveSession key={moveFor.id} app={app} session={moveFor} onDone={() => setMoving(null)} />
+          {/* A drop on another project opens the form anew with that project. */}
+          <MoveSession
+            key={`${moveFor.id} ${moving?.project ?? ''}`}
+            app={app}
+            session={moveFor}
+            project={moving?.project}
+            onDone={() => app.setMoving(null)}
+          />
         </div>
       )}
       {favoriteGroup}
@@ -453,7 +498,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
           y={menu.y}
           label={`Session «${titleOf(menuFor)}»`}
           items={sessionMenu(app, menuFor, {
-            onMove: () => setMoving(menuFor.id),
+            onMove: () => app.setMoving({ session: menuFor.id }),
             onAskDelete: () => setMenu({ ...menu, confirm: true }),
           })}
           backdrop={phone}
@@ -744,7 +789,8 @@ export function PhoneTile({ p, named }: { p: Project; named?: boolean }) {
 }
 
 /** A row of the live list, without buttons of its own. Desktop: a right click opens its menu,
- *  the mouse on it the list's archive and favorites buttons past the column. Phone: a long
+ *  the mouse on it the list's archive and favorites buttons past the column; dragged onto a
+ *  project of the bar, the session moves there (`dropSession`). Phone: a long
  *  press or a right click opens the same menu. In Reorder: a handle (left on a desktop, right
  *  on a phone), no menu, no link. Without `onMenu` (a phone's "Sessions" view) it has no menu;
  *  with `project` its project's name starts the state line and its tile ends the row. */
@@ -760,6 +806,7 @@ export function SessionRow({
   dragging,
   menuOpen,
   hover,
+  onDragStart,
   onPrefetch,
   onMenu,
 }: {
@@ -777,6 +824,9 @@ export function SessionRow({
   /** Its menu is open: the row stays lit under it. */
   menuOpen?: boolean;
   hover?: HoverHandlers;
+  /** A desktop row of the live list: it can be dragged onto a project of the bar
+   *  (`SESSION_DRAG`), and this runs as the drag starts. */
+  onDragStart?: () => void;
   /** Loads the newest page of the chat before it is opened. */
   onPrefetch: () => void;
   onMenu?: (x: number, y: number) => void;
@@ -862,6 +912,22 @@ export function SessionRow({
           },
         };
   useEffect(() => cancelPress, []);
+  // The ghost of the drag is the row, held where the pointer took it.
+  const drag = onDragStart && {
+    onDragStart: (e: DragEvent) => {
+      const dt = e.dataTransfer!;
+      const row = e.currentTarget as HTMLElement;
+      const r = row.getBoundingClientRect();
+      dt.setData(SESSION_DRAG, s.id);
+      dt.effectAllowed = 'move';
+      dt.setDragImage(row, e.clientX - r.left, e.clientY - r.top);
+      dragged = { id: s.id, project_id: s.project_id };
+      onDragStart();
+    },
+    onDragEnd: () => {
+      dragged = null;
+    },
+  };
   const cls = `session-row ${current ? 'is-current' : ''} ${menuOpen ? 'is-menu' : ''} ${s.unread > 0 ? 'has-unread' : ''}`;
   return (
     <li class={`session-item ${dragging ? 'is-dragging' : ''}`} {...handlers}>
@@ -874,6 +940,7 @@ export function SessionRow({
           href={`#/s/${s.id}`}
           aria-current={current ? 'page' : undefined}
           {...prefetchOn(onPrefetch)}
+          {...drag}
           onClick={(e) => {
             // The press opened the menu: no navigation on release.
             if (fired.current) {

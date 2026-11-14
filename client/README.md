@@ -85,11 +85,13 @@ A 12-megapixel photo takes about a second. libheif is LGPL-3.0; its license is i
     pill and `--mark-bg`, a project's mark: the "needs you" count, else a stripe running around the
     icon while a session works, else the unread dot; a star on a favorite; the project search
     (⌘K / Ctrl+K), the order menu (Custom, Name, Recent), the project's menu and archived
-    projects; in the Compact look, a row per project with its icon and full name;
+    projects; in the Compact look, a row per project with its icon and full name; a project
+    takes a session row dropped on it;
   - `SessionList.tsx` + `sessions.ts` — the session column: a head of one row (name, search, the
     order menu, "⋯", "+"), the project's favorites pinned over the list, the groups (Needs you,
     Running, idle by age), one menu per row on a right click, archive and favorites buttons past
-    the column's edge on hover, the workers line at the bottom; `PhoneHome.tsx` — a
+    the column's edge on hover, a desktop row dragged onto a project on the bar to move it there,
+    the workers line at the bottom; `PhoneHome.tsx` — a
     phone's first screen, the projects; `NewSession.tsx` — a new session as a chat window with
     its chips; `ContextMenu.tsx` — the client's menus;
   - `ProjectSettings.tsx` — the project settings page (`#/p/<id>/settings`): Appearance, the

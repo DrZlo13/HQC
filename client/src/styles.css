@@ -570,6 +570,17 @@ select.input {
   cursor: grabbing;
   box-shadow: 0 0 0 2px var(--accent);
 }
+/* A session row from the column dragged over a project, a tile or a row with its name: the ring
+   says it moves there on release. */
+.rail-item.is-drop .rail-project {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+/* The icon and the name are not targets of their own (nor are the marks over the tile): a drag
+   over the tile meets the tile only, so passing onto the icon is no dragleave that would put the
+   ring out (WebKit's dragleave has no relatedTarget to tell the two apart). */
+.rail-project > * {
+  pointer-events: none;
+}
 .rail-done {
   color: var(--accent-text);
 }
@@ -593,6 +604,8 @@ select.input {
   align-items: center;
   justify-content: center;
   border: 2px solid var(--rail);
+  /* Over the tile's corner: a drag or a click there goes to the tile. */
+  pointer-events: none;
 }
 /* No one waits or works, but a session has unread events. */
 .rail-unread {
@@ -704,7 +717,6 @@ select.input {
   top: -2px;
   left: 20px;
   right: auto;
-  pointer-events: none;
 }
 :root.rail-names .rail-unread {
   top: 1px;

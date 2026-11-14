@@ -706,9 +706,20 @@ function AddWorkspace({
  *  folder, and the folder on the session's worker, as when a workspace is added: one of that
  *  project's folders there, one from the tree, or typed; a missing one the worker can make.
  *  The session then continues there, with its next input. */
-export function MoveSession({ app, session, onDone }: { app: AppState; session: SessionInfo; onDone: () => void }) {
+export function MoveSession({
+  app,
+  session,
+  project: initial,
+  onDone,
+}: {
+  app: AppState;
+  session: SessionInfo;
+  /** The project chosen when the form opens. */
+  project?: string;
+  onDone: () => void;
+}) {
   // `''`: a new project.
-  const [project, setProject] = useState('');
+  const [project, setProject] = useState(initial ?? '');
   const [path, setPath] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ReturnType<typeof addError> | null>(null);

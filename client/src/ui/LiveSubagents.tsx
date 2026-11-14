@@ -2,7 +2,7 @@
 // pinned above the input while the feed scrolls: one line each, "Agent:" or "Command:" (when
 // the worker says which), its task and what it does now, then its tokens, tool calls and run
 // time, which ticks here between the lists the hub sends; a command has only its description
-// and run time. A subagent's line ends with a stop button.
+// and run time. A `stoppable` line ends with a stop button.
 
 import { useState } from 'preact/hooks';
 import type { LiveSubagent } from '../proto';
@@ -11,9 +11,9 @@ import { IconStop } from './icons';
 import { count } from './labels';
 
 /** `agents`: the latest list, which came at `receivedAt` (`Date.now()`); `now`: the clock
- *  (tests). Nothing for an empty list. A `stoppable` row (a subagent's) gets a stop button,
- *  which calls `onStop` with its `task_id` and stays disabled until that settles; the row goes
- *  when the subagent ends. */
+ *  (tests). Nothing for an empty list. A `stoppable` row (a subagent's or a command's) gets a
+ *  stop button, which calls `onStop` with its `task_id` and stays disabled until that settles;
+ *  the row goes when the task ends. */
 export function LiveSubagents({
   agents,
   receivedAt,
@@ -46,7 +46,9 @@ export function LiveSubagents({
             <span class="pulse-dot live-agents-dot" aria-hidden="true" />
             <span class="live-agents-what">
               {a.kind && <span class="live-agents-kind">{a.kind === 'agent' ? 'Agent: ' : 'Command: '}</span>}
-              <span class="live-agents-task">{a.description}</span>
+              <span class="live-agents-task" id={`live-task-${a.task_id}`}>
+                {a.description}
+              </span>
               {a.activity ? `: ${a.activity}` : ''}
             </span>
             <span class="live-agents-stats">{stats(a, a.duration_ms + Math.max(0, t - receivedAt))}</span>
@@ -54,8 +56,9 @@ export function LiveSubagents({
               <button
                 type="button"
                 class="icon-btn live-agents-stop"
-                aria-label="Stop the subagent"
-                title="Stop the subagent"
+                aria-label="Stop this task"
+                aria-describedby={`live-task-${a.task_id}`}
+                title="Stop this task"
                 disabled={stopping.has(a.task_id)}
                 onClick={() => stop(a.task_id)}
               >

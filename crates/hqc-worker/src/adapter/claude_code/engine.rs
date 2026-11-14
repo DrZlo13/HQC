@@ -46,7 +46,8 @@
 //!   commands of the latest
 //!   `background_tasks_changed` list (`task_type: local_bash`, not `ambient`, whose
 //!   `task_started` has come and was not a `Monitor` call's, of no subagent that counts), each
-//!   with its `description` and run time only, when they or a `description` change;
+//!   with its `description`, run time and `stoppable` only, when they or a `description`
+//!   change;
 //! - `system` `background_tasks_changed` (`tasks`: the CLI's list of the session's running
 //!   background tasks, subagents and commands, its subagents' too) →
 //!   [`AdapterEvent::BackgroundTasks`] with their number when it changes;
@@ -623,11 +624,12 @@ impl Core {
         }))
     }
 
-    /// Stop task `task_id` alone, a subagent of [`AdapterEvent::LiveSubagents`]:
-    /// `control_request {subtype: stop_task, task_id}`. The CLI answers `success` with `{}`, also
-    /// for a task it does not know or one that has ended, or an error with the reason it did not
-    /// stop it; a stopped subagent then ends with `task_updated` and `task_notification`
-    /// `stopped`, as any end of it (by the 2.1.312 code, not checked live).
+    /// Stop task `task_id` alone, a `stoppable` row of [`AdapterEvent::LiveSubagents`], a
+    /// subagent or a command: `control_request {subtype: stop_task, task_id}`. The CLI answers
+    /// `success` with `{}`, also for a task it does not know or one that has ended, or an error
+    /// with the reason it did not stop it; a stopped subagent then ends with `task_updated` and
+    /// `task_notification` `stopped`, as any end of it (by the 2.1.312 code, not checked live); a
+    /// command ends so too (checked live on 2.1.312).
     pub fn stop_task(&self, task_id: &str) -> Action {
         Action::Write(json!({
             "type": "control_request",
@@ -1529,14 +1531,14 @@ impl Core {
     }
 
     /// [`Core::live`], then [`Core::live_commands`], as sent: the run time of each counted now;
-    /// a subagent is `stoppable` ([`Core::stop_task`]), a command is not.
+    /// a subagent and a command alike are `stoppable` ([`Core::stop_task`]).
     fn live_list(&self) -> Action {
         Action::Emit(AdapterEvent::LiveSubagents(
             self.live
                 .iter()
-                .map(|a| (a, LiveKind::Agent, true))
-                .chain(self.live_commands.iter().map(|c| (c, LiveKind::Command, false)))
-                .map(|(a, kind, stoppable)| LiveSubagent {
+                .map(|a| (a, LiveKind::Agent))
+                .chain(self.live_commands.iter().map(|a| (a, LiveKind::Command)))
+                .map(|(a, kind)| LiveSubagent {
                     task_id: a.task_id.clone(),
                     description: a.title.clone(),
                     activity: a.activity.clone(),
@@ -1545,7 +1547,7 @@ impl Core {
                     duration_ms: u64::try_from(a.since.elapsed().as_millis()).unwrap_or(u64::MAX),
                     call_id: a.call_id.clone(),
                     kind: Some(kind),
-                    stoppable,
+                    stoppable: true,
                 })
                 .collect(),
         ))

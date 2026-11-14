@@ -782,9 +782,10 @@ describe('live subagents', () => {
     expect(rows()).toEqual([['A command of an older worker', '1s']]);
   });
 
-  it("stops a subagent from its row, the button off until the hub answers; a command's row has none", async () => {
-    // SPEC 0.137: the worker marks a subagent's row `stoppable`, not a command's.
-    const { api, app } = setup('idle', { subagents: 1, background_tasks: 2 });
+  it("stops a subagent or a command from its row, the button off until the hub answers; a row without stoppable has none", async () => {
+    // SPEC 0.137: the worker marks a subagent's row and a command's `stoppable`; an older
+    // worker marks none.
+    const { api, app } = setup('idle', { subagents: 1, background_tasks: 3 });
     await mount(app);
     await act(async () =>
       subscriber!.onEvent(
@@ -792,13 +793,14 @@ describe('live subagents', () => {
           (e) =>
             (e.payload.agents = [
               { task_id: 'a52af2b436ded4cea', description: 'Sleep and reply with number', duration_ms: 3000, stoppable: true },
-              { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards on cirunner', duration_ms: 65_000 },
+              { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards on cirunner', duration_ms: 65_000, stoppable: true },
+              { task_id: 'bold', description: 'A command of an older worker', duration_ms: 1000 },
             ]),
         ),
       ),
     );
     const stops = () => [...root.querySelectorAll<HTMLElement>('.live-agents-row')].map((r) => r.querySelector<HTMLButtonElement>('.live-agents-stop'));
-    expect(stops().map((b) => b !== null)).toEqual([true, false]);
+    expect(stops().map((b) => b !== null)).toEqual([true, true, false]);
     let answer = () => {};
     api.stopTask.mockImplementationOnce(() => new Promise<void>((r) => (answer = () => r())));
     await act(async () => stops()[0]!.click());
@@ -810,6 +812,8 @@ describe('live subagents', () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(stops()[0]!.disabled).toBe(false);
+    await act(async () => stops()[1]!.click());
+    expect(api.stopTask).toHaveBeenLastCalledWith('s1', 'b2st7oc3z');
   });
 
   it('sends the stop as POST /api/sessions/{id}/tasks/{task_id}/stop', async () => {

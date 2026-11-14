@@ -200,8 +200,8 @@ pub struct LiveSubagent {
     /// A subagent or a background command (since SPEC 0.141); absent from an older worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<LiveKind>,
-    /// The runtime stops it alone on `session.stop_task` (since SPEC 0.137): a subagent's row;
-    /// absent — false, a command's row and every row of an older worker.
+    /// The runtime stops it alone on `session.stop_task` (since SPEC 0.137): a subagent's row
+    /// and a command's; absent — false, every row of an older worker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stoppable: bool,
 }

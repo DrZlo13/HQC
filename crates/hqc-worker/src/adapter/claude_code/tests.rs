@@ -4205,7 +4205,7 @@ fn background_asks_the_cli_to_move_the_call() {
     }
 }
 
-/// The stop button of a subagent's row: `control_request {subtype: stop_task, task_id}`; the
+/// The stop button of a row: `control_request {subtype: stop_task, task_id}`; the
 /// CLI's answer, `{}` or an error, gives no action.
 #[test]
 fn stop_task_asks_the_cli_to_stop_the_task() {
@@ -4229,12 +4229,12 @@ fn stop_task_asks_the_cli_to_stop_the_task() {
     }
 }
 
-/// Only a subagent's row is `stoppable`, the agent's background command beside it is not; the
+/// A subagent's row and the agent's background command beside it are both `stoppable`; the
 /// subagent stopped alone ends as any end of it (the lines after the stop are made up after the
 /// CLI's code, 2.1.312: `task_updated` `killed`, the list without it, `task_notification`
 /// `stopped`): its row goes, the command's stays, and its "Background task" line comes.
 #[test]
-fn only_a_subagent_row_is_stoppable() {
+fn a_subagent_row_and_a_command_row_are_stoppable() {
     let mut core = Core::new(Uuid::now_v7(), false);
     let lines = [
         r#"{"type":"system","subtype":"task_started","task_id":"a52af2b436ded4cea","tool_use_id":"toolu_01B2anRdzK42h65tA2gdwhb2","description":"Sleep and reply with number","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent"}"#,
@@ -4258,7 +4258,7 @@ fn only_a_subagent_row_is_stoppable() {
         rows,
         [
             ("a52af2b436ded4cea".to_string(), true),
-            ("b2st7oc3z".to_string(), false)
+            ("b2st7oc3z".to_string(), true)
         ]
     );
 

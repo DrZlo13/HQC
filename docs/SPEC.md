@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.136, 2026-11-13. Status: the architecture agreed after six reviews and a survey of
+Version 0.141, 2026-11-14. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -496,7 +496,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text` | adapter; transport only, not written to the database |
-| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6); a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms` and `call_id?` |
+| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?` and `kind` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -1915,9 +1915,11 @@ than the text, and an open thinking block is prose in the feed's font. Since 0.1
 two cards in the project's colour, two lines each at any width, which never wrap: a long text is cut
 with an ellipsis. Its start: a call of `Agent` (`Task` in older Claude Code) is no row of a run: it
 ends the run before it and is a card of its own (tinted background and border), its result inside
-it. Its first line is a small agent icon, the call's `description`, the call's `subagent_type`
-dimmed and a "background" chip when its `run_in_background` is true (the word "Subagent" is only the
-card's label for a screen reader); its second the subagent's state: while the latest
+it. Its first line is a small agent icon, "Agent started:" dimmed (since 0.141; before it only the
+card's label for a screen reader said "Subagent"), the call's `description`, the call's
+`subagent_type` dimmed (since 0.141 not on a phone screen 480 px wide or less, where the label
+leaves the task too little room; the type opens with the call's arguments) and a "background" chip
+when its `run_in_background` is true; its second the subagent's state: while the latest
 `subagents.live` (§4) has a row with the call's `call_id`, a pulsing dot, what it does now
 ("Running" before any progress: the CLI's text often starts "Running …" itself) and, at the right,
 the row's `<tokens> tokens · <n> tools · <run time>`, ticking every second as above the input; else
@@ -1940,7 +1942,8 @@ where the subagent ended: at a `system task_notification` with `status` `complet
 such a call's background launch, in place of the notification's "Background task ·" line (a
 command's or a Monitor's notification keeps its line); and at the result of a subagent that ran in
 the foreground, any result of the call but a background launch's. Its first line is the state's mark
-(a check, a cross, a square when stopped), the task, "done", "failed" or "stopped" and, on the
+(a check, a cross, a square when stopped), "Agent finished:" dimmed (since 0.141), the task, "done",
+"failed" or "stopped" and, on the
 call's first end only, the run time from the call to the end (a later one, a SendMessage that
 continued the subagent, would count from the call); its second the end's text, the notification's or
 the result's (an error's `error_text`; a done one's without the CLI's trailer, from the last
@@ -2011,7 +2014,9 @@ what was not reported yet left out, the run time ticking every second from `dura
 line is cut with an ellipsis. A subagent's line goes when it ends; a dropped socket, and a chat
 closed, clear the lines until the next subscribe brings the hub's list. Since 0.127 the list also
 holds the agent's background commands, which only `background_tasks` counts, so the chat shows it while
-either count is above 0; a command's line is its description and its run time.
+either count is above 0; a command's line is its description and its run time. Since 0.141 a line
+starts with "Agent: " or "Command: " dimmed, as its `kind` says; a line without a known `kind`
+(from an older worker, or a value this client does not know) has neither.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
 keeps it up after the turn has ended.
@@ -3067,7 +3072,8 @@ running gets its own row when that subagent's row goes. Other task types (`mcp_t
 entry's, which 2.1.312 sets to the Bash call's `description`, or to the command without one,
 cut to 4096 bytes as `args_preview` — and `duration_ms`, the worker's own time since the
 command's first `task_started` (for a command a subagent left, since the command started, not
-since it got its row); no `activity`, `total_tokens` or `tool_uses`. Commands go in the order they became rows; the list is sent
+since it got its row); no `activity`, `total_tokens` or `tool_uses`. Since 0.141 each row has `kind`:
+`agent` for a subagent's, `command` for a command's. Commands go in the order they became rows; the list is sent
 again when one comes, goes or its `description` changes. They never change
 `session.state.subagents`. The worker sends `subagents.live` directly, not through the outbox, as
 `agent.delta`, ignores a list read after the agent's process stopped and sends an empty list
@@ -5046,6 +5052,18 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.136 → 0.141 (a line above the input and a subagent's cards say what they are)
+§4, §6, §8.1: a line of the list above the input did not say whether it was a subagent or a
+background command: a subagent before its first progress report and a command both showed a task
+and a run time, and the client could not tell them apart either. A row of `subagents.live` now has
+`kind`, `agent` or `command`, which the worker sets by the list the row comes from, and the client
+starts the line with "Agent: " or "Command: ". A row from an older worker has no `kind` and its line
+neither word. §6: a subagent's start and end cards in the feed showed an icon, the task and the
+state, and did not say that a subagent had started or finished; their first line now starts with
+"Agent started:" and "Agent finished:". On a phone screen 480 px wide or less the start card leaves
+out the subagent's type, which the label would leave too little room beside the task. 0.137–0.140
+are taken by other pull requests.
 
 ### 0.128 → 0.136 (a chat scrolled with a trackpad stays where the user scrolled it)
 §12 Client: in Safari and the macOS app (WebKit) a chat whose rendered feed was short, as a chat

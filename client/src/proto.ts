@@ -126,7 +126,8 @@ export interface AgentDelta {
   text: string;
 }
 /** One subagent the agent runs now (SPEC §4, since 0.101), or (since 0.127) one background
- *  shell command of the agent, with only `task_id`, `description` and `duration_ms`. */
+ *  shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
+ *  `kind`. */
 export interface LiveSubagent {
   task_id: string;
   /** Its task. */
@@ -140,7 +141,11 @@ export interface LiveSubagent {
   /** `call_id` of the `tool.call` that started it (since 0.135); absent before the runtime
    *  names it. */
   call_id?: string;
+  /** A subagent or a background command (since 0.141); absent from an older worker. */
+  kind?: LiveKind;
 }
+export const LIVE_KINDS = ['agent', 'command'] as const;
+export type LiveKind = (typeof LIVE_KINDS)[number];
 /** The whole list: the subagents in the order they started, then (since 0.127) the agent's
  *  background commands; empty: none. Transport only. */
 export interface SubagentsLive {
@@ -414,6 +419,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
         tool_uses: optNum(a, 'tool_uses'),
         duration_ms: num(a, 'duration_ms'),
         call_id: optStr(a, 'call_id'),
+        kind: oneOf(a, 'kind', LIVE_KINDS),
       };
     }),
   }),

@@ -95,7 +95,7 @@ use std::time::Instant;
 use anyhow::{anyhow, bail};
 use hqc_proto::event::{
     ApprovalCanonical, ApprovalOption, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event,
-    EventKind, LiveSubagent, SessionState,
+    EventKind, LiveKind, LiveSubagent, SessionState,
 };
 use hqc_proto::frame::{PermissionMode, SessionInput};
 use serde_json::{json, Value};
@@ -1432,8 +1432,9 @@ impl Core {
         Action::Emit(AdapterEvent::LiveSubagents(
             self.live
                 .iter()
-                .chain(&self.live_commands)
-                .map(|a| LiveSubagent {
+                .map(|a| (a, LiveKind::Agent))
+                .chain(self.live_commands.iter().map(|a| (a, LiveKind::Command)))
+                .map(|(a, kind)| LiveSubagent {
                     task_id: a.task_id.clone(),
                     description: a.title.clone(),
                     activity: a.activity.clone(),
@@ -1441,6 +1442,7 @@ impl Core {
                     tool_uses: a.tool_uses,
                     duration_ms: u64::try_from(a.since.elapsed().as_millis()).unwrap_or(u64::MAX),
                     call_id: a.call_id.clone(),
+                    kind: Some(kind),
                 })
                 .collect(),
         ))

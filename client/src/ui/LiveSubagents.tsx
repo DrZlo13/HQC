@@ -1,7 +1,8 @@
 // The subagents and the background commands the agent runs now (`subagents.live`, SPEC §6),
-// pinned above the input while the feed scrolls: one line each, its task and what it does now,
-// then its tokens, tool calls and run time, which ticks here between the lists the hub sends;
-// a command has only its description and run time.
+// pinned above the input while the feed scrolls: one line each, "Agent:" or "Command:" (when
+// the worker says which), its task and what it does now, then its tokens, tool calls and run
+// time, which ticks here between the lists the hub sends; a command has only its description
+// and run time.
 
 import type { LiveSubagent } from '../proto';
 import { useNow } from './hooks';
@@ -27,6 +28,7 @@ export function LiveSubagents({
           <li key={a.task_id} class="live-agents-row">
             <span class="pulse-dot live-agents-dot" aria-hidden="true" />
             <span class="live-agents-what">
+              {a.kind && <span class="live-agents-kind">{a.kind === 'agent' ? 'Agent: ' : 'Command: '}</span>}
               <span class="live-agents-task">{a.description}</span>
               {a.activity ? `: ${a.activity}` : ''}
             </span>

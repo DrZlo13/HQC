@@ -3828,6 +3828,12 @@ a.relay-peer {
   flex-grow: 1;
 }
 
+/* What the card is: a subagent started or finished. */
+.subagent-label {
+  flex: none;
+  color: var(--muted);
+}
+
 .subagent-type {
   flex: 0 1000 auto;
   min-width: 3em;
@@ -3926,6 +3932,13 @@ a.relay-peer {
 /* A phone: the second line from the card's edge, for the room. */
 .layout-phone :is(.subagent-status, .subagent-end-peek, .subagent-end-text) {
   margin-left: 0;
+}
+/* A screen 480 px wide or less: the label leaves the task too little room beside the type, so the
+   type goes (it opens with the call's arguments). */
+@media (max-width: 480px) {
+  .layout-phone .subagent-type {
+    display: none;
+  }
 }
 
 .card-unknown {
@@ -4508,6 +4521,9 @@ a.relay-peer {
 }
 .live-agents-task {
   color: var(--text);
+}
+.live-agents-kind {
+  color: var(--muted);
 }
 /* One column: the dot in the 22 px gutter of the feed's marks, the text on the feed's text. */
 :root.feed-column .chat:not(.chat-phone) .live-agents {

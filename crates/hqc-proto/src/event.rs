@@ -169,7 +169,8 @@ pub struct ClarifyQuestion {
 }
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
-/// shell command of the agent, with only `task_id`, `description` and `duration_ms`.
+/// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
+/// `kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSubagent {
     pub task_id: String,
@@ -189,6 +190,19 @@ pub struct LiveSubagent {
     /// `task_started`; since SPEC 0.135); absent before that comes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    /// A subagent or a background command (since SPEC 0.141); absent from an older worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<LiveKind>,
+}
+
+/// What a row of `subagents.live` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveKind {
+    Agent,
+    Command,
+    #[serde(other)]
+    Unknown,
 }
 
 /// An answer in `clarify.response.answers`: one string, or several for `multi` questions.
@@ -772,6 +786,10 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ArtifactKind>(v("audio")).unwrap(),
             ArtifactKind::Unknown
+        );
+        assert_eq!(
+            serde_json::from_value::<LiveKind>(v("workflow")).unwrap(),
+            LiveKind::Unknown
         );
     }
 

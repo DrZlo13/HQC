@@ -3230,6 +3230,7 @@ async fn live_subagents_are_sent_again_on_connect() {
         tool_uses: None,
         duration_ms: 1000,
         call_id: None,
+        kind: None,
     };
     adapters
         .emit(sid, AdapterEvent::LiveSubagents(vec![agent.clone()]))

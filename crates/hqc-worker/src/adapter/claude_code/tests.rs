@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use hqc_proto::event::{
     ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
-    SessionState,
+    LiveKind, SessionState,
 };
 use hqc_proto::frame::{Runtime, SessionInput};
 use serde_json::{json, Value};
@@ -4745,6 +4745,33 @@ fn a_command_a_subagent_left_running_counts_from_its_start() {
         .find(|s| s.task_id == "c")
         .unwrap();
     assert!(c.duration_ms >= 50, "{}", c.duration_ms);
+}
+
+/// [`COMMANDS_BESIDE_A_SUBAGENT`]: each row says whether it is a subagent or a command (SPEC
+/// 0.141), so that a client can tell a command from a subagent that has not reported yet.
+#[test]
+fn a_row_says_whether_it_is_a_subagent_or_a_command() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut last = None;
+    for l in COMMANDS_BESIDE_A_SUBAGENT[..4].iter().copied() {
+        for a in core.on_line(l) {
+            if let Action::Emit(AdapterEvent::LiveSubagents(list)) = a {
+                last = Some(list);
+            }
+        }
+    }
+    let kinds: Vec<_> = last
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.task_id, s.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("A".to_owned(), Some(LiveKind::Agent)),
+            ("m".to_owned(), Some(LiveKind::Command))
+        ]
+    );
 }
 
 /// A foreground subagent the CLI sent no end for (an interrupt, a denied call,

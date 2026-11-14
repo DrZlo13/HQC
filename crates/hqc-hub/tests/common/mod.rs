@@ -201,6 +201,15 @@ impl TestHub {
         upgrade: Option<(i64, String)>,
         configure: impl FnOnce(&mut Config),
     ) -> Self {
+        // The hub's log goes to the test's captured output, which libtest prints only for a
+        // test that fails: a run that flakes on CI says what the hub did (`RUST_LOG` for more).
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "hqc_hub=debug".into()),
+            )
+            .with_test_writer()
+            .try_init();
         let url = db_url();
         let admin = PgPoolOptions::new()
             .max_connections(1)

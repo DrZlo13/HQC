@@ -574,9 +574,11 @@ pub async fn deliver_result(app: &AppState, p: &PendingRow) {
         .get(&p.session_id)
         .is_some_and(|sc| sc.start == StartState::Starting)
     {
+        tracing::debug!(session_id = %p.session_id, request_id = %p.request_id, "result waits for the ack of session.start");
         return;
     }
     let id = conn.send_raw(t, payload);
+    tracing::debug!(session_id = %p.session_id, request_id = %p.request_id, frame = %id, "result sent");
     st.replies.insert(id, Reply::Result { pending_id: p.id });
 }
 

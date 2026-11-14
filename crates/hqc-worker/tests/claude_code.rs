@@ -163,7 +163,22 @@ async fn hub_runs_a_claude_code_turn_with_an_approval() {
         json!({"session_id": sid, "event_id": input2, "text": "again", "artifact_ids": [], "peer_prefix": []}),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The worker writes it to the CLI's stdin when it gets to it: on a busy runner that is
+    // later than any fixed pause.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while claude
+        .stdin()
+        .last()
+        .map(|v| v["message"]["content"].clone())
+        != Some(json!("again"))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{:?}",
+            claude.stdin()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert_eq!(claude.commands().len(), 1);
     assert_eq!(
         claude.stdin().last().unwrap()["message"]["content"],

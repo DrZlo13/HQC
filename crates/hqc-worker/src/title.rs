@@ -312,6 +312,26 @@ mod tests {
         assert!(parse_output(b"Not logged in").is_err());
     }
 
+    /// Writes an executable script through `sh`, so that this process never holds it open for
+    /// writing: another test's thread that forks meanwhile would carry that descriptor into
+    /// its child until the child's `exec`, and running the script would fail with `Text file
+    /// busy` (Linux, seen on CI).
+    fn write_script(path: &Path, script: &str) {
+        use std::io::Write;
+        let mut sh = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        assert!(sh.wait().unwrap().success());
+    }
+
     /// A fake `claude`: records its arguments, folder and stdin next to `log`, sleeps
     /// `HQC_FAKE_SLEEP` seconds and prints a result.
     fn fake_claude(dir: &Path, result: &str) -> PathBuf {
@@ -328,12 +348,7 @@ mod tests {
              sleep \"${{HQC_FAKE_SLEEP:-0}}\"\n\
              printf '%s' '{result}'\n"
         );
-        std::fs::write(&bin, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_script(&bin, &script);
         bin
     }
 
@@ -385,7 +400,7 @@ mod tests {
         let script = std::fs::read_to_string(&bin)
             .unwrap()
             .replace("${HQC_FAKE_SLEEP:-0}", "1");
-        std::fs::write(&bin, script).unwrap();
+        write_script(&bin, &script);
         let t = Arc::new(Titler::new(bin, root.clone(), Duration::from_secs(10)));
         let run = |t: Arc<Titler>| tokio::spawn(async move { t.title("a", "b").await });
         let (a, b) = (run(t.clone()), run(t.clone()));
@@ -405,12 +420,7 @@ mod tests {
         let root = tmp.path().join("titles");
         // Not logged in: plain text and exit 1.
         let bin = tmp.path().join("false-claude");
-        std::fs::write(&bin, "#!/bin/sh\necho 'Not logged in' >&2\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_script(&bin, "#!/bin/sh\necho 'Not logged in' >&2\nexit 1\n");
         let t = Titler::new(bin, root.clone(), Duration::from_secs(10));
         match t.title("a", "b").await {
             Err(TitleError::Failed(e)) => assert!(e.contains("Not logged in"), "{e}"),
@@ -445,7 +455,7 @@ mod tests {
         let script = std::fs::read_to_string(&bin)
             .unwrap()
             .replace("${HQC_FAKE_SLEEP:-0}", "30");
-        std::fs::write(&bin, script).unwrap();
+        write_script(&bin, &script);
         let t = Titler::new(bin, root.clone(), Duration::from_millis(500));
         let started = std::time::Instant::now();
         match t.title("a", "b").await {

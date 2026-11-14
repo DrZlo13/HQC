@@ -4,6 +4,7 @@
 
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { render } from 'preact';
+import { act } from 'preact/test-utils';
 import { Window } from 'happy-dom';
 // @ts-expect-error plain JS module without types
 import { startMock } from '../mock/server.mjs';
@@ -75,7 +76,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  render(null, root);
+  // Inside `act` the effects' cleanups run before it returns: unmounted plainly, preact runs
+  // them after a frame or a timeout, which could come after the globals below are gone.
+  act(() => render(null, root));
   app.socket.stop();
   await mock.close();
   await win.happyDOM.close();

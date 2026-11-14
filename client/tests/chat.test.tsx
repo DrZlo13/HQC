@@ -645,10 +645,10 @@ describe('live subagents', () => {
     await act(async () => subscriber!.onEvent(live()));
     expect(rows()).toEqual([
       [
-        'Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
+        'Agent: Fix schematic power nets in import: Running Verify the final sample runs are byte-identical',
         '155.3k tokens · 188 tools · 4m 13s',
       ],
-      ['Reply with number', '1s'],
+      ['Agent: Reply with number', '1s'],
     ]);
     // Pinned: outside the feed's scroller, right above the input.
     expect($('.timeline .live-agents')).toBeNull();
@@ -657,7 +657,7 @@ describe('live subagents', () => {
     expect($('.live-agents')).toBeNull();
   });
 
-  it('shows a background command while no subagent runs: its description and run time', async () => {
+  it('shows a background command while no subagent runs: "Command:", its description and run time', async () => {
     const { app } = setup('idle', { subagents: 0, background_tasks: 1 });
     await mount(app);
     await act(async () =>
@@ -665,12 +665,24 @@ describe('live subagents', () => {
         live(
           (e) =>
             (e.payload.agents = [
-              { task_id: 'b2st7oc3z', description: 'Full run over 1000 boards on cirunner', duration_ms: 65_000 },
+              {
+                task_id: 'b2st7oc3z',
+                description: 'Full run over 1000 boards on cirunner',
+                duration_ms: 65_000,
+                kind: 'command',
+              },
             ]),
         ),
       ),
     );
-    expect(rows()).toEqual([['Full run over 1000 boards on cirunner', '1m 5s']]);
+    expect(rows()).toEqual([['Command: Full run over 1000 boards on cirunner', '1m 5s']]);
+    // A row of an older worker has no `kind`, nor a word before its task.
+    await act(async () =>
+      subscriber!.onEvent(
+        live((e) => (e.payload.agents = [{ task_id: 'bold', description: 'A command of an older worker', duration_ms: 1000 }])),
+      ),
+    );
+    expect(rows()).toEqual([['A command of an older worker', '1s']]);
   });
 });
 

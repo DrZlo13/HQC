@@ -971,9 +971,9 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
       expect(root.querySelector(".tool-group")).toBeNull();
       const card = root.querySelector(".subagent")!;
       expect(card.classList.contains("subagent-running")).toBe(true);
-      // The icon and the card say it is a subagent; the word is for a screen reader only.
+      // The head says what the card is (SPEC 0.141), not only the icon.
       expect(card.getAttribute("aria-label")).toBe("Subagent");
-      expect(card.querySelector(".subagent-head")!.textContent).not.toContain("Subagent");
+      expect(card.querySelector(".subagent-label")!.textContent).toBe("Agent started:");
       expect(card.querySelector(".subagent-type")!.textContent).toBe("general-purpose");
       expect(card.querySelector(".subagent-chip")!.textContent).toBe("background");
       expect(card.querySelector(".subagent-task")!.textContent).toBe(AGENT.description);
@@ -1099,6 +1099,7 @@ describe("a subagent's card (SPEC §6, since 0.135)", () => {
     const [done, failed] = root.querySelectorAll(".subagent-end");
     expect(done.classList.contains("subagent-done")).toBe(true);
     expect(done.getAttribute("aria-label")).toBe("Subagent ended");
+    expect(done.querySelector(".subagent-label")!.textContent).toBe("Agent finished:");
     expect(done.querySelector(".subagent-icon .mark-ok")).not.toBeNull();
     expect(done.querySelector(".subagent-task")!.textContent).toBe(AGENT.description);
     expect(done.querySelector(".subagent-state")!.textContent).toBe("done");

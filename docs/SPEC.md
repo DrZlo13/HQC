@@ -530,7 +530,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn") | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.137: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, §6, §8.1; `text` is then empty; absent when false) | adapter; transport only, not written to the database |
-| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.137; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row says, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?` and `kind` |
+| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.137; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row and a command's say, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?`, `kind` and `stoppable` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.137: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -2206,10 +2206,10 @@ closed, clear the lines until the next subscribe brings the hub's list. Since 0.
 holds the agent's background commands, which only `background_tasks` counts, so the chat shows it while
 either count is above 0; a command's line is its description and its run time. Since 0.141 a line
 starts with "Agent: " or "Command: " dimmed, as its `kind` says; a line without a known `kind`
-(from an older worker, or a value this client does not know) has neither. Since 0.137 a
-subagent's line (`stoppable`) ends with a small stop button, as in the VS Code tab: it sends
-`POST .../tasks/{task_id}/stop` and is disabled until the hub answers, a failure shown as a
-notice; the line goes when the subagent ends. A command's line has none.
+(from an older worker, or a value this client does not know) has neither. Since 0.137 a line
+marked `stoppable`, a subagent's or a command's, ends with a small stop button, as in the VS Code
+tab: it sends `POST .../tasks/{task_id}/stop` and is disabled until the hub answers, a failure
+shown as a notice; the line goes when the task ends.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
 keeps it up after the turn has ended.
@@ -3594,15 +3594,20 @@ gives `agent.message` with `interrupted: true`; the turn ends with `system turn_
 (above).
 
 Stopping one task (since 0.137, the VS Code tab's stop of a background task, which
-`perTaskStopAffordance` declares): the adapter marks the subagents of `subagents.live`
-`stoppable`, not the commands after them, and `session.stop_task` (§5.3) is `control_request
+`perTaskStopAffordance` declares): the adapter marks every row of `subagents.live`
+`stoppable`, the subagents' and the commands', and `session.stop_task` (§5.3) is `control_request
 {subtype: "stop_task", task_id: <task_id>}` (2.1.312). The CLI stops that task and answers
 `success` with `{}`, also for a task it does not know or one that has already ended, or an
 error with the reason it did not stop it; the subagent then ends as any end of it, with
 `task_updated` `killed` and `task_notification` `stopped` **[verify]**: its row goes and its
 "Background task" line comes (above); the CLI then queues the task's notification ("was
 stopped by user") for the main agent, which starts a turn of its own (§17.1, since 0.121)
-**[verify]**. The adapter only logs the answer.
+**[verify]**. A command stopped so ends the same way, its row going and its "Background task" line
+coming, but the CLI starts no turn for it: its note "Task … was stopped by the user or by the app
+connected to this session" is passive and reaches the agent with its next turn (checked live on
+2.1.312 with `sleep 120` run in the background: its processes were gone at once, `task_notification`
+`stopped` came, the main agent started no turn of its own, and the next input's turn carried the
+note, which the agent answered from). The adapter only logs the answer.
 
 Moving a call to the background (since 0.125, the VS Code tab's "Run in background", extension
 2.1.319). A call of the agent itself the CLI runs in the foreground is one whose `system`
@@ -5738,14 +5743,14 @@ mode after this turn"). Migration `0042_permission_allow_all` widens the checks 
 0.128 is taken by another pull request.
 
 §4, §5.3, §6, §8.1: with Stop sparing them, nothing in hqc stopped a runaway background subagent
-but archiving the session. As in the VS Code tab, a subagent's line above the input now ends
-with a small stop button: the adapter marks the subagents of `subagents.live` with the new
-`stoppable: true` (example `event.subagents.live.json`), not the agent's background commands;
+or command but archiving the session. As in the VS Code tab, a subagent's line above the input, and a
+background command's, now ends with a small stop button: the adapter marks the rows of
+`subagents.live` with the new `stoppable: true` (example `event.subagents.live.json`);
 the button sends `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (`write` level, as
 `/stop`; a `task_id` longer than 128 bytes or with U+0000 → `400`), the hub sends the new frame
 `session.stop_task` {session_id, task_id} → `ack` (example `hub.session.stop_task.json`),
 fire-and-forget like `session.background`, and the worker writes `control_request` `stop_task`
-`{task_id}`, whose answer goes only to its log. The CLI's end of the stopped subagent removes its
+`{task_id}`, whose answer goes only to its log. The CLI's end of the stopped task removes its
 line and gives its "Background task" line, as before. An older worker sends no `stoppable`, so no
 button shows for its sessions, and answers `session.stop_task` with `error {invalid_frame}`;
 older hubs and clients ignore the new field.

@@ -92,6 +92,16 @@ describe('layout widths', () => {
     expect(rule('.choice-other .input')['flex']).toBe('1');
   });
 
+  it("an answered request's row on a phone wraps the button instead of squeezing the command to nothing", () => {
+    // Checked in Chromium and WebKit at 390px: the command ~110px wide, the button on a line of
+    // its own inside the row (before: the command 0px, the button 56px past the row).
+    expect(rule('.perm-done-row')['flex-wrap']).toBe('wrap');
+    expect(rule('.perm-done-what')['flex']).toBe('1 1 4em');
+    expect(rule('.perm-done-what')['max-width']).toBe('max-content');
+    expect(rule('.perm-done-outcome')['min-width']).toBe('0');
+    expect(rule('.perm-done-row .btn-link')['margin-left']).toBe('auto');
+  });
+
   it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {
     expect([rule('.dot')['flex'], rule('.dot')['width']]).toEqual(['0 0 8px', '8px']);
     for (const sel of ['.sessions-phone .dot', '.preview-row .dot']) {

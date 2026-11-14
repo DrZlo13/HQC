@@ -121,7 +121,6 @@ export function PermissionBlock({
           {v.worker ? WORKER_REQUEST_LABELS[event.payload.tool] ?? event.payload.tool : `${v.shell ? '$ ' : ''}${v.what || event.payload.tool}`}
         </span>
         <span class="perm-done-outcome outcome">· {outcome.text}</span>
-        <span class="spacer" />
         <button type="button" class="btn-link" aria-expanded={again} onClick={() => setAgain(!again)}>
           {again ? 'Hide the request' : 'Show the request again'}
         </button>

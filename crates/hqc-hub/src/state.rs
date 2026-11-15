@@ -71,6 +71,8 @@ struct Aggregates {
     spawned_by_address: Option<String>,
     /// The user's (`session_favorites`).
     favorite_at: Option<DateTime<Utc>>,
+    /// The label of the session's provider (SPEC 0.144).
+    provider_label: Option<String>,
 }
 
 /// A stored enum name (`runtime`, `process_state`, `locked_by`) as its proto type.
@@ -90,7 +92,8 @@ async fn aggregates(db: &PgPool, user: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<A
                 AND e.seq > COALESCE(r.last_read_seq, 0) AND {UNREAD_FILTER}) AS unread,
             (SELECT p.slug || '/' || sp.slug FROM sessions sp JOIN projects p ON p.id = sp.project_id
                 WHERE sp.id = s.spawned_by) AS spawned_by_address,
-            f.created_at AS favorite_at
+            f.created_at AS favorite_at,
+            (SELECT pr.label FROM providers pr WHERE pr.id = s.provider_id) AS provider_label
          FROM sessions s
          LEFT JOIN read_cursors r ON r.session_id = s.id AND r.user_id = $1
          LEFT JOIN session_favorites f ON f.session_id = s.id AND f.user_id = $1
@@ -148,6 +151,10 @@ pub async fn views(
                         .unwrap_or_default(),
                     restricted: s.restricted,
                     start_failures: s.start_failures.max(0) as u32,
+                    provider: s
+                        .provider_id
+                        .zip(a.provider_label.clone())
+                        .map(|(id, label)| hqc_proto::api::ProviderRef { id, label }),
                 },
                 auto_approve: s.auto_approve,
                 wake_on_send: s.wake_on_send,

@@ -1135,6 +1135,9 @@ pub async fn new_session(
         Some(w) if w.owner_id == owner && w.revoked_at.is_none() => w,
         _ => return Err(ApiError::BadRequest("unknown worker".into())),
     };
+    if let Some(p) = b.provider_id {
+        crate::providers::check(app, owner, &worker, p).await?;
+    }
     let cwd = b
         .cwd
         .as_deref()
@@ -1171,6 +1174,10 @@ pub async fn new_session(
         spawn,
     )
     .await?;
+    if b.provider_id.is_some() {
+        // Before the first start, which carries it.
+        db::set_session_provider(&app.db, id, b.provider_id).await?;
+    }
     let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
     events::system(app, &s, "session_created", "Session created").await?;
     delivery::kick(app, id, true).await;
@@ -1221,6 +1228,13 @@ pub struct PatchSession {
         deserialize_with = "hqc_proto::frame::maybe_null::deserialize"
     )]
     pub model: Option<Option<String>>,
+    /// Absent: unchanged; `null`: the runtime's own endpoint (SPEC 0.144). A provider of the
+    /// owner the session's worker allows; a change restarts a running agent.
+    #[serde(
+        default,
+        deserialize_with = "hqc_proto::frame::maybe_null::deserialize"
+    )]
+    pub provider_id: Option<Option<Uuid>>,
 }
 
 pub async fn patch_session(
@@ -1230,7 +1244,7 @@ pub async fn patch_session(
     Json(b): Json<PatchSession>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
-    if s.system && b.model.is_some() {
+    if s.system && (b.model.is_some() || b.provider_id.is_some()) {
         return Err(ApiError::Conflict(
             "system_session",
             "the worker's service session has no agent".into(),
@@ -1292,6 +1306,20 @@ pub async fn patch_session(
                 permission_mode: m,
             },
         );
+    }
+    if let Some(p) = b.provider_id {
+        if let Some(p) = p {
+            crate::providers::check_for_session(&app, &s, p).await?;
+        }
+        if p != s.provider_id {
+            db::set_session_provider(&app.db, id, p).await?;
+            // An environment cannot change in a running CLI: the agent starts again on the
+            // new provider, its transcript resumed (SPEC 0.144).
+            let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
+            if s.process_state != "stopped" {
+                restart_agent(&app, &s).await;
+            }
+        }
     }
     if let Some(m) = b.model {
         db::set_model(&app.db, id, m.as_deref()).await?;
@@ -1650,8 +1678,16 @@ pub async fn restart(
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
     driven_from_hqc(&s)?;
+    let sent = restart_agent(&app, &s).await;
+    Ok(Json(json!({ "sent": sent })))
+}
+
+/// Ends the session's agent process and starts it again at once with a new `session.start`
+/// (SPEC §17.3): a restart, and a change of provider (SPEC 0.144). `false`: its worker is
+/// offline, so the next start carries what changed anyway.
+pub(crate) async fn restart_agent(app: &AppState, s: &SessionRow) -> bool {
     let Some(conn) = s.worker_id.and_then(|w| app.workers.get(w)) else {
-        return Ok(Json(json!({ "sent": false })));
+        return false;
     };
     {
         // The kill goes out under the lock, so its `stopped` finds `Started` only if the process
@@ -1659,14 +1695,14 @@ pub async fn restart(
         // more `session.start`, which the worker acks without touching the new process. Inputs
         // sent to the old process go again after the start's `ack`.
         let mut st = conn.st.lock().await;
-        conn.send(HubFrame::SessionKill { session_id: id });
-        if let Some(sc) = st.sessions.get_mut(&id) {
+        conn.send(HubFrame::SessionKill { session_id: s.id });
+        if let Some(sc) = st.sessions.get_mut(&s.id) {
             sc.start = StartState::NotStarted;
             sc.inflight.clear();
         }
     }
-    delivery::kick(&app, id, true).await;
-    Ok(Json(json!({ "sent": true })))
+    delivery::kick(app, s.id, true).await;
+    true
 }
 
 pub async fn retry(

@@ -197,6 +197,11 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
             .await?
             .and_then(|v| serde_json::from_value(v).ok()),
         has_history: db::session_has_history(&app.db, s.id).await?,
+        // Its description; the worker runs it only if its worker.toml allows it (SPEC §14).
+        provider: match s.provider_id {
+            Some(id) => db::provider(&app.db, id).await?.map(|p| p.spec()),
+            None => None,
+        },
     })
 }
 

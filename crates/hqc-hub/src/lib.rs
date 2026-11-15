@@ -30,6 +30,7 @@ pub mod mcp;
 pub mod mirror;
 pub mod moves;
 pub mod peers;
+pub mod providers;
 pub mod push;
 pub mod requests;
 pub mod rules;
@@ -112,6 +113,14 @@ pub fn router(app: AppState) -> Router {
         .route("/api/sessions/{id}/stop", post(api::stop))
         .route("/api/sessions/{id}/background", post(api::background))
         .route("/api/sessions/{id}/restart", post(api::restart))
+        .route(
+            "/api/providers",
+            get(providers::list).post(providers::create),
+        )
+        .route(
+            "/api/providers/{id}",
+            axum::routing::patch(providers::update).delete(providers::delete),
+        )
         .route("/api/sessions/{id}/retry", post(api::retry))
         .route("/api/sessions/{id}/archive", post(api::archive))
         .route("/api/sessions/{id}/unarchive", post(api::unarchive))

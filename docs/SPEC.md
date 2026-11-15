@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.167, 2026-11-17. Status: the architecture agreed after six reviews and a survey of
+Version 0.168, 2026-11-18. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -541,7 +541,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, §6, §8.1; `text` is then empty; absent when false) | adapter; transport only, not written to the database |
 | `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row and a command's say, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?`, `kind` and `stoppable` |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
-| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.161: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
+| `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.161: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time), `refusal?` (since 0.168: `true` for the runtime's reply to a model refusal, Claude Code's with `stop_reason: "refusal"`; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Under a `refusal` one, while no message of the user stands after it in the feed, the session is not archived and VS Code does not hold it (`locked_vscode`, whose chat has no input), a small "Switch model" opens a model menu: the aliases, the versions, "Another model…" and the providers the session's worker allows (§6), the session's model checked, without Claude Code's default, which a running agent is not switched to (it takes it at its next start, §5.3 `session.model`). The checked one only closes the menu; another switches the session as the "More" menu does, and once the hub took it the line says "Switched to <model>. Send the message again." in the button's place. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12) | adapter |
@@ -1922,7 +1922,8 @@ default), DuckDuckGo, Bing or Yandex, kept on this device (`localStorage`), not 
 "Models" (since 0.144) lists the user's providers (§3 Provider), each with its model, `base_url`
 and the workers that allow it, or the `[providers.<name>] base_url = "…"` line a `worker.toml`
 needs when none does, with Edit and Delete, and "Add a provider"; the model menus of a session
-(the new session's model chip and the chat's "More") list, below the Claude models, the
+(the new session's model chip and the chat's "More") list, below the Claude models (Claude
+Code's default, the aliases, since 0.168 the versions, "Another model…"), the
 providers its worker allows; picking one in a chat asks once ("The agent restarts on …"), and a
 Claude model picked there leaves the provider in the same `PATCH`; a provider session's chat
 header names the provider instead of the model and shows no cost, which the CLI computes at a
@@ -2134,10 +2135,11 @@ feed says to write the first message (or, for a project without workspaces, that
 one, with "Add a workspace"). Chips over the input choose the workspace (each of the project's
 with its worker and path, the default marked, "Add a workspace…" under them), the folder inside
 it (typed, `.` by default), the permissions (the worker's default, Ask, Auto, Auto after the
-one-line confirmation below) and the model (Claude Code's default, an alias, or another name
-typed), the defaults already chosen: the project's `default_workspace_id`, else its first
-workspace (§13.4). The first message creates the session with those choices (`POST
-/api/projects/{id}/sessions`, no title) and goes in as its first input; until the chat is there
+one-line confirmation below) and the model (Claude Code's default, an alias, since 0.168 a
+version, or another name typed), the defaults already chosen: the project's
+`default_workspace_id`, else its first workspace (§13.4). The first message creates the
+session with those choices (`POST /api/projects/{id}/sessions`, no title) and goes in as its
+first input; until the chat is there
 the input sends nothing more ("Starting…") and the chips are off, while what is typed and
 attached meanwhile stays; the draft row stands for the new session in the list. Once the chat's
 first page is in, the address becomes `#/s/<session>` and the session's chat replaces the
@@ -3376,7 +3378,10 @@ seen live), and gave an empty `0 → 0 tokens` line under the interrupted reply.
 `assistant` text whose `message.model` is `<synthetic>` — a reply the CLI wrote itself (an API
 error, "Credit balance is too low"; on 2.1.312 with `is_api_error_message` and the same `uuid` as
 the transcript record) — → `agent.message` with `runtime: true`, held and ended like any other text:
-the turn it ends has it as the final `agent.message`; `system` `task_notification` (`task_id`,
+the turn it ends has it as the final `agent.message`; since 0.168 one with
+`message.stop_reason: "refusal"` (2.1.312's reply to a model refusal, "API Error: … can't respond
+to your last message with <model> …", the refusal's `stop_details` beside it) also with
+`refusal: true`; `system` `task_notification` (`task_id`,
 `status`, `summary`, `output_file`; checked live on 2.1.312 with a `run_in_background` Bash: it
 comes when the task ends, after the `result` of the turn that started it and before the turn the CLI
 then starts by itself, which brings `system/init`, the answer and its own `result`) → `system
@@ -4076,7 +4081,8 @@ prompt; `tool_use` → `tool.call` (since 0.135 an `Agent` or `Task` call's `arg
 its `prompt` last, since 0.155 any call's with its fields from the shortest value to the
 longest, as the adapter's, §8.1); non-empty `thinking` → `agent.thinking`. Since 0.69:
 `assistant` text with `message.model` `<synthetic>` → `agent.message` with `runtime: true`
-(§8.1), `final` by its `stop_reason` as any other; a `user` record with `origin.kind:
+(§8.1), `final` by its `stop_reason` as any other, since 0.168 with `refusal: true` when that is
+`refusal`; a `user` record with `origin.kind:
 task-notification` (2.1.312: `origin {kind, producer: session-task, runId}`, `promptSource:
 system`, `turnOrigin: task_notification`, text
 `<task-notification><task-id>…<status>…</status><summary>…</summary>…`) → `system
@@ -5747,6 +5753,20 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.167 → 0.168 (model versions in the model menus, and the offer on a refusal)
+Claude Code's own catalog of models (`initialize`, 2.1.312) gives a subscription only its
+default and the aliases, so a version could only be typed. §6 client layout: the model menus
+(the chat's "More", the new session's model chip) list, after the aliases, the versions a
+subscription answers as themselves, newest first per family: Opus 5.5, 5, 4.8, 4.7 and 4.6,
+Sonnet 5.5, 5 and 4.6, Haiku 5.5 and 4.5, Fable 5.1 and 5 (`claude-opus-4-1` is left out: it is
+served by Opus 5.5); a session on one of them shows it chosen, not as a typed name. §4: the
+runtime's reply to a model refusal is `agent.message` with `refusal: true` beside `runtime`;
+§8.1 and the mirror (§9) take it from `message.stop_reason: "refusal"` of the CLI's synthetic
+reply. The client offers "Switch model" under such a line while no message of the user stands
+after it and VS Code does not hold the session; its menu has the models of "More" but Claude
+Code's default, which a running agent is not switched to; a pick other than the checked one
+switches the session as "More" does and the line asks to send the message again.
 
 ### 0.166 → 0.167 (quick messages)
 §3 Project `quick_messages` (hub migration `0049_project_quick_messages`), §6 `PATCH

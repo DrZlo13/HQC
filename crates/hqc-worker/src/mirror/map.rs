@@ -162,16 +162,12 @@ pub fn compaction(summary: &Message, boundary: Option<Uuid>) -> Event {
     } else {
         text(&body)
     };
-    event_at(
+    system_at(
         boundary.unwrap_or(summary.uuid),
         ts(summary),
         0,
-        Author::System,
-        EventKind::System {
-            text: t,
-            code: CONTEXT_COMPACTED.into(),
-            fork: None,
-        },
+        CONTEXT_COMPACTED,
+        t,
     )
 }
 
@@ -184,19 +180,7 @@ fn local_command(s: &hqc_claude_jsonl::System) -> Vec<Event> {
         return vec![];
     }
     command_output(t)
-        .map(|o| {
-            event_at(
-                uuid,
-                parse_ts(s.timestamp.as_deref()),
-                0,
-                Author::System,
-                EventKind::System {
-                    text: o,
-                    code: COMMAND_OUTPUT.into(),
-                    fork: None,
-                },
-            )
-        })
+        .map(|o| system_at(uuid, parse_ts(s.timestamp.as_deref()), 0, COMMAND_OUTPUT, o))
         .into_iter()
         .collect()
 }
@@ -284,6 +268,24 @@ fn agent() -> Author {
     Author::Agent { id: Uuid::nil() }
 }
 
+/// `system` `code` with `text` at `ts`, the id of content block `index` of record `uuid`.
+fn system_at(uuid: Uuid, ts: DateTime<Utc>, index: usize, code: &str, text: String) -> Event {
+    event_at(
+        uuid,
+        ts,
+        index,
+        Author::System,
+        EventKind::System {
+            text,
+            code: code.into(),
+            call_id: None,
+            status: None,
+            task_id: None,
+            fork: None,
+        },
+    )
+}
+
 /// The text of `<tag>…</tag>` in a notification, trimmed; `None` when absent or empty.
 fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
     let (open, close) = (format!("<{name}>"), format!("</{name}>"));
@@ -341,11 +343,20 @@ fn user(m: &Message) -> Vec<Event> {
                 }
                 // The CLI's own lines are no message a person typed.
                 if INTERRUPTED.contains(&line) {
-                    out.push(system(m, i, TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT.into()));
+                    out.push(system_at(
+                        m.uuid,
+                        ts(m),
+                        i,
+                        TURN_INTERRUPTED,
+                        TURN_INTERRUPTED_TEXT.into(),
+                    ));
                     continue;
                 }
                 if is_command_output(line) {
-                    out.extend(command_output(line).map(|o| system(m, i, COMMAND_OUTPUT, o)));
+                    out.extend(
+                        command_output(line)
+                            .map(|o| system_at(m.uuid, ts(m), i, COMMAND_OUTPUT, o)),
+                    );
                     continue;
                 }
                 let typed = command(line);

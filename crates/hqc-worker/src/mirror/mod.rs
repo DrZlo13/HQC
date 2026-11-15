@@ -21,8 +21,10 @@
 //! another uuid; a message typed during a turn then ([`map::is_queued_prompt`]), which
 //! stream-json does not repeat; and a slash command's output ([`map::is_local_command`]) or a
 //! compaction's summary ([`map::is_compact_summary`]) then: only the adapter writes that
-//! process's stdin, and the adapter reported the compaction. Any other main-chain record is
-//! someone else's:
+//! process's stdin, and the adapter reported the compaction. A transcript the mirror has not
+//! read yet waits while a process of the worker has cleared its conversation in that folder
+//! and not named the new transcript ([`OwnRecords::is_clearing`]): the CLI begins that one
+//! before it names it. Any other main-chain record is someone else's:
 //! - while a process of this worker runs the session (`locked_by: hqc`) the mirror does not
 //!   emit it and does not move past it for [`GRACE`] (stream-json may lag behind the file).
 //!   Then, with Claude Code's registry of live sessions (below), it goes out like any other
@@ -452,6 +454,11 @@ impl Mirror {
                 .insert(path.to_path_buf(), read_tree(path, row.offset)?);
         }
         let live = self.own.is_live(runtime);
+        // A transcript begun in a folder where a process of this worker cleared its
+        // conversation is that process's until its `init` names it (then it is live).
+        if !live && row.offset == 0 && path.parent().is_some_and(|d| self.own.is_clearing(d)) {
+            return Ok(());
+        }
         if !live {
             self.signalled.remove(&runtime);
         }

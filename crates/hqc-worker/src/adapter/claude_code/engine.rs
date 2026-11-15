@@ -88,7 +88,8 @@
 //! - `conversation_reset` (`/clear`) → `system conversation_cleared`, and the cost baseline
 //!   starts from 0 again; the next `system` `init` with another `session_id` →
 //!   [`AdapterEvent::RuntimeSessionId`] with it, the transcript the CLI writes from then on;
-//! - `system` `session_title_changed` → [`AdapterEvent::Title`] at once;
+//! - `system` `session_title_changed` (a person's title, `/rename`; the CLI's own is only in
+//!   the transcript) → [`AdapterEvent::Title`] at once;
 //! - the result of the main agent's `ScheduleWakeup` call → [`AdapterEvent::Wakeup`] with its
 //!   `scheduledFor`, none for 0; a `command_lifecycle` `started` with `wakeup_source:
 //!   loop_wakeup` and that `scheduled_for` → [`AdapterEvent::Wakeup`] with none;
@@ -406,6 +407,11 @@ pub struct Core {
 }
 
 impl Core {
+    /// A `conversation_reset` came and no `system/init` has named the new transcript yet.
+    pub fn clearing(&self) -> bool {
+        self.cleared
+    }
+
     /// Uuids of the main-chain `user`/`assistant` messages (with the prompt echoes) read
     /// from stdout since the last call, for [`crate::mirror::OwnRecords`].
     pub fn take_seen(&mut self) -> Vec<Uuid> {
@@ -1005,7 +1011,8 @@ impl Core {
                     );
                     vec![]
                 }
-                // The session got a title or a new one (the CLI's own, `/rename`), at once.
+                // A person gave the session a title (`/rename`), at once. The CLI's own title
+                // is not streamed (2.1.312): the adapter reads it from the transcript.
                 Some("session_title_changed") => v["title"]
                     .as_str()
                     .map(str::trim)

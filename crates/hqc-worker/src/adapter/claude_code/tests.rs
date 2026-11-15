@@ -378,7 +378,7 @@ fn approval_options(evs: &[AdapterEvent]) -> Vec<(String, ApprovalCanonical)> {
 }
 
 /// T13 (SPEC §8.1): when the turn ends the adapter reads the transcript and reports its
-/// last `ai-title` before `TurnEnded`.
+/// last `ai-title` before `TurnEnded` (a tick during the turn may read it earlier).
 #[tokio::test]
 async fn ai_title_is_reported_at_turn_end() {
     let fx = fixture!("permission-allow");
@@ -396,11 +396,17 @@ async fn ai_title_is_reported_at_turn_end() {
     let evs = h
         .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
         .await;
-    assert_eq!(shape(&evs[evs.len() - 2..]), ["title", "turn_ended"]);
-    assert_eq!(
-        evs[evs.len() - 2],
-        AdapterEvent::Title("Touch a file".into())
-    );
+    assert_eq!(titles_in(&evs), ["Touch a file"]);
+}
+
+/// The titles among `evs`.
+fn titles_in(evs: &[AdapterEvent]) -> Vec<&str> {
+    evs.iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Title(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// SPEC §8.1: a title a person gave (`custom-title`) is the one reported at the end of the
@@ -426,7 +432,7 @@ async fn a_custom_title_is_reported_at_turn_end() {
     let evs = h
         .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
         .await;
-    assert_eq!(evs[evs.len() - 2], AdapterEvent::Title("Mine".into()));
+    assert_eq!(titles_in(&evs), ["Mine"]);
 }
 
 #[tokio::test]
@@ -6332,7 +6338,158 @@ async fn after_clear_the_process_writes_the_new_transcript() {
     assert!(!own.is_live(new));
 }
 
-/// `system/session_title_changed` (2.1.312: the CLI's own title, `/rename`) is the session's
+/// From `conversation_reset` until the `init` that names the new transcript the folder of the
+/// session's transcript is marked in the registry, as the CLI begins the new one before it
+/// names it (SPEC §9.3); the end of the process unmarks it too. A question the agent asks
+/// holds the scripted CLI at each point.
+#[tokio::test]
+async fn a_cleared_folder_is_marked_until_init() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let reset = |session: Uuid| {
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": session}).to_string()
+    };
+    let ask = |id: &str| {
+        json!({"type": "control_request", "request_id": id, "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string()
+    };
+    let stream = [
+        init(old),
+        reset(old),
+        ask("q1"),
+        init(new),
+        ask("q2"),
+        reset(new),
+        ask("q3"),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let folder =
+        super::paths::transcript_path(config.path(), &work.path().canonicalize().unwrap(), &old)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let question = |ev: &AdapterEvent| match ev {
+        AdapterEvent::Event(e) => match &e.kind {
+            EventKind::ClarifyRequest { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    assert!(!own.is_clearing(&folder));
+    a.input(&SessionInput {
+        session_id: s.session_id,
+        event_id: Uuid::now_v7(),
+        text: "/clear".into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+    })
+    .await
+    .unwrap();
+    let q1 = first(&mut events, question).await;
+    assert!(own.is_clearing(&folder), "after conversation_reset");
+    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    let q2 = first(&mut events, question).await;
+    assert!(!own.is_clearing(&folder), "the init named it");
+    assert!(own.is_live(new));
+    a.answer_clarify(&q2, &BTreeMap::new()).await.unwrap();
+    first(&mut events, question).await;
+    assert!(own.is_clearing(&folder), "cleared again");
+    a.kill().await.unwrap();
+    assert!(!own.is_clearing(&folder), "the process is gone");
+}
+
+/// What `want` makes of the first adapter event it takes, within 5 s each.
+async fn first<T>(
+    events: &mut mpsc::Receiver<AdapterEvent>,
+    want: impl Fn(&AdapterEvent) -> Option<T>,
+) -> T {
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("no adapter event in 5 s")
+            .expect("event channel closed");
+        if let Some(t) = want(&ev) {
+            return t;
+        }
+    }
+}
+
+/// The CLI's own title, which it writes into the transcript during the first turn and does not
+/// stream (2.1.312), is reported while the turn still runs (SPEC §8.1): a question holds the
+/// scripted turn open.
+#[tokio::test]
+async fn a_title_written_during_a_turn_is_reported_before_its_end() {
+    let claude_session = Uuid::new_v4();
+    let stream = [
+        json!({"type": "system", "subtype": "init", "session_id": CLI_SESSION,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string(),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+    ]
+    .join("\n");
+    let mut h = Harness::start(&stream, claude_session).await;
+    let transcript = super::paths::transcript_path(
+        h._dirs.1.path(),
+        &h._dirs.0.path().canonicalize().unwrap(),
+        &claude_session,
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    h.adapter
+        .input(&SessionInput {
+            session_id: h.session_id,
+            event_id: Uuid::now_v7(),
+            text: "Fix the build".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+            peer: None,
+            permission_cap: None,
+            schedule_id: None,
+        })
+        .await
+        .unwrap();
+    first(&mut h.events, |ev| match ev {
+        AdapterEvent::Event(e) => matches!(e.kind, EventKind::ClarifyRequest { .. }).then_some(()),
+        _ => None,
+    })
+    .await;
+    std::fs::write(
+        &transcript,
+        format!("{{\"type\":\"ai-title\",\"aiTitle\":\"Build fix\",\"sessionId\":\"{claude_session}\"}}\n"),
+    )
+    .unwrap();
+    let title = first(&mut h.events, |ev| match ev {
+        AdapterEvent::Title(t) => Some(t.clone()),
+        AdapterEvent::TurnEnded { .. } => panic!("the turn ended"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(title, "Build fix");
+}
+
+/// `system/session_title_changed` (2.1.312: a title a person gave, `/rename`) is the session's
 /// title at once, not at the end of the turn.
 #[test]
 fn a_title_from_the_stream_is_reported_at_once() {

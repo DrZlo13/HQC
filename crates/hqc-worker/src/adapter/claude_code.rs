@@ -23,7 +23,7 @@ pub mod rules;
 pub mod scripted;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,6 +83,23 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         self.0.end(self.1, self.2);
+    }
+}
+
+/// The transcript folder of a process that cleared its conversation, marked in [`OwnRecords`]
+/// until the process names the new transcript or ends.
+struct Clearing(Arc<OwnRecords>, PathBuf);
+
+impl Clearing {
+    fn new(own: Arc<OwnRecords>, folder: PathBuf) -> Self {
+        own.clearing(&folder);
+        Self(own, folder)
+    }
+}
+
+impl Drop for Clearing {
+    fn drop(&mut self) {
+        self.0.cleared(&self.1);
     }
 }
 
@@ -390,7 +407,7 @@ impl Io {
                     self.report_title().await;
                     let _ = self.events.send(ev).await;
                 }
-                // The CLI's own word: the transcript gives the same title at the turn's end.
+                // A person's title (`/rename`): the transcript gives the same one later.
                 Action::Emit(AdapterEvent::Title(t)) => self.title_changed(t).await,
                 Action::Emit(ev) => {
                     // The session task is gone only when the session is being torn down.
@@ -410,9 +427,10 @@ impl Io {
         Ok(())
     }
 
-    /// After a turn: the transcript's title (its last `custom-title`, else its last
-    /// `ai-title`), if there is one and it is new. The CLI writes `ai-title` after the first
-    /// prompt; a missing file or title is not an error.
+    /// After a turn, and during one until the process has a title ([`rate::meter`]): the
+    /// transcript's title (its last `custom-title`, else its last `ai-title`), if there is one
+    /// and it is new. The CLI writes `ai-title` after the first prompt; a missing file or title
+    /// is not an error.
     async fn report_title(&self) {
         let Some(path) = self.transcript() else {
             return;
@@ -1281,6 +1299,7 @@ async fn monitor(
 ) {
     let mut rd = BufReader::new(stdout);
     let mut buf = Vec::new();
+    let mut clearing: Option<Clearing> = None;
     let mut drain = exited.clone();
     let after_exit = async move {
         let _ = drain.wait_for(Option::is_some).await;
@@ -1294,11 +1313,20 @@ async fn monitor(
                 Ok(_) => {
                     let line = String::from_utf8_lossy(&buf).into_owned();
                     buf.clear();
-                    let (actions, seen) = {
+                    let (actions, seen, cleared) = {
                         let mut c = lock(&core);
                         let a = c.on_line(&line);
-                        (a, c.take_seen())
+                        (a, c.take_seen(), c.clearing())
                     };
+                    // `/clear`: the CLI begins the new transcript before the `init` that names
+                    // it (~70 ms, `w1-clear`); the mirror is not to take it for someone else's.
+                    if cleared && clearing.is_none() {
+                        clearing = io
+                            .transcript()
+                            .as_deref()
+                            .and_then(Path::parent)
+                            .map(|d| Clearing::new(io.own.clone(), d.to_path_buf()));
+                    }
                     // After `/clear` the process writes the new transcript: its records from
                     // this line on are that one's, and the old one is no longer written.
                     for a in &actions {
@@ -1308,6 +1336,10 @@ async fn monitor(
                                 live = Live::new(io.own.clone(), new, live.2);
                             }
                         }
+                    }
+                    // Unmarked once the new transcript is live.
+                    if !cleared {
+                        clearing = None;
                     }
                     for u in seen {
                         io.own.add(io.runtime(), u);
@@ -1328,6 +1360,7 @@ async fn monitor(
     // The process wrote its last record: the mirror may treat what follows as another
     // writer's.
     drop(live);
+    drop(clearing);
     // Its ssh-agent goes with it (T44), its secrets (SPEC 0.147) and the fork copy it resumed
     // (SPEC §8.1).
     drop(secrets);

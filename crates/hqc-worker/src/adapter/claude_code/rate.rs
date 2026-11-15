@@ -135,6 +135,12 @@ pub(super) async fn meter(
             }
         }
         was_live = live;
+        // The CLI writes its own title into the transcript during the first turn and does not
+        // stream it (`session_title_changed` carries only a person's): it is read on each tick
+        // of a turn until the process has one, not only at the turn's end (SPEC §8.1).
+        if working && lock(&io.title).is_none() {
+            io.report_title().await;
+        }
         let now = Instant::now();
         if working {
             window.push_back((now, tokens));

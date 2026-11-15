@@ -938,7 +938,7 @@ async fn runtime_title_goes_in_session_state() {
 }
 
 // T27 (SPEC §5.4): the runtime's slash commands go in `session.state`, once per change, and
-// stay in the later ones like the title; since SPEC 0.138 with what the runtime says of each
+// stay in the later ones like the title; since SPEC 0.151 with what the runtime says of each
 // in `command_info`.
 #[tokio::test]
 async fn runtime_commands_go_in_session_state() {

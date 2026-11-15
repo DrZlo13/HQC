@@ -1234,6 +1234,9 @@ fn a_compaction_is_one_line_with_its_summary() {
                    build."
                 .into(),
             code: "context_compacted".into(),
+            call_id: None,
+            status: None,
+            task_id: None,
             fork: None,
         }
     );
@@ -1304,4 +1307,51 @@ fn a_custom_title_wins_over_the_ai_title() {
         (row.title.as_deref(), row.custom_title.as_deref()),
         (Some("Auto again"), Some("Mine"))
     );
+}
+
+/// After `/clear` the CLI begins the new transcript before the `init` that names it reaches
+/// the worker (`w1-clear`: ~70 ms): while a process of the worker has cleared its conversation
+/// in the folder, a transcript there the mirror has not read is not imported; once the process
+/// runs it, its records are the process's. Another transcript begun after that is imported as
+/// before.
+#[test]
+fn a_transcript_begun_after_clear_is_not_imported() {
+    let clear = Uuid::new_v4();
+    let transcript = service_line(
+        "cleared",
+        clear,
+        None,
+        r#""type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"}"#,
+    ) + "\n";
+    let mut s = setup("cleared", &transcript);
+    let folder = s.file.parent().unwrap().to_path_buf();
+    s.own.clearing(&folder);
+    append(&s.file, &transcript);
+    let t0 = Instant::now();
+    let out = s.mirror.poll(t0, SystemTime::now());
+    assert!(out.is_empty(), "before init: {:?}", labels(&out));
+    // `init` names it; the echo of `/clear` names the record.
+    s.own.begin(s.runtime, None);
+    s.own.add(s.runtime, clear);
+    s.own.cleared(&folder);
+    for later in [0, 10] {
+        let out = s
+            .mirror
+            .poll(t0 + Duration::from_secs(later), SystemTime::now());
+        assert!(out.is_empty(), "{later} s: {:?}", labels(&out));
+    }
+    let other = Uuid::new_v4();
+    append(
+        &folder.join(format!("{other}.jsonl")),
+        &(service_line(
+            "cleared",
+            Uuid::new_v4(),
+            None,
+            r#""type":"user","message":{"role":"user","content":"Hello"}"#,
+        )
+        .replace(SERVICE_SESSION, &other.to_string())
+            + "\n"),
+    );
+    let out = s.mirror.poll(t0, SystemTime::now());
+    assert_eq!(labels(&out), ["user:Hello"]);
 }

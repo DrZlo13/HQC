@@ -11,10 +11,14 @@
 //! prompt record with a new uuid (2.1.312, a message typed while a fresh process started). The
 //! mirror asks the registry whether a record is the adapter's and whether a process of the
 //! session runs right now. Keyed by `runtime_session_id` (the transcript's uuid); in memory only:
-//! after a worker restart the mirror's offsets on disk say what was already handled.
+//! after a worker restart the mirror's offsets on disk say what was already handled. After
+//! `/clear` the process goes on in a new transcript of the same folder, which the CLI writes
+//! before it names it (`w1-clear`): until then the folder is marked
+//! ([`OwnRecords::clearing`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use uuid::Uuid;
@@ -25,6 +29,9 @@ const INPUTS: usize = 32;
 #[derive(Debug, Default)]
 pub struct OwnRecords {
     inner: Mutex<HashMap<Uuid, Entry>>,
+    /// Transcript folders where a process cleared its conversation and has not named the
+    /// new transcript yet, with how many such processes.
+    clearing: Mutex<HashMap<PathBuf, u32>>,
 }
 
 #[derive(Debug, Default)]
@@ -110,8 +117,38 @@ impl OwnRecords {
         self.lock().get(&session).is_some_and(|e| e.live > 0)
     }
 
+    /// A process with its transcript in `folder` cleared its conversation (`/clear`): a
+    /// transcript the CLI begins there before the process's next `init` names it is that
+    /// process's.
+    pub fn clearing(&self, folder: &Path) {
+        *self
+            .lock_clearing()
+            .entry(folder.to_path_buf())
+            .or_default() += 1;
+    }
+
+    /// That process named its new transcript, or it is gone.
+    pub fn cleared(&self, folder: &Path) {
+        let mut m = self.lock_clearing();
+        if let Some(n) = m.get_mut(folder) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(folder);
+            }
+        }
+    }
+
+    /// A process of `folder` cleared its conversation and has not named the new transcript.
+    pub fn is_clearing(&self, folder: &Path) -> bool {
+        self.lock_clearing().contains_key(folder)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Entry>> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_clearing(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, u32>> {
+        self.clearing.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

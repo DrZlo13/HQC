@@ -231,8 +231,6 @@ struct Outcome {
 struct SessionHandle {
     tx: mpsc::UnboundedSender<Cmd>,
     task: JoinHandle<()>,
-    /// `runtime_session_id` of the last `session.start`: the transcript the session runs.
-    runtime_session_id: Option<String>,
     /// The workspace of the last `session.start` the session took: another one is a move.
     workspace: PathBuf,
 }
@@ -292,8 +290,11 @@ enum Cmd {
         put: Box<SecretPut>,
     },
     Resync,
-    /// Another writer continues the transcript: stop after the current turn (SPEC §9.3).
-    Release,
+    /// Another writer continues transcript `runtime_session_id`: if it is this session's,
+    /// stop after the current turn (SPEC §9.3).
+    Release {
+        runtime_session_id: Uuid,
+    },
     /// A process outside the worker opened transcript `runtime_session_id`: if it is this
     /// session's, stop after the current turn (SPEC §9.3).
     Held {
@@ -417,19 +418,10 @@ impl Supervisor {
                 return;
             }
             Inbound::ForeignWriter { runtime_session_id } => {
-                let rid = runtime_session_id.to_string();
-                match self
-                    .sessions
-                    .iter()
-                    .find(|(_, h)| h.runtime_session_id.as_deref() == Some(rid.as_str()))
-                {
-                    Some((sid, h)) => {
-                        tracing::info!(session_id = %sid, runtime_session_id = %rid, "session continued elsewhere; releasing it now");
-                        let _ = h.tx.send(Cmd::Release);
-                    }
-                    None => {
-                        tracing::debug!(runtime_session_id = %rid, "foreign writer for a session not run here")
-                    }
+                // As for a holder: the session's own task knows its transcript, another one
+                // after `/clear` (SPEC §8.1).
+                for h in self.sessions.values() {
+                    let _ = h.tx.send(Cmd::Release { runtime_session_id });
                 }
                 return;
             }
@@ -480,7 +472,6 @@ impl Supervisor {
                     self.sessions.insert(sid, h);
                 }
                 if let Some(h) = self.sessions.get_mut(&sid) {
-                    h.runtime_session_id = spec.runtime_session_id.clone();
                     h.workspace = spec.workspace.clone();
                 }
                 (
@@ -1006,7 +997,6 @@ impl Supervisor {
         SessionHandle {
             tx,
             task: tokio::spawn(s.run(rx)),
-            runtime_session_id: spec.runtime_session_id.clone(),
             workspace: spec.workspace.clone(),
         }
     }
@@ -1025,7 +1015,7 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::Approval { id, .. }
         | Cmd::Clarify { id, .. }
         | Cmd::Secret { id, .. } => id.clone(),
-        Cmd::Resync | Cmd::Release | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
+        Cmd::Resync | Cmd::Release { .. } | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
     }
 }
 
@@ -1363,21 +1353,28 @@ impl Session {
                     self.tokens_rate(self.token_rate);
                 }
             }
-            Cmd::Release => self.release().await,
+            Cmd::Release { runtime_session_id } => {
+                if self.runs(runtime_session_id) {
+                    tracing::info!(session_id = %self.id, %runtime_session_id, "session continued elsewhere; releasing it now");
+                    self.release().await;
+                }
+            }
             Cmd::Held { runtime_session_id } => {
-                let rid = runtime_session_id.to_string();
-                let mine = self
-                    .runtime_session_id
-                    .as_deref()
-                    .or(self.spec.runtime_session_id.as_deref())
-                    == Some(rid.as_str());
-                if mine && self.state != ProcessState::Stopped {
-                    tracing::info!(session_id = %self.id, runtime_session_id = %rid, "the session was opened outside hqc; releasing it now");
+                if self.runs(runtime_session_id) && self.state != ProcessState::Stopped {
+                    tracing::info!(session_id = %self.id, %runtime_session_id, "the session was opened outside hqc; releasing it now");
                     self.release().await;
                 }
             }
             Cmd::Shutdown => unreachable!("handled in run"),
         }
+    }
+
+    /// Whether `runtime_session_id` is the transcript this session runs.
+    fn runs(&self, runtime_session_id: Uuid) -> bool {
+        self.runtime_session_id
+            .as_deref()
+            .or(self.spec.runtime_session_id.as_deref())
+            == Some(runtime_session_id.to_string().as_str())
     }
 
     /// Run in `mode` from now on (T38): the next start takes it from the spec, a running

@@ -77,9 +77,10 @@ pub enum AdapterEvent {
     /// one (Claude Code: after `/clear`, the new transcript, SPEC §8.1); sent in
     /// `session.state`, and later starts continue it.
     RuntimeSessionId(String),
-    /// The runtime named the session (Claude Code: `system/session_title_changed`, and the
-    /// transcript's title read when a turn ends, SPEC §8.1); sent as `session.state.title`.
-    /// Reported when it changes.
+    /// The runtime named the session (Claude Code: a title a person gave, `/rename`, from
+    /// `system/session_title_changed` at once; the transcript's title, the CLI's own included,
+    /// read every 2 s of a turn until the process has one and when a turn ends, SPEC §8.1);
+    /// sent as `session.state.title`. Reported when it changes.
     Title(String),
     /// The runtime's slash commands, without `/`, with what it says of each (Claude Code: the
     /// answer to `initialize`, `system/commands_changed`, `system/init`, SPEC §8.1); sent as

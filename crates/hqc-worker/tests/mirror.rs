@@ -9,6 +9,7 @@ use std::time::Duration;
 use common::*;
 use hqc_claude_jsonl::{parse_str, Record};
 use hqc_worker::adapter::fake::{FakeAdapters, FakeCall};
+use hqc_worker::adapter::AdapterEvent;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -163,6 +164,70 @@ async fn foreign_writer_releases_the_session() {
     };
     assert_eq!(r["payload"]["candidates"][0]["path"], ws.as_str(), "{r}");
     assert_eq!(r["payload"]["candidates"][0]["sessions_count"], 1);
+    w.stop().await;
+}
+
+/// After `/clear` the session runs another transcript (SPEC §8.1): another writer of that one
+/// releases the session too.
+#[tokio::test]
+async fn foreign_writer_of_the_transcript_after_clear_releases_the_session() {
+    let env = Env::with_mirror();
+    let (_, own) = env.mirror.clone().unwrap();
+    write_transcript(&env);
+    let runtime: Uuid = RUNTIME.parse().unwrap();
+    own.begin(runtime, None);
+    for u in stream_uuids() {
+        own.add(runtime, u);
+    }
+
+    let mut hub = FakeHub::start().await;
+    let adapters = FakeAdapters::new();
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let mut c = hub.accept().await;
+    c.handshake().await;
+
+    let sid = Uuid::now_v7();
+    let mut start = env.start_payload(sid);
+    start["runtime_session_id"] = json!(Uuid::new_v4().to_string());
+    let id = c.frame("session.start", start).await;
+    assert_eq!(c.expect("ack").await["id"], id.as_str());
+    let eid = Uuid::now_v7();
+    c.frame(
+        "session.input",
+        json!({"session_id": sid, "event_id": eid, "text": "/clear", "artifact_ids": [], "peer_prefix": []}),
+    )
+    .await;
+    adapters
+        .wait_for("input", |c| {
+            c.iter().any(|x| matches!(x, FakeCall::Input { .. }))
+        })
+        .await;
+    adapters.accept_input(sid, eid).await;
+    // The runtime goes on in transcript RUNTIME.
+    adapters
+        .emit(sid, AdapterEvent::RuntimeSessionId(RUNTIME.into()))
+        .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["runtime_session_id"] == RUNTIME {
+            break;
+        }
+    }
+
+    let ws = env.workspace().display().to_string();
+    let r = mirror_set(&mut c, &ws, true).await;
+    assert_eq!(r["type"], "ack", "{r}");
+    adapters
+        .wait_for("kill during the turn", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["process_state"] == "stopped" {
+            assert_eq!(st["payload"]["locked_by"], "vscode", "{st}");
+            break;
+        }
+    }
+    own.end(runtime, None);
     w.stop().await;
 }
 

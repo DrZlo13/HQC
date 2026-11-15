@@ -64,7 +64,7 @@ impl Store {
              );",
         )
         .context("initializing the mirror state")?;
-        // A state file from before SPEC 0.138 has no `custom_title`.
+        // A state file from before SPEC 0.151 has no `custom_title`.
         let has: bool = db
             .query_row(
                 "SELECT count(*) FROM pragma_table_info('files') WHERE name = 'custom_title'",
@@ -175,7 +175,7 @@ mod tests {
         }
     }
 
-    /// A state file written before SPEC 0.138 has no `custom_title`: it opens with its rows and
+    /// A state file written before SPEC 0.151 has no `custom_title`: it opens with its rows and
     /// stores one from then on.
     #[test]
     fn a_state_file_without_custom_titles_opens() {

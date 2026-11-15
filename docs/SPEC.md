@@ -3582,16 +3582,16 @@ group gets SIGINT; the CLI exits on it, and the next input brings the process up
 Since 0.143, if the turn still runs 10 s after the SIGINT (a process stuck in a tool call that
 the signal does not end), the group gets SIGTERM, and SIGKILL 5 s later, as a kill does: Stop
 ends a stuck session together with the commands it started.
-Since 0.137, with `perTaskStopAffordance` in the process's `initialize` (above), the interrupt
-stops only the turn: background subagents and workflows go on, as in the VS Code tab (by the
-2.1.312 binary, "an interrupt on an open-input (interactive stream-json) session spares running
-background agents/workflows (Stop only aborts the turn)"; it still stops observer agents)
-**[verify]**. Without the flag 2.1.312 killed them, each with `task_notification` `stopped`
-(checked live with a subagent that `CLAUDE_CODE_ENTRYPOINT=claude-vscode` put in the background,
-then `result` `terminal_reason: aborted_tools`). One background task is stopped alone with the
-CLI's `stop_task` (below). The reply cut off is an `assistant` record with `aborted: true` and
-gives `agent.message` with `interrupted: true`; the turn ends with `system turn_interrupted`
-(above).
+Since 0.137, with `perTaskStopAffordance` in the process's `initialize` (above), the interrupt stops
+only the turn: background subagents and workflows go on, as in the VS Code tab (by the 2.1.312
+binary, "an interrupt on an open-input (interactive stream-json) session spares running background
+agents/workflows (Stop only aborts the turn)"; it still stops observer agents; checked live on
+2.1.312 with a background subagent). Without the flag 2.1.312 killed them, each with
+`task_notification` `stopped` (checked live with a subagent that
+`CLAUDE_CODE_ENTRYPOINT=claude-vscode` put in the background, then `result` `terminal_reason:
+aborted_tools`). One background task is stopped alone with the CLI's `stop_task` (below). The reply
+cut off is an `assistant` record with `aborted: true` and gives `agent.message` with `interrupted:
+true`; the turn ends with `system turn_interrupted` (above).
 
 Stopping one task (since 0.137, the VS Code tab's stop of a background task, which
 `perTaskStopAffordance` declares): the adapter marks every row of `subagents.live`
@@ -5510,22 +5510,21 @@ by other pull requests.
 §8.1: Stop killed the agent's background subagents and workflows along with the turn: the worker
 sent no `initialize`, and without its `perTaskStopAffordance` the CLI's interrupt stops them. The
 worker now writes `control_request` `initialize` with only `perTaskStopAffordance: true` as the
-first stdin line of every process, new, resumed or forked, before any input (the CLI applies it
-only before the first user message), and skips the answer; the interrupt then stops the turn
-alone **[verify]**. A subagent is stopped alone from its line (below). §4, §8.1: a reply cut off by
-Stop looked finished, and a Stop during a tool call left nothing in the feed: an `assistant` text
-with `aborted: true` gives `agent.message` with the new `interrupted: true`, which the client
+first stdin line of every process, new, resumed or forked, before any input (the CLI applies it only
+before the first user message), and skips the answer; the interrupt then stops the turn alone
+(checked live on 2.1.312). A subagent is stopped alone from its line (below). §4, §8.1: a reply cut
+off by Stop looked finished, and a Stop during a tool call left nothing in the feed: an `assistant`
+text with `aborted: true` gives `agent.message` with the new `interrupted: true`, which the client
 shows muted with " · interrupted" after its time, and a `result` with a `terminal_reason`
-`aborted_*` gives one `system turn_interrupted` "Interrupted" line at the end of the turn, after
-its `usage`. A turn that ended early for another reason (an error, `max_turns`, the budget, a
-hook) just ended: the reason went into `status idle` `detail`, which the client draws only for
-`error`. Such a `result` (an error, or a `terminal_reason` other than `completed`,
-`background_requested` and `tool_deferred`) now gives one
-`system turn_ended_early` line in the same place, "Turn ended early: " with its `terminal_reason`
-(the subtype without one), the API's status and its `errors`, cut to 300 bytes, and `status
-idle` carries no `detail`. A `result` with no tokens gives no `usage` line whatever its
-`num_turns` (0.115 kept it for `num_turns` other than 0): a reply interrupted while it streamed
-had an empty `0 → 0 tokens` line under it.
+`aborted_*` gives one `system turn_interrupted` "Interrupted" line at the end of the turn, after its
+`usage`. A turn that ended early for another reason (an error, `max_turns`, the budget, a hook) just
+ended: the reason went into `status idle` `detail`, which the client draws only for `error`. Such a
+`result` (an error, or a `terminal_reason` other than `completed`, `background_requested` and
+`tool_deferred`) now gives one `system turn_ended_early` line in the same place, "Turn ended early:
+" with its `terminal_reason` (the subtype without one), the API's status and its `errors`, cut to
+300 bytes, and `status idle` carries no `detail`. A `result` with no tokens gives no `usage` line
+whatever its `num_turns` (0.115 kept it for `num_turns` other than 0): a reply interrupted while it
+streamed had an empty `0 → 0 tokens` line under it.
 
 §4, §5.3, §6, §8.1: with Stop sparing them, nothing in hqc stopped a runaway background subagent
 or command but archiving the session. As in the VS Code tab, a subagent's line above the input, and a

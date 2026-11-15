@@ -349,8 +349,8 @@ pub struct Core {
     /// A `conversation_reset` came (`/clear`): the next `system/init` with another
     /// `session_id` names the transcript the CLI goes on in.
     cleared: bool,
-    /// The conversation is new (a new session, a fork, `/clear`) and its first model turn has
-    /// not ended: the CLI writes its `ai-title` then.
+    /// The conversation is new (a new session, `/clear`) and its first model turn has not
+    /// ended: the CLI writes its `ai-title` then.
     fresh: bool,
     /// Ids of the main agent's `ScheduleWakeup` `tool_use` blocks, until their result.
     wakeup_calls: HashSet<String>,
@@ -496,7 +496,7 @@ impl Core {
         self
     }
 
-    /// The process starts a new conversation (`--session-id`, a fork), not `--resume`.
+    /// The process starts a new session's conversation ([`super::Launch::new_conversation`]).
     pub fn with_new_conversation(mut self, new: bool) -> Self {
         self.fresh = new;
         self

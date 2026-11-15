@@ -428,10 +428,9 @@ impl Io {
     }
 
     /// After a turn, and during the first turn of a new conversation until the process has a
-    /// title ([`rate::meter`]): the
-    /// transcript's title (its last `custom-title`, else its last `ai-title`), if there is one
-    /// and it is new. The CLI writes `ai-title` after the first prompt; a missing file or title
-    /// is not an error.
+    /// title ([`rate::meter`]): the transcript's title (its last `custom-title`, else its last
+    /// `ai-title`), if there is one and it is new. The CLI writes `ai-title` after the first
+    /// prompt; a missing file or title is not an error.
     async fn report_title(&self) {
         let Some(path) = self.transcript() else {
             return;
@@ -499,6 +498,15 @@ pub enum Launch {
     /// `--resume <fork_copy_path(uuid)> --fork-session --session-id <uuid> --resume-session-at
     /// <at>`: a new transcript with the source's records up to `at`.
     Fork { at: Uuid },
+}
+
+impl Launch {
+    /// A new session's conversation, the one the CLI writes its `ai-title` for in the first
+    /// turn: a fork's CLI takes the source's conversation as titled, and the hub keeps a fork's
+    /// own title.
+    pub fn new_conversation(&self) -> bool {
+        matches!(self, Launch::New)
+    }
 }
 
 /// The copy of a fork's source transcript, cut right after the record the fork starts at
@@ -952,7 +960,7 @@ impl ClaudeCodeAdapter {
         let mut core = Core::new(self.session_id, spec.restricted)
             .with_policy(Arc::new(Policy::new(&spec.environment.permissions)))
             .with_cost_baseline(cost_baseline)
-            .with_new_conversation(!matches!(launch, Launch::Resume));
+            .with_new_conversation(launch.new_conversation());
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }

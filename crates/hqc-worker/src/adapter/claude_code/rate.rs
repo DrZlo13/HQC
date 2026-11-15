@@ -88,6 +88,12 @@ impl Tail {
     }
 }
 
+/// The transcript's title is read on this tick: during the first model turn of a new
+/// conversation ([`Core::fresh`]) while the process has sent no title.
+fn reads_title(working: bool, fresh: bool, titled: bool) -> bool {
+    working && fresh && !titled
+}
+
 /// Counts the rate of the process until it exits.
 pub(super) async fn meter(
     core: Arc<Mutex<Core>>,
@@ -141,7 +147,7 @@ pub(super) async fn meter(
         // person's): it is read on each tick of that turn until the process has one, not only
         // at the turn's end (SPEC §8.1). A resumed conversation without one gets none, and its
         // transcript, tens of MB, is not read every tick.
-        if working && fresh && lock(&io.title).is_none() {
+        if reads_title(working, fresh, lock(&io.title).is_some()) {
             io.report_title().await;
         }
         let now = Instant::now();
@@ -166,6 +172,16 @@ pub(super) async fn meter(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// SPEC §8.1: a tick reads the title only in a new conversation's first turn, until the
+    /// process has one; a resumed transcript without one, tens of MB, is not read every tick.
+    #[test]
+    fn a_tick_reads_the_title_only_in_a_new_conversation_first_turn() {
+        assert!(reads_title(true, true, false));
+        assert!(!reads_title(true, false, false), "a resumed conversation");
+        assert!(!reads_title(true, true, true), "the process has a title");
+        assert!(!reads_title(false, true, false), "no turn");
+    }
 
     fn line(id: &str, block: &str, output_tokens: u64) -> String {
         json!({

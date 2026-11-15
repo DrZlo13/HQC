@@ -1920,10 +1920,14 @@ fn the_answer_to_initialize_gives_the_commands() {
     );
 }
 
-/// The transcript's title is read on each tick only in the first model turn of a new
-/// conversation: not in a resumed one, and `/clear`'s own result does not end that turn.
+/// A new conversation, whose title the ticker reads during its first model turn: a new session's
+/// or the one `/clear` starts, not a resumed one or a fork; `/clear`'s own result does not end
+/// that turn.
 #[test]
-fn only_a_new_conversation_first_turn_reads_the_title_on_each_tick() {
+fn a_new_conversation_lasts_until_its_first_model_turn_ends() {
+    assert!(Launch::New.new_conversation());
+    assert!(!Launch::Resume.new_conversation());
+    assert!(!Launch::Fork { at: Uuid::nil() }.new_conversation());
     let sid = Uuid::now_v7();
     let result = |local: Option<&str>| {
         let mut v = json!({"type": "result", "subtype": "success", "is_error": false,

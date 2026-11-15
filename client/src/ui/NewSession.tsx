@@ -310,6 +310,8 @@ function NewSessionChips({
   const workspace = list?.find((w) => w.id === id);
   const worker = workspace && app.workerName(workspace.worker_id);
   const custom = draft.model !== undefined && !(MODEL_ALIASES as readonly string[]).includes(draft.model);
+  // A provider the draft chose that this workspace's worker does not allow is not shown.
+  const chosenProvider = app.providersFor(workspace?.worker_id).find((p) => p.id === draft.provider_id);
   const close = () => setOpen(null);
   // Enter in a menu's field closes it: the field has set its value already.
   const enterCloses = (e: KeyboardEvent) => {
@@ -393,17 +395,46 @@ function NewSessionChips({
         </ContextMenu>
       );
     } else {
+      const claude = !draft.provider_id;
       const items: MenuEntry[] = [
-        { label: "Claude Code's default", cls: 'btn-model-default', checked: draft.model === undefined, onSelect: () => app.setNewSession({ model: undefined }) },
+        {
+          label: "Claude Code's default",
+          cls: 'btn-model-default',
+          checked: claude && draft.model === undefined,
+          onSelect: () => app.setNewSession({ model: undefined, provider_id: undefined }),
+        },
         ...MODEL_ALIASES.map((m) => ({
           label: modelName(m),
           cls: `btn-model-${m}`,
-          checked: draft.model === m,
-          onSelect: () => app.setNewSession({ model: m }),
+          checked: claude && draft.model === m,
+          onSelect: () => app.setNewSession({ model: m, provider_id: undefined }),
         })),
         // Another model waits for its name, in the menu.
-        { label: 'Another model…', cls: 'btn-model-custom', checked: custom, keepOpen: true, onSelect: () => setOpen({ ...open, custom: true }) },
+        {
+          label: 'Another model…',
+          cls: 'btn-model-custom',
+          checked: claude && custom,
+          keepOpen: true,
+          onSelect: () => {
+            app.setNewSession({ provider_id: undefined });
+            setOpen({ ...open, custom: true });
+          },
+        },
       ];
+      // The providers the workspace's worker allows (SPEC 0.144).
+      const providers = app.providersFor(workspace?.worker_id);
+      if (providers.length) {
+        items.push('sep');
+        for (const p of providers) {
+          items.push({
+            label: p.label,
+            detail: p.model,
+            cls: 'btn-model-provider',
+            checked: draft.provider_id === p.id,
+            onSelect: () => app.setNewSession({ provider_id: p.id }),
+          });
+        }
+      }
       menu = <ContextMenu {...at} label="Model" items={items} />;
     }
   }
@@ -449,7 +480,7 @@ function NewSessionChips({
           'model',
           <IconModel />,
           <span class="new-chip-text">
-            Model: <b>{draft.model ? modelName(draft.model) : 'default'}</b>
+            Model: <b>{chosenProvider ? chosenProvider.label : draft.model ? modelName(draft.model) : 'default'}</b>
           </span>,
         )}
       </div>

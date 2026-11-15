@@ -240,7 +240,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'Web search', 'Notifications', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'Web search', 'Models', 'Notifications', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();
@@ -355,6 +355,29 @@ it('picks the web search of selected text in "Settings"', async () => {
   expect(app.webSearch.id).toBe('duckduckgo');
   pick('Google')!.click();
   await until('google', () => app.webSearch.id === 'google');
+});
+
+it('adds a model provider in "Settings" and lists the workers that allow it', async () => {
+  location.hash = '#/settings';
+  (await until('add a provider', () => $('.btn-add-provider')))!.click();
+  const input = (name: string) => $<HTMLInputElement>(`input[name=${name}]`)!;
+  await until('the form', () => $('.provider-form'));
+  for (const [name, value] of [
+    ['provider_label', 'Qwen 3.8 (local)'],
+    ['provider_name', 'qwen-local'],
+    ['provider_base_url', 'http://192.168.1.229:8082/'],
+    ['provider_model', 'qwen3.8-27b'],
+  ]) {
+    input(name).value = value;
+    input(name).dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
+  }
+  await new Promise((r) => setTimeout(r, 10));
+  $('.btn-save-provider')!.click();
+  const row = await until('the provider', () => $('.provider-row'));
+  expect(row.textContent).toContain('Qwen 3.8 (local)');
+  expect(row.textContent).toContain('qwen3.8-27b · http://192.168.1.229:8082');
+  expect(row.querySelector('.provider-workers')!.textContent).toMatch(/^on /);
+  expect(app.providers.map((p) => p.name)).toEqual(['qwen-local']);
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

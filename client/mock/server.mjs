@@ -546,6 +546,35 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   };
 
   route('GET', '/api/me', () => me);
+  // SPEC 0.144: the owner's model providers; the mock's one worker allows each it keeps, so
+  // the model menus offer them.
+  const providers = new Map();
+  const providerFields = (body) => {
+    const f = { name: String(body?.name ?? '').trim(), label: String(body?.label ?? '').trim(), base_url: String(body?.base_url ?? '').trim().replace(/\/+$/, ''), model: String(body?.model ?? '').trim() };
+    if (!/^[A-Za-z0-9_-]+$/.test(f.name) || !f.label || !/^https?:\/\//.test(f.base_url) || !f.model) throw fail(400, 'bad_request', 'name, label, base_url and model are needed');
+    if (body?.context_tokens !== undefined) f.context_tokens = body.context_tokens;
+    return f;
+  };
+  const providerView = (p) => ({ ...p, workers: allWorkers().filter((w) => w.status !== "revoked").map((w) => w.id) });
+  route('GET', '/api/providers', () => ({ providers: [...providers.values()].map(providerView) }));
+  route('POST', '/api/providers', (_, body) => {
+    const f = providerFields(body);
+    if ([...providers.values()].some((p) => p.name === f.name)) throw fail(409, 'provider_exists', `you have a provider named "${f.name}"`);
+    const p = { id: randomUUID(), ...f, created_at: now(), updated_at: now() };
+    providers.set(p.id, p);
+    return withStatus(201, providerView(p));
+  });
+  route('PATCH', '/api/providers/:id', (p, body) => {
+    const old = providers.get(p.id);
+    if (!old) throw fail(404, 'not_found', 'unknown provider');
+    const next = { ...old, ...providerFields(body), updated_at: now() };
+    providers.set(p.id, next);
+    return providerView(next);
+  });
+  route('DELETE', '/api/providers/:id', (p) => {
+    if (!providers.delete(p.id)) throw fail(404, 'not_found', 'unknown provider');
+    return withStatus(204, null);
+  });
   // T49: the app theme; the look and the project bar's order (SPEC §3 User); the project's color
   // and icon, the icon image (checked loosely: the hub checks the magic bytes and the size in
   // pixels).

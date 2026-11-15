@@ -6544,13 +6544,6 @@ button.ps-look {
   color: var(--text2);
 }
 
-.md-html {
-  white-space: pre-wrap;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--muted);
-}
-
 .md-code {
   border: 1px solid var(--border);
   border-radius: 10px;

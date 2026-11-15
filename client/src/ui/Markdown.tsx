@@ -56,7 +56,16 @@ const mathInline: TokenizerExtension = {
   tokenizer: (src) => mathToken(src),
 };
 
-const marked = new Marked({ gfm: true, breaks: true, extensions: [mathBlock, mathInline] });
+// No HTML blocks: by CommonMark a line that starts with a tag opens one that runs to the next
+// blank line, and as HTML is shown as text, the Markdown under such a line was shown raw too (a
+// compaction summary starts with a `<system-reminder>` line). The tags are inline HTML of a
+// paragraph instead, shown as text, and the lines after them are Markdown.
+const marked = new Marked({
+  gfm: true,
+  breaks: true,
+  extensions: [mathBlock, mathInline],
+  tokenizer: { html: () => undefined },
+});
 
 /** GFM with single newlines as <br>, as chat messages are written, and formulas. */
 export function parseMarkdown(src: string): Token[] {
@@ -202,13 +211,6 @@ function block(t: MarkedToken, key: number): ComponentChildren {
       );
     case 'hr':
       return <hr key={key} />;
-    case 'html':
-      // Raw HTML stays the text it was written as.
-      return (
-        <p key={key} class="md-html">
-          {t.text}
-        </p>
-      );
     default:
       return inlineToken(t, key);
   }

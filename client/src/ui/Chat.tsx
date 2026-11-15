@@ -4,7 +4,7 @@ import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { onBack } from '../nav';
-import { PERMISSION_MODES, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState } from '../proto';
+import { PERMISSION_MODES, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelField } from './agentSettings';
@@ -140,8 +140,10 @@ export function Chat({
   const rulesHref = workspace && `#/p/${workspace.project_id}/rules/${workspace.id}?session=${encodeURIComponent(sessionId)}`;
 
   // The runtime's slash commands come with the session object (T27), which the summary does
-  // not refresh: fetch it when an idle session has no list yet (after its first process).
-  const fetchCommands = !system && info !== undefined && info.commands === undefined && state === 'idle';
+  // not refresh, and with what the runtime says of each only in the hub's answer about this
+  // one session, not in its lists: fetch it when an idle session has no list yet (after its
+  // first process) or came from a list.
+  const fetchCommands = !system && info !== undefined && info.command_info === undefined && state === 'idle';
   useEffect(() => {
     if (fetchCommands) void app.refreshSession(sessionId);
   }, [app, sessionId, fetchCommands]);
@@ -755,6 +757,7 @@ export function Chat({
           insertQuote={insertQuote}
           phone={phone}
           commands={info?.commands}
+          commandInfo={info?.command_info}
           files={files}
           reading={reading}
           onFiles={addFiles}
@@ -1129,6 +1132,7 @@ export function Composer({
   placeholder,
   phone = false,
   commands,
+  commandInfo,
   files = [],
   reading = 0,
   onFiles = () => {},
@@ -1145,6 +1149,8 @@ export function Composer({
   phone?: boolean;
   /** The runtime's slash commands: `/` at the start of the text opens a list of them. */
   commands?: string[];
+  /** What the runtime says of each command, shown beside it in the list. */
+  commandInfo?: SlashCommand[];
   files?: OutgoingFile[];
   /** Files picked and still being read: nothing is sent until they are in `files`. */
   reading?: number;
@@ -1208,6 +1214,7 @@ export function Composer({
   const [pick, setPick] = useState(0);
   const [closedAt, setClosedAt] = useState<string | null>(null);
   const matches = closedAt === text ? [] : matchCommands(commands, text);
+  const about = useMemo(() => new Map((commandInfo ?? []).map((c) => [c.name, c])), [commandInfo]);
   const popup = matches.length > 0;
   const active = Math.min(pick, matches.length - 1);
   const list = useRef<HTMLUListElement>(null);
@@ -1357,6 +1364,8 @@ export function Composer({
               >
                 <span class="cmd-slash">/</span>
                 {c}
+                {about.get(c)?.argument_hint && <span class="cmd-args">{about.get(c)?.argument_hint}</span>}
+                {about.get(c)?.description && <span class="cmd-desc">{about.get(c)?.description}</span>}
               </li>
             ))}
           </ul>

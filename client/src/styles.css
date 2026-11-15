@@ -4666,6 +4666,18 @@ a.relay-peer {
   color: var(--muted);
 }
 
+/* What the runtime says of the command (SPEC 0.138): its arguments, then a line on it. */
+.cmd-args {
+  margin-left: 8px;
+  color: var(--muted);
+}
+
+.cmd-desc {
+  margin-left: 12px;
+  font-family: var(--sans);
+  color: var(--muted);
+}
+
 .composer-phone .cmd-item {
   padding: 10px 12px;
   font-size: 15px;

@@ -18,6 +18,7 @@ import {
   type EventOf,
   type SessionInfo,
   type SessionState,
+  type SlashCommand,
   type SpawnedBy,
 } from '../src/proto';
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
@@ -66,6 +67,7 @@ function setup(
     history?: HqcEvent[];
     commands?: string[];
     fetched?: string[];
+    fetched_info?: SlashCommand[];
     spawned_by?: SpawnedBy;
     permission_mode?: PermissionMode;
     effective_permission_mode?: PermissionMode;
@@ -78,8 +80,9 @@ function setup(
 ) {
   const history = opts.history ?? HISTORY;
   const api = {
-    // GET /api/sessions/{id}: the session object with the commands the hub has by now.
-    session: vi.fn(async () => ({ ...info, commands: opts.fetched })),
+    // GET /api/sessions/{id}: the session object with the commands the hub has by now, and
+    // what the runtime says of each, which a list does not carry.
+    session: vi.fn(async (): Promise<SessionInfo> => ({ ...info, commands: opts.fetched ?? opts.commands, command_info: opts.fetched_info })),
     events: vi.fn(async (_id: string, after: number) => {
       const events = history.filter((e) => e.seq! > after);
       return { events, invalid: [], maxSeq: Math.max(after, ...events.map((e) => e.seq!)), count: events.length };
@@ -1175,6 +1178,25 @@ describe('slash command completion (T27)', () => {
     const item = [...root.querySelectorAll<HTMLElement>('.cmd-item')].find((o) => o.textContent === '/review')!;
     await act(() => item.click());
     expect(area().value).toBe('/review ');
+  });
+
+  it('shows what the runtime says of each command, asked for when the session came from a list (SPEC 0.138)', async () => {
+    const info: SlashCommand[] = [
+      { name: 'compact', description: 'Clear conversation history but keep a summary in context', argument_hint: '<instructions>' },
+      { name: 'context', description: 'Visualize current context usage' },
+    ];
+    const { api, app } = setup('idle', { commands: COMMANDS, fetched_info: info });
+    await mount(app);
+    expect(api.session, 'a list gives no command_info').toHaveBeenCalledTimes(1);
+    await type('/co');
+    const items = [...root.querySelectorAll('.cmd-item')];
+    expect(items[0].querySelector('.cmd-args')?.textContent).toBe('<instructions>');
+    expect(items[0].querySelector('.cmd-desc')?.textContent).toBe('Clear conversation history but keep a summary in context');
+    expect(items[1].querySelector('.cmd-args'), 'no hint').toBeNull();
+    expect(items[1].querySelector('.cmd-desc')?.textContent).toBe('Visualize current context usage');
+    expect(items[2].textContent, 'nothing said of it').toBe('/code-review');
+    await press('Enter');
+    expect(area().value, 'only the name goes in').toBe('/compact ');
   });
 
   it('no list, no popup; an idle session without a list fetches the session again', async () => {

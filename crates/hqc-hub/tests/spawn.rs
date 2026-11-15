@@ -416,3 +416,99 @@ async fn spawns_are_limited_per_chain_and_per_hour() {
     assert!(r["error"]["message"].as_str().unwrap().contains("20"));
     hub.finish().await;
 }
+
+/// SPEC 0.144: `hqc_spawn(provider)` names a provider of the owner; without `model` and
+/// `provider` the new session runs on the caller's provider, or, when its workspace's machine
+/// does not allow that one, on the runtime's own endpoint; both at once, or an unknown name,
+/// is refused.
+#[tokio::test]
+async fn spawn_on_a_provider() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let mut w = FakeWorker::connect(&hub, &t).await.expect("worker connect");
+    w.hello_with(WS_PATH, hub.boot_id, json!({"providers": ["qwen-local"]}))
+        .await;
+    let pid = hub.personal_project().await;
+    let (s, v) = hub.add_workspace(&mut w, &pid, WS_PATH).await;
+    assert_eq!(s, 201, "{v}");
+    let (s, p) = hub
+        .post(
+            "/api/providers",
+            json!({"name": "qwen-local", "label": "Qwen", "base_url": "http://192.168.1.229:8082",
+                   "model": "qwen3.8-27b"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{p}");
+    let (_, glm) = hub
+        .post(
+            "/api/providers",
+            json!({"name": "zai", "label": "GLM", "base_url": "https://api.z.ai/api/anthropic",
+                   "model": "glm-5"}),
+        )
+        .await;
+    let (_, ta) = started(&hub, &mut w, "Spawner").await;
+    let start_of = |frames: Vec<Value>| frames.into_iter().find(|f| f["type"] == "session.start");
+
+    let (r, before) = spawn(
+        &mut w,
+        &ta,
+        json!({"project": "personal", "provider": "qwen-local", "prompt": "Read the code."}),
+    )
+    .await;
+    let b = session_at(&hub, address(&r).trim_start_matches("personal/")).await;
+    let start = match start_of(before) {
+        Some(f) => f,
+        None => w.expect("session.start").await,
+    };
+    assert_eq!(
+        start["payload"]["provider"]["name"], "qwen-local",
+        "{start}"
+    );
+    assert!(start["payload"].get("model").is_none(), "{start}");
+    assert_eq!(hub.session(&b).await["agent"]["provider"]["id"], p["id"]);
+    w.reply(&start["id"], "ack", json!({})).await;
+    w.expect("session.input").await;
+
+    for (args, why) in [
+        (
+            json!({"project": "personal", "provider": "qwen-local", "model": "opus", "prompt": "x"}),
+            "both",
+        ),
+        (
+            json!({"project": "personal", "provider": "nope", "prompt": "x"}),
+            "unknown",
+        ),
+        (
+            json!({"project": "personal", "provider": "zai", "prompt": "x"}),
+            "not allowed",
+        ),
+    ] {
+        let (r, _) = spawn(&mut w, &ta, args).await;
+        assert_eq!(code(&r), "invalid_args", "{why}: {r}");
+    }
+
+    // A session on a provider passes it on; one on a provider its machine no longer allows
+    // spawns on the runtime's own endpoint.
+    sqlx::query("UPDATE sessions SET provider_id = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(&b).unwrap())
+        .bind(Uuid::parse_str(glm["id"].as_str().unwrap()).unwrap())
+        .execute(&hub.app.db)
+        .await
+        .unwrap();
+    let tb = start["payload"]["session_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (r, before) = spawn(
+        &mut w,
+        &tb,
+        json!({"project": "personal", "prompt": "Help."}),
+    )
+    .await;
+    let c = session_at(&hub, address(&r).trim_start_matches("personal/")).await;
+    assert!(hub.session(&c).await["agent"].get("provider").is_none());
+    if let Some(f) = start_of(before) {
+        assert!(f["payload"].get("provider").is_none(), "{f}");
+    }
+    hub.finish().await;
+}

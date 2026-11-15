@@ -70,6 +70,8 @@ struct SpawnArgs {
     workspace: Option<String>,
     runtime: Option<String>,
     model: Option<String>,
+    /// A provider of the owner by name (SPEC 0.144).
+    provider: Option<String>,
     prompt: String,
     /// `worktree` (T47).
     isolation: Option<String>,
@@ -77,7 +79,7 @@ struct SpawnArgs {
     branch: Option<String>,
 }
 
-/// `hqc_spawn(project, workspace?, runtime?, model?, prompt, isolation?, branch?)`:
+/// `hqc_spawn(project, workspace?, runtime?, model?, provider?, prompt, isolation?, branch?)`:
 /// `{address, worktree?: {path, branch}}`.
 pub async fn spawn(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Answer, McpError> {
     let a: SpawnArgs = args(c.args.clone())?;
@@ -193,9 +195,36 @@ async fn create(
         limits(app, caller.owner_id, chain_id).await?;
         peers::admit(app, caller, chain).await?;
     }
+    // The caller's model, or its provider, unless the call names one (SPEC 0.144).
+    let (model, provider_id) = match (&a.model, &a.provider) {
+        (Some(_), Some(_)) => {
+            return Err(err(
+                error_code::INVALID_ARGS,
+                "give model or provider, not both",
+            ))
+        }
+        (Some(m), None) => (Some(m.clone()), None),
+        (None, Some(name)) => {
+            let p = db::provider_by_name(&app.db, caller.owner_id, name)
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    err(
+                        error_code::INVALID_ARGS,
+                        format!("no model provider named {name:?}"),
+                    )
+                })?;
+            (None, Some(p.id))
+        }
+        (None, None) => (caller.model.clone(), caller.provider_id),
+    };
+    // Inherited, not asked for: a workspace whose machine does not allow it runs the new agent
+    // on the runtime's own endpoint instead of failing the call.
+    let inherited = a.model.is_none() && a.provider.is_none() && provider_id.is_some();
     let req = CreateSessionRequest {
         workspace_id,
-        model: a.model.clone().or_else(|| caller.model.clone()),
+        model,
+        provider_id,
         // Never `auto`, whatever the caller runs in or the worker's default (T38): the owner
         // switches a spawned session to auto by hand.
         permission_mode: Some(PermissionMode::Ask),
@@ -216,6 +245,15 @@ async fn create(
     };
     match api::new_session(app, caller.owner_id, &project, &req, Some(spawn)).await {
         Ok(s) => Ok(s),
+        Err(ApiError::Unprocessable("provider_not_allowed", _)) if inherited => {
+            let req = CreateSessionRequest {
+                provider_id: None,
+                ..req
+            };
+            api::new_session(app, caller.owner_id, &project, &req, Some(spawn))
+                .await
+                .map_err(api_error)
+        }
         Err(e) => Err(api_error(e)),
     }
 }
@@ -437,7 +475,9 @@ async fn limits(app: &AppState, owner: Uuid, chain_id: Uuid) -> Result<(), McpEr
 fn api_error(e: ApiError) -> McpError {
     match e {
         ApiError::NotFound => err(error_code::NOT_FOUND, "not found"),
-        ApiError::BadRequest(m) | ApiError::Invalid(_, m) => err(error_code::INVALID_ARGS, m),
+        ApiError::BadRequest(m) | ApiError::Invalid(_, m) | ApiError::Unprocessable(_, m) => {
+            err(error_code::INVALID_ARGS, m)
+        }
         ApiError::Conflict("no_workspace", _) => err(
             error_code::INVALID_ARGS,
             "the project has no default workspace; give `workspace`",

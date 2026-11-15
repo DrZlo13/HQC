@@ -1118,7 +1118,11 @@ export class AppState {
   }
 
   async saveProvider(id: string | undefined, f: ProviderFields): Promise<void> {
-    const p = id ? await this.api.updateProvider(id, f) : await this.api.createProvider(f);
+    // Only the fields: the form of an existing provider starts from the whole object, and the
+    // hub refuses its `id`, `workers` and times.
+    const fields: ProviderFields = { name: f.name, label: f.label, base_url: f.base_url, model: f.model };
+    if (f.context_tokens !== undefined) fields.context_tokens = f.context_tokens;
+    const p = id ? await this.api.updateProvider(id, fields) : await this.api.createProvider(fields);
     this.providers = [...this.providers.filter((x) => x.id !== p.id), p].sort((a, b) => a.label.localeCompare(b.label));
     // Its sessions show the new label after they are fetched again.
     if (id) await this.refreshSessions().catch(() => {});

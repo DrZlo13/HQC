@@ -378,6 +378,16 @@ it('adds a model provider in "Settings" and lists the workers that allow it', as
   expect(row.textContent).toContain('qwen3.8-27b · http://192.168.1.229:8082');
   expect(row.querySelector('.provider-workers')!.textContent).toMatch(/^on /);
   expect(app.providers.map((p) => p.name)).toEqual(['qwen-local']);
+
+  // Edited: the form starts from the whole provider, and only its fields go to the hub.
+  row.querySelector<HTMLButtonElement>('.btn-edit-provider')!.click();
+  await until('the edit form', () => $('.provider-form'));
+  input('provider_base_url').value = 'http://192.168.1.229:8083';
+  input('provider_base_url').dispatchEvent(new win.Event('input', { bubbles: true }) as unknown as Event);
+  await new Promise((r) => setTimeout(r, 10));
+  $<HTMLButtonElement>('.btn-save-provider')!.click();
+  await until('the edited provider', () => app.providers[0]?.base_url === 'http://192.168.1.229:8083');
+  expect($('.provider-form')).toBeNull();
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

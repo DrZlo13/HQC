@@ -550,6 +550,9 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   // the model menus offer them.
   const providers = new Map();
   const providerFields = (body) => {
+    // As the hub's `ProviderRequest`: no other field.
+    const extra = Object.keys(body ?? {}).filter((k) => !['name', 'label', 'base_url', 'model', 'context_tokens'].includes(k));
+    if (extra.length) throw fail(422, 'unprocessable', `unknown field \`${extra[0]}\``);
     const f = { name: String(body?.name ?? '').trim(), label: String(body?.label ?? '').trim(), base_url: String(body?.base_url ?? '').trim().replace(/\/+$/, ''), model: String(body?.model ?? '').trim() };
     if (!/^[A-Za-z0-9_-]+$/.test(f.name) || !f.label || !/^https?:\/\//.test(f.base_url) || !f.model) throw fail(400, 'bad_request', 'name, label, base_url and model are needed');
     if (body?.context_tokens !== undefined) f.context_tokens = body.context_tokens;

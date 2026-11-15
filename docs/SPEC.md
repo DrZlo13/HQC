@@ -2334,6 +2334,14 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   records the spawner (`spawned_by`, §3); spawns are limited per chain and per owner and
   hour (§20, `limit_exceeded`). A worker that is offline gets the session when it connects,
   as for the API.
+  Since 0.144: `hqc_spawn(project, workspace?, runtime?, model?, provider?, prompt, isolation?,
+  branch?)`: `provider` — a provider of the owner by its name (§3 Provider), which the new
+  session's worker must allow (else `invalid_args`, as for an unknown name or `model` and
+  `provider` together); without `model` and `provider` the new session takes the caller's model
+  and the caller's provider, and with a workspace whose machine does not allow that provider it
+  runs on the runtime's own endpoint instead of failing the call. So an agent hands a part of its
+  work to another model as a session of its own (a subagent of a process runs on that process's
+  endpoint, §8.1).
   Since 0.61 (T47): `hqc_spawn(project, workspace?, runtime?, model?, prompt, isolation?,
   branch?)`. `isolation: "worktree"` (the only value; another is `invalid_args`, as is
   `branch` without isolation) puts the new session in an `ephemeral` worktree of its own (§3
@@ -5138,7 +5146,7 @@ session object's `agent.provider`; §5.3 `session.start.provider`, §5.4 `hello.
 by its name with the same `base_url` and keeps the key, the hub keeps the description in one
 place; §8.1 the CLI's variables for a provider, the worker's own Anthropic credentials left out,
 and a session without a provider exactly as before (an owner's gateway in the worker's
-environment keeps working); §4 `system provider_refused`; §6 client layout: "Models" in Settings,
+environment keeps working); §4 `system provider_refused`; §7 `hqc_spawn(provider?)`, a caller's provider passed on; §6 client layout: "Models" in Settings,
 providers in the model menus, the header without cost. Checked end to end on 2026-11-15:
 Claude Code over `qwen3.8-27b` through gpu-arbiter's `/v1/messages` (tool calls, streaming, the
 prefix cache, auto mode's classifier). The pool of subscriptions of issue #43 is left out:

@@ -176,6 +176,8 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         permission_mode: crate::permissions::PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     }
 }
@@ -931,6 +933,107 @@ async fn command_line_carries_permissions() {
 /// T43 (SPEC §14): a session in a bound folder gets its environment's merged rules in
 /// `--settings`, its `env` on top of the child allowlist, and no `--strict-mcp-config` with
 /// `allow_local_mcp`; a session elsewhere on the same worker gets none of it.
+/// SPEC 0.144: a provider's endpoint, its key and its one model reach the CLI on top of the
+/// environment's variables, and the worker's own Anthropic credentials do not; a session
+/// without a provider gets the environment as it is, a gateway's `ANTHROPIC_BASE_URL` too.
+#[tokio::test]
+async fn command_line_of_a_provider() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let cfg = crate::config::Config::parse(&format!(
+        r#"hub_url = "https://h"
+allowed_roots = [{root:?}]
+[environments.gw]
+env = {{ ANTHROPIC_BASE_URL = "http://gw.local:8787", ANTHROPIC_API_KEY = "sk-ant-own" }}
+[[env_bindings]]
+path = "{}"
+environment = "gw"
+"#,
+        root.display()
+    ))
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let claude = ScriptedClaude::new("");
+    let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
+    let a = ClaudeCodeAdapter {
+        session_id: Uuid::nil(),
+        opts: factory.opts.clone(),
+        spawner: factory.spawner.clone(),
+        events: mpsc::channel(1).0,
+        proc: None,
+    };
+    let var = |env: &[(String, String)], k: &str| {
+        env.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone())
+    };
+    let model = |args: &[String]| {
+        let i = args.iter().position(|a| a == "--model")?;
+        Some(args[i + 1].clone())
+    };
+    let mut s = spec(Uuid::now_v7(), &root, Uuid::new_v4());
+    s.environment = cfg.environment(&s.workspace);
+    s.model = Some("claude-opus-5-5".into());
+
+    // Without a provider: the environment's gateway and key, the session's model.
+    let plain = a.command(&s, &Uuid::nil(), Launch::New, None);
+    assert_eq!(
+        var(&plain.env, "ANTHROPIC_BASE_URL").as_deref(),
+        Some("http://gw.local:8787")
+    );
+    assert_eq!(
+        var(&plain.env, "ANTHROPIC_API_KEY").as_deref(),
+        Some("sk-ant-own")
+    );
+    assert_eq!(var(&plain.env, "ANTHROPIC_MODEL"), None);
+    assert_eq!(model(&plain.args).as_deref(), Some("claude-opus-5-5"));
+
+    s.provider = Some(crate::config::SessionProvider {
+        name: "qwen-local".into(),
+        base_url: "http://192.168.1.229:8082".into(),
+        model: "qwen3.8-27b".into(),
+        context_tokens: Some(200_000),
+        api_key: None,
+    });
+    let on = a.command(&s, &Uuid::nil(), Launch::New, None);
+    assert_eq!(
+        var(&on.env, "ANTHROPIC_BASE_URL").as_deref(),
+        Some("http://192.168.1.229:8082")
+    );
+    assert_eq!(
+        var(&on.env, "ANTHROPIC_API_KEY"),
+        None,
+        "the worker's key stays"
+    );
+    assert_eq!(var(&on.env, "ANTHROPIC_AUTH_TOKEN").as_deref(), Some("hqc"));
+    for k in [
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ] {
+        assert_eq!(var(&on.env, k).as_deref(), Some("qwen3.8-27b"), "{k}");
+    }
+    assert_eq!(
+        var(&on.env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS").as_deref(),
+        Some("200000")
+    );
+    assert_eq!(model(&on.args).as_deref(), Some("qwen3.8-27b"));
+    // Each variable once.
+    let mut names: Vec<&str> = on.env.iter().map(|(k, _)| k.as_str()).collect();
+    let n = names.len();
+    names.dedup();
+    assert_eq!(names.len(), n);
+
+    s.provider.as_mut().unwrap().api_key = Some(crate::token::Secret::new("sk-zai"));
+    let keyed = a.command(&s, &Uuid::nil(), Launch::New, None);
+    assert_eq!(
+        var(&keyed.env, "ANTHROPIC_AUTH_TOKEN").as_deref(),
+        Some("sk-zai")
+    );
+}
+
 #[tokio::test]
 async fn command_line_follows_the_environment() {
     let root = tempfile::tempdir().unwrap();

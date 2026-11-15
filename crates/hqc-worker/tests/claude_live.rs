@@ -132,6 +132,8 @@ async fn live_repo_settings_ignored() {
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -265,6 +267,8 @@ async fn live_environment_ssh() {
                 permission_mode: PermissionMode::Ask,
                 folder_rules: None,
                 has_history: false,
+                provider: None,
+                provider_refused: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -489,6 +493,8 @@ async fn live_environment_ssh_keys() {
                 permission_mode: PermissionMode::Ask,
                 folder_rules: None,
                 has_history: false,
+                provider: None,
+                provider_refused: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -633,6 +639,8 @@ async fn live_folder_rules() {
         permission_mode: PermissionMode::Ask,
         folder_rules: Some(rules),
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -734,6 +742,8 @@ async fn live_permission_mode_switch() {
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -884,6 +894,8 @@ async fn live_bash_turn_with_approval() {
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1120,6 +1132,8 @@ async fn live_permission_policy() {
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1250,6 +1264,8 @@ async fn live_ai_title() {
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1430,6 +1446,8 @@ async fn live_input_joins_turn() {
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1578,6 +1596,8 @@ async fn live_move_resumes_in_the_new_folder() {
         permission_mode: PermissionMode::Ask,
         folder_rules: None,
         has_history: false,
+        provider: None,
+        provider_refused: None,
         fork: None,
     };
     let input = |text: &str| SessionInput {

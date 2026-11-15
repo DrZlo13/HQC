@@ -65,7 +65,8 @@
 //! - Model: `session.model` switches a running agent at once, mid-turn too
 //!   ([`Adapter::set_model`]); `null` (the runtime's default) reaches it at its next start,
 //!   as any model reaches a stopped one. A `session.start` for a running agent with another
-//!   model does the same.
+//!   model does the same. A session on a provider (SPEC 0.144) keeps the provider's model:
+//!   the hub changes a provider with a restart.
 //! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
 //!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`]) is killed, the
 //!   next input resumes it. A reconnect and a holder report (`Cmd::Resync`, `Cmd::Held`) are
@@ -1292,6 +1293,12 @@ impl Session {
     /// until then too.
     async fn switch_model(&mut self, model: Option<String>) {
         if self.spec.model == model {
+            return;
+        }
+        // A provider has one model (SPEC §8.1): a Claude model name would go to its endpoint.
+        if let Some(p) = &self.spec.provider {
+            tracing::info!(session_id = %self.id, ?model, provider = %p.name, "session.model ignored: the session runs on a provider");
+            self.spec.model = model;
             return;
         }
         tracing::info!(session_id = %self.id, ?model, "model switched");

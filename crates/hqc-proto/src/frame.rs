@@ -853,6 +853,10 @@ pub struct Hello {
     pub share_local_models: bool,
     #[serde(default)]
     pub local_models: Vec<serde_json::Value>,
+    /// The model providers `worker.toml` allows (`[providers.<name>]`, since SPEC 0.144):
+    /// their names only, never `base_url` or a key. Absent — none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
     /// Fingerprint of the machine (T21, SPEC §5.1): hex sha256 of a stable machine id with
     /// the salt `hqc`; the id itself never leaves the machine. Absent from older workers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1097,6 +1101,28 @@ pub struct SessionStart {
     /// has none (`system transcript_missing`). Absent when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_history: bool,
+    /// Since SPEC 0.144: the session's model provider, as the hub describes it ([`Provider`]).
+    /// The worker runs it only if its `worker.toml` allows the name with the same `base_url`;
+    /// absent — the runtime's own endpoint, the CLI's environment as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+}
+
+/// A model provider (SPEC §3 Provider, since 0.144): an Anthropic-compatible endpoint with one
+/// model behind it. Nothing in it is secret; a key, if the endpoint needs one, is only in the
+/// worker's `worker.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Provider {
+    /// The owner's name of it, the `[providers.<name>]` a worker allows.
+    pub name: String,
+    /// The endpoint's root (`…/v1/messages` is under it), as `ANTHROPIC_BASE_URL` takes it.
+    pub base_url: String,
+    /// The model every model name of the runtime goes to.
+    pub model: String,
+    /// The model's context window, for the runtime's compaction. Absent — the runtime's own
+    /// assumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
 }
 
 /// Usage limits of the worker's account (SPEC §5.4 `worker.limits`): Claude Code's

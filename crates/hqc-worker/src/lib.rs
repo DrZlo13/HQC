@@ -108,6 +108,13 @@ impl Worker {
             allow_foreign_sessions: self.config.allow_foreign_sessions,
             share_local_models: false,
             local_models: vec![],
+            // Names only, never `base_url` or a key (SPEC §14).
+            providers: self
+                .config
+                .providers
+                .iter()
+                .map(|p| p.name.clone())
+                .collect(),
             machine_id: self.machine_id.clone(),
         }
     }

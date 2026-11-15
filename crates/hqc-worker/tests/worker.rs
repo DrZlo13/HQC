@@ -1914,7 +1914,8 @@ async fn environments_in_hello_and_inspect() {
         "{}[environments.infra]\nenv = {{ GITHUB_TOKEN = \"ghp_t43_secret\" }}\n\
          [environments.infra.permissions]\nunblock = [\"Bash(ssh:*)\"]\n\
          allow = [\"Bash(ssh debian@192.168.1.20:*)\"]\n\
-         [[env_bindings]]\npath = {ws:?}\nenvironment = \"infra\"\n",
+         [[env_bindings]]\npath = {ws:?}\nenvironment = \"infra\"\n\
+         [providers.zai]\nbase_url = \"https://api.z.ai/api/anthropic\"\napi_key = \"sk-zai-secret\"\n",
         env.config_toml(&hub.url())
     ))
     .unwrap();
@@ -1933,6 +1934,10 @@ async fn environments_in_hello_and_inspect() {
     );
     assert!(!hello.to_string().contains("ghp_t43_secret"));
     assert!(!hello.to_string().contains("GITHUB_TOKEN"));
+    // SPEC 0.144: a provider by name only.
+    assert_eq!(p["providers"], json!(["zai"]));
+    assert!(!hello.to_string().contains("sk-zai-secret"));
+    assert!(!hello.to_string().contains("api.z.ai"));
 
     let mut start = env.start_payload(Uuid::now_v7());
     start["environment"] = json!("default");

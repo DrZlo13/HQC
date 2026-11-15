@@ -852,6 +852,7 @@ async fn the_answer_goes_before_the_stop_at_shutdown() {
             allow_foreign_sessions: false,
             share_local_models: false,
             local_models: vec![],
+            providers: vec![],
             machine_id: None,
         };
         let conn = Connection::new(

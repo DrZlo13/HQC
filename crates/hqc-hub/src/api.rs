@@ -1659,7 +1659,10 @@ pub async fn input(
     Ok(reply(StatusCode::CREATED, &row))
 }
 
-/// Abort the current turn; open requests are cancelled with `stopped`.
+/// Abort the current turn. The hub's own open requests (a move, a secret) are cancelled with
+/// `stopped`. The runtime's (approvals, questions) are the worker's to close: it cancels those
+/// of the interrupted turn when the turn ends, and a background subagent's stay open, since the
+/// subagent goes on (SPEC §8.1, since 0.137). With no worker connected the hub cancels them too.
 pub async fn stop(
     State(app): State<AppState>,
     user: CurrentUser,
@@ -1667,8 +1670,17 @@ pub async fn stop(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
-    requests::cancel_open_of_session(&app, id, CancelReason::Stopped).await?;
+    let open = db::open_requests_of_session(&app.db, id).await?;
+    let runtimes = |kind: &str| matches!(kind, "approval" | "clarify");
+    for p in open.iter().filter(|p| !runtimes(&p.kind)) {
+        requests::cancel(&app, p, CancelReason::Stopped).await?;
+    }
     let sent = send_to_worker(&app, &s, HubFrame::SessionStop { session_id: id });
+    if !sent {
+        for p in open.iter().filter(|p| runtimes(&p.kind)) {
+            requests::cancel(&app, p, CancelReason::Stopped).await?;
+        }
+    }
     Ok(Json(json!({ "sent": sent })))
 }
 

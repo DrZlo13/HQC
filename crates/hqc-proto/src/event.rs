@@ -176,8 +176,8 @@ pub struct SecretAsk {
 }
 
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
-/// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
-/// `kind`.
+/// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id`,
+/// `kind` and `stoppable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSubagent {
     pub task_id: String,

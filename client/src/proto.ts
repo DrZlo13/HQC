@@ -129,8 +129,8 @@ export interface AgentDelta {
   reset?: boolean;
 }
 /** One subagent the agent runs now (SPEC §4, since 0.101), or (since 0.127) one background
- *  shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
- *  `kind`. */
+ *  shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id`,
+ *  `kind` and `stoppable`. */
 export interface LiveSubagent {
   task_id: string;
   /** Its task. */
@@ -146,8 +146,8 @@ export interface LiveSubagent {
   call_id?: string;
   /** A subagent or a background command (since 0.141); absent from an older worker. */
   kind?: LiveKind;
-  /** Since 0.137: it can be stopped alone (`POST .../tasks/{task_id}/stop`), a subagent's row;
-   *  absent on a command's row and from an older worker. */
+  /** Since 0.137: it can be stopped alone (`POST .../tasks/{task_id}/stop`), a subagent's row
+   *  and a command's; absent from an older worker. */
   stoppable?: boolean;
 }
 export const LIVE_KINDS = ['agent', 'command'] as const;

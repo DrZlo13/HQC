@@ -646,9 +646,10 @@ async fn approval_answer_and_expiry() {
     hub.finish().await;
 }
 
-/// Clarify: answer by id; stop cancels an open one with `clarify.response {answers: {}}`.
+/// Clarify: answer by id; after Stop an open one is the worker's to close, no empty answer goes
+/// to it, and the worker's `clarify.cancel` closes it.
 #[tokio::test]
-async fn clarify_answer_and_cancel_on_stop() {
+async fn clarify_answer_and_cancel_after_stop() {
     let hub = TestHub::start().await;
     let (_, token) = hub.enroll("home-mac").await;
     let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
@@ -684,15 +685,17 @@ async fn clarify_answer_and_cancel_on_stop() {
         .post(&format!("/api/sessions/{sid}/stop"), json!({}))
         .await;
     assert_eq!((s, r["sent"].as_bool()), (200, Some(true)));
-    let f = w.expect("clarify.response").await;
-    assert_eq!(
-        f["payload"],
-        json!({"session_id": sid, "request_id": "c-2", "answers": {}})
-    );
     w.expect("session.stop").await;
+    w.event(agent_event(
+        &sid,
+        "clarify.cancel",
+        json!({"request_id": "c-2", "reason": "stopped"}),
+    ))
+    .await;
     let events = hub.events(&sid).await;
     let cancel = events.last().unwrap();
     assert_eq!(cancel["type"], "clarify.cancel");
+    assert_eq!(cancel["author"]["kind"], "agent");
     assert_eq!(
         cancel["payload"],
         json!({"request_id": "c-2", "reason": "stopped"})
@@ -702,7 +705,7 @@ async fn clarify_answer_and_cancel_on_stop() {
 
 /// A worker's cancel (the Claude Code adapter's for a request still open when the turn ends)
 /// closes its request; sent again, it gets its `seq`. One for a request the hub closed already
-/// (stop cancels first) is not stored a second time.
+/// (a stopped process's, which the hub cancels) is not stored a second time.
 #[tokio::test]
 async fn a_workers_cancel_closes_its_request_once() {
     let hub = TestHub::start().await;
@@ -737,12 +740,13 @@ async fn a_workers_cancel_closes_its_request_once() {
         approval_payload("req-2", far),
     ))
     .await;
-    let (s, _) = hub
-        .post(&format!("/api/sessions/{sid}/stop"), json!({}))
-        .await;
-    assert_eq!(s, 200);
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "stopped", "locked_by": "none"}),
+    )
+    .await;
+    w.expect("ack").await;
     w.expect("approval.response").await;
-    w.expect("session.stop").await;
     let ack = w
         .event(agent_event(
             &sid,
@@ -769,6 +773,67 @@ async fn a_workers_cancel_closes_its_request_once() {
             (json!("req-1"), json!("agent")),
             (json!("req-2"), json!("system"))
         ]
+    );
+    hub.finish().await;
+}
+
+/// SPEC §8.1 (0.137): Stop spares background subagents, so it leaves the runtime's open
+/// requests to the worker, which cancels those of the interrupted turn and keeps a background
+/// subagent's: nothing answers this one, and the owner still can. With no worker connected the
+/// hub cancels them, as before.
+#[tokio::test]
+async fn stop_leaves_the_runtimes_requests_to_the_worker() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("stop").await;
+    ack_start(&mut w, &sid).await;
+    let far = "2099-01-01T00:00:00Z";
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-1", far),
+    ))
+    .await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/stop"), json!({}))
+        .await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(true)));
+    let stop = w.expect("session.stop").await;
+    w.reply(&stop["id"], "ack", json!({})).await;
+    w.expect_silence(Duration::from_millis(300)).await;
+    let (s, v) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/req-1"),
+            json!({"option_id": "allow"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let f = w.expect("approval.response").await;
+    assert_eq!(f["payload"]["option_id"], "allow");
+    w.reply(&f["id"], "ack", json!({})).await;
+
+    w.event(agent_event(
+        &sid,
+        "approval.request",
+        approval_payload("req-2", far),
+    ))
+    .await;
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (s, r) = hub
+        .post(&format!("/api/sessions/{sid}/stop"), json!({}))
+        .await;
+    assert_eq!((s, r["sent"].as_bool()), (200, Some(false)));
+    let events = hub.events(&sid).await;
+    let cancel = events.last().unwrap();
+    assert_eq!(
+        (cancel["type"].as_str(), &cancel["payload"]),
+        (
+            Some("approval.cancel"),
+            &json!({"request_id": "req-2", "reason": "stopped"})
+        )
     );
     hub.finish().await;
 }

@@ -1054,7 +1054,7 @@ MCP calls (worker → hub → worker):
   as text with a deny option, §10.1),
   `clarify.response` {session_id, request_id, answers}; there is no `by` field in the frames, it
   is only in the events. There is no `approval.cancel` frame: when cancelling a request itself
-  (timeout, `stop`, archiving), the hub writes an `approval.cancel` event and sends the worker
+  (timeout, archiving, `stop` with no worker connected, §10.1), the hub writes an `approval.cancel` event and sends the worker
   an `approval.response` with the `option_id` of the `canonical: deny` option, so that the
   adapter closes the request in the runtime. Likewise for `clarify`: the hub writes a
   `clarify.cancel` event and sends `clarify.response` with `answers: {}` — an empty object means
@@ -4214,12 +4214,15 @@ The first answer wins: it closes the request, every device sees the `approval.re
 event, and the client removes the buttons. A second answer (from another device) gets
 `409 request_closed`; no cancel event is written in that case. Expiry, `POST /stop`, a worker
 restart and archiving produce `approval.cancel`, and the client removes the buttons.
-All these cancellations are written by the hub: on expiry, `stop` and archiving it writes the
-`approval.cancel` event and sends the worker an `approval.response` frame with the
-`canonical: deny` option, so the adapter closes the request in the runtime (§5.3; since 0.69
-that deny also ends the runtime's turn, §8.1); on a worker restart, only the event (§5.2). On `POST /stop` the hub first cancels open requests with
-`stopped`, then sends `session.stop`; the adapter and the worker's supervisor do not emit a
-cancel on `session.stop`. Since 0.69 the Claude Code adapter cancels a request of the main agent
+On expiry and archiving the hub writes the `approval.cancel` event and sends the worker an
+`approval.response` frame with the `canonical: deny` option, so the adapter closes the request in
+the runtime (§5.3; since 0.69 that deny also ends the runtime's turn, §8.1); on a worker restart,
+only the event (§5.2). On `POST /stop` the hub cancels with `stopped` the requests it holds itself
+(a move, §7; a secret), then sends `session.stop`. Since 0.137 it leaves the runtime's approvals
+and questions to a connected worker: the adapter cancels those of the interrupted turn when the
+turn ends (below), and a background subagent's stay open, as the subagent goes on (§8.1); with no
+worker connected the hub cancels them as on expiry. The adapter and the worker's supervisor do
+not emit a cancel on `session.stop` itself. Since 0.69 the Claude Code adapter cancels a request of the main agent
 or of a foreground subagent still open when the runtime's turn ends with
 `approval.cancel`/`clarify.cancel {stopped}`: after "No" to one of two parallel calls the CLI
 ends the turn and no longer waits for the other (before, the adapter forgot it and the card
@@ -4236,7 +4239,8 @@ turn's `result`; a notification without the subagent's report that comes while t
 cancel waits with it. The hub stores
 a worker's cancel only if it closes an open request, in the transaction that closes it, so a
 cancel that fails to be stored leaves the request open for the worker's resend: one it closed
-already (`stop`, an answer that crossed the cancel) keeps its own event. The hub cancels an open `clarify` the same way: a
+already (a stopped process's, `stop` with no worker connected, an answer that crossed the cancel)
+keeps its own event. The hub cancels an open `clarify` the same way: a
 `clarify.cancel` event and a `clarify.response` frame with `answers: {}`; the adapter answers
 the runtime `deny`, and the turn continues without answers. Since 0.137 a `clarify` cancelled
 with `worker_restart` or `stopped` keeps its card open in its session's feed while no
@@ -5524,7 +5528,11 @@ ended: the reason went into `status idle` `detail`, which the client draws only 
 " with its `terminal_reason` (the subtype without one), the API's status and its `errors`, cut to
 300 bytes, and `status idle` carries no `detail`. A `result` with no tokens gives no `usage` line
 whatever its `num_turns` (0.115 kept it for `num_turns` other than 0): a reply interrupted while it
-streamed had an empty `0 → 0 tokens` line under it.
+streamed had an empty `0 → 0 tokens` line under it. §5.3, §10.1: `POST /stop` cancelled every open
+request of the session, so a background subagent that went on got "No" to its permission request
+and empty answers to its questions; with a worker connected it now cancels only the hub's own (a
+move, a secret), and the worker cancels the requests of the interrupted turn when it ends, as it
+did before.
 
 §4, §5.3, §6, §8.1: with Stop sparing them, nothing in hqc stopped a runaway background subagent
 or command but archiving the session. As in the VS Code tab, a subagent's line above the input, and a

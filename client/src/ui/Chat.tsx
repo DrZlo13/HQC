@@ -409,6 +409,16 @@ export function Chat({
   const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} />;
   const agents = agentsLabel(info?.subagents);
   const conn = app.offline && <span class="conn-lost">offline</span>;
+  // In the meta row on a computer; on a phone, where the row has no room for the address beside
+  // a running session's buttons, the header's last line, under the buttons too.
+  const spawned = info?.spawned_by && (
+    <span class="chat-spawned">
+      started by{' '}
+      <a class="mono" href={`#/s/${info.spawned_by.session_id}`}>
+        {info.spawned_by.address}
+      </a>
+    </span>
+  );
 
   // T50: archived — read-only, no input; restore and delete are on the archive's rows.
   const archived = info?.archived ?? false;
@@ -466,14 +476,7 @@ export function Chat({
             )}
             {!system && info && <PermissionMark info={info} />}
             {system && <span class="chat-system-note">the worker's service session</span>}
-            {info?.spawned_by && (
-              <span class="chat-spawned">
-                started by{' '}
-                <a class="mono" href={`#/s/${info.spawned_by.session_id}`}>
-                  {info.spawned_by.address}
-                </a>
-              </span>
-            )}
+            {!phone && spawned}
             {phone ? (
               // Held elsewhere, the machine is in the pill already.
               <span class="chat-where mono">{[!locked && worker, path && homePath(path).split('/').pop()].filter(Boolean).join(' · ')}</span>
@@ -575,6 +578,7 @@ export function Chat({
             providers={app.providersFor(info.worker_id)}
           />
         )}
+        {phone && spawned}
       </header>
       {archived && info && (
         <div class="archived-band stripes">

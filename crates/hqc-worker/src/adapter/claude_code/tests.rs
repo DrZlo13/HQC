@@ -182,9 +182,12 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
 
 impl Harness {
     async fn start(stream: &str, claude_session: Uuid) -> Self {
+        Self::start_with(ScriptedClaude::new(stream), claude_session).await
+    }
+
+    async fn start_with(claude: ScriptedClaude, claude_session: Uuid) -> Self {
         let work = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let claude = ScriptedClaude::new(stream);
         let factory = ClaudeCodeAdapters::new(options(config.path()), Arc::new(claude.clone()));
         let session_id = Uuid::now_v7();
         let spec = spec(session_id, work.path(), claude_session);
@@ -1577,6 +1580,50 @@ async fn stop_interrupts_then_falls_back_to_sigint() {
         .is_err());
     h.adapter.kill().await.unwrap();
     assert_eq!(h.claude.signals(), [Sig::Interrupt]);
+}
+
+/// A process stuck in a tool call that SIGINT does not reach: after another `stop_grace` the
+/// group gets SIGTERM, the process dies, and Stop has stopped the session.
+#[tokio::test]
+async fn stop_escalates_to_sigterm_when_sigint_does_not_end_the_turn() {
+    let fx = fixture!("permission-allow");
+    let stream: String = fx
+        .stream
+        .lines()
+        .filter(|l| l.contains("\"isReplay\": true") || l.contains("\"text_delta\""))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let claude = ScriptedClaude::new(&stream).ignoring(&[Sig::Interrupt]);
+    let mut h = Harness::start_with(claude, fx.claude_session()).await;
+    let input_id = Uuid::now_v7();
+    h.adapter
+        .input(&SessionInput {
+            session_id: h.session_id,
+            event_id: input_id,
+            text: "hi".into(),
+            artifact_ids: vec![],
+            peer_prefix: vec![],
+            peer: None,
+            permission_cap: None,
+            schedule_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.next().await,
+        AdapterEvent::InputAccepted { event_id: input_id }
+    );
+    assert_eq!(shape(&[h.next().await]), ["delta"]);
+    h.adapter.stop().await.unwrap();
+    let mut last = h.next().await;
+    while matches!(last, AdapterEvent::Event(_)) {
+        last = h.next().await;
+    }
+    assert!(
+        matches!(last, AdapterEvent::Exited { error: Some(_) }),
+        "{last:?}"
+    );
+    assert_eq!(h.claude.signals(), [Sig::Interrupt, Sig::Terminate]);
 }
 
 #[tokio::test]

@@ -1,8 +1,8 @@
 //! A stand-in for `claude` in tests: plays a captured stream-json stdout over in-memory
 //! pipes. It waits for the first stdin line (the prompt) before playing, and after each
 //! `control_request` waits for one more stdin line (the answer), like the real CLI. After
-//! the script it stays "running" until signalled. Every stdin line, command and signal is
-//! recorded.
+//! the script it stays "running" until signalled (a signal it [`ScriptedClaude::ignoring`]
+//! is recorded and survived). Every stdin line, command and signal is recorded.
 
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,8 @@ struct State {
 pub struct ScriptedClaude {
     script: Arc<Vec<String>>,
     state: Arc<Mutex<State>>,
+    /// Signals the process survives, like a CLI stuck in a tool call that ignores SIGINT.
+    ignored: Arc<Vec<Sig>>,
 }
 
 impl ScriptedClaude {
@@ -38,7 +40,14 @@ impl ScriptedClaude {
                     .collect(),
             ),
             state: Arc::default(),
+            ignored: Arc::default(),
         }
+    }
+
+    /// The same, surviving `signals`.
+    pub fn ignoring(mut self, signals: &[Sig]) -> Self {
+        self.ignored = Arc::new(signals.to_vec());
+        self
     }
 
     pub fn stdin(&self) -> Vec<Value> {
@@ -111,13 +120,16 @@ impl Spawner for ScriptedClaude {
             // Dropping `script_out` closes stdout.
         });
         let state = self.state.clone();
+        let ignored = self.ignored.clone();
         let signal = Box::new(move |s: Sig| {
             state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .signals
                 .push(s);
-            let _ = sig_tx.send(Some(s));
+            if !ignored.contains(&s) {
+                let _ = sig_tx.send(Some(s));
+            }
             Ok(())
         });
         let mut rx = sig_rx;

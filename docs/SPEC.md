@@ -1086,10 +1086,12 @@ MCP calls (worker → hub → worker):
   truncated}` (since 0.175) — what subagent `task_id` of `subagents.live` (§4) has done, for the
   history the client opens under its line (§6); nothing is stored. `task_id` is 1 to 64 bytes of
   `[A-Za-z0-9_-]`, since the worker reads a file by it, else `error {invalid_frame}`. The worker
-  reads the subagent's transcript (Claude Code: §8.1) and answers with the newest events it maps
+  reads the subagent's transcript (Claude Code: §8.1), only its last 4 MiB, since one runs to
+  100 MB and the client asks every 2 s, and answers with the newest events it maps
   from it, at most 200 that take at most 512 KiB as JSON together (an event over that alone is
   left out), so the reply stays under the hub's 1 MiB per message (§20), oldest first, without
-  `seq`, in the session and by its agent, and `truncated` when any was left out; a subagent
+  `seq`, in the session and by its agent, and `truncated` when any was left out or the start of
+  the file was not read; a subagent
   without a transcript, and a runtime that keeps none, has no events. A session the worker has not started is `error {unknown_session}`. As for `fs.stat`,
   `request_id` equals the frame's `id` and the hub waits 10 s for the answer.
 - `session.steer` {session_id, text} — intervene in a turn without interrupting it, if the
@@ -2441,14 +2443,16 @@ message opens the schedules of the chat ("Schedules" in the menu), and goes when
 is sent or it is paused or deleted (a recurring one then shows its next run). The same one-line
 ellipsis as the other lines, on a computer and on a
 phone; a dropped socket clears these lines too until the next subscribe.
-Since 0.175 a subagent's line (its `call_id` names an `Agent` or `Task` call of the feed; a
-command's line is none) is, but for its stop button, a button that opens under it what the
-subagent has done (`GET .../subagents/{task_id}/history`), drawn with the feed's own rows
-(thinking, tool calls with their results, text), newest at the bottom, in a box at most 40 % of
-the window's height that scrolls, opens at its bottom and stays there while the user has not
-scrolled up; "Earlier steps are not shown." above it when `truncated`. While it is open it is
-fetched again 2 s after each answer; a second click closes it, one is open at a time, and it goes
-with its line when the subagent ends.
+Since 0.175 a subagent's line (a row whose `kind` is `agent`, or none this client knows,
+whatever the feed holds: a chat loads only its latest events, and a subagent's subagent has no
+call there; a command's, a Monitor's, a wakeup's and a cron job's line is none) is, but for its
+stop button, a button that opens under it what the subagent has done (`GET
+.../subagents/{task_id}/history`), drawn with the feed's own rows (thinking, tool calls with their
+results, text), newest at the bottom, in a box at most 40 % of the window's height that scrolls,
+opens at its bottom and stays there while the user has not scrolled up; "Earlier steps are not
+shown." above it when `truncated`. While it is open it is fetched again 2 s after each answer,
+not while the page is hidden, and at once when it is shown again; a second click closes it, one
+is open at a time, and it goes with its line when the subagent ends.
 The same on a phone, as wide as the block.
 `background_tasks` (since 0.104): the background tasks the runtime lists for the agent now,
 from `session.state` (§5.4); absent — 0. A command the agent left running in the background
@@ -4136,7 +4140,10 @@ and tool calls of its `assistant` records and the results of its calls of its `u
 `isSidechain`), with the event ids of §3 and the mirror's caps on previews. Its task, the text of
 its first `user` record, gives none, nor does a text given to it later (a SendMessage that
 continues it) or injected by the CLI, nor the CLI's request records; a file that is not there
-gives none. The reply keeps the newest of them, at most 200 that take at most 512 KiB as JSON
+gives none. It is opened as `hqc_attach` opens one (§7): a symlink in its last component, or
+anything but a regular file (a FIFO would hang the read), gives none. Of a file over 4 MiB only
+the last 4 MiB are read, the line cut at their start left out, and the reply is `truncated`. The
+reply keeps the newest of them, at most 200 that take at most 512 KiB as JSON
 together; one over that alone is left out, and the ones before it are kept.
 Since 0.173 the worker reports what the main agent waits on as `session.state.activity` (§5.4),
 whenever it changes, a new thinking estimate at most once per 2 s (the CLI sends one with every
@@ -6502,12 +6509,19 @@ optional.
 
 §5.3, §6, §8.1: what a subagent did was not in the chat at all (the VS Code tab writes its steps
 into the feed, where they scroll away). A subagent's line above the input now opens, under it,
-its steps drawn with the feed's rows, fetched when asked and again every 2 s while it is open: the
+its steps drawn with the feed's rows, fetched when asked and again every 2 s while it is open and
+the page is not hidden: the
 new `GET /api/sessions/{id}/subagents/{task_id}/history` asks the worker with the new frame
-`session.subagent_history`, which reads the subagent's transcript and answers with its newest
+`session.subagent_history`, which reads the last 4 MiB of the subagent's transcript (one runs to
+100 MB), opened as `hqc_attach` opens a file (no symlink, no FIFO), and answers with its newest
 events (`{events[], truncated}`), at most 200 and 512 KiB as JSON, so that the reply never
-reaches the hub's 1 MiB per message, past which the hub drops the worker's link; stored nowhere. A worker before 0.175 does not know the frame
-(`error {invalid_frame}`, `400 invalid_path` to the client). No migration.
+reaches the hub's 1 MiB per message, past which the hub drops the worker's link; stored nowhere.
+§6: every row of `subagents.live` whose `kind` (§4, since 0.141) is `agent`, or none the client
+knows, is a subagent's and opens, also when the chat has not loaded its `Agent` call or it was
+started by a subagent; a command's, a Monitor's, a wakeup's and a cron job's (since 0.169) do not.
+A worker before 0.175 does not know the frame (`error {invalid_frame}`, `400 invalid_path` to the
+client), and one before 0.141 does not mark its commands, whose lines then open to that error
+too. No migration.
 
 ### 0.173 → 0.174 (the CLI's requests: only a person's, the reason, a withdrawal, an MCP server's; its results)
 §8.1: the Claude Code adapter answered a `can_use_tool` from a `session` rule or the folder's hqc

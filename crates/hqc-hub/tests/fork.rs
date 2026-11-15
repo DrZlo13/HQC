@@ -581,6 +581,13 @@ async fn a_fork_before_a_clear_cuts_the_transcript_before_it() {
     );
     line["author"] = json!({"kind": "system"});
     w.event(line).await;
+    // `/clear`'s own result ends its turn: no answer of the agent.
+    w.event(agent_event(
+        &sid,
+        "status",
+        json!({"state": "idle", "in_reply_to": m2["event_id"]}),
+    ))
+    .await;
     let cleared = uuid::Uuid::new_v4().to_string();
     for runtime in [runtime_of(&start), cleared.clone(), cleared.clone()] {
         w.send(

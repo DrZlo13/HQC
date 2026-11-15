@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.144, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.145, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1195,7 +1195,11 @@ MCP calls (worker → hub → worker):
   every following `session.state`, the hub applies it by the `title_source` rule (§3 Session),
   folding it to one line of up to 200 characters. `held_by` — the transcript's holder (§9.3): no
   field — the worker has no registry data, `null` — nobody, `{entrypoint, status}` — a live foreign
-  process.
+  process. The session's `updated_at`, by which the session lists are ordered (§6), does not
+  move on every `session.state` (since 0.145): `process_state`, `runtime_session_id` and
+  `locked_by` move it only when they change what the hub keeps (`locked_by` after §9.3), a new
+  `title` or holder as before; the `session.state` the worker sends again for every session
+  after `hello` repeats them and keeps it, unless something changed while the worker was away.
   **Holder report** — a `session.state` with a nil `session_id`, the transcript's
   `runtime_session_id` and `held_by` (`process_state: stopped`, `locked_by: none` — the hub does
   not read them): the hub looks the session up by worker and `runtime_session_id` (none — only
@@ -5135,6 +5139,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.144 → 0.145 (a reconnect does not reorder the session lists)
+§5.4: the hub set a session's `updated_at` on every `session.state`, and after `hello` the worker
+sends one for every session again, so a reconnect gave all of a worker's sessions the same time
+and the lists showed them in the order the frames came, not by their last activity (in one hub,
+100 sessions of a worker within 1.5 s after a network drop). Its `process_state`,
+`runtime_session_id` and `locked_by` now move `updated_at` only when one of them changes; a new
+runtime title or holder moves it as before.
 
 ### 0.143 → 0.144 (model providers, iteration 5)
 §19: iteration 5 is model providers, `docs/ITERATION-5.md`; the ACP adapter and Hermes move to

@@ -284,6 +284,10 @@ pub enum EventKind {
         /// permission request; since SPEC 0.161); absent when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         interrupted: bool,
+        /// The runtime's reply to a model refusal (`stop_reason: "refusal"`; since SPEC
+        /// 0.168); absent when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        refusal: bool,
     },
     #[serde(rename = "agent.thinking")]
     AgentThinking { text: String },

@@ -189,6 +189,7 @@ pub fn agent_message(session_id: Uuid, text: &str) -> Event {
             in_reply_to: None,
             runtime: false,
             interrupted: false,
+            refusal: false,
         },
     )
 }

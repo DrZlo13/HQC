@@ -202,6 +202,8 @@ async fn build_start(app: &AppState, s: &SessionRow) -> anyhow::Result<SessionSt
             Some(id) => db::provider(&app.db, id).await?.map(|p| p.spec()),
             None => None,
         },
+        // The worker runs it only if its worker.toml has `browser = true` (SPEC 0.148).
+        browser: s.browser,
     })
 }
 

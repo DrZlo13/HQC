@@ -155,6 +155,7 @@ pub async fn views(
                         .provider_id
                         .zip(a.provider_label.clone())
                         .map(|(id, label)| hqc_proto::api::ProviderRef { id, label }),
+                    browser: s.browser,
                 },
                 auto_approve: s.auto_approve,
                 wake_on_send: s.wake_on_send,

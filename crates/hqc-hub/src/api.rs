@@ -1235,6 +1235,10 @@ pub struct PatchSession {
         deserialize_with = "hqc_proto::frame::maybe_null::deserialize"
     )]
     pub provider_id: Option<Option<Uuid>>,
+    /// The owner's Chrome for the agent (SPEC 0.148), on a worker with `browser`; a change
+    /// restarts a running agent.
+    #[serde(default)]
+    pub browser: Option<bool>,
 }
 
 pub async fn patch_session(
@@ -1244,7 +1248,7 @@ pub async fn patch_session(
     Json(b): Json<PatchSession>,
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Manage).await?;
-    if s.system && (b.model.is_some() || b.provider_id.is_some()) {
+    if s.system && (b.model.is_some() || b.provider_id.is_some() || b.browser.is_some()) {
         return Err(ApiError::Conflict(
             "system_session",
             "the worker's service session has no agent".into(),
@@ -1315,6 +1319,41 @@ pub async fn patch_session(
             db::set_session_provider(&app.db, id, p).await?;
             // An environment cannot change in a running CLI: the agent starts again on the
             // new provider, its transcript resumed (SPEC 0.144).
+            let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
+            if s.process_state != "stopped" {
+                restart_agent(&app, &s).await;
+            }
+        }
+    }
+    if let Some(on) = b.browser {
+        if on {
+            let worker = match s.worker_id {
+                Some(w) => db::worker(&app.db, w).await?,
+                None => None,
+            };
+            match worker {
+                // The owner's own Chrome, on their own machine (SPEC §14).
+                Some(w) if w.owner_id == user.id && s.owner_id == user.id && w.browser => {}
+                Some(w) if w.owner_id == user.id && s.owner_id == user.id => {
+                    return Err(ApiError::Unprocessable(
+                        "browser_not_allowed",
+                        format!(
+                            "worker {} does not give a browser: add browser = true to its worker.toml",
+                            w.name
+                        ),
+                    ))
+                }
+                _ => {
+                    return Err(ApiError::Forbidden(
+                        "only the worker owner gives a session their browser".into(),
+                    ))
+                }
+            }
+        }
+        if on != s.browser {
+            db::set_session_browser(&app.db, id, on).await?;
+            // `--chrome` is a flag of the process: the agent starts again with it, its
+            // transcript resumed.
             let s = db::session(&app.db, id).await?.ok_or(ApiError::NotFound)?;
             if s.process_state != "stopped" {
                 restart_agent(&app, &s).await;
@@ -1906,6 +1945,7 @@ pub async fn workers(
                 "share_local_models": w.share_local_models,
                 "local_models": w.local_models,
                 "session_secrets": w.session_secrets,
+                "browser": w.browser,
                 "system_session_id": w.system_session_id,
                 "created_at": w.created_at,
             })

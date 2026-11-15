@@ -292,6 +292,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             // `the_activity_follows_the_stream` and `a_heartbeat_is_reported` look at them.
             AdapterEvent::Activity(_) | AdapterEvent::Heartbeat => continue,
             AdapterEvent::ModelKept(m) => format!("model_kept:{m}"),
+            AdapterEvent::ToolResult { .. } => "tool.result".into(),
             AdapterEvent::Event(e) => match &e.kind {
                 EventKind::AgentDelta { .. } => "delta".into(),
                 EventKind::AgentMessage { r#final, .. } => format!("agent.message:{final}"),
@@ -312,7 +313,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
 fn events(evs: &[AdapterEvent]) -> Vec<&Event> {
     evs.iter()
         .filter_map(|e| match e {
-            AdapterEvent::Event(e) => Some(e),
+            AdapterEvent::Event(e) | AdapterEvent::ToolResult { event: e, .. } => Some(e),
             _ => None,
         })
         .collect()
@@ -8839,4 +8840,148 @@ fn a_wakeup_is_reported_until_it_fires() {
         [None],
         "stopped"
     );
+}
+
+/// The `user` line of a tool result with `content`, and `tool_use_result` when given.
+fn tool_result_line(content: Value, tool_use_result: Option<Value>) -> String {
+    let mut v = json!({"type":"user","uuid":Uuid::new_v4(),"parent_tool_use_id":null,
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":content}]}});
+    if let Some(r) = tool_use_result {
+        v["tool_use_result"] = r;
+    }
+    v.to_string()
+}
+
+/// SPEC §8.1, 0.150: a result longer than its 4 KB preview goes with its whole text, at most
+/// its first 2 MiB, to be uploaded; a short one is an event as before.
+#[test]
+fn a_long_result_goes_with_its_whole_text() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let long = format!("{}é", "x".repeat(5000));
+    let got = emitted(core.on_line(&tool_result_line(json!(long), None)));
+    let [AdapterEvent::ToolResult { event, files }] = &got[..] else {
+        panic!("{got:?}");
+    };
+    let EventKind::ToolResult { result_preview, .. } = &event.kind else {
+        panic!("{event:?}");
+    };
+    assert_eq!(result_preview.len(), super::engine::PREVIEW_LIMIT);
+    assert_eq!(files.text.as_deref(), Some(long.as_str()));
+    assert!(files.images.is_empty());
+
+    let huge = "y".repeat(crate::adapter::FULL_RESULT_LIMIT + 10);
+    let got = emitted(core.on_line(&tool_result_line(json!(huge), None)));
+    let [AdapterEvent::ToolResult { files, .. }] = &got[..] else {
+        panic!("{got:?}");
+    };
+    assert_eq!(
+        files.text.as_deref(),
+        Some(&huge[..crate::adapter::FULL_RESULT_LIMIT])
+    );
+
+    let got = emitted(core.on_line(&tool_result_line(json!("short"), None)));
+    assert!(
+        matches!(&got[..], [AdapterEvent::Event(e)] if matches!(e.kind, EventKind::ToolResult { .. })),
+        "{got:?}"
+    );
+}
+
+/// SPEC §8.1, 0.150: an image of a result (a screenshot) goes with it decoded, with its media
+/// type; the preview keeps its `[image]`, and one that does not decode is left out.
+#[test]
+fn a_result_image_goes_with_it() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let content = json!([
+        {"type":"text","text":"Screenshot"},
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0K"}},
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"not base64!"}},
+    ]);
+    let got = emitted(core.on_line(&tool_result_line(content, None)));
+    let [AdapterEvent::ToolResult { event, files }] = &got[..] else {
+        panic!("{got:?}");
+    };
+    let EventKind::ToolResult { result_preview, .. } = &event.kind else {
+        panic!("{event:?}");
+    };
+    assert_eq!(result_preview, "Screenshot\n[image]\n[image]");
+    assert_eq!(files.text, None);
+    assert_eq!(
+        files.images,
+        [crate::adapter::ResultImage {
+            media_type: "image/png".into(),
+            data: b"\x89PNG\r\n".to_vec(),
+        }]
+    );
+}
+
+/// SPEC §8.1, 0.150: an `Agent` call's result is the subagent's report from `tool_use_result`
+/// (2.1.312), without the trailer the CLI adds to the `tool_result` for the model.
+#[test]
+fn an_agent_result_is_its_report() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let content = json!([
+        {"type":"text","text":"The nets are fine."},
+        {"type":"text","text":"agentId: a60dff5983122596e (use SendMessage with to: 'a60dff5983122596e', summary: '<5-10 word recap>' to continue this agent)\n<usage>subagent_tokens: 1200\ntool_uses: 3\nduration_ms: 4100</usage>"},
+    ]);
+    let report = json!({"status":"completed","agentId":"a60dff5983122596e","agentType":"Explore",
+        "content":[{"type":"text","text":"The nets are fine."}],"totalToolUseCount":3,
+        "totalDurationMs":4100,"totalTokens":1200,"prompt":"Check the nets"});
+    let got = events(&emitted(
+        core.on_line(&tool_result_line(content.clone(), Some(report))),
+    ))
+    .into_iter()
+    .cloned()
+    .collect::<Vec<_>>();
+    let [Event {
+        kind: EventKind::ToolResult { result_preview, .. },
+        ..
+    }] = &got[..]
+    else {
+        panic!("{got:?}");
+    };
+    assert_eq!(result_preview, "The nets are fine.");
+    // A background launch has no report: its text stays.
+    let launched = json!({"status":"async_launched","agentId":"a1","description":"d","prompt":"p","outputFile":"/tmp/o"});
+    let got = events(&emitted(core.on_line(&tool_result_line(
+        json!("Async agent launched successfully."),
+        Some(launched),
+    ))))
+    .into_iter()
+    .cloned()
+    .collect::<Vec<_>>();
+    let [Event {
+        kind: EventKind::ToolResult { result_preview, .. },
+        ..
+    }] = &got[..]
+    else {
+        panic!("{got:?}");
+    };
+    assert_eq!(result_preview, "Async agent launched successfully.");
+}
+
+/// SPEC §8.1, 0.150: the CLI's "(no content)" for a reply without text is no `agent.message`.
+#[test]
+fn no_content_is_no_message() {
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    started(&mut core, sid);
+    let mut got = vec![];
+    for l in [
+        json!({"type":"assistant","uuid":Uuid::new_v4(),"parent_tool_use_id":null,
+            "message":{"model":"claude-haiku-5-5","content":[{"type":"text","text":"(no content)"}]}}),
+        json!({"type":"result","subtype":"success","usage":{}}),
+    ] {
+        got.extend(emitted(core.on_line(&l.to_string())));
+    }
+    let messages: Vec<_> = events(&got)
+        .into_iter()
+        .filter(|e| matches!(e.kind, EventKind::AgentMessage { .. }))
+        .collect();
+    assert!(messages.is_empty(), "{messages:?}");
 }

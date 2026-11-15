@@ -46,6 +46,9 @@
 //!   alone ([`Adapter::stop_task`]); it is acked, also with no agent running. The token rate
 //!   ([`AdapterEvent::TokenRate`]) goes as `tokens.rate` when it changes, 0 once when the agent
 //!   stops, and again as it is on every [`AdapterEvent::Heartbeat`].
+//! - A tool result with files ([`AdapterEvent::ToolResult`]: its whole text, its images) goes to
+//!   the hub once they are uploaded with `PUT /worker/artifacts`, before the adapter's next
+//!   event (SPEC §8.1).
 //! - Every change of `process_state` is sent as `session.state`; all states are sent again
 //!   on every connect.
 //! - Permission mode (T38): `session.start.permission_mode` and `session.permission_mode`
@@ -93,7 +96,7 @@ use std::time::Duration;
 
 use std::path::{Path, PathBuf};
 
-use hqc_proto::event::EventKind;
+use hqc_proto::event::{ArtifactKind, EventKind};
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
     ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
@@ -109,7 +112,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::adapter::{Adapter, AdapterEvent, AdapterFactory};
+use crate::adapter::{Adapter, AdapterEvent, AdapterFactory, ResultFiles};
 use crate::config::{Config, StartSpec};
 use crate::inbox::{self, ArtifactClient, InboxFile};
 use crate::known_paths::KnownPaths;
@@ -1954,16 +1957,79 @@ impl Session {
         self.ask_runtime(own).await;
     }
 
+    fn send_event(&self, e: hqc_proto::event::Event) {
+        if e.session_id != self.id {
+            tracing::warn!(session_id = %self.id, other = %e.session_id, "adapter event for another session dropped");
+            return;
+        }
+        if let Err(err) = self.link.event(e) {
+            tracing::error!(session_id = %self.id, "outbox write failed, event lost: {err:#}");
+        }
+    }
+
+    /// Uploads what a tool result carries beyond its preview as artifacts of the session (SPEC
+    /// §8.1): its whole text into `artifact_id`, its images into `artifact_ids`. One that fails
+    /// is logged and left out.
+    async fn upload_result(&mut self, event: &mut hqc_proto::event::Event, files: ResultFiles) {
+        let EventKind::ToolResult {
+            artifact_id,
+            artifact_ids,
+            ..
+        } = &mut event.kind
+        else {
+            return;
+        };
+        if let Some(text) = files.text {
+            match self
+                .artifacts
+                .upload_bytes(
+                    self.id,
+                    text.into_bytes(),
+                    "result.txt",
+                    "text/plain; charset=utf-8",
+                    ArtifactKind::Text,
+                )
+                .await
+            {
+                Ok(id) => *artifact_id = Some(id),
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, code = %e.code, "upload of a tool result: {}", e.message)
+                }
+            }
+        }
+        for img in files.images {
+            let name = format!(
+                "image.{}",
+                img.media_type.rsplit('/').next().unwrap_or_default()
+            );
+            match self
+                .artifacts
+                .upload_bytes(
+                    self.id,
+                    img.data,
+                    &name,
+                    &img.media_type,
+                    ArtifactKind::Image,
+                )
+                .await
+            {
+                Ok(id) => artifact_ids.push(id),
+                Err(e) => {
+                    tracing::warn!(session_id = %self.id, code = %e.code, "upload of a tool result's image: {}", e.message)
+                }
+            }
+        }
+    }
+
     async fn on_event(&mut self, ev: AdapterEvent) {
         match ev {
-            AdapterEvent::Event(e) => {
-                if e.session_id != self.id {
-                    tracing::warn!(session_id = %self.id, other = %e.session_id, "adapter event for another session dropped");
-                    return;
+            AdapterEvent::Event(e) => self.send_event(e),
+            AdapterEvent::ToolResult { mut event, files } => {
+                // Here, before the next event of the adapter: the feed keeps its order.
+                if event.session_id == self.id {
+                    self.upload_result(&mut event, files).await;
                 }
-                if let Err(err) = self.link.event(e) {
-                    tracing::error!(session_id = %self.id, "outbox write failed, event lost: {err:#}");
-                }
+                self.send_event(event);
             }
             AdapterEvent::InputAccepted { event_id } => {
                 let (joined, slash) = if let Some(t) =

@@ -41,6 +41,7 @@ fn label(ev: &AdapterEvent) -> String {
                 _ => ty,
             }
         }
+        AdapterEvent::ToolResult { .. } => "tool.result".into(),
         AdapterEvent::InputAccepted { .. } => "accepted".into(),
         AdapterEvent::TurnEnded { .. } => "turn_ended".into(),
         AdapterEvent::Exited { error } => format!("exited:{error:?}"),

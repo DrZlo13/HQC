@@ -3575,3 +3575,91 @@ async fn model_is_started_and_switched() {
     assert_eq!(switched(&adapters).len(), 2);
     w.stop().await;
 }
+
+// SPEC §8.1, 0.150: a tool result's whole text and images are uploaded for its session before
+// the event goes, which names them, and the adapter's next event comes after it; a refused
+// upload leaves its field out and the event goes as it was.
+#[tokio::test]
+async fn a_tool_result_goes_after_its_files() {
+    use hqc_worker::adapter::{ResultFiles, ResultImage};
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+
+    let result = |preview: &str| {
+        agent_event(
+            sid,
+            EventKind::ToolResult {
+                call_id: "t1".into(),
+                result_preview: preview.into(),
+                error: false,
+                error_text: None,
+                duration_ms: None,
+                artifact_id: None,
+                artifact_ids: vec![],
+            },
+        )
+    };
+    let files = ResultFiles {
+        text: Some("the whole text".into()),
+        images: vec![ResultImage {
+            media_type: "image/png".into(),
+            data: b"png".to_vec(),
+        }],
+    };
+    let ev = result("the whole");
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::ToolResult {
+                event: ev.clone(),
+                files: files.clone(),
+            },
+        )
+        .await;
+    let after = agent_message(sid, "after");
+    adapters.emit(sid, AdapterEvent::Event(after.clone())).await;
+    let f = stored_event(&mut c).await;
+    assert_eq!(event_id(&f), ev.event_id);
+    let ups = hub.artifacts.uploads();
+    assert_eq!(ups.len(), 2);
+    let p = &f["payload"]["event"]["payload"];
+    assert_eq!(p["artifact_id"], json!(ups[0].id));
+    assert_eq!(p["artifact_ids"], json!([ups[1].id]));
+    assert_eq!(p["result_preview"], "the whole");
+    assert_eq!(ups[0].body, b"the whole text");
+    assert_eq!(ups[0].headers["x-hqc-session-id"], sid.to_string());
+    assert_eq!(ups[0].headers["x-hqc-artifact-kind"], "text");
+    assert_eq!(ups[0].headers["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(ups[1].body, b"png");
+    assert_eq!(ups[1].headers["x-hqc-artifact-kind"], "image");
+    assert_eq!(ups[1].headers["x-hqc-artifact-name"], "image.png");
+    assert_eq!(ups[1].headers["content-type"], "image/png");
+    assert_eq!(event_id(&stored_event(&mut c).await), after.event_id);
+
+    hub.artifacts.fail_uploads.store(true, Ordering::SeqCst);
+    let ev = result("again");
+    adapters
+        .emit(
+            sid,
+            AdapterEvent::ToolResult {
+                event: ev.clone(),
+                files,
+            },
+        )
+        .await;
+    let f = stored_event(&mut c).await;
+    assert_eq!(event_id(&f), ev.event_id);
+    let p = &f["payload"]["event"]["payload"];
+    assert!(
+        p.get("artifact_id").is_none() && p.get("artifact_ids").is_none(),
+        "{p}"
+    );
+    assert_eq!(p["result_preview"], "again");
+    w.stop().await;
+}

@@ -390,6 +390,7 @@ fn user(m: &Message) -> Vec<Event> {
                         error_text: error.then(|| preview(&t, ERROR_TEXT_LIMIT)),
                         duration_ms: None,
                         artifact_id: None,
+                        artifact_ids: vec![],
                     },
                 ));
                 out.extend(answered(m, i, call_id));

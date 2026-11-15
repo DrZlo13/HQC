@@ -30,6 +30,11 @@ use claude_code::ClaudeCodeAdapters;
 pub enum AdapterEvent {
     /// An event for the hub. Everything except `agent.delta` goes through the outbox.
     Event(Event),
+    /// A `tool.result` with files of the result to upload first (Claude Code, SPEC §8.1): the
+    /// supervisor uploads them as artifacts of the session, names them in `artifact_id` and
+    /// `artifact_ids`, then sends the event as [`AdapterEvent::Event`]; a failed upload leaves
+    /// its field out.
+    ToolResult { event: Event, files: ResultFiles },
     /// The runtime has taken the input `event_id` (Claude Code: the `--replay-user-messages`
     /// echo; ACP: `session/prompt` sent). Only now does the hub get `ack {event_id}`
     /// (SPEC §5.2).
@@ -109,6 +114,26 @@ pub enum AdapterEvent {
     /// The process ended by itself. Not required after `kill`.
     Exited { error: Option<String> },
 }
+
+/// What a tool result carries beyond its `result_preview` ([`AdapterEvent::ToolResult`]).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ResultFiles {
+    /// The whole text of a result longer than its preview, at most its first
+    /// [`FULL_RESULT_LIMIT`] bytes: a `text` artifact, `artifact_id`.
+    pub text: Option<String>,
+    /// The result's images in order: `image` artifacts, `artifact_ids`.
+    pub images: Vec<ResultImage>,
+}
+
+/// An image block of a tool result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResultImage {
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+/// The most of a result's text uploaded: what "Open" of a text shows in the client (2 MiB).
+pub const FULL_RESULT_LIMIT: usize = 2 * 1024 * 1024;
 
 pub type EventSink = mpsc::Sender<AdapterEvent>;
 

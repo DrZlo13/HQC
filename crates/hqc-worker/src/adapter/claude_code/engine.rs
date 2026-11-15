@@ -11,7 +11,8 @@
 //!   ([`Core::live_text`]);
 //! - `assistant` text → `agent.message`, held until the next element: another assistant
 //!   block or a tool result makes it `final: false`, `result` makes it `final: true`; an
-//!   input written during a turn the CLI started by itself leaves it held;
+//!   input written during a turn the CLI started by itself leaves it held; a text that is the
+//!   CLI's [`NO_CONTENT`] gives none;
 //! - `assistant` `tool_use` → `tool.call` ([`args_preview`]: an `Agent` call's `prompt`
 //!   last); non-empty `thinking` → `agent.thinking`;
 //! - `assistant` text with `model` `<synthetic>` (the CLI's own reply: an API error, "Credit
@@ -86,7 +87,10 @@
 //!   of the events of those records of this turn not retracted yet ([`Core::retract`]), the
 //!   latter then `system model_refusal_fallback`, its fallback the model of this turn's `usage`
 //!   unless its `scope` is `local`;
-//! - `user` `tool_result` → `tool.result`; `user` with `isReplay: true` → input accepted;
+//! - `user` `tool_result` → `tool.result`, its text the report of a subagent that completed
+//!   when the record's `tool_use_result` has one ([`agent_report`]); a text longer than the
+//!   preview and the result's images go with it to be uploaded ([`AdapterEvent::ToolResult`]);
+//!   `user` with `isReplay: true` → input accepted;
 //!   every user message written to stdin gets a fresh v4 `uuid`, which its echo and its
 //!   `command_lifecycle` lines name (2.1.312);
 //! - `result` → `usage` (one with no tokens and no `compact_boundary` in it gives none, or,
@@ -166,7 +170,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::rules::SessionRules;
-use crate::adapter::{new_event, AdapterEvent};
+use crate::adapter::{new_event, AdapterEvent, ResultFiles, ResultImage, FULL_RESULT_LIMIT};
 use crate::permissions::{FolderRules, Policy};
 
 /// `*_preview` limit (SPEC §4).
@@ -261,6 +265,10 @@ pub const ELICITATION_LIMIT: usize = 256 * 1024;
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
 pub const SYNTHETIC_MODEL: &str = "<synthetic>";
+/// The CLI's text for a reply without text (2.1.312): a non-streaming reply whose blocks it
+/// all dropped, a message of its own with empty text. No `agent.message`, as the VS Code tab
+/// draws none (extension 2.1.319).
+pub const NO_CONTENT: &str = "(no content)";
 /// `request_id` prefix of our `initialize` control request.
 const INIT_REQUEST: &str = "hqc-init-";
 /// `message.stop_reason` of the CLI's own reply to a model refusal (2.1.312, stream-json and
@@ -1642,7 +1650,7 @@ impl Core {
             match block["type"].as_str() {
                 Some("text") => {
                     let t = block["text"].as_str().unwrap_or("");
-                    if t.is_empty() {
+                    if t.is_empty() || t == NO_CONTENT {
                         continue;
                     }
                     out.extend(self.flush(false));
@@ -2305,13 +2313,22 @@ impl Core {
         let Some(uuid) = record_uuid(v) else {
             return vec![];
         };
+        let blocks = blocks(v);
+        // The record's `tool_use_result` is its `tool_result`'s only when it has one, as the VS
+        // Code tab reads it (extension 2.1.319).
+        let single = blocks.iter().filter(|b| b["type"] == "tool_result").count() == 1;
         let mut out = Vec::new();
-        for (i, block) in blocks(v).iter().enumerate() {
+        for (i, block) in blocks.iter().enumerate() {
             if block["type"] != "tool_result" {
                 continue;
             }
             out.extend(self.flush(false));
-            let text = result_text(&block["content"]);
+            let whole = text(
+                &single
+                    .then(|| agent_report(&v["tool_use_result"]))
+                    .flatten()
+                    .unwrap_or_else(|| result_text(&block["content"])),
+            );
             let error = block["is_error"] == true;
             // The wakeup a `ScheduleWakeup` call armed, `scheduledFor: 0` for none (`stopped`);
             // a failed call changed nothing. Likewise a job a `CronCreate` call made and one a
@@ -2337,17 +2354,27 @@ impl Core {
             if self.cron_deletes.remove(call) && !error {
                 out.extend(self.cron_deleted(result));
             }
-            out.push(self.emit(
-                record_event_id(&uuid, i),
-                EventKind::ToolResult {
-                    call_id: block["tool_use_id"].as_str().unwrap_or("").into(),
-                    result_preview: preview(&text, PREVIEW_LIMIT),
-                    error,
-                    error_text: error.then(|| preview(&text, ERROR_TEXT_LIMIT)),
-                    duration_ms: None,
-                    artifact_id: None,
-                },
-            ));
+            let kind = EventKind::ToolResult {
+                call_id: block["tool_use_id"].as_str().unwrap_or("").into(),
+                result_preview: preview(&whole, PREVIEW_LIMIT),
+                error,
+                error_text: error.then(|| preview(&whole, ERROR_TEXT_LIMIT)),
+                duration_ms: None,
+                artifact_id: None,
+                artifact_ids: vec![],
+            };
+            let files = ResultFiles {
+                text: (whole.len() > PREVIEW_LIMIT).then(|| preview(&whole, FULL_RESULT_LIMIT)),
+                images: result_images(&block["content"]),
+            };
+            let id = record_event_id(&uuid, i);
+            out.push(if files == ResultFiles::default() {
+                self.emit(id, kind)
+            } else {
+                let mut event = self.emit_event(kind);
+                event.event_id = id;
+                Action::Emit(AdapterEvent::ToolResult { event, files })
+            });
         }
         out
     }
@@ -3398,6 +3425,51 @@ pub fn result_text(content: &Value) -> String {
         Value::Null => String::new(),
         other => compact(other),
     }
+}
+
+/// The report of a subagent that completed, from the `tool_use_result` of its `Agent` (`Task`)
+/// call, `{status: completed, agentId, content: [text blocks], …}`: the report without the
+/// trailer with `agentId` and `<usage>` that the CLI adds to the `tool_result` for the model
+/// (2.1.312; "render from it instead of parsing the tool_result text", SDK 0.3.312).
+fn agent_report(r: &Value) -> Option<String> {
+    if r["status"] != "completed" || !r["agentId"].is_string() {
+        return None;
+    }
+    let parts = r["content"].as_array()?;
+    Some(
+        parts
+            .iter()
+            .filter(|p| p["type"] == "text")
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The images of a `tool_result` block's `content`, decoded: `{type: image, source: {type:
+/// base64, media_type, data}}` (a screenshot, a `Read` of a picture); one that does not decode
+/// is left out.
+fn result_images(content: &Value) -> Vec<ResultImage> {
+    use base64::Engine;
+    let Some(parts) = content.as_array() else {
+        return vec![];
+    };
+    parts
+        .iter()
+        .filter(|p| p["type"] == "image" && p["source"]["type"] == "base64")
+        .filter_map(|p| {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(p["source"]["data"].as_str()?)
+                .ok()?;
+            Some(ResultImage {
+                media_type: p["source"]["media_type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                data,
+            })
+        })
+        .collect()
 }
 
 fn compact(v: &Value) -> String {

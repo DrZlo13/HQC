@@ -65,6 +65,8 @@ pub struct Artifacts {
     pub uploads: Arc<std::sync::Mutex<Vec<Upload>>>,
     /// Answer uploads only after a while.
     pub stall_uploads: Arc<std::sync::atomic::AtomicBool>,
+    /// Refuse uploads with `413`.
+    pub fail_uploads: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Artifacts {
@@ -162,6 +164,13 @@ impl Artifacts {
                 return None;
             }
             body.extend_from_slice(&tmp[..n]);
+        }
+        if self.fail_uploads.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = stream
+                .write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+            let _ = stream.shutdown().await;
+            return Some(());
         }
         let id = Uuid::now_v7();
         self.uploads

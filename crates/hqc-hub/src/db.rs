@@ -1533,7 +1533,7 @@ pub struct SessionRow {
     pub held_by: Option<Value>,
     pub vscode_held_at: Option<DateTime<Utc>>,
     /// The runtime's slash commands (`session.state.commands`, SPEC §5.4): a JSON array of
-    /// names, since SPEC 0.138 of `{name, description?, argument_hint?}`.
+    /// names, since SPEC 0.151 of `{name, description?, argument_hint?}`.
     pub commands: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -1822,7 +1822,7 @@ pub async fn set_user_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<
     Ok(())
 }
 
-/// The runtime's slash commands (`session.state.commands`, T27), since SPEC 0.138 with their
+/// The runtime's slash commands (`session.state.commands`, T27), since SPEC 0.151 with their
 /// descriptions (`command_info`); written only when they changed, so a `session.state`
 /// without a new list does not touch `updated_at`.
 pub async fn set_commands(
@@ -2334,6 +2334,9 @@ pub async fn turn_answered(db: &PgPool, session_id: Uuid, input_id: Uuid) -> sql
     .await
 }
 
+/// A worker's `session.state`. When the runtime goes on in another transcript (`/clear`,
+/// SPEC §8.1), the events the session has so far keep the one they were written in as
+/// `origin_runtime`: a fork before one of them cuts that transcript (SPEC §6).
 /// `updated_at`, which orders the session lists (SPEC §5.4, §6), moves only when
 /// `process_state`, `locked_by` or `runtime_session_id` changes: a repeat, such as the
 /// `session.state` the worker sends again after `hello`, keeps it.
@@ -2344,6 +2347,18 @@ pub async fn set_process_state(
     runtime_session_id: Option<&str>,
     locked_by: &str,
 ) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    if let Some(new) = runtime_session_id {
+        sqlx::query(
+            "UPDATE events e SET origin_runtime = s.runtime_session_id FROM sessions s
+             WHERE s.id = $1 AND e.session_id = $1 AND e.origin_runtime IS NULL
+               AND s.runtime_session_id <> '' AND s.runtime_session_id <> $2",
+        )
+        .bind(id)
+        .bind(new)
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query(
         "UPDATE sessions SET process_state = $2,
             runtime_session_id = COALESCE($3, runtime_session_id), locked_by = $4,
@@ -2358,9 +2373,9 @@ pub async fn set_process_state(
     .bind(process_state)
     .bind(runtime_session_id)
     .bind(locked_by)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await
 }
 
 // ---------------------------------------------------------------- mirror (SPEC §9)

@@ -75,7 +75,7 @@ struct Aggregates {
     provider_label: Option<String>,
 }
 
-/// `sessions.commands` as stored: names before SPEC 0.138, `SlashCommand`s since.
+/// `sessions.commands` as stored: names before SPEC 0.151, `SlashCommand`s since.
 fn stored_commands(v: Value) -> Option<Vec<SlashCommand>> {
     #[derive(serde::Deserialize)]
     #[serde(untagged)]

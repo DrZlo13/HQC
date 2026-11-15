@@ -92,14 +92,14 @@ struct Clearing(Arc<OwnRecords>, PathBuf);
 
 impl Clearing {
     fn new(own: Arc<OwnRecords>, folder: PathBuf) -> Self {
-        own.clearing(&folder);
+        own.mark_clearing(&folder);
         Self(own, folder)
     }
 }
 
 impl Drop for Clearing {
     fn drop(&mut self) {
-        self.0.cleared(&self.1);
+        self.0.unmark_clearing(&self.1);
     }
 }
 
@@ -427,7 +427,8 @@ impl Io {
         Ok(())
     }
 
-    /// After a turn, and during one until the process has a title ([`rate::meter`]): the
+    /// After a turn, and during the first turn of a new conversation until the process has a
+    /// title ([`rate::meter`]): the
     /// transcript's title (its last `custom-title`, else its last `ai-title`), if there is one
     /// and it is new. The CLI writes `ai-title` after the first prompt; a missing file or title
     /// is not an error.
@@ -950,7 +951,8 @@ impl ClaudeCodeAdapter {
         };
         let mut core = Core::new(self.session_id, spec.restricted)
             .with_policy(Arc::new(Policy::new(&spec.environment.permissions)))
-            .with_cost_baseline(cost_baseline);
+            .with_cost_baseline(cost_baseline)
+            .with_new_conversation(!matches!(launch, Launch::Resume));
         if let Some(rules) = &spec.folder_rules {
             core = core.with_folder(rules.clone(), spec.workspace.clone());
         }

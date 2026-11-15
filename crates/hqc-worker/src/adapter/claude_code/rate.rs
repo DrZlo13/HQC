@@ -106,11 +106,12 @@ pub(super) async fn meter(
             _ = tick.tick() => {}
             _ = exited.wait_for(Option::is_some) => return,
         }
-        let (mut tokens, working, session, live) = {
+        let (mut tokens, working, fresh, session, live) = {
             let mut c = lock(&core);
             (
                 c.take_output_tokens(),
                 c.working(),
+                c.fresh(),
                 c.cli_session().map(str::to_owned),
                 c.live_ids(),
             )
@@ -135,10 +136,12 @@ pub(super) async fn meter(
             }
         }
         was_live = live;
-        // The CLI writes its own title into the transcript during the first turn and does not
-        // stream it (`session_title_changed` carries only a person's): it is read on each tick
-        // of a turn until the process has one, not only at the turn's end (SPEC §8.1).
-        if working && lock(&io.title).is_none() {
+        // The CLI writes its own title into the transcript during the first turn of a new
+        // conversation and does not stream it (`session_title_changed` carries only a
+        // person's): it is read on each tick of that turn until the process has one, not only
+        // at the turn's end (SPEC §8.1). A resumed conversation without one gets none, and its
+        // transcript, tens of MB, is not read every tick.
+        if working && fresh && lock(&io.title).is_none() {
             io.report_title().await;
         }
         let now = Instant::now();

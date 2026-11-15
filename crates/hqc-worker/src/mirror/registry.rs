@@ -14,7 +14,7 @@
 //! after a worker restart the mirror's offsets on disk say what was already handled. After
 //! `/clear` the process goes on in a new transcript of the same folder, which the CLI writes
 //! before it names it (`w1-clear`): until then the folder is marked
-//! ([`OwnRecords::clearing`]).
+//! ([`OwnRecords::mark_clearing`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -120,7 +120,7 @@ impl OwnRecords {
     /// A process with its transcript in `folder` cleared its conversation (`/clear`): a
     /// transcript the CLI begins there before the process's next `init` names it is that
     /// process's.
-    pub fn clearing(&self, folder: &Path) {
+    pub fn mark_clearing(&self, folder: &Path) {
         *self
             .lock_clearing()
             .entry(folder.to_path_buf())
@@ -128,7 +128,7 @@ impl OwnRecords {
     }
 
     /// That process named its new transcript, or it is gone.
-    pub fn cleared(&self, folder: &Path) {
+    pub fn unmark_clearing(&self, folder: &Path) {
         let mut m = self.lock_clearing();
         if let Some(n) = m.get_mut(folder) {
             *n = n.saturating_sub(1);

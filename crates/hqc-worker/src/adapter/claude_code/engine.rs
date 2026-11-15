@@ -349,6 +349,9 @@ pub struct Core {
     /// A `conversation_reset` came (`/clear`): the next `system/init` with another
     /// `session_id` names the transcript the CLI goes on in.
     cleared: bool,
+    /// The conversation is new (a new session, a fork, `/clear`) and its first model turn has
+    /// not ended: the CLI writes its `ai-title` then.
+    fresh: bool,
     /// Ids of the main agent's `ScheduleWakeup` `tool_use` blocks, until their result.
     wakeup_calls: HashSet<String>,
     /// When the wakeup the main agent armed last is due, in epoch ms (the `scheduledFor` of
@@ -452,6 +455,7 @@ impl Core {
             init_commands: None,
             terminal_commands: Vec::new(),
             cleared: false,
+            fresh: false,
             wakeup_calls: HashSet::new(),
             wakeup: None,
             permission_mode: None,
@@ -490,6 +494,18 @@ impl Core {
     pub fn with_cost_baseline(mut self, total: Option<f64>) -> Self {
         self.cost_total = total;
         self
+    }
+
+    /// The process starts a new conversation (`--session-id`, a fork), not `--resume`.
+    pub fn with_new_conversation(mut self, new: bool) -> Self {
+        self.fresh = new;
+        self
+    }
+
+    /// The conversation is new and its first model turn has not ended: the token rate's
+    /// ticker reads the transcript's title on each tick of it.
+    pub fn fresh(&self) -> bool {
+        self.fresh
     }
 
     /// Whether turn number `turn` (from [`Core::interrupt`]) is still running.
@@ -890,6 +906,7 @@ impl Core {
             "conversation_reset" => {
                 tracing::info!(session_id = %self.session_id, trigger = ?v["trigger"].as_str(), "conversation cleared");
                 self.cleared = true;
+                self.fresh = true;
                 self.cost_total = None;
                 vec![self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into())]
             }
@@ -1738,6 +1755,10 @@ impl Core {
 
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
         self.self_turn = false;
+        // A local command's result (`/clear`'s own) ends no model turn.
+        if v["local_command"].is_null() {
+            self.fresh = false;
+        }
         let mut out: Vec<Action> = self.flush(true).into_iter().collect();
         // A request the CLI no longer waits for: after "No" to one of two parallel calls it
         // ends the turn and drops the other. Without the cancel the hub keeps its card open

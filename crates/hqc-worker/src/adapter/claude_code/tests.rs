@@ -1920,6 +1920,34 @@ fn the_answer_to_initialize_gives_the_commands() {
     );
 }
 
+/// The transcript's title is read on each tick only in the first model turn of a new
+/// conversation: not in a resumed one, and `/clear`'s own result does not end that turn.
+#[test]
+fn only_a_new_conversation_first_turn_reads_the_title_on_each_tick() {
+    let sid = Uuid::now_v7();
+    let result = |local: Option<&str>| {
+        let mut v = json!({"type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "total_cost_usd": 0.0, "session_id": "s", "uuid": Uuid::new_v4()});
+        if let Some(l) = local {
+            v["local_command"] = json!(l);
+        }
+        v.to_string()
+    };
+    assert!(!Core::new(sid, false).fresh(), "a resumed conversation");
+    let mut core = Core::new(sid, false).with_new_conversation(true);
+    assert!(core.fresh());
+    core.on_line(&result(None));
+    assert!(!core.fresh(), "the first model turn ended");
+    core.on_line(
+        &json!({"type": "conversation_reset", "trigger": "clear", "session_id": "s"}).to_string(),
+    );
+    assert!(core.fresh(), "/clear starts a new conversation");
+    core.on_line(&result(Some("clear")));
+    assert!(core.fresh(), "/clear's own result is no model turn");
+    core.on_line(&result(None));
+    assert!(!core.fresh());
+}
+
 /// `/clear` (the lines of the live run `w1-clear`, 2.1.312): `conversation_reset` says
 /// "Conversation cleared" and starts the cost from 0, as the CLI's `total_cost_usd` does; the
 /// first `system/init` after it, with the new conversation's id, moves the session to that

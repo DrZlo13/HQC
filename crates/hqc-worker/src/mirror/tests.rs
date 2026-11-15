@@ -1325,7 +1325,7 @@ fn a_transcript_begun_after_clear_is_not_imported() {
     ) + "\n";
     let mut s = setup("cleared", &transcript);
     let folder = s.file.parent().unwrap().to_path_buf();
-    s.own.clearing(&folder);
+    s.own.mark_clearing(&folder);
     append(&s.file, &transcript);
     let t0 = Instant::now();
     let out = s.mirror.poll(t0, SystemTime::now());
@@ -1333,7 +1333,7 @@ fn a_transcript_begun_after_clear_is_not_imported() {
     // `init` names it; the echo of `/clear` names the record.
     s.own.begin(s.runtime, None);
     s.own.add(s.runtime, clear);
-    s.own.cleared(&folder);
+    s.own.unmark_clearing(&folder);
     for later in [0, 10] {
         let out = s
             .mirror

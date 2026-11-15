@@ -1841,6 +1841,46 @@ describe("messages", () => {
     expect(t.usageTotals().cost).toBe(2.5);
   });
 
+  it("counts the conversations before a /clear in the session's cost", () => {
+    const at = (seq: number) =>
+      `0199f3a2-7c10-7000-8000-0000000003${String(seq).padStart(2, "0")}`;
+    const usage = (seq: number, total: number) =>
+      ev("event.usage", (e) => {
+        e.seq = seq;
+        e.event_id = at(seq);
+        e.payload = {
+          input_tokens: 10,
+          output_tokens: 5,
+          cost_usd: 0.25,
+          session_cost_usd: total,
+        };
+      });
+    const cleared = (seq: number) =>
+      ev("event.system", (e) => {
+        e.seq = seq;
+        e.event_id = at(seq);
+        e.payload = { text: "Conversation cleared", code: "conversation_cleared" };
+      });
+    const history = [
+      usage(1, 1.25),
+      usage(2, 2.5),
+      cleared(3),
+      cleared(4),
+      usage(5, 0.25),
+      // The agent unloaded and resumed: the CLI goes on from the new transcript's total.
+      usage(6, 0.75),
+    ];
+    const t = new Timeline();
+    for (const e of history.slice(0, 4)) t.apply(e);
+    expect(t.usageTotals().cost).toBe(2.5);
+    for (const e of history.slice(4)) t.apply(e);
+    expect(t.usageTotals().cost).toBe(3.25);
+    // A chat opened again gets the newest events first, then the older ones.
+    const reopened = new Timeline();
+    for (const e of [...history].reverse()) reopened.apply(e);
+    expect(reopened.usageTotals().cost).toBe(3.25);
+  });
+
   it("draws the line of a usage with no tokens but a cost, as /compact's", () => {
     const t = new Timeline();
     t.apply(agentText(1, "All tests passed.", true));

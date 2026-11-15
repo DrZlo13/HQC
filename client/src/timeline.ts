@@ -350,13 +350,20 @@ export class Timeline {
   }
 
   /** Model of the last `usage` that names one, and the session's cost: the runtime's own
-   *  running total of the last `usage` that has one (`session_cost_usd`, T27), else the sum
-   *  of `cost_usd` over the loaded history. */
+   *  running total of the last `usage` that has one (`session_cost_usd`, T27) plus the last
+   *  total before each `/clear`, after which the runtime counts from 0 again (`system
+   *  conversation_cleared`, SPEC §8.1), else the sum of `cost_usd` over the loaded history. */
   usageTotals(): { model?: string; cost?: number } {
     let model: string | undefined;
     let sum: number | undefined;
     let total: number | undefined;
+    let before: number | undefined;
     for (const e of this.events()) {
+      if (e.type === "system" && e.payload.code === "conversation_cleared") {
+        if (total !== undefined) before = (before ?? 0) + total;
+        total = undefined;
+        continue;
+      }
       if (e.type !== "usage") continue;
       if (e.payload.model) model = e.payload.model;
       if (e.payload.cost_usd !== undefined)
@@ -364,7 +371,11 @@ export class Timeline {
       if (e.payload.session_cost_usd !== undefined)
         total = e.payload.session_cost_usd;
     }
-    return { model, cost: total ?? sum };
+    const runtime =
+      before === undefined && total === undefined
+        ? undefined
+        : (before ?? 0) + (total ?? 0);
+    return { model, cost: runtime ?? sum };
   }
 
   /** The call of a result: results whose call is in the timeline are shown with it. */

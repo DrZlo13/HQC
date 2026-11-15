@@ -1180,7 +1180,7 @@ describe('slash command completion (T27)', () => {
     expect(area().value).toBe('/review ');
   });
 
-  it('shows what the runtime says of each command, asked for when the session came from a list (SPEC 0.138)', async () => {
+  it('shows what the runtime says of each command, asked for when the session came from a list (SPEC 0.151)', async () => {
     const info: SlashCommand[] = [
       { name: 'compact', description: 'Clear conversation history but keep a summary in context', argument_hint: '<instructions>' },
       { name: 'context', description: 'Visualize current context usage' },

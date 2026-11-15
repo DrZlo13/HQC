@@ -150,7 +150,7 @@ describe('examples/wire', () => {
     expect(s.spawned_by).toEqual({ session_id: '0199f3a2-7c10-7000-8000-000000000002', address: 'hqc/planner' });
     expect(sys.spawned_by).toBeUndefined();
     expect(() => parseSessionInfo({ ...(load('api.session.json') as object), commands: [1] })).toThrow();
-    // SPEC 0.138: the same commands with what the runtime says of each.
+    // SPEC 0.151: the same commands with what the runtime says of each.
     expect(s.command_info?.[0]).toEqual({
       name: 'compact',
       description: 'Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]',

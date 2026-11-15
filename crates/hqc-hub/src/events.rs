@@ -157,13 +157,22 @@ pub async fn ingest_worker_event(
         app.end_live_text(s.id);
     }
     let str_field = |k: &str| raw.get(k).and_then(Value::as_str).map(str::to_string);
+    let mut payload = raw.get("payload").cloned().unwrap_or(Value::Null);
+    // Only the hub's own card asks the owner for a secret (SPEC 0.147).
+    if matches!(ev.kind, EventKind::ApprovalRequest { .. }) {
+        if let Some(p) = payload.as_object_mut() {
+            if p.remove("secret").is_some() {
+                tracing::warn!(session_id = %s.id, "a worker's approval.request carried `secret`: dropped");
+            }
+        }
+    }
     let new = NewEvent {
         event_id: ev.event_id,
         session_id: ev.session_id,
         ts: ev.ts,
         author: raw.get("author").cloned().unwrap_or(Value::Null),
         kind: str_field("type").unwrap_or_default(),
-        payload: raw.get("payload").cloned().unwrap_or(Value::Null),
+        payload,
         chain: None,
         client_op_id: str_field("client_op_id"),
         delivery: None,

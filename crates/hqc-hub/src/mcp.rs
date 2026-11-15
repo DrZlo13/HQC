@@ -116,6 +116,14 @@ pub const REGISTRY: &[HubTool] = &[
         run: |app, caller, c| Box::pin(crate::moves::tool(app, caller, c)),
     },
     HubTool {
+        name: hqc_proto::mcp::SECRET,
+        run: |app, caller, c| Box::pin(crate::secrets::tool(app, caller, c)),
+    },
+    HubTool {
+        name: hqc_proto::mcp::SSH_KEYGEN,
+        run: |app, caller, c| Box::pin(crate::secrets::keygen(app, caller, c)),
+    },
+    HubTool {
         name: hqc_proto::mcp::RENAME,
         run: |app, caller, c| Box::pin(now(rename(app, caller, c.args.clone()))),
     },

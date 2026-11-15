@@ -56,7 +56,7 @@ fn can(user: &CurrentUser, _action: Action, s: &SessionRow) -> bool {
 
 /// The worker's service session takes no input and is neither stopped, archived nor
 /// deleted (SPEC §10.2): `409 system_session`.
-fn not_system(s: &SessionRow) -> ApiResult<()> {
+pub(crate) fn not_system(s: &SessionRow) -> ApiResult<()> {
     if s.system {
         return Err(ApiError::Conflict(
             "system_session",
@@ -66,7 +66,7 @@ fn not_system(s: &SessionRow) -> ApiResult<()> {
     Ok(())
 }
 
-async fn session_for(
+pub(crate) async fn session_for(
     app: &AppState,
     user: &CurrentUser,
     id: Uuid,
@@ -1905,6 +1905,7 @@ pub async fn workers(
                 "allow_foreign_sessions": w.allow_foreign_sessions,
                 "share_local_models": w.share_local_models,
                 "local_models": w.local_models,
+                "session_secrets": w.session_secrets,
                 "system_session_id": w.system_session_id,
                 "created_at": w.created_at,
             })

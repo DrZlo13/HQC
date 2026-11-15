@@ -91,7 +91,8 @@ pub async fn fork(app: &AppState, s: &SessionRow, event_id: Uuid) -> ApiResult<S
     };
     // The records the cut may be at, in the transcript of the newest: a fork's own turns are in
     // its transcript, its copied history in the one it was first written in (a fork that never
-    // ran, or that was deleted, has none of it).
+    // ran, or that was deleted, has none of it). Only those after the last `/clear` before the
+    // message: a fork before the first answer after it starts a new conversation.
     let bound = until.unwrap_or(at.seq);
     let records = db::agent_messages_before(&app.db, s.id, bound, CUTS, &runtime).await?;
     let source = records.first().map(|(_, r)| r.clone());

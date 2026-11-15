@@ -3346,7 +3346,9 @@ pub async fn fork_cut_before_input(
 /// The `agent.message` events of session `id` before `seq`, newest first, at most `limit`:
 /// where a fork before that message may cut the conversation (SPEC §6). Each as the record it
 /// stands for: the id it got from the runtime and the transcript it was written in, a copy's
-/// origin (`events.origin_*`), else its own id in `runtime`, the session's transcript.
+/// origin (`events.origin_*`), else its own id in `runtime`, the session's transcript. Only
+/// those after the last `/clear` before `seq` (`system conversation_cleared`, the session's own
+/// or copied): the conversation before it is not the agent's any more.
 pub async fn agent_messages_before(
     db: &PgPool,
     id: Uuid,
@@ -3358,6 +3360,9 @@ pub async fn agent_messages_before(
         "SELECT COALESCE(origin_id, event_id), COALESCE(origin_runtime, $4) FROM events
          WHERE session_id = $1 AND seq < $2 AND type = 'agent.message'
            AND author ->> 'kind' = 'agent'
+           AND seq > COALESCE((SELECT max(seq) FROM events
+                               WHERE session_id = $1 AND seq < $2 AND type = 'system'
+                                 AND payload ->> 'code' = 'conversation_cleared'), 0)
          ORDER BY seq DESC LIMIT $3",
     )
     .bind(id)

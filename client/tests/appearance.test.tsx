@@ -359,7 +359,7 @@ it('picks the web search of selected text in "Settings"', async () => {
 
 it('adds a model provider in "Settings" and lists the workers that allow it', async () => {
   location.hash = '#/settings';
-  (await until('add a provider', () => $('.btn-add-provider')))!.click();
+  (await until('add a provider', () => $<HTMLButtonElement>('.btn-add-provider')))!.click();
   const input = (name: string) => $<HTMLInputElement>(`input[name=${name}]`)!;
   await until('the form', () => $('.provider-form'));
   for (const [name, value] of [

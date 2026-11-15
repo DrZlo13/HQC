@@ -135,6 +135,8 @@ async fn live_repo_settings_ignored() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -271,6 +273,8 @@ async fn live_environment_ssh() {
                 provider: None,
                 provider_refused: None,
                 secrets: None,
+                browser: false,
+                browser_refused: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -498,6 +502,8 @@ async fn live_environment_ssh_keys() {
                 provider: None,
                 provider_refused: None,
                 secrets: None,
+                browser: false,
+                browser_refused: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -645,6 +651,8 @@ async fn live_folder_rules() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -749,6 +757,8 @@ async fn live_permission_mode_switch() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -902,6 +912,8 @@ async fn live_bash_turn_with_approval() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1141,6 +1153,8 @@ async fn live_permission_policy() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1274,6 +1288,8 @@ async fn live_ai_title() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1457,6 +1473,8 @@ async fn live_input_joins_turn() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1608,6 +1626,8 @@ async fn live_move_resumes_in_the_new_folder() {
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     };
     let input = |text: &str| SessionInput {

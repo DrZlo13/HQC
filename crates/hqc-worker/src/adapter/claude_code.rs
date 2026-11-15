@@ -41,6 +41,14 @@ pub const TRANSCRIPT_MISSING_TEXT: &str = "The Claude Code transcript of this se
 
 /// `system.code` of a session whose provider this worker does not allow (SPEC §4, §8.1).
 pub const PROVIDER_REFUSED: &str = "provider_refused";
+/// `system.code` of a session that asked for the browser this worker does not give (SPEC 0.148).
+pub const BROWSER_REFUSED: &str = "browser_refused";
+/// The browser tools a session with the browser never gets (SPEC 0.148): they send files of
+/// the machine to a web page.
+pub const BROWSER_DISALLOWED: &[&str] = &[
+    "mcp__claude-in-chrome__file_upload",
+    "mcp__claude-in-chrome__upload_image",
+];
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -582,7 +590,24 @@ impl ClaudeCodeAdapter {
             ]);
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);
+        // SPEC 0.148: Chrome only for a session its owner gave it; never by the CLI's own
+        // default (`/chrome`'s "enabled by default").
+        args.push(
+            if spec.browser {
+                "--chrome"
+            } else {
+                "--no-chrome"
+            }
+            .into(),
+        );
         let mut disallowed: Vec<String> = spec.disallowed_tools.clone();
+        if spec.browser {
+            for t in BROWSER_DISALLOWED {
+                if !disallowed.iter().any(|d| d == t) {
+                    disallowed.push(t.to_string());
+                }
+            }
+        }
         for t in self.opts.native_messaging.disallowed(spec.restricted) {
             if !disallowed.iter().any(|d| d == t) {
                 disallowed.push(t.to_string());
@@ -812,10 +837,27 @@ impl ClaudeCodeAdapter {
             cwd = %spec.workdir.display(),
             environment = %spec.environment.name,
             ssh_keys = ?spec.environment.ssh_keys,
+            browser = spec.browser,
             "claude started"
         );
         // A provider the hub asked for that this worker does not allow: the agent runs on the
         // runtime's own endpoint, and the feed says why (SPEC §8.1).
+        if let Some(why) = &spec.browser_refused {
+            tracing::warn!(session_id = %self.session_id, reason = %why, "browser refused; the agent starts without it");
+            let ev = crate::adapter::new_event(
+                self.session_id,
+                Author::System,
+                EventKind::System {
+                    text: format!("{why}: the agent runs without the browser"),
+                    code: BROWSER_REFUSED.into(),
+                    call_id: None,
+                    status: None,
+                    task_id: None,
+                    fork: None,
+                },
+            );
+            let _ = self.events.send(AdapterEvent::Event(ev)).await;
+        }
         if let Some(why) = &spec.provider_refused {
             tracing::warn!(session_id = %self.session_id, reason = %why, "provider refused; the agent starts without it");
             let ev = crate::adapter::new_event(

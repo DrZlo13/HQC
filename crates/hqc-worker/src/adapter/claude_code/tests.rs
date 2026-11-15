@@ -179,6 +179,8 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         provider: None,
         provider_refused: None,
         secrets: None,
+        browser: false,
+        browser_refused: None,
         fork: None,
     }
 }
@@ -649,6 +651,7 @@ async fn command_line_new_then_resume() {
             "--strict-mcp-config",
             "--allowedTools",
             "mcp__hqc",
+            "--no-chrome",
             "--disallowedTools",
             "ListAgents",
             "SendMessage",
@@ -2789,6 +2792,7 @@ async fn native_messaging_follows_the_worker_config() {
         "--strict-mcp-config",
         "--allowedTools",
         "mcp__hqc",
+        "--no-chrome",
         "--disallowedTools",
         "ListAgents",
         "SendMessage",
@@ -5417,4 +5421,31 @@ fn a_subagent_waiting_on_its_background_command_keeps_its_request() {
         }
     }
     assert_eq!(cancels, [(21, "sub".to_string())]);
+}
+
+/// SPEC 0.148: a session given the browser runs with `--chrome` and without the tools that
+/// upload files; every other one with `--no-chrome`.
+#[test]
+fn the_browser_only_where_it_is_given() {
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let f = ClaudeCodeAdapters::new(options(config.path()), Arc::new(ScriptedClaude::new("")));
+    let a = ClaudeCodeAdapter {
+        session_id: Uuid::nil(),
+        opts: f.opts.clone(),
+        spawner: f.spawner.clone(),
+        events: mpsc::channel(1).0,
+        proc: None,
+    };
+    let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
+    let args = |s: &StartSpec| a.command(s, &Uuid::nil(), Launch::New, None, None).args;
+    let off = args(&s);
+    assert!(off.contains(&"--no-chrome".to_string()) && !off.contains(&"--chrome".to_string()));
+    s.browser = true;
+    let on = args(&s);
+    assert!(on.contains(&"--chrome".to_string()) && !on.contains(&"--no-chrome".to_string()));
+    let pos = on.iter().position(|x| x == "--disallowedTools").unwrap();
+    for t in super::BROWSER_DISALLOWED {
+        assert!(on[pos..].iter().any(|x| x == t), "{t} in {on:?}");
+    }
 }

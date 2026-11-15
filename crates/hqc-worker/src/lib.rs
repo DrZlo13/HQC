@@ -117,6 +117,7 @@ impl Worker {
                 .map(|p| p.name.clone())
                 .collect(),
             session_secrets: self.config.session_secrets,
+            browser: self.config.browser,
             machine_id: self.machine_id.clone(),
         }
     }

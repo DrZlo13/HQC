@@ -239,6 +239,20 @@ describe('HTML is text', () => {
     }
   });
 
+  it('a line of tags does not turn the Markdown under it into text', () => {
+    // The head of a compaction summary: the tags run into the summary with no blank line.
+    const el = md(
+      '<system-reminder>\n<tools-used-before-summary>Agent, Bash</tools-used-before-summary>\n</system-reminder>\n' +
+        'Summary:\n1. Primary Request and Intent:\n   - **Overall project:** the `model.py` bench',
+    );
+    expect(el.textContent).toContain('<system-reminder>');
+    expect(el.textContent).toContain('<tools-used-before-summary>Agent, Bash</tools-used-before-summary>');
+    expect(el.querySelector('system-reminder, tools-used-before-summary')).toBeNull();
+    expect(el.querySelector('ol > li')!.firstChild!.textContent).toBe('Primary Request and Intent:');
+    expect(el.querySelector('ol ul li strong')!.textContent).toBe('Overall project:');
+    expect(el.querySelector('ol ul li code')!.textContent).toBe('model.py');
+  });
+
   it('HTML inside link text, table cells and code stays text', () => {
     const el = md('[<img src=x onerror=alert(1)>](https://e.com)\n\n| <script>x</script> |\n|---|\n| <b>c</b> |');
     expect(el.querySelector('img, script, b')).toBeNull();

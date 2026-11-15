@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.142, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.143, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3273,6 +3273,9 @@ Interrupting a turn (`session.stop`): the adapter sends `control_request {subtyp
 error_during_execution`, the partial reply text comes as a separate `assistant` record, and
 the process stays alive (checked on 2.1.308). If there is no `result` within 10 s, the process
 group gets SIGINT; the CLI exits on it, and the next input brings the process up via `--resume`.
+Since 0.143, if the turn still runs 10 s after the SIGINT (a process stuck in a tool call that
+the signal does not end), the group gets SIGTERM, and SIGKILL 5 s later, as a kill does: Stop
+ends a stuck session together with the commands it started.
 
 Moving a call to the background (since 0.125, the VS Code tab's "Run in background", extension
 2.1.319). A call of the agent itself the CLI runs in the foreground is one whose `system`
@@ -5063,6 +5066,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.142 → 0.143 (Stop ends a stuck session)
+§8.1: Stop sent `interrupt`, then SIGINT to the process group after 10 s, and nothing after
+that: a process stuck in a tool call that SIGINT did not end kept its turn, and the session
+could not be stopped from the chat. If the turn still runs 10 s after the SIGINT, the group now
+gets SIGTERM, and SIGKILL 5 s later, as a kill does; the next input resumes the transcript.
 
 ### 0.141 → 0.142 (selected text is searched on the web)
 §6 client layout: the menu of text selected in the feed (a right click on a computer) has "Search

@@ -6,7 +6,9 @@
 //!   exists (the worker restarted, or the process ran before), else `--session-id <uuid>`
 //!   (a process that never got a prompt left no transcript to resume).
 //! - `stop` sends `control_request {subtype: interrupt}`; if no `result` follows within
-//!   [`ClaudeOptions::stop_grace`], the process group gets SIGINT.
+//!   [`ClaudeOptions::stop_grace`], the process group gets SIGINT; if the turn still runs
+//!   another `stop_grace` later, SIGTERM, and SIGKILL 5 s after that, so a process stuck in a
+//!   tool call is stopped with what it started.
 //! - `kill` sends SIGTERM to the process group, SIGKILL after 5 s.
 //! - A process that exits by itself is reported as [`AdapterEvent::Exited`].
 //! - While it runs, its token rate is counted every 2 s ([`rate`]).
@@ -163,7 +165,7 @@ pub struct ClaudeOptions {
     /// Claude Code's own cross-session messaging, on top of `session.start.disallowed_tools`
     /// (`allow_native_messaging` and `allow_subagent_messages` in the worker config).
     pub native_messaging: NativeMessaging,
-    /// Interrupt → SIGINT fallback delay.
+    /// Interrupt → SIGINT fallback delay, and SIGINT → SIGTERM.
     pub stop_grace: Duration,
     /// A process that dies this soon after spawning fails `start` instead of being
     /// reported as `Exited` (bad flags, unknown `--resume` id, not logged in).
@@ -949,9 +951,23 @@ impl Adapter for ClaudeCodeAdapter {
                 _ = tokio::time::sleep(grace) => {}
                 _ = exited.wait_for(Option::is_some) => return,
             }
-            if lock(&core).turn_running(turn) {
-                tracing::warn!(session_id = %io.session_id, "no result after interrupt; sending SIGINT");
-                io.signal(Sig::Interrupt);
+            if !lock(&core).turn_running(turn) {
+                return;
+            }
+            tracing::warn!(session_id = %io.session_id, "no result after interrupt; sending SIGINT");
+            io.signal(Sig::Interrupt);
+            // A process that runs the turn on, stuck in a tool call that SIGINT does not reach,
+            // goes with the commands it started: the group, as `kill` does.
+            for (wait, sig) in [(grace, Sig::Terminate), (KILL_GRACE, Sig::Kill)] {
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = exited.wait_for(Option::is_some) => return,
+                }
+                if !lock(&core).turn_running(turn) {
+                    return;
+                }
+                tracing::warn!(session_id = %io.session_id, signal = ?sig, "the turn runs on after SIGINT; signalling the process group");
+                io.signal(sig);
             }
         });
         Ok(())

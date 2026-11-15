@@ -5527,6 +5527,64 @@ idle` carries no `detail`. A `result` with no tokens gives no `usage` line whate
 `num_turns` (0.115 kept it for `num_turns` other than 0): a reply interrupted while it streamed
 had an empty `0 → 0 tokens` line under it.
 
+§4, §5.3, §6, §8.1: with Stop sparing them, nothing in hqc stopped a runaway background subagent
+or command but archiving the session. As in the VS Code tab, a subagent's line above the input, and a
+background command's, now ends with a small stop button: the adapter marks the rows of
+`subagents.live` with the new `stoppable: true` (example `event.subagents.live.json`);
+the button sends `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (`write` level, as
+`/stop`; a `task_id` longer than 128 bytes or with U+0000 → `400`), the hub sends the new frame
+`session.stop_task` {session_id, task_id} → `ack` (example `hub.session.stop_task.json`),
+fire-and-forget like `session.background`, and the worker writes `control_request` `stop_task`
+`{task_id}`, whose answer goes only to its log. The CLI's end of the stopped task removes its
+line and gives its "Background task" line, as before. An older worker sends no `stoppable`, so no
+button shows for its sessions, and answers `session.stop_task` with `error {invalid_frame}`;
+older hubs and clients ignore the new field.
+
+§6: a message written while a turn ran that waited for a turn of its own (one written in the
+seconds before the final answer, an answer to a permission request that ended the turn, a
+slash command, a run of a schedule, another session's message, a person's input while another
+session's question runs) stood in the feed at its `seq`, above the rest of that turn and its
+answer, which never saw it, with "· awaiting delivery" as if the worker were off. An input
+that came while a turn ran now stands at the bottom of the feed until the agent takes it, "·
+queued" while `pending`; one the agent took into that turn (`joined`) then stands at its `seq`
+as before, one that waited for a turn of its own where the agent took it: after the turns it
+waited through, before the work of its own, a `joined` one behind it right after it. One
+written during the agent's text (0.108) and taken only after that turn stood under that text,
+above the rest of the turn, though the agent answered it in a turn of its own: it now stands
+after that turn too, with the text of its own turn under it; one the agent took into that turn
+keeps its place under the text. §6, §7.1 hub: a fork before such an
+input cuts after the turns it waited through, and the files of a reply to a question that
+waited are those of its own turn, not of the turn it waited through. §6, §17.1: a tool call
+without a result stayed "running" for good when its turn was lost (the worker restarted, the
+agent died), and the
+activity line of a later turn showed "Running $ <that command>" with its time growing until the
+agent called a tool. A call with an end of a turn after it is now not finished, marked as a
+failed call, and the activity line looks only at the calls after the last end of a turn.
+
+§8.1, §17.2: the last answer of a turn the CLI started by itself (after a background task's
+end) was lost now and then: an input that came between that text and the turn's `result` (9–100
+ms apart on the stand) dropped the text the adapter held for the `result`. The input now leaves
+it held, as an input written into a turn of hqc's does, and the `result` ends it `final: true`.
+§4, §6, §8.1: when the CLI abandoned a request whose stream broke and retried it, the live text
+showed the start of the abandoned attempt with the retry after it; a retry that came back with a
+tool call only left the abandoned text up until the turn ended, and every input of that time was
+marked `during_text`. A main agent's `message_start` after text deltas that no `assistant` text
+took up now gives `agent.delta` with the new `reset: true` and an empty `text` (example
+`event.agent.delta.reset.json`): the hub drops its copy of the text, so a later input is not
+marked `during_text` and a later subscriber gets no copy, and the client drops the text it shows
+live, as the VS Code tab drops the rows of an abandoned attempt. The same reset comes before a
+main agent's `assistant` (not `<synthetic>`) of another `message.id` than the latest
+`message_start`'s while such text stands: 2.1.312 mostly retries a broken stream without one,
+and that response has no `message_start`. Older hubs and clients ignore
+the field and keep the text, as before. §10.1: a question of the agent that a worker restart or
+Stop cancelled could not be answered: its card closed with its options grey. Such a card
+(`clarify.cancel` `worker_restart` or `stopped`) now stays open while no message of the user
+stands after the cancel and the session takes input, and Answer, once every question has an
+answer, sends the answers as the user's message in the words of the VS Code tab for an earlier
+question, `Answering your earlier question "<question>": <answer>`; the first message of the user
+after the cancel, read as the tab reads it, shows the card answered or closes it; a card cancelled
+otherwise stays closed.
+
 ### 0.148 → 0.149 (the browser marked in the lists)
 §6 client layout: a session given the browser has a ring in the browser's color and a globe in
 the session list, and its project a dashed ring of that color on the project bar and on a phone's
@@ -5694,6 +5752,16 @@ also when the agent thinks it knows the address, since an address of this sessio
 history (an `hqc_rename` result, `current: true` in `hqc_list_sessions`) is the source's.
 0.129–0.132 are taken by open branches.
 
+### 0.128 → 0.132 (a quick call does not swap the activity line)
+§17.1: the line at the bottom of the feed turned into "Running <command or tool>" on every
+`tool.call` and back to "Agent is working" on its `tool.result`, so a turn of quick calls (a
+Read, a grep) made it flicker between the two. A call is now named on that line once it has run
+for 2 s; until then the line stays "Agent is working". The 2 s count from the call's `ts`, or from
+a later `approval.response` or `clarify.response` after it: a call that waited for a permission
+runs only after the answer, and its `ts` is from before the card. 0.129–0.131 are taken by open
+
+pull requests.
+
 ### 0.128 → 0.131 (Answer waits for an answer to every question)
 §4 `clarify.request`: the client sent the answers to the questions that had one and left the
 rest out, so an owner who answered one question of four sent it and the agent took the other
@@ -5741,64 +5809,6 @@ mode after this turn"). Migration `0042_permission_allow_all` widens the checks 
 `session.permission_mode` with `allow_all`, and a `session.input` with `permission_cap:
 "allow_all"`, as an unreadable frame, so the workers go first, then the hub and the client.
 0.128 is taken by another pull request.
-
-§4, §5.3, §6, §8.1: with Stop sparing them, nothing in hqc stopped a runaway background subagent
-or command but archiving the session. As in the VS Code tab, a subagent's line above the input, and a
-background command's, now ends with a small stop button: the adapter marks the rows of
-`subagents.live` with the new `stoppable: true` (example `event.subagents.live.json`);
-the button sends `POST /api/sessions/{id}/tasks/{task_id}/stop` → `{sent}` (`write` level, as
-`/stop`; a `task_id` longer than 128 bytes or with U+0000 → `400`), the hub sends the new frame
-`session.stop_task` {session_id, task_id} → `ack` (example `hub.session.stop_task.json`),
-fire-and-forget like `session.background`, and the worker writes `control_request` `stop_task`
-`{task_id}`, whose answer goes only to its log. The CLI's end of the stopped task removes its
-line and gives its "Background task" line, as before. An older worker sends no `stoppable`, so no
-button shows for its sessions, and answers `session.stop_task` with `error {invalid_frame}`;
-older hubs and clients ignore the new field.
-
-§6: a message written while a turn ran that waited for a turn of its own (one written in the
-seconds before the final answer, an answer to a permission request that ended the turn, a
-slash command, a run of a schedule, another session's message, a person's input while another
-session's question runs) stood in the feed at its `seq`, above the rest of that turn and its
-answer, which never saw it, with "· awaiting delivery" as if the worker were off. An input
-that came while a turn ran now stands at the bottom of the feed until the agent takes it, "·
-queued" while `pending`; one the agent took into that turn (`joined`) then stands at its `seq`
-as before, one that waited for a turn of its own where the agent took it: after the turns it
-waited through, before the work of its own, a `joined` one behind it right after it. One
-written during the agent's text (0.108) and taken only after that turn stood under that text,
-above the rest of the turn, though the agent answered it in a turn of its own: it now stands
-after that turn too, with the text of its own turn under it; one the agent took into that turn
-keeps its place under the text. §6, §7.1 hub: a fork before such an
-input cuts after the turns it waited through, and the files of a reply to a question that
-waited are those of its own turn, not of the turn it waited through. §6, §17.1: a tool call
-without a result stayed "running" for good when its turn was lost (the worker restarted, the
-agent died), and the
-activity line of a later turn showed "Running $ <that command>" with its time growing until the
-agent called a tool. A call with an end of a turn after it is now not finished, marked as a
-failed call, and the activity line looks only at the calls after the last end of a turn.
-
-§8.1, §17.2: the last answer of a turn the CLI started by itself (after a background task's
-end) was lost now and then: an input that came between that text and the turn's `result` (9–100
-ms apart on the stand) dropped the text the adapter held for the `result`. The input now leaves
-it held, as an input written into a turn of hqc's does, and the `result` ends it `final: true`.
-§4, §6, §8.1: when the CLI abandoned a request whose stream broke and retried it, the live text
-showed the start of the abandoned attempt with the retry after it; a retry that came back with a
-tool call only left the abandoned text up until the turn ended, and every input of that time was
-marked `during_text`. A main agent's `message_start` after text deltas that no `assistant` text
-took up now gives `agent.delta` with the new `reset: true` and an empty `text` (example
-`event.agent.delta.reset.json`): the hub drops its copy of the text, so a later input is not
-marked `during_text` and a later subscriber gets no copy, and the client drops the text it shows
-live, as the VS Code tab drops the rows of an abandoned attempt. The same reset comes before a
-main agent's `assistant` (not `<synthetic>`) of another `message.id` than the latest
-`message_start`'s while such text stands: 2.1.312 mostly retries a broken stream without one,
-and that response has no `message_start`. Older hubs and clients ignore
-the field and keep the text, as before. §10.1: a question of the agent that a worker restart or
-Stop cancelled could not be answered: its card closed with its options grey. Such a card
-(`clarify.cancel` `worker_restart` or `stopped`) now stays open while no message of the user
-stands after the cancel and the session takes input, and Answer, once every question has an
-answer, sends the answers as the user's message in the words of the VS Code tab for an earlier
-question, `Answering your earlier question "<question>": <answer>`; the first message of the user
-after the cancel, read as the tab reads it, shows the card answered or closes it; a card cancelled
-otherwise stays closed.
 
 ### 0.127 → 0.128 (the kind of a file uploaded again, and "Open" of a Markdown file)
 §3 Artifact, §6, §12: an upload of a file the owner already has under the same name returned

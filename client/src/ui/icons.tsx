@@ -348,6 +348,15 @@ export const IconAgent = ({ size = 14 }: { size?: number }) => (
   </Svg>
 );
 
+/** A room of several agents, beside "+" of the session column: two robots' heads. */
+export const IconRoom = ({ size = 16 }: { size?: number }) => (
+  <Svg size={size}>
+    <rect x="2" y="8" width="7.5" height="7" rx="2" />
+    <rect x="10.5" y="8" width="7.5" height="7" rx="2" />
+    <path d="M5.75 5.5V8M14.25 5.5V8" />
+  </Svg>
+);
+
 /** The chips of a new session: its workspace (a screen), folder and model (a clock). */
 export const IconWorkspace = ({ size = 14 }: { size?: number }) => (
   <Svg size={size}>

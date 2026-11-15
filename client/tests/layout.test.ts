@@ -137,6 +137,19 @@ describe('layout widths', () => {
     expect(CSS.indexOf('.attachments > .attachment-kind-image')).toBeGreaterThan(CSS.indexOf('.attachments > .attachment {'));
   });
 
+  it("a new room's form at 390px is as wide as the page, and a room's agents in its header wrap", () => {
+    // Not checked in a browser. The form is a flex item of the page's scroller, whose minimum
+    // would be its widest content; a fieldset's minimum is its content's by default; the text
+    // beside a radio and an agent's card may shrink; the fields are 100% wide.
+    expect(rule('.room-form')['min-width']).toBe('0');
+    expect(rule('.room-modes')['min-width']).toBe('0');
+    expect(rule('.room-mode-text')['min-width']).toBe('0');
+    expect(rule('.room-agent')['min-width']).toBe('0');
+    expect(rule('.input')['width']).toBe('100%');
+    expect(rule('.chat-room-agents')['flex-wrap']).toBe('wrap');
+    expect(rule('.chat-room-agent')['overflow-wrap']).toBe('anywhere');
+  });
+
   it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {
     expect([rule('.dot')['flex'], rule('.dot')['width']]).toEqual(['0 0 8px', '8px']);
     for (const sel of ['.sessions-phone .dot', '.preview-row .dot']) {

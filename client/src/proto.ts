@@ -1236,6 +1236,11 @@ export interface SessionInfo {
   provider?: ProviderRef;
   /** The owner gave the agent their Chrome (`agent.browser`, SPEC 0.148); absent: no browser. */
   browser?: boolean;
+  /** Only on a room (a session with no worker whose agents are member sessions): which of the
+   *  owner's and the agents' messages wake the agents. */
+  room_mode?: RoomMode;
+  /** Only on a room's member session: the room. */
+  room_id?: Uuid;
 }
 
 /** A session's provider as the session object names it. */
@@ -1277,6 +1282,11 @@ export interface SlashCommand {
   /** What it takes after the name, e.g. `[--force]`. */
   argument_hint?: string;
 }
+
+export const ROOM_MODES = ['conversation', 'council'] as const;
+/** A room's mode: in `conversation` an agent's post wakes the other agents too; in `council`
+ *  only the owner's message wakes them, all at once. */
+export type RoomMode = (typeof ROOM_MODES)[number];
 
 /** `spawned_by` of a session: the spawning session and its address. */
 export interface SpawnedBy {
@@ -1380,6 +1390,8 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     model: optStr(agent, 'model'),
     provider: optProviderRef(agent),
     browser: optBool(agent, 'browser') || undefined,
+    room_mode: oneOf(o, 'room_mode', ROOM_MODES),
+    room_id: optStr(o, 'room_id'),
   };
 }
 

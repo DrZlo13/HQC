@@ -32,11 +32,11 @@ interface Counts {
 const NONE: Counts = { wait: 0, run: 0, unread: 0 };
 
 /** The counts of each project, over the sessions the bar's marks count (not archived, not a
- *  service session), by the list's rule (`bucketOf`). */
+ *  service session, not a room's member; a room with its members' state), by the list's rule
+ *  (`bucketOf`). */
 function projectCounts(app: AppState): Map<string, Counts> {
   const out = new Map<string, Counts>();
-  for (const s of app.sessions.values()) {
-    if (s.archived || s.system) continue;
+  for (const s of app.countedSessions()) {
     const c = out.get(s.project_id) ?? { ...NONE };
     const b = bucketOf(s);
     if (b === 'wait') c.wait++;

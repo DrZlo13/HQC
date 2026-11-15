@@ -25,6 +25,7 @@ import {
   IconReorder,
   IconRestart,
   IconRestore,
+  IconRoom,
   IconSearch,
   IconSettings,
   IconShield,
@@ -218,6 +219,9 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   const draft = app.newSession?.projectId === pid ? app.newSession : null;
   const newSession = () => {
     if (pid) location.hash = `#/p/${pid}/new`;
+  };
+  const newRoom = () => {
+    if (pid) location.hash = `#/p/${pid}/new-room`;
   };
 
   useEffect(() => setReorder(null), [pid]);
@@ -419,7 +423,7 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
   return (
     <section class={`sessions ${phone ? 'sessions-phone' : ''} ${reorder ? 'is-reordering' : ''}`}>
       {/* One row: on a phone "‹" back to the projects, then the project's name, the search (its
-          own page), the order, the project's menu and a new session. */}
+          own page), the order, the project's menu, a new room and a new session. */}
       <header class="side-head">
         {phone && (
           <a class="icon-btn btn-back" href="#/" aria-label="Back to projects" onClick={(e) => onBack(e, '#/')}>
@@ -434,6 +438,16 @@ function LiveList({ app, current, phone, requests }: { app: AppState; current?: 
         </a>
         <ModeMenu app={app} pid={pid} mode={mode} disabled={!!reorder} phone={phone} onReorder={startReorder} />
         {project && <ProjectMenu app={app} project={project} phone={phone} />}
+        <button
+          type="button"
+          class="icon-btn btn-new-room"
+          aria-label="New room"
+          title="New room"
+          disabled={!pid || !app.me}
+          onClick={newRoom}
+        >
+          <IconRoom />
+        </button>
         <button
           type="button"
           class="btn btn-primary btn-new-session"

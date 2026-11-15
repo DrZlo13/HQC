@@ -8933,7 +8933,7 @@ fn an_agent_result_is_its_report() {
         "content":[{"type":"text","text":"The nets are fine."}],"totalToolUseCount":3,
         "totalDurationMs":4100,"totalTokens":1200,"prompt":"Check the nets"});
     let got = events(&emitted(
-        core.on_line(&tool_result_line(content.clone(), Some(report))),
+        core.on_line(&tool_result_line(content.clone(), Some(report.clone()))),
     ))
     .into_iter()
     .cloned()
@@ -8963,6 +8963,21 @@ fn an_agent_result_is_its_report() {
         panic!("{got:?}");
     };
     assert_eq!(result_preview, "Async agent launched successfully.");
+    // A record with two results: `tool_use_result` is neither's, both keep their own text.
+    let mut two: Value =
+        serde_json::from_str(&tool_result_line(json!("first"), Some(report))).unwrap();
+    two["message"]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"tool_result","tool_use_id":"t2","content":"second"}));
+    let got = events(&emitted(core.on_line(&two.to_string())))
+        .into_iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::ToolResult { result_preview, .. } => Some(result_preview.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(got, ["first", "second"]);
 }
 
 /// SPEC §8.1, 0.150: the CLI's "(no content)" for a reply without text is no `agent.message`.

@@ -1326,10 +1326,16 @@ describe("tool groups (T26)", () => {
       });
     const t = new Timeline();
     t.apply(call(1, "a", "Bash", { command: "curl -I example.com" }));
-    t.apply(out(2, "a", "See https://example.com/a?b=1. Not javascript:alert(1) or ftp://x.y/z"));
+    const text =
+      'See https://example.com/a?b=1. Not javascript:alert(1) or ftp://x.y/z; "url":"https://en.wikipedia.org/wiki/Rust_(programming_language)", [x](https://a.b/c)';
+    t.apply(out(2, "a", text));
     t.apply(call(3, "p", "Artifact", { file_path: "report.html" }));
     t.apply(out(4, "p", "Published Report at https://claude.ai/artifact/abc"));
+    // The same page opened again in the run: still one line.
+    t.apply(call(5, "q", "Artifact", { file_path: "report.html" }));
+    t.apply(out(6, "q", "Published Report at https://claude.ai/artifact/abc"));
     show(t);
+    expect(root.querySelectorAll(".tool-artifact")).toHaveLength(1);
     const g = root.querySelector(".tool-group")!;
     // Folded, the page is on a line of its own after the run.
     const page = root.querySelector<HTMLAnchorElement>(".tool-artifact a")!;
@@ -1340,10 +1346,13 @@ describe("tool groups (T26)", () => {
       g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
     );
     const [, result] = [...g.querySelectorAll("details.tool-row")[0].querySelectorAll(".pre")];
+    // A bracket the address opened stays in it; one that closes the text around it does not.
     expect([...result.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([
       "https://example.com/a?b=1",
+      "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+      "https://a.b/c",
     ]);
-    expect(result.textContent).toBe("See https://example.com/a?b=1. Not javascript:alert(1) or ftp://x.y/z");
+    expect(result.textContent).toBe(text);
   });
 
   it("shows a result without its call as a group of its own", () => {

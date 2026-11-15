@@ -927,6 +927,8 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
     const href = page && safeHref(page);
     return href ? [href] : [];
   });
+  // One page opened twice in the run is one line.
+  const unique = [...new Set(pages)];
   return (
     <>
       <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
@@ -950,8 +952,8 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
           </div>
         )}
       </div>
-      {pages.map((href, i) => (
-        <div key={i} class="tool-artifact">
+      {unique.map((href) => (
+        <div key={href} class="tool-artifact">
           <span class="tool-artifact-label">Artifact</span>{' '}
           <a href={href} target="_blank" rel="noopener noreferrer">
             {href}
@@ -1071,13 +1073,27 @@ function ToolCallBody({
   );
 }
 
+/** An address found in text without what closes the sentence around it: trailing punctuation,
+ *  and a closing bracket only when the address has no opening one for it, so
+ *  `…/wiki/Rust_(programming_language)` keeps its `)` and `[x](https://a.b/c)` loses it. */
+function trimUrl(found: string): string {
+  const pairs: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+  let url = found;
+  for (;;) {
+    const t = url.replace(/[.,;:!?]+$/, '');
+    const close = t.at(-1) ?? '';
+    const open = pairs[close];
+    if (open && t.split(open).length < t.split(close).length) url = t.slice(0, -1);
+    else return t;
+  }
+}
+
 /** `text` with its http and https addresses as links that open in a new tab (SPEC §6). */
 function withLinks(text: string): ComponentChildren {
   const out: ComponentChildren[] = [];
   let last = 0;
   for (const m of text.matchAll(/https?:\/\/[^\s<>"'`]+/g)) {
-    // The punctuation that closes a sentence is not part of the address.
-    const url = m[0].replace(/[.,;:!?)\]}]+$/, '');
+    const url = trimUrl(m[0]);
     const href = safeHref(url);
     if (!href) continue;
     out.push(

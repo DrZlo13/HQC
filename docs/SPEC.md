@@ -4697,7 +4697,8 @@ its `prompt` last, since 0.155 any call's with its fields from the shortest valu
 longest, as the adapter's, §8.1); non-empty `thinking` → `agent.thinking`. Since 0.69:
 `assistant` text with `message.model` `<synthetic>` → `agent.message` with `runtime: true`
 (§8.1), `final` by its `stop_reason` as any other, since 0.168 with `refusal: true` when that is
-`refusal`; a `user` record with `origin.kind:
+`refusal`; since 0.150 an `assistant` text that is
+exactly `(no content)` gives none, as from the adapter; a `user` record with `origin.kind:
 task-notification` (2.1.312: `origin {kind, producer: session-task, runId}`, `promptSource:
 system`, `turnOrigin: task_notification`, text
 `<task-notification><task-id>…<status>…</status><summary>…</summary>…`) → `system
@@ -6437,7 +6438,7 @@ hub's cleanup, §12, keeps the artifacts of every event's `artifact_ids` as it d
 `Agent` (`Task`) call that completed was the `tool_result` text with the CLI's trailer for the
 model (`agentId: …`, `<usage>`); it is now the subagent's report from `tool_use_result`. An
 `assistant` text `(no content)`, the CLI's for a reply without text, was drawn as the agent's
-answer; it gives no `agent.message` now. §6: the addresses in a result are links, its images
+answer; it gives no `agent.message` now, from the adapter and the mirror (§9.1). §6: the addresses in a result are links, its images
 thumbnails that open in the viewer, and the page address of an `Artifact` call's result a line
 of its own under the run of calls, seen while the run is folded. An older client ignores
 `artifact_ids`; an older hub stores the field it does not know as part of the payload.

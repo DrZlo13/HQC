@@ -49,7 +49,7 @@ use uuid::Uuid;
 
 use crate::adapter::claude_code::engine::{
     args_preview, parse_questions, preview, result_text, text, COMMAND_OUTPUT, CONTEXT_COMPACTED,
-    CONTEXT_COMPACTED_TEXT, ERROR_TEXT_LIMIT, PREVIEW_LIMIT, REFUSAL, SYNTHETIC_MODEL,
+    CONTEXT_COMPACTED_TEXT, ERROR_TEXT_LIMIT, NO_CONTENT, PREVIEW_LIMIT, REFUSAL, SYNTHETIC_MODEL,
     TASK_NOTIFICATION, TURN_INTERRUPTED, TURN_INTERRUPTED_TEXT,
 };
 
@@ -528,7 +528,7 @@ fn assistant(m: &Message, in_reply_to: Option<Uuid>) -> Vec<Event> {
         let kind = match b["type"].as_str() {
             Some("text") => {
                 let t = b["text"].as_str().unwrap_or("");
-                if t.is_empty() {
+                if t.is_empty() || t == NO_CONTENT {
                     continue;
                 }
                 EventKind::AgentMessage {
@@ -750,6 +750,13 @@ mod tests {
                 0
             )
         );
+        // The CLI's "(no content)" for a reply without text is no message (SPEC §9.1, 0.150).
+        let empty = line.replace(
+            "There's an issue with the selected model (claude-bogus-model-9-9). It may not exist or you may not have access to it.",
+            "(no content)",
+        );
+        let rec = hqc_claude_jsonl::parse_line(&empty).unwrap();
+        assert!(record_events(&rec, Some(prompt)).is_empty());
     }
 
     /// The CLI's own reply to a model refusal (`<synthetic>`, `stop_reason` `refusal` with its

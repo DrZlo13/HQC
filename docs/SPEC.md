@@ -552,7 +552,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.161: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time), `refusal?` (since 0.168: `true` for the runtime's reply to a model refusal, Claude Code's with `stop_reason: "refusal"`; absent when false) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Under a `refusal` one, while no message of the user stands after it in the feed, the session is not archived and VS Code does not hold it (`locked_vscode`, whose chat has no input), a small "Switch model" opens a model menu: the aliases, the versions, "Another model…" and the providers the session's worker allows (§6), the session's model checked, without Claude Code's default, which a running agent is not switched to (it takes it at its next start, §5.3 `session.model`). The checked one only closes the menu; another switches the session as the "More" menu does, and once the hub took it the line says "Switched to <model>. Send the message again." in the button's place, until a `system model_not_switched` after the choice (§8.1) brings the button back. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
-| `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12) | adapter |
+| `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12; since 0.150 the Claude Code adapter's whole text of a result longer than `result_preview`, its first 2 MiB, kind `text`, §8.1), `artifact_ids[]?` (since 0.150: the result's images, kind `image`, in order; absent when none, §8.1) | adapter |
 | `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}` | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; since 0.150 `reason?` — why the runtime asks (Claude Code: `decision_reason`, at most 1024 bytes), `display_name?` — the runtime's name of the tool (at most 256 bytes), both absent when blank, and `human_only?` — `true` when only a person may answer it (§8.1): its `options` are `once` and `deny`, it has no `rule_suggestions`, and the hub's `auto_approve` leaves it to the owner (§10.1); absent when false. The client shows `reason` under the card's title and names the tool by `display_name` when there is one, an MCP server's tool as `<tool> (<server>)` (the runtime's `display_name` of one drops the server); `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived, since 0.150 withdrawn — the runtime withdrew its request, §8.1; the client says "withdrawn") | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
@@ -626,7 +626,8 @@ Rules:
   `attachment` events of a turn that answers an `hqc_ask` go back to the asker with the
   reply (§7.1).
 - `*_preview` fields are cut by the worker to 4 KB; the full tool result is not sent to the hub,
-  except diffs and results saved as artifacts.
+  except diffs and results saved as artifacts (since 0.150 a longer result of Claude Code and the
+  images of a result, `tool.result.artifact_id` and `artifact_ids`, §8.1).
 - `agent.delta` goes to clients over WebSocket and is not saved; `agent.message` is saved. The
   hub keeps the text of a session's deltas in memory until its `agent.message`, a `status`
   other than `running` or (since 0.161) a delta with `reset` (up to 512 KiB, and not past the
@@ -1423,7 +1424,8 @@ MCP calls (worker → hub → worker):
   `x-hqc-artifact-name` — the name, percent-encoded as in the download; `x-hqc-artifact-kind?`
   and `Content-Type` as in `POST /api/artifacts`. The answer is the artifact (§6), `201`, or
   `200` for the same content under the same name. A bad token `401`, over the limit `413
-  too_large`, an unknown `kind` `400`.
+  too_large`, an unknown `kind` `400`. Since 0.150 also a tool result's whole text and its
+  images (§8.1), with their `Content-Type`.
 
 ## 6. Client ↔ Hub protocol
 
@@ -2275,8 +2277,15 @@ first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
 `<server>/<tool>`); a Skill call's line names its skill, a SendMessage call's line (since 0.163)
 says what it sent: its `summary`, else its plain-text `message` on one line; thinking and tool
 lines are fainter than the text, and an open thinking block is prose in the feed's font. Since
-0.135 a subagent has two cards in the project's colour, two lines each at any width, which never
-wrap: a long text is cut
+0.150 an opened call's result has its `http` and `https` addresses as links (opened in a new
+tab), its images (`tool.result.artifact_ids`) as thumbnails under its text, each opening in the
+viewer over the chat (§12), and "Full result" when `artifact_id` holds the whole text (it opens
+in a new tab); a run with an `Artifact` call whose result names one page address (the result
+starts "Published ", "Created a new Artifact at http", "An earlier attempt of this call already
+created the Artifact at http" or "Opened the Artifact at http", and has one "at http(s)://…", as
+the VS Code tab reads it, extension 2.1.319) has that address as a link on a line of its own
+under the run, seen while the run is folded. Since 0.135 a subagent has two cards in the
+project's colour, two lines each at any width, which never wrap: a long text is cut
 with an ellipsis. Its start: a call of `Agent` (`Task` in older Claude Code) is no row of a run: it
 ends the run before it and is a card of its own (tinted background and border), its result inside
 it. Its first line is a small agent icon, "Agent started:" dimmed (since 0.141; before it only the
@@ -3793,9 +3802,24 @@ values of 3 KB or more counted as equally long, fields of the same length in sor
 Edit of two long strings keeps `new_string` before `old_string`), an `Agent` or `Task` call's
 `prompt` still last, so the cut falls in the longest values and a Write's `file_path` or a Bash
 call's `description` comes whole; the mirror builds it the same way, §9.1); `tool_result` →
-`tool.result`; `result` → `usage` and `status idle`. Since 0.161 the `result` also gives, after the
-`usage` and before `status idle`, one `system` line that says how the turn ended when it did not
-complete: `turn_interrupted`
+`tool.result`; `result` → `usage` and `status idle`. Since 0.150: the `tool.result` of an `Agent`
+(`Task`) call whose subagent completed has the subagent's report as its text, the text blocks of the
+record's `tool_use_result.content` (`{status: completed, agentId, content, …}`, 2.1.312), not the
+`tool_result` text, to which the CLI adds a trailer for the model (`agentId: … (use SendMessage …)`
+and a `<usage>` block); a record with more than one `tool_result` keeps their texts, as the VS Code
+tab reads `tool_use_result` only with one. A result whose text is longer than `result_preview` (4
+KB) has its text, at most its first 2 MiB (what "Open" of a text shows, §12), uploaded as an
+artifact of kind `text` (`PUT /worker/artifacts`, §5.4, named `result.txt`) in `artifact_id`; each
+image block of the result (`{type: image, source: {type: base64, media_type, data}}`, a screenshot,
+a `Read` of a picture) is uploaded decoded as an artifact of kind `image` with its `media_type`
+(named `image.<subtype>`) in `artifact_ids`, in order, one over the artifact limit (§12) not at all;
+the preview keeps `[image]` in its place. The worker uploads before it sends the event and before it
+handles the adapter's next event, so the feed keeps its order; a failed upload is logged and leaves
+its field out, the event goes as it was. An `assistant` text that is exactly `(no content)` gives no
+`agent.message`: the CLI writes it for a reply without text (2.1.312: a non-streaming reply whose
+blocks it all dropped, a message of its own with empty text), and the VS Code tab draws none. Since
+0.161 the `result` also gives, after the `usage` and before `status idle`, one `system` line that
+says how the turn ended when it did not complete: `turn_interrupted`
 "Interrupted" for a `terminal_reason` `aborted_streaming` (during the reply) or `aborted_tools`
 (during a tool call); `turn_ended_early` for an error `result` (`subtype` other than `success`, or
 `is_error: true`) or a `terminal_reason` other than `completed`, `background_requested` (the model
@@ -5445,7 +5469,9 @@ for one of its sessions; the owner is the session's owner, dedup and `kind` as f
 upload; the artifact is linked to the session in `artifact_sessions`, which is what the tool
 checks (and the session's worker may download it back). The `attachment` event renders like a
 user's attachment, standing in the feed after the tool group of its call; diffs of ACP agents
-are saved as artifacts by the adapter itself (§8.2). Agent → agent (since 0.46, T41): the
+are saved as artifacts by the adapter itself (§8.2), and since 0.150 the worker uploads the
+whole text of a long Claude Code tool result and a result's images the same way (§8.1), shown in
+the call's row (§6). Agent → agent (since 0.46, T41): the
 `files` of `hqc_send`/`hqc_ask` go up by the same worker upload and down into the target's
 `.hqc/inbox` like a user's files; the files of a reply into the asker's (§7, §7.1). In the
 feed a `peer.message` shows its files under its text like a `user.message`.
@@ -5462,7 +5488,7 @@ project's `icon.url` changes with the image.
 
 **Cleanup** (since 0.23, T21). Once a day (the first time right after start) the hub deletes
 artifact records that no event references (`artifact_ids` of `user.message` and, since 0.46,
-`peer.message`, `artifact_id` of
+`peer.message`, since 0.150 of `tool.result`, `artifact_id` of
 `attachment` and `tool.result`) and that are older than `HQC_ARTIFACT_RETENTION_DAYS` (default
 30, `0` means never delete) by `updated_at`, the last upload of the same file or input with it.
 The file on disk is deleted only when no records are left for its sha256: first it is moved
@@ -6371,7 +6397,7 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.149 → 0.150 (the CLI's requests: only a person's, the reason, a withdrawal, an MCP server's)
+### 0.149 → 0.150 (the CLI's requests: only a person's, the reason, a withdrawal, an MCP server's; its results)
 §8.1: the Claude Code adapter answered a `can_use_tool` from a `session` rule or the folder's hqc
 rules, and the hub's `auto_approve` answered it, also when the CLI said that only a person may
 (`requires_user_interaction`, `matched_ask_rule`, `suppress_always_allow_rule`), and the card
@@ -6400,6 +6426,21 @@ client shows such a card without its reason and an MCP server's request as the a
 question, a form without "Decline" and a link without its URL; an older hub's `auto_approve`
 answers a `human_only` request, and it takes no `action`, so a declined or done request gets
 `400`.
+
+The results. §4, §8.1: a tool result over its 4 KB preview was cut there, and "Full result" of
+the client never came: the worker set no `artifact_id`. The worker now uploads such a result's
+text, its first 2 MiB, as a `text` artifact in `artifact_id` before it sends the event. A
+result's images were only `[image]` in the preview; each is now an `image` artifact in the new
+`tool.result.artifact_ids[]` (a list, beside `artifact_id`: one result may carry several, and the
+hub's cleanup, §12, keeps the artifacts of every event's `artifact_ids` as it does for
+`user.message` and `peer.message`). A failed upload leaves its field out. The result of an
+`Agent` (`Task`) call that completed was the `tool_result` text with the CLI's trailer for the
+model (`agentId: …`, `<usage>`); it is now the subagent's report from `tool_use_result`. An
+`assistant` text `(no content)`, the CLI's for a reply without text, was drawn as the agent's
+answer; it gives no `agent.message` now. §6: the addresses in a result are links, its images
+thumbnails that open in the viewer, and the page address of an `Artifact` call's result a line
+of its own under the run of calls, seen while the run is folded. An older client ignores
+`artifact_ids`; an older hub stores the field it does not know as part of the payload.
 
 ### 0.172 → 0.173 (what the agent is doing now: retries, compaction, thinking, long calls; the CLI's notices)
 §8.1, §5.4, §6, §17.1: while Claude Code retried a failed request to the model API, compacted

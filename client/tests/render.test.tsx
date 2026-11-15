@@ -1318,6 +1318,34 @@ describe("tool groups (T26)", () => {
     );
   });
 
+  it("a result's http and https addresses are links; an Artifact call's page is a line under the run (SPEC 0.150)", async () => {
+    const out = (seq: number, call_id: string, result_preview: string) =>
+      ev("event.tool.result", (e) => {
+        e.seq = seq;
+        e.payload = { call_id, error: false, result_preview };
+      });
+    const t = new Timeline();
+    t.apply(call(1, "a", "Bash", { command: "curl -I example.com" }));
+    t.apply(out(2, "a", "See https://example.com/a?b=1. Not javascript:alert(1) or ftp://x.y/z"));
+    t.apply(call(3, "p", "Artifact", { file_path: "report.html" }));
+    t.apply(out(4, "p", "Published Report at https://claude.ai/artifact/abc"));
+    show(t);
+    const g = root.querySelector(".tool-group")!;
+    // Folded, the page is on a line of its own after the run.
+    const page = root.querySelector<HTMLAnchorElement>(".tool-artifact a")!;
+    expect(page.getAttribute("href")).toBe("https://claude.ai/artifact/abc");
+    expect(page.getAttribute("target")).toBe("_blank");
+    expect(g.contains(page)).toBe(false);
+    await act(async () =>
+      g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
+    );
+    const [, result] = [...g.querySelectorAll("details.tool-row")[0].querySelectorAll(".pre")];
+    expect([...result.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([
+      "https://example.com/a?b=1",
+    ]);
+    expect(result.textContent).toBe("See https://example.com/a?b=1. Not javascript:alert(1) or ftp://x.y/z");
+  });
+
   it("shows a result without its call as a group of its own", () => {
     const t = new Timeline();
     t.apply(ev("event.tool.result"));

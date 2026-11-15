@@ -235,7 +235,10 @@ export interface ToolResult {
   error: boolean;
   error_text?: string;
   duration_ms?: number;
+  /** A diff, or the whole text of a result longer than `result_preview` (since SPEC 0.150). */
   artifact_id?: Uuid;
+  /** The result's images, in order (since SPEC 0.150); empty when none. */
+  artifact_ids: Uuid[];
 }
 export interface ApprovalOption {
   id: string;
@@ -553,6 +556,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     error_text: optStr(p, 'error_text'),
     duration_ms: optNum(p, 'duration_ms'),
     artifact_id: optStr(p, 'artifact_id'),
+    artifact_ids: present(p, 'artifact_ids') ? strArr(p, 'artifact_ids') : [],
   }),
   'approval.request': (p) => ({
     request_id: str(p, 'request_id'),

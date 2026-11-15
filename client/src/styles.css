@@ -3663,6 +3663,26 @@ select.input {
   padding: 6px 0 4px;
 }
 
+/* A result's images: thumbnails in a row, each opens in the viewer (SPEC §6). */
+.tool-images > .attachment {
+  flex: none;
+}
+
+.tool-images .attachment-image img {
+  max-width: 160px;
+  max-height: 120px;
+}
+
+/* The page an `Artifact` call published: a line under its run of calls (SPEC §6). */
+.tool-artifact {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.tool-artifact-label {
+  color: var(--muted);
+}
+
 .label {
   margin-top: 6px;
   font-size: 11px;

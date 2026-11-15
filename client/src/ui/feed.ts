@@ -284,6 +284,25 @@ export function groupDuration(rows: ToolRow[]): number | undefined {
   return sum || undefined;
 }
 
+/** How an `Artifact` call's result that names its page starts (the VS Code tab's list,
+ *  extension 2.1.319). */
+const ARTIFACT_PAGE = [
+  'Published ',
+  'Created a new Artifact at http',
+  'An earlier attempt of this call already created the Artifact at http',
+  'Opened the Artifact at http',
+];
+
+/** The page address an `Artifact` call's result names (SPEC §6): its one `at http(s)://…`, in a
+ *  result that starts as the CLI's does, as the VS Code tab reads it. */
+export function artifactPage(tool: string, r: EventOf<'tool.result'>['payload'] | undefined): string | undefined {
+  if (tool !== 'Artifact' || !r || r.error) return undefined;
+  const t = r.result_preview;
+  if (!ARTIFACT_PAGE.some((p) => t.startsWith(p))) return undefined;
+  const at = [...t.matchAll(/\bat (https?:\/\/\S+)/g)];
+  return at.length === 1 ? at[0][1] : undefined;
+}
+
 /** `Agent` (`Task` in older Claude Code): the tool that starts a subagent. */
 export function subagentTool(tool: string): boolean {
   return tool === 'Agent' || tool === 'Task';

@@ -16,6 +16,7 @@ import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attac
 import { ContextMenu } from './ContextMenu';
 import {
   argsText,
+  artifactPage,
   askTarget,
   buildFeed,
   callArgs,
@@ -908,7 +909,7 @@ function Thinking({ event }: { event: EventOf<'agent.thinking'> }) {
 
 /** A run of tool calls, collapsed: "N tool calls · time", then the call's line when it is
  *  one, else the tools it called, each once, in the order first called; open, a row per call
- *  (T26). */
+ *  (T26). Under it, a line with the page each of its `Artifact` calls published. */
 function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }>; actions: ChatActions }) {
   const [open, setOpen] = useState(false);
   const calls = callRows(block.rows);
@@ -919,28 +920,45 @@ function ToolGroup({ block, actions }: { block: Extract<Block, { kind: 'tools' }
   const one = calls.length === 1 ? calls[0].call : undefined;
   const peek = one && callPeek(one.payload.tool, one.payload.args_preview, actions.workspaceRoot);
   const kinds = [...new Set(calls.flatMap((r) => (r.call ? [toolKind(r.call.payload.tool)] : [])))];
+  // The pages its `Artifact` calls published: a line each under the run, folded or not.
+  const pages = calls.flatMap(({ call, result }) => {
+    const r = call ? (actions.timeline.resultFor(call.payload.call_id) ?? result) : undefined;
+    const page = call && artifactPage(call.payload.tool, r?.payload);
+    const href = page && safeHref(page);
+    return href ? [href] : [];
+  });
   return (
-    <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
-      <button type="button" class="tool-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span class="chevron">
-          <IconChevron />
-        </span>
-        <StateMark state={state} />
-        <span class="tool-stats">{stats}</span>
-        {peek ? (
-          <span class="tool-peek mono">{peek}</span>
-        ) : (
-          calls.length > 1 && kinds.length > 0 && <span class="tool-peek tool-kinds">({kinds.join(', ')})</span>
+    <>
+      <div class={`tool-group tool-${state} ${open ? 'is-open' : ''}`}>
+        <button type="button" class="tool-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+          <span class="chevron">
+            <IconChevron />
+          </span>
+          <StateMark state={state} />
+          <span class="tool-stats">{stats}</span>
+          {peek ? (
+            <span class="tool-peek mono">{peek}</span>
+          ) : (
+            calls.length > 1 && kinds.length > 0 && <span class="tool-peek tool-kinds">({kinds.join(', ')})</span>
+          )}
+        </button>
+        {open && (
+          <div class="tool-group-body">
+            {block.rows.map((r) => (
+              <ToolRowView key={r.key} row={r} actions={actions} />
+            ))}
+          </div>
         )}
-      </button>
-      {open && (
-        <div class="tool-group-body">
-          {block.rows.map((r) => (
-            <ToolRowView key={r.key} row={r} actions={actions} />
-          ))}
+      </div>
+      {pages.map((href, i) => (
+        <div key={i} class="tool-artifact">
+          <span class="tool-artifact-label">Artifact</span>{' '}
+          <a href={href} target="_blank" rel="noopener noreferrer">
+            {href}
+          </a>
         </div>
-      )}
-    </div>
+      ))}
+    </>
   );
 }
 
@@ -996,7 +1014,8 @@ function ToolRowView({ row, actions }: { row: ToolRow; actions: ChatActions }) {
 }
 
 /** An opened call, in its row of a group or on a subagent's card: the change of an Edit, a
- *  MultiEdit or a Write (its result only if it failed), else the arguments and the result. */
+ *  MultiEdit or a Write (its result only if it failed), else the arguments and the result, its
+ *  addresses as links and its images as thumbnails. */
 function ToolCallBody({
   call,
   result,
@@ -1033,7 +1052,14 @@ function ToolCallBody({
         <>
           <div class="label">{r.error ? 'Error' : 'Result'}</div>
           {r.error_text && <div class="error-text">{r.error_text}</div>}
-          {r.result_preview && <pre class="pre">{r.result_preview}</pre>}
+          {r.result_preview && <pre class="pre">{withLinks(r.result_preview)}</pre>}
+          {r.artifact_ids.length > 0 && (
+            <div class="attachments tool-images">
+              {r.artifact_ids.map((id) => (
+                <AttachmentView key={id} id={id} kind="image" actions={actions} />
+              ))}
+            </div>
+          )}
           {r.artifact_id && (
             <button type="button" class="btn btn-small" onClick={() => actions.openArtifact(r.artifact_id!)}>
               Full result
@@ -1043,6 +1069,27 @@ function ToolCallBody({
       )}
     </div>
   );
+}
+
+/** `text` with its http and https addresses as links that open in a new tab (SPEC §6). */
+function withLinks(text: string): ComponentChildren {
+  const out: ComponentChildren[] = [];
+  let last = 0;
+  for (const m of text.matchAll(/https?:\/\/[^\s<>"'`]+/g)) {
+    // The punctuation that closes a sentence is not part of the address.
+    const url = m[0].replace(/[.,;:!?)\]}]+$/, '');
+    const href = safeHref(url);
+    if (!href) continue;
+    out.push(
+      text.slice(last, m.index),
+      <a key={m.index} href={href} target="_blank" rel="noopener noreferrer">
+        {url}
+      </a>,
+    );
+    last = m.index + url.length;
+  }
+  out.push(text.slice(last));
+  return out;
 }
 
 /** A subagent the agent started (its `Agent` call): a card of its own in the project's colour,

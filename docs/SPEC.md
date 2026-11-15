@@ -1661,45 +1661,42 @@ the rest is marked "later"):
   source's model, `permission_mode` and `auto_approve`, titled "<title> (fork)", whose
   conversation is the source's before the user's message `event_id` (a `user.message` of a
   person in this session, else `404`); a session that is not Claude Code or has no workspace on
-  a worker of its owner: `409 not_forkable`. The cut is the source's last `agent.message`
-  events before the message (up to 20, newest first): they go as `session.start.fork` (§5.3)
-  with the source's `runtime_session_id`; with none (the first message) the session starts
-  with no conversation and no fork. Its feed gets the source's `user.message`,
-  `agent.message`, `agent.thinking`, `tool.call`, `tool.result`, `attachment`, `peer.message`
-  and `system` events before the message under new ids, at `seq` 1.., none of them an input to
-  deliver, then `system forked_from`, all read by the owner; requests, statuses and usage stay
-  with the source. Since 0.156 the copies go in without their search words, which the hub
-  writes as soon as the copy is in, without the answer waiting for them (§15). Since 0.82 a
-  copy keeps its origin (`events.origin_id`, `origin_runtime`, not on the wire): the id the runtime's record gave the event and the transcript that record
-  was first written in. The cut's events are each named by their origin, and the fork goes to
-  the transcript of the newest one with only the events in it: a fork of a fork before a
-  message of its copied history cuts in the transcript that history came from, which stays on
-  the worker when the sessions between never ran (the CLI writes a fork's transcript at its
-  first message) or were deleted (§17.4). Since 0.151 the events a session has when its runtime
-  goes on in another transcript (`/clear`, §8.1) get the one they were written in as
-  `origin_runtime`: a fork before a message of the conversation before `/clear` cuts that
-  transcript, one after the first answer after it the new one (before, every fork cut the new
-  one, and the worker did not find the cut there); the cut is only among the answers after the
-  last `system conversation_cleared` before the message, or before the place the client shows
-  it at (below; its own or copied), so a fork before
-  the first answer after `/clear` starts a new conversation, like one before the first message,
-  without the source's events. Since 0.108 a fork before a message with
-  `during_text` keeps the `agent.message` the client shows above it (below, the WebSocket
-  paragraph) as the newest cut and the last copied event. Since 0.137 a fork before a message
-  the client shows after the turns it waited through (the same paragraph; one with
-  `during_text` too) cuts after them: the
+  a worker of its owner: `409 not_forkable`. The cut is the source's last `agent.message` events
+  before the message (up to 20, newest first): they go as `session.start.fork` (§5.3) with the
+  source's `runtime_session_id`; with none (the first message) the session starts with no
+  conversation and no fork. Its feed gets the source's `user.message`, `agent.message`,
+  `agent.thinking`, `tool.call`, `tool.result`, `attachment`, `peer.message` and `system` events
+  before the message under new ids, at `seq` 1.., none of them an input to deliver, then `system
+  forked_from`, all read by the owner; requests, statuses and usage stay with the source. Since
+  0.156 the copies go in without their search words, which the hub writes as soon as the copy
+  is in, without the answer waiting for them (§15). Since 0.82 a copy keeps its origin (`events.origin_id`, `origin_runtime`, not on the wire): the id
+  the runtime's record gave the event and the transcript that record was first written in. The
+  cut's events are each named by their origin, and the fork goes to the transcript of the newest
+  one with only the events in it: a fork of a fork before a message of its copied history cuts
+  in the transcript that history came from, which stays on the worker when the sessions between
+  never ran (the CLI writes a fork's transcript at its first message) or were deleted (§17.4).
+  Since 0.151 the events a session has when its runtime goes on in another transcript (`/clear`,
+  §8.1) get the one they were written in as `origin_runtime`: a fork before a message of the
+  conversation before `/clear` cuts that transcript, one after the first answer after it the new
+  one (before, every fork cut the new one, and the worker did not find the cut there); the cut
+  is only among the answers after the last `system conversation_cleared` (its own or copied)
+  before the message, or before the place the client shows it at (below), so a fork before the
+  first answer after `/clear` starts a new conversation, like one before the first message,
+  without the source's events. Since 0.108 a fork before a message with `during_text` keeps the
+  `agent.message` the client shows above it (below, the WebSocket paragraph) as the newest cut
+  and the last copied event. Since 0.137 a fork before a message the client shows after the
+  turns it waited through (the same paragraph; one with `during_text` too) cuts after them: the
   newest cut is the last `agent.message` before the place the client shows the message at, and
   the feed also gets the events after the message and before that place but its inputs. The
-  agent starts at once. The client puts the message's text into the new
-  session's input as its draft and opens it. Since 0.134 the agent of a fork with copied
-  history is told it is a copy: the first input after `system forked_from` goes with
-  `session.input.text` beginning `[hqc fork] <the forked_from text>. The conversation above
-  was copied from that session; this session is <its address>, separate from it from here
-  on.` and an empty line, the address the session has at delivery; a slash command does not
-  carry it (the next input does) and a failed input does not count; in a `peer.message` the
-  note stands after the worker's sender header (§7.1). An input sent again before its `ack`
-  carries it again. The feed keeps the text as typed. A fork before the first message has no
-  copied history and no note.
+  agent starts at once. The client puts the message's text into the new session's input as its
+  draft and opens it. Since 0.134 the agent of a fork with copied history is told it is a copy:
+  the first input after `system forked_from` goes with `session.input.text` beginning `[hqc
+  fork] <the forked_from text>. The conversation above was copied from that session; this
+  session is <its address>, separate from it from here on.` and an empty line, the address the
+  session has at delivery; a slash command does not carry it (the next input does) and a failed
+  input does not count; in a `peer.message` the note stands after the worker's sender header
+  (§7.1). An input sent again before its `ack` carries it again. The feed keeps the text as
+  typed. A fork before the first message has no copied history and no note.
 - `POST /api/sessions/{id}/move` {path, project?, create?} → the session object (since 0.75;
   `manage` level, §3 Grant): the session continues in folder `path` of its worker, in that
   folder's project (§3 Session). The hub checks the folder with `fs.stat` as `POST
@@ -3717,19 +3714,18 @@ The working directory is `<workspace>/<cwd>`. The process environment comes from
 of the workspace path in the worker's local config (§14). Authentication is the subscription
 already logged in on the machine (Keychain on a Mac); the hub neither stores nor sees it.
 
-Session title. Claude Code writes a record
-`{"type": "ai-title", "aiTitle": "<title>", "sessionId": "<uuid>"}` to the transcript: a title
-the model made up from the first prompt, sometimes several times per session (the last one
-wins; fixture `tool-call-2.1.307`, the records come right after the first prompt, before the
-model's reply). After every finished turn the adapter reads the transcript and, if the
-last non-empty `aiTitle` differs from the one already sent, sends the hub `session.state`
-with a `title` field (§5.4); the hub applies it by the `title_source` rule (§3 Session).
-Checked on 2.1.308 (T13, live run `live_ai_title`): with `--input-format stream-json`
-the CLI **does not write** `ai-title`, neither by the end of the turn nor 5 s after it; none of
-the T0 (2.1.307) and T12 (2.1.308) transcripts recorded in this mode have it either — it is
-there only in the run with the prompt as an argument (`tool-call-2.1.307`). So in iteration 1
-adapter sessions in practice keep the default title until the CLI starts writing
-`ai-title` in this mode or the user renames them **[verify]** on
+Session title. Claude Code writes a record `{"type": "ai-title", "aiTitle": "<title>",
+"sessionId": "<uuid>"}` to the transcript: a title the model made up from the first prompt,
+sometimes several times per session (the last one wins; fixture `tool-call-2.1.307`, the records
+come right after the first prompt, before the model's reply). After every finished turn the
+adapter reads the transcript and, if the last non-empty `aiTitle` differs from the one already
+sent, sends the hub `session.state` with a `title` field (§5.4); the hub applies it by the
+`title_source` rule (§3 Session). Checked on 2.1.308 (T13, live run `live_ai_title`): with
+`--input-format stream-json` the CLI **does not write** `ai-title`, neither by the end of the
+turn nor 5 s after it; none of the T0 (2.1.307) and T12 (2.1.308) transcripts recorded in this
+mode have it either — it is there only in the run with the prompt as an argument
+(`tool-call-2.1.307`). So in iteration 1 adapter sessions in practice keep the default title
+until the CLI starts writing `ai-title` in this mode or the user renames them **[verify]** on
 later CLI versions. Such sessions get a title from the worker via `title.request` (§3 Session,
 since 0.25). On 2.1.312 the CLI writes `ai-title` in this mode during the first turn, before the
 turn's answer (live run `w1-clear`), and does not stream it: `system session_title_changed`
@@ -3739,10 +3735,11 @@ trimmed, an empty one dropped; the transcript's title, its last non-empty `custo
 `/rename`, the VS Code tab's rename), else its last `ai-title`, is read every 2 s of the first
 model turn of a new conversation (a new session or the first turn after `/clear`: the CLI writes
 `ai-title` then, and not in a fork, whose own title the hub keeps; a resumed transcript without
-one, tens of MB, is not read every 2 s; with the token rate, below) while the process has sent no title yet, and at the end of every
-turn, so a title a person gave is not taken back by an older `ai-title`; either is sent only
-when it differs from the last one sent. Before 0.151 the transcript was read only at the end of
-a turn, so a new session got its title when its first turn ended.
+one, tens of MB, is not read every 2 s; with the token rate, below) while the process has sent
+no title yet, and at the end of every turn, so a title a person gave is not taken back by an
+older `ai-title`; either is sent only when it differs from the last one sent. Before 0.151 the
+transcript was read only at the end of a turn, so a new session got its title when its first
+turn ended.
 
 The worker runs `title.request` (T24) as a one-shot process — not through the session's adapter
 and not in its process: `claude -p --model claude-haiku-5-5 --max-turns 1 --no-session-persistence
@@ -5676,19 +5673,19 @@ before the wakeup was due, and the wakeup died with the process. The adapter now
 the worker counts the idle timeout from the later of the agent's last activity and the wakeup's
 time (live runs `x6-wake-*`).
 
-§5.4, §6, §8.1: the title came at the end of a turn, from the transcript's last `ai-title`, so
-a new session got its title when its first turn ended and a later `ai-title` took back a
+§5.4, §6, §8.1: the title came at the end of a turn, from the transcript's last `ai-title`, so a
+new session got its title when its first turn ended and a later `ai-title` took back a
 `/rename`, and the slash commands came as names with `system/init`. The adapter now sends a
 person's title, `system session_title_changed`, at once, reads the transcript's title every 2 s
 of the first model turn of a new session or after `/clear` while the process has none and at the
-end of every turn, the transcript's last
-`custom-title` winning over its `ai-title`, and the commands come from the CLI's answer to
-`initialize` (skipped before) and from `system commands_changed` with the first line of each
-description and its argument hint, before the first turn. New optional `command_info`
-`[{name, description?, argument_hint?}]` in `session.state` and, only in an answer about one
-session, in the session object (examples `worker.session.state.json`, `api.session.json`); the
-client's `/` list shows the argument hint and the description after each name. An older hub or
-client ignores the field; from an older worker the hub keeps the names alone.
+end of every turn, the transcript's last `custom-title` winning over its `ai-title`, and the
+commands come from the CLI's answer to `initialize` (skipped before) and from `system
+commands_changed` with the first line of each description and its argument hint, before the
+first turn. New optional `command_info` `[{name, description?, argument_hint?}]` in
+`session.state` and, only in an answer about one session, in the session object (examples
+`worker.session.state.json`, `api.session.json`); the client's `/` list shows the argument hint
+and the description after each name. An older hub or client ignores the field; from an older
+worker the hub keeps the names alone.
 
 §4, §9, §9.1, §9.2, §9.4: the mirror showed the CLI's own lines as a person's bubbles with raw
 tags and lost what a command printed, the compactions and a title a person gave. Now

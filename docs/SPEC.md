@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.144, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.146, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -3935,7 +3935,9 @@ Edit or MultiEdit call shows the change as a diff of `old_string` → `new_strin
 MultiEdit), of a Write the content, read from the call's `tool.call`; a preview cut at 4 KB is
 shown as far as it goes and marked cut. An Edit with `replace_all` is marked "All occurrences".
 A call's row in the feed, opened, shows the same change in place of its arguments, and its
-result only if the call failed. The request goes to
+result only if the call failed. Another call's opened row shows its arguments as indented JSON,
+each line of a string on a line of its own; a preview cut at 4 KB is shown as far as it goes and
+marked cut. The request goes to
 **the worker owner**; a collaborator with `write` sees the request but cannot answer it.
 The first answer wins: it closes the request, every device sees the `approval.response`
 event, and the client removes the buttons. A second answer (from another device) gets
@@ -5135,6 +5137,14 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.144 → 0.146 (a call's arguments as indented JSON)
+§10.1: an opened call's row (and a subagent's start card) showed `args_preview` as it came, one
+line of JSON with `\n` in its strings, so a subagent's prompt or a long command was a block of
+text with escapes. The client now writes it indented, two spaces a level, and a string's lines
+each on a line of its own under its key; a preview cut at 4 KB is read as far as it goes and
+marked cut; a preview that is not JSON is shown as it is. Only the client changes. 0.145 is
+taken by an open pull request.
 
 ### 0.143 → 0.144 (model providers, iteration 5)
 §19: iteration 5 is model providers, `docs/ITERATION-5.md`; the ACP adapter and Hermes move to

@@ -3015,7 +3015,7 @@ async fn a_task_is_stopped_alone() {
 
 /// SPEC §4, §8.1: `system model_not_switched` from the worker names the model the runtime
 /// kept, and the session's model becomes it; a name hqc would not take from the user stays a
-/// line. A `retraction` is stored like any event.
+/// line. A `retraction` is stored like any event, without the ids of no event of its session.
 #[tokio::test]
 async fn a_refused_model_switch_corrects_the_session() {
     let hub = TestHub::start().await;
@@ -3056,7 +3056,7 @@ async fn a_refused_model_switch_corrects_the_session() {
     let (_, page) = hub.get(&format!("/api/sessions/{sid}/events")).await;
     let last = page["events"].as_array().unwrap().last().unwrap().clone();
     assert_eq!(last["type"], "retraction", "{page}");
-    assert_eq!(last["payload"]["event_ids"], json!([gone]));
+    assert_eq!(last["payload"]["event_ids"], json!([]), "{gone}");
     hub.finish().await;
 }
 

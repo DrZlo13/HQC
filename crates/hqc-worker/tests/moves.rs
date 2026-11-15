@@ -893,6 +893,7 @@ async fn the_answer_goes_before_the_stop_at_shutdown() {
             title: None,
             held_by: None,
             commands: None,
+            command_info: None,
             permission_mode: None,
             capped_input: None,
             subagents: 0,

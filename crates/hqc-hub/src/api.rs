@@ -906,8 +906,17 @@ pub async fn project_sessions(
     }
     let rows = db::sessions_of_project(&app.db, id).await?;
     Ok(Json(SessionList {
-        sessions: state::views(&app, user.id, rows).await?,
+        sessions: listed(state::views(&app, user.id, rows).await?),
     }))
+}
+
+/// Sessions as a list gives them: without `command_info`, which only the answer about one
+/// session carries (SPEC §6).
+fn listed(mut sessions: Vec<api::Session>) -> Vec<api::Session> {
+    for s in &mut sessions {
+        s.command_info = None;
+    }
+    sessions
 }
 
 /// `GET /api/sessions` (SPEC §6): the sessions of every project of the user in one list, the
@@ -918,7 +927,7 @@ pub async fn all_sessions(
 ) -> ApiResult<Json<SessionList>> {
     let rows = db::sessions_of_owned_projects(&app.db, user.id).await?;
     Ok(Json(SessionList {
-        sessions: state::views(&app, user.id, rows).await?,
+        sessions: listed(state::views(&app, user.id, rows).await?),
     }))
 }
 

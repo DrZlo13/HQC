@@ -148,6 +148,7 @@ impl HubLink {
             title: None,
             held_by: Some(held_by),
             commands: None,
+            command_info: None,
             permission_mode: None,
             capped_input: None,
             subagents: 0,

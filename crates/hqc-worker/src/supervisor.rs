@@ -70,8 +70,9 @@
 //!   the hub changes a provider with a restart.
 //! - `idle_timeout` (SPEC §17.3): an idle process (no turn, no subagent running, no
 //!   background task the runtime lists: [`AdapterEvent::BackgroundTasks`]) is killed, the
-//!   next input resumes it. A reconnect and a holder report (`Cmd::Resync`, `Cmd::Held`) are
-//!   no activity of the agent.
+//!   next input resumes it; one whose agent armed a wakeup ([`AdapterEvent::Wakeup`]) is idle
+//!   only from the wakeup's time on. A reconnect and a holder report (`Cmd::Resync`,
+//!   `Cmd::Held`) are no activity of the agent.
 //! - `max_sessions`: at most that many agent processes at once; one more start is
 //!   `agent_start_failed`, retryable.
 //! - Workspaces hqc makes and deletes (T45): `workspace.create` is acked at once and runs in
@@ -980,6 +981,7 @@ impl Supervisor {
             runtime_session_id: None,
             title: None,
             commands: None,
+            wake_at: None,
             permission_mode: None,
             asked_mode: spec.permission_mode,
             moving: None,
@@ -1089,7 +1091,10 @@ struct Session {
     /// The runtime's title of the session, repeated in every `session.state`.
     title: Option<String>,
     /// The runtime's slash commands, repeated in every `session.state` like `title`.
-    commands: Option<Vec<String>>,
+    commands: Option<Vec<hqc_proto::frame::SlashCommand>>,
+    /// When the wakeup the agent armed is due ([`AdapterEvent::Wakeup`]): idle unload waits
+    /// for it.
+    wake_at: Option<Instant>,
     /// The permission mode the agent runs in (T38): the one it was started or switched
     /// with, then what the runtime reports; repeated in every `session.state`.
     permission_mode: Option<PermissionMode>,
@@ -1184,7 +1189,7 @@ impl Session {
     fn idle_deadline(&self) -> Option<Instant> {
         let t = self.idle_timeout?;
         // A background subagent or command outlives the turn and may be silent for long (a
-        // build).
+        // build). An armed wakeup dies with the process: the agent is idle from its time on.
         (self.state == ProcessState::Running
             && self.turn.is_none()
             && self.injected.is_empty()
@@ -1192,7 +1197,11 @@ impl Session {
             && self.queue.is_empty()
             && self.subagents == 0
             && self.background_tasks == 0)
-            .then(|| self.last_activity + t)
+            .then(|| {
+                self.wake_at
+                    .map_or(self.last_activity, |w| w.max(self.last_activity))
+                    + t
+            })
     }
 
     async fn on_cmd(&mut self, c: Cmd) {
@@ -2022,9 +2031,20 @@ impl Session {
             }
             AdapterEvent::Limits(l) => self.link.send(WorkerFrame::WorkerLimits(l)),
             AdapterEvent::RuntimeSessionId(r) => {
+                // A start of this task resumes it, as the hub's next `session.start` will
+                // (after `/clear` the transcript is another one, SPEC §8.1).
+                self.spec.runtime_session_id = Some(r.clone());
                 self.runtime_session_id = Some(r);
                 self.send_state();
             }
+            // As the count: a wakeup of a process already stopped died with it.
+            AdapterEvent::Wakeup(at) if self.state != ProcessState::Stopped => {
+                self.wake_at = at.map(|at| {
+                    let after = (at - chrono::Utc::now()).to_std().unwrap_or_default();
+                    Instant::now() + after
+                });
+            }
+            AdapterEvent::Wakeup(_) => {}
             AdapterEvent::Title(t) => {
                 if self.title.as_deref() != Some(t.as_str()) {
                     self.title = Some(t);
@@ -2271,9 +2291,10 @@ impl Session {
             self.slot = None;
             // Its MCP server is gone with it; a call still open fails.
             self.link.mcp().unbind(self.id);
-            // And its subagents, background tasks and foreground calls; the next process
-            // counts its own.
+            // And its subagents, background tasks, foreground calls and wakeup; the next
+            // process counts its own.
             self.subagents = 0;
+            self.wake_at = None;
             self.live = None;
             // Its `session.state` counts nothing, which drops the hub's list.
             self.live_cleared = false;
@@ -2308,7 +2329,11 @@ impl Session {
             },
             title: self.title.clone(),
             held_by: None,
-            commands: self.commands.clone(),
+            commands: self
+                .commands
+                .as_ref()
+                .map(|c| c.iter().map(|c| c.name.clone()).collect()),
+            command_info: self.commands.clone(),
             permission_mode: self.permission_mode,
             capped_input: self.capped_input(),
             subagents: self.subagents,

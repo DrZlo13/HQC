@@ -9,7 +9,9 @@ use uuid::Uuid;
 
 use crate::client_frame::SessionSummary;
 use crate::event::SessionState;
-use crate::frame::{HeldBy, LockedBy, PermissionMode, ProcessState, Runtime, TitleSource};
+use crate::frame::{
+    HeldBy, LockedBy, PermissionMode, ProcessState, Runtime, SlashCommand, TitleSource,
+};
 
 /// A session as `GET /api/sessions/{id}`, the session list and `POST .../sessions` return
 /// it (SPEC §3 Session, §6). `state`, `queue_len`, `last_read_seq` and `unread` are computed
@@ -59,6 +61,12 @@ pub struct Session {
     /// until a process of the session has reported a list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<String>>,
+    /// The commands of `commands`, in the same order, with what the runtime says of each
+    /// (`session.state.command_info`, since SPEC 0.138); the client shows them in the `/`
+    /// list. Only in an answer about one session, not in the lists (`GET /api/sessions`,
+    /// `GET /api/projects/{id}/sessions`): kilobytes per session there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_info: Option<Vec<SlashCommand>>,
     /// The session whose agent started this one with `hqc_spawn` (SPEC §7), while it exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<SpawnedBy>,
@@ -1226,6 +1234,11 @@ mod tests {
             held.commands, None,
             "absent until a process reported a list"
         );
+        assert_eq!(
+            s.command_info.as_ref().map(|c| c[2].description.as_deref()),
+            Some(Some("Review a pull request"))
+        );
+        assert_eq!(held.command_info, None);
         assert_eq!(summary.favorite_at, s.favorite_at);
         assert!(s.favorite_at.is_some() && held.favorite_at.is_none());
         roundtrip::<EventPage>(include_str!("../examples/wire/api.events.json"));

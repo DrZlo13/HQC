@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use hqc_proto::{
     api::{Agent, Session, SpawnedBy},
     event::SessionState,
-    frame::{LockedBy, PermissionMode, ProcessState, Runtime, TitleSource},
+    frame::{LockedBy, PermissionMode, ProcessState, Runtime, SlashCommand, TitleSource},
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -75,6 +75,29 @@ struct Aggregates {
     provider_label: Option<String>,
 }
 
+/// `sessions.commands` as stored: names before SPEC 0.138, `SlashCommand`s since.
+fn stored_commands(v: Value) -> Option<Vec<SlashCommand>> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Name(String),
+        Command(SlashCommand),
+    }
+    let list: Vec<Stored> = serde_json::from_value(v).ok()?;
+    Some(
+        list.into_iter()
+            .map(|c| match c {
+                Stored::Name(name) => SlashCommand {
+                    name,
+                    description: None,
+                    argument_hint: None,
+                },
+                Stored::Command(c) => c,
+            })
+            .collect(),
+    )
+}
+
 /// A stored enum name (`runtime`, `process_state`, `locked_by`) as its proto type.
 fn stored_enum<T: DeserializeOwned>(name: &str, fallback: T) -> T {
     serde_json::from_value(Value::String(name.to_string())).unwrap_or(fallback)
@@ -130,6 +153,7 @@ pub async fn views(
                 queue_len: a.queue_len,
             });
             let count = |n: i64| n.max(0) as u64;
+            let commands = s.commands.and_then(stored_commands);
             Some(Session {
                 id: s.id,
                 project_id: s.project_id,
@@ -170,7 +194,10 @@ pub async fn views(
                 created_at: s.created_at,
                 updated_at: s.updated_at,
                 held_by: s.held_by.and_then(|v| serde_json::from_value(v).ok()),
-                commands: s.commands.and_then(|v| serde_json::from_value(v).ok()),
+                commands: commands
+                    .as_ref()
+                    .map(|c| c.iter().map(|c| c.name.clone()).collect()),
+                command_info: commands,
                 system: s.system,
                 permission_mode: s.permission_mode.as_deref().and_then(PermissionMode::parse),
                 effective_permission_mode: s

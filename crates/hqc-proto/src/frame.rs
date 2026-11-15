@@ -121,11 +121,17 @@ pub enum WorkerFrame {
         /// `runtime_session_id` and ignores `process_state` and `locked_by`.
         #[serde(default, skip_serializing_if = "Option::is_none", with = "maybe_null")]
         held_by: Option<Option<HeldBy>>,
-        /// Slash commands the runtime offers, without the `/` (Claude Code: `slash_commands`
-        /// of `system/init`, SPEC §8.1). Absent — not known yet; the worker repeats the last
-        /// list in every following `session.state`, like `title`.
+        /// Slash commands the runtime offers, without the `/` (Claude Code: the answer to
+        /// `initialize`, `system/commands_changed`, `system/init`, SPEC §8.1). Absent — not
+        /// known yet; the worker repeats the last list in every following `session.state`,
+        /// like `title`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         commands: Option<Vec<String>>,
+        /// The commands of `commands`, in the same order, with what the runtime says of each
+        /// (since SPEC 0.138); a hub that knows the field takes it instead of `commands`.
+        /// Sent with `commands`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_info: Option<Vec<SlashCommand>>,
         /// The permission mode the session's agent runs in (T38), as the worker decided it
         /// and the runtime confirmed it; repeated in every following `session.state`.
         /// Absent — not known yet.
@@ -329,6 +335,20 @@ pub struct MirrorEvent {
 
 /// The quiet period of SPEC §9.1/§9.3: a transcript written within it is live in VS Code.
 pub const MIRROR_RECENT_S: u64 = 30;
+
+/// A slash command of the runtime (since SPEC 0.138; Claude Code: the `commands` of its
+/// answer to `initialize` and of `system/commands_changed`, SPEC §8.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// Without the `/`.
+    pub name: String,
+    /// One line on what it does. Absent — the runtime said nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// What it takes after the name, e.g. `[--force]`. Absent — nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
 
 /// A live Claude Code process outside hqc that holds a transcript open (SPEC §9.3): an entry
 /// of `<claude config>/sessions/<pid>.json` whose process exists and is not the worker's.
@@ -2357,6 +2377,26 @@ mod tests {
         };
         assert_eq!(commands(&old).unwrap()[0], "compact");
         assert_eq!(commands(&held), None);
+        // `command_info` (SPEC 0.138): additive too, the same commands with what the runtime
+        // says of each.
+        let info = |f: &Envelope<WorkerFrame>| match &f.body {
+            WorkerFrame::SessionState { command_info, .. } => command_info.clone(),
+            other => panic!("not session.state: {other:?}"),
+        };
+        let listed = info(&old).unwrap();
+        assert_eq!(
+            listed[0].argument_hint.as_deref(),
+            Some("<optional custom summarization instructions>")
+        );
+        assert_eq!(
+            listed[3],
+            SlashCommand {
+                name: "code-review".into(),
+                description: None,
+                argument_hint: None
+            }
+        );
+        assert_eq!(info(&held), None);
         // `subagents` (SPEC 0.68): absent is 0.
         let subagents = |f: &Envelope<WorkerFrame>| match &f.body {
             WorkerFrame::SessionState { subagents, .. } => *subagents,

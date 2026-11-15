@@ -10,12 +10,14 @@ use hqc_proto::event::{
     ApprovalCanonical, Author, CancelReason, ClarifyAnswer, ClarifyQuestion, Event, EventKind,
     LiveKind, SessionState,
 };
-use hqc_proto::frame::{Runtime, SessionInput};
+use hqc_proto::frame::{Runtime, SessionInput, SlashCommand};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::engine::{Action, Core};
+use super::engine::{
+    Action, Core, COMMAND_TEXT_LIMIT, CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT,
+};
 use super::process::{CommandSpec, OsSpawner, Sig};
 use super::scripted::ScriptedClaude;
 use super::{ClaudeCodeAdapter, ClaudeCodeAdapters, ClaudeOptions, Launch};
@@ -275,6 +277,7 @@ fn shape(events: &[AdapterEvent]) -> Vec<String> {
             AdapterEvent::RuntimeSessionId(_) => "runtime_session_id".into(),
             AdapterEvent::Title(_) => "title".into(),
             AdapterEvent::Commands(_) => "commands".into(),
+            AdapterEvent::Wakeup(at) => format!("wakeup:{}", at.is_some()),
             // Every `system/init` carries it; the T38 tests look at it on their own.
             AdapterEvent::PermissionMode(_) => continue,
             // Every turn's `rate_limit_event`; `limits_of_a_rate_limit_event` looks at it.
@@ -398,6 +401,32 @@ async fn ai_title_is_reported_at_turn_end() {
         evs[evs.len() - 2],
         AdapterEvent::Title("Touch a file".into())
     );
+}
+
+/// SPEC §8.1: a title a person gave (`custom-title`) is the one reported at the end of the
+/// turn, over an `ai-title` written after it.
+#[tokio::test]
+async fn a_custom_title_is_reported_at_turn_end() {
+    let fx = fixture!("permission-allow");
+    let mut h = Harness::start(fx.stream, fx.claude_session()).await;
+    let (work, config) = &h._dirs;
+    let transcript = super::paths::transcript_path(
+        config.path(),
+        &work.path().canonicalize().unwrap(),
+        &fx.claude_session(),
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let titles = [
+        r#"{"type":"custom-title","customTitle":"Mine","sessionId":"x"}"#,
+        r#"{"type":"ai-title","aiTitle":"Touch a file","sessionId":"x"}"#,
+    ]
+    .join("\n");
+    std::fs::write(&transcript, format!("{}{titles}\n", fx.transcript)).unwrap();
+
+    let evs = h
+        .turn(&fx.prompt(), Uuid::now_v7(), "once", BTreeMap::new())
+        .await;
+    assert_eq!(evs[evs.len() - 2], AdapterEvent::Title("Mine".into()));
 }
 
 #[tokio::test]
@@ -1803,23 +1832,173 @@ async fn every_process_gets_initialize_first() {
     h.adapter.kill().await.unwrap();
 }
 
-/// The CLI's answer to `initialize`, a success (2.1.312: the commands, models and account) or
-/// an error, gives nothing.
+/// The CLI's answer to `initialize` (2.1.312, shape of a live answer: `{name, description,
+/// argumentHint, aliases?, builtin?}`) gives the commands with the first line of each
+/// description and the argument hint, before any `system/init`; an error gives nothing. Its
+/// list wins over the names of `system/init`, whose `terminal_slash_commands` it loses, and
+/// `commands_changed` replaces it.
 #[test]
-fn the_answer_to_initialize_is_skipped() {
+fn the_answer_to_initialize_gives_the_commands() {
     let mut core = Core::new(Uuid::now_v7(), false);
     let init = writes(&[core.initialize()]);
     let id = init[0]["request_id"].as_str().unwrap();
-    for answer in [
-        json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
-            "response": {"commands": [{"name": "compact", "description": "Clear conversation history but keep a summary in context", "argumentHint": ""}],
-                "agents": [], "output_style": "default", "models": [], "account": {}, "pid": 4242},
-            "pending_permission_requests": [], "pending_user_dialog_requests": []}}),
-        json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
-            "error": "initialize: skills must be an array of strings"}}),
+    let error = json!({"type": "control_response", "response": {"subtype": "error", "request_id": id,
+        "error": "initialize: skills must be an array of strings"}});
+    assert!(core.on_line(&error.to_string()).is_empty());
+    let long = "x".repeat(300);
+    let answer = json!({"type": "control_response", "response": {"subtype": "success", "request_id": id,
+        "response": {"commands": [
+            {"name": "compact", "description": "Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]", "argumentHint": "<optional custom summarization instructions>", "builtin": true},
+            {"name": "claude-api", "description": format!("Build apps with the Claude API.\nTRIGGER when: {long}"), "argumentHint": ""},
+            {"name": "doctor", "description": "Health-check the user's Claude Code setup", "argumentHint": "[prompt-audit [<path>]]", "aliases": ["checkup"], "builtin": true},
+            {"name": "__remote-workflow", "description": "Run the workflow script", "argumentHint": "", "builtin": true},
+            {"name": "long", "description": long, "argumentHint": ""}],
+            "agents": [], "output_style": "default", "models": [], "account": {}, "pid": 4242},
+        "pending_permission_requests": [], "pending_user_dialog_requests": []}});
+    let one = |name: &str, description: Option<&str>, argument_hint: Option<&str>| SlashCommand {
+        name: name.into(),
+        description: description.map(Into::into),
+        argument_hint: argument_hint.map(Into::into),
+    };
+    let reported = |actions: &[Action]| -> Vec<Vec<SlashCommand>> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Emit(AdapterEvent::Commands(c)) => Some(c.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let compact = one(
+        "compact",
+        Some("Clear conversation history but keep a summary in context. Optional: /compact [instructions for summarization]"),
+        Some("<optional custom summarization instructions>"),
+    );
+    let api = one("claude-api", Some("Build apps with the Claude API."), None);
+    let doctor = one(
+        "doctor",
+        Some("Health-check the user's Claude Code setup"),
+        Some("[prompt-audit [<path>]]"),
+    );
+    let cut = one("long", Some(&long[..COMMAND_TEXT_LIMIT]), None);
+    assert_eq!(
+        reported(&core.on_line(&answer.to_string())),
+        [vec![compact.clone(), api.clone(), doctor, cut.clone()]],
+        "before any turn"
+    );
+    let init = json!({"type": "system", "subtype": "init", "session_id": CLI_SESSION,
+        "model": "claude-haiku-5-5", "permissionMode": "default",
+        "slash_commands": ["compact", "claude-api", "doctor", "__remote-workflow", "long", "other"],
+        "terminal_slash_commands": ["doctor"]});
+    assert_eq!(
+        reported(&core.on_line(&init.to_string())),
+        [vec![compact.clone(), api.clone(), cut.clone()]],
+        "the terminal's own go; the names of init add nothing"
+    );
+    let changed = json!({"type": "system", "subtype": "commands_changed",
+        "commands": [{"name": "compact", "description": "Compact", "argumentHint": ""},
+            {"name": "new-skill", "description": "A skill found in a subfolder", "argumentHint": "<file>"}],
+        "uuid": Uuid::new_v4(), "session_id": CLI_SESSION});
+    let list = vec![
+        one("compact", Some("Compact"), None),
+        one(
+            "new-skill",
+            Some("A skill found in a subfolder"),
+            Some("<file>"),
+        ),
+    ];
+    assert_eq!(reported(&core.on_line(&changed.to_string())), [list]);
+    assert!(
+        core.on_line(&changed.to_string()).is_empty(),
+        "the same list: not reported again"
+    );
+}
+
+/// `/clear` (the lines of the live run `w1-clear`, 2.1.312): `conversation_reset` says
+/// "Conversation cleared" and starts the cost from 0, as the CLI's `total_cost_usd` does; the
+/// first `system/init` after it, with the new conversation's id, moves the session to that
+/// transcript, once.
+#[test]
+fn clear_moves_the_session_to_a_new_transcript() {
+    const OLD: &str = "8ff09d1d-af14-46c9-ac99-63cd19302d2c";
+    const NEW: &str = "4d4b2f4f-a1f2-47a3-9438-c1d3d9733c6f";
+    let init = |session: &str| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "bypassPermissions",
+            "slash_commands": ["clear", "compact"], "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let echo_in = |session: &str, text: &str| {
+        json!({"type": "user", "message": {"role": "user", "content": text},
+            "session_id": session, "parent_tool_use_id": null, "uuid": Uuid::new_v4(),
+            "timestamp": "2026-11-11T22:34:40.295Z", "isReplay": true})
+        .to_string()
+    };
+    let result = |session: &str, total: f64, tokens: u64, local: Option<&str>| {
+        let mut v = json!({"type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "total_cost_usd": total, "session_id": session,
+            "usage": {"input_tokens": tokens, "output_tokens": tokens}, "uuid": Uuid::new_v4()});
+        if let Some(l) = local {
+            v["local_command"] = json!(l);
+        }
+        v.to_string()
+    };
+    let sid = Uuid::now_v7();
+    let mut core = Core::new(sid, false);
+    let mut actions = Vec::new();
+    written(&mut core, sid, "Reply with exactly: ONE");
+    for l in [
+        init(OLD),
+        echo_in(OLD, "Reply with exactly: ONE"),
+        reply("ONE"),
+        result(OLD, 0.00232649, 3, None),
     ] {
-        assert!(core.on_line(&answer.to_string()).is_empty(), "{answer}");
+        actions.extend(core.on_line(&l));
     }
+    written(&mut core, sid, "/clear");
+    let reset = json!({"type": "conversation_reset", "new_conversation_id": "45db54bd-8b7d-44bd-a9a9-a73c5d0f6bf4",
+        "uuid": "45db54bd-8b7d-44bd-a9a9-a73c5d0f6bf4", "trigger": "clear",
+        "user_message_uuid": Uuid::new_v4(), "timestamp": "2026-11-11T22:34:41.884Z", "session_id": OLD});
+    for l in [
+        reset.to_string(),
+        init(NEW),
+        echo_in(
+            NEW,
+            "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>",
+        ),
+        result(NEW, 0.0, 0, Some("clear")),
+    ] {
+        actions.extend(core.on_line(&l));
+    }
+    written(&mut core, sid, "What did I ask you to reply before?");
+    for l in [
+        init(NEW),
+        echo_in(NEW, "What did I ask you to reply before?"),
+        reply("NOTHING TWO"),
+        result(NEW, 0.00232689, 3, None),
+    ] {
+        actions.extend(core.on_line(&l));
+    }
+    assert_eq!(
+        system_events(&actions),
+        [(
+            CONVERSATION_CLEARED.to_string(),
+            CONVERSATION_CLEARED_TEXT.to_string()
+        )]
+    );
+    let moved: Vec<&AdapterEvent> = actions
+        .iter()
+        .filter_map(|a| match a {
+            Action::Emit(e @ AdapterEvent::RuntimeSessionId(_)) => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(moved, [&AdapterEvent::RuntimeSessionId(NEW.into())]);
+    assert_eq!(
+        costs_and_commands(&actions).0,
+        [(0.00232649, 0.00232649), (0.00232689, 0.00232689)],
+        "the turn after /clear costs what the new total says"
+    );
 }
 
 #[tokio::test]
@@ -3696,7 +3875,9 @@ fn costs_and_commands(actions: &[Action]) -> (Vec<(f64, f64)>, Vec<Vec<String>>)
                     costs.push((c, t));
                 }
             }
-            Action::Emit(AdapterEvent::Commands(c)) => commands.push(c.clone()),
+            Action::Emit(AdapterEvent::Commands(c)) => {
+                commands.push(c.iter().map(|c| c.name.clone()).collect())
+            }
             _ => {}
         }
     }
@@ -6065,4 +6246,173 @@ fn the_browser_only_where_it_is_given() {
     for t in super::BROWSER_DISALLOWED {
         assert!(on[pos..].iter().any(|x| x == t), "{t} in {on:?}");
     }
+}
+
+/// After `/clear` the process writes the new transcript (SPEC §8.1, §9.3): its records and the
+/// inputs written from then on are registered under the new id, which is live, and the old one
+/// is not; the title is read from the new transcript.
+#[tokio::test]
+async fn after_clear_the_process_writes_the_new_transcript() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let answer = Uuid::new_v4();
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let done = |session: Uuid| {
+        json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+            "total_cost_usd": 0.001, "session_id": session,
+            "usage": {"input_tokens": 4, "output_tokens": 2}})
+        .to_string()
+    };
+    let stream = [
+        init(old),
+        reply("ONE"),
+        done(old),
+        json!({"type": "conversation_reset", "new_conversation_id": Uuid::new_v4(),
+            "trigger": "clear", "session_id": old})
+        .to_string(),
+        init(new),
+        json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [{"type": "text", "text": "TWO"}]},
+            "parent_tool_use_id": null, "session_id": new, "uuid": answer})
+        .to_string(),
+        done(new),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let workdir = work.path().canonicalize().unwrap();
+    for (session, title) in [(old, "Before"), (new, "After")] {
+        let t = super::paths::transcript_path(config.path(), &workdir, &session);
+        std::fs::create_dir_all(t.parent().unwrap()).unwrap();
+        std::fs::write(
+            &t,
+            format!(
+                "{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\",\"sessionId\":\"{session}\"}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    let input = |text: &str| SessionInput {
+        session_id: s.session_id,
+        event_id: Uuid::now_v7(),
+        text: text.into(),
+        artifact_ids: vec![],
+        peer_prefix: vec![],
+        peer: None,
+        permission_cap: None,
+        schedule_id: None,
+    };
+    a.input(&input("x")).await.unwrap();
+    let mut titles = Vec::new();
+    while titles.len() < 2 {
+        let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let AdapterEvent::Title(t) = ev {
+            titles.push(t);
+        }
+    }
+    assert_eq!(titles, ["Before", "After"]);
+    assert!(own.is_live(new) && !own.is_live(old));
+    assert!(own.is_own(new, answer) && !own.is_own(old, answer));
+    a.input(&input("next")).await.unwrap();
+    assert!(own.claim(new, Uuid::new_v4(), Some("next")));
+    a.kill().await.unwrap();
+    assert!(!own.is_live(new));
+}
+
+/// `system/session_title_changed` (2.1.312: the CLI's own title, `/rename`) is the session's
+/// title at once, not at the end of the turn.
+#[test]
+fn a_title_from_the_stream_is_reported_at_once() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let line = |title: &str| {
+        json!({"type": "system", "subtype": "session_title_changed", "title": title,
+            "uuid": Uuid::new_v4(), "session_id": CLI_SESSION})
+        .to_string()
+    };
+    assert_eq!(
+        emitted(core.on_line(&line(" Fix the build "))),
+        [AdapterEvent::Title("Fix the build".into())]
+    );
+    assert!(core.on_line(&line("  ")).is_empty(), "no title");
+}
+
+/// A wakeup the main agent armed with `ScheduleWakeup` (lines of the live run
+/// `x6-wake-control`, 2.1.312) is reported from its result until the CLI starts it: a
+/// `command_lifecycle` `started` with `wakeup_source: loop_wakeup` and its `scheduled_for`.
+/// The fire of an older one, a failed call and a subagent's call change nothing; a stopped one
+/// (`scheduledFor: 0`) is none.
+#[test]
+fn a_wakeup_is_reported_until_it_fires() {
+    const DUE: i64 = 1794439200000;
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let call = |id: &str, parent: Option<&str>| {
+        json!({"type": "assistant", "message": {"model": "claude-haiku-5-5", "role": "assistant",
+            "content": [{"type": "tool_use", "id": id, "name": "ScheduleWakeup",
+                "input": {"delaySeconds": 70, "reason": "probe", "prompt": "WAKEUP-FIRED", "noop": false}}]},
+            "parent_tool_use_id": parent, "session_id": CLI_SESSION, "uuid": Uuid::new_v4()})
+        .to_string()
+    };
+    let done = |id: &str, at: i64, error: bool, parent: Option<&str>| {
+        json!({"type": "user", "message": {"role": "user", "content": [{"tool_use_id": id,
+            "type": "tool_result", "is_error": error, "content": "Next wakeup scheduled for 02:20:00 (in 72s)."}]},
+            "parent_tool_use_id": parent, "session_id": CLI_SESSION, "uuid": Uuid::new_v4(),
+            "tool_use_result": {"scheduledFor": at, "clampedDelaySeconds": 70, "wasClamped": false}})
+        .to_string()
+    };
+    let fired = |at: i64| {
+        json!({"type": "command_lifecycle", "command_uuid": Uuid::new_v4(), "state": "started",
+            "wakeup_source": "loop_wakeup", "scheduled_for": at,
+            "uuid": Uuid::new_v4(), "session_id": CLI_SESSION})
+        .to_string()
+    };
+    let wakeups = |actions: Vec<Action>| -> Vec<Option<i64>> {
+        emitted(actions)
+            .into_iter()
+            .filter_map(|e| match e {
+                AdapterEvent::Wakeup(at) => Some(at.map(|t| t.timestamp_millis())),
+                _ => None,
+            })
+            .collect()
+    };
+    core.on_line(&call("toolu_01TWrwmcrfbR9Z62ePaNnJTw", None));
+    assert_eq!(
+        wakeups(core.on_line(&done("toolu_01TWrwmcrfbR9Z62ePaNnJTw", DUE, false, None))),
+        [Some(DUE)]
+    );
+    assert!(
+        wakeups(core.on_line(&fired(DUE - 60_000))).is_empty(),
+        "an older one fired"
+    );
+    core.on_line(&call("toolu_failed", None));
+    assert!(wakeups(core.on_line(&done("toolu_failed", 0, true, None))).is_empty());
+    core.on_line(&call("toolu_sub", Some("toolu_agent")));
+    assert!(
+        wakeups(core.on_line(&done("toolu_sub", DUE + 1, false, Some("toolu_agent")))).is_empty(),
+        "a subagent's"
+    );
+    assert_eq!(wakeups(core.on_line(&fired(DUE))), [None]);
+    core.on_line(&call("toolu_again", None));
+    assert_eq!(
+        wakeups(core.on_line(&done("toolu_again", DUE + 70_000, false, None))),
+        [Some(DUE + 70_000)]
+    );
+    core.on_line(&call("toolu_stop", None));
+    assert_eq!(
+        wakeups(core.on_line(&done("toolu_stop", 0, false, None))),
+        [None],
+        "stopped"
+    );
 }

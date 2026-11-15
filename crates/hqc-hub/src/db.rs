@@ -1532,7 +1532,8 @@ pub struct SessionRow {
     /// (SPEC §9.3), and since when.
     pub held_by: Option<Value>,
     pub vscode_held_at: Option<DateTime<Utc>>,
-    /// The runtime's slash commands (`session.state.commands`, SPEC §5.4): a JSON array.
+    /// The runtime's slash commands (`session.state.commands`, SPEC §5.4): a JSON array of
+    /// names, since SPEC 0.138 of `{name, description?, argument_hint?}`.
     pub commands: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -1821,9 +1822,14 @@ pub async fn set_user_title(db: &PgPool, id: Uuid, title: &str) -> sqlx::Result<
     Ok(())
 }
 
-/// The runtime's slash commands (`session.state.commands`, T27); written only when they
-/// changed, so a `session.state` without a new list does not touch `updated_at`.
-pub async fn set_commands(db: &PgPool, id: Uuid, commands: &[String]) -> sqlx::Result<()> {
+/// The runtime's slash commands (`session.state.commands`, T27), since SPEC 0.138 with their
+/// descriptions (`command_info`); written only when they changed, so a `session.state`
+/// without a new list does not touch `updated_at`.
+pub async fn set_commands(
+    db: &PgPool,
+    id: Uuid,
+    commands: &[hqc_proto::frame::SlashCommand],
+) -> sqlx::Result<()> {
     let v = serde_json::to_value(commands).unwrap_or(Value::Null);
     sqlx::query(
         "UPDATE sessions SET commands = $2

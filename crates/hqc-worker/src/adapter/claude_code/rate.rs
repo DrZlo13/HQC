@@ -117,9 +117,10 @@ pub(super) async fn meter(
         };
         // Beside the session's transcript: `<CLI session id>/subagents`.
         let dir = io
-            .transcript
+            .transcript()
             .as_deref()
             .and_then(Path::parent)
+            .map(Path::to_path_buf)
             .zip(session)
             .map(|(p, s)| p.join(s).join("subagents"));
         if let Some(dir) = dir {

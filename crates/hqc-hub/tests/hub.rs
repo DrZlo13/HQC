@@ -1849,6 +1849,56 @@ async fn runtime_commands_are_kept_on_the_session() {
     hub.finish().await;
 }
 
+/// SPEC 0.138: `session.state.command_info` is taken over `commands`, cleaned like it (one line,
+/// at most 200 characters, empty absent), and given only in the session object, not in the
+/// lists.
+#[tokio::test]
+async fn command_info_is_kept_and_given_with_the_session_only() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Commands").await;
+    ack_start(&mut w, &sid).await;
+    let long = "x".repeat(300);
+    w.send(
+        "session.state",
+        json!({"session_id": sid, "process_state": "running", "locked_by": "hqc",
+            "commands": ["compact", "review"],
+            "command_info": [
+                {"name": "compact", "description": "Clear the history,\n  keep a summary", "argument_hint": "<instructions>"},
+                {"name": "/review", "description": long, "argument_hint": "  "},
+                {"name": "two words"}]}),
+    )
+    .await;
+    w.expect("ack").await;
+    let v = hub.session(&sid).await;
+    assert_eq!(v["commands"], json!(["compact", "review"]), "{v}");
+    assert_eq!(
+        v["command_info"],
+        json!([
+            {"name": "compact", "description": "Clear the history, keep a summary", "argument_hint": "<instructions>"},
+            {"name": "review", "description": "x".repeat(200)}
+        ])
+    );
+    let pid = hub.personal_project().await;
+    for url in [
+        format!("/api/projects/{pid}/sessions"),
+        "/api/sessions".into(),
+    ] {
+        let (_, list) = hub.get(&url).await;
+        let listed = list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == sid.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(listed["commands"][1], "review", "{url}");
+        assert!(listed.get("command_info").is_none(), "{url}: {listed}");
+    }
+    hub.finish().await;
+}
+
 /// SPEC §17.2: an input the worker reports `joined` went into the turn already running. It is
 /// delivered but opens no turn: its ack, which can come after that turn's final answer (it
 /// bypasses the worker's outbox), must not open the turn again.

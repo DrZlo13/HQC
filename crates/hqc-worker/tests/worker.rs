@@ -938,7 +938,8 @@ async fn runtime_title_goes_in_session_state() {
 }
 
 // T27 (SPEC §5.4): the runtime's slash commands go in `session.state`, once per change, and
-// stay in the later ones like the title.
+// stay in the later ones like the title; since SPEC 0.138 with what the runtime says of each
+// in `command_info`.
 #[tokio::test]
 async fn runtime_commands_go_in_session_state() {
     let env = Env::new();
@@ -950,12 +951,27 @@ async fn runtime_commands_go_in_session_state() {
     c.handshake().await;
     start_session(&mut c, &env, sid).await;
     let list = vec!["compact".to_string(), "review".to_string()];
+    let compact = hqc_proto::frame::SlashCommand {
+        name: "compact".into(),
+        description: Some("Compact the conversation".into()),
+        argument_hint: Some("<instructions>".into()),
+    };
+    let review = hqc_proto::frame::SlashCommand {
+        name: "review".into(),
+        description: None,
+        argument_hint: None,
+    };
+    let info = serde_json::json!([
+        {"name": "compact", "description": "Compact the conversation", "argument_hint": "<instructions>"},
+        {"name": "review"}
+    ]);
     adapters
-        .emit(sid, AdapterEvent::Commands(list.clone()))
+        .emit(sid, AdapterEvent::Commands(vec![compact, review]))
         .await;
     loop {
         let st = c.expect("session.state").await;
         if st["payload"]["commands"] == serde_json::json!(list) {
+            assert_eq!(st["payload"]["command_info"], info);
             break;
         }
     }
@@ -964,6 +980,7 @@ async fn runtime_commands_go_in_session_state() {
         let st = c.expect("session.state").await;
         if st["payload"]["process_state"] == "stopped" {
             assert_eq!(st["payload"]["commands"], serde_json::json!(list));
+            assert_eq!(st["payload"]["command_info"], info);
             break;
         }
     }
@@ -1104,6 +1121,76 @@ async fn idle_timeout_waits_for_background_tasks() {
     adapters
         .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
         .await;
+    w.stop().await;
+}
+
+// idle_timeout (SPEC §17.3): an agent that armed a wakeup for itself is not idle before it is
+// due; once it fired or was stopped, the usual timeout counts.
+#[tokio::test]
+async fn idle_timeout_waits_for_an_armed_wakeup() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let due = chrono::Utc::now() + chrono::Duration::seconds(60);
+    adapters.emit(sid, AdapterEvent::Wakeup(Some(due))).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        !adapters.calls().contains(&FakeCall::Kill(sid)),
+        "never idle before the wakeup is due"
+    );
+    adapters.emit(sid, AdapterEvent::Wakeup(None)).await;
+    adapters
+        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    w.stop().await;
+}
+
+// After `/clear` the session goes on in another transcript (SPEC §8.1): the hub hears of it, and
+// the worker's next start of the agent resumes that one.
+#[tokio::test]
+async fn a_new_runtime_session_id_is_the_one_resumed() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let mut hub = FakeHub::start().await;
+    let mut cfg = env.config(&hub.url());
+    cfg.idle_timeout = Some(Duration::from_millis(300));
+    let w = start_worker_with(&env, cfg, &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let cleared = Uuid::new_v4().to_string();
+    adapters
+        .emit(sid, AdapterEvent::RuntimeSessionId(cleared.clone()))
+        .await;
+    loop {
+        let st = c.expect("session.state").await;
+        if st["payload"]["runtime_session_id"] == cleared.as_str() {
+            break;
+        }
+    }
+    adapters
+        .wait_for("idle kill", |c| c.contains(&FakeCall::Kill(sid)))
+        .await;
+    let b = Uuid::now_v7();
+    c.frame("session.input", input(sid, b, "B")).await;
+    adapters
+        .wait_for("resume", |c| {
+            c.iter().filter(|c| **c == FakeCall::Resume(sid)).count() == 1
+        })
+        .await;
+    let specs = adapters.start_specs();
+    assert_eq!(
+        specs.last().unwrap().runtime_session_id.as_deref(),
+        Some(cleared.as_str())
+    );
     w.stop().await;
 }
 

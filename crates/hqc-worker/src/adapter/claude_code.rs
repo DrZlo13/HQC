@@ -372,12 +372,13 @@ struct Io {
     stdin: tokio::sync::Mutex<Pin<Box<dyn AsyncWrite + Send>>>,
     events: EventSink,
     signal: SignalFn,
-    /// The session's transcript, where the CLI writes `ai-title` (SPEC §8.1).
-    transcript: Option<PathBuf>,
+    /// The session's transcript, where the CLI writes `ai-title` (SPEC §8.1); another one
+    /// after `/clear` ([`Io::moved_to`]).
+    transcript: Mutex<Option<PathBuf>>,
     /// The last title reported by this process.
     title: Mutex<Option<String>>,
     /// The transcript's uuid and the registry its records go to (SPEC §9.3).
-    runtime: Uuid,
+    runtime: Mutex<Uuid>,
     own: Arc<OwnRecords>,
 }
 
@@ -389,6 +390,8 @@ impl Io {
                     self.report_title().await;
                     let _ = self.events.send(ev).await;
                 }
+                // The CLI's own word: the transcript gives the same title at the turn's end.
+                Action::Emit(AdapterEvent::Title(t)) => self.title_changed(t).await,
                 Action::Emit(ev) => {
                     // The session task is gone only when the session is being torn down.
                     let _ = self.events.send(ev).await;
@@ -407,23 +410,29 @@ impl Io {
         Ok(())
     }
 
-    /// After a turn: the last `ai-title` of the transcript, if there is one and it is new.
-    /// The CLI writes it after the first prompt; a missing file or title is not an error.
+    /// After a turn: the transcript's title (its last `custom-title`, else its last
+    /// `ai-title`), if there is one and it is new. The CLI writes `ai-title` after the first
+    /// prompt; a missing file or title is not an error.
     async fn report_title(&self) {
-        let Some(path) = &self.transcript else {
+        let Some(path) = self.transcript() else {
             return;
         };
-        let text = match tokio::fs::read_to_string(path).await {
+        let text = match tokio::fs::read_to_string(&path).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::debug!(session_id = %self.session_id, "no transcript for ai-title: {e}");
                 return;
             }
         };
-        let Some(title) = hqc_claude_jsonl::last_ai_title(&text) else {
+        let Some(title) = hqc_claude_jsonl::last_title(&text) else {
             return;
         };
-        let title = hqc_proto::replace_nul(&title).into_owned();
+        self.title_changed(hqc_proto::replace_nul(&title).into_owned())
+            .await;
+    }
+
+    /// [`AdapterEvent::Title`] unless `title` is the one last reported.
+    async fn title_changed(&self, title: String) {
         {
             let mut last = lock(&self.title);
             if last.as_deref() == Some(title.as_str()) {
@@ -432,6 +441,22 @@ impl Io {
             *last = Some(title.clone());
         }
         let _ = self.events.send(AdapterEvent::Title(title)).await;
+    }
+
+    fn transcript(&self) -> Option<PathBuf> {
+        lock(&self.transcript).clone()
+    }
+
+    fn runtime(&self) -> Uuid {
+        *lock(&self.runtime)
+    }
+
+    /// After `/clear` the CLI writes transcript `new` in the same folder (SPEC §8.1).
+    fn moved_to(&self, new: Uuid) {
+        *lock(&self.runtime) = new;
+        if let Some(p) = lock(&self.transcript).as_mut() {
+            p.set_file_name(format!("{new}.jsonl"));
+        }
     }
 
     fn signal(&self, s: Sig) {
@@ -918,9 +943,9 @@ impl ClaudeCodeAdapter {
             stdin: tokio::sync::Mutex::new(spawned.stdin),
             events: self.events.clone(),
             signal: spawned.signal,
-            transcript,
+            transcript: Mutex::new(transcript),
             title: Mutex::new(None),
-            runtime: uuid,
+            runtime: Mutex::new(uuid),
             own: self.opts.own_records.clone(),
         });
         let pid = spawned.pid;
@@ -1072,7 +1097,7 @@ impl Adapter for ClaudeCodeAdapter {
         let p = self.running()?;
         let actions = lock(&p.core).input_with_images(input, images);
         // Before the write: the mirror may read the prompt's record before its echo.
-        p.io.own.sent(p.io.runtime, &input.text);
+        p.io.own.sent(p.io.runtime(), &input.text);
         tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude");
         p.io.run(actions).await
     }
@@ -1095,7 +1120,7 @@ impl Adapter for ClaudeCodeAdapter {
         let Some(actions) = lock(&p.core).inject_with_images(input, images) else {
             return Ok(false);
         };
-        p.io.own.sent(p.io.runtime, &input.text);
+        p.io.own.sent(p.io.runtime(), &input.text);
         tracing::info!(session_id = %self.session_id, event_id = %input.event_id, "input sent to claude during the turn");
         p.io.run(actions).await?;
         Ok(true)
@@ -1189,7 +1214,7 @@ impl Adapter for ClaudeCodeAdapter {
         let action = lock(&p.core).set_model(model);
         // The CLI writes the switch into the transcript as a typed `/model <name>`; it is ours,
         // not a prompt of someone else for the mirror to import.
-        p.io.own.sent(p.io.runtime, &format!("/model {model}"));
+        p.io.own.sent(p.io.runtime(), &format!("/model {model}"));
         p.io.run(vec![action]).await
     }
 
@@ -1249,7 +1274,7 @@ async fn monitor(
     mut exited: watch::Receiver<Option<ExitInfo>>,
     mut gate: watch::Receiver<bool>,
     stderr_tail: Arc<Mutex<String>>,
-    live: Live,
+    mut live: Live,
     ssh_agent: Option<crate::ssh::SshAgent>,
     secrets: Option<Arc<crate::secrets::ProcessSecrets>>,
     fork_copy: Option<RemoveOnDrop>,
@@ -1274,8 +1299,18 @@ async fn monitor(
                         let a = c.on_line(&line);
                         (a, c.take_seen())
                     };
+                    // After `/clear` the process writes the new transcript: its records from
+                    // this line on are that one's, and the old one is no longer written.
+                    for a in &actions {
+                        if let Action::Emit(AdapterEvent::RuntimeSessionId(r)) = a {
+                            if let Ok(new) = r.parse::<Uuid>() {
+                                io.moved_to(new);
+                                live = Live::new(io.own.clone(), new, live.2);
+                            }
+                        }
+                    }
                     for u in seen {
-                        io.own.add(io.runtime, u);
+                        io.own.add(io.runtime(), u);
                     }
                     if let Err(e) = io.run(actions).await {
                         tracing::warn!(session_id = %io.session_id, "{e:#}");

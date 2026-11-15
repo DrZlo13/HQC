@@ -106,6 +106,8 @@ export interface SessionPatch {
   model?: string | null;
   /** `null`: back to the runtime's own endpoint; a change restarts a running agent. */
   provider_id?: string | null;
+  /** The owner's Chrome for the agent (SPEC 0.148); a change restarts a running agent. */
+  browser?: boolean;
 }
 
 /** The fields of `POST /api/providers` and `PATCH /api/providers/{id}` (all of them). */
@@ -142,6 +144,9 @@ export interface WorkerInfo {
   /** `session_secrets = true` in its `worker.toml` (SPEC 0.147): it takes secrets and ssh
    *  keys for its owner's sessions. */
   session_secrets?: boolean;
+  /** `browser = true` in its `worker.toml` (SPEC 0.148): a session of its owner may run with
+   *  the user's Chrome on that machine. */
+  browser?: boolean;
 }
 
 /** What `POST /api/sessions/{id}/secrets` sends (SPEC 0.147): never kept by the client. */

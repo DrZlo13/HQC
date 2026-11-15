@@ -1108,11 +1108,26 @@ export class AppState {
 
   /** The workers that take secrets for their owner's sessions (SPEC 0.147), by id. */
   secretWorkers = new Set<string>();
+  /** The workers that give a session the user's Chrome (`browser`, SPEC 0.148), by id. */
+  browserWorkers = new Set<string>();
 
   async loadWorkers(): Promise<void> {
     const ws = await this.api.workers();
     this.secretWorkers = new Set(ws.filter((w) => w.session_secrets).map((w) => w.id));
+    this.browserWorkers = new Set(ws.filter((w) => w.browser).map((w) => w.id));
     this.changed();
+  }
+
+  /** Whether worker `workerId` gives a session the user's Chrome. */
+  givesBrowser(workerId: string | undefined): boolean {
+    return !!workerId && this.browserWorkers.has(workerId);
+  }
+
+  /** The browser of the session on or off (SPEC 0.148): a running agent restarts. */
+  async setBrowser(sessionId: string, on: boolean): Promise<void> {
+    const s = await this.api.patchSession(sessionId, { browser: on });
+    this.sessions.set(s.id, s);
+    this.edited();
   }
 
   /** Whether worker `workerId` takes secrets. */

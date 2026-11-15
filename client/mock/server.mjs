@@ -253,6 +253,16 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
       }
       s.model = body.model ?? undefined;
     }
+    // SPEC 0.148: only on a worker whose worker.toml has `browser = true`.
+    if (body?.browser !== undefined) {
+      if (typeof body.browser !== 'boolean') throw fail(400, 'bad_request', 'browser is true or false');
+      if (s.system) throw fail(409, 'system_session', "the worker's service session has no agent");
+      const w = allWorkers().find((x) => x.id === (workspaces.get(s.workspace_id)?.worker_id ?? workerId));
+      if (body.browser && !w?.browser) {
+        throw fail(422, 'browser_not_allowed', `worker ${w?.name ?? '?'} does not give a browser: add browser = true to its worker.toml`);
+      }
+      s.browser = body.browser;
+    }
     return s;
   }
 
@@ -280,6 +290,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
         disallowed_tools: [],
         restricted: false,
         start_failures: 0,
+        ...(s.browser ? { browser: true } : {}),
       },
       auto_approve: false,
       wake_on_send: false,
@@ -1292,7 +1303,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
   // Workers as the hub lists them (SPEC §6): `revoked` only with `include_revoked=1`.
   const allWorkers = () =>
-    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true }, ...enrolled].map((w) =>
+    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true, browser: true }, ...enrolled].map((w) =>
       revoked.has(w.id) ? { ...w, status: 'revoked', revoked_at: new Date().toISOString() } : w,
     );
   route('GET', '/api/workers', (_, __, q) => ({

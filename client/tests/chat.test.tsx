@@ -106,6 +106,8 @@ function setup(
           : patch.provider_id
             ? { id: patch.provider_id, label: app.providers.find((p) => p.id === patch.provider_id)?.label ?? '' }
             : undefined,
+      // SPEC 0.148: the browser as stored.
+      browser: patch.browser === undefined ? info.browser : patch.browser || undefined,
     })),
     // POST /api/sessions/{id}/fork: the new session.
     forkSession: vi.fn(async () => ({ ...info, id: 's2', title: 'test 12 (fork)', last_seq: 4, last_read_seq: 4 })),
@@ -455,6 +457,43 @@ describe('model', () => {
     await set('model', 'opus');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { provider_id: null, model: 'opus' });
     expect(app.sessions.get('s1')!.provider).toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+
+  it('gives the agent the browser after a confirmation and takes it away, only on a worker that gives one', async () => {
+    const { app, api } = setup('running');
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    // A worker without `browser`: no item.
+    await mount(app);
+    await open();
+    expect($('.btn-browser')).toBeNull();
+    await open();
+    // GET /api/workers: this worker's worker.toml has `browser = true`.
+    Object.assign(api, { workers: vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', browser: true }]) });
+    await act(() => app.loadWorkers());
+    await open();
+    expect($('.btn-browser-on')!.textContent).toBe('Browser: off · Give the browser');
+    // Declined: nothing changes.
+    await act(async () => $('.btn-browser-on')!.click());
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(String((confirm.mock.calls[0] as unknown[])[0])).toContain('Give the agent your browser?');
+    expect(api.patchSession).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await open();
+    await act(async () => $('.btn-browser-on')!.click());
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { browser: true });
+    expect(app.sessions.get('s1')!.browser).toBe(true);
+    // The header says the agent has it.
+    expect($('.chat-browser')!.textContent).toBe('Browser');
+    expect($('.chat-browser')!.getAttribute('title')).toContain('The agent has your Chrome on');
+    // And off again.
+    await open();
+    expect($('.btn-browser-off')!.textContent).toBe('Browser: on · Turn off');
+    await act(async () => $('.btn-browser-off')!.click());
+    expect(String((confirm.mock.calls.at(-1) as unknown[])[0])).toBe('The agent restarts without the browser.');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { browser: false });
+    expect($('.chat-browser')).toBeNull();
     vi.unstubAllGlobals();
   });
 

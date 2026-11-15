@@ -198,6 +198,11 @@ async fn run(logs: worker_log::LogReceiver) -> anyhow::Result<()> {
         if n > 0 {
             tracing::info!(removed = n, "stale ssh-agent sockets removed");
         }
+        // The secrets of processes it left behind (SPEC 0.147).
+        let n = config.secrets.clean().context("secrets folders")?;
+        if n > 0 {
+            tracing::info!(removed = n, "stale secrets folders removed");
+        }
     }
     let adapters = Arc::new(
         BuiltinAdapters::from_config(&config, permission_mode).with_mcp(McpLaunch {

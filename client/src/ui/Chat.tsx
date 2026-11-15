@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { ApiError, type SessionPatch, type WorkerLimits } from '../api';
+import { ApiError, type SecretFields, type SecretGiven, type SessionPatch, type WorkerLimits } from '../api';
 import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
@@ -16,7 +16,8 @@ import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { copyText } from '../clipboard';
 import { ContextMenu } from './ContextMenu';
-import { IconArchive, IconAttach, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSearch, IconSend, IconShield, IconStop } from './icons';
+import { ComposerSecret } from './secrets';
+import { IconArchive, IconAttach, IconKey, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSearch, IconSend, IconShield, IconStop } from './icons';
 import { MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
@@ -184,6 +185,9 @@ export function Chat({
     sheetRequest,
     findSession: (ref) => app.findSession(ref),
     peerMessage,
+    giveSecret: !system && app.takesSecrets(info?.worker_id)
+      ? async (requestId, f) => void (await app.api.giveSecret(sessionId, f, requestId))
+      : undefined,
     fork: !system && info?.workspace_id
       ? (e) =>
           void app.forkSession(sessionId, e.event_id, e.payload.text).then(
@@ -728,6 +732,7 @@ export function Chat({
             chat.send(text, files);
             setFiles([]);
           }}
+          giveSecret={!system && app.takesSecrets(info?.worker_id) ? (f) => app.api.giveSecret(sessionId, f) : undefined}
         />
       )}
       {viewing && (
@@ -1093,6 +1098,7 @@ export function Composer({
   onDraft,
   autoFocus = false,
   wait,
+  giveSecret,
 }: {
   onSend: (text: string) => void;
   placeholder?: string;
@@ -1115,6 +1121,9 @@ export function Composer({
   /** Sending waits for this (a new session being created): send is disabled with it as its
    *  title, Enter sends nothing, the text stays. */
   wait?: string;
+  /** "Secret" beside attach (SPEC 0.147): only where the session's worker takes secrets. The
+   *  answer's `note` goes into the text; the value goes nowhere else. */
+  giveSecret?: (f: SecretFields) => Promise<SecretGiven>;
 }) {
   const [text, setText] = useState(initial);
   const typed = useRef(false);
@@ -1147,6 +1156,12 @@ export function Composer({
     };
   }, [insertQuote]);
   const picker = useRef<HTMLInputElement>(null);
+  const [secretOpen, setSecretOpen] = useState(false);
+  const addNote = (note: string) => {
+    caretToEnd.current = true;
+    setText((cur) => (cur.trim() ? `${cur.replace(/\s+$/, '')}\n${note}` : note));
+    area.current?.focus();
+  };
   const canSend = !wait && (text.trim() !== '' || files.length > 0) && reading === 0;
   // The slash command popup (T27): the matches, the highlighted one, and the text Esc closed
   // it at (typing on reopens it).
@@ -1205,6 +1220,18 @@ export function Composer({
       <IconAttach />
     </button>
   );
+  const secretButton = giveSecret && (
+    <button
+      type="button"
+      class={`icon-btn btn-secret ${secretOpen ? 'is-on' : ''}`}
+      aria-label="Secret for the agent"
+      title="Give the agent a password or an ssh key"
+      aria-expanded={secretOpen}
+      onClick={() => setSecretOpen(!secretOpen)}
+    >
+      <IconKey />
+    </button>
+  );
   const send = (
     <button type="submit" class="btn-send" aria-label="Send" title={wait ?? 'Send'} disabled={!canSend}>
       <IconSend />
@@ -1259,6 +1286,9 @@ export function Composer({
   );
   return (
     <div class="composer-wrap">
+      {giveSecret && secretOpen && (
+        <ComposerSecret give={giveSecret} onNote={addNote} onClose={() => setSecretOpen(false)} />
+      )}
       <form
         class={`composer ${phone ? 'composer-phone' : ''}`}
         // A press on a button of the composer (send, attach, remove a file) leaves the focus in
@@ -1328,6 +1358,7 @@ export function Composer({
         {/* One row: attach, the field (growing with its lines), send. */}
         <div class="composer-row">
           {attach}
+          {secretButton}
           {textarea}
           {send}
         </div>

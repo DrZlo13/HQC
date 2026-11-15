@@ -620,6 +620,43 @@ pub struct AddWorkspaceRules {
     pub rules: Vec<String>,
 }
 
+/// `POST /api/sessions/{id}/secrets` (since SPEC 0.147, §6): a secret or an ssh key for the
+/// session's running agent, passed to its worker in `secret.put` and kept by the hub nowhere.
+/// `request_id` answers the agent's `hqc_secret` (its `kind` and `name` must be the
+/// request's). Unknown fields are refused, so a misspelt `remember` is not a silent no.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretRequest {
+    pub kind: crate::frame::SecretKind,
+    pub name: String,
+    pub value: crate::frame::SecretValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<crate::frame::SecretValue>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remember: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+impl std::fmt::Debug for SecretRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretRequest")
+            .field("kind", &self.kind)
+            .field("name", &self.name)
+            .field("value", &self.value)
+            .field("remember", &self.remember)
+            .field("request_id", &self.request_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The answer to `POST /api/sessions/{id}/secrets`: what the worker told the agent's side,
+/// never the value. The client puts `note` into the message being written.
+pub type SecretGiven = crate::frame::SecretOutcome;
+
+/// `GET /api/workspaces/{id}/keys` (since SPEC 0.147): the ssh keys its worker keeps for it.
+pub type WorkspaceKeyList = crate::frame::WorkspaceKeysResult;
+
 /// `GET /api/workspaces/{id}/permissions?command=|tool=`: the worker's
 /// `permissions.inspect` (SPEC §5.3, §6).
 pub type WorkspacePermissions = crate::frame::InspectResult;
@@ -1334,6 +1371,19 @@ mod tests {
             wp.check.map(|c| c.verdict),
             Some(crate::frame::Verdict::Deny)
         );
+        // SPEC 0.147: a secret for a session, what comes back, a workspace's keys.
+        let sr: SecretRequest = roundtrip(include_str!("../examples/wire/api.secret.request.json"));
+        assert!(!format!("{sr:?}").contains("horse"));
+        let sk: SecretRequest =
+            roundtrip(include_str!("../examples/wire/api.secret.request.key.json"));
+        assert!(sk.remember && !format!("{sk:?}").contains("OPENSSH"));
+        assert!(serde_json::from_value::<SecretRequest>(
+            serde_json::json!({"kind": "secret", "name": "a", "value": "b", "remeber": true})
+        )
+        .is_err());
+        let g: SecretGiven = roundtrip(include_str!("../examples/wire/api.secret.json"));
+        assert!(g.note.contains("$HQC_SECRETS/WIFI_PASS") && !g.remembered);
+        roundtrip::<WorkspaceKeyList>(include_str!("../examples/wire/api.workspace.keys.json"));
         let a: Artifact = roundtrip(include_str!("../examples/wire/api.artifact.json"));
         assert_eq!(a.kind, crate::event::ArtifactKind::Image);
         roundtrip::<ArtifactUrl>(include_str!("../examples/wire/api.artifact.url.json"));

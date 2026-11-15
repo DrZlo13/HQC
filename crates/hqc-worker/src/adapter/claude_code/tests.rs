@@ -178,6 +178,7 @@ fn spec(session_id: Uuid, workdir: &std::path::Path, claude_session: Uuid) -> St
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     }
 }
@@ -906,7 +907,7 @@ async fn command_line_carries_permissions() {
     let f = ClaudeCodeAdapters::from_config(&cfg, "manual".into());
     assert_eq!(f.opts.ask_mode, "manual");
     let mode = |a: &ClaudeCodeAdapter, s: &StartSpec| -> String {
-        let args = a.command(s, &Uuid::nil(), Launch::New, None).args;
+        let args = a.command(s, &Uuid::nil(), Launch::New, None, None).args;
         let i = args.iter().position(|a| a == "--permission-mode").unwrap();
         args[i + 1].clone()
     };
@@ -925,7 +926,7 @@ async fn command_line_carries_permissions() {
     assert_eq!(mode(&a, &s), "auto");
     // The deny list goes with auto as with ask.
     assert!(a
-        .command(&s, &Uuid::nil(), Launch::New, None)
+        .command(&s, &Uuid::nil(), Launch::New, None, None)
         .args
         .contains(&"--settings".to_string()));
 }
@@ -974,7 +975,7 @@ environment = "gw"
     s.model = Some("claude-opus-5-5".into());
 
     // Without a provider: the environment's gateway and key, the session's model.
-    let plain = a.command(&s, &Uuid::nil(), Launch::New, None);
+    let plain = a.command(&s, &Uuid::nil(), Launch::New, None, None);
     assert_eq!(
         var(&plain.env, "ANTHROPIC_BASE_URL").as_deref(),
         Some("http://gw.local:8787")
@@ -993,7 +994,7 @@ environment = "gw"
         context_tokens: Some(200_000),
         api_key: None,
     });
-    let on = a.command(&s, &Uuid::nil(), Launch::New, None);
+    let on = a.command(&s, &Uuid::nil(), Launch::New, None, None);
     assert_eq!(
         var(&on.env, "ANTHROPIC_BASE_URL").as_deref(),
         Some("http://192.168.1.229:8082")
@@ -1027,7 +1028,7 @@ environment = "gw"
     assert_eq!(names.len(), n);
 
     s.provider.as_mut().unwrap().api_key = Some(crate::token::Secret::new("sk-zai"));
-    let keyed = a.command(&s, &Uuid::nil(), Launch::New, None);
+    let keyed = a.command(&s, &Uuid::nil(), Launch::New, None, None);
     assert_eq!(
         var(&keyed.env, "ANTHROPIC_AUTH_TOKEN").as_deref(),
         Some("sk-zai")
@@ -1074,7 +1075,7 @@ environment = "infra"
     let command = |dir: &str| {
         let mut s = spec(Uuid::now_v7(), &root.join(dir), Uuid::new_v4());
         s.environment = cfg.environment(&s.workspace);
-        a.command(&s, &Uuid::nil(), Launch::New, None)
+        a.command(&s, &Uuid::nil(), Launch::New, None, None)
     };
     let settings = |args: &[String]| -> Value {
         let i = args.iter().position(|a| a == "--settings").unwrap();
@@ -1151,7 +1152,7 @@ environment = "mine"
         let mut s = spec(Uuid::now_v7(), &root.join(dir), Uuid::new_v4());
         s.environment = cfg.environment(&s.workspace);
         s.restricted = restricted;
-        a.command(&s, &Uuid::nil(), Launch::New, None).args
+        a.command(&s, &Uuid::nil(), Launch::New, None, None).args
     };
     let sources = |args: &[String]| {
         args.iter()
@@ -1194,7 +1195,7 @@ fn allow_all_starts_in_bypass_permissions() {
         proc: None,
     };
     let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
-    let args = |s: &StartSpec| a.command(s, &Uuid::nil(), Launch::New, None).args;
+    let args = |s: &StartSpec| a.command(s, &Uuid::nil(), Launch::New, None, None).args;
     let mode = |args: &[String]| {
         let i = args.iter().position(|a| a == "--permission-mode").unwrap();
         args[i + 1].clone()
@@ -2750,7 +2751,7 @@ async fn native_messaging_follows_the_worker_config() {
         };
         let mut s = spec(Uuid::now_v7(), work.path(), Uuid::new_v4());
         s.restricted = restricted;
-        a.command(&s, &Uuid::nil(), Launch::New, None).args
+        a.command(&s, &Uuid::nil(), Launch::New, None, None).args
     };
     let disallowed = |args: &[String]| -> Vec<String> {
         let i = args.iter().position(|a| a == "--disallowedTools");

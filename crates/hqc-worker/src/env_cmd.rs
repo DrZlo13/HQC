@@ -77,6 +77,27 @@ pub fn summary(cfg: &Config) -> String {
         };
         let _ = writeln!(out, "  {}: {} ({key})", p.name, p.base_url);
     }
+    // SPEC 0.147: secrets and keys from the chat, and the keys kept for workspaces.
+    let _ = writeln!(
+        out,
+        "session_secrets: {}",
+        if cfg.session_secrets { "on" } else { "off" }
+    );
+    out.push_str("workspace keys:\n");
+    match cfg.secrets.all() {
+        Ok(all) if all.is_empty() => out.push_str("  none\n"),
+        Ok(all) => {
+            for (path, keys) in all {
+                let _ = writeln!(out, "  {path}:");
+                for k in keys {
+                    let _ = writeln!(out, "    {} {}", k.name, k.fingerprint);
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(out, "  unreadable: {e:#}");
+        }
+    }
     out
 }
 
@@ -99,8 +120,16 @@ pub fn which(cfg: &Config, path: &Path) -> anyhow::Result<String> {
         }
     }
     vars(&mut out, &e);
-    if e.ssh_keys.is_empty() {
+    let kept = cfg.secrets.workspace(&path).list().unwrap_or_default();
+    if e.ssh_keys.is_empty() && kept.is_empty() && !cfg.session_secrets {
         out.push_str("    ssh keys: none (no SSH_AUTH_SOCK)\n");
+    }
+    for k in &kept {
+        let _ = writeln!(
+            out,
+            "    kept for this workspace: {} {}",
+            k.name, k.fingerprint
+        );
     }
     let _ = writeln!(
         out,

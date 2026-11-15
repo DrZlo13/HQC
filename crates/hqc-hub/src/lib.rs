@@ -36,6 +36,7 @@ pub mod requests;
 pub mod rules;
 pub mod schedules;
 pub mod search;
+pub mod secrets;
 pub mod security;
 pub mod spawn;
 pub mod state;
@@ -127,6 +128,12 @@ pub fn router(app: AppState) -> Router {
         .route(
             "/api/sessions/{id}/requests/{request_id}",
             post(api::answer_request),
+        )
+        .route("/api/sessions/{id}/secrets", post(secrets::give))
+        .route("/api/workspaces/{id}/keys", get(secrets::keys))
+        .route(
+            "/api/workspaces/{id}/keys/{name}",
+            axum::routing::delete(secrets::delete_key),
         )
         .route("/api/requests", get(api::open_requests))
         .route("/api/sessions/{id}/read_cursor", put(api::read_cursor))

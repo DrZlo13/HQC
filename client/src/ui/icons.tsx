@@ -291,6 +291,14 @@ export const IconLock = ({ size = 16 }: { size?: number }) => (
   </Svg>
 );
 
+/** A key: a secret or an ssh key for the agent (SPEC 0.147). */
+export const IconKey = ({ size = 17 }: { size?: number }) => (
+  <Svg size={size}>
+    <circle cx="7" cy="13" r="3.5" />
+    <path d="M9.5 10.5L16 4M13.5 6.5l2 2M11.5 8.5l1.5 1.5" />
+  </Svg>
+);
+
 /** ↗ / ↙ of the blocks between sessions (T51): left this session, came into it. */
 export const IconArrowOut = ({ size = 14 }: { size?: number }) => (
   <Svg size={size}>

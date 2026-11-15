@@ -21,6 +21,7 @@ pub mod mirror;
 pub mod outbox;
 pub mod peer;
 pub mod permissions;
+pub mod secrets;
 pub mod ssh;
 pub mod supervisor;
 pub mod title;
@@ -115,6 +116,7 @@ impl Worker {
                 .iter()
                 .map(|p| p.name.clone())
                 .collect(),
+            session_secrets: self.config.session_secrets,
             machine_id: self.machine_id.clone(),
         }
     }

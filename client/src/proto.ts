@@ -196,6 +196,13 @@ export interface ApprovalRequest {
   policy_hint?: PolicyHint;
   /** hqc rules the worker suggests for "Allow in this folder" (T48), one per part. */
   rule_suggestions?: RuleSuggestion[];
+  /** The hub's card of an agent's `hqc_secret` (SPEC 0.147): what it asks for. */
+  secret?: SecretAsked;
+}
+/** The secret an `hqc_secret` card asks for: its name and kind are the agent's, fixed. */
+export interface SecretAsked {
+  name: string;
+  kind: 'secret' | 'ssh_key';
 }
 /** A simple part of a command and the hqc rule suggested for it (none: no pattern). */
 export interface RuleSuggestion {
@@ -459,6 +466,7 @@ const PAYLOAD_PARSERS: { [T in EventType]: (p: Obj) => PayloadByType[T] } = {
     expires_at: optStr(p, 'expires_at'),
     policy_hint: present(p, 'policy_hint') ? tolerantEnum(p, 'policy_hint', POLICY_HINTS) : undefined,
     rule_suggestions: present(p, 'rule_suggestions') ? parseSuggestions(p, 'rule_suggestions') : undefined,
+    secret: present(p, 'secret') ? parseSecretAsked(obj(p.secret, 'secret')) : undefined,
   }),
   'approval.response': (p) => ({
     request_id: str(p, 'request_id'),
@@ -587,6 +595,8 @@ export interface Frame<T extends string = string, P = Obj> {
   payload: P;
 }
 
+const SECRET_PUT_KINDS = ['secret', 'ssh_key', 'ssh_keygen'] as const;
+
 const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
   hello: (p) => {
     num(p, 'protocol_version');
@@ -612,6 +622,9 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     bool(p, 'allow_foreign_sessions');
     bool(p, 'share_local_models');
     arr(p, 'local_models');
+    optStrArr(p, 'providers');
+    // SPEC 0.147: the worker takes secrets for its owner's sessions.
+    optBool(p, 'session_secrets');
   },
   'hello.ack': (p) => {
     num(p, 'protocol_version');
@@ -709,6 +722,28 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     str(p, 'request_id');
     str(p, 'path');
     optBool(p, 'force');
+  },
+  // SPEC 0.147: a secret or an ssh key for a session's agent, and a workspace's remembered keys.
+  'secret.put': (p) => {
+    str(p, 'request_id');
+    str(p, 'session_id');
+    const kind = strictEnum(p, 'kind', SECRET_PUT_KINDS);
+    str(p, 'name');
+    if (kind === 'ssh_keygen') {
+      if (present(p, 'value')) throw new ProtoError('secret.put: ssh_keygen takes no value');
+    } else str(p, 'value');
+    optStr(p, 'passphrase');
+    optBool(p, 'remember');
+    optStr(p, 'comment');
+  },
+  'workspace.keys': (p) => {
+    str(p, 'request_id');
+    str(p, 'path');
+  },
+  'workspace.key_delete': (p) => {
+    str(p, 'request_id');
+    str(p, 'path');
+    str(p, 'name');
   },
   // T30: an agent's hqc MCP tool call and its answer (SPEC §5.2).
   'mcp.call': (p) => {
@@ -1452,6 +1487,10 @@ export function parseWorkspaceRuleList(v: unknown): WorkspaceRule[] {
     const o = obj(e, `rules[${i}]`);
     return { id: str(o, 'id'), rule: str(o, 'rule'), created_at: str(o, 'created_at') };
   });
+}
+
+function parseSecretAsked(o: Obj): SecretAsked {
+  return { name: str(o, 'name'), kind: strictEnum(o, 'kind', ['secret', 'ssh_key'] as const) };
 }
 
 function parseSuggestions(o: Obj, key: string): RuleSuggestion[] {

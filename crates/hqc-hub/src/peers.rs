@@ -1218,7 +1218,7 @@ pub async fn expire(app: &AppState) -> anyhow::Result<()> {
 pub async fn cancelled(app: &AppState, worker_id: Uuid, c: &McpCancel) -> anyhow::Result<()> {
     let open: Option<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
-         WHERE kind IN ('ask', 'move') AND request_id = $1 AND worker_id = $2
+         WHERE kind IN ('ask', 'move', 'secret') AND request_id = $1 AND worker_id = $2
            AND closed_at IS NULL"
     ))
     .bind(&c.request_id)
@@ -1226,7 +1226,7 @@ pub async fn cancelled(app: &AppState, worker_id: Uuid, c: &McpCancel) -> anyhow
     .fetch_optional(&app.db)
     .await?;
     let Some(p) = open else { return Ok(()) };
-    if p.kind == crate::moves::KIND {
+    if p.kind == crate::moves::KIND || p.kind == crate::secrets::KIND {
         // Without a frame, as the ask: nobody waits for the call's result.
         return requests::cancel_without_frame(app, &p, CancelReason::Stopped).await;
     }
@@ -1285,7 +1285,7 @@ pub async fn worker_restarted(app: &AppState, worker_id: Uuid) -> anyhow::Result
 pub async fn after_hello(app: &AppState, worker_id: Uuid) -> anyhow::Result<()> {
     let rows: Vec<PendingRow> = sqlx::query_as(&format!(
         "SELECT {ASK_COLS} FROM pending_requests
-         WHERE kind IN ('ask', 'move') AND worker_id = $1 AND result IS NOT NULL
+         WHERE kind IN ('ask', 'move', 'secret') AND worker_id = $1 AND result IS NOT NULL
            AND result_delivered_at IS NULL
          ORDER BY closed_at"
     ))

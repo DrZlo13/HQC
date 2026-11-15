@@ -338,7 +338,7 @@ impl Workspaces {
             keys => self
                 .cfg
                 .ssh
-                .start_agent(keys)
+                .start_agent(&self.cfg.ssh.files(keys))
                 .await
                 .map(Some)
                 .map_err(|e| format!("the environment's ssh keys: {e:#}")),

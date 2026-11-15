@@ -18,6 +18,7 @@
 //! # allow_native_messaging = false  # keep Claude Code's ListAgents/SendMessage (bypass the hub)
 //! # allow_subagent_messages = false # keep SendMessage for own subagents, refuse other sessions'
 //! # show_in_vscode = true          # sessions run by hqc appear in VS Code's history
+//! # session_secrets = false        # take secrets and ssh keys for a session from the chat
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
@@ -106,6 +107,8 @@ struct RawConfig {
     allow_subagent_messages: bool,
     #[serde(default = "default_true")]
     show_in_vscode: bool,
+    #[serde(default)]
+    session_secrets: bool,
     #[serde(default)]
     permissions: Option<RawPermissions>,
     #[serde(default)]
@@ -413,6 +416,10 @@ pub struct Config {
     /// Write transcripts with `entrypoint: claude-vscode`, so sessions run by hqc appear in
     /// the VS Code extension's history (it lists only its own entrypoint, SPEC §9).
     pub show_in_vscode: bool,
+    /// Take `secret.put` from the hub for sessions of the worker's owner that are not
+    /// restricted (SPEC §14, since 0.147): a secret becomes a file of the agent's process, a key
+    /// goes into its ssh-agent and may be kept for the workspace. Off by default.
+    pub session_secrets: bool,
     /// `[permissions]`: the worker's allow/deny rules and the ask/auto mode (SPEC §14). A
     /// session runs with its environment's [`Environment::permissions`], built on these.
     pub permissions: Permissions,
@@ -429,6 +436,16 @@ pub struct Config {
     pub ssh: crate::ssh::Store,
     /// `[providers.*]` by name.
     pub providers: Vec<AllowedProvider>,
+    /// `$HQC_HOME/secrets` and `$HQC_HOME/workspace-keys` (SPEC 0.147).
+    pub secrets: crate::secrets::Stores,
+}
+
+/// What a session that may have secrets gets (SPEC §14, since 0.147): the stores, and the keys
+/// kept for its workspace (none for a session without one).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSecrets {
+    pub stores: crate::secrets::Stores,
+    pub workspace: Option<crate::secrets::WorkspaceKeys>,
 }
 
 /// What a session may be started with, after checking `session.start` against the config.
@@ -472,6 +489,10 @@ pub struct StartSpec {
     /// Why `session.start.provider` was not run (SPEC §8.1 `provider_refused`): the session
     /// starts without it.
     pub provider_refused: Option<String>,
+    /// `session_secrets` is on, and the session is its owner's on this worker's owner and not
+    /// restricted (SPEC §14): the process gets `HQC_SECRETS`, an ssh-agent and the workspace's
+    /// kept keys. `None`: none of it.
+    pub secrets: Option<SessionSecrets>,
 }
 
 impl StartSpec {
@@ -589,6 +610,7 @@ impl Config {
             allow_native_messaging: raw.allow_native_messaging,
             allow_subagent_messages: raw.allow_subagent_messages,
             show_in_vscode: raw.show_in_vscode,
+            session_secrets: raw.session_secrets,
             default_environment: Arc::new(Environment::default_of(&permissions)),
             permissions,
             environments,
@@ -597,6 +619,7 @@ impl Config {
             clone_timeout: Duration::from_secs(raw.clone_timeout),
             scratch_root: home.join("scratch"),
             ssh: crate::ssh::Store::in_home(&home),
+            secrets: crate::secrets::Stores::in_home(&home),
             providers,
         })
     }
@@ -641,6 +664,17 @@ impl Config {
                 Err(why) => (None, Some(why)),
             },
         };
+        let secrets = (self.session_secrets
+            && s.owner_is_worker_owner
+            && !s.restricted
+            && s.runtime == Runtime::ClaudeCode)
+            .then(|| SessionSecrets {
+                stores: self.secrets.clone(),
+                workspace: s
+                    .workspace_path
+                    .as_ref()
+                    .map(|_| self.secrets.workspace(&ws)),
+            });
         Ok(StartSpec {
             session_id: s.session_id,
             runtime: s.runtime,
@@ -662,6 +696,7 @@ impl Config {
             has_history: s.has_history,
             provider,
             provider_refused,
+            secrets,
         })
     }
 
@@ -881,6 +916,37 @@ mod tests {
         };
         s.workspace_path = Some(ws.display().to_string());
         s.clone()
+    }
+
+    /// SPEC 0.147: secrets only with `session_secrets`, for the owner's session that is not
+    /// restricted; its workspace's kept keys with it.
+    #[test]
+    fn secrets_only_for_the_owners_unrestricted_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ws")).unwrap();
+        let toml = |extra: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\nallow_foreign_sessions = true\n{extra}",
+                dir.path().display().to_string(),
+            )
+        };
+        let off = Config::parse(&toml("")).unwrap();
+        assert!(!off.session_secrets);
+        let ws = dir.path().join("ws");
+        assert!(off.check_start(&start(&ws)).unwrap().secrets.is_none());
+        let on = Config::parse(&toml("session_secrets = true\n")).unwrap();
+        let mut s = start(&ws);
+        s.owner_is_worker_owner = true;
+        s.restricted = false;
+        let got = on.check_start(&s).unwrap().secrets.unwrap();
+        let canonical = ws.canonicalize().unwrap();
+        assert_eq!(got.workspace, Some(on.secrets.workspace(&canonical)));
+        let mut restricted = s.clone();
+        restricted.restricted = true;
+        assert!(on.check_start(&restricted).unwrap().secrets.is_none());
+        let mut foreign = s.clone();
+        foreign.owner_is_worker_owner = false;
+        assert!(on.check_start(&foreign).unwrap().secrets.is_none());
     }
 
     /// SPEC 0.144: a provider runs only by its name in `[providers.*]` with the same

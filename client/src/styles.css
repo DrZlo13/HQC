@@ -7581,3 +7581,109 @@ button.ps-look {
   max-width: 520px;
   margin: 8px 0;
 }
+
+/* SPEC 0.147: a secret or an ssh key for the agent. The composer's form sits above its row,
+   as wide as the composer; the hqc_secret card uses the permission card's frame. */
+.btn-secret {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  color: var(--muted);
+}
+.btn-secret.is-on {
+  color: var(--accent);
+}
+.composer-wrap:has(> .composer-secret) {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.composer-secret {
+  flex: 1 1 100%;
+  max-width: 780px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.composer-secret-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.secret-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.secret-card .secret-form {
+  margin-top: 10px;
+}
+.secret-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.secret-kind {
+  flex: none;
+  width: 180px;
+}
+.secret-name {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+.secret-key {
+  resize: vertical;
+  font-size: 12px;
+}
+.secret-remember {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.secret-actions {
+  display: flex;
+  gap: 8px;
+}
+.secret-purpose {
+  white-space: normal;
+}
+.ws-keys {
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 12px 14px;
+}
+.ws-keys h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.ws-keys-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.ws-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.ws-key-name {
+  font-weight: 600;
+}
+.ws-key-fp {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.ws-key-confirm {
+  display: flex;
+  gap: 6px;
+}

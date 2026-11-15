@@ -438,6 +438,8 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
 
   async function turn(s, input, t) {
     const askClarify = /question|clarify|вопрос/i.test(input.payload.text);
+    // SPEC 0.147: the agent asks for a secret with hqc_secret; the owner gives it in the card.
+    const askSecret = /\bsecret\b|password|парол/i.test(input.payload.text) && !/HQC_SECRETS/.test(input.payload.text);
     status(s, 'running');
     await step(t, 300);
 
@@ -464,7 +466,24 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
     await step(t, 300);
 
     let final;
-    if (askClarify) {
+    if (askSecret) {
+      const request_id = `toolu_${randomUUID().slice(0, 8)}`;
+      const answer = await request(s, t, 'approval', mk(s, 'event.approval.request', {
+        request_id,
+        tool: 'hqc_secret',
+        description: 'The Wi-Fi password to write into the camera config',
+        options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
+        secret: { name: 'WIFI_PASS', kind: 'secret' },
+        expires_at: undefined,
+        policy_hint: undefined,
+        rule_suggestions: undefined,
+      }));
+      if (answer.cancel) return;
+      status(s, 'running');
+      final = answer.option_id === 'give'
+        ? 'Got it: the password is in "$HQC_SECRETS/WIFI_PASS"; writing it into the config.'
+        : 'OK, no password: leaving the Wi-Fi unset.';
+    } else if (askClarify) {
       const request_id = `req-${randomUUID().slice(0, 8)}`;
       const answer = await request(s, t, 'clarify', mk(s, 'event.clarify.request', { request_id }));
       if (answer.cancel) return;
@@ -576,6 +595,62 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   });
   route('DELETE', '/api/providers/:id', (p) => {
     if (!providers.delete(p.id)) throw fail(404, 'not_found', 'unknown provider');
+    return withStatus(204, null);
+  });
+  // SPEC 0.147: a secret or an ssh key for a session's agent, through the worker; the mock
+  // keeps no value. The keys a workspace remembers, by workspace id (names and fingerprints).
+  const workspaceKeys = new Map();
+  const SECRET_NAME = /^(?![.-])[A-Za-z0-9_.-]{1,64}$/;
+  const fingerprint = (seed) => `SHA256:${Buffer.from(seed).toString('base64').replace(/=+$/, '').slice(0, 43)}`;
+  route('POST', '/api/sessions/:id/secrets', (p, body) => {
+    const s = sessionOr404(p.id);
+    const extra = Object.keys(body ?? {}).filter((k) => !['kind', 'name', 'value', 'passphrase', 'remember', 'request_id'].includes(k));
+    if (extra.length) throw fail(400, 'bad_request', `unknown field \`${extra[0]}\``);
+    const { kind, name, value } = body ?? {};
+    if (!['secret', 'ssh_key'].includes(kind)) throw fail(400, 'bad_request', 'kind is secret or ssh_key');
+    if (typeof name !== 'string' || !SECRET_NAME.test(name)) throw fail(422, 'secret_refused', 'a bad name');
+    if (typeof value !== 'string' || !value) throw fail(400, 'bad_request', 'value is required');
+    if (s.system) throw fail(409, 'unavailable', 'a service session takes no secret');
+    if (kind === 'ssh_key' && !value.includes('PRIVATE KEY')) throw fail(422, 'secret_refused', 'not an OpenSSH private key');
+    if (kind === 'ssh_key' && /ENCRYPTED/.test(value) && body.passphrase !== 'pass') throw fail(422, 'secret_refused', 'a wrong passphrase');
+    let o;
+    if (body.request_id !== undefined) {
+      o = s.open;
+      if (!o || o.request_id !== body.request_id || o.event.payload.tool !== 'hqc_secret') throw fail(409, 'request_closed', 'the request is already closed');
+      const asked = o.event.payload.secret;
+      if (asked.name !== name || asked.kind !== kind) throw fail(400, 'bad_request', `the request asks for ${asked.kind} ${asked.name}`);
+    }
+    const fp = kind === 'ssh_key' ? fingerprint(value) : undefined;
+    const remembered = kind === 'ssh_key' && body.remember === true && !!s.workspace_id;
+    if (remembered) {
+      const keys = workspaceKeys.get(s.workspace_id) ?? [];
+      if (keys.some((k) => k.name === name)) throw fail(422, 'secret_refused', `this workspace has a key named ${name}`);
+      workspaceKeys.set(s.workspace_id, [...keys, { name, fingerprint: fp }]);
+    }
+    const text = kind === 'ssh_key'
+      ? `ssh key ${name} (${fp}) given${remembered ? ', remembered for this workspace' : ''}`
+      : `Secret ${name} given`;
+    store(s, mk(s, 'event.system', { text, code: 'secret_given' }));
+    if (o) {
+      s.open = null;
+      store(s, mk(s, 'event.approval.response', { request_id: o.request_id, option_id: 'give', by: userId, message: undefined }));
+      o.resolve({ option_id: 'give' });
+    }
+    return kind === 'ssh_key'
+      ? { note: `The ssh key ${name} (${fp}) is loaded in your ssh-agent.`, fingerprint: fp, ...(remembered ? { remembered } : {}) }
+      : {
+          note: `The secret ${name} is in the file "$HQC_SECRETS/${name}" for as long as your process runs: read it in a command, as "$(cat "$HQC_SECRETS/${name}")", and do not print it.`,
+          path: `$HQC_SECRETS/${name}`,
+        };
+  });
+  route('GET', '/api/workspaces/:id/keys', (p) => {
+    if (!workspaces.has(p.id)) throw fail(404, 'not_found', 'unknown workspace');
+    return { keys: workspaceKeys.get(p.id) ?? [] };
+  });
+  route('DELETE', '/api/workspaces/:id/keys/:name', (p) => {
+    const keys = workspaceKeys.get(p.id) ?? [];
+    if (!keys.some((k) => k.name === p.name)) throw fail(404, 'not_found', 'no such key');
+    workspaceKeys.set(p.id, keys.filter((k) => k.name !== p.name));
     return withStatus(204, null);
   });
   // T49: the app theme; the look and the project bar's order (SPEC §3 User); the project's color
@@ -1217,7 +1292,7 @@ export async function startMock({ port = 0, speed = 1, log = () => {} } = {}) {
   route('GET', '/api/mock/artifacts/:id', (p) => ({ artifact_id: p.id, note: 'mock artifact' }));
   // Workers as the hub lists them (SPEC §6): `revoked` only with `include_revoked=1`.
   const allWorkers = () =>
-    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online' }, ...enrolled].map((w) =>
+    [{ id: workerId, name: 'home-mac', os: 'macos', status: 'online', session_secrets: true }, ...enrolled].map((w) =>
       revoked.has(w.id) ? { ...w, status: 'revoked', revoked_at: new Date().toISOString() } : w,
     );
   route('GET', '/api/workers', (_, __, q) => ({

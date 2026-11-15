@@ -134,6 +134,7 @@ async fn live_repo_settings_ignored() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -269,6 +270,7 @@ async fn live_environment_ssh() {
                 has_history: false,
                 provider: None,
                 provider_refused: None,
+                secrets: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -495,6 +497,7 @@ async fn live_environment_ssh_keys() {
                 has_history: false,
                 provider: None,
                 provider_refused: None,
+                secrets: None,
                 fork: None,
             };
             println!("--- {dir}: environment {}", spec.environment.name);
@@ -641,6 +644,7 @@ async fn live_folder_rules() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -744,6 +748,7 @@ async fn live_permission_mode_switch() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -896,6 +901,7 @@ async fn live_bash_turn_with_approval() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1134,6 +1140,7 @@ async fn live_permission_policy() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1266,6 +1273,7 @@ async fn live_ai_title() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1448,6 +1456,7 @@ async fn live_input_joins_turn() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let (tx, mut rx) = mpsc::channel(4096);
@@ -1598,6 +1607,7 @@ async fn live_move_resumes_in_the_new_folder() {
         has_history: false,
         provider: None,
         provider_refused: None,
+        secrets: None,
         fork: None,
     };
     let input = |text: &str| SessionInput {

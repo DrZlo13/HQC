@@ -171,6 +171,33 @@ pub async fn answer(
                 json!({"request_id": request_id, "option_id": option_id, "by": user.id.to_string()}),
             )
         }
+        // An `hqc_secret` (SPEC 0.147): declined here; given by `POST .../secrets`.
+        crate::secrets::KIND => {
+            if body.message.is_some() || body.answers.is_some() {
+                return Err(ApiError::BadRequest(
+                    "a request for a secret is declined here; give it with POST /api/sessions/{id}/secrets".into(),
+                ));
+            }
+            if s.owner_id != user.id {
+                return Err(ApiError::Forbidden(
+                    "only the session owner answers a request for a secret".into(),
+                ));
+            }
+            match body.option_id.as_deref() {
+                Some(worker_approval::DENY) => {}
+                _ => {
+                    return Err(ApiError::BadRequest(
+                        "option_id is deny; give the secret with POST /api/sessions/{id}/secrets"
+                            .into(),
+                    ))
+                }
+            }
+            (
+                Some(crate::secrets::declined(request_id)),
+                "approval.response",
+                json!({"request_id": request_id, "option_id": worker_approval::DENY, "by": user.id.to_string()}),
+            )
+        }
         "worker_approval" => {
             if body.message.is_some() {
                 return Err(ApiError::BadRequest(
@@ -299,7 +326,7 @@ async fn cancel_inner(
         return Ok(());
     };
     let ev_type = match p.kind.as_str() {
-        "approval" | "worker_approval" | "move" => "approval.cancel",
+        "approval" | "worker_approval" | "move" | crate::secrets::KIND => "approval.cancel",
         "clarify" => "clarify.cancel",
         _ => return Ok(()),
     };
@@ -326,6 +353,7 @@ async fn cancel_inner(
         }),
         "worker_approval" => Some(worker_response(&p.request_id, worker_approval::DENY)),
         "move" => Some(crate::moves::cancelled(&p.request_id, reason)),
+        crate::secrets::KIND => Some(crate::secrets::cancelled(&p.request_id, reason)),
         _ => Some(json!({"type": "clarify.response",
                          "payload": {"session_id": s.id, "request_id": p.request_id, "answers": {}}})),
     };
@@ -696,7 +724,7 @@ pub async fn open_of(app: &AppState, owner: Uuid) -> anyhow::Result<Vec<OpenRequ
          JOIN projects pr ON pr.id = s.project_id
          LEFT JOIN workers w ON w.id = s.worker_id
          WHERE p.closed_at IS NULL
-           AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'follow')
+           AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret', 'follow')
            AND s.owner_id = $1 AND NOT s.archived
          ORDER BY p.created_at, p.id",
     )

@@ -233,3 +233,27 @@ describe('mock scenario', () => {
     chat.close();
   });
 });
+
+// SPEC 0.147: the mock passes a secret on as the hub does, and refuses what the hub refuses.
+describe('mock secrets', () => {
+  it('gives a secret, keeps a key for the workspace, refuses unknown fields', async () => {
+    const me = await api.me();
+    const s = (await api.sessions(me.personal_project_id)).find((x) => x.title === 'Empty session')!;
+    const g = await api.giveSecret(s.id, { kind: 'secret', name: 'WIFI_PASS', value: 'x' });
+    expect(g.note).toContain('$HQC_SECRETS/WIFI_PASS');
+    expect(JSON.stringify(g)).not.toContain('"x"');
+    const k = await api.giveSecret(s.id, { kind: 'ssh_key', name: 'pi-lab', value: 'OPENSSH PRIVATE KEY', remember: true });
+    expect(k.remembered).toBe(true);
+    expect((await api.workspaceKeys(s.workspace_id!)).map((x) => x.name)).toContain('pi-lab');
+    await api.deleteWorkspaceKey(s.workspace_id!, 'pi-lab');
+    expect(await api.workspaceKeys(s.workspace_id!)).toEqual([]);
+    const res = await fetch(`${mock.url}/api/sessions/${s.id}/secrets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'secret', name: 'A', value: 'b', remeber: true }),
+    });
+    expect(res.status).toBe(400);
+    const workers = await api.workers();
+    expect(workers[0].session_secrets).toBe(true);
+  });
+});

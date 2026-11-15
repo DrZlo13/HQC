@@ -24,6 +24,9 @@ function requestActions(app: AppState, r: OpenRequest, timeline: Timeline): Chat
     discard: () => {},
     openArtifact: () => {},
     system: r.system,
+    giveSecret: app.takesSecrets(r.worker_id)
+      ? async (requestId, f) => void (await app.api.giveSecret(r.session_id, f, requestId))
+      : undefined,
   };
 }
 

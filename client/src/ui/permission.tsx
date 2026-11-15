@@ -11,7 +11,8 @@ import type { ChatActions, FolderActions } from './cards';
 import { callArgs, callLine, callPaths, fileChange, outsidePath } from './feed';
 import { CodeBlock } from './Markdown';
 import { useAction, useNow } from './hooks';
-import { IconCheck, IconCross, IconInfo, IconShield } from './icons';
+import { IconCheck, IconCross, IconInfo, IconKey, IconShield } from './icons';
+import { SecretForm } from './secrets';
 import {
   CANCEL_LABELS,
   CANONICAL_OUTCOMES,
@@ -88,6 +89,8 @@ export function outcomeText(event: EventOf<'approval.request'>, actions: ChatAct
   if (fate.cancel) return { ok: false, text: `cancelled: ${CANCEL_LABELS[fate.cancel.reason]}` };
   const r = fate.response;
   if (!r || !('option_id' in r)) return null;
+  // The hub's answer to an `hqc_secret` the owner filled in (SPEC 0.147).
+  if (r.option_id === SECRET_GIVEN) return { ok: true, text: 'given' };
   const opt = event.payload.options.find((o) => o.id === r.option_id);
   const deny = opt ? isDeny(opt) : false;
   let text = opt ? (opt.canonical === 'unknown' ? opt.label : CANONICAL_OUTCOMES[opt.canonical]) : r.option_id;
@@ -95,6 +98,9 @@ export function outcomeText(event: EventOf<'approval.request'>, actions: ChatAct
   else if (r.by === 'auto') text = `${text} automatically`;
   return { ok: !deny, text };
 }
+
+/** `option_id` of the `approval.response` the hub writes when a secret was given. */
+export const SECRET_GIVEN = 'give';
 
 export function PermissionBlock({
   event,
@@ -108,6 +114,7 @@ export function PermissionBlock({
   sheet?: boolean;
 }) {
   const [again, setAgain] = useState(false);
+  if (event.payload.tool === 'hqc_secret' && event.payload.secret) return <SecretCard event={event} actions={actions} sheet={sheet} />;
   const outcome = outcomeText(event, actions);
   if (!outcome) return <PermissionCard event={event} call={call} actions={actions} sheet={sheet} />;
   const v = requestView(event, call);
@@ -523,6 +530,71 @@ function PermissionCard({
       )}
       {open && expired && <div class="perm-status muted">The time to answer has run out</div>}
       {outcome && <div class="perm-status outcome">Answer: {outcome.text}</div>}
+      {error && <div class="error-text">{error}</div>}
+    </section>
+  );
+}
+
+/** The hub's card of an agent's `hqc_secret` (SPEC 0.147, §7): what it asks for and why, the
+ *  value's fields, Give and Decline. Answered, it folds into a row like a permission. */
+function SecretCard({ event, actions, sheet }: { event: EventOf<'approval.request'>; actions: ChatActions; sheet?: boolean }) {
+  const p = event.payload;
+  const asked = p.secret!;
+  const outcome = outcomeText(event, actions);
+  const { busy, error, run } = useAction();
+  const deny = p.options.find((o) => o.canonical === 'deny');
+  const what = asked.kind === 'ssh_key' ? `ssh key ${asked.name}` : `secret ${asked.name}`;
+  if (outcome) {
+    return (
+      <div class="perm-done secret-done" data-request={p.request_id}>
+        <div class="perm-done-row">
+          <span class={`mark ${outcome.ok ? 'mark-ok' : 'mark-no'}`} aria-hidden="true">
+            {outcome.ok ? <IconCheck /> : <IconCross />}
+          </span>
+          <span class="perm-done-what mono">{what}</span>
+          <span class="perm-done-outcome outcome">· {outcome.text}</span>
+        </div>
+      </div>
+    );
+  }
+  const give = actions.giveSecret;
+  return (
+    <section
+      class={`perm ${sheet ? 'perm-sheet' : 'perm-card'} is-open secret-card`}
+      aria-label="Secret request"
+      data-request={p.request_id}
+    >
+      <div class="perm-head">
+        <span class="perm-icon">
+          <IconKey size={15} />
+        </span>
+        <div class="perm-titles">
+          <div class="perm-title">
+            The agent asks for {asked.kind === 'ssh_key' ? 'an ssh key' : 'a secret'}: <span class="mono">{asked.name}</span>
+          </div>
+          {p.description && <div class="perm-sub secret-purpose">{p.description}</div>}
+        </div>
+      </div>
+      {give ? (
+        <SecretForm
+          asked={asked}
+          giveLabel="Give"
+          cancelLabel="Decline"
+          escapeCancels={false}
+          onGive={(f) => give(p.request_id, f)}
+          onCancel={() => deny && run(() => actions.approve(p.request_id, deny.id))}
+        />
+      ) : (
+        <div class="perm-actions">
+          <span class="muted small">Open the session to give it.</span>
+          {deny && (
+            <button type="button" class="btn btn-ghost btn-deny" disabled={busy} onClick={() => run(() => actions.approve(p.request_id, deny.id))}>
+              Decline
+            </button>
+          )}
+        </div>
+      )}
+      {busy && <div class="muted small">Declining…</div>}
       {error && <div class="error-text">{error}</div>}
     </section>
   );

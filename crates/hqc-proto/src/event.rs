@@ -168,6 +168,13 @@ pub struct ClarifyQuestion {
     pub multi: Option<bool>,
 }
 
+/// The secret an `hqc_secret` card asks for (SPEC §4, since 0.147).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretAsk {
+    pub name: String,
+    pub kind: crate::frame::SecretKind,
+}
+
 /// One subagent of `subagents.live` (SPEC §4, since 0.101), or (since 0.127) one background
 /// shell command of the agent, with only `task_id`, `description`, `duration_ms`, `call_id` and
 /// `kind`.
@@ -298,6 +305,11 @@ pub enum EventKind {
         /// the session has no workspace or the worker cannot split the command.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rule_suggestions: Option<Vec<RuleSuggestion>>,
+        /// What an `hqc_secret` asks for (since SPEC 0.147): only in the hub's own card (`tool:
+        /// hqc_secret`); the hub drops it from a worker's event, so no card but its own asks
+        /// the owner for a secret.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<SecretAsk>,
     },
     #[serde(rename = "approval.response")]
     ApprovalResponse {
@@ -686,6 +698,20 @@ mod tests {
         assert_eq!(EventKind::TYPES, SPEC_EVENT_TYPES);
         let names: Vec<&str> = EXAMPLES.iter().map(|(n, _)| *n).collect();
         assert_eq!(names, SPEC_EVENT_TYPES);
+    }
+
+    /// SPEC 0.147: the hub's `hqc_secret` card carries what it asks for.
+    #[test]
+    fn a_secret_card_roundtrips() {
+        let src = include_str!("../examples/wire/event.approval.request.secret.json");
+        let wire: serde_json::Value = serde_json::from_str(src).unwrap();
+        let ev: Event = serde_json::from_value(wire.clone()).unwrap();
+        let EventKind::ApprovalRequest { secret, tool, .. } = &ev.kind else {
+            panic!("not approval.request");
+        };
+        assert_eq!(tool, "hqc_secret");
+        assert_eq!(secret.as_ref().unwrap().name, "WIFI_PASS");
+        assert_eq!(serde_json::to_value(&ev).unwrap(), wire);
     }
 
     #[test]

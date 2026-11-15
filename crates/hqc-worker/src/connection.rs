@@ -501,15 +501,20 @@ impl Connection {
             Ok(f) => f,
             Err(e) => {
                 // Strict frames (SPEC §5.2): answer with the frame id if there is one.
-                let id = serde_json::from_str::<Value>(text)
-                    .ok()
+                let v = serde_json::from_str::<Value>(text).ok();
+                let id = v
+                    .as_ref()
                     .and_then(|v| v.get("id")?.as_str().map(String::from))
                     .unwrap_or_default();
-                tracing::warn!(%id, "invalid frame from hub: {e}");
-                let reply = Envelope::new(
-                    id,
-                    wire_error(error_code::INVALID_FRAME, e.to_string(), false),
-                );
+                // A parse error may quote a value: never the one of a secret (SPEC 0.147).
+                let why = if v.as_ref().and_then(|v| v.get("type")?.as_str()) == Some("secret.put")
+                {
+                    "secret.put is malformed".to_string()
+                } else {
+                    e.to_string()
+                };
+                tracing::warn!(%id, "invalid frame from hub: {why}");
+                let reply = Envelope::new(id, wire_error(error_code::INVALID_FRAME, why, false));
                 return send_json(ws, &reply)
                     .await
                     .map_err(|e| format!("send: {e}"));
@@ -663,6 +668,9 @@ fn frame_type(f: &HubFrame) -> &'static str {
         HubFrame::WorkspaceCreate(_) => "workspace.create",
         HubFrame::WorkspaceInspect(_) => "workspace.inspect",
         HubFrame::WorkspaceDelete(_) => "workspace.delete",
+        HubFrame::SecretPut(_) => "secret.put",
+        HubFrame::WorkspaceKeys(_) => "workspace.keys",
+        HubFrame::WorkspaceKeyDelete(_) => "workspace.key_delete",
         HubFrame::Ack(_) => "ack",
         HubFrame::Error(_) => "error",
     }

@@ -118,8 +118,14 @@ impl Store {
         Ok(dest)
     }
 
-    /// An `ssh-agent` of its own for one agent process, with the keys `names` loaded.
-    pub async fn start_agent(&self, names: &[String]) -> anyhow::Result<SshAgent> {
+    /// The files of the store's keys `names`.
+    pub fn files(&self, names: &[String]) -> Vec<PathBuf> {
+        names.iter().map(|n| self.keys.join(n)).collect()
+    }
+
+    /// An `ssh-agent` of its own for one agent process, with the key files `files` loaded
+    /// (none: an empty agent, for keys given later, SPEC 0.147).
+    pub async fn start_agent(&self, files: &[PathBuf]) -> anyhow::Result<SshAgent> {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -159,33 +165,8 @@ impl Store {
         ) {
             bail!("ssh-agent did not start");
         }
-
-        let mut add = tokio::process::Command::new("ssh-add");
-        add.arg("-q")
-            .args(names.iter().map(|n| self.keys.join(n)))
-            .env_clear()
-            .env(SSH_AUTH_SOCK, &agent.socket)
-            // A key with a passphrase fails instead of prompting on the worker's terminal.
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("SSH_ASKPASS", "/usr/bin/false")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .process_group(0);
-        if let Some(p) = std::env::var_os("PATH") {
-            add.env("PATH", p);
-        }
-        let out = tokio::time::timeout(START_TIMEOUT, add.output())
-            .await
-            .context("ssh-add did not finish")?
-            .context("running ssh-add")?;
-        if !out.status.success() {
-            bail!(
-                "ssh-add {}: {}",
-                names.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+        if !files.is_empty() {
+            ssh_add(&agent.socket, files).await?;
         }
         Ok(agent)
     }
@@ -224,9 +205,51 @@ impl Store {
     }
 }
 
+/// Load the key files `files` into the ssh-agent at `socket`. A key with a passphrase fails
+/// instead of prompting on the worker's terminal; the error names the files, never a key.
+pub async fn ssh_add(socket: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
+    let mut add = tokio::process::Command::new("ssh-add");
+    add.arg("-q")
+        .args(files)
+        .env_clear()
+        .env(SSH_AUTH_SOCK, socket)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("SSH_ASKPASS", "/usr/bin/false")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    if let Some(p) = std::env::var_os("PATH") {
+        add.env("PATH", p);
+    }
+    let out = tokio::time::timeout(START_TIMEOUT, add.output())
+        .await
+        .context("ssh-add did not finish")?
+        .context("running ssh-add")?;
+    if !out.status.success() {
+        // Key names, as in `ssh_keys`: the files' last components.
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| {
+                f.file_name()
+                    .unwrap_or(f.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        bail!(
+            "ssh-add {}: {}",
+            names.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// The user's own folder (`dir`) or regular file, closed to group and others; a clear
 /// refusal with the fix otherwise.
-fn private(path: &Path, dir: bool) -> anyhow::Result<()> {
+pub(crate) fn private(path: &Path, dir: bool) -> anyhow::Result<()> {
     let m = std::fs::symlink_metadata(path).with_context(|| format!("{}", path.display()))?;
     let (kind, fix) = if dir {
         ("folder", 0o700)
@@ -391,8 +414,8 @@ pub(crate) mod tests {
     async fn an_agent_lives_as_long_as_its_guard() {
         let (dir, s) = store();
         s.add_key("infra", &keygen(dir.path(), "src")).unwrap();
-        let a = s.start_agent(&["infra".into()]).await.unwrap();
-        let b = s.start_agent(&["infra".into()]).await.unwrap();
+        let a = s.start_agent(&s.files(&["infra".into()])).await.unwrap();
+        let b = s.start_agent(&s.files(&["infra".into()])).await.unwrap();
         assert_ne!(a.socket(), b.socket());
         assert!(a.socket().starts_with(&s.agents));
         assert_eq!(mode(&s.agents), 0o700);
@@ -406,7 +429,11 @@ pub(crate) mod tests {
         // A key that does not load fails the start and leaves nothing behind.
         std::fs::write(s.keys.join("broken"), "not a key").unwrap();
         chmod(&s.keys.join("broken"), 0o600);
-        let e = s.start_agent(&["broken".into()]).await.err().unwrap();
+        let e = s
+            .start_agent(&s.files(&["broken".into()]))
+            .await
+            .err()
+            .unwrap();
         assert!(format!("{e:#}").contains("ssh-add broken"), "{e:#}");
         drop(b);
         assert_eq!(std::fs::read_dir(&s.agents).unwrap().count(), 0);
@@ -417,7 +444,7 @@ pub(crate) mod tests {
     async fn stale_agents_are_cleaned_at_start() {
         let (dir, s) = store();
         s.add_key("infra", &keygen(dir.path(), "src")).unwrap();
-        let a = s.start_agent(&["infra".into()]).await.unwrap();
+        let a = s.start_agent(&s.files(&["infra".into()])).await.unwrap();
         let socket = a.socket().to_path_buf();
         let pid = a.child.id().unwrap();
         // A second name for the same socket, outside the folder, to look at the agent after.

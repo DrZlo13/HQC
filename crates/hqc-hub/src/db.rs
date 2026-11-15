@@ -410,6 +410,8 @@ pub struct WorkerRow {
     pub machine_hash: Option<String>,
     /// The provider names its `worker.toml` allows, from its last `hello` (SPEC 0.144).
     pub providers: Value,
+    /// Its last `hello` had `session_secrets` (SPEC 0.147).
+    pub session_secrets: bool,
 }
 
 impl WorkerRow {
@@ -424,7 +426,7 @@ impl WorkerRow {
 const WORKER_COLS: &str = "id, owner_id, name, os, revoked_at, last_seen, protocol_version, \
     capabilities, environments, env_bindings, allowed_roots, allow_foreign_sessions, \
     share_local_models, local_models, system_session_id, created_at, updated_at, machine_hash, \
-    providers";
+    providers, session_secrets";
 
 pub async fn worker(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkerRow>> {
     sqlx::query_as(&format!("SELECT {WORKER_COLS} FROM workers WHERE id = $1"))
@@ -464,7 +466,8 @@ pub async fn worker_hello(
          UPDATE workers SET protocol_version = $2, capabilities = $3, environments = $4,
             env_bindings = $5, allowed_roots = $6, allow_foreign_sessions = $7,
             share_local_models = $8, local_models = $9, boot_id = $10, last_seen = now(),
-            machine_hash = COALESCE($11, machine_hash), providers = $12, updated_at = now()
+            machine_hash = COALESCE($11, machine_hash), providers = $12, session_secrets = $13,
+            updated_at = now()
          WHERE id = $1 AND revoked_at IS NULL
          RETURNING (SELECT boot_id FROM old)",
     )
@@ -480,6 +483,7 @@ pub async fn worker_hello(
     .bind(h.boot_id)
     .bind(h.machine_id.as_deref().and_then(machine_hash))
     .bind(serde_json::to_value(&h.providers).unwrap_or_default())
+    .bind(h.session_secrets)
     .fetch_optional(db)
     .await
 }
@@ -2290,7 +2294,7 @@ pub async fn running_turns(db: &PgPool) -> sqlx::Result<Vec<(Uuid, Option<Uuid>)
          WHERE s.turn_open AND NOT s.archived AND NOT s.last_turn_error AND s.locked_by <> 'vscode'
            AND NOT EXISTS (SELECT 1 FROM pending_requests p WHERE p.session_id = s.id
                            AND p.closed_at IS NULL
-                           AND p.kind IN ('approval', 'clarify', 'ask', 'move', 'follow'))
+                           AND p.kind IN ('approval', 'clarify', 'ask', 'move', 'secret', 'follow'))
            AND NOT {UNANSWERED_FAILED_INPUT}",
     ))
     .fetch_all(db)
@@ -2971,7 +2975,7 @@ pub async fn find_open_request(
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
          WHERE session_id = $1 AND request_id = $2 AND closed_at IS NULL
-           AND kind IN ('approval', 'clarify', 'worker_approval', 'move', 'follow')"
+           AND kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret', 'follow')"
     ))
     .bind(session_id)
     .bind(request_id)
@@ -3099,7 +3103,7 @@ pub async fn open_requests_of_session(
 ) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests
-         WHERE session_id = $1 AND closed_at IS NULL AND kind IN ('approval', 'clarify', 'move')"
+         WHERE session_id = $1 AND closed_at IS NULL AND kind IN ('approval', 'clarify', 'move', 'secret')"
     ))
     .bind(session_id)
     .fetch_all(db)
@@ -3112,7 +3116,7 @@ pub async fn open_requests_of_worker(
 ) -> sqlx::Result<Vec<PendingRow>> {
     sqlx::query_as(&format!(
         "SELECT {PENDING_COLS} FROM pending_requests p
-         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move')
+         WHERE p.closed_at IS NULL AND p.kind IN ('approval', 'clarify', 'worker_approval', 'move', 'secret')
            AND p.session_id IN (SELECT id FROM sessions WHERE worker_id = $1)"
     ))
     .bind(worker_id)

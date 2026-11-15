@@ -6,6 +6,7 @@ import { ApiError, type WorkerInfo } from '../api';
 import type { LookName, Theme } from '../proto';
 import { pushStatus, subscribePush, type PushStatus } from '../push';
 import { BASES, LOOKS, THEMES } from '../theme';
+import { WEB_SEARCHES } from '../websearch';
 
 const THEME_GROUPS = [
   { id: 'dark', label: 'Dark' },
@@ -173,6 +174,25 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           session and a tile per project. The same on every device.
         </p>
         {lookError && <div class="error-text">{lookError}</div>}
+
+        <h2>Web search</h2>
+        <div class="seg-group settings-web-search" role="group" aria-label="Web search">
+          {WEB_SEARCHES.map((w) => (
+            <button
+              type="button"
+              key={w.id}
+              class={`seg ${app.webSearch.id === w.id ? 'is-on' : ''}`}
+              aria-pressed={app.webSearch.id === w.id}
+              onClick={() => app.setWebSearch(w)}
+            >
+              {w.label}
+            </button>
+          ))}
+        </div>
+        <p class="muted">
+          Where "Search in …" of the menu of text selected in a chat searches, in a new tab. On this
+          device.
+        </p>
 
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>

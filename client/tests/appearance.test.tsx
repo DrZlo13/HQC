@@ -240,7 +240,7 @@ it('saves letters in upper case and uploads an image; a wrong file never leaves 
 it('picks the app theme on the Settings page: a light tile applies at once and goes to the hub', async () => {
   location.hash = '#/settings';
   await until('theme tiles', () => $$('.theme-group .base-pick').length === 6);
-  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'Notifications', 'Workers']);
+  expect($$('.page-body h2').map((h) => h.textContent)).toEqual(['Theme', 'Look', 'Web search', 'Notifications', 'Workers']);
   expect($$('.theme-group-label').map((l) => l.textContent)).toEqual(['Dark', 'Light']);
   expect($('.base-pick[aria-pressed=true]')!.textContent).toBe('Warm');
   button('Graphite', '[aria-label="Light themes"]')!.click();
@@ -344,6 +344,17 @@ it('sets the look from "Settings" on the document root and on the hub', async ()
   expect((await app.api.me()).look).toBe('spacious');
   expect($('.rail-name')).toBeNull();
   expect($$('input[type=checkbox]')).toEqual([]);
+});
+
+it('picks the web search of selected text in "Settings"', async () => {
+  location.hash = '#/settings';
+  const pick = (label: string) => button(label, '[aria-label="Web search"]');
+  expect((await until('web search switch', () => pick('Google')))!.getAttribute('aria-pressed')).toBe('true');
+  pick('DuckDuckGo')!.click();
+  await until('duckduckgo', () => pick('DuckDuckGo')!.getAttribute('aria-pressed') === 'true');
+  expect(app.webSearch.id).toBe('duckduckgo');
+  pick('Google')!.click();
+  await until('google', () => app.webSearch.id === 'google');
 });
 
 it('is a full-screen sheet on a phone, with the same sections', async () => {

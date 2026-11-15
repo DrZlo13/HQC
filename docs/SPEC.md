@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.141, 2026-11-14. Status: the architecture agreed after six reviews and a survey of
+Version 0.142, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -1740,7 +1740,9 @@ a row of light tiles, a click applies it at once). On a light theme the client s
 `apple-mobile-web-app-status-bar-style` from `black-translucent` (white status text) to
 `default` (dark text) **[verify]**: whether an iPhone's Home Screen app picks the change up at
 once, at its next start or only when added again. The Settings page (since 0.114) has a back
-arrow to the address it was opened from (on a computer, from `#/`, the current project), and
+arrow to the address it was opened from (on a computer, from `#/`, the current project);
+"Web search" (since 0.142) picks where "Search in …" of selected text searches: Google (the
+default), DuckDuckGo, Bing or Yandex, kept on this device (`localStorage`), not on the hub; and
 "Workers" lists a line per worker: its online dot, name, system (macOS, Linux, Windows), status
 and "Revoke", or "Delete" for a revoked one. The project settings (`#/p/<id>/settings`, "Project
 settings…" in the project's menu, below) have Appearance (the "Project appearance" dialog: the
@@ -1959,7 +1961,8 @@ Markdown marks; a click on the head opens the whole text as Markdown. In the Com
 start's mark is a pulsing dot while it runs, a check when done, a cross when it failed or stopped
 and a grey dot in the background; the end's a check when done, else a cross. Quote (since 0.74): on
 a computer a right click on text selected in the feed opens the client's menu with "Quote" (into the
-input as `> ` lines) and "Copy"; on a phone a "Quote" button under the selection's end. The input is
+input as `> ` lines), "Copy" and (since 0.142) "Search in <the search picked in Settings>", which
+opens its results for the text in a new tab; on a phone a "Quote" button under the selection's end. The input is
 one row: the paperclip, the field growing with its lines up to 200 px, send; on a computer its
 placeholder says "Enter to send, Shift+Enter for a new line". On a computer the input takes the
 caret when the chat opens, once its newest page is in, unless a request waits for an answer (an open
@@ -1969,7 +1972,8 @@ stays at its bottom while its images load: only a scroll up lets go of the botto
 
 than the text, and an open thinking block is prose in the feed's font. Quote (since 0.74): on a
 computer a right click on text selected in the feed opens the client's menu with "Quote" (into
-the input as `> ` lines) and "Copy"; on a phone a "Quote" button under the selection's end. The
+the input as `> ` lines), "Copy" and (since 0.142) "Search in <the search picked in Settings>",
+which opens its results for the text in a new tab; on a phone a "Quote" button under the selection's end. The
 input is one row: the paperclip, the field growing with its lines up to 200 px, send; on a
 computer its placeholder says "Enter to send, Shift+Enter for a new line". On a computer the
 input takes the caret when the chat opens, once its newest page is in, unless a request waits
@@ -5059,6 +5063,13 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.141 → 0.142 (selected text is searched on the web)
+§6 client layout: the menu of text selected in the feed (a right click on a computer) has "Search
+in Google" after "Quote" and "Copy": the text's results in a new tab. Settings has a section "Web
+search" to pick Google, DuckDuckGo, Bing or Yandex instead; the choice is kept on the device, not
+on the hub, so there is no migration and no API change. On a phone the system's own selection menu
+has a search already.
 
 ### 0.136 → 0.141 (a line above the input and a subagent's cards say what they are)
 §4, §6, §8.1: a line of the list above the input did not say whether it was a subagent or a

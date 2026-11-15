@@ -12,6 +12,7 @@ import type { SessionInfo } from '../src/proto';
 import type { HubSocket } from '../src/ws';
 import { Settings } from '../src/ui/Settings';
 import { SessionList } from '../src/ui/SessionList';
+import { WEB_SEARCHES } from '../src/websearch';
 
 let root: HTMLElement;
 afterEach(() => {
@@ -35,6 +36,7 @@ function settingsApp(api: Partial<Api>) {
     device: {},
     theme: () => 'warm',
     lookName: () => 'spacious',
+    webSearch: WEB_SEARCHES[0],
     reloadSessions: vi.fn(async () => {}),
   } as unknown as AppState;
 }

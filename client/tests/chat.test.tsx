@@ -23,6 +23,7 @@ import {
 import { ALLOW_ALL_CONFIRM, AUTO_CONFIRM, modelName, shownModel } from '../src/ui/labels';
 import type { HubSocket, SessionSubscriber } from '../src/ws';
 import { Chat, withQuote } from '../src/ui/Chat';
+import { WEB_SEARCHES, storedWebSearch } from '../src/websearch';
 
 const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
 const ev = (name: string, seq: number, patch: (e: any) => void = () => {}): HqcEvent => {
@@ -1614,7 +1615,7 @@ describe('Quote', () => {
     // No floating button on a computer: the menu has it.
     expect($('.btn-quote')).toBeNull();
     expect(await rightClick(textNode('All tests pass.')), 'the browser\'s menu is not shown').toBe(false);
-    expect([...document.querySelectorAll('.ctx-menu [role="menuitem"]')].map((b) => b.textContent!.trim())).toEqual(['Quote', 'Copy']);
+    expect([...document.querySelectorAll('.ctx-menu [role="menuitem"]')].map((b) => b.textContent!.trim())).toEqual(['Quote', 'Copy', 'Search in Google']);
     // Its own class: the floating button's style (fixed, shifted) is not the item's.
     expect($('.ctx-menu .btn-quote')).toBeNull();
     await act(() => $('.ctx-menu .menu-quote')!.click());
@@ -1640,6 +1641,28 @@ describe('Quote', () => {
     await rightClick(textNode('All tests pass.'));
     await act(async () => $('.ctx-menu .btn-copy-selection')!.click());
     expect(writeText).toHaveBeenCalledWith('All tests pass.');
+    vi.unstubAllGlobals();
+  });
+
+  it('searches the selected text on the web from the same menu, with the search picked in Settings', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const { app } = setup('idle');
+    await mount(app);
+    await select(textNode('All tests pass.'));
+    await rightClick(textNode('All tests pass.'));
+    await act(async () => $('.ctx-menu .menu-web-search')!.click());
+    expect(open).toHaveBeenCalledWith('https://www.google.com/search?q=All%20tests%20pass.', '_blank', 'noopener');
+    expect($('.ctx-menu')).toBeNull();
+    await act(() => app.setWebSearch(WEB_SEARCHES.find((w) => w.id === 'yandex')!));
+    await select(textNode('All tests pass.'));
+    await rightClick(textNode('All tests pass.'));
+    expect($('.ctx-menu .menu-web-search')!.textContent!.trim()).toBe('Search in Yandex');
+    await act(async () => $('.ctx-menu .menu-web-search')!.click());
+    expect(open).toHaveBeenLastCalledWith('https://yandex.ru/search/?text=All%20tests%20pass.', '_blank', 'noopener');
+    // Kept on this device: a reload starts with it.
+    expect(storedWebSearch().id).toBe('yandex');
+    act(() => app.setWebSearch(WEB_SEARCHES[0]));
     vi.unstubAllGlobals();
   });
 

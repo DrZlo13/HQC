@@ -26,6 +26,7 @@ import { storedLook, storedTheme, type DeviceLayout } from './theme';
 import { projectName } from './ui/Appearance';
 import { arrange, bucketOf } from './ui/sessions';
 import { HubSocket, hubSocketUrl, type ConnState } from './ws';
+import { keepWebSearch, storedWebSearch, type WebSearch } from './websearch';
 
 /** How long "Archived «…» · Undo" stays before the archive goes to the hub (T50). */
 export const ARCHIVE_UNDO_MS = 5000;
@@ -531,6 +532,14 @@ export class AppState {
     } finally {
       this.changed();
     }
+  }
+
+  /** Where "Search in …" of selected text searches, on this device (`websearch.ts`). */
+  webSearch: WebSearch = storedWebSearch();
+  setWebSearch(s: WebSearch): void {
+    this.webSearch = s;
+    keepWebSearch(s);
+    this.changed();
   }
 
   /** A copy of the bar's order on this device, for the first paint after a reload. */

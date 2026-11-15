@@ -605,7 +605,7 @@ the client renders only them. The "source" column is the component that produces
 | `turn_ended_early` | worker (adapter) | since 0.161: the runtime ended the turn early for another reason — an error, the limit of turns or of budget, a hook (Claude Code: an error `result`, or a `terminal_reason` other than `completed`, `background_requested` and `tool_deferred`, §8.1); `text` "Turn ended early: " and the reason; one per turn, at its end, after its `usage` |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
-| `elicitation_unsupported` | worker (adapter) | since 0.150: an MCP server asked for input the card cannot ask (a property that is an object or an array, a link without a URL); the adapter declined to show it and answered the runtime `cancel` (§8.1); `text` names the server |
+| `elicitation_unsupported` | worker (adapter) | since 0.150: an MCP server asked for input the card cannot ask (a property that is an object or an array, a link without a URL) or one too large (a `clarify.request` over 256 KiB of JSON); the adapter declined to show it and answered the runtime `cancel` (§8.1); `text` names the server and, for a request too large, says so |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
 | `worker_replaced` | hub | in the service session: the worker was re-enrolled with replacement (§5.1); extra fields `old_name`, `new_name` |
 | `worker_revoked` | hub | in the service session: the worker's token was revoked, the session archived (§5.1, §10.2) |
@@ -1863,7 +1863,8 @@ the rest is marked "later"):
   `canonical: deny`/`deny_always`, non-empty, up to 16 KiB, otherwise `400`. A `clarify` takes
   non-empty `answers`; since 0.150 one with `server` (an MCP server's, §4) also takes `action`:
   `accept` with `answers` or without (a link's Done), `decline` without answers; `action` on
-  another clarify, an unknown one, or `decline` with answers: `400`
+  another clarify, an unknown one, or `decline` with answers: `400`; only the worker owner
+  answers one with `server`, anyone else gets `403` (§10.1, §11)
 - `POST /api/artifacts` (multipart: field `file`, optional `kind`) → `201` and the artifact
   object `{id, kind, name, mime, size, sha256, created_at}` (`api.artifact.json`); the same
   file under the same name again → `200` and the earlier object, with the `kind` given (since
@@ -3764,7 +3765,12 @@ An MCP server asks for input (since 0.150, **[verify]** on a live CLI): `control
 `property_order` (then any it leaves out), ids `1`, `2`, …: a string with `enum` gives its
 values as options, a boolean the options Yes and No, a string, a number or an integer free text;
 `title` is the question's `header` and `description` its `text` (the title, else the property's
-name, without one). For a property of another type (an object, an array) or a link without `url`
+name, without one). What is only shown is cut: `server` to 256 bytes, `message` to 4 KB, a
+question's `text` and `header` to 1024 bytes; what goes back to the server or is opened is kept
+whole: the property names (the keys of the answer), the `enum` values and `url`. For a property
+of another type (an object, an array), a link without `url`, or a request whose `clarify.request`
+is over 256 KiB of JSON (the `enum` values are not cut, and the hub drops a worker's connection
+on a message over 1 MiB, §20, which the worker would resend from its outbox on every reconnect)
 the adapter answers `{action: cancel}` at once and writes `system elicitation_unsupported` (§4).
 The answer goes back as the `control_response` `{action: accept, content}` — the answers by
 property name, a Yes/No as `true`/`false`, an integer's or a number's text as a number when it
@@ -5026,10 +5032,14 @@ result only if the call failed. Another call's opened row shows its arguments as
 each line of a string on a line of its own; a preview cut at 4 KB is shown as far as it goes and
 marked cut. The request goes to
 **the worker owner**; a collaborator with `write` sees the request but cannot answer it.
-The first answer wins: it closes the request, every device sees the `approval.response`
-event, and the client removes the buttons. A second answer (from another device) gets
-`409 request_closed`; no cancel event is written in that case. Expiry, `POST /stop`, a worker
-restart and archiving produce `approval.cancel`, and the client removes the buttons.
+Since 0.150 so does an MCP server's `clarify.request` (with `server`, §4, §8.1): the server runs
+with the worker owner's credentials (§11.1), and a collaborator's answer, say an accepted deploy
+confirmation, would be given in the owner's name; anyone else gets `403`. The agent's own
+questions are answered by anyone with `write`. The first answer wins: it closes the request,
+every device sees the `approval.response` event, and the client removes the buttons. A second
+answer (from another device) gets `409 request_closed`; no cancel event is written in that case.
+Expiry, `POST /stop`, a worker restart and archiving produce `approval.cancel`, and the client
+removes the buttons.
 On expiry and archiving the hub writes the `approval.cancel` event and sends the worker an
 `approval.response` frame with the `canonical: deny` option, so the adapter closes the request in
 the runtime (§5.3; since 0.69 that deny also ends the runtime's turn, §8.1); on a worker restart,
@@ -5304,6 +5314,7 @@ The Google Docs model: everything is private, a Grant gives access. The function
 | `hqc_send`/`hqc_ask` to a session (through one's own agent) | | yes | yes | yes |
 | `hqc_schedule` to a session | | yes | yes | yes |
 | answer `approval` | | | | worker owner only |
+| answer an MCP server's `clarify` (with `server`, §4; since 0.150) | | | | worker owner only |
 | answer a `move` request (an agent's `hqc_move`, §7, §10.1) | | | | session owner only |
 | rename, archive, unarchive, delete a session | | | yes | yes |
 | create/delete a workspace | | | yes (with the worker owner's confirmation) | yes |
@@ -6379,7 +6390,12 @@ takes as `cancel`, and never reached the person; it is now a `clarify.request` w
 typed as `accept`; `clarify.response` and its frame carry `action?` (`accept`, `decline`), which
 `POST …/requests/{request_id}` takes for such a request only, `decline` and a link's Done without
 answers; a form with an object or an array is answered `cancel` with `system
-elicitation_unsupported`. The plan of `ExitPlanMode` is not part of this change. An older
+elicitation_unsupported`. §6, §10.1, §11: only the worker owner answers such a request, anyone
+else gets `403`: the server runs with the owner's credentials. §4, §8.1: what such a request
+only shows is cut (`server` to 256 bytes, `message` to 4 KB, a question's text and header to 1024
+bytes), and one whose `clarify.request` is over 256 KiB of JSON, which the hub would refuse by
+dropping the worker's connection, is answered `cancel` with `system elicitation_unsupported` as
+well. The plan of `ExitPlanMode` is not part of this change. An older
 client shows such a card without its reason and an MCP server's request as the agent's
 question, a form without "Decline" and a link without its URL; an older hub's `auto_approve`
 answers a `human_only` request, and it takes no `action`, so a declined or done request gets

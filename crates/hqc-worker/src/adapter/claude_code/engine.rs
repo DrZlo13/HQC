@@ -130,7 +130,8 @@
 //!   policy_denied` when a deny rule of `[permissions]` matches (checked first); a request
 //!   only a person may answer gets no allow by a rule and only `once` / `deny`;
 //! - `control_request` `elicitation` (an MCP server asks the person) → `clarify.request` with
-//!   `server`, or `cancel` plus `system elicitation_unsupported` for a form it cannot ask;
+//!   `server`, or `cancel` plus `system elicitation_unsupported` for a form it cannot ask or
+//!   one too large;
 //! - `control_cancel_request` (the CLI withdrew its request) → `approval.cancel` /
 //!   `clarify.cancel` `withdrawn`;
 //! - `system` `permission_denied` (the CLI refused a call by its rules, no request) →
@@ -250,6 +251,12 @@ pub const ELICITATION_UNSUPPORTED: &str = "elicitation_unsupported";
 /// `approval.request.reason` and `display_name` limits, in bytes (SPEC §4).
 pub const REASON_LIMIT: usize = 1024;
 pub const DISPLAY_NAME_LIMIT: usize = 256;
+/// An MCP server's request (SPEC §8.1): its `server` and each question's text and header are
+/// cut to these many bytes; one whose `clarify.request` is over [`ELICITATION_LIMIT`] bytes of
+/// JSON is cancelled, as the hub drops a worker's connection on a frame over 1 MiB.
+pub const SERVER_NAME_LIMIT: usize = 256;
+pub const QUESTION_TEXT_LIMIT: usize = 1024;
+pub const ELICITATION_LIMIT: usize = 256 * 1024;
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
@@ -2671,10 +2678,13 @@ impl Core {
 
     /// `control_request` `elicitation`: an MCP server asks the person for input (SPEC §8.1) →
     /// `clarify.request` with `server` and `message`, the questions of its form or, with `mode:
-    /// url`, its `url` and none. A form the card cannot ask, or a link without a URL, is
-    /// answered `cancel` at once, with a `system` line.
+    /// url`, its `url` and none. A form the card cannot ask, a link without a URL, or a
+    /// request over [`ELICITATION_LIMIT`] is answered `cancel` at once, with a `system` line.
     fn elicitation(&mut self, request_id: String, req: &Value) -> Vec<Action> {
-        let server = text(req["mcp_server_name"].as_str().unwrap_or(""));
+        let server = preview(
+            req["mcp_server_name"].as_str().unwrap_or(""),
+            SERVER_NAME_LIMIT,
+        );
         let link = req["mode"] == "url";
         let url = req["url"]
             .as_str()
@@ -2687,27 +2697,43 @@ impl Core {
         };
         let Some((questions, fields)) = form else {
             tracing::warn!(session_id = %self.session_id, %server, "MCP server's request the card cannot ask; cancelled");
-            return vec![
-                Action::Write(control_response(&request_id, json!({"action": "cancel"}))),
-                self.emit_system(
-                    ELICITATION_UNSUPPORTED,
-                    format!("The MCP server {server} asked for input that hqc cannot show; its request was cancelled."),
-                ),
-            ];
+            return self.elicitation_cancelled(
+                &request_id,
+                format!("The MCP server {server} asked for input that hqc cannot show; its request was cancelled."),
+            );
         };
-        tracing::info!(session_id = %self.session_id, %server, questions = questions.len(), link, "MCP server's request");
-        self.pending
-            .insert(request_id.clone(), Pending::Elicitation { fields });
-        vec![self.emit_new(EventKind::ClarifyRequest {
-            request_id,
+        let count = questions.len();
+        let kind = EventKind::ClarifyRequest {
+            request_id: request_id.clone(),
             questions,
-            server: Some(server),
+            server: Some(server.clone()),
             message: req["message"]
                 .as_str()
                 .filter(|m| !m.trim().is_empty())
-                .map(text),
+                .map(|m| preview(m, PREVIEW_LIMIT)),
             url,
-        })]
+        };
+        let size = serde_json::to_vec(&kind).map_or(0, |v| v.len());
+        if size > ELICITATION_LIMIT {
+            tracing::warn!(session_id = %self.session_id, %server, size, "MCP server's request too large; cancelled");
+            return self.elicitation_cancelled(
+                &request_id,
+                format!("The MCP server {server} asked for input too large for hqc to show; its request was cancelled."),
+            );
+        }
+        tracing::info!(session_id = %self.session_id, %server, questions = count, link, "MCP server's request");
+        self.pending
+            .insert(request_id, Pending::Elicitation { fields });
+        vec![self.emit_new(kind)]
+    }
+
+    /// An MCP server's request answered `cancel` at once, with a `system
+    /// elicitation_unsupported` line of `text` ([`Self::elicitation`]).
+    fn elicitation_cancelled(&self, request_id: &str, text: String) -> Vec<Action> {
+        vec![
+            Action::Write(control_response(request_id, json!({"action": "cancel"}))),
+            self.emit_system(ELICITATION_UNSUPPORTED, text),
+        ]
     }
 
     /// `control_cancel_request {request_id}`: the CLI withdrew a request of its own (it stopped
@@ -3263,7 +3289,8 @@ pub(crate) fn parse_questions(input: &Value) -> Option<(Vec<ClarifyQuestion>, Ve
 /// The questions of an MCP server's form (`elicitation` `requested_schema.properties`, in
 /// `property_order`, then any it leaves out), with each one's type: an `enum` gives its values
 /// as options, a boolean Yes and No, a string, number or integer free text; `title` is the
-/// question's header and `description` its text (the title, or the name, without one). `None`:
+/// question's header and `description` its text (the title, or the name, without one), each
+/// cut to [`QUESTION_TEXT_LIMIT`]; names and values are kept whole. `None`:
 /// a property of another type (an object, an array), which the card cannot ask.
 fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
     let props = match &req["requested_schema"]["properties"] {
@@ -3302,8 +3329,10 @@ fn form_fields(req: &Value) -> Option<(Vec<ClarifyQuestion>, Fields)> {
         let description = p["description"].as_str().filter(|s| !s.trim().is_empty());
         questions.push(ClarifyQuestion {
             id: (i + 1).to_string(),
-            text: text(description.or(title).unwrap_or(name)),
-            header: title.filter(|_| description.is_some()).map(text),
+            text: preview(description.or(title).unwrap_or(name), QUESTION_TEXT_LIMIT),
+            header: title
+                .filter(|_| description.is_some())
+                .map(|t| preview(t, QUESTION_TEXT_LIMIT)),
             options,
             option_descriptions: None,
             multi: None,

@@ -2944,6 +2944,49 @@ fn an_mcp_servers_link_and_a_form_hqc_cannot_ask() {
     }
 }
 
+/// SPEC 0.150: an MCP server's text is shown cut: a 10 KB `message` arrives as its first
+/// `PREVIEW_LIMIT` bytes.
+#[test]
+fn an_mcp_servers_long_message_is_cut() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let long = "m".repeat(10 * 1024);
+    let a = core.on_line(&elicitation("e1", json!({"message": long})));
+    let p = clarify_wire(&a);
+    assert_eq!(p["message"], json!(&long[..super::engine::PREVIEW_LIMIT]));
+}
+
+/// SPEC 0.150: a request whose `clarify.request` would be over 256 KiB (here its enum values,
+/// which go back to the server and are not cut) is answered `cancel` at once, with a `system
+/// elicitation_unsupported` line, and gives no card.
+#[test]
+fn an_mcp_servers_request_over_256_kib_is_cancelled() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let values: Vec<String> = (0..300)
+        .map(|i| format!("{i:04}{}", "v".repeat(1020)))
+        .collect();
+    assert!(values.iter().map(String::len).sum::<usize>() > 256 * 1024);
+    let a = core.on_line(&elicitation(
+        "e1",
+        json!({"requested_schema": {"type": "object", "properties": {
+            "region": {"type": "string", "enum": values}}}}),
+    ));
+    assert!(!a
+        .iter()
+        .any(|a| matches!(a, Action::Emit(AdapterEvent::Event(e))
+        if matches!(e.kind, EventKind::ClarifyRequest { .. }))));
+    let w = writes(&a);
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0]["response"]["request_id"], "e1");
+    assert_eq!(w[0]["response"]["response"], json!({"action": "cancel"}));
+    let sys = system_events(&a);
+    assert_eq!(sys.len(), 1);
+    assert_eq!(sys[0].0, "elicitation_unsupported");
+    assert!(sys[0].1.contains("too large"), "{}", sys[0].1);
+    assert!(core
+        .answer_clarify("e1", &BTreeMap::new(), Some(ClarifyAction::Decline))
+        .is_err());
+}
+
 /// A denial is the VS Code tab's (cc_remote docs/SPEC.md §2.12): "No" stops the turn
 /// (`interrupt: true`), a text answer gives the reason after two spaces and lets the turn go
 /// on. After "No" the CLI ends the turn by itself (lines of a live run on 2.1.312): the turn

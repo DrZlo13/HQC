@@ -826,6 +826,77 @@ async fn an_mcp_servers_request_is_declined_or_done() {
     hub.finish().await;
 }
 
+/// SPEC 0.150: an MCP server runs with the worker owner's credentials, so only the worker owner
+/// answers its request: anyone else with `write` gets `403` and the request stays open; the
+/// owner's answer goes through. (Over HTTP another user does not see the session at all, `404`:
+/// there are no grants yet, SPEC §11.)
+#[tokio::test]
+async fn only_the_worker_owner_answers_an_mcp_servers_request() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("mcp server asks").await;
+    ack_start(&mut w, &sid).await;
+    let q = json!({"request_id": "c-1", "server": "deploy", "message": "Deploy the release?",
+        "questions": [{"id": "1", "text": "To production?", "options": ["Yes", "No"]}]});
+    w.event(agent_event(&sid, "clarify.request", q)).await;
+
+    let other = hqc_hub::db::ensure_user(&hub.app.db, "other@example.com")
+        .await
+        .unwrap();
+    let user = hqc_hub::auth::CurrentUser {
+        id: other.id,
+        email: other.email,
+        display_name: other.display_name,
+        timezone: other.timezone,
+        personal_project_id: other.personal_project_id.unwrap(),
+        theme: Default::default(),
+        look: Default::default(),
+        project_sort: Default::default(),
+    };
+    let s = hqc_hub::db::session(&hub.app.db, sid.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let body = hqc_hub::requests::AnswerBody {
+        option_id: None,
+        answers: Some(
+            [(
+                "1".to_string(),
+                hqc_proto::event::ClarifyAnswer::One("Yes".into()),
+            )]
+            .into(),
+        ),
+        message: None,
+        action: Some(hqc_proto::event::ClarifyAction::Accept),
+    };
+    let r = hqc_hub::requests::answer(&hub.app, &user, &s, "c-1", body).await;
+    assert!(
+        matches!(r, Err(hqc_hub::error::ApiError::Forbidden(_))),
+        "{r:?}"
+    );
+    w.expect_silence(Duration::from_millis(300)).await;
+    assert!(hqc_hub::db::find_open_request(&hub.app.db, s.id, "c-1")
+        .await
+        .unwrap()
+        .is_some());
+
+    let (st, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/requests/c-1"),
+            json!({"answers": {"1": "Yes"}, "action": "accept"}),
+        )
+        .await;
+    assert_eq!(st, 200, "{r}");
+    let f = w.expect("clarify.response").await;
+    assert_eq!(
+        f["payload"],
+        json!({"session_id": sid, "request_id": "c-1", "answers": {"1": "Yes"}, "action": "accept"})
+    );
+    w.reply(&f["id"], "ack", json!({})).await;
+    hub.finish().await;
+}
+
 /// A worker's cancel (the Claude Code adapter's for a request still open when the turn ends)
 /// closes its request; sent again, it gets its `seq`. One for a request the hub closed already
 /// (a stopped process's, which the hub cancels) is not stored a second time.

@@ -96,6 +96,15 @@ fn deny_option(payload: &Value) -> Option<String> {
         .map(|o| o.id.clone())
 }
 
+/// The owner of the session's worker, `None` without one: who answers its approvals and an MCP
+/// server's request (SPEC §10.1, §11).
+async fn worker_owner(app: &AppState, s: &SessionRow) -> ApiResult<Option<Uuid>> {
+    Ok(match s.worker_id {
+        Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
+        None => None,
+    })
+}
+
 /// `POST /api/sessions/{id}/requests/{request_id}`.
 pub async fn answer(
     app: &AppState,
@@ -114,11 +123,7 @@ pub async fn answer(
     let (frame, ev_type, ev_payload) = match p.kind.as_str() {
         "approval" => {
             // Approvals go to the worker owner only (SPEC §10.1, §11).
-            let owner = match s.worker_id {
-                Some(w) => db::worker(&app.db, w).await?.map(|w| w.owner_id),
-                None => None,
-            };
-            if owner != Some(user.id) {
+            if worker_owner(app, s).await? != Some(user.id) {
                 return Err(ApiError::Forbidden(
                     "only the worker owner answers approvals".into(),
                 ));
@@ -231,6 +236,14 @@ pub async fn answer(
             )
         }
         "clarify" => {
+            // An MCP server runs with the worker owner's credentials: only the worker owner
+            // answers its request; the agent's own question, anyone with `write` (SPEC §10.1, §11).
+            let from_server = p.payload.get("server").is_some_and(|v| !v.is_null());
+            if from_server && worker_owner(app, s).await? != Some(user.id) {
+                return Err(ApiError::Forbidden(
+                    "only the worker owner answers an MCP server's request".into(),
+                ));
+            }
             if body.message.is_some() {
                 return Err(ApiError::BadRequest(
                     "a clarify request takes answers, not a message".into(),
@@ -240,7 +253,7 @@ pub async fn answer(
             // too, and `decline` with none (SPEC §6).
             let action = match body.action {
                 None => None,
-                Some(_) if p.payload.get("server").is_none_or(Value::is_null) => {
+                Some(_) if !from_server => {
                     return Err(ApiError::BadRequest(
                         "action goes only with an MCP server's request".into(),
                     ));

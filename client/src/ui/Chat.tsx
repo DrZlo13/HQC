@@ -7,7 +7,7 @@ import { onBack } from '../nav';
 import { PERMISSION_MODES, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState, type SlashCommand } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
-import { ModelField } from './agentSettings';
+import { ModelField, type ModelChoice } from './agentSettings';
 import { ArtifactViewer, type ViewedArtifact } from './attachments';
 import { Limits } from './limits';
 import { ActivityLine, FeedBlocks, StreamingMessage, blockSeq, onlyRequests, type ChatActions } from './cards';
@@ -208,6 +208,17 @@ export function Chat({
           )
       : undefined,
     forking: (eventId) => app.forking(eventId),
+    // Where "More" has the model field (SPEC 0.168), and not while VS Code holds the session:
+    // its message cannot be sent again from here.
+    modelSwitch:
+      !system && info && !info.archived && state !== 'locked_vscode'
+        ? {
+            model: info.model,
+            provider: info.provider?.id,
+            providers: app.providersFor(info.worker_id),
+            to: (c) => setAgent(agentPatch(info, c)),
+          }
+        : undefined,
     openArtifact: (id, download) => {
       // Open the window synchronously, or mobile browsers block it as a popup.
       const w = window.open('about:blank', '_blank');
@@ -415,13 +426,20 @@ export function Chat({
     if (line && !confirm(line)) return;
     void act(() => app.setPermissionMode(sessionId, mode), 'Not switched');
   };
-  const setAgent = (patch: AgentPatch) => {
+  // Resolves to whether the hub took the change.
+  const setAgent = async (patch: AgentPatch): Promise<boolean> => {
     // Another provider restarts the agent (SPEC 0.144): asked once, as a switch to Auto is.
     if (patch.provider_id !== undefined && patch.provider_id !== (info?.provider?.id ?? null)) {
       const to = patch.provider_id ? app.providers.find((p) => p.id === patch.provider_id)?.label : "Claude Code's own endpoint";
-      if (!confirm(`The agent restarts on ${to ?? 'the provider'}; its conversation is read again from the start of the context.`)) return;
+      if (!confirm(`The agent restarts on ${to ?? 'the provider'}; its conversation is read again from the start of the context.`)) return false;
     }
-    void act(() => app.setAgentSettings(sessionId, patch), 'Not changed');
+    try {
+      await app.setAgentSettings(sessionId, patch);
+      return true;
+    } catch (e) {
+      setNotice(`Not changed: ${(e as Error).message}`);
+      return false;
+    }
   };
   // SPEC 0.148: the user's Chrome for the agent, on a worker that gives it; either way the
   // agent restarts, so it is asked once.
@@ -950,6 +968,13 @@ export function currentMode(info: SessionInfo): PermissionMode {
 
 type AgentPatch = Pick<SessionPatch, 'model' | 'provider_id'>;
 
+/** The `PATCH` of a model menu's choice: a Claude model leaves the provider the session runs on
+ *  in the same `PATCH`. */
+function agentPatch(info: SessionInfo, c: ModelChoice): AgentPatch {
+  if ('provider' in c) return { provider_id: c.provider };
+  return info.provider ? { provider_id: null, model: c.model ?? null } : { model: c.model ?? null };
+}
+
 /** "More": schedules, the move to another project, the permission mode and the model; on
  *  a phone also the path, the model of the last turn and the cost. Archiving is on the
  *  list's rows, restore and delete on the archive's (T50). */
@@ -1062,10 +1087,10 @@ function MoreMenu({
             <div class="menu-settings">
               <ModelField
                 value={info.model}
-                onChange={(m) => onAgent(info.provider ? { provider_id: null, model: m ?? null } : { model: m ?? null })}
+                onChange={(m) => onAgent(agentPatch(info, { model: m }))}
                 providers={providers}
                 provider={info.provider?.id}
-                onProvider={(id) => onAgent({ provider_id: id })}
+                onProvider={(id) => onAgent(agentPatch(info, { provider: id }))}
               />
               <Limits load={loadLimits} />
             </div>

@@ -16,7 +16,7 @@ import { buildFeed } from './feed';
 import { useSubscription } from './hooks';
 import { copyText } from '../clipboard';
 import { ContextMenu } from './ContextMenu';
-import { IconArchive, IconAttach, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSend, IconShield, IconStop } from './icons';
+import { IconArchive, IconAttach, IconBack, IconCode, IconCopy, IconLock, IconMore, IconPanel, IconQuote, IconSearch, IconSend, IconShield, IconStop } from './icons';
 import { MODE_LABELS, STATE_LABELS, agentsLabel, formatCost, homePath, modeConfirm, modelName, shownModel } from './labels';
 import { LiveSubagents } from './LiveSubagents';
 import { CopyButton } from './Markdown';
@@ -656,6 +656,12 @@ export function Chat({
               },
             },
             { label: 'Copy', icon: <IconCopy size={16} />, cls: 'btn-copy-selection', onSelect: () => void copyText(quoteMenu.text).catch(() => {}) },
+            {
+              label: `Search in ${app.webSearch.label}`,
+              icon: <IconSearch size={16} />,
+              cls: 'menu-web-search',
+              onSelect: () => void window.open(app.webSearch.url(quoteMenu.text.trim()), '_blank', 'noopener'),
+            },
           ]}
           onClose={() => setQuoteMenu(null)}
         />

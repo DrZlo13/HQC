@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.143, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.144, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -190,7 +190,7 @@ version, load_session, resume, image, isolation}]` — the result of each agent'
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 5),
+Hermes profile in iteration 6),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object).
 
@@ -2213,7 +2213,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 5) and is refused until then
+  `content` comes with the bare model (iteration 6) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -2231,7 +2231,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 5); the result is `{to,
+  is required until the personal session exists (iteration 6); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -2280,7 +2280,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 5 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 6 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -4356,7 +4356,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 5). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 6). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -4895,13 +4895,16 @@ send from a session in a lower mode (§7.1).
    ahead of the agents on 2026-10-31; the session template (§13.3) went to `docs/BACKLOG.md`.
    Tasks: `docs/ITERATION-4.md`. Criterion checked by hand on the production hub on 2026-11-03.
    Closed on 2026-11-03.
-5. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
-   worker; bare model and local models through a proxy; the personal assistant session
-   (moved from 3: its default runtime is the bare model, §8.3), until then `hqc_send` needs
-   `session`.
-6. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+5. Model providers (since 0.144): an Anthropic-compatible endpoint with one model, picked per
+   session in the model menu; the hub keeps the owner's providers, a worker runs only those its
+   `worker.toml` allows with the same `base_url`, keys stay on the worker; Claude Code stays the
+   harness. Tasks: `docs/ITERATION-5.md`.
+6. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+   worker; the bare model; the personal assistant session (moved from 3: its default runtime is
+   the bare model, §8.3), until then `hqc_send` needs `session`.
+7. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-7. Tauri, native notifications, several agents in one session.
+8. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -5066,6 +5069,16 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.143 → 0.144 (iteration 5 is model providers)
+§19: iteration 5 is model providers, `docs/ITERATION-5.md`: an Anthropic-compatible endpoint
+with one model, picked per session; the hub keeps the descriptions, a worker allows a provider
+by name and `base_url` in `worker.toml` and keeps its key. Claude Code over a local model
+through gpu-arbiter's `/v1/messages` was checked end to end on 2026-11-15. The ACP adapter and
+Hermes move to iteration 6, sharing to 7, the rest to 8. The pool of subscriptions of issue #43
+is left out: Anthropic's terms for Claude Code rule out routing requests through consumer
+subscriptions against their limits. No change of the protocol yet: the sections follow with
+the tasks.
 
 ### 0.142 → 0.143 (Stop ends a stuck session)
 §8.1: Stop sent `interrupt`, then SIGINT to the process group after 10 s, and nothing after

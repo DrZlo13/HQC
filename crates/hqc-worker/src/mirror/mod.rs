@@ -18,8 +18,11 @@
 //! known by uuid or, for prompts, by the input's text ([`OwnRecords`], fed by the adapter) and
 //! skipped: the adapter sent them. So is a background task's notification while that process
 //! runs ([`map::is_task_notification`]): the adapter reported it from stream-json under
-//! another uuid; and a message typed during a turn then ([`map::is_queued_prompt`]), which
-//! stream-json does not repeat. Any other main-chain record is someone else's:
+//! another uuid; a message typed during a turn then ([`map::is_queued_prompt`]), which
+//! stream-json does not repeat; and a slash command's output ([`map::is_local_command`]) or a
+//! compaction's summary ([`map::is_compact_summary`]) then: only the adapter writes that
+//! process's stdin, and the adapter reported the compaction. Any other main-chain record is
+//! someone else's:
 //! - while a process of this worker runs the session (`locked_by: hqc`) the mirror does not
 //!   emit it and does not move past it for [`GRACE`] (stream-json may lag behind the file).
 //!   Then, with Claude Code's registry of live sessions (below), it goes out like any other
@@ -139,6 +142,9 @@ pub struct Mirror {
     /// Transcripts whose row is not settled in their folder ([`Mirror::settle`]): how far
     /// they were searched in this process.
     searched: HashMap<PathBuf, u64>,
+    /// The `compact_boundary` read last of each transcript whose summary record has not come
+    /// yet: the compaction's event takes its id ([`map::compaction`]).
+    boundaries: HashMap<PathBuf, Uuid>,
 }
 
 impl Mirror {
@@ -165,6 +171,7 @@ impl Mirror {
             deferred: HashMap::new(),
             quota_retry: QUOTA_RETRY,
             searched: HashMap::new(),
+            boundaries: HashMap::new(),
         }
     }
 
@@ -497,11 +504,23 @@ impl Mirror {
                 pos = end;
                 continue;
             }
+            // A person's title wins over the CLI's, whichever came last.
+            if let Record::CustomTitle(t) = &rec {
+                let t = t.custom_title.trim();
+                if !t.is_empty() {
+                    row.custom_title = Some(hqc_proto::replace_nul(t).into_owned());
+                }
+                pos = end;
+                continue;
+            }
             // A record joins the tree once consumed: a held one may still turn out ours.
             let link = hqc_claude_jsonl::link(line).filter(|l| !l.is_sidechain);
             let Some(uuid) = map::counted_uuid(&rec) else {
+                if let Some(b) = map::compact_boundary(&rec) {
+                    self.boundaries.insert(path.to_path_buf(), b);
+                }
                 if let Some(f) = self.track(path, runtime, link, &rec) {
-                    out.push(wrap(f, row.title.clone()));
+                    out.push(wrap(f, row.shown_title()));
                 }
                 pos = end;
                 continue;
@@ -512,12 +531,19 @@ impl Mirror {
             // has another uuid; the record is the CLI's own, not another writer's. So is a
             // message typed during a turn: only the adapter writes that process's stdin, and
             // the hub has the input already.
-            let reported = live && (map::is_task_notification(&rec) || map::is_queued_prompt(&rec));
+            let reported = live
+                && (map::is_task_notification(&rec)
+                    || map::is_queued_prompt(&rec)
+                    || map::is_local_command(&rec)
+                    || map::is_compact_summary(&rec));
             // The claim first: it uses up the input the record stands for, which would
             // otherwise later take a message with the same text from someone else.
             if self.own.claim(runtime, uuid, typed.as_deref()) || reported {
+                if map::is_compact_summary(&rec) {
+                    self.boundaries.remove(path);
+                }
                 if let Some(f) = self.track(path, runtime, link, &rec) {
-                    out.push(wrap(f, row.title.clone()));
+                    out.push(wrap(f, row.shown_title()));
                 }
                 if matches!(rec, Record::User(_)) {
                     row.last_prompt =
@@ -548,9 +574,14 @@ impl Mirror {
                 tracing::info!(runtime_session_id = %runtime, record = %uuid, "record the worker's process did not report; no holder, so not another writer");
             }
             if let Some(f) = self.track(path, runtime, link, &rec) {
-                out.push(wrap(f, row.title.clone()));
+                out.push(wrap(f, row.shown_title()));
             }
-            let events = map::record_events(&rec, row.last_prompt);
+            let events = match &rec {
+                Record::User(m) if map::is_compact_summary(&rec) => {
+                    vec![map::compaction(m, self.boundaries.remove(path))]
+                }
+                _ => map::record_events(&rec, row.last_prompt),
+            };
             // A message typed during a turn is not the turn's input: the answers that follow
             // still reply to its prompt, as from the adapter.
             if matches!(rec, Record::User(_)) {
@@ -560,7 +591,7 @@ impl Mirror {
             let old = skip_until.is_some_and(|t| record_ts(&rec).is_some_and(|ts| ts <= t));
             if !old {
                 for event in events {
-                    out.push(wrap(event, row.title.clone()));
+                    out.push(wrap(event, row.shown_title()));
                 }
             }
             self.held.remove(&uuid);

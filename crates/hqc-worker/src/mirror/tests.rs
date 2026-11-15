@@ -614,7 +614,7 @@ fn registry_unknown_record_without_holder_keeps_the_session() {
     let Output::Event(e) = &out[0] else {
         panic!("{:?}", labels(&out))
     };
-    assert!(labels(&out)[0].starts_with("user:<command-name>/compact</command-name>"));
+    assert_eq!(labels(&out)[0], "user:/compact", "the command as typed");
     assert_eq!(e.held_by, Some(None), "registry data: no holder");
     assert!(s
         .mirror
@@ -1167,4 +1167,141 @@ fn a_cached_copy_is_a_candidate_of_its_folder() {
     let paths: Vec<&str> = found.candidates.iter().map(|c| c.path.as_str()).collect();
     assert_eq!(paths, [B]);
     assert_eq!(t.cwd().as_deref(), Some(B));
+}
+
+const SERVICE_SESSION: &str = "6f1c0b55-0d0e-4a43-9a51-0f3a2c1d9e01";
+
+/// A record of folder `/tmp/hqc-fixture/<name>` in transcript [`SERVICE_SESSION`] (2.1.312
+/// shapes).
+fn service_line(name: &str, u: Uuid, parent: Option<Uuid>, rest: &str) -> String {
+    let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
+    format!(
+        r#"{{"parentUuid":{parent},"isSidechain":false,"uuid":"{u}","timestamp":"2026-11-12T10:00:00.000Z","cwd":"/tmp/hqc-fixture/{name}","sessionId":"{SERVICE_SESSION}",{rest}}}"#
+    )
+}
+
+/// A compaction in a session the worker does not run (as 2.1.312 writes it: the boundary,
+/// attachments, then the summary hanging on the last of them) is one `system
+/// context_compacted` with the summary, the id derived from the boundary's uuid as the
+/// adapter derives it; also when a pass ends between the boundary and the summary.
+#[test]
+fn a_compaction_is_one_line_with_its_summary() {
+    let (prompt, boundary, attachment, summary) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let line = |u, parent, rest: &str| service_line("compact", u, parent, rest);
+    let head = [
+        line(
+            prompt,
+            None,
+            r#""type":"user","message":{"role":"user","content":"Go on"}"#,
+        ),
+        line(
+            boundary,
+            None,
+            r#""type":"system","subtype":"compact_boundary","content":"Conversation compacted","level":"info","compactMetadata":{"trigger":"auto","preTokens":167164}"#,
+        ),
+        line(
+            attachment,
+            Some(boundary),
+            r#""type":"attachment","attachment":{"type":"plan_mode"}"#,
+        ),
+    ]
+    .join("\n")
+        + "\n";
+    let tail = line(
+        summary,
+        Some(attachment),
+        r#""type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation. Summary: the build."}"#,
+    ) + "\n";
+    let mut s = setup("compact", &head);
+    append(&s.file, &head);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    assert_eq!(labels(&out), ["user:Go on"]);
+    append(&s.file, &tail);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    let [Output::Event(e)] = out.as_slice() else {
+        panic!("{:?}", labels(&out))
+    };
+    assert_eq!(e.event.event_id, Event::id_from_claude_block(&boundary, 0));
+    assert_eq!(
+        e.event.kind,
+        EventKind::System {
+            text: "This session is being continued from a previous conversation. Summary: the \
+                   build."
+                .into(),
+            code: "context_compacted".into(),
+            fork: None,
+        }
+    );
+}
+
+/// A slash command's output (`system local_command`, 2.1.312) and a compaction's summary
+/// while the worker's own process runs the session are the CLI's: neither emitted nor taken
+/// for another writer, also without the registry.
+#[test]
+fn command_output_and_a_summary_are_the_adapters_while_it_runs() {
+    let transcript = [
+        service_line(
+            "cmd",
+            Uuid::new_v4(),
+            None,
+            r#""type":"system","subtype":"local_command","content":"<local-command-stdout>Total cost: $0.0123</local-command-stdout>","level":"info","isMeta":false"#,
+        ),
+        service_line(
+            "cmd",
+            Uuid::new_v4(),
+            None,
+            r#""type":"user","isCompactSummary":true,"message":{"role":"user","content":"Summary"}"#,
+        ),
+    ]
+    .join("\n")
+        + "\n";
+    let mut s = setup("cmd", &transcript);
+    s.own.begin(s.runtime, None);
+    append(&s.file, &transcript);
+    let t0 = Instant::now();
+    for later in [0, 10] {
+        let out = s
+            .mirror
+            .poll(t0 + Duration::from_secs(later), SystemTime::now());
+        assert!(out.is_empty(), "{later} s: {:?}", labels(&out));
+    }
+}
+
+/// A title a person gave the session (`custom-title`) is the session's title over the CLI's
+/// (`ai-title`), also over one the CLI writes after it (SPEC §9.2).
+#[test]
+fn a_custom_title_wins_over_the_ai_title() {
+    let title = |ty: &str, key: &str, t: &str| {
+        format!(r#"{{"type":"{ty}","{key}":"{t}","sessionId":"{SERVICE_SESSION}"}}"#)
+    };
+    let transcript = [
+        title("ai-title", "aiTitle", "Auto"),
+        title("custom-title", "customTitle", "Mine"),
+        title("ai-title", "aiTitle", "Auto again"),
+        service_line(
+            "titled",
+            Uuid::new_v4(),
+            None,
+            r#""type":"user","message":{"role":"user","content":"Hello"}"#,
+        ),
+    ]
+    .join("\n")
+        + "\n";
+    let mut s = setup("titled", &transcript);
+    append(&s.file, &transcript);
+    let out = s.mirror.poll(Instant::now(), SystemTime::now());
+    let [Output::Event(e)] = out.as_slice() else {
+        panic!("{:?}", labels(&out))
+    };
+    assert_eq!(e.title.as_deref(), Some("Mine"));
+    let row = s.mirror.store.get(&s.file).unwrap().unwrap();
+    assert_eq!(
+        (row.title.as_deref(), row.custom_title.as_deref()),
+        (Some("Auto again"), Some("Mine"))
+    );
 }

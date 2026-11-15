@@ -20,11 +20,17 @@ pub enum Record {
     Assistant(Message),
     /// The session title Claude Code generates after the first prompt (SPEC §8.1, §9).
     AiTitle(AiTitle),
+    /// The title a person gave the session (`/rename`, the VS Code tab's rename); it wins over
+    /// [`Record::AiTitle`] (SPEC §9).
+    CustomTitle(CustomTitle),
     /// What the CLI adds to the conversation: among others a message a person typed while a
     /// turn ran ([`Attachment::queued_prompt`]).
     Attachment(Attachment),
-    /// Everything else: file-history-snapshot, system, queue-operation, last-prompt,
-    /// cost-state, atis-latch, summary, ... (SPEC §9).
+    /// A line of the CLI's own: a slash command's output, where a compaction began
+    /// ([`System`]).
+    System(System),
+    /// Everything else: file-history-snapshot, queue-operation, last-prompt, cost-state,
+    /// atis-latch, summary, ... (SPEC §9).
     #[serde(other)]
     Other,
 }
@@ -152,6 +158,28 @@ impl Attachment {
     }
 }
 
+/// A `system` record (SPEC §9): `local_command` holds a slash command's output as `content`
+/// `<local-command-stdout>…</local-command-stdout>` (or `-stderr`); `compact_boundary` is where
+/// a compaction began, the summary record (`isCompactSummary`) comes after it; others
+/// (`stop_hook_summary`, `turn_duration`, ...) say nothing for the history. Fields are optional:
+/// the record keeps its place in the fork tree whatever it holds.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct System {
+    #[serde(default)]
+    pub uuid: Option<Uuid>,
+    #[serde(default)]
+    pub subtype: Option<String>,
+    #[serde(default)]
+    pub content: serde_json::Value,
+    #[serde(default)]
+    pub is_sidechain: bool,
+    #[serde(default)]
+    pub is_meta: bool,
+    #[serde(default)]
+    pub timestamp: Option<String>,
+}
+
 /// `cwd` of the first record of `s` that has one. The folder name under `projects/` cannot be
 /// decoded back (SPEC §9), so recorded `cwd`s are the source of a transcript's folder.
 pub fn first_cwd(s: &str) -> Option<String> {
@@ -174,6 +202,32 @@ pub struct AiTitle {
     /// Kept as text: a malformed id must not cost the title.
     #[serde(default)]
     pub session_id: Option<String>,
+}
+
+/// `{"type": "custom-title", "customTitle": "...", "sessionId": "..."}` (2.1.312); the last
+/// one wins.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTitle {
+    #[serde(default)]
+    pub custom_title: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// The title of a transcript: its last non-empty `custom-title`, else its last non-empty
+/// `ai-title`, trimmed. Cheap like [`last_ai_title`].
+pub fn last_title(s: &str) -> Option<String> {
+    s.lines()
+        .rev()
+        .filter(|l| l.contains("\"custom-title\""))
+        .find_map(|l| match parse_line(l) {
+            Ok(Record::CustomTitle(t)) if !t.custom_title.trim().is_empty() => {
+                Some(t.custom_title.trim().to_string())
+            }
+            _ => None,
+        })
+        .or_else(|| last_ai_title(s))
 }
 
 /// The last non-empty `ai-title` of a transcript, trimmed. Lines that do not mention
@@ -303,6 +357,44 @@ mod tests {
             last_ai_title(include_str!("../fixtures/permission-allow-2.1.307.jsonl")),
             None
         );
+    }
+
+    /// A person's `custom-title` (2.1.312) is the title over any `ai-title`, also one written
+    /// after it; without one the last `ai-title` is.
+    #[test]
+    fn a_custom_title_wins() {
+        assert_eq!(
+            last_title(FIXTURE).as_deref(),
+            Some("Hqc-uuid-test echo command")
+        );
+        let renamed = format!(
+            "{FIXTURE}{}\n{}\n{}\n",
+            r#"{"type":"custom-title","customTitle":" Mine ","sessionId":"x"}"#,
+            r#"{"type":"ai-title","aiTitle":"Later","sessionId":"x"}"#,
+            r#"{"type":"custom-title","customTitle":"","sessionId":"x"}"#,
+        );
+        assert_eq!(last_title(&renamed).as_deref(), Some("Mine"));
+    }
+
+    /// `system` records parse whatever they hold (SPEC §9.4): a `local_command` with its
+    /// output, one whose `content` is no string, one without a `uuid`.
+    #[test]
+    fn system_records_parse() {
+        let out = r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>ok</local-command-stdout>","isMeta":false,"uuid":"73698000-0e8a-4b4c-9d8e-1f2a3b4c5d6e"}"#;
+        let Ok(Record::System(s)) = parse_line(out) else {
+            panic!("{out}");
+        };
+        assert_eq!(s.subtype.as_deref(), Some("local_command"));
+        assert_eq!(
+            s.content.as_str(),
+            Some("<local-command-stdout>ok</local-command-stdout>")
+        );
+        for odd in [
+            r#"{"type":"system","subtype":"stop_hook_summary","content":[1,2]}"#,
+            r#"{"type":"system","subtype":"turn_duration","durationMs":1200}"#,
+        ] {
+            assert!(matches!(parse_line(odd), Ok(Record::System(_))), "{odd}");
+        }
     }
 
     /// T27: the baseline of a resumed process is the last `cost-state`; the transcript before

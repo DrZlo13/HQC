@@ -87,6 +87,20 @@ describe('layout widths', () => {
     expect(rule('.msg-text')['white-space']).toBe('pre-wrap');
   });
 
+  it("a chat header's meta row is one line: the address of \"started by\" and the folder give way to an ellipsis", () => {
+    const meta = rule('.chat-meta');
+    expect([meta['flex-wrap'], meta['white-space'], meta['overflow']]).toEqual(['nowrap', 'nowrap', 'clip']);
+    for (const sel of ['.chat-spawned', '.chat-path .mono']) {
+      expect([rule(sel)['min-width'], rule(sel)['overflow'], rule(sel)['text-overflow']], sel).toEqual(['0', 'clip', 'ellipsis']);
+    }
+    // At its narrowest the folder holds its copy button: it does not run onto the "/" after it.
+    expect(rule('.chat-path')['min-width']).toBe('28px');
+    // The copy button neither gives way nor grows with "Copied"; a capped mode keeps its name.
+    expect([rule('.chat-path .btn-copy')['flex'], rule('.chat-path .btn-copy')['height']]).toEqual(['none', '24px']);
+    expect(rule('.chat:not(.chat-phone) .chat-meta .perm-capped')['min-width']).toBe('5em');
+    expect(rule('.chat-spawned a:focus-visible, .chat-path .btn-copy:focus-visible')['outline-offset']).toBe('-2px');
+  });
+
   it("an option's box keeps its 18px beside a long description, the Other field takes the rest", () => {
     expect(rule('.choice input')['flex']).toBe('none');
     expect(rule('.choice-other .input')['flex']).toBe('1');
@@ -108,7 +122,7 @@ describe('layout widths', () => {
     expect(rule('.chat-head-main')['flex']).toBe('1');
     const spawned = rule('.chat-phone .chat-spawned');
     expect(spawned['flex-basis']).toBe('100%');
-    expect([spawned['white-space'], spawned['overflow'], spawned['text-overflow']]).toEqual(['nowrap', 'hidden', 'ellipsis']);
+    expect([spawned['white-space'], spawned['overflow'], spawned['text-overflow']]).toEqual(['nowrap', 'clip', 'ellipsis']);
   });
 
   it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {

@@ -4093,3 +4093,31 @@ describe('a phone (< 900 px)', () => {
     expect(viewTitle()).toBe('Projects');
   });
 });
+
+describe('the browser of a session (SPEC 0.149)', () => {
+  it('rings a session given the browser with a globe after its title, and its project on the bar and on a phone', async () => {
+    const app = makeApp([
+      ...LIST.map((s) => (s.id === 'prof' ? { ...s, browser: true } : s)),
+      // An archived one does not mark its project.
+      sess('gone', 'Gone', 'archived', at(0.5), { project_id: 'p0', archived: true, browser: true }),
+    ]);
+    await mount(<SessionList app={app} />);
+    const rows = [...root.querySelectorAll<HTMLElement>('.session-row')];
+    const marked = rows.filter((r) => r.classList.contains('has-browser'));
+    expect(marked.map((r) => r.querySelector('.session-title')!.textContent)).toEqual(['Collision profiling']);
+    expect(marked[0].querySelector('.session-browser')!.getAttribute('title')).toBe('The agent has your browser');
+    expect(rows.filter((r) => r.querySelector('.session-browser')).length).toBe(1);
+
+    await mount(<ProjectRail app={app} />);
+    const rail = [...root.querySelectorAll('.rail-item')].map((i) => [
+      i.querySelector('.rail-project')!.getAttribute('aria-label'),
+      i.classList.contains('has-browser'),
+    ]);
+    expect(rail).toContainEqual(['physics-mp', true]);
+    expect(rail).toContainEqual(['Personal', false]);
+
+    await mount(<PhoneHome app={app} />);
+    const tile = (n: string) => phoneRow(n).querySelector('.phone-tile-wrap')!.classList.contains('has-browser');
+    expect([tile('physics-mp'), tile('Personal')]).toEqual([true, false]);
+  });
+});

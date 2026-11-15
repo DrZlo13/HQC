@@ -908,6 +908,14 @@ export class AppState {
     return n;
   }
 
+  /** Whether one of the project's sessions has the browser (SPEC 0.148). */
+  projectBrowser(projectId: string): boolean {
+    for (const s of this.sessions.values()) {
+      if (s.project_id === projectId && !s.archived && !s.system && s.browser) return true;
+    }
+    return false;
+  }
+
   /** Whether one of the project's sessions has unread events, among the ones
    *  [`projectWaiting`] counts (no archived or service sessions). */
   projectUnread(projectId: string): boolean {

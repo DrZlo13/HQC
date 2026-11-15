@@ -28,6 +28,7 @@ import {
   IconShield,
   IconStar,
   IconStarOff,
+  IconGlobe,
   IconTrash,
 } from './icons';
 import { agentsLabel, formatWhen, homePath } from './labels';
@@ -846,6 +847,11 @@ export function SessionRow({
       <span class="session-main">
         <span class="session-top">
           <span class="session-title">{title}</span>
+          {s.browser && (
+            <span class="session-browser" title="The agent has your browser">
+              <IconGlobe />
+            </span>
+          )}
           {draft && !current && <span class="session-draft">Draft</span>}
           {compact && agents && <span class="session-ag">{agents}</span>}
           {when && <span class="session-when">{when}</span>}
@@ -928,7 +934,7 @@ export function SessionRow({
       dragged = null;
     },
   };
-  const cls = `session-row ${current ? 'is-current' : ''} ${menuOpen ? 'is-menu' : ''} ${s.unread > 0 ? 'has-unread' : ''}`;
+  const cls = `session-row ${current ? 'is-current' : ''} ${menuOpen ? 'is-menu' : ''} ${s.unread > 0 ? 'has-unread' : ''} ${s.browser ? 'has-browser' : ''}`;
   return (
     <li class={`session-item ${dragging ? 'is-dragging' : ''}`} {...handlers}>
       {!phone && handle}

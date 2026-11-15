@@ -72,6 +72,7 @@ export const STATUS = {
   dangerFill: '#C8483A', // destructive confirm button
   relay: '#A99BFF', // messages between sessions (bg 8%, border 32%)
   relayText: '#C4BAFF',
+  browser: '#E36BFF', // the ring of a session and a project given the browser
   permissionBg: '#1F1A12',
   permissionBorder: '#5A4520',
 };
@@ -87,6 +88,7 @@ export const STATUS_LIGHT: typeof STATUS = {
   dangerFill: '#C8483A',
   relay: '#6E5BD8',
   relayText: '#5642B8',
+  browser: '#A11FC0',
   permissionBg: '#FFF5E3',
   permissionBorder: '#E3C48A',
 };

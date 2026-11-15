@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.148, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.149, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -2030,7 +2030,11 @@ your profile, signed in as you, and sees the tabs you drag into its tab group. I
 type there; it cannot upload files. Watch what it does."), taking it away says the agent
 restarts without it; both send `PATCH /api/sessions/{id} {browser}`. While it is on, the chat
 header shows "Browser" after the model or provider, titled "The agent has your Chrome on
-<worker>".
+<worker>". Since 0.149 the lists mark it in the browser's own color (fuchsia, `--browser`, apart
+from the amber of waiting, the blue of unread and the violet of messages between sessions): the
+session's row has a ring of it and a globe after its title ("The agent has your browser"), and a
+project with such a session that is not archived has a dashed ring of it around its tile on the
+project bar and on a phone's list of projects, around the marks it has already.
 
 A new session (since 0.114) opens at once as a chat window, `#/p/<project>/new`, with nothing on
 the hub yet: the header says "New session", "Draft" and where it will run; the list shows it as
@@ -5319,6 +5323,12 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.148 → 0.149 (the browser marked in the lists)
+§6 client layout: a session given the browser has a ring in the browser's color and a globe in
+the session list, and its project a dashed ring of that color on the project bar and on a phone's
+list of projects; the browser's color is a status color of its own (`--browser`). Only the client
+changes.
 
 ### 0.147 → 0.148 (the browser in a session)
 §14: `browser = true` in `worker.toml` lets the owner give one session's agent their Chrome on

@@ -428,7 +428,7 @@ export function ProjectRail({ app }: { app: AppState }) {
             const background = on || names ? undefined : { background: tileBackground(p) };
             const cls = `project-row rail-project ${on ? 'is-current' : ''} ${unread ? 'has-unread' : ''}`;
             return (
-              <div key={p.id} class={`rail-item ${dragId === p.id ? 'is-dragging' : ''} ${dropId === p.id ? 'is-drop' : ''}`}>
+              <div key={p.id} class={`rail-item ${dragId === p.id ? 'is-dragging' : ''} ${dropId === p.id ? 'is-drop' : ''} ${app.projectBrowser(p.id) ? 'has-browser' : ''}`}>
                 {on && <span class="rail-pill" aria-hidden="true" />}
                 {order ? (
                   <span

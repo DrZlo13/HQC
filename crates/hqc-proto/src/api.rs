@@ -150,6 +150,54 @@ pub struct Agent {
     pub disallowed_tools: Vec<String>,
     pub restricted: bool,
     pub start_failures: u32,
+    /// The model provider the agent runs on (since SPEC 0.144); absent — the runtime's own
+    /// endpoint and `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderRef>,
+}
+
+/// The provider of a session's agent, as the session object names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRef {
+    pub id: Uuid,
+    pub label: String,
+}
+
+/// A model provider of the owner (SPEC §3 Provider, §6, since 0.144): `GET /api/providers`,
+/// the reply to `POST` and `PATCH`. A worker runs it only if its `worker.toml` allows `name`
+/// with this `base_url`; `workers` are the owner's workers whose last `hello` allowed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelProvider {
+    pub id: Uuid,
+    pub name: String,
+    pub label: String,
+    pub base_url: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
+    #[serde(default)]
+    pub workers: Vec<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `GET /api/providers`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderList {
+    pub providers: Vec<ModelProvider>,
+}
+
+/// `POST /api/providers` and `PATCH /api/providers/{id}`: every field (a `PATCH` replaces
+/// them all).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRequest {
+    pub name: String,
+    pub label: String,
+    pub base_url: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
 }
 
 /// `GET /api/projects/{id}/sessions`.
@@ -236,6 +284,10 @@ pub struct CreateSessionRequest {
     /// worker owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
+    /// A provider of the owner the session's worker allows (since SPEC 0.144); absent — the
+    /// runtime's own endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<Uuid>,
 }
 
 /// A project (SPEC §3 Project, §6): `GET /api/projects/{id}`, an element of the list, the

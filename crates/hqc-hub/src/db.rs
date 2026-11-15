@@ -408,11 +408,23 @@ pub struct WorkerRow {
     pub updated_at: DateTime<Utc>,
     /// The machine fingerprint of its last `hello` or enrollment (SPEC §5.1, T21).
     pub machine_hash: Option<String>,
+    /// The provider names its `worker.toml` allows, from its last `hello` (SPEC 0.144).
+    pub providers: Value,
+}
+
+impl WorkerRow {
+    /// Whether its last `hello` allowed provider `name`.
+    pub fn allows_provider(&self, name: &str) -> bool {
+        self.providers
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(name)))
+    }
 }
 
 const WORKER_COLS: &str = "id, owner_id, name, os, revoked_at, last_seen, protocol_version, \
     capabilities, environments, env_bindings, allowed_roots, allow_foreign_sessions, \
-    share_local_models, local_models, system_session_id, created_at, updated_at, machine_hash";
+    share_local_models, local_models, system_session_id, created_at, updated_at, machine_hash, \
+    providers";
 
 pub async fn worker(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkerRow>> {
     sqlx::query_as(&format!("SELECT {WORKER_COLS} FROM workers WHERE id = $1"))
@@ -452,7 +464,7 @@ pub async fn worker_hello(
          UPDATE workers SET protocol_version = $2, capabilities = $3, environments = $4,
             env_bindings = $5, allowed_roots = $6, allow_foreign_sessions = $7,
             share_local_models = $8, local_models = $9, boot_id = $10, last_seen = now(),
-            machine_hash = COALESCE($11, machine_hash), updated_at = now()
+            machine_hash = COALESCE($11, machine_hash), providers = $12, updated_at = now()
          WHERE id = $1 AND revoked_at IS NULL
          RETURNING (SELECT boot_id FROM old)",
     )
@@ -467,6 +479,7 @@ pub async fn worker_hello(
     .bind(serde_json::to_value(&h.local_models).unwrap_or_default())
     .bind(h.boot_id)
     .bind(h.machine_id.as_deref().and_then(machine_hash))
+    .bind(serde_json::to_value(&h.providers).unwrap_or_default())
     .fetch_optional(db)
     .await
 }
@@ -1530,6 +1543,9 @@ pub struct SessionRow {
     /// The background tasks the runtime lists for the agent now
     /// (`session.state.background_tasks`).
     pub background_tasks: i32,
+    /// The model provider the session runs on (SPEC §3 Provider, since 0.144); `None`: the
+    /// runtime's own endpoint.
+    pub provider_id: Option<Uuid>,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1538,7 +1554,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
     s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode, \
-    s.permission_capped_by, s.subagents, s.background_tasks";
+    s.permission_capped_by, s.subagents, s.background_tasks, s.provider_id";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1894,6 +1910,136 @@ pub async fn set_model(db: &PgPool, id: Uuid, model: Option<&str>) -> sqlx::Resu
     sqlx::query("UPDATE sessions SET model = $2, updated_at = now() WHERE id = $1")
         .bind(id)
         .bind(model)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// A model provider of its owner (SPEC §3 Provider, since 0.144).
+#[derive(Debug, Clone, FromRow)]
+pub struct ProviderRow {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub name: String,
+    pub label: String,
+    pub base_url: String,
+    pub model: String,
+    pub context_tokens: Option<i32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl ProviderRow {
+    /// What `session.start` carries.
+    pub fn spec(&self) -> hqc_proto::frame::Provider {
+        hqc_proto::frame::Provider {
+            name: self.name.clone(),
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            context_tokens: self.context_tokens.and_then(|n| u32::try_from(n).ok()),
+        }
+    }
+}
+
+/// A provider's fields as the owner writes them.
+pub struct ProviderFields<'a> {
+    pub name: &'a str,
+    pub label: &'a str,
+    pub base_url: &'a str,
+    pub model: &'a str,
+    pub context_tokens: Option<i32>,
+}
+
+pub async fn providers_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<ProviderRow>> {
+    sqlx::query_as("SELECT * FROM providers WHERE owner_id = $1 ORDER BY label, name")
+        .bind(owner)
+        .fetch_all(db)
+        .await
+}
+
+pub async fn provider(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ProviderRow>> {
+    sqlx::query_as("SELECT * FROM providers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+}
+
+/// `None`: the owner has a provider of this name already.
+pub async fn insert_provider(
+    db: &PgPool,
+    owner: Uuid,
+    f: &ProviderFields<'_>,
+) -> sqlx::Result<Option<ProviderRow>> {
+    sqlx::query_as(
+        "INSERT INTO providers (id, owner_id, name, label, base_url, model, context_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (owner_id, name) DO NOTHING
+         RETURNING *",
+    )
+    .bind(new_id())
+    .bind(owner)
+    .bind(f.name)
+    .bind(f.label)
+    .bind(f.base_url)
+    .bind(f.model)
+    .bind(f.context_tokens)
+    .fetch_optional(db)
+    .await
+}
+
+/// `Ok(None)`: another provider of the owner has this name.
+pub async fn update_provider(
+    db: &PgPool,
+    id: Uuid,
+    f: &ProviderFields<'_>,
+) -> sqlx::Result<Option<ProviderRow>> {
+    let r = sqlx::query_as(
+        "UPDATE providers SET name = $2, label = $3, base_url = $4, model = $5,
+            context_tokens = $6, updated_at = now()
+         WHERE id = $1 RETURNING *",
+    )
+    .bind(id)
+    .bind(f.name)
+    .bind(f.label)
+    .bind(f.base_url)
+    .bind(f.model)
+    .bind(f.context_tokens)
+    .fetch_optional(db)
+    .await;
+    match r {
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Ok(None),
+        r => r,
+    }
+}
+
+/// `false`: sessions run on it.
+pub async fn delete_provider(db: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let r = sqlx::query("DELETE FROM providers WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await;
+    match r {
+        Ok(_) => Ok(true),
+        Err(sqlx::Error::Database(e)) if e.is_foreign_key_violation() => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// The sessions that run on provider `id`.
+pub async fn sessions_on_provider(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar("SELECT id FROM sessions WHERE provider_id = $1")
+        .bind(id)
+        .fetch_all(db)
+        .await
+}
+
+pub async fn set_session_provider(
+    db: &PgPool,
+    id: Uuid,
+    provider: Option<Uuid>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET provider_id = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(provider)
         .execute(db)
         .await?;
     Ok(())

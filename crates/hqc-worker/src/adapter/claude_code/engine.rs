@@ -2710,7 +2710,15 @@ impl Core {
             message: req["message"]
                 .as_str()
                 .filter(|m| !m.trim().is_empty())
-                .map(|m| preview(m, PREVIEW_LIMIT)),
+                .map(|m| {
+                    // The person answers in their own name: a cut text says it was cut.
+                    let shown = preview(m, PREVIEW_LIMIT);
+                    if shown.len() < hqc_proto::replace_nul(m).len() {
+                        format!("{shown}…")
+                    } else {
+                        shown
+                    }
+                }),
             url,
         };
         let size = serde_json::to_vec(&kind).map_or(0, |v| v.len());

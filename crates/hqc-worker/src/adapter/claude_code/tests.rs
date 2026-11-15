@@ -2944,15 +2944,37 @@ fn an_mcp_servers_link_and_a_form_hqc_cannot_ask() {
     }
 }
 
-/// SPEC 0.150: an MCP server's text is shown cut: a 10 KB `message` arrives as its first
-/// `PREVIEW_LIMIT` bytes.
+/// SPEC 0.150: what an MCP server's request only shows is cut: a 10 KB `message` arrives as its
+/// first `PREVIEW_LIMIT` bytes and "…", the server's name as 256 bytes, a field's title and
+/// description as 1024; the field's name, the key of the answer, is kept whole.
 #[test]
 fn an_mcp_servers_long_message_is_cut() {
     let mut core = Core::new(Uuid::now_v7(), false);
     let long = "m".repeat(10 * 1024);
-    let a = core.on_line(&elicitation("e1", json!({"message": long})));
+    let name = "n".repeat(2 * 1024);
+    let a = core.on_line(&elicitation(
+        "e1",
+        json!({"message": long, "mcp_server_name": "s".repeat(1024),
+            "requested_schema": {"type": "object", "properties": {
+                name.clone(): {"type": "string", "title": "t".repeat(4096),
+                    "description": "d".repeat(4096)}}}}),
+    ));
     let p = clarify_wire(&a);
-    assert_eq!(p["message"], json!(&long[..super::engine::PREVIEW_LIMIT]));
+    assert_eq!(
+        p["message"],
+        json!(format!("{}…", &long[..super::engine::PREVIEW_LIMIT]))
+    );
+    assert_eq!(p["server"], json!("s".repeat(256)));
+    assert_eq!(p["questions"][0]["text"], json!("d".repeat(1024)));
+    assert_eq!(p["questions"][0]["header"], json!("t".repeat(1024)));
+    // The answer goes back under the property's own name, not cut.
+    let answers = BTreeMap::from([("1".to_string(), ClarifyAnswer::One("x".into()))]);
+    let w = writes(
+        &core
+            .answer_clarify("e1", &answers, Some(ClarifyAction::Accept))
+            .unwrap(),
+    );
+    assert_eq!(w[0]["response"]["response"]["content"], json!({name: "x"}));
 }
 
 /// SPEC 0.150: a request whose `clarify.request` would be over 256 KiB (here its enum values,

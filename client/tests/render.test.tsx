@@ -1112,7 +1112,7 @@ describe("requests of the CLI (SPEC 0.150)", () => {
       "once",
       "deny",
     ]);
-    // Without the fields: the tool's own name, no reason.
+    // Without the fields: the tool's own name, an MCP one with its server, no reason.
     const plain = new Timeline();
     plain.apply(
       ev("event.approval.request", (e) => {
@@ -1121,7 +1121,7 @@ describe("requests of the CLI (SPEC 0.150)", () => {
     );
     show(plain);
     expect(root.querySelector(".perm-title")!.textContent).toBe(
-      "The agent wants to use mcp__web__fetch",
+      "The agent wants to use fetch (web)",
     );
     expect(root.querySelector(".perm-reason")).toBeNull();
   });

@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.147, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.148, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -199,7 +199,8 @@ Hermes profile in iteration 7),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
 the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
 `session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
-§14; from the last `hello`).
+§14; from the last `hello`), `browser` (since 0.148, hub migration `0045`: its `worker.toml` has
+`browser = true`, §14; from the last `hello`).
 
 `system_session_id` — the worker's service session (§10.2). It is created together with the
 worker when enrollment is confirmed (`POST /api/workers/enroll/confirm`); for workers older than
@@ -326,7 +327,8 @@ required for Claude Code without a workspace; null for a bare model; ACP agents 
 workspace are not allowed, §8.4), `cwd` (a relative path inside the workspace, `.` by default),
 `title`, `title_source` (`default` | `runtime` | `user` — who set the title), `slug`
 (unique in the project, does not change on rename; a move to another project keeps it when it
-is free there and appends `-2`, `-3`… otherwise), `agent`,
+is free there and appends `-2`, `-3`… otherwise), `agent` (since 0.148 with `browser`: the owner
+gave the agent their Chrome on the worker's machine, §14; hub migration `0045`),
 `auto_approve`, `wake_on_send` (true by default since 0.55, T52, and on every session made before it, hub migration `0027`; false before), `locked_by` (none/hqc/vscode),
 `last_seq`, `archived`, `archived_at` (nullable; since 0.53, T50: when it was archived, cleared
 on unarchive; null for sessions archived before hub migration `0026`, the client then shows no
@@ -568,6 +570,7 @@ the client renders only them. The "source" column is the component that produces
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
 | `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
 | `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
+| `browser_refused` | worker (adapter) | since 0.148: `session.start.browser` asks for the browser this worker does not give (no `browser = true` in its `worker.toml`, a session not of its owner or restricted); the agent starts without it (`--no-chrome`), and the text says why (§8.1, §14) |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
@@ -902,7 +905,7 @@ MCP calls (worker → hub → worker):
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
   cwd, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?,
-  permission_mode?, allow_rules?[], fork?, has_history?, provider?}
+  permission_mode?, allow_rules?[], fork?, has_history?, provider?, browser?}
   — `mode`: `new` | `resume` (§5.2); `fork` (since 0.80) — {runtime_session_id, at_event_ids[]}
   of a session forked before a message of its user (§6): the Claude Code adapter, while the
   session has no transcript yet, reads transcript `runtime_session_id` in the session's own
@@ -914,7 +917,11 @@ MCP calls (worker → hub → worker):
   context_tokens?} of the session's provider (§3 Provider), absent without one; the worker runs
   it only if `[providers.<name>]` of its `worker.toml` has the same `base_url` (a trailing `/`
   does not count), and otherwise starts the agent without it and writes `system
-  provider_refused` (§4, §8.1); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
+  provider_refused` (§4, §8.1); `browser` (since 0.148) — `true` when the owner gave the session
+  their browser: the worker runs Claude Code with `--chrome` only if its `worker.toml` has
+  `browser = true` and the session is its owner's and not restricted, and otherwise starts the
+  agent with `--no-chrome` and writes `system browser_refused` (§4, §8.1, §14); absent — off;
+  `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto` | `allow_all` (since 0.129),
@@ -1208,10 +1215,11 @@ MCP calls (worker → hub → worker):
 ### 5.4 Worker → hub frames
 - `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[], providers[]?,
-  session_secrets?, machine_id?}
+  session_secrets?, browser?, machine_id?}
   — `providers` (since 0.144): the names of the `[providers.*]` its `worker.toml` allows, never
   a `base_url` or a key; absent — none; `session_secrets` (since 0.147): `true` when its
-  `worker.toml` has `session_secrets = true` (§14), absent — false; `boot_id`: a uuid, new on every start of the worker process, the same in every `hello`
+  `worker.toml` has `session_secrets = true` (§14), absent — false; `browser` (since 0.148): `true`
+  when its `worker.toml` has `browser = true` (§14), absent — false; `boot_id`: a uuid, new on every start of the worker process, the same in every `hello`
   of that process (§5.2, §17.3); `machine_id` — the machine fingerprint (since 0.23, §5.1). `capabilities` — `{claude_code?: {version,
   sessions_registry?, moves?}, acp_agents[]}`; `sessions_registry: true` — the worker reads the Claude
   Code live sessions registry and reports holders (§9.3); `moves: true` (since 0.75) — the worker
@@ -1566,6 +1574,13 @@ the rest is marked "later"):
   workspace's worker keeps for it (`workspace.keys`, `workspace.key_delete`, §5.3); the worker
   must be online (`409 worker_offline`). `GET /api/workers` has `session_secrets` in the worker
   object.
+  `PATCH /api/sessions/{id} {browser}` (since 0.148, §14): `true` gives the session's agent the
+  owner's Chrome on the worker's machine, only by the worker's owner for a session of theirs on
+  a worker whose last `hello` had `browser` (else `422 browser_not_allowed`, another user `403`,
+  the service session `409 system_session`); `false` takes it away. A change restarts a running
+  agent as a change of provider does (`session.kill`, then `session.start` with `browser`, the
+  transcript resumed); a stopped one starts with it. The session object's `agent.browser` is
+  `true` while it is on; `GET /api/workers` has `browser` in the worker object.
   `model` (since 0.74) — absent: unchanged, `null`: the runtime's default; it is checked as on
   creation before anything is written, the service session answers `409 system_session`, and
   the hub sends the worker `session.model` (§5.3). It is not in `session.summary`: another
@@ -2007,6 +2022,15 @@ agent asks for a secret / an ssh key: <name>", the agent's purpose and the same 
 comes, and on the requests screen it has the same form. The rules screen of a workspace whose
 worker has `session_secrets` lists the ssh keys kept for it (name, fingerprint) with Delete
 after a confirmation; an offline worker gives a line saying so.
+
+The browser (since 0.148, §14). The chat's "More" menu of a session whose worker has `browser`
+has "Browser: off · Give the browser" or "Browser: on · Turn off"; giving it asks once ("Give the
+agent your browser? The agent restarts with your Chrome on <worker>: it opens its own tabs in
+your profile, signed in as you, and sees the tabs you drag into its tab group. It can click and
+type there; it cannot upload files. Watch what it does."), taking it away says the agent
+restarts without it; both send `PATCH /api/sessions/{id} {browser}`. While it is on, the chat
+header shows "Browser" after the model or provider, titled "The agent has your Chrome on
+<worker>".
 
 A new session (since 0.114) opens at once as a chat window, `#/p/<project>/new`, with nothing on
 the hub yet: the header says "New session", "Draft" and where it will run; the list shows it as
@@ -3026,7 +3050,11 @@ those, e.g. `PATH`), then the worker's own `SSH_AUTH_SOCK` (only in an environme
 `session_secrets`) gets an ssh-agent of its own in any environment, empty when nothing is to be
 loaded, with its environment's `ssh_keys` and the keys kept for its workspace, so
 `SSH_AUTH_SOCK` too, and `HQC_SECRETS`, the folder of its process's secrets; its hqc MCP server
-gets `HQC_SECRET_TOOLS=1`. A session on a provider (since 0.144, §3 Provider) gets on top of the environment's
+gets `HQC_SECRET_TOOLS=1`. The command line has `--chrome` for a session given the browser
+(since 0.148, §14), with `mcp__claude-in-chrome__file_upload` and
+`mcp__claude-in-chrome__upload_image` in `--disallowedTools`, and `--no-chrome` for every other
+one, so the CLI's own default (`/chrome`'s "enabled by default") never gives a session the
+browser; the browser tools take the session's mode and the approvals as any other tool. A session on a provider (since 0.144, §3 Provider) gets on top of the environment's
 `env`: `ANTHROPIC_BASE_URL` (its `base_url`), `ANTHROPIC_AUTH_TOKEN` (the `api_key` of
 `worker.toml`, else a placeholder, so the CLI sends no OAuth token of the subscription there),
 `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`,
@@ -4729,6 +4757,23 @@ session asks and why, and a prompt-injected agent that has a secret can leak it.
 the card it writes (`approval.request` with `secret`, §4) its own: it drops `secret` from an
 `approval.request` a worker sends.
 
+The browser (since 0.148). `browser = true` at the top of `worker.toml` (off by default; the hub
+cannot turn it on) lets the owner give a session's agent their Chrome on this machine (`PATCH
+/api/sessions/{id} {browser}`, §6): Claude Code runs with `--chrome` and reaches the browser
+through Anthropic's Claude in Chrome extension and its native messaging host, which Claude Code
+installs at its first such start; the CLI must be signed in with `/login` (with an API key or a
+`setup-token` token it keeps the integration off). The agent works in a tab group of its own in
+the user's profile, signed in as the user, and sees the tabs the user drags into that group; it
+reads, navigates, clicks and types there under the session's mode, while uploading files of the
+machine (`file_upload`, `upload_image`) is never offered. Only a session of the worker's owner
+that is not restricted; a refused one starts without it (`browser_refused`). Every other
+session runs with `--no-chrome`. The extension's own per-site permissions apply too. What the
+agent does in the user's accounts is the owner's to watch: a page it reads (a listing's
+description) can carry instructions, and nothing but the session's mode stops a click there.
+`hqc-worker env` shows `browser`. Checked on 2026-11-15 with Claude Code 2.1.322: under `-p` and
+`--strict-mcp-config` the CLI connects `claude-in-chrome` (`source: dynamic`) and lists its
+tools; **[verify]** through hqc's own stream-json run.
+
 Limitation: without a container or a separate OS user the agent sees the files
 and the process environment of the user, including other workspaces and session tokens on the
 same machine. The boundary is the absence of keys; prohibitions in settings are the first line,
@@ -5102,7 +5147,8 @@ send from a session in a lower mode (§7.1).
    from the chat, and the agent asks for one (`hqc_secret`) or makes a key for its workspace
    (`hqc_ssh_keygen`); the value reaches the agent's process, not the model, the transcript or
    the hub's storage; a key may be kept for the workspace; only a worker with `session_secrets`
-   takes them (§14). Tasks: `docs/ITERATION-6.md`.
+   takes them (§14); and the owner's Chrome for one session (since 0.148, `browser`). Tasks:
+   `docs/ITERATION-6.md`.
 7. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
@@ -5273,6 +5319,17 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.147 → 0.148 (the browser in a session)
+§14: `browser = true` in `worker.toml` lets the owner give one session's agent their Chrome on
+that machine (Claude Code's `--chrome` with the Claude in Chrome extension): its own tab group in
+the user's profile, signed in as the user, plus the tabs the user drags into it; everything but
+uploading files, under the session's mode; every other session runs with `--no-chrome`. §5.3
+`session.start.browser`, §5.4 `hello.browser`, §3 Worker and Session `browser` (hub migration
+`0045`), §6 `PATCH /api/sessions/{id} {browser}` (a change restarts the agent, as a provider's
+does) and the chat's "Browser" in "More" and its header; §4 `system browser_refused`; §8.1 the
+flags. The owner's case: an agent that looks through listings on eBay, AliExpress and Amazon in
+their accounts and reports back.
 
 ### 0.146 → 0.147 (secrets in a session, iteration 6)
 §19: iteration 6 is secrets in a session, `docs/ITERATION-6.md`; ACP and Hermes move to 7,

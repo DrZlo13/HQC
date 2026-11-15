@@ -151,3 +151,32 @@ client `secrets.test.tsx`.
 
 To use it: `session_secrets = true` at the top of a worker's `worker.toml`, then a restart of the
 worker.
+
+## T60–T62. The browser in a session (done, SPEC 0.148)
+
+The owner's case (2026-11-15): an agent that looks through listings on eBay, AliExpress and
+Amazon in the owner's accounts and reports what it found. An iframe cannot do it (those sites
+forbid framing, and a cross-origin frame is out of reach); an extension of our own would redo
+Anthropic's Claude in Chrome, which Claude Code drives with `--chrome`. Checked by hand on
+drzlo-mac (Claude Code 2.1.322): under hqc's flags the CLI connects `claude-in-chrome` and its
+tools reach the user's Chrome; the agent gets a tab group of its own, and a tab the user drags
+into it is the agent's too.
+
+Decisions: given per session by the owner, on a worker whose `worker.toml` has `browser = true`;
+no rules of our own on the browser's tools (the owner watches the tab group, the extension has
+its own site permissions): everything but `file_upload` and `upload_image`, under the session's
+mode; every other session gets `--no-chrome`, so `/chrome`'s default cannot give one the browser.
+
+- T60 (worker): `browser` in `worker.toml` and `hello`, `session.start.browser` →
+  `--chrome` and the two tools in `--disallowedTools`, `--no-chrome` otherwise, `system
+  browser_refused`, `hqc-worker env`. Tests: `config::tests::the_browser_only_where_the_worker_gives_it`,
+  `adapter::claude_code::tests::the_browser_only_where_it_is_given`.
+- T61 (hub): migration `0045`, `PATCH /api/sessions/{id} {browser}` (only the worker owner,
+  only a worker with `browser`, a change restarts the agent), `session.start.browser`,
+  `agent.browser`, `browser` in `GET /api/workers`. Tests: `tests/browser.rs`.
+- T62 (client): "Browser" in the chat's "More" with a confirmation, the header's "Browser",
+  the mock. Tests: `chat.test.tsx`.
+
+To use it: install the Claude in Chrome extension in the machine's Chrome and sign it in to the
+same Claude account as the worker's `claude`; `browser = true` at the top of `worker.toml`; a
+restart of the worker; then "Browser" in a session's "More".

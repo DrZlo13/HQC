@@ -943,6 +943,20 @@ device's `authorized_keys`). Only sessions of the worker's owner that are not re
   has is up to it: give one only to a session you see asking for a reason you know.
 - Off (the default): the button is not shown, and the worker refuses `secret.put`.
 
+**The browser in a session** (SPEC §14, since 0.148). To let an agent look through pages in
+your accounts (listings on eBay, Amazon, AliExpress) in this machine's Chrome:
+
+1. Install the Claude in Chrome extension (Chrome Web Store, publisher Anthropic,
+   `fcoeoabgfenejglbffodgkkbkcdhcgfn`) and sign it in to the same Claude account as the worker's
+   `claude` (which must be signed in with `/login`, not an API key or a `setup-token` token).
+2. `browser = true` at the top of `worker.toml`, then restart the worker.
+3. In a session's chat, "More" → "Browser: off · Give the browser". The agent restarts with it.
+
+The agent opens its own tab group in your profile, signed in as you; drag a tab into that group to
+give it that tab. It can read, navigate, click and type there under the session's mode, never
+upload files. Watch the tab group: a page can carry instructions, and a click there is yours.
+Every other session runs with `--no-chrome`.
+
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with
 `entrypoint: sdk-cli`, and the VS Code extension's conversation history shows only its own

@@ -119,6 +119,10 @@ Claude Code adapter, `provider_refused`, `hqc-worker env`; the hub's migration `
 `tests/worker.rs::environments_in_hello_and_inspect`; hub `tests/providers.rs`; client
 `chat.test.tsx` (switching to a provider and back), `appearance.test.tsx` (Settings → Models).
 
+Also in it: `hqc_spawn(provider?)` (§7): an agent spawns a session on a provider by name, and a
+session on a provider passes it on to the sessions it spawns (`tests/spawn.rs::spawn_on_a_provider`).
+A subagent stays on its process's endpoint: one process has one `ANTHROPIC_BASE_URL`.
+
 Notes for the RUNBOOK: on macOS the worker needs Local Network access (System Settings →
 Privacy & Security → Local Network → `hqc-worker`) to reach an endpoint on the LAN; without it
 the CLI fails with `EHOSTUNREACH`. A rebuilt `hqc-worker` may need it granted again.

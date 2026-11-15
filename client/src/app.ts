@@ -292,6 +292,8 @@ export class AppState {
       await this.refreshSessions();
       // The model menus list them; without them the menus offer the Claude models only.
       void this.loadProviders().catch(() => {});
+      // "Secret" in the composer, only where the worker takes secrets.
+      void this.loadWorkers().catch(() => {});
       this.error = null;
     } catch (e) {
       this.error = (e as Error).message;
@@ -1102,6 +1104,20 @@ export class AppState {
     const s = await this.api.patchSession(sessionId, patch);
     this.sessions.set(s.id, s);
     this.edited();
+  }
+
+  /** The workers that take secrets for their owner's sessions (SPEC 0.147), by id. */
+  secretWorkers = new Set<string>();
+
+  async loadWorkers(): Promise<void> {
+    const ws = await this.api.workers();
+    this.secretWorkers = new Set(ws.filter((w) => w.session_secrets).map((w) => w.id));
+    this.changed();
+  }
+
+  /** Whether worker `workerId` takes secrets. */
+  takesSecrets(workerId: string | undefined): boolean {
+    return !!workerId && this.secretWorkers.has(workerId);
   }
 
   /** The owner's model providers (SPEC 0.144), as the hub last listed them. */

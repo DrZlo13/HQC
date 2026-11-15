@@ -1,0 +1,339 @@
+// @vitest-environment happy-dom
+// SPEC 0.147 (docs/ITERATION-6.md T59): a secret or an ssh key for the session's agent — the
+// composer's "Secret" (only where the worker takes secrets), the agent's `hqc_secret` card,
+// the service line, the workspace's remembered keys on the rules screen. The value goes only
+// into the request: never into the draft, the storage or the feed.
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render } from 'preact';
+import { act } from 'preact/test-utils';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { ApiError, type Api, type SecretFields } from '../src/api';
+import { AppState } from '../src/app';
+import { parseEvent, type HqcEvent, type SessionInfo } from '../src/proto';
+import { Timeline } from '../src/timeline';
+import { ChatItems, type ChatActions } from '../src/ui/cards';
+import { Chat } from '../src/ui/Chat';
+import { RulesScreen } from '../src/ui/Rules';
+import { secretNameError } from '../src/ui/secrets';
+import type { HubSocket } from '../src/ws';
+
+const WIRE = join(import.meta.dirname, '../../crates/hqc-proto/examples/wire');
+const raw = (name: string): any => JSON.parse(readFileSync(join(WIRE, `${name}.json`), 'utf8'));
+const ev = (name: string, seq: number, patch: (e: any) => void = () => {}): HqcEvent => {
+  const e = raw(name);
+  e.seq = seq;
+  e.session_id = 's1';
+  patch(e);
+  return parseEvent(e);
+};
+
+const PASSWORD = 'correct horse battery staple';
+const NOTE =
+  'The secret WIFI_PASS is in the file "$HQC_SECRETS/WIFI_PASS" for as long as your process runs: read it in a command, as "$(cat "$HQC_SECRETS/WIFI_PASS")", and do not print it.';
+
+let root: HTMLElement;
+afterEach(() => {
+  if (root) render(null, root);
+  document.body.innerHTML = '';
+  localStorage.clear();
+  sessionStorage.clear();
+});
+
+const $ = <E extends Element = HTMLElement>(sel: string) => root.querySelector<E>(sel);
+const $$ = (sel: string) => [...root.querySelectorAll<HTMLElement>(sel)];
+const buttonByText = (text: string) => $$('button').find((b) => b.textContent?.trim() === text) as HTMLButtonElement | undefined;
+const flush = () => act(async () => void (await new Promise((r) => setTimeout(r, 0))));
+const typeInto = (el: HTMLInputElement | HTMLTextAreaElement, value: string) =>
+  act(() => {
+    el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+/** Nothing the client keeps holds `s`. */
+const nowhere = (s: string) => {
+  for (const st of [localStorage, sessionStorage]) {
+    for (let i = 0; i < st.length; i++) expect(st.getItem(st.key(i)!) ?? '').not.toContain(s);
+  }
+};
+
+describe('secret names', () => {
+  it('are what the worker takes', () => {
+    for (const ok of ['WIFI_PASS', 'pi-lab', 'a.b', 'x'.repeat(64)]) expect(secretNameError(ok), ok).toBeNull();
+    for (const bad of ['', '.x', '-x', 'a b', 'a/b', 'x'.repeat(65), 'пароль']) expect(secretNameError(bad), bad).not.toBeNull();
+  });
+});
+
+describe('the composer’s Secret', () => {
+  function setup(opts: { secrets?: boolean; fail?: boolean } = {}) {
+    const api = {
+      session: vi.fn(async () => info),
+      events: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+      eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, minSeq: undefined, count: 0 })),
+      readCursor: vi.fn(async () => {}),
+      sessions: vi.fn(async () => []),
+      projects: vi.fn(async () => []),
+      workspaces: vi.fn(async () => []),
+      giveSecret: vi.fn(async (_id: string, f: SecretFields) => {
+        if (opts.fail) throw new ApiError(422, 'a wrong passphrase', 'secret_refused');
+        return f.kind === 'secret'
+          ? { note: NOTE, path: '$HQC_SECRETS/WIFI_PASS' }
+          : { note: `The ssh key ${f.name} (SHA256:abc) is loaded in your ssh-agent.`, fingerprint: 'SHA256:abc', remembered: f.remember };
+      }),
+    };
+    const socket = { onState: () => () => {}, subscribe: () => () => {} } as unknown as HubSocket;
+    const app = new AppState(api as unknown as Api, socket);
+    app.conn = 'open';
+    const info: SessionInfo = {
+      id: 's1',
+      project_id: 'p1',
+      workspace_id: 'w1',
+      worker_id: 'wk1',
+      cwd: '.',
+      title: 'camera',
+      slug: 'camera',
+      state: 'idle',
+      queue_len: 0,
+      unread: 0,
+      last_seq: 0,
+      last_read_seq: 0,
+      archived: false,
+      updated_at: '2026-11-15T19:47:00Z',
+      system: false,
+    };
+    app.sessions.set('s1', info);
+    if (opts.secrets !== false) app.secretWorkers = new Set(['wk1']);
+    return { api, app };
+  }
+  async function mount(app: AppState) {
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    await act(async () => {
+      render(<Chat app={app} sessionId="s1" />, root);
+      await new Promise((r) => setTimeout(r, 50));
+    });
+  }
+  const area = () => $<HTMLTextAreaElement>('.composer-input')!;
+
+  it('is not offered where the worker does not take secrets', async () => {
+    const { app } = setup({ secrets: false });
+    await mount(app);
+    expect($('.btn-secret')).toBeNull();
+    expect($('.btn-attach')).not.toBeNull();
+  });
+
+  it('sends a password and puts the note, not the value, into the message', async () => {
+    const { app, api } = setup();
+    await mount(app);
+    await typeInto(area(), 'Write it into the camera');
+    await act(async () => $('.btn-secret')!.click());
+    const form = $('.composer-secret form')!;
+    // Not inside the composer's own form.
+    expect(form.closest('form.composer')).toBeNull();
+    const value = $<HTMLInputElement>('.secret-value')!;
+    expect(value.type).toBe('password');
+    expect(value.getAttribute('autocomplete')).toBe('current-password');
+    expect(buttonByText('Give')!.disabled).toBe(true);
+    await typeInto($<HTMLInputElement>('.secret-name')!, 'WIFI_PASS');
+    await typeInto(value, PASSWORD);
+    await act(async () => buttonByText('Give')!.click());
+    await flush();
+    expect(api.giveSecret).toHaveBeenCalledWith('s1', { kind: 'secret', name: 'WIFI_PASS', value: PASSWORD });
+    expect($('.composer-secret')).toBeNull();
+    expect(area().value).toBe(`Write it into the camera\n${NOTE}`);
+    expect(root.innerHTML).not.toContain(PASSWORD);
+    nowhere(PASSWORD);
+    // Opened again: empty.
+    await act(async () => $('.btn-secret')!.click());
+    expect($<HTMLInputElement>('.secret-value')!.value).toBe('');
+  });
+
+  it('keeps the form filled on an error, and the value out of the draft and storage', async () => {
+    const { app } = setup({ fail: true });
+    await mount(app);
+    await act(async () => $('.btn-secret')!.click());
+    await act(async () => buttonByText('SSH key')!.click());
+    expect($('.secret-value')).toBeNull();
+    const key = $<HTMLTextAreaElement>('.secret-key')!;
+    expect(key.getAttribute('autocomplete')).toBe('off');
+    await typeInto($<HTMLInputElement>('.secret-name')!, 'pi-lab');
+    await typeInto(key, '-----BEGIN OPENSSH PRIVATE KEY-----\nSECRETKEYDATA\n-----END OPENSSH PRIVATE KEY-----');
+    await typeInto($<HTMLInputElement>('.secret-passphrase')!, 'wrongpass');
+    await act(async () => $<HTMLInputElement>('.secret-remember input')!.click());
+    await act(async () => buttonByText('Give')!.click());
+    await flush();
+    expect($('.composer-secret .error-text')!.textContent).toBe('a wrong passphrase');
+    expect($<HTMLTextAreaElement>('.secret-key')!.value).toContain('SECRETKEYDATA');
+    expect(area().value).toBe('');
+    nowhere('SECRETKEYDATA');
+    nowhere('wrongpass');
+    // Cancel clears it.
+    await act(async () => buttonByText('Cancel')!.click());
+    await act(async () => $('.btn-secret')!.click());
+    expect($<HTMLInputElement>('.secret-name')!.value).toBe('');
+  });
+
+  it('sends a key with its passphrase and remember', async () => {
+    const { app, api } = setup();
+    await mount(app);
+    await act(async () => $('.btn-secret')!.click());
+    await act(async () => buttonByText('SSH key')!.click());
+    await typeInto($<HTMLInputElement>('.secret-name')!, 'pi-lab');
+    await typeInto($<HTMLTextAreaElement>('.secret-key')!, 'KEY');
+    await typeInto($<HTMLInputElement>('.secret-passphrase')!, 'pass');
+    await act(async () => $<HTMLInputElement>('.secret-remember input')!.click());
+    await act(async () => buttonByText('Give')!.click());
+    await flush();
+    expect(api.giveSecret).toHaveBeenCalledWith('s1', { kind: 'ssh_key', name: 'pi-lab', value: 'KEY', passphrase: 'pass', remember: true });
+    expect(area().value).toBe('The ssh key pi-lab (SHA256:abc) is loaded in your ssh-agent.');
+  });
+});
+
+describe('the agent’s hqc_secret card', () => {
+  const asked = () =>
+    ev('event.approval.request', 6, (e) => {
+      e.author = { kind: 'system' };
+      e.payload = {
+        request_id: 'toolu_1',
+        tool: 'hqc_secret',
+        description: 'The Wi-Fi password to write into the camera config',
+        options: [{ id: 'deny', label: 'Decline', canonical: 'deny' }],
+        secret: { name: 'WIFI_PASS', kind: 'secret' },
+      };
+    });
+
+  function show(over: Partial<ChatActions> = {}, more: HqcEvent[] = []) {
+    const t = new Timeline();
+    t.apply(asked());
+    for (const e of more) t.apply(e);
+    const actions: ChatActions = {
+      timeline: t,
+      approve: vi.fn(async () => {}),
+      answer: vi.fn(async () => {}),
+      resend: vi.fn(),
+      discard: vi.fn(),
+      openArtifact: vi.fn(),
+      giveSecret: vi.fn(async () => {}),
+      ...over,
+    };
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    act(() => render(<ChatItems items={t.items()} actions={actions} />, root));
+    return actions;
+  }
+
+  it('parses the request it asks for', () => {
+    const e = asked();
+    expect(e.type === 'approval.request' && e.payload.secret).toEqual({ name: 'WIFI_PASS', kind: 'secret' });
+  });
+
+  it('shows what is asked and why, and gives it with its request', async () => {
+    const actions = show();
+    const card = $('section[aria-label="Secret request"]')!;
+    expect(card.textContent).toContain('The agent asks for a secret: WIFI_PASS');
+    expect(card.textContent).toContain('The Wi-Fi password to write into the camera config');
+    // Name and kind are the agent's.
+    expect($('.secret-name')).toBeNull();
+    expect(buttonByText('SSH key')).toBeUndefined();
+    await typeInto($<HTMLInputElement>('.secret-value')!, PASSWORD);
+    await act(async () => buttonByText('Give')!.click());
+    await flush();
+    expect(actions.giveSecret).toHaveBeenCalledWith('toolu_1', { kind: 'secret', name: 'WIFI_PASS', value: PASSWORD });
+    expect(actions.approve).not.toHaveBeenCalled();
+  });
+
+  it('declines through the request', async () => {
+    const actions = show();
+    await act(async () => buttonByText('Decline')!.click());
+    await flush();
+    expect(actions.approve).toHaveBeenCalledWith('toolu_1', 'deny');
+    expect(actions.giveSecret).not.toHaveBeenCalled();
+  });
+
+  it('folds into "given" after the hub answered it, beside the service line', () => {
+    show({}, [
+      ev('event.system', 7, (e) => (e.payload = { text: 'Secret WIFI_PASS given', code: 'secret_given' })),
+      ev('event.approval.response', 8, (e) => (e.payload = { request_id: 'toolu_1', option_id: 'give', by: 'u1' })),
+    ]);
+    expect($('section[aria-label="Secret request"]')).toBeNull();
+    expect($('.secret-done')!.textContent).toContain('secret WIFI_PASS');
+    expect($('.secret-done')!.textContent).toContain('given');
+    expect(root.textContent).toContain('Secret WIFI_PASS given');
+  });
+
+  it('only declines where it cannot be given', () => {
+    show({ giveSecret: undefined });
+    expect($('.secret-value')).toBeNull();
+    expect(buttonByText('Decline')).toBeDefined();
+  });
+});
+
+describe('the workspace’s ssh keys', () => {
+  function setup(opts: { secrets?: boolean; offline?: boolean } = {}) {
+    let keys = [{ name: 'pi-kitchen', fingerprint: 'SHA256:mVPwvezndPv' }];
+    const api = {
+      workspaces: vi.fn(async () => [
+        {
+          id: 'w1',
+          project_id: 'p1',
+          worker_id: 'wk1',
+          path: '/Users/me/work/pi',
+          label: '',
+          environment: 'default',
+          kind: 'dir',
+          mirror_enabled: true,
+          hqc_rules: 0,
+          created_at: '2026-10-20T10:00:00Z',
+        },
+      ]),
+      workers: vi.fn(async () => [{ id: 'wk1', name: 'home-mac', status: 'online', session_secrets: opts.secrets !== false }]),
+      workspaceRules: vi.fn(async () => []),
+      workspacePermissions: vi.fn(async () => {
+        throw new ApiError(409, 'the worker is offline', 'worker_offline');
+      }),
+      workspaceKeys: vi.fn(async () => {
+        if (opts.offline) throw new ApiError(409, 'the worker is offline', 'worker_offline');
+        return keys;
+      }),
+      deleteWorkspaceKey: vi.fn(async (_id: string, name: string) => {
+        keys = keys.filter((k) => k.name !== name);
+      }),
+    };
+    const socket = { onState: () => () => {}, subscribe: () => () => {} } as unknown as HubSocket;
+    const app = new AppState(api as unknown as Api, socket);
+    root = document.createElement('div');
+    document.body.appendChild(root);
+    act(() => render(<RulesScreen app={app} projectId="p1" workspaceId="w1" />, root));
+    return api;
+  }
+
+  it('lists them and deletes one after a confirmation', async () => {
+    const api = setup();
+    await flush();
+    await flush();
+    const section = $('section[aria-label="SSH keys"]')!;
+    expect(section.querySelector('.ws-key-name')!.textContent).toBe('pi-kitchen');
+    expect(section.querySelector('.ws-key-fp')!.textContent).toBe('SHA256:mVPwvezndPv');
+    await act(async () => $<HTMLButtonElement>('button[aria-label="Delete pi-kitchen"]')!.click());
+    expect(api.deleteWorkspaceKey).not.toHaveBeenCalled();
+    await act(async () => buttonByText('Delete pi-kitchen')!.click());
+    await flush();
+    expect(api.deleteWorkspaceKey).toHaveBeenCalledWith('w1', 'pi-kitchen');
+    expect($('.ws-keys-none')!.textContent).toBe('No keys');
+  });
+
+  it('is not shown where the worker does not take secrets', async () => {
+    const api = setup({ secrets: false });
+    await flush();
+    await flush();
+    expect($('section[aria-label="SSH keys"]')).toBeNull();
+    expect(api.workspaceKeys).not.toHaveBeenCalled();
+  });
+
+  it('says so when the worker is offline', async () => {
+    setup({ offline: true });
+    await flush();
+    await flush();
+    expect($('.ws-keys-off')!.textContent).toContain('the worker is offline');
+  });
+});

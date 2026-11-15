@@ -14,6 +14,7 @@ import { isToolName, ruleCommand, ruleError } from '../rules';
 import { useSubscription } from './hooks';
 import { IconBack, IconCross, IconInfo, IconPlus, IconShield } from './icons';
 import { MODE_LABELS, homePath } from './labels';
+import { WorkspaceKeys } from './secrets';
 
 const HQC = 'HQC';
 const EXAMPLES = ['git status', 'npm install && npm test', 'Edit'];
@@ -312,6 +313,15 @@ export function RulesScreen({
             </div>
             {asks.length > 0 && <ul class="rule-list">{asks.map(rowView)}</ul>}
           </section>
+
+          {/* SPEC 0.147: the ssh keys the worker keeps for this folder, where it takes them. */}
+          {worker?.session_secrets && (
+            <WorkspaceKeys
+              key={workspaceId}
+              load={() => app.api.workspaceKeys(workspaceId)}
+              remove={(name) => app.api.deleteWorkspaceKey(workspaceId, name)}
+            />
+          )}
         </div>
       </div>
     </section>

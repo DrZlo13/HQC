@@ -5,6 +5,7 @@
 // buttons at the other edge on hover. One component per event type of SPEC §4; unknown and
 // invalid events render as a collapsed row and never throw.
 
+import type { SecretFields } from '../api';
 import type { ComponentChildren } from 'preact';
 import { useMemo, useState } from 'preact/hooks';
 import type { ClarifyAnswer, ClarifyQuestion, EventOf, HqcEvent, SessionState } from '../proto';
@@ -111,6 +112,9 @@ export interface ChatActions {
   /** A new session with the conversation before this message of the user, the message in
    *  its input (SPEC §6 fork); absent where a session cannot fork. */
   fork?(event: EventOf<'user.message'>): void;
+  /** Gives the secret an agent's `hqc_secret` asks for (SPEC 0.147); absent where it cannot
+   *  be given (the session's worker does not take secrets). */
+  giveSecret?(requestId: string, f: SecretFields): Promise<void>;
 }
 
 export function ChatItems({ items, actions }: { items: Item[]; actions: ChatActions }) {

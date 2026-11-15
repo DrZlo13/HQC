@@ -139,6 +139,33 @@ export interface WorkerInfo {
   /** The usage limits of the worker's account as it last reported them (SPEC §6); absent
    *  until a turn has run there since the hub started. */
   limits?: WorkerLimits | null;
+  /** `session_secrets = true` in its `worker.toml` (SPEC 0.147): it takes secrets and ssh
+   *  keys for its owner's sessions. */
+  session_secrets?: boolean;
+}
+
+/** What `POST /api/sessions/{id}/secrets` sends (SPEC 0.147): never kept by the client. */
+export interface SecretFields {
+  kind: 'secret' | 'ssh_key';
+  name: string;
+  value: string;
+  passphrase?: string;
+  remember?: boolean;
+}
+
+/** The answer: what the agent's side was told, never the value. */
+export interface SecretGiven {
+  note: string;
+  path?: string;
+  fingerprint?: string;
+  public_key?: string;
+  remembered?: boolean;
+}
+
+/** An ssh key the worker keeps for a workspace (SPEC 0.147). */
+export interface WorkspaceKey {
+  name: string;
+  fingerprint: string;
 }
 
 /** `utilization` 0..1, `resets_at` Unix seconds. */
@@ -593,6 +620,33 @@ export class Api {
 
   async deleteProvider(id: string): Promise<void> {
     await this.req('DELETE', `/api/providers/${enc(id)}`);
+  }
+
+  /** A secret or an ssh key for the session's running agent (SPEC 0.147); `requestId`
+   *  answers the agent's `hqc_secret`. Only the fields go: the hub refuses others. */
+  async giveSecret(sessionId: string, f: SecretFields, requestId?: string): Promise<SecretGiven> {
+    const body: Record<string, unknown> = { kind: f.kind, name: f.name, value: f.value };
+    if (f.kind === 'ssh_key') {
+      if (f.passphrase) body.passphrase = f.passphrase;
+      if (f.remember) body.remember = true;
+    }
+    if (requestId) body.request_id = requestId;
+    const r = (await this.req('POST', `/api/sessions/${enc(sessionId)}/secrets`, body)) as Partial<SecretGiven> | null;
+    if (typeof r?.note !== 'string') throw new ApiError(500, 'secret: expected a note');
+    return r as SecretGiven;
+  }
+
+  /** The ssh keys the worker keeps for a workspace (SPEC 0.147). */
+  async workspaceKeys(id: string): Promise<WorkspaceKey[]> {
+    const data = (await this.req('GET', `/api/workspaces/${enc(id)}/keys`)) as { keys?: unknown };
+    if (!Array.isArray(data?.keys)) throw new ApiError(500, 'keys: expected a list');
+    return data.keys.filter(
+      (k): k is WorkspaceKey => typeof k?.name === 'string' && typeof k?.fingerprint === 'string',
+    );
+  }
+
+  async deleteWorkspaceKey(id: string, name: string): Promise<void> {
+    await this.req('DELETE', `/api/workspaces/${enc(id)}/keys/${enc(name)}`);
   }
 
   async workers(opts: { includeRevoked?: boolean } = {}): Promise<WorkerInfo[]> {

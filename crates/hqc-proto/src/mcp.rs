@@ -216,7 +216,8 @@ pub const TOOLS: &[Tool] = &[
             turn; it can answer you with hqc_send. Returns the new session's address at once \
             and does not wait for its work. The session runs in a workspace of `project` (the \
             project's default workspace when `workspace` is absent) on that workspace's \
-            machine, with your model unless `model` is given. With `isolation: \"worktree\"` \
+            machine, with your model, or your model provider if you run on one, unless \
+            `model` or `provider` is given. With `isolation: \"worktree\"` \
             the new session works in a git worktree of that workspace of its own, on a new \
             branch (hqc/<session-slug> unless `branch` is given), so it does not edit the \
             checkout you work in; the call then waits until the worktree is made and also \
@@ -237,6 +238,10 @@ pub const TOOLS: &[Tool] = &[
                         "description": "The agent's runtime; claude_code is the only one so far."
                     },
                     "model": {"type": "string", "description": "The new agent's model."},
+                    "provider": {
+                        "type": "string",
+                        "description": "A model provider of your owner by its name (Settings → Models), e.g. a local model; the workspace's machine must allow it. Not together with `model`."
+                    },
                     "prompt": {"type": "string", "description": "The new agent's first task."},
                     "isolation": {
                         "type": "string",

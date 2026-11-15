@@ -1957,6 +1957,18 @@ pub async fn providers_of(db: &PgPool, owner: Uuid) -> sqlx::Result<Vec<Provider
         .await
 }
 
+pub async fn provider_by_name(
+    db: &PgPool,
+    owner: Uuid,
+    name: &str,
+) -> sqlx::Result<Option<ProviderRow>> {
+    sqlx::query_as("SELECT * FROM providers WHERE owner_id = $1 AND name = $2")
+        .bind(owner)
+        .bind(name)
+        .fetch_optional(db)
+        .await
+}
+
 pub async fn provider(db: &PgPool, id: Uuid) -> sqlx::Result<Option<ProviderRow>> {
     sqlx::query_as("SELECT * FROM providers WHERE id = $1")
         .bind(id)

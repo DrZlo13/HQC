@@ -398,3 +398,283 @@ async fn a_foreground_call_is_moved_to_the_background() {
         .starts_with("hqc-background-"));
     w.stop().await;
 }
+
+/// The `SSH_AUTH_SOCK` and `HQC_SECRETS` of the latest process the scripted CLI was started as.
+fn process_env(claude: &ScriptedClaude) -> (String, String) {
+    let cmd = claude.commands().last().unwrap().clone();
+    let get = |k: &str| {
+        cmd.env
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{k} not in {:?}",
+                    cmd.env.iter().map(|(k, _)| k).collect::<Vec<_>>()
+                )
+            })
+    };
+    (get("SSH_AUTH_SOCK"), get("HQC_SECRETS"))
+}
+
+/// The keys an ssh-agent holds, as `ssh-add -l` lists them.
+fn agent_keys(socket: &str) -> String {
+    let out = std::process::Command::new("ssh-add")
+        .arg("-l")
+        .env_clear()
+        .env("SSH_AUTH_SOCK", socket)
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A fresh ed25519 key with `passphrase` (empty: none), as a user pastes it.
+fn keygen(dir: &std::path::Path, name: &str, passphrase: &str) -> String {
+    let path = dir.join(name);
+    let ok = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", passphrase, "-C", name, "-f"])
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    std::fs::read_to_string(path).unwrap()
+}
+
+/// SPEC 0.147 (T57): with `session_secrets` the agent's process gets `HQC_SECRETS`, an
+/// ssh-agent of its own (empty at first) and the secret tools; `secret.put` writes a secret,
+/// loads a key, keeps one for the workspace that the next process loads, makes one; refusals
+/// never carry the value.
+#[tokio::test]
+async fn secrets_and_keys_reach_the_running_agent() {
+    let env = Env::new();
+    // Under /tmp: ssh-agent sockets must stay short.
+    let home = tempfile::Builder::new()
+        .prefix("hqc-t57-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let claude = ScriptedClaude::new(&fixture("stream-permission-allow-2.1.307.jsonl"));
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ssh: hqc_worker::ssh::Store::in_home(&home_path),
+            mcp: Some(hqc_worker::adapter::claude_code::McpLaunch {
+                program: "/bin/hqc-worker".into(),
+                socket: env.mcp_socket(),
+            }),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut config = hqc_worker::config::Config::parse(&format!(
+        "{}session_secrets = true\n",
+        env.config_toml("http://127.0.0.1:1")
+    ))
+    .unwrap();
+    let mut hub = FakeHub::start().await;
+    config.hub_url = hub.url();
+    config.secrets = hqc_worker::secrets::Stores::in_home(&home_path);
+    let stores = config.secrets.clone();
+    let w = start_worker_factory(&env, config, Arc::new(factory));
+    let mut c = hub.accept().await;
+    let hello = c.handshake().await;
+    assert_eq!(hello["payload"]["session_secrets"], true);
+
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    let (socket, dir) = process_env(&claude);
+    assert!(
+        dir.starts_with(&home_path.join("secrets").display().to_string()),
+        "{dir}"
+    );
+    assert!(agent_keys(&socket).contains("no identities") || agent_keys(&socket).is_empty());
+    let cmd = claude.commands()[0].clone();
+    let mcp = &cmd.args[cmd.args.iter().position(|a| a == "--mcp-config").unwrap() + 1];
+    assert!(mcp.contains("\"HQC_SECRET_TOOLS\":\"1\""), "{mcp}");
+
+    let put = |kind: &str, name: &str, extra: Value| {
+        let mut p = json!({"request_id": "", "session_id": sid, "kind": kind, "name": name});
+        p.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        p
+    };
+    // Sent with its frame id as request_id; the answer comes under the same id.
+    async fn ask(c: &mut HubConn, mut payload: Value) -> Value {
+        let id = format!("h-{}", Uuid::new_v4().simple());
+        payload["request_id"] = json!(id);
+        c.send(json!({"id": id, "type": "secret.put", "payload": payload}))
+            .await;
+        loop {
+            let f = c.recv().await;
+            if f["id"] == id.as_str() {
+                return f;
+            }
+        }
+    }
+
+    // A secret: a file of the process, the agent told the path only.
+    let r = ask(
+        &mut c,
+        put("secret", "WIFI_PASS", json!({"value": "hunter2-wifi"})),
+    )
+    .await;
+    assert_eq!(r["type"], "result", "{r}");
+    let s = &r["payload"]["secret"];
+    assert_eq!(s["path"], "$HQC_SECRETS/WIFI_PASS");
+    assert!(!r.to_string().contains("hunter2"), "{r}");
+    assert_eq!(
+        std::fs::read_to_string(format!("{dir}/WIFI_PASS")).unwrap(),
+        "hunter2-wifi"
+    );
+
+    // A key with a passphrase: wrong, then right, and kept for the workspace.
+    let keys = tempfile::tempdir().unwrap();
+    let pi = keygen(keys.path(), "pi-lab", "pass");
+    let r = ask(
+        &mut c,
+        put(
+            "ssh_key",
+            "pi-lab",
+            json!({"value": pi, "passphrase": "nope", "remember": true}),
+        ),
+    )
+    .await;
+    assert_eq!(r["type"], "error", "{r}");
+    let msg = r["payload"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("passphrase") && !msg.contains("nope") && !msg.contains("OPENSSH"),
+        "{msg}"
+    );
+    let r = ask(
+        &mut c,
+        put(
+            "ssh_key",
+            "pi-lab",
+            json!({"value": pi, "passphrase": "pass", "remember": true}),
+        ),
+    )
+    .await;
+    assert_eq!(r["type"], "result", "{r}");
+    let fp = r["payload"]["secret"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(r["payload"]["secret"]["remembered"].as_bool().unwrap());
+    assert!(agent_keys(&socket).contains(&fp), "loaded now");
+    // Made by the worker: only the public half comes back.
+    let r = ask(&mut c, put("ssh_keygen", "pi-kitchen", json!({}))).await;
+    let made = &r["payload"]["secret"];
+    assert!(
+        made["public_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("ssh-ed25519 "),
+        "{r}"
+    );
+    assert!(!r.to_string().contains("PRIVATE"), "{r}");
+    let made_fp = made["fingerprint"].as_str().unwrap().to_string();
+    assert!(agent_keys(&socket).contains(&made_fp));
+    // The same name again is refused, and so is a remembered plain secret and a bad name.
+    for p in [
+        put("ssh_keygen", "pi-kitchen", json!({})),
+        put("secret", "X", json!({"value": "v", "remember": true})),
+        put("secret", "../x", json!({"value": "v"})),
+        put("secret", "EMPTY", json!({"value": ""})),
+    ] {
+        let r = ask(&mut c, p.clone()).await;
+        assert_eq!(r["type"], "error", "{p} -> {r}");
+    }
+
+    // The workspace keeps the two keys; the next process loads them, the secret is gone.
+    let kept = stores.workspace(&env.workspace()).list().unwrap();
+    assert_eq!(
+        kept.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+        ["pi-kitchen", "pi-lab"]
+    );
+    c.frame("session.kill", json!({"session_id": sid})).await;
+    c.expect("ack").await;
+    assert!(
+        !std::path::Path::new(&dir).exists(),
+        "the secrets went with the process"
+    );
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    let (socket2, dir2) = process_env(&claude);
+    assert_ne!(dir2, dir);
+    let listed = agent_keys(&socket2);
+    assert!(
+        listed.contains(&fp) && listed.contains(&made_fp),
+        "{listed}"
+    );
+    assert!(!std::path::Path::new(&dir2).join("WIFI_PASS").exists());
+
+    // The keys of the workspace, and one forgotten.
+    let path = env.workspace().display().to_string();
+    c.send(json!({"id": "k-1", "type": "workspace.keys", "payload": {"request_id": "k-1", "path": path}}))
+        .await;
+    let r = loop {
+        let f = c.recv().await;
+        if f["id"] == "k-1" {
+            break f;
+        }
+    };
+    assert_eq!(r["payload"]["keys"].as_array().unwrap().len(), 2, "{r}");
+    c.send(json!({"id": "k-2", "type": "workspace.key_delete",
+                  "payload": {"request_id": "k-2", "path": path, "name": "pi-lab"}}))
+        .await;
+    let r = loop {
+        let f = c.recv().await;
+        if f["id"] == "k-2" {
+            break f;
+        }
+    };
+    assert_eq!(r["payload"]["key_deleted"], true, "{r}");
+    assert_eq!(stores.workspace(&env.workspace()).list().unwrap().len(), 1);
+    w.stop().await;
+}
+
+/// SPEC 0.147: without `session_secrets` (the default) the process gets none of it and
+/// `secret.put` is refused.
+#[tokio::test]
+async fn without_session_secrets_nothing_is_given() {
+    let env = Env::new();
+    let claude = ScriptedClaude::new(&fixture("stream-permission-allow-2.1.307.jsonl"));
+    let factory = ClaudeCodeAdapters::new(
+        ClaudeOptions {
+            config_dir: Some(env.dir.path().join("claude-config")),
+            ..ClaudeOptions::default()
+        },
+        Arc::new(claude.clone()),
+    );
+    let mut hub = FakeHub::start().await;
+    let w = start_worker_factory(&env, env.config(&hub.url()), Arc::new(factory));
+    let mut c = hub.accept().await;
+    let hello = c.handshake().await;
+    assert!(hello["payload"].get("session_secrets").is_none(), "{hello}");
+    let sid = Uuid::now_v7();
+    c.frame("session.start", env.start_payload(sid)).await;
+    c.expect("ack").await;
+    let cmd = claude.commands()[0].clone();
+    assert!(!cmd
+        .env
+        .iter()
+        .any(|(k, _)| k == "HQC_SECRETS" || k == "SSH_AUTH_SOCK"));
+    c.send(
+        json!({"id": "s-1", "type": "secret.put", "payload": {"request_id": "s-1",
+                  "session_id": sid, "kind": "secret", "name": "A", "value": "topsecret"}}),
+    )
+    .await;
+    let r = loop {
+        let f = c.recv().await;
+        if f["id"] == "s-1" {
+            break f;
+        }
+    };
+    assert_eq!(r["type"], "error", "{r}");
+    assert!(!r.to_string().contains("topsecret"));
+    w.stop().await;
+}

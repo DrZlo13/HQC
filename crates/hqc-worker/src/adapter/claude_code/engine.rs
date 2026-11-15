@@ -1741,6 +1741,7 @@ impl Core {
             expires_at: None,
             policy_hint,
             rule_suggestions,
+            secret: None,
         })]
     }
 

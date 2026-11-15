@@ -92,9 +92,13 @@ use std::path::{Path, PathBuf};
 use hqc_proto::event::EventKind;
 use hqc_proto::frame::{
     error_code, worker_approval, Ack, Envelope, HeldBy, HubFrame, LockedBy, PermissionMode,
-    ProcessState, RequestResult, ResultBody, Runtime, SessionInput, SessionStart, StartMode,
-    TitleRequest, TitleResult, WireError, WorkerApprovalRequest, WorkerFrame,
+    ProcessState, RequestResult, ResultBody, Runtime, SecretOutcome, SecretPut, SecretPutResult,
+    SessionInput, SessionStart, StartMode, TitleRequest, TitleResult, WireError,
+    WorkerApprovalRequest, WorkerFrame, WorkspaceKeyDeleteResult, WorkspaceKeysResult,
 };
+
+/// Why `secret.put` and the workspace keys are refused on a worker without them (SPEC 0.147).
+const SECRETS_OFF: &str = "this worker takes no secrets: session_secrets is off in its worker.toml";
 use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -274,6 +278,11 @@ enum Cmd {
         id: String,
         request_id: String,
         answers: std::collections::BTreeMap<String, hqc_proto::event::ClarifyAnswer>,
+    },
+    /// A secret or a key for the running agent (SPEC 0.147).
+    Secret {
+        id: String,
+        put: Box<SecretPut>,
     },
     Resync,
     /// Another writer continues the transcript: stop after the current turn (SPEC §9.3).
@@ -677,6 +686,47 @@ impl Supervisor {
                 });
                 return;
             }
+            // SPEC 0.147: never with `session_secrets` off, whatever the hub sends.
+            HubFrame::SecretPut(put) => {
+                if !self.cfg.session_secrets {
+                    tracing::warn!(session_id = %put.session_id, "secret.put refused: session_secrets is off");
+                    self.link.reply(
+                        &id,
+                        wire_error(error_code::INVALID_FRAME, SECRETS_OFF, false),
+                    );
+                    return;
+                }
+                (
+                    put.session_id,
+                    Cmd::Secret {
+                        id,
+                        put: Box::new(put),
+                    },
+                )
+            }
+            HubFrame::WorkspaceKeys(r) => {
+                let keys = self.workspace_keys(&r.path);
+                self.fs_request(id, r.request_id, move || {
+                    let keys = keys?;
+                    keys.list()
+                        .map(|keys| ResultBody::WorkspaceKeys(WorkspaceKeysResult { keys }))
+                        .map_err(|e| format!("{e:#}"))
+                });
+                return;
+            }
+            HubFrame::WorkspaceKeyDelete(r) => {
+                let keys = self.workspace_keys(&r.path);
+                self.fs_request(id, r.request_id, move || {
+                    let deleted = keys?.delete(&r.name).map_err(|e| format!("{e:#}"))?;
+                    if deleted {
+                        tracing::info!(path = %r.path, name = %r.name, "workspace ssh key forgotten");
+                    }
+                    Ok(ResultBody::WorkspaceKeyDeleted(WorkspaceKeyDeleteResult {
+                        key_deleted: deleted,
+                    }))
+                });
+                return;
+            }
             other => {
                 tracing::debug!(?other, "frame not for the supervisor");
                 return;
@@ -700,6 +750,18 @@ impl Supervisor {
                 );
             }
         }
+    }
+
+    /// The keys kept for the workspace at hub path `path` (SPEC 0.147): with `session_secrets`
+    /// on, and only for a folder inside `allowed_roots`.
+    fn workspace_keys(&self, path: &str) -> Result<crate::secrets::WorkspaceKeys, String> {
+        if !self.cfg.session_secrets {
+            return Err(SECRETS_OFF.into());
+        }
+        let folder = self
+            .workspace(path)
+            .ok_or("path is not a folder inside allowed_roots")?;
+        Ok(self.cfg.secrets.workspace(&folder))
     }
 
     /// A hub path as the canonical folder it names, if that is a folder inside
@@ -941,7 +1003,8 @@ fn id_of(c: &Cmd) -> String {
         | Cmd::PermissionMode { id, .. }
         | Cmd::Model { id, .. }
         | Cmd::Approval { id, .. }
-        | Cmd::Clarify { id, .. } => id.clone(),
+        | Cmd::Clarify { id, .. }
+        | Cmd::Secret { id, .. } => id.clone(),
         Cmd::Resync | Cmd::Release | Cmd::Held { .. } | Cmd::Shutdown => String::new(),
     }
 }
@@ -1224,6 +1287,22 @@ impl Session {
                 self.reply_result(&id, r);
                 self.pump().await;
             }
+            Cmd::Secret { id, put } => {
+                let frame = match self.put_secret(&put).await {
+                    Ok(secret) => {
+                        tracing::info!(session_id = %self.id, kind = ?put.kind, name = %put.name, remembered = secret.remembered, "secret given to the agent");
+                        WorkerFrame::Result(RequestResult {
+                            request_id: put.request_id.clone(),
+                            body: ResultBody::Secret(SecretPutResult { secret }),
+                        })
+                    }
+                    Err(e) => {
+                        tracing::info!(session_id = %self.id, kind = ?put.kind, name = %put.name, "secret.put refused: {e:#}");
+                        wire_error(error_code::INVALID_FRAME, format!("{e:#}"), false)
+                    }
+                };
+                self.link.reply(&id, frame);
+            }
             Cmd::Resync => {
                 self.send_state();
                 // A list sent while disconnected was lost; the next one may come only with
@@ -1291,6 +1370,115 @@ impl Session {
     /// switches at once, mid-turn too. `None`, the runtime's default, has no name to switch
     /// to: a running agent takes it at its next start. A runtime that refuses keeps its model
     /// until then too.
+    /// `secret.put` for this session's running agent (SPEC §14, since 0.147). The error is
+    /// what the hub shows the owner; it never carries the value, the key or the passphrase.
+    async fn put_secret(&mut self, put: &SecretPut) -> anyhow::Result<SecretOutcome> {
+        use hqc_proto::frame::SecretKind;
+        let Some(allowed) = self.spec.secrets.clone() else {
+            anyhow::bail!(
+                "this session takes no secrets: it is restricted or not the worker owner's"
+            );
+        };
+        let Some(proc) = self.adapter.secrets() else {
+            anyhow::bail!("the agent is not running: give it once it runs");
+        };
+        let value = || -> anyhow::Result<&str> {
+            match put.value.as_ref().map(|v| v.0.as_str()) {
+                Some(v) if v.len() > hqc_proto::frame::MAX_SECRET => anyhow::bail!(
+                    "the value is longer than {} KiB",
+                    hqc_proto::frame::MAX_SECRET / 1024
+                ),
+                Some(v) if !v.is_empty() => Ok(v),
+                _ => anyhow::bail!("the value is empty"),
+            }
+        };
+        let workspace = || {
+            allowed
+                .workspace
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("the session has no workspace to keep a key for"))
+        };
+        let name = &put.name;
+        match put.kind {
+            SecretKind::Secret => {
+                if put.remember {
+                    anyhow::bail!("only an ssh key is kept for the workspace");
+                }
+                let path = proc.put(name, value()?)?;
+                Ok(SecretOutcome {
+                    note: format!(
+                        "The secret {name} is in the file \"{path}\" for as long as your process runs: read it in a command, as \"$(cat \"{path}\")\", and do not print it."
+                    ),
+                    path: Some(path),
+                    fingerprint: None,
+                    public_key: None,
+                    remembered: false,
+                })
+            }
+            SecretKind::SshKey => {
+                let key = crate::secrets::read_key(
+                    value()?,
+                    put.passphrase.as_ref().map(|p| p.0.as_str()),
+                )?;
+                let fp = crate::secrets::fingerprint(&key);
+                let kept = if put.remember {
+                    Some(workspace()?)
+                } else {
+                    None
+                };
+                if let Some(w) = &kept {
+                    w.add(name, &key)?;
+                }
+                if let Err(e) = proc.add_key(&key).await {
+                    if let Some(w) = &kept {
+                        let _ = w.delete(name);
+                    }
+                    return Err(e);
+                }
+                let also = if put.remember {
+                    " and remembered for this workspace"
+                } else {
+                    ""
+                };
+                Ok(SecretOutcome {
+                    note: format!(
+                        "The ssh key {name} ({fp}) is loaded in your ssh-agent{also}: ssh and git use it."
+                    ),
+                    path: None,
+                    fingerprint: Some(fp),
+                    public_key: None,
+                    remembered: put.remember,
+                })
+            }
+            SecretKind::SshKeygen => {
+                let comment = match put.comment.as_deref().map(str::trim) {
+                    Some(c) if c.chars().count() > 100 || c.chars().any(|c| c.is_control()) => {
+                        anyhow::bail!("the comment is one line of at most 100 characters")
+                    }
+                    Some(c) if !c.is_empty() => c.to_string(),
+                    _ => format!("hqc {name}"),
+                };
+                let w = workspace()?;
+                let key = crate::secrets::generate(&comment)?;
+                w.add(name, &key)?;
+                if let Err(e) = proc.add_key(&key).await {
+                    let _ = w.delete(name);
+                    return Err(e);
+                }
+                let fp = crate::secrets::fingerprint(&key);
+                Ok(SecretOutcome {
+                    note: format!(
+                        "The ssh key {name} ({fp}) is made, remembered for this workspace and loaded in your ssh-agent; its public key is public_key."
+                    ),
+                    path: None,
+                    fingerprint: Some(fp),
+                    public_key: Some(crate::secrets::public_line(&key)?),
+                    remembered: true,
+                })
+            }
+        }
+    }
+
     async fn switch_model(&mut self, model: Option<String>) {
         if self.spec.model == model {
             return;

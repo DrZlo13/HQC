@@ -204,7 +204,9 @@ impl Session<'_> {
             }
             "ping" => self.respond(id, json!({})),
             "tools/list" => {
-                let tools: Vec<Value> = TOOLS.iter().map(|t| t.listing()).collect();
+                // SPEC 0.147: the secret tools only where the worker gives secrets.
+                let secrets = std::env::var(crate::secrets::SECRET_TOOLS_ENV).as_deref() == Ok("1");
+                let tools = listed_tools(secrets);
                 self.respond(id, json!({ "tools": tools }));
             }
             "tools/call" => self.call(id, &params).await,
@@ -394,6 +396,16 @@ async fn read_reply<R: tokio::io::AsyncBufRead + Unpin>(
         return None;
     }
     serde_json::from_slice(buf).ok()
+}
+
+/// `tools/list`: every tool, the secret ones (`hqc_secret`, `hqc_ssh_keygen`) only for an agent
+/// whose worker gives secrets (`HQC_SECRET_TOOLS=1`, SPEC 0.147).
+pub fn listed_tools(secrets: bool) -> Vec<Value> {
+    TOOLS
+        .iter()
+        .filter(|t| secrets || !hqc_proto::mcp::SECRET_TOOLS.contains(&t.name))
+        .map(|t| t.listing())
+        .collect()
 }
 
 /// The `tools/call` result: the hub's JSON as text, or the error as `isError` text.

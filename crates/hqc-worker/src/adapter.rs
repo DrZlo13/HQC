@@ -164,6 +164,11 @@ pub trait Adapter: Send {
     fn pid(&self) -> Option<u32> {
         None
     }
+    /// The secrets folder and ssh-agent of the process while it runs (SPEC 0.147); `None`:
+    /// no process runs, or the session may not have secrets.
+    fn secrets(&self) -> Option<std::sync::Arc<crate::secrets::ProcessSecrets>> {
+        None
+    }
     /// Switch the running process to `mode` (T38); with no process, nothing to do: the next
     /// start takes the mode from its [`StartSpec`]. The runtime confirms with
     /// [`AdapterEvent::PermissionMode`].

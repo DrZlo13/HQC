@@ -276,3 +276,22 @@ fn tool_results() {
     assert_eq!(e["isError"], true);
     assert_eq!(e["content"][0]["text"], "not_found: no project x");
 }
+
+/// SPEC 0.147: the secret tools are listed only with `HQC_SECRET_TOOLS=1`.
+#[test]
+fn secret_tools_only_where_secrets_are_given() {
+    let names = |v: Vec<Value>| -> Vec<String> {
+        v.iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let off = names(listed_tools(false));
+    let on = names(listed_tools(true));
+    for t in hqc_proto::mcp::SECRET_TOOLS {
+        assert!(
+            !off.iter().any(|n| n == t) && on.iter().any(|n| n == t),
+            "{t}"
+        );
+    }
+    assert_eq!(on.len(), off.len() + hqc_proto::mcp::SECRET_TOOLS.len());
+}

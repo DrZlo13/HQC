@@ -250,15 +250,20 @@ impl McpLaunch {
     /// The `--mcp-config` JSON: the server `hqc` with the session token in its own `env`.
     /// The token is thereby on the CLI's command line, which on macOS other users cannot
     /// read (T30, SPEC §7), and not in the CLI's environment, which the agent's Bash tool
-    /// inherits.
-    pub fn config(&self, token: &crate::token::Secret) -> String {
+    /// inherits. `secret_tools`: the server lists `hqc_secret` and `hqc_ssh_keygen` too
+    /// (a session with [`crate::config::SessionSecrets`], SPEC 0.147).
+    pub fn config(&self, token: &crate::token::Secret, secret_tools: bool) -> String {
+        let mut env = serde_json::json!({ (crate::mcp::TOKEN_ENV): token.expose() });
+        if secret_tools {
+            env[crate::secrets::SECRET_TOOLS_ENV] = "1".into();
+        }
         serde_json::json!({
             "mcpServers": {
                 "hqc": {
                     "type": "stdio",
                     "command": self.program,
                     "args": ["mcp", "--socket", self.socket],
-                    "env": { (crate::mcp::TOKEN_ENV): token.expose() },
+                    "env": env,
                 }
             }
         })
@@ -348,6 +353,8 @@ struct Proc {
     monitor: JoinHandle<()>,
     /// The CLI's process (SPEC §7.2: the hqc MCP server must descend from it).
     pid: Option<u32>,
+    /// Its secrets folder and ssh-agent (SPEC 0.147), held by the monitor until it exits.
+    secrets: Option<std::sync::Weak<crate::secrets::ProcessSecrets>>,
 }
 
 struct Io {
@@ -537,6 +544,7 @@ impl ClaudeCodeAdapter {
     /// - `--strict-mcp-config` unless the environment has `allow_local_mcp` (the hqc server
     ///   is in `--mcp-config` either way); [`crate::config::Environment::process_env`];
     ///   `SSH_AUTH_SOCK` only as `ssh_agent`, the socket of the process's own ssh-agent (T44);
+    ///   `HQC_SECRETS` only as `secrets`, the folder of the process's secrets (SPEC 0.147);
     /// - `disallowed_tools` → `--disallowedTools`, `system_prompt` →
     ///   `--append-system-prompt`. Nothing of `session.start` is silently dropped.
     pub fn command(
@@ -545,6 +553,7 @@ impl ClaudeCodeAdapter {
         uuid: &Uuid,
         launch: Launch,
         ssh_agent: Option<&std::path::Path>,
+        secrets: Option<&std::path::Path>,
     ) -> CommandSpec {
         let mut args: Vec<String> = [
             "-p",
@@ -567,7 +576,10 @@ impl ClaudeCodeAdapter {
             args.push("--strict-mcp-config".into());
         }
         if let Some(m) = &self.opts.mcp {
-            args.extend(["--mcp-config".into(), m.config(&spec.session_token)]);
+            args.extend([
+                "--mcp-config".into(),
+                m.config(&spec.session_token, secrets.is_some()),
+            ]);
         }
         args.extend(["--allowedTools".into(), "mcp__hqc".into()]);
         let mut disallowed: Vec<String> = spec.disallowed_tools.clone();
@@ -660,6 +672,12 @@ impl ClaudeCodeAdapter {
                 if let Some(sock) = ssh_agent {
                     env.push((crate::ssh::SSH_AUTH_SOCK.into(), sock.display().to_string()));
                 }
+                if let Some(dir) = secrets {
+                    env.push((
+                        crate::secrets::SECRETS_ENV.into(),
+                        dir.display().to_string(),
+                    ));
+                }
                 if let Some(e) = &self.opts.entrypoint {
                     env.push(("CLAUDE_CODE_ENTRYPOINT".into(), e.clone()));
                 }
@@ -741,17 +759,43 @@ impl ClaudeCodeAdapter {
         };
         // T44: an ssh-agent of this process's own; it stops when the process has exited
         // (the monitor drops it), or right here if the spawn fails.
-        let ssh_agent = match spec.environment.ssh_keys.as_slice() {
-            [] => None,
-            keys => Some(
+        // SPEC 0.147: a session that may have secrets always gets one, with the keys kept for
+        // its workspace too, and a folder for its secrets that goes with the process.
+        let mut key_files = self.opts.ssh.files(&spec.environment.ssh_keys);
+        if let Some(w) = spec.secrets.as_ref().and_then(|s| s.workspace.as_ref()) {
+            key_files.extend(
+                w.files()
+                    .context("the ssh keys kept for the workspace")?
+                    .into_iter()
+                    .map(|(_, p)| p),
+            );
+        }
+        let ssh_agent = if key_files.is_empty() && spec.secrets.is_none() {
+            None
+        } else {
+            Some(
                 self.opts
                     .ssh
-                    .start_agent(keys)
+                    .start_agent(&key_files)
                     .await
-                    .context("the environment's ssh keys")?,
-            ),
+                    .context("the session's ssh keys")?,
+            )
         };
-        let cmd = self.command(spec, &uuid, launch, ssh_agent.as_ref().map(|a| a.socket()));
+        let secrets = match (&spec.secrets, &ssh_agent) {
+            (Some(s), Some(a)) => Some(Arc::new(
+                s.stores
+                    .process(a.socket().to_path_buf())
+                    .context("the folder of the session's secrets")?,
+            )),
+            _ => None,
+        };
+        let cmd = self.command(
+            spec,
+            &uuid,
+            launch,
+            ssh_agent.as_ref().map(|a| a.socket()),
+            secrets.as_ref().map(|s| s.dir()),
+        );
         let spawned = self
             .spawner
             .spawn(&cmd)
@@ -867,6 +911,7 @@ impl ClaudeCodeAdapter {
             stderr_tail.clone(),
             live,
             ssh_agent,
+            secrets.clone(),
             fork_copy,
         ));
         tokio::spawn(rate::meter(core.clone(), io.clone(), exited.clone()));
@@ -878,7 +923,9 @@ impl ClaudeCodeAdapter {
             started,
             monitor,
             pid,
+            secrets: secrets.as_ref().map(Arc::downgrade),
         };
+        drop(secrets);
 
         // Bad flags, an unknown `--resume` id or a logged-out CLI end the process at once.
         let early =
@@ -1047,6 +1094,11 @@ impl Adapter for ClaudeCodeAdapter {
         self.proc.as_ref().and_then(|p| p.pid)
     }
 
+    fn secrets(&self) -> Option<Arc<crate::secrets::ProcessSecrets>> {
+        let p = self.running().ok()?;
+        p.secrets.as_ref()?.upgrade()
+    }
+
     async fn kill(&mut self) -> anyhow::Result<()> {
         let Some(mut p) = self.proc.take() else {
             return Ok(());
@@ -1141,6 +1193,7 @@ async fn monitor(
     stderr_tail: Arc<Mutex<String>>,
     live: Live,
     ssh_agent: Option<crate::ssh::SshAgent>,
+    secrets: Option<Arc<crate::secrets::ProcessSecrets>>,
     fork_copy: Option<RemoveOnDrop>,
 ) {
     let mut rd = BufReader::new(stdout);
@@ -1182,7 +1235,9 @@ async fn monitor(
     // The process wrote its last record: the mirror may treat what follows as another
     // writer's.
     drop(live);
-    // Its ssh-agent goes with it (T44), and the fork copy it resumed (SPEC §8.1).
+    // Its ssh-agent goes with it (T44), its secrets (SPEC 0.147) and the fork copy it resumed
+    // (SPEC §8.1).
+    drop(secrets);
     drop(ssh_agent);
     drop(fork_copy);
     let actions = lock(&core).on_exit();

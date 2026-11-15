@@ -3552,6 +3552,84 @@ async fn a_subagents_history_comes_from_its_transcript() {
     w.stop().await;
 }
 
+// Of a long transcript only the last 4 MiB are read, without the line cut at their start; a
+// symlink or a FIFO in its place is no transcript (a FIFO would hang the read).
+#[tokio::test]
+async fn a_subagents_history_is_the_tail_of_a_regular_file() {
+    let env = Env::new();
+    let adapters = FakeAdapters::new();
+    let dir = env.dir.path().join("subagents");
+    std::fs::create_dir_all(&dir).unwrap();
+    adapters.set_subagents_dir(dir.clone());
+    let mut hub = FakeHub::start().await;
+    let w = start_worker(&env, &hub.url(), &adapters);
+    let sid = Uuid::now_v7();
+    let mut c = hub.accept().await;
+    c.handshake().await;
+    start_session(&mut c, &env, sid).await;
+    let record = |kind: &str, content: Value| {
+        json!({"parentUuid": Uuid::new_v4(), "isSidechain": true, "agentId": "big",
+            "type": kind, "uuid": Uuid::new_v4(), "timestamp": "2026-11-13T10:00:00.000Z",
+            "message": {"role": kind, "content": content}})
+        .to_string()
+    };
+    let call = |id: &str| {
+        record(
+            "assistant",
+            json!([{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "ls"}}]),
+        )
+    };
+    // The first call; then the last 4 MiB: a line cut right before a call (whole, it does not
+    // parse; its rest does), a text (no event) and the last call.
+    let tail = 4 * 1024 * 1024;
+    let (cut, last) = (call("toolu_cut"), call("toolu_last"));
+    let empty = record("user", json!("")).len();
+    let text = "x".repeat(tail - cut.len() - last.len() - 2 - empty);
+    let long = [
+        call("toolu_first"),
+        format!("junk {cut}"),
+        record("user", json!(text)),
+        last,
+    ];
+    let file = long.join("\n");
+    assert!(file[file.len() - tail..].starts_with(&cut));
+    std::fs::write(dir.join("agent-big.jsonl"), file).unwrap();
+    std::fs::write(dir.join("agent-small.jsonl"), call("toolu_small")).unwrap();
+    std::os::unix::fs::symlink(dir.join("agent-small.jsonl"), dir.join("agent-link.jsonl"))
+        .unwrap();
+    let fifo = dir.join("agent-fifo.jsonl");
+    let fifo = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+    let ask = |task_id: &str| json!({"request_id": "r-1", "session_id": sid, "task_id": task_id});
+    c.frame("session.subagent_history", ask("big")).await;
+    let f = c.expect("result").await;
+    let events = f["payload"]["events"].as_array().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e["payload"]["call_id"].clone())
+            .collect::<Vec<_>>(),
+        ["toolu_last"],
+        "{f}"
+    );
+    assert_eq!(f["payload"]["truncated"], true);
+
+    c.frame("session.subagent_history", ask("small")).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"].as_array().unwrap().len(), 1, "{f}");
+    c.frame("session.subagent_history", ask("link")).await;
+    let f = c.expect("result").await;
+    assert_eq!(f["payload"]["events"], json!([]), "{f}");
+    c.frame("session.subagent_history", ask("fifo")).await;
+    let f = c
+        .maybe("result", Duration::from_secs(10))
+        .await
+        .expect("a FIFO is answered at once");
+    assert_eq!(f["payload"]["events"], json!([]), "{f}");
+    w.stop().await;
+}
+
 // The token rate goes as `tokens.rate` when it changes; one above 0 is sent again on the next
 // connect (the hub dropped it with the link), a 0 is not; the agent stopped, it sends 0.
 #[tokio::test]

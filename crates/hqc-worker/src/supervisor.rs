@@ -1060,17 +1060,46 @@ fn id_of(c: &Cmd) -> String {
     }
 }
 
+/// The most of a subagent's transcript `session.subagent_history` reads, from its end: one runs
+/// to 100 MB, and the client asks every 2 s while the history is open.
+const SUBAGENT_TRANSCRIPT_TAIL: u64 = 4 * 1024 * 1024;
+
 /// The answer to `session.subagent_history` from the subagent's transcript at `path`, its
-/// events in session `session` ([`crate::mirror::map::subagent_events`]); no file, no events.
+/// events in session `session` ([`crate::mirror::map::subagent_events`]). The file is opened as
+/// `hqc_attach` opens one (no symlink in its last component, a regular file: a FIFO would hang
+/// the blocking thread), and only its last [`SUBAGENT_TRANSCRIPT_TAIL`] bytes are read, the
+/// line cut at their start left out and `truncated` set. No such file, no events.
 fn subagent_history(path: Option<PathBuf>, session: Uuid) -> SubagentHistoryResult {
-    let bytes = path.and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    let mut cut = false;
+    if let Some(Ok((mut f, size))) = path.map(|p| crate::mcp::attach::open_regular(&p, u64::MAX)) {
+        cut = size > SUBAGENT_TRANSCRIPT_TAIL;
+        let read = f
+            .seek(SeekFrom::Start(
+                size.saturating_sub(SUBAGENT_TRANSCRIPT_TAIL),
+            ))
+            .and_then(|_| f.take(SUBAGENT_TRANSCRIPT_TAIL).read_to_end(&mut bytes));
+        if read.is_err() {
+            bytes.clear();
+        } else if cut {
+            let start = bytes
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(bytes.len(), |i| i + 1);
+            bytes.drain(..start);
+        }
+    }
     let (mut events, truncated) =
         crate::mirror::map::subagent_events(&String::from_utf8_lossy(&bytes));
     for e in &mut events {
         e.session_id = session;
         e.author = hqc_proto::event::Author::Agent { id: session };
     }
-    SubagentHistoryResult { events, truncated }
+    SubagentHistoryResult {
+        events,
+        truncated: truncated || cut,
+    }
 }
 
 struct Queued {

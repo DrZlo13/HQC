@@ -102,7 +102,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         buttonStack.spacing = 8
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // The shortcuts inside the app: one row per action, its name and its recorder; New
+        // The app's shortcuts: one row per action, its name and its recorder; New
         // Session in Project's row also has its project.
         let shortcutsLabel = NSTextField(labelWithString: "Shortcuts")
         shortcutsLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)

@@ -21,7 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.windowController = windowController
         windowController.showWindow(nil)
 
-        // The shortcuts inside the app (their defaults until the user records others).
+        // The app's shortcuts, New Session in Project's from any app (their defaults until the
+        // user records others).
         ShortcutMonitor.shared.onPress = { [weak self] action in
             self?.perform(action)
         }

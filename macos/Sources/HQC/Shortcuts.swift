@@ -98,7 +98,8 @@ enum ShortcutAction: String, CaseIterable {
     var defaultShortcut: Shortcut {
         switch self {
         case .newSession: return Shortcut(keyCode: kVK_ANSI_N, flags: [.command], key: "n")
-        case .newSessionInProject: return Shortcut(keyCode: kVK_ANSI_N, flags: [.shift, .command], key: "n")
+        // Not ⇧⌘N: a global one would take it from every other app (Finder's New Folder).
+        case .newSessionInProject: return Shortcut(keyCode: kVK_ANSI_N, flags: [.control, .option, .command], key: "n")
         case .archiveSession: return Shortcut(keyCode: kVK_ANSI_A, flags: [.control, .command], key: "a")
         case .previousSession: return Shortcut(keyCode: kVK_UpArrow, flags: [.option, .command], key: Self.up)
         case .nextSession: return Shortcut(keyCode: kVK_DownArrow, flags: [.option, .command], key: Self.down)
@@ -160,37 +161,73 @@ struct NewSessionTarget: Codable, Equatable {
     }
 }
 
-// The shortcuts inside the app: one local key monitor, which sees the keys before the web
-// page and the menu do, and the menu items showing the same keys.
+// The app's shortcuts: one local key monitor, which sees the keys before the web page and the
+// menu do, for every action but New Session in Project, whose shortcut is a system hot key
+// working from any app; and the menu items showing the same keys.
 final class ShortcutMonitor {
 
     static let shared = ShortcutMonitor()
 
-    // Called with the action whose shortcut was pressed while the app is active.
+    // The action whose shortcut works while another app is active too.
+    static let globalAction = ShortcutAction.newSessionInProject
+
+    // Called with the action whose shortcut was pressed.
     var onPress: ((ShortcutAction) -> Void)?
 
-    // On while a recorder in Settings takes the keys.
-    var isPaused = false
+    // On while a recorder in Settings takes the keys; the hot key is let go meanwhile, so its
+    // keys reach the recorder.
+    var isPaused = false {
+        didSet { updateHotKey() }
+    }
 
     // The menu item of each action; its key equivalent mirrors the action's shortcut.
     var menuItems: [ShortcutAction: NSMenuItem] = [:]
 
     private var monitor: Any?
+    private var hotKey: EventHotKeyRef?
 
     func start() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, !self.isPaused,
-                  let action = ShortcutAction.allCases.first(where: { $0.shortcut?.matches(event) == true }) else {
+                  let action = ShortcutAction.allCases.first(where: {
+                      $0 != Self.globalAction && $0.shortcut?.matches(event) == true
+                  }) else {
                 return event
             }
             self.onPress?(action)
             return nil
         }
+        // The hot key's presses, delivered on the main thread.
+        var pressed = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
+            ShortcutMonitor.shared.onPress?(ShortcutMonitor.globalAction)
+            return noErr
+        }, 1, &pressed, nil, nil)
         NotificationCenter.default.addObserver(forName: .shortcutsDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.updateMenuItems()
+            self?.updateHotKey()
         }
         updateMenuItems()
+        updateHotKey()
+    }
+
+    // Registers the global action's shortcut as the system hot key, again whenever it changes;
+    // none while paused or with the shortcut cleared.
+    private func updateHotKey() {
+        if let hotKey {
+            UnregisterEventHotKey(hotKey)
+            self.hotKey = nil
+        }
+        guard monitor != nil, !isPaused, let shortcut = Self.globalAction.shortcut else { return }
+        var modifiers: UInt32 = 0
+        if shortcut.flags.contains(.command) { modifiers |= UInt32(cmdKey) }
+        if shortcut.flags.contains(.option) { modifiers |= UInt32(optionKey) }
+        if shortcut.flags.contains(.control) { modifiers |= UInt32(controlKey) }
+        if shortcut.flags.contains(.shift) { modifiers |= UInt32(shiftKey) }
+        // Signature "HQC ".
+        RegisterEventHotKey(UInt32(shortcut.keyCode), modifiers, EventHotKeyID(signature: 0x4851_4320, id: 1),
+                            GetApplicationEventTarget(), 0, &hotKey)
     }
 
     private func updateMenuItems() {

@@ -40,7 +40,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     // Closing hides the window instead, so the pages keep their state; the Dock icon brings it
-    // back, and so does any of the app's shortcuts while the app is still active.
+    // back, and so do the app's shortcuts while the app is still active, New Session in Project
+    // from any app.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
         return false

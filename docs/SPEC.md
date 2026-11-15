@@ -1678,8 +1678,11 @@ the rest is marked "later"):
   first message) or were deleted (§17.4). Since 0.151 the events a session has when its runtime
   goes on in another transcript (`/clear`, §8.1) get the one they were written in as
   `origin_runtime`: a fork before a message of the conversation before `/clear` cuts that
-  transcript, one after it the new one (before, every fork cut the new one, and the worker did
-  not find the cut there). Since 0.108 a fork before a message with
+  transcript, one after the first answer after it the new one (before, every fork cut the new
+  one, and the worker did not find the cut there); the cut is only among the answers after the
+  last `system conversation_cleared` before the message (its own or copied), so a fork before
+  the first answer after `/clear` starts a new conversation, like one before the first message,
+  without the source's events. Since 0.108 a fork before a message with
   `during_text` keeps the `agent.message` the client shows above it (below, the WebSocket
   paragraph) as the newest cut and the last copied event. Since 0.137 a fork before a message
   the client shows after the turns it waited through (the same paragraph; one with
@@ -3732,8 +3735,10 @@ turn's answer (live run `w1-clear`), and does not stream it: `system session_tit
 (`title`) carries only a title a person gave (`/rename`). Since 0.151 that one is sent at once,
 trimmed, an empty one dropped; the transcript's title, its last non-empty `custom-title`
 (`{"type": "custom-title", "customTitle": "<title>", "sessionId": "<uuid>"}`, a person's:
-`/rename`, the VS Code tab's rename), else its last `ai-title`, is read every 2 s of a turn
-(with the token rate, below) while the process has sent no title yet, and at the end of every
+`/rename`, the VS Code tab's rename), else its last `ai-title`, is read every 2 s of the first
+model turn of a new conversation (a new session, a fork, the first turn after `/clear`: the CLI
+writes `ai-title` then; a resumed transcript without one, tens of MB, is not read every 2 s;
+with the token rate, below) while the process has sent no title yet, and at the end of every
 turn, so a title a person gave is not taken back by an older `ai-title`; either is sent only
 when it differs from the last one sent. Before 0.151 the transcript was read only at the end of
 a turn, so a new session got its title when its first turn ended.

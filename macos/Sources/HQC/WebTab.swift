@@ -36,9 +36,10 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     // once the load finishes.
     private var pendingAction: ShortcutAction?
 
-    // A session a notification click asked for while the page was still loading; it is opened
-    // once the load finishes, in the new document.
-    private var pendingSession: String?
+    // A page address, as the parts of its `#/` route, that a notification click (a session) or
+    // New Session in Project (a project's new session) asked for while the page was still
+    // loading; it is opened once the load finishes, in the new document.
+    private var pendingRoute: [String]?
 
     // Fired (on the main thread) whenever the document title changes.
     var onTitleChanged: (() -> Void)?
@@ -139,23 +140,53 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     }
 
     private func run(_ action: ShortcutAction) {
-        webView.callAsyncJavaScript(action.script, arguments: [:], in: nil, in: .page,
+        guard let script = action.script else { return }
+        webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: .page,
                                     completionHandler: nil)
     }
 
     // Opens a session in the page, as a click on its row does; while the page is still
     // loading, once after the load finishes.
     func openSession(_ id: String) {
+        open(route: ["s", id])
+    }
+
+    // Opens the new-session screen of a project (`#/p/<id>/new`), as the client's New session
+    // button does; while the page is still loading, once after the load finishes.
+    func openNewSession(project id: String) {
+        open(route: ["p", id, "new"])
+    }
+
+    private func open(route: [String]) {
         if webView.isLoading {
-            pendingSession = id
+            pendingRoute = route
         } else {
-            setHash(session: id)
+            setHash(route)
         }
     }
 
-    private func setHash(session id: String) {
-        webView.callAsyncJavaScript("location.hash = '#/s/' + encodeURIComponent(id);",
-                                    arguments: ["id": id], in: nil, in: .page, completionHandler: nil)
+    // Sets the page's address to `#/` and the route's parts, each encoded, joined by `/`.
+    private func setHash(_ route: [String]) {
+        webView.callAsyncJavaScript("location.hash = '#/' + route.map((part) => encodeURIComponent(part)).join('/');",
+                                    arguments: ["route": route], in: nil, in: .page, completionHandler: nil)
+    }
+
+    // The hub's projects, the archived ones aside, by the client's own call (client/src/api.ts
+    // projects()); `done` gets their ids and names on the main thread, none when the call fails
+    // (not signed in, the page loading).
+    func projects(done: @escaping ([(id: String, name: String)]) -> Void) {
+        let script = """
+            const res = await fetch('/api/projects', { credentials: 'include' });
+            const body = await res.json();
+            return body.projects.map((p) => [p.id, p.name]);
+            """
+        webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: .page) { result in
+            guard case .success(let value) = result, let rows = value as? [[String]] else {
+                done([])
+                return
+            }
+            done(rows.compactMap { $0.count == 2 ? (id: $0[0], name: $0[1]) : nil })
+        }
     }
 
     // Answers a permission request with one of its options, by the client's own call
@@ -368,9 +399,9 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if let id = pendingSession {
-            pendingSession = nil
-            setHash(session: id)
+        if let route = pendingRoute {
+            pendingRoute = nil
+            setHash(route)
         }
         if let action = pendingAction {
             pendingAction = nil
@@ -381,13 +412,13 @@ final class WebTab: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessag
     // A load that failed drops what waited for it, so a later reload does not run it.
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         pendingAction = nil
-        pendingSession = nil
+        pendingRoute = nil
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
                  withError error: Error) {
         pendingAction = nil
-        pendingSession = nil
+        pendingRoute = nil
     }
 
     // The page's web process crashed or was killed: load it again.

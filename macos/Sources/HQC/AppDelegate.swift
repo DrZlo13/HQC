@@ -50,7 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    // Shows the window (also when it was closed) and runs a shortcut action in the active tab.
+    // Shows the window (also when it was closed) and hands a shortcut action to
+    // MainViewController.perform(_:).
     private func perform(_ action: ShortcutAction) {
         if let window = windowController?.window, window.isMiniaturized {
             window.deminiaturize(nil)

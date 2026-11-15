@@ -5,9 +5,11 @@
 // session actions do nothing.
 extension ShortcutAction {
 
-    var script: String {
+    // None for New Session in Project: MainViewController opens its project's address instead.
+    var script: String? {
         switch self {
         case .newSession: return Self.newSessionScript
+        case .newSessionInProject: return nil
         case .archiveSession: return Self.archiveScript
         case .previousSession: return Self.sessionStepScript(-1)
         case .nextSession: return Self.sessionStepScript(1)

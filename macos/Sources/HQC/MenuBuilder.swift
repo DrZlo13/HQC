@@ -27,11 +27,12 @@ enum MenuBuilder {
 
     // MARK: - File menu
 
-    // File ▸ New Session, Archive Session.
+    // File ▸ New Session, New Session in Project, Archive Session.
     private static func fileMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
         let menu = NSMenu(title: "File")
         menu.addItem(actionItem(.newSession))
+        menu.addItem(actionItem(.newSessionInProject))
         menu.addItem(actionItem(.archiveSession))
         item.submenu = menu
         return item

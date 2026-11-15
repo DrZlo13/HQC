@@ -67,9 +67,11 @@ struct Shortcut: Codable, Equatable {
     }
 }
 
-// What the app's shortcuts do, each run in the active tab's page.
+// What the app's shortcuts do, each run in the active tab's page; New Session in Project in the
+// tab of its project's server.
 enum ShortcutAction: String, CaseIterable {
     case newSession
+    case newSessionInProject
     case archiveSession
     case previousSession
     case nextSession
@@ -79,6 +81,7 @@ enum ShortcutAction: String, CaseIterable {
     var title: String {
         switch self {
         case .newSession: return "New Session"
+        case .newSessionInProject: return "New Session in Project"
         case .archiveSession: return "Archive Session"
         case .previousSession: return "Previous Session"
         case .nextSession: return "Next Session"
@@ -95,6 +98,7 @@ enum ShortcutAction: String, CaseIterable {
     var defaultShortcut: Shortcut {
         switch self {
         case .newSession: return Shortcut(keyCode: kVK_ANSI_N, flags: [.command], key: "n")
+        case .newSessionInProject: return Shortcut(keyCode: kVK_ANSI_N, flags: [.shift, .command], key: "n")
         case .archiveSession: return Shortcut(keyCode: kVK_ANSI_A, flags: [.control, .command], key: "a")
         case .previousSession: return Shortcut(keyCode: kVK_UpArrow, flags: [.option, .command], key: Self.up)
         case .nextSession: return Shortcut(keyCode: kVK_DownArrow, flags: [.option, .command], key: Self.down)
@@ -126,6 +130,33 @@ enum ShortcutAction: String, CaseIterable {
             }
         }
         self.shortcut = shortcut
+    }
+}
+
+// A project on one of the servers, as New Session in Project opens it: its target, kept in
+// UserDefaults as JSON, and each item of its menu in Settings. The name is what Settings shows
+// while the server's projects are not loaded.
+struct NewSessionTarget: Codable, Equatable {
+    let serverID: UUID
+    // The hub's id of the project.
+    let projectID: String
+    let projectName: String
+
+    private static let defaultsKey = "newSessionProject"
+
+    // The saved target; nil when none was picked.
+    static func load() -> NewSessionTarget? {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey) else { return nil }
+        return try? JSONDecoder().decode(NewSessionTarget.self, from: data)
+    }
+
+    // Saves `target` as the target; nil clears it.
+    static func save(_ target: NewSessionTarget?) {
+        if let target, let data = try? JSONEncoder().encode(target) {
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: defaultsKey)
+        }
     }
 }
 

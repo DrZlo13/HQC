@@ -32,6 +32,7 @@ pub async fn pause(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
+    not_room(&s)?;
     driven_from_hqc(&s)?;
     // The turn as it is when the pause is set: one that ends after it stops the agent itself.
     let turn_open: Option<bool> = sqlx::query_scalar(
@@ -59,6 +60,7 @@ pub async fn resume(
 ) -> ApiResult<Json<Value>> {
     let s = session_for(&app, &user, id, Action::Write).await?;
     not_system(&s)?;
+    not_room(&s)?;
     driven_from_hqc(&s)?;
     // Read under the row's lock: the end of a turn may have set the pause's time again just now.
     let resumed: Option<(DateTime<Utc>, bool, DateTime<Utc>)> = sqlx::query_as(
@@ -140,6 +142,17 @@ fn elapsed(secs: i64) -> String {
         (d, 0, _) => format!("{d} d"),
         (d, h, _) => format!("{d} d {h} h"),
     }
+}
+
+/// A room has no agent of its own to pause (SPEC §7.1.1): its agents are paused one by one.
+fn not_room(s: &db::SessionRow) -> ApiResult<()> {
+    if s.room_mode.is_some() {
+        return Err(ApiError::Conflict(
+            "room",
+            "a room has no agent of its own: its agents' sessions are paused and resumed".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn view(app: &AppState, user: &CurrentUser, id: Uuid) -> ApiResult<Json<Value>> {

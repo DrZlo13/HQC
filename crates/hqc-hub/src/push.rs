@@ -141,11 +141,14 @@ pub fn on_event(app: &AppState, s: &SessionRow, row: &EventRow, kind: &EventKind
             .first()
             .map(|q| format!("Question: {}", clip(&q.text, 140)))
             .unwrap_or_else(|| "The agent has a question".into()),
+        // A room's agent is not shown to the owner: its answer pushes as the post in the room
+        // (SPEC §7.1.1).
         EventKind::AgentMessage {
             text,
             r#final: true,
             ..
-        } => clip(text, 160),
+        } if s.room_id.is_none() => clip(text, 160),
+        EventKind::PeerMessage { text, .. } if s.room_mode.is_some() => clip(text, 160),
         EventKind::System { code, text, .. }
             if code == "agent_start_failed" || code == "input_rejected" =>
         {

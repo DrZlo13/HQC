@@ -34,6 +34,7 @@ pub mod peers;
 pub mod providers;
 pub mod push;
 pub mod requests;
+pub mod rooms;
 pub mod rules;
 pub mod schedules;
 pub mod search;
@@ -98,6 +99,7 @@ pub fn router(app: AppState) -> Router {
             "/api/projects/{id}/sessions",
             get(api::project_sessions).post(api::create_session),
         )
+        .route("/api/projects/{id}/rooms", post(api::create_room))
         .route(
             "/api/projects/{id}/session_order",
             get(api::get_session_order).put(api::put_session_order),

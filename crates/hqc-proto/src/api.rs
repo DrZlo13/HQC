@@ -112,6 +112,39 @@ pub struct Session {
     /// Absent — not paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<DateTime<Utc>>,
+    /// The mode of a room (SPEC §7.1.1, since 0.172): a session with no worker and no agent
+    /// (`runtime: none`) whose agents are sessions of their own. Present only on a room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_mode: Option<RoomMode>,
+    /// The room an agent's session belongs to (SPEC §7.1.1, since 0.172). Absent on other
+    /// sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<Uuid>,
+}
+
+/// How a room's agents wake (SPEC §7.1.1, since 0.172): in `conversation` the owner's message
+/// and every agent's post wake the room's other agents; in `council` only the owner's message
+/// wakes them, and each sees the posts since its last turn with its next input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomMode {
+    Conversation,
+    Council,
+}
+
+impl RoomMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoomMode::Conversation => "conversation",
+            RoomMode::Council => "council",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::Conversation, Self::Council]
+            .into_iter()
+            .find(|m| m.as_str() == s)
+    }
 }
 
 /// `spawned_by` of a session: the spawning session and its address
@@ -307,6 +340,36 @@ pub struct CreateSessionRequest {
     /// runtime's own endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<Uuid>,
+}
+
+/// `POST /api/projects/{id}/rooms` (SPEC §6, §7.1.1, since 0.172): a room and a session for
+/// each of `agents` (at least one), all in one workspace and folder, chosen as for
+/// [`CreateSessionRequest`], in `permission_mode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateRoomRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub mode: RoomMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
+    pub agents: Vec<RoomAgent>,
+}
+
+/// An agent of [`CreateRoomRequest`]: its model (absent or empty — the runtime's default) or
+/// provider, as for [`CreateSessionRequest`], and the system prompt its runtime gets
+/// (`--append-system-prompt` for Claude Code).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RoomAgent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 /// A project (SPEC §3 Project, §6): `GET /api/projects/{id}`, an element of the list, the
@@ -1437,6 +1500,43 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<CreateSessionRequest>("{}").unwrap(),
             CreateSessionRequest::default()
+        );
+    }
+
+    // SPEC 0.172: a room is a session with no worker and no agent; its agents are sessions with
+    // `room_id`.
+    #[test]
+    fn room_examples_roundtrip() {
+        let r: CreateRoomRequest =
+            roundtrip(include_str!("../examples/wire/api.room.request.json"));
+        assert_eq!(r.mode, RoomMode::Council);
+        assert_eq!(r.agents.len(), 3);
+        assert_eq!(
+            r.agents[2],
+            RoomAgent::default(),
+            "the runtime's default model"
+        );
+        let room: Session = roundtrip(include_str!("../examples/wire/api.session.room.json"));
+        assert_eq!(room.room_mode, Some(RoomMode::Council));
+        assert!(room.worker_id.is_none() && room.workspace_id.is_none() && room.room_id.is_none());
+        assert_eq!(room.agent.runtime, Runtime::None);
+        let member: Session = roundtrip(include_str!(
+            "../examples/wire/api.session.room.member.json"
+        ));
+        assert_eq!(member.room_id, Some(room.id));
+        assert_eq!(member.room_mode, None);
+        assert_eq!(member.spawned_by.map(|s| s.session_id), Some(room.id));
+        assert_eq!(member.workspace_id, r.workspace_id);
+        assert_eq!(member.agent.model, r.agents[0].model);
+        assert_eq!(member.agent.system_prompt, r.agents[0].system_prompt);
+        let plain: Session = roundtrip(include_str!("../examples/wire/api.session.json"));
+        assert!(plain.room_mode.is_none() && plain.room_id.is_none());
+        for m in [RoomMode::Conversation, RoomMode::Council] {
+            assert_eq!(RoomMode::parse(m.as_str()), Some(m));
+            assert_eq!(serde_json::to_value(m).unwrap(), m.as_str());
+        }
+        assert!(
+            serde_json::from_str::<CreateRoomRequest>(r#"{"mode":"chat","agents":[]}"#).is_err()
         );
     }
 

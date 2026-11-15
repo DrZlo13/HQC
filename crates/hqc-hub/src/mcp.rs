@@ -451,6 +451,13 @@ async fn rename(app: &AppState, caller: &SessionRow, v: Value) -> ToolResult {
             let (s, address) = crate::peers::target(app, caller, &s).await?;
             (s.id, address)
         }
+        // A room's agent is named by its title there (SPEC §7.1.1).
+        None if caller.room_id.is_some() => {
+            return Err(err(
+                error_code::INVALID_ARGS,
+                "this session's title is its name in its room: it is not renamed",
+            ));
+        }
         None => (
             caller.id,
             crate::peers::address(app, caller).await.map_err(internal)?,

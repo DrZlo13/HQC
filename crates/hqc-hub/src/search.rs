@@ -7,7 +7,8 @@
 //!   output (D); and session titles (A). `/` and `.` are read as spaces there and in the
 //!   query, so a path or an address is a phrase of its parts.
 //! - Whose: the owner's sessions, archived ones included (and marked), the workers' service
-//!   sessions left out. Until grants (iteration 6) nobody else's.
+//!   sessions left out, and of a room's agents' sessions the inputs from the room, which the
+//!   room has itself. Until grants (iteration 6) nobody else's.
 //! - How: the `hqc` configuration stems Russian and English words, so a word finds its other
 //!   forms. [`Parsed`] reads the query (words ANDed, `"phrase"`, `or`, `-word`, `word*`);
 //!   Postgres reads each operand with `to_tsquery` ([`READ`]), and [`Parsed::assembled`] puts
@@ -373,6 +374,7 @@ async fn hits(
                     ts_rank(e.search_words, $6::tsquery, 1) AS rank
              FROM events e JOIN s ON s.id = e.session_id
              WHERE e.search_words IS NOT NULL AND e.search_words @@ $5::tsquery
+                 AND NOT (e.type = 'peer.message' AND e.payload ? 'room')
                  AND ($8::text[] IS NULL OR e.type = ANY($8::text[]))
                  AND ($9::timestamptz IS NULL OR e.ts >= $9::timestamptz)
              UNION ALL
@@ -456,6 +458,7 @@ async fn counts(
              SELECT e.session_id, k.kind
              FROM events e JOIN s ON s.id = e.session_id JOIN k ON k.type = e.type
              WHERE e.search_words IS NOT NULL AND e.search_words @@ $4::tsquery
+                 AND NOT (e.type = 'peer.message' AND e.payload ? 'room')
                  AND ($5::timestamptz IS NULL OR e.ts >= $5::timestamptz)
              UNION ALL
              SELECT s.id, 'title' FROM s

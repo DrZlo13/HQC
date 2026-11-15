@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use hqc_proto::{
-    api::{Agent, Session, SpawnedBy},
+    api::{Agent, RoomMode, Session, SpawnedBy},
     event::SessionState,
     frame::{LockedBy, PermissionMode, ProcessState, Runtime, SlashCommand, TitleSource},
 };
@@ -250,6 +250,8 @@ async fn build(
                 ),
                 favorite_at: a.favorite_at,
                 paused_at: s.paused_at,
+                room_mode: s.room_mode.as_deref().and_then(RoomMode::parse),
+                room_id: s.room_id,
             })
         })
         .collect())

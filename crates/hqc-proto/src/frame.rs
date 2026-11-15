@@ -80,6 +80,10 @@ pub enum Activity {
     Compacting,
     /// The model thinks, `estimated_tokens` so far by the runtime's estimate.
     Thinking { estimated_tokens: u64 },
+    /// A kind this hub does not know (a newer worker's): the rest of `session.state` still
+    /// reads, and clients show none.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `error {code, message, retryable, details?}` (SPEC §5).
@@ -1500,6 +1504,15 @@ mod tests {
     use super::*;
     use serde::de::DeserializeOwned;
     use serde_json::{json, Value};
+
+    /// SPEC 0.173: an `activity` of a kind this hub does not know reads as `Unknown`, so the rest
+    /// of a newer worker's `session.state` still reads.
+    #[test]
+    fn an_unknown_activity_reads() {
+        let a: Activity =
+            serde_json::from_value(json!({"kind": "waiting_hook", "hook": "PreToolUse"})).unwrap();
+        assert_eq!(a, Activity::Unknown);
+    }
 
     /// Frame `type` values of iteration 1, as written in SPEC §5.3 / §5.4.
     const SPEC_HUB_TYPES: &[&str] = &[

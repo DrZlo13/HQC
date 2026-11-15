@@ -5251,6 +5251,20 @@ fn a_refusal_of_an_older_model_switch_is_dropped() {
     );
 }
 
+/// SPEC §8.1: the CLI's fixed "set_model failed" can follow a switch that applied; one naming
+/// the model asked for gives no line.
+#[test]
+fn a_failed_answer_naming_the_model_asked_for_is_no_line() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let id = match core.set_model("claude-sonnet-5") {
+        Action::Write(v) => v["request_id"].as_str().unwrap().to_owned(),
+        a => panic!("{a:?}"),
+    };
+    let answer = json!({"type": "control_response", "response": {"subtype": "error",
+        "request_id": id, "error": "set_model failed", "model": "claude-sonnet-5"}});
+    assert!(core.on_line(&answer.to_string()).is_empty());
+}
+
 /// SPEC §4, §8.1: a refusal answered by another model for the session (`model_refusal_fallback`
 /// with `scope` `session` or none, cli:108465) makes the turn's `usage` name the model that
 /// answered; with `scope` `local` (a subagent's or a side question's answer) it does not.

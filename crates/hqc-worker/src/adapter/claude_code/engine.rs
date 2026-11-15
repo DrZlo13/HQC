@@ -450,8 +450,9 @@ pub struct Core {
     /// hqc's allow rules of the session's workspace and its path (T48); `None` without one.
     folder: Option<(FolderRules, std::path::PathBuf)>,
     model: Option<String>,
-    /// `request_id` of the latest `set_model` sent ([`Core::set_model`]).
+    /// `request_id` of the latest `set_model` sent ([`Core::set_model`]), and its model.
     model_request: Option<String>,
+    model_requested: Option<String>,
     /// The session's cumulative cost and `modelUsage` token sums as of the last `usage` with a
     /// `cost_usd` (or the transcript's last `cost-state` when resumed, none after `/clear`):
     /// the baseline of the next turn's cost and of a compaction's tokens, one value so that
@@ -587,6 +588,7 @@ impl Core {
             folder: None,
             model: None,
             model_request: None,
+            model_requested: None,
             cost_base: None,
             compacted: false,
             commands: None,
@@ -828,6 +830,7 @@ impl Core {
     pub fn set_model(&mut self, model: &str) -> Action {
         let id = format!("{MODEL_REQUEST}{}", Uuid::now_v7());
         self.model_request = Some(id.clone());
+        self.model_requested = Some(model.to_owned());
         Action::Write(json!({
             "type": "control_request",
             "request_id": id,
@@ -1365,8 +1368,12 @@ impl Core {
             {
                 return vec![];
             }
-            // The error names the model the CLI kept (2.1.312): the session's again.
+            // The error names the model the CLI kept (2.1.312): the session's again. The fixed
+            // "set_model failed" can follow a switch that applied, naming the model asked for.
             let kept = r["model"].as_str().map(text);
+            if kept.is_some() && kept == self.model_requested {
+                return vec![];
+            }
             let why = r["error"].as_str().map_or_else(|| "refused".into(), text);
             let t = match &kept {
                 Some(m) => format!("Model not switched: {why}. The agent stays on {m}"),

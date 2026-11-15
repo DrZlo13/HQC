@@ -55,6 +55,9 @@ pub enum Ingested {
     Refused(String),
 }
 
+/// Most events one `retraction` hides: the runtime takes back the records of one answer.
+const MAX_RETRACTED: usize = 1024;
+
 /// Event types only the hub writes (SPEC §4): input of users, answers to requests and
 /// messages between sessions, and `schedules.live`. A worker sending one is refused.
 fn hub_only(kind: &EventKind) -> bool {
@@ -168,6 +171,17 @@ pub async fn ingest_worker_event(
                 tracing::warn!(session_id = %s.id, "a worker's approval.request carried `secret`: dropped");
             }
         }
+    }
+    // A retraction hides events in every client and in forks (SPEC 0.173): it may name only the
+    // agent's own output in this session, at most MAX_RETRACTED events; other ids are left out
+    // of what is stored (the worker also names records that gave no event).
+    if let EventKind::Retraction { event_ids } = &ev.kind {
+        let named = &event_ids[..event_ids.len().min(MAX_RETRACTED)];
+        let kept = db::retractable(&app.db, s.id, named).await?;
+        if kept.len() != event_ids.len() {
+            tracing::info!(session_id = %s.id, named = event_ids.len(), kept = kept.len(), "retraction: ids it may not hide left out");
+        }
+        payload = json!({ "event_ids": kept });
     }
     let new = NewEvent {
         event_id: ev.event_id,

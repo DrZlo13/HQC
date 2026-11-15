@@ -2837,6 +2837,25 @@ pub async fn insert_event(db: &PgPool, e: &NewEvent) -> sqlx::Result<Inserted> {
 
 /// [`insert_event`] of an event that is read for `user` at once: the read cursor moves over
 /// it in the same transaction, so an imported record costs one commit (SPEC §9.1).
+/// Of `ids`, in their order, the events of `session_id` a `retraction` may hide (SPEC 0.173):
+/// the agent's own replies, thinking, calls and results.
+pub async fn retractable(db: &PgPool, session_id: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<Uuid>> {
+    let found: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT event_id FROM events
+         WHERE session_id = $1 AND event_id = ANY($2) AND author ->> 'kind' = 'agent'
+           AND type IN ('agent.message', 'agent.thinking', 'tool.call', 'tool.result')",
+    )
+    .bind(session_id)
+    .bind(ids)
+    .fetch_all(db)
+    .await?;
+    Ok(ids
+        .iter()
+        .copied()
+        .filter(|id| found.contains(id))
+        .collect())
+}
+
 pub async fn insert_event_read(db: &PgPool, e: &NewEvent, user: Uuid) -> sqlx::Result<Inserted> {
     Ok(insert(db, e, None, Some(user))
         .await?

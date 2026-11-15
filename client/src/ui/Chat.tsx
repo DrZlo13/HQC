@@ -768,7 +768,10 @@ export function Chat({
           {notice}
         </div>
       )}
-      {!system && info?.worker_id && <LimitBar load={loadLimits} refresh={`${info.worker_id} ${state}`} />}
+      {/* A session on a provider does not run on the subscription the limits are of. */}
+      {!system && info?.worker_id && !info.provider && (
+        <LimitBar load={loadLimits} refresh={`${info.worker_id} ${state}`} />
+      )}
       {/* The list also holds the agent's background commands, which only background_tasks counts. */}
       {/* The wakeups and cron jobs of the agent and the session's schedules wait while it is idle. */}
       {((info?.subagents ?? 0) > 0 ||

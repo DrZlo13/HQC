@@ -564,7 +564,7 @@ the client renders only them. The "source" column is the component that produces
 | `usage` | `input_tokens`, `output_tokens`, `cache_read?`, `cache_write?`, `cost_usd?`, `session_cost_usd?`, `model?` | Claude Code adapter on `result` (since 0.69 not on one with `num_turns: 0`, no tokens and no cost; since 0.115 one with `num_turns: 0` and no tokens, since 0.161 any with no tokens, unless a compaction came in it, carries no tokens, no `cost_usd` and the grown `session_cost_usd`, and the feed draws no line for it, §8.1; since 0.170 the `usage` of a compaction carries the growth of `modelUsage` as its tokens); for ACP agents optional and without `cost_usd` (ACP v1 has no standard usage). Since 0.28 (T27): `cost_usd` is the cost of this turn (since 0.115 with what background subagents spent after the previous `usage` with a `cost_usd` of the same process, since 0.161 also with what a turn with no tokens before it cost, §8.1); `session_cost_usd` is the runtime's own running total of the whole runtime session after the turn (Claude Code: `result.total_cost_usd`, carried over `--resume`), absent if the runtime has none (§8.1). The client's header shows the latest `session_cost_usd`, else the sum of `cost_usd`; since 0.162 plus the last `session_cost_usd` before each `system conversation_cleared` (after `/clear` the runtime counts from 0 again, §8.1), so it shows the whole session's cost |
 | `status` | `state` (§17.1), `detail?`, `in_reply_to?` (since 0.69: on the `idle` that ends a turn, the event_id of the turn's input once the runtime echoed it (§8.1; in 0.69 the input the adapter sent last once echoed), as on `agent.message`; a turn the runtime starts by itself after a background task carries the input before it; absent on other statuses and from older workers; the hub fails an `hqc_ask` by it, §7.1) | worker or hub; the Claude Code adapter sends `idle` with `in_reply_to` on `result` (§8.1; since 0.161 without `detail`: why a turn ended early is a `system` line, `turn_interrupted` or `turn_ended_early`, below), and since 0.121 `running` on the `system/init` of a turn the CLI starts by itself (§8.1) |
 | `system` | `text`, `code`, `level?` (`warn` \| `error`, only on `worker_log`), `call_id?`, `status?`, `task_id?` (since 0.135, only on `task_notification`), `from_session_id?` (since 0.172, only on `room_passed`: the agent that passed), `trigger?`, `pre_tokens?`, `post_tokens?` (since 0.173, only on `context_compacted`), `model?` (since 0.173, only on `model_not_switched`) | hub or worker; codes below |
-| `retraction` | `event_ids[]` | adapter (since 0.173): events of the session the runtime took back — Claude Code's answer of a model that refused, replaced by another model's answer (§8.1). Stored like any event; nothing is deleted: clients do not show the events it names, also ones loaded after it, nor the retraction itself |
+| `retraction` | `event_ids[]` | adapter (since 0.173): events of the session the runtime took back — Claude Code's answer of a model that refused, replaced by another model's answer (§8.1). The hub keeps of `event_ids` only the session's own `agent.message`, `agent.thinking`, `tool.call` and `tool.result` of the agent, at most 1024, and stores it with those; nothing is deleted: clients do not show the events it names, also ones loaded after it, nor the retraction itself; search (§15) still finds them |
 
 `system` codes (the list is open; the client shows an unknown code as text):
 
@@ -1365,7 +1365,8 @@ MCP calls (worker → hub → worker):
   — a request to the model API failed and is retried after `retry_delay_ms` (`error_status`
   absent: the attempt got no response); `{kind: compacting}` — the runtime compacts the
   context; `{kind: thinking, estimated_tokens}` — the model thinks, about that many tokens into
-  its thinking block. Absent — none, and like `subagents` every report says it; the worker
+  its thinking block; a kind the hub does not know reads as none (a newer worker's), and the
+  rest of the frame still reads. Absent — none, and like `subagents` every report says it; the worker
   sends a `session.state` whenever it changes, a new thinking estimate at most once per 2 s.
   The hub keeps it in memory, not in the database, as the session's `activity` (§6), and drops
   it when an event ends the turn, the turn times out or is lost (§17.3), the agent stops, its
@@ -1903,7 +1904,8 @@ the rest is marked "later"):
   `rejected` (the limit named by `rate_limit_type`, "usage limit" for one it does not know), else
   "You've used 82% of your weekly limit · resets Wed 18:00" for the fuller window at 70 % or
   more; nothing below, and nothing for a limit or a window whose reset time has passed (the hub
-  keeps the last report, and a new one comes with the next turn).
+  keeps the last report, and a new one comes with the next turn), nor in a session on a provider
+  (its model does not run on the subscription the limits are of).
   `GET /api/workers/enroll/{code}` → `{name, os, created_at, country?, replaceable?}`
   (`EnrollInfo`; `country` is `CF-IPCountry` of the `enroll` request, absent with
   `HQC_CLIENT_IP_HEADER`, §5.1; `replaceable`: §5.1, workers
@@ -4246,7 +4248,9 @@ and `model`, the model it kept) gives `system model_not_switched` with the error
 and that `model`; the worker keeps the model as the session's, so a `session.model` naming it
 switches nothing, and the hub makes it the session's `agent.model` (§4). Only a refusal of the
 latest `set_model` the adapter sent does: one of an earlier request, after which the user chose
-another model, is only logged, since the model it names is not the one asked for last.
+another model, is only logged, since the model it names is not the one asked for last. So is one
+whose `model` is the model asked for: the CLI's fixed "set_model failed" can follow a switch that
+applied, "so it names the model too" (2.1.312).
 
 Limits (since 0.81). The CLI writes a `rate_limit_event` before each turn's answer (2.1.310):
 `rate_limit_info.unifiedWindows.{five_hour, seven_day}` with `utilization` and `resetsAt`; the
@@ -6337,19 +6341,25 @@ the `usage` names the fallback. A refusal with no other model (`model_refusal_no
 feed: the worker reads `supersedes` and `retracted_message_uuids` and sends the new event type
 `retraction` with the ids of the events it derived from those records, which the hub stores like any
 event and clients do not show, nor the events it names (as the VS Code tab drops those rows); it
-also ends the text being written, for which no message comes, and a fork leaves those events out. A
+also ends the text being written, for which no message comes, and a fork leaves those events out.
+Of its ids the hub keeps only the agent's own replies, thinking, calls and results of the session,
+at most 1024, so a worker cannot hide a person's message, an answer or another session's event;
+search still finds them. A
 `system model_refusal_fallback` line says which model answered, and the turn's `usage` names it
 unless the fallback's `scope` is `local`. A model switch the CLI refused was only logged while the
 header showed the model chosen: it is a `system model_not_switched` line with the reason and
 `model`, the model kept, which the worker keeps and the hub makes the session's `agent.model`; an
 open chat fetches the session object again on that line, and a refusal of a switch the user has made
-again since is only logged. MCP servers that did not connect (not the ones the user turned off) and
+again since is only logged, as is one that names the model asked for (the CLI's fixed "set_model
+failed" after a switch that applied). MCP servers that did not connect (not the ones the user turned off) and
 plugins that did not load were silent: `system mcp_not_connected` and `system plugin_errors`, given
 when their list changes, not before every turn. §5.4, §6: `worker.limits` carries `status`,
 `rate_limit_type` and `resets_at` of the limit nearest, `GET /api/workers` shows them, and the chat
 shows a bar above the input at 70 % of a window or once a limit is hit ("You've hit your 5-hour
 limit · resets 18:00"), worded as the VS Code tab words it, though the tab shows the share only once
-the status is `allowed_warning`; a limit or a window whose reset time has passed shows none. Before,
+the status is `allowed_warning`; a limit or a window whose reset time has passed shows none, nor a
+session on a provider. A `session.state.activity` of a kind the hub does not know reads as none, so
+a newer worker's frame still reads. Before,
 the limits showed only in the "More" menu. An older worker sends none of these, older hubs ignore
 the new fields (an older hub stores a `retraction` as an event of an unknown type), and an older
 client shows the new codes as text and a `retraction` as a collapsed card of an unknown event, next

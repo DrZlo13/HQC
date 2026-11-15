@@ -1418,6 +1418,55 @@ async fn a_retraction_ends_the_answer_text() {
     hub.finish().await;
 }
 
+/// SPEC §4 (0.173): a `retraction` hides only the agent's own output in its session: of the ids
+/// it names, the hub keeps that of its session's `agent.message` and drops those of a person's
+/// message, of another session's answer and of no event.
+#[tokio::test]
+async fn a_retraction_hides_only_the_agents_output() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let other = hub.create_session("other").await;
+    ack_start(&mut w, &other).await;
+    let theirs = agent_event(
+        &other,
+        "agent.message",
+        json!({"text": "theirs", "final": true}),
+    );
+    w.event(theirs.clone()).await;
+    let sid = hub.create_session("retracted").await;
+    ack_start(&mut w, &sid).await;
+    let (s, r) = hub
+        .post(
+            &format!("/api/sessions/{sid}/input"),
+            json!({"text": "mine"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{r}");
+    let input = r["event"]["event_id"].clone();
+    let si = w.expect("session.input").await;
+    w.reply(&si["id"], "ack", json!({"event_id": input})).await;
+    let refused = agent_event(
+        &sid,
+        "agent.message",
+        json!({"text": "refused", "final": true}),
+    );
+    w.event(refused.clone()).await;
+    w.event(agent_event(
+        &sid,
+        "retraction",
+        json!({"event_ids": [input, theirs["event_id"], refused["event_id"], Uuid::now_v7()]}),
+    ))
+    .await;
+    let events = hub.events(&sid).await;
+    let retraction = events.iter().find(|e| e["type"] == "retraction").unwrap();
+    assert_eq!(
+        retraction["payload"],
+        json!({"event_ids": [refused["event_id"]]})
+    );
+    hub.finish().await;
+}
+
 /// Web Push on approval.request when nobody watches; no push while a client is subscribed.
 #[tokio::test]
 async fn push_only_without_live_subscription() {

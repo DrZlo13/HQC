@@ -161,6 +161,9 @@ pub async fn ingest(
             | EventKind::SubagentsLive { .. }
             | EventKind::TokensRate { .. }
             | EventKind::SchedulesLive { .. }
+            // The adapter's alone (SPEC §4): stored only through the worker's `event`, which
+            // keeps of its ids the agent's own output.
+            | EventKind::Retraction { .. }
     ) {
         return Ok(dropped.into());
     }

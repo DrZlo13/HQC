@@ -64,6 +64,19 @@ pub fn summary(cfg: &Config) -> String {
     for b in &cfg.env_bindings {
         let _ = writeln!(out, "  {} -> {}", b.path, b.environment);
     }
+    // SPEC 0.144: a session runs on one only when the hub describes it with this base_url.
+    out.push_str("providers:\n");
+    if cfg.providers.is_empty() {
+        out.push_str("  none\n");
+    }
+    for p in &cfg.providers {
+        let key = if p.api_key.is_some() {
+            "api_key ***"
+        } else {
+            "no api_key"
+        };
+        let _ = writeln!(out, "  {}: {} ({key})", p.name, p.base_url);
+    }
     out
 }
 
@@ -153,6 +166,21 @@ pub fn add_key(store: &Store, name: &str, file: &Path) -> anyhow::Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn providers_are_listed_without_keys() {
+        let c = Config::parse(
+            "hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n\
+             [providers.zai]\nbase_url = \"https://api.z.ai/api/anthropic\"\napi_key = \"sk-zai-secret\"\n",
+        )
+        .unwrap();
+        let out = summary(&c);
+        assert!(
+            out.contains("zai: https://api.z.ai/api/anthropic (api_key ***)"),
+            "{out}"
+        );
+        assert!(!out.contains("sk-zai-secret"));
+    }
 
     #[test]
     fn values_are_never_printed() {

@@ -108,6 +108,16 @@ struct RawConfig {
     environments: BTreeMap<String, RawEnvironment>,
     #[serde(default)]
     env_bindings: Vec<RawBinding>,
+    #[serde(default)]
+    providers: BTreeMap<String, RawProvider>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProvider {
+    base_url: String,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,6 +233,29 @@ impl Environment {
     }
 }
 
+fn parse_provider(name: &str, raw: RawProvider) -> anyhow::Result<AllowedProvider> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("a provider's name is letters, digits, '-' and '_'");
+    }
+    let base_url = raw.base_url.trim_end_matches('/').to_string();
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+        || base_url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        bail!("base_url must be an http:// or https:// URL");
+    }
+    Ok(AllowedProvider {
+        name: name.to_string(),
+        base_url,
+        api_key: raw.api_key.filter(|k| !k.is_empty()).map(Secret::new),
+    })
+}
+
 fn parse_environment(
     name: &str,
     raw: RawEnvironment,
@@ -324,6 +357,29 @@ fn is_loopback(u: &reqwest::Url) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// A model provider `worker.toml` allows (`[providers.<name>]`, SPEC §14, since 0.144): a
+/// session the hub starts with a provider of this name and this `base_url` runs on it. The
+/// hub keeps the description; the worker decides, and keeps the key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AllowedProvider {
+    pub name: String,
+    /// Without a trailing `/`, as it is compared.
+    pub base_url: String,
+    /// `ANTHROPIC_AUTH_TOKEN` for an endpoint that needs one; never in `hello` or logs.
+    pub api_key: Option<Secret>,
+}
+
+/// A provider a session runs on: the hub's description, checked against the worker's
+/// [`AllowedProvider`] ([`Config::check_start`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionProvider {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    pub context_tokens: Option<u32>,
+    pub api_key: Option<Secret>,
+}
+
 /// Validated config. Paths are absolute and normalized (canonical when they exist).
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -367,6 +423,8 @@ pub struct Config {
     pub scratch_root: PathBuf,
     /// The key store `$HQC_HOME/keys` and the agent sockets `$HQC_HOME/agents` (T44).
     pub ssh: crate::ssh::Store,
+    /// `[providers.*]` by name.
+    pub providers: Vec<AllowedProvider>,
 }
 
 /// What a session may be started with, after checking `session.start` against the config.
@@ -405,6 +463,11 @@ pub struct StartSpec {
     /// `session.start.has_history` (SPEC §5.3): the session has had a conversation, so a
     /// missing transcript is reported, not just started anew.
     pub has_history: bool,
+    /// `session.start.provider` as this worker allows it; `None`: the runtime's own endpoint.
+    pub provider: Option<SessionProvider>,
+    /// Why `session.start.provider` was not run (SPEC §8.1 `provider_refused`): the session
+    /// starts without it.
+    pub provider_refused: Option<String>,
 }
 
 impl StartSpec {
@@ -505,6 +568,11 @@ impl Config {
                 environment: b.environment,
             });
         }
+        let providers = raw
+            .providers
+            .into_iter()
+            .map(|(name, p)| parse_provider(&name, p).with_context(|| format!("providers.{name}")))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let home = hqc_home().unwrap_or_else(|_| std::env::temp_dir().join("hqc"));
         Ok(Self {
             hub_url: raw.hub_url.trim_end_matches('/').to_string(),
@@ -525,6 +593,7 @@ impl Config {
             clone_timeout: Duration::from_secs(raw.clone_timeout),
             scratch_root: home.join("scratch"),
             ssh: crate::ssh::Store::in_home(&home),
+            providers,
         })
     }
 
@@ -561,6 +630,13 @@ impl Config {
         if !s.owner_is_worker_owner && !self.allow_foreign_sessions {
             return Err("foreign sessions are not allowed on this worker".into());
         }
+        let (provider, provider_refused) = match &s.provider {
+            None => (None, None),
+            Some(p) => match self.provider(p) {
+                Ok(p) => (Some(p), None),
+                Err(why) => (None, Some(why)),
+            },
+        };
         Ok(StartSpec {
             session_id: s.session_id,
             runtime: s.runtime,
@@ -580,6 +656,36 @@ impl Config {
             folder_rules: None,
             fork: s.fork.clone(),
             has_history: s.has_history,
+            provider,
+            provider_refused,
+        })
+    }
+
+    /// The hub's description of a provider as this worker allows it (SPEC §14): its name in
+    /// `[providers.*]` with the same `base_url`, and a model that may go on a command line.
+    /// `Err` is the reason the session starts without it.
+    pub fn provider(&self, p: &hqc_proto::frame::Provider) -> Result<SessionProvider, String> {
+        let Some(allowed) = self.providers.iter().find(|a| a.name == p.name) else {
+            return Err(format!(
+                "this worker does not allow the provider {:?}",
+                p.name
+            ));
+        };
+        if p.base_url.trim_end_matches('/') != allowed.base_url {
+            return Err(format!(
+                "the provider {:?} is allowed on this worker with another base_url",
+                p.name
+            ));
+        }
+        if !valid_model(&p.model) {
+            return Err(format!("{:?} is not a model name", p.model));
+        }
+        Ok(SessionProvider {
+            name: allowed.name.clone(),
+            base_url: allowed.base_url.clone(),
+            model: p.model.clone(),
+            context_tokens: p.context_tokens,
+            api_key: allowed.api_key.clone(),
         })
     }
 
@@ -771,6 +877,73 @@ mod tests {
         };
         s.workspace_path = Some(ws.display().to_string());
         s.clone()
+    }
+
+    /// SPEC 0.144: a provider runs only by its name in `[providers.*]` with the same
+    /// `base_url`; any other description starts the session without it and says why. The
+    /// key is never in `hello` or in `Debug`.
+    #[test]
+    fn providers_are_allowed_by_name_and_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ws")).unwrap();
+        let c = Config::parse(&format!(
+            "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\n\
+             [providers.qwen-local]\nbase_url = \"http://192.168.1.229:8082/\"\n\
+             [providers.zai]\nbase_url = \"https://api.z.ai/api/anthropic\"\napi_key = \"sk-zai-secret\"\n",
+            dir.path().display().to_string(),
+        ))
+        .unwrap();
+        let names: Vec<&str> = c.providers.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["qwen-local", "zai"]);
+        assert_eq!(c.providers[0].base_url, "http://192.168.1.229:8082");
+        assert!(!format!("{c:?}").contains("sk-zai-secret"));
+
+        let described = |name: &str, base_url: &str| hqc_proto::frame::Provider {
+            name: name.into(),
+            base_url: base_url.into(),
+            model: "qwen3.8-27b".into(),
+            context_tokens: Some(200_000),
+        };
+        let mut s = start(&ws(&c));
+        // A trailing `/` is the same endpoint.
+        s.provider = Some(described("qwen-local", "http://192.168.1.229:8082/"));
+        let spec = c.check_start(&s).unwrap();
+        let p = spec.provider.unwrap();
+        assert_eq!(
+            (p.name.as_str(), p.model.as_str()),
+            ("qwen-local", "qwen3.8-27b")
+        );
+        assert_eq!(p.context_tokens, Some(200_000));
+        assert!(p.api_key.is_none());
+        assert!(spec.provider_refused.is_none());
+        // The key comes from `worker.toml`, never from the hub.
+        s.provider = Some(described("zai", "https://api.z.ai/api/anthropic"));
+        let p = c.check_start(&s).unwrap().provider.unwrap();
+        assert_eq!(p.api_key.unwrap().expose(), "sk-zai-secret");
+
+        for (name, url, why) in [
+            ("other", "http://192.168.1.229:8082", "does not allow"),
+            ("qwen-local", "http://evil.example:8082", "another base_url"),
+        ] {
+            s.provider = Some(described(name, url));
+            let spec = c.check_start(&s).unwrap();
+            assert!(spec.provider.is_none(), "{name} {url}");
+            assert!(spec.provider_refused.unwrap().contains(why));
+        }
+        s.provider = Some(hqc_proto::frame::Provider {
+            model: "--dangerously-skip-permissions".into(),
+            ..described("qwen-local", "http://192.168.1.229:8082")
+        });
+        assert!(c.check_start(&s).unwrap().provider.is_none());
+
+        for bad in [
+            "[providers.\"a b\"]\nbase_url = \"http://x\"\n",
+            "[providers.x]\nbase_url = \"ftp://x\"\n",
+            "[providers.x]\nbase_url = \"http://x\"\nkey = \"k\"\n",
+        ] {
+            let text = format!("hub_url = \"https://h\"\nallowed_roots = [\"/a\"]\n{bad}");
+            assert!(Config::parse(&text).is_err(), "{bad}");
+        }
     }
 
     #[test]

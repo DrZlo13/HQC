@@ -39,6 +39,9 @@ pub const TRANSCRIPT_MISSING_TEXT: &str = "The Claude Code transcript of this se
     (Claude Code deletes transcripts older than its cleanupPeriodDays setting, 30 days by \
     default): the agent continues without the earlier conversation";
 
+/// `system.code` of a session whose provider this worker does not allow (SPEC §4, §8.1).
+pub const PROVIDER_REFUSED: &str = "provider_refused";
+
 use anyhow::Context;
 use async_trait::async_trait;
 use hqc_proto::event::{Author, ClarifyAnswer, EventKind};
@@ -85,6 +88,42 @@ const STDERR_TAIL: usize = 2048;
 /// [`PROJECT_SETTING_SOURCES`].
 pub const SETTING_SOURCES: &str = "user,local";
 pub const PROJECT_SETTING_SOURCES: &str = "user,project,local";
+
+/// Credentials of the worker's own environment that a session with a provider does not get:
+/// the CLI would send them to the provider's endpoint.
+const PROVIDER_DROPS: &[&str] = &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"];
+
+/// The CLI's variables for a provider (SPEC §8.1, since 0.144), on top of the environment's:
+/// the endpoint, its key (a placeholder when it needs none: the CLI then sends no OAuth token
+/// of the subscription), and every model name the CLI uses — the main model, the aliases, the
+/// small fast model, subagents — on the provider's one model, so that a server which swaps
+/// models on one GPU is never asked for another.
+pub fn provider_env(p: &crate::config::SessionProvider) -> Vec<(String, String)> {
+    let key = p.api_key.as_ref().map_or("hqc", |k| k.expose()).to_string();
+    let mut env = vec![
+        ("ANTHROPIC_BASE_URL".to_string(), p.base_url.clone()),
+        ("ANTHROPIC_AUTH_TOKEN".to_string(), key),
+        (
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+            "1".to_string(),
+        ),
+    ];
+    for k in [
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ] {
+        env.push((k.to_string(), p.model.clone()));
+    }
+    if let Some(n) = p.context_tokens {
+        env.push(("CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(), n.to_string()));
+    }
+    env
+}
 
 /// The agent's environment: only these variables of the worker's (SPEC §8.1), never `HQC_*`
 /// (the worker's token store, config) or other secrets the worker runs with. `SHELL` and
@@ -589,7 +628,12 @@ impl ClaudeCodeAdapter {
             ]),
         }
         args.push("--verbose".into());
-        if let Some(m) = &spec.model {
+        // A provider has one model, and every model name goes to it (SPEC §8.1).
+        let model = match &spec.provider {
+            Some(p) => Some(&p.model),
+            None => spec.model.as_ref(),
+        };
+        if let Some(m) = model {
             args.extend(["--model".into(), m.clone()]);
         }
         args.extend(self.opts.extra_args.iter().cloned());
@@ -603,6 +647,14 @@ impl ClaudeCodeAdapter {
             cwd: spec.workdir.clone(),
             env: {
                 let mut env = spec.environment.process_env();
+                if let Some(p) = &spec.provider {
+                    // The worker's own Anthropic credentials never reach another endpoint.
+                    env.retain(|(k, _)| !PROVIDER_DROPS.contains(&k.as_str()));
+                    for (k, v) in provider_env(p) {
+                        env.retain(|(x, _)| *x != k);
+                        env.push((k, v));
+                    }
+                }
                 // The worker's own come last.
                 env.retain(|(k, _)| k != "CLAUDE_CODE_ENTRYPOINT" && k != "MCP_TOOL_TIMEOUT");
                 if let Some(sock) = ssh_agent {
@@ -718,6 +770,24 @@ impl ClaudeCodeAdapter {
             ssh_keys = ?spec.environment.ssh_keys,
             "claude started"
         );
+        // A provider the hub asked for that this worker does not allow: the agent runs on the
+        // runtime's own endpoint, and the feed says why (SPEC §8.1).
+        if let Some(why) = &spec.provider_refused {
+            tracing::warn!(session_id = %self.session_id, reason = %why, "provider refused; the agent starts without it");
+            let ev = crate::adapter::new_event(
+                self.session_id,
+                Author::System,
+                EventKind::System {
+                    text: format!("{why}: the agent runs on Claude Code's own endpoint"),
+                    code: PROVIDER_REFUSED.into(),
+                    call_id: None,
+                    status: None,
+                    task_id: None,
+                    fork: None,
+                },
+            );
+            let _ = self.events.send(AdapterEvent::Event(ev)).await;
+        }
         // The session talked before, but its transcript is gone (Claude Code deletes those
         // older than its `cleanupPeriodDays`, 30 days by default): the agent starts without the
         // conversation, and the feed says so (SPEC §8.1).

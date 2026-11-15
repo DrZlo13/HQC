@@ -1654,6 +1654,39 @@ async fn runtime_title_does_not_override_the_user() {
     hub.finish().await;
 }
 
+/// SPEC §5.4 (0.145): a `session.state` that repeats what the hub has, as the one the worker
+/// sends again after a reconnect does here, keeps the session's `updated_at`; a change of the
+/// process moves it.
+#[tokio::test]
+async fn a_repeated_state_keeps_the_session_time() {
+    let hub = TestHub::start().await;
+    let (_, token) = hub.enroll("home-mac").await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    let sid = hub.create_session("Kept time").await;
+    ack_start(&mut w, &sid).await;
+    let state = |ps: &str| {
+        json!({"session_id": sid, "process_state": ps, "locked_by": "hqc",
+               "runtime_session_id": "rt-kept-time"})
+    };
+    w.send("session.state", state("running")).await;
+    w.expect("ack").await;
+    let before = hub.session(&sid).await["updated_at"].clone();
+
+    // The same worker process reconnects and reports the session again.
+    w.close().await;
+    hub.wait_session(&sid, "worker_offline", |v| v["state"] == "worker_offline")
+        .await;
+    let (mut w, _) = FakeWorker::online(&hub, &token, WS_PATH).await;
+    w.send("session.state", state("running")).await;
+    w.expect("ack").await;
+    assert_eq!(hub.session(&sid).await["updated_at"], before, "a repeat");
+
+    w.send("session.state", state("stopped")).await;
+    w.expect("ack").await;
+    assert_ne!(hub.session(&sid).await["updated_at"], before, "a change");
+    hub.finish().await;
+}
+
 /// T27 (SPEC §5.4, §6): `session.state.commands` is stored on the session and shown in the
 /// session object; a frame without it keeps the list, names are cleaned and deduplicated.
 #[tokio::test]

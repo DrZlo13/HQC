@@ -36,7 +36,8 @@
 //!   the summary ([`compaction`]), as from the adapter but without its `trigger` and token
 //!   counts.
 //!
-//! Empty thinking (2.1.308 writes only a signature), images and unknown blocks give no event.
+//! Empty thinking (2.1.308 writes only a signature), an `assistant` text that is the CLI's
+//! [`NO_CONTENT`], images and unknown blocks give no event.
 //! `session_id` and the author ids are nil: the worker does not know the hqc session, the
 //! hub fills them in (`mirror.event`, SPEC §5.4). Timestamps are the records' own.
 

@@ -6438,10 +6438,11 @@ hub's cleanup, §12, keeps the artifacts of every event's `artifact_ids` as it d
 `Agent` (`Task`) call that completed was the `tool_result` text with the CLI's trailer for the
 model (`agentId: …`, `<usage>`); it is now the subagent's report from `tool_use_result`. An
 `assistant` text `(no content)`, the CLI's for a reply without text, was drawn as the agent's
-answer; it gives no `agent.message` now, from the adapter and the mirror (§9.1). §6: the addresses in a result are links, its images
-thumbnails that open in the viewer, and the page address of an `Artifact` call's result a line
-of its own under the run of calls, seen while the run is folded. An older client ignores
-`artifact_ids`; an older hub stores the field it does not know as part of the payload.
+answer; it gives no `agent.message` now, from the adapter and the mirror (§9.1). §6: the
+addresses in a result are links, its images thumbnails that open in the viewer, and the page
+address of an `Artifact` call's result a line of its own under the run of calls, seen while the
+run is folded. An older client ignores `artifact_ids`; an older hub stores the field it does not
+know as part of the payload.
 
 ### 0.172 → 0.173 (what the agent is doing now: retries, compaction, thinking, long calls; the CLI's notices)
 §8.1, §5.4, §6, §17.1: while Claude Code retried a failed request to the model API, compacted

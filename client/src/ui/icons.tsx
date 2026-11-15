@@ -292,6 +292,14 @@ export const IconLock = ({ size = 16 }: { size?: number }) => (
 );
 
 /** A key: a secret or an ssh key for the agent (SPEC 0.147). */
+/** The browser of a session (SPEC 0.148): a globe. */
+export const IconGlobe = ({ size = 13 }: { size?: number }) => (
+  <Svg size={size}>
+    <circle cx="10" cy="10" r="7" />
+    <path d="M3 10h14M10 3c2.2 2 3.2 4.4 3.2 7s-1 5-3.2 7c-2.2-2-3.2-4.4-3.2-7s1-5 3.2-7z" />
+  </Svg>
+);
+
 export const IconKey = ({ size = 17 }: { size?: number }) => (
   <Svg size={size}>
     <circle cx="7" cy="13" r="3.5" />

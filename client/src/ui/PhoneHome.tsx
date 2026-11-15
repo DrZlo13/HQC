@@ -135,7 +135,7 @@ function Projects({ app, onError }: { app: AppState; onError: (m: string) => voi
           </div>
           <ul class="session-list">
             {g.items.map((p) => (
-              <ProjectRow key={p.id} p={p} c={of(p)} rate={app.projectRate(p.id)} spacious={spacious} />
+              <ProjectRow key={p.id} p={p} c={of(p)} rate={app.projectRate(p.id)} spacious={spacious} browser={app.projectBrowser(p.id)} />
             ))}
             {g.id === 'all' && (
               <li>
@@ -161,12 +161,12 @@ function Projects({ app, onError }: { app: AppState; onError: (m: string) => voi
  *  Spacious look "N waiting · N running" under it), then the running mark (in the project's
  *  color) with how many run, the amber count of those that wait and the count of those with
  *  unread events. */
-function ProjectRow({ p, c, rate, spacious }: { p: Project; c: Counts; rate: number; spacious: boolean }) {
+function ProjectRow({ p, c, rate, spacious, browser }: { p: Project; c: Counts; rate: number; spacious: boolean; browser?: boolean }) {
   const sub = [c.wait && `${c.wait} waiting`, c.run && `${c.run} running`].filter(Boolean).join(' · ');
   return (
     <li>
       <a class={`phone-project ${c.unread ? 'has-unread' : ''}`} href={`#/p/${p.id}`}>
-        <span class="phone-tile-wrap">
+        <span class={`phone-tile-wrap ${browser ? 'has-browser' : ''}`}>
           <PhoneTile p={p} />
           {c.run > 0 && c.wait === 0 && <RailRun rate={rate} quiet />}
         </span>

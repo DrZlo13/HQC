@@ -7687,3 +7687,22 @@ button.ps-look {
   display: flex;
   gap: 6px;
 }
+
+/* SPEC 0.148: a session given the browser, and a project with one: a dashed ring in the
+   browser's color, and a globe after the session's title. */
+.session-row.has-browser {
+  box-shadow: inset 0 0 0 1.5px var(--browser);
+}
+.session-browser {
+  flex: none;
+  display: inline-flex;
+  color: var(--browser);
+}
+.rail-item.has-browser .rail-project {
+  outline: 2px dashed var(--browser);
+  outline-offset: 2px;
+}
+.phone-tile-wrap.has-browser > .phone-tile {
+  outline: 2px dashed var(--browser);
+  outline-offset: 2px;
+}

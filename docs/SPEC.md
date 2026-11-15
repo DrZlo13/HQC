@@ -1,6 +1,6 @@
 # hqc — technical specification
 
-Version 0.146, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
+Version 0.147, 2026-11-15. Status: the architecture agreed after six reviews and a survey of
 similar systems (§22), before implementation started. Changes are in §23, old versions in
 `SPEC-CHANGELOG.md`. Marks: **[decision]** — decided, needs confirmation;
 **[verify]** — needs checking on a real build.
@@ -61,7 +61,12 @@ Cloudflare Access (SSO), workers through a separate route with their own tokens 
   `allow_foreign_sessions`; the user's identity and answers to permission requests come from
   the hub and are trusted **[decision]**. The hub is the root of trust for conversations and
   permissions: whoever controls the hub can answer `allow` to any `approval.request`, write to
-  any session and pass any session off as the worker owner's (`owner_is_worker_owner`).
+  any session and pass any session off as the worker owner's (`owner_is_worker_owner`). Nor
+  for `session_secrets` (since 0.147, §14): the worker takes secrets only when its own
+  `worker.toml` says so; the hub passes a secret through and keeps it nowhere, but it sees it in
+  memory while it does, so whoever controls the hub sees the secrets given while they do (and
+  could put a key of theirs into a workspace's keys, which gives the agent nothing but access to
+  where that key opens).
 - Consequences of a hub compromise: remote code execution on every connected
   worker as its owner, within `allowed_roots` and whatever the agent's tools allow
   (Bash can leave the workspace) — the hub starts a session, sends input and answers `once`
@@ -190,9 +195,11 @@ version, load_session, resume, image, isolation}]` — the result of each agent'
 when the worker starts), `local_models[]`, `share_local_models`, `allowed_roots[]`,
 `environments[]` (since 0.56 `{name, allow_local_mcp?, permissions {unblock?, allow?, deny?}}`,
 never the values of `env`; `default` is implied), `env_bindings[]` (`{path, environment}`; the
-Hermes profile in iteration 6),
+Hermes profile in iteration 7),
 `allow_foreign_sessions`, `idle_timeout`, `system_session_id` (§10.2), `machine_hash` (since 0.23:
-the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object).
+the machine fingerprint from enrollment and the last `hello`, §5.1; not part of the API worker object),
+`session_secrets` (since 0.147, hub migration `0044`: its `worker.toml` has `session_secrets = true`,
+§14; from the last `hello`).
 
 `system_session_id` — the worker's service session (§10.2). It is created together with the
 worker when enrollment is confirmed (`POST /api/workers/enroll/confirm`); for workers older than
@@ -447,7 +454,7 @@ the last upload of the same file or the last input with it.
 
 ### PendingRequest
 Open requests that survive a hub restart: `kind`
-(approval/clarify/ask/worker_approval/move/follow/mcp_call), `session_id`, `request_id`,
+(approval/clarify/ask/worker_approval/move/secret/follow/mcp_call), `session_id`, `request_id`,
 `payload`, `expires_at`, `from_session_id`, `from_event_id`, `worker_id`
 (for ask and mcp_call: whom to give the result to), `result` (filled in when the answer has
 been received but not yet delivered to the worker).
@@ -488,6 +495,15 @@ it), no `expires_at`, no `result`: no call waits for it. At most one is open per
 the owner's answer closes it, and is used once: an allowed move is made by the answer, and a
 closed row means records ask nothing more about that move.
 
+A `secret` (since 0.147) is a row of the session whose agent's `hqc_secret` waits for the owner
+(§7, §10.1): `request_id` — the `mcp.call`'s, `worker_id` — the session's worker, `payload` —
+the hub's `approval.request` in the session's feed (`tool: hqc_secret`, `description` — the
+agent's purpose, `secret: {name, kind}`, the one option `deny`), no `expires_at` (the call ends
+at the runtime's tool timeout, as a move's), `result` — the `mcp.result` frame once the owner
+gave it (`POST /api/sessions/{id}/secrets` with `request_id`, §6: the worker's note, the path or
+the key's fingerprint) or declined it. The runtime's `mcp.cancel` and a worker restart close the
+row without a frame. Nothing of the secret is in it.
+
 ### ScheduledMessage
 `owner_id`, `session_id` or (`project_id`, `workspace_id`, template), `cron` or `at`,
 `timezone`, `message`, `enabled`, `last_run`, `catch_up`.
@@ -518,7 +534,7 @@ the client renders only them. The "source" column is the component that produces
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
 | `tool.call` | `call_id`, `tool`, `args_preview` | adapter |
 | `tool.result` | `call_id`, `result_preview`, `error` (bool), `error_text?` (short error text), `duration_ms?`, `artifact_id?` (a diff or a large result, §12) | adapter |
-| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]` | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split |
+| `approval.request` | `request_id`, `tool`, `description`, `options[{id, label, canonical}]`, `expires_at?`, `policy_hint?` (allow/deny), `rule_suggestions?[{part, rule?}]`, `secret?{name, kind}` | adapter; `options` are **the agent's real options**, `canonical` ∈ once/session/always/deny/deny_always for the client's buttons; `policy_hint` — the call matches an `allow` or `deny` rule of the worker's `[permissions]` block (§14); no field — it matches neither; the client labels the card with it; `rule_suggestions` (since 0.52, T48) — the hqc rules the worker suggests for "Allow in this folder" (§10.1): one per simple part of a Bash command (`rule` absent when it has none for that part), the tool name for another tool; absent for a session without a workspace and for a command the worker's matcher cannot split; `secret` (since 0.147) — only in the hub's card of an `hqc_secret` (`tool: hqc_secret`, `author {kind: system}`, §7): the name and kind (`secret`, `ssh_key`) asked for; the hub drops it from a worker's event |
 | `approval.response` | `request_id`, `option_id`, `by` (user id or `auto`), `message?` (the user's text instead of the call, only with a `deny`/`deny_always` option, §10.1) | client, or the hub with `auto_approve` |
 | `approval.cancel` | `request_id`, `reason` (timeout/stopped/worker_restart/archived) | adapter, worker or hub. An answer from another device is not a cancellation: the first answer closes the request, the second gets `409 request_closed` (§10.1) |
 | `clarify.request` | `request_id`, `questions[{id, text, header?, options?: [string], option_descriptions?: [string], multi?: bool}]` | Claude Code adapter: the `AskUserQuestion` tool arrives as `can_use_tool`, the answer goes into `updatedInput.answers` (verified on 2.1.307 with `--permission-prompt-tool stdio`, §8.1). Since 0.69 `header` is the question's short label and `option_descriptions` what each option means, in the order and number of `options`, `""` for an option without one; each is absent when empty. The client shows `header` above the question, each description under its option, and an "Other" field: its text is the answer (with `multi`, an item of the array beside the checked labels); "Other" chosen with nothing typed is sent as `"Other"`, as the VS Code tab does. As in the tab, "Answer" stays disabled until every question has an answer: an option picked, a text typed (not only spaces) or "Other" chosen. ACP agents have no source for it |
@@ -551,6 +567,7 @@ the client renders only them. The "source" column is the component that produces
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
 | `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
+| `secret_given` | hub | since 0.147: a secret or an ssh key reached the session's agent (`POST /api/sessions/{id}/secrets`, `hqc_ssh_keygen`, §6, §7): the text names it and a key's fingerprint, never the value |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
@@ -1114,6 +1131,27 @@ MCP calls (worker → hub → worker):
   with git's message; `force` (only when the user confirmed the files the inspection listed, §6)
   removes them. A worktree folder that is gone already is pruned and `removed: false`. `force`
   changes nothing for a clone.
+- `secret.put` {request_id, session_id, kind, name, value?, passphrase?, remember?, comment?} →
+  `result {request_id, secret {note, path?, fingerprint?, public_key?, remembered?}}` or `error
+  {invalid_frame}` with the reason (since 0.147, §14) — a secret or an ssh key for the session's
+  running agent. `kind`: `secret` (`value` is the secret: the file `$HQC_SECRETS/<name>` of the
+  agent's process, replacing one of that name), `ssh_key` (`value` is a private key in OpenSSH
+  format, `passphrase` decrypts it and is not kept; it is loaded into the process's ssh-agent,
+  and with `remember` kept for the session's workspace) or `ssh_keygen` (the worker makes an
+  ed25519 key with `comment`, `hqc <name>` when absent, keeps it for the workspace and loads
+  it; `public_key` is its public half). `name` is a key name of §14 (letters, digits, `_`, `-`
+  and `.`, 1 to 64, not starting with `.` or `-`); `value` is at most 64 KiB. `note` is what the
+  agent is told, never the value. The worker takes it only with `session_secrets`, for a session
+  of its owner that is not restricted and whose agent runs now; a kept name the workspace has
+  already, a bad key, a wrong passphrase are refused, and the reason never carries the value, the
+  key or the passphrase; a frame that does not parse is answered "secret.put is malformed",
+  without the parser's words. The hub sends it only on the owner's request and waits 30 s; the
+  frame never goes through the outbox and the worker logs only the kind and the name.
+- `workspace.keys` {request_id, path} → `result {request_id, keys[{name, fingerprint}]}` and
+  `workspace.key_delete` {request_id, path, name} → `result {request_id, key_deleted}` (since
+  0.147) — the ssh keys the worker keeps for the workspace at `path` (a folder inside
+  `allowed_roots`, after resolving symlinks), with `session_secrets` only, else `error
+  {invalid_frame}`. `key_deleted: false`: the workspace has no such key.
 - `workspace.list_candidates` {request_id} → `result {request_id, candidates[{path,
   sessions_count, last_active}]}` — folders with Claude Code transcripts (§9.1): `path` is the
   records' `cwd`, only inside `allowed_roots`, sorted by path; `last_active` is the modification
@@ -1170,9 +1208,10 @@ MCP calls (worker → hub → worker):
 ### 5.4 Worker → hub frames
 - `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
   allowed_roots[], allow_foreign_sessions, share_local_models, local_models[], providers[]?,
-  machine_id?}
+  session_secrets?, machine_id?}
   — `providers` (since 0.144): the names of the `[providers.*]` its `worker.toml` allows, never
-  a `base_url` or a key; absent — none; `boot_id`: a uuid, new on every start of the worker process, the same in every `hello`
+  a `base_url` or a key; absent — none; `session_secrets` (since 0.147): `true` when its
+  `worker.toml` has `session_secrets = true` (§14), absent — false; `boot_id`: a uuid, new on every start of the worker process, the same in every `hello`
   of that process (§5.2, §17.3); `machine_id` — the machine fingerprint (since 0.23, §5.1). `capabilities` — `{claude_code?: {version,
   sessions_registry?, moves?}, acp_agents[]}`; `sessions_registry: true` — the worker reads the Claude
   Code live sessions registry and reports holders (§9.3); `moves: true` (since 0.75) — the worker
@@ -1506,6 +1545,27 @@ the rest is marked "later"):
   name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
   base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
   `workers[]`, the owner's workers whose last `hello` allowed it.
+  `POST /api/sessions/{id}/secrets` (since 0.147, §14) {kind, name, value, passphrase?,
+  remember?, request_id?} (unknown fields: `422`): a secret (`kind: secret`) or an ssh private
+  key (`kind: ssh_key`, with `passphrase` and `remember` for it only) for the session's running
+  agent, from its owner, on a worker of theirs with `session_secrets` (else `409 unavailable`),
+  not the service session, not archived. The hub passes it in `secret.put` (§5.3) and keeps it
+  nowhere: in no event, row, log line or error. `200` is the worker's `{note, path?,
+  fingerprint?, remembered?}`; the client puts `note` into the message being written, so the
+  agent learns where the secret is with the user's next message. `409 worker_offline`, `422
+  secret_refused` with the worker's reason (no running agent, a bad key, a wrong passphrase, a
+  kept name the workspace has), `504 worker_timeout`. The feed gets `system secret_given` with the
+  name and, for a key, its fingerprint ("Secret WIFI_PASS given", "ssh key pi-lab (SHA256:…)
+  given, remembered for this workspace"). `request_id` answers the session's open `hqc_secret`
+  (§7): its `name` and `kind` must be the request's (`400`), a closed one is `409
+  request_closed`; the request closes with the call's result and the feed gets `approval.response
+  {option_id: give}`; a refused give leaves it open. "Decline" is the request's answer with
+  `option_id: deny` (`POST /api/sessions/{id}/requests/{request_id}`); no other option is taken.
+  `GET /api/workspaces/{id}/keys` ({keys: [{name, fingerprint}]}) and `DELETE
+  /api/workspaces/{id}/keys/{name}` (`204`, `404` for a key the workspace has not): the keys the
+  workspace's worker keeps for it (`workspace.keys`, `workspace.key_delete`, §5.3); the worker
+  must be online (`409 worker_offline`). `GET /api/workers` has `session_secrets` in the worker
+  object.
   `model` (since 0.74) — absent: unchanged, `null`: the runtime's default; it is checked as on
   creation before anything is written, the service session answers `409 system_session`, and
   the hub sends the worker `session.model` (§5.3). It is not in `session.summary`: another
@@ -1933,6 +1993,21 @@ from. A press on a button of the composer (send, attach, remove a file) leaves t
 field: a phone keeps its keyboard, and the composer does not grow under the tap by the home
 indicator's room before the click lands.
 
+Secrets (since 0.147, §14). The composer of a session whose worker has `session_secrets` has a
+key button beside the attach one: a form above the composer with the kind (Password, SSH key), a
+name and the value — a password field (`autocomplete="current-password"`, so a phone's password
+manager fills it), a key a text area without spelling help, with an optional passphrase and
+"Remember for this workspace". "Give" sends `POST /api/sessions/{id}/secrets`; on success the
+answer's `note` goes on a line of its own into the message being written and the form closes;
+on an error the form keeps what was typed and shows the reason. The value lives only in the
+form while it is open: never in the draft, the feed, `localStorage` or `sessionStorage`. The
+hub's `hqc_secret` card (`approval.request` with `tool: hqc_secret` and `secret`) shows "The
+agent asks for a secret / an ssh key: <name>", the agent's purpose and the same fields, with
+"Give" and "Decline"; it is answered once the hub's `approval.response` with `give` or `deny`
+comes, and on the requests screen it has the same form. The rules screen of a workspace whose
+worker has `session_secrets` lists the ssh keys kept for it (name, fingerprint) with Delete
+after a confirmation; an offline worker gives a line saying so.
+
 A new session (since 0.114) opens at once as a chat window, `#/p/<project>/new`, with nothing on
 the hub yet: the header says "New session", "Draft" and where it will run; the list shows it as
 the group "Draft" on top, the current row "New session" with "Draft · <worker> · <path>"; the
@@ -2260,7 +2335,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
 - `hqc_attach(path?, content?, name?, kind?, caption?)` — upload a file as an artifact
   to the current session; `path` for runtimes with a file system, `content` for the bare model.
   Since 0.34 (T31) the worker's MCP server lists `hqc_attach(path, name?, kind?, caption?)`;
-  `content` comes with the bare model (iteration 6) and is refused until then
+  `content` comes with the bare model (iteration 7) and is refused until then
   (`invalid_args`). The worker daemon does the file part itself, trusting neither the hub nor
   the agent's path (§2.1): `path` is absolute or relative to the session's working directory;
   its canonical form (symlinks resolved) must lie inside the session's workspace and inside
@@ -2278,7 +2353,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   live_attach.rs`): the event lands between the call's `tool.call` and `tool.result`.
 - `hqc_send(text, session?)` — a message to another session without waiting for a reply;
   without `session`, to the owner's personal assistant session. Since 0.35 (T32): `session`
-  is required until the personal session exists (iteration 6); the result is `{to,
+  is required until the personal session exists (iteration 7); the result is `{to,
   delivery}`, `to` — the target's address, `delivery` — `queued` (the input queue, the
   target wakes on sends; by default since 0.55) or `buffered` (the send buffer, §7.1); since 0.47 (T42) also
   `with_reply`: the send goes back with the reply to the target's open ask (§7.1). Since 0.54
@@ -2327,7 +2402,7 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   cap of its chain (§7.1), and so does the spawned session's first turn. `project` — a slug or an id
   of the owner's project; `workspace` — an id, a label or a path of a workspace of that
   project (else `not_found`), absent — the project's `default_workspace_id` (none:
-  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 6 (else
+  `invalid_args`, §13.4); `runtime` — `claude_code` only until iteration 7 (else
   `invalid_args`); `model` absent — the calling session's model (a cheap spawner does not
   start an expensive agent by default), present — checked as in §6. `prompt` (not blank)
   becomes a `peer.message` with `mode: send` from the calling session in the new session's
@@ -2502,19 +2577,43 @@ Tools act with the session owner's rights; the agent has no rights of its own.
   address does not change. The result is `{address, title}` — the session's address and the
   title as stored. A repeat of the call (§5.2) sets the same title again.
 
+- `hqc_secret(name, purpose, kind?)` (since 0.147) — asks the owner for a secret without it
+  entering the conversation: `kind` `secret` (the default) or `ssh_key`, `name` a key name of §14,
+  `purpose` one line of 1 to 300 characters the owner is shown (a control character, a line or
+  paragraph separator or a bidirectional control is `invalid_args`, as for `hqc_move`'s path).
+  Only on a worker of the owner with `session_secrets`, else `unavailable`. It opens a
+  PendingRequest `secret` (§3) with the hub's card in the feed and waits as `hqc_ask` does
+  (`ack` now, the `mcp.result` later, kept until the worker acknowledges it); a repeat finds the
+  request. The owner's give (§6) answers `{name, note, path?, fingerprint?, remembered?}`:
+  `note` says where the secret is (`$HQC_SECRETS/<name>`, to use as `"$(cat
+  "$HQC_SECRETS/<name>")"` in a command) or that the key is in the agent's ssh-agent; "Decline"
+  and a cancel are `unavailable` with why. Listed only to an agent whose worker gives secrets
+  (§7.2).
+- `hqc_ssh_keygen(name, comment?)` (since 0.147) — the worker makes an ed25519 key for the
+  calling session's workspace (`secret.put {kind: ssh_keygen}`, §5.3), keeps it there and loads
+  it into the agent's ssh-agent; the result is `{name, fingerprint, public_key, note}`, the
+  private half never leaves the worker. No card: the agent gets nothing it could not make with
+  `ssh-keygen`, while the key stays out of the workspace's files and every later session of the
+  workspace has it. `comment` is one line of at most 100 characters; a session without a
+  workspace, a name the workspace has and a worker without `session_secrets` are refused. The
+  feed gets `system secret_given` ("ssh key pi-kitchen (SHA256:…) made for this workspace").
+  Listed only as `hqc_secret` is.
+
 Session address: `<project-slug>/<session-slug>` or the id. A slug is unique within the project
 and does not change on rename.
 
 A tool is listed in `tools/list` only once its task lands (iteration 3: `hqc_list_sessions`
 since 0.33, T30; `hqc_attach` since 0.34, T31; `hqc_send`, `hqc_ask` since 0.35, T32;
 `hqc_search_history` since 0.36, T33; `hqc_spawn` since 0.37, T34; `hqc_schedule` since 0.38, T35;
-`hqc_move` since 0.76; `hqc_rename` since 0.103); the list is shared by the worker's MCP
+`hqc_move` since 0.76; `hqc_rename` since 0.103; `hqc_secret` and `hqc_ssh_keygen` since 0.147,
+listed by the worker's MCP server only with `HQC_SECRET_TOOLS=1` in its environment, which the
+worker sets for a session that may have secrets); the list is shared by the worker's MCP
 server and the hub (`hqc_proto::mcp::TOOLS`), the hub's implementations are a registry next
 to it (`crates/hqc-hub/src/mcp.rs`). Errors have the one shape `{code, message}` (§5.2); the MCP
 server returns them as a tool result with `isError: true` and the text `<code>: <message>`.
 Codes added in 0.35: `timeout` (no reply in time), `limit_exceeded` (a chain limit, §7.1),
 `worker_restart` (the asking worker restarted; never seen by the agent, whose call died).
-Until grants (iteration 6) every tool works only on the calling session's owner's own
+Until grants (iteration 8) every tool works only on the calling session's owner's own
 projects and sessions; anything else is `not_found`.
 
 ### 7.1 Semantics of send and ask **[decision]**
@@ -2923,7 +3022,11 @@ The process environment is scrubbed: from the worker's environment only `PATH`, 
 those, e.g. `PATH`), then the worker's own `SSH_AUTH_SOCK` (only in an environment with
 `ssh_keys`: the socket of this process's own ssh-agent, §14; since 0.57 the user's
 `SSH_AUTH_SOCK` no longer passes), `CLAUDE_CODE_ENTRYPOINT` and `MCP_TOOL_TIMEOUT`;
-`HQC_*` never. A session on a provider (since 0.144, §3 Provider) gets on top of the environment's
+`HQC_*` never, except `HQC_SECRETS`: a session that may have secrets (since 0.147, §14
+`session_secrets`) gets an ssh-agent of its own in any environment, empty when nothing is to be
+loaded, with its environment's `ssh_keys` and the keys kept for its workspace, so
+`SSH_AUTH_SOCK` too, and `HQC_SECRETS`, the folder of its process's secrets; its hqc MCP server
+gets `HQC_SECRET_TOOLS=1`. A session on a provider (since 0.144, §3 Provider) gets on top of the environment's
 `env`: `ANTHROPIC_BASE_URL` (its `base_url`), `ANTHROPIC_AUTH_TOKEN` (the `api_key` of
 `worker.toml`, else a placeholder, so the CLI sends no OAuth token of the subscription there),
 `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`,
@@ -4365,7 +4468,7 @@ from the `fs.list_dirs` tree or its path is typed in, the worker checks it with 
 the hub stores the canonical path. Since 0.64, when the folder is missing (`400
 path_not_found`) the form offers "Create the folder and add" in place of "Add" (until the path
 or the worker changes), which sends `create: true`. Only the worker's owner can add a workspace to a worker (until
-the sharing of iteration 6 a worker has no other users), so there is no confirmation through the
+the sharing of iteration 8 a worker has no other users), so there is no confirmation through the
 service session yet; if the worker is offline, the workspace is not created. Since 0.58 (T45)
 `clone`: the client gives the URL, the parent folder and a name, the hub checks the parent and
 stores the workspace `creating`, the worker checks the new path itself and clones into it in its
@@ -4424,7 +4527,7 @@ The worker's local config is the only source of truth for:
   old file is ignored with a warning in the log at start;
 - `environments{}` — named environments (`[environments.<name>]`, below; since 0.56, T43);
 - `env_bindings[]` — records `{path, environment, hermes_profile?, foreign_profile?}`
-  (`[[env_bindings]]`; the profiles are iteration 6). A binding is looked up **by the workspace
+  (`[[env_bindings]]`; the profiles are iteration 7). A binding is looked up **by the workspace
   path** (not by the session's `cwd`), canonical (symlinks resolved; the binding's own path is
   resolved again at every lookup, so a binding through a symlink names its target); the longest
   binding that equals or contains the path wins, compared by path components (`/a/b` does not
@@ -4602,6 +4705,30 @@ is a link or belongs to another user (the message names the `chmod`), or when a 
 `ssh_keys` is not in the store. The worker reads key material only in `add-key`; logs, frames
 and `hqc-worker env` carry key names, never keys.
 
+Secrets from the chat (since 0.147, iteration 6, `docs/ITERATION-6.md`). `session_secrets = true`
+at the top of `worker.toml` (off by default; the hub cannot turn it on) lets the owner give a
+running agent a secret or an ssh key from the chat (`secret.put`, §5.3, §6) and the agent ask for
+one (`hqc_secret`) or make a key (`hqc_ssh_keygen`, §7), in a session of the worker's owner that
+is not restricted (§8.4) and runs Claude Code. The value goes to the agent's process, not to the
+model: a secret is the file `$HQC_SECRETS/<name>` (0600) in `$HQC_HOME/secrets/<id>/` (0700),
+made when the process starts and removed when it ends (stop, idle stop, restart, crash; a worker
+that died leaves folders behind, and its next start removes them), so after a restart the agent
+asks again; the agent is told the path. A key is decrypted by the worker itself (a passphrase
+never goes on a command line) and loaded with `ssh-add` from a 0600 file in that folder that is
+removed at once; every such process has an ssh-agent of its own, empty if nothing is to be
+loaded. A key kept for a workspace ("Remember for this workspace", and every `hqc_ssh_keygen`
+key) is in `$HQC_HOME/workspace-keys/<the first 32 hex of the sha256 of the workspace's canonical
+path>/<name>` (0700 and 0600, without a passphrase, the path in `.path` beside them), apart
+from the store of `ssh_keys`: through the hub one adds only a new key to one's own workspace,
+and never binds a key of that store to a folder by its name. Every agent process of a session in
+that workspace loads them beside its environment's `ssh_keys`; a clone of a new workspace
+(§5.3) does not. `hqc-worker env` shows `session_secrets` and the kept keys by workspace (name
+and fingerprint), `hqc-worker env which <path>` those of the folder. What the agent then does
+with a secret it has is its business: the boundary is that the owner gives it, seeing which
+session asks and why, and a prompt-injected agent that has a secret can leak it. The hub keeps
+the card it writes (`approval.request` with `secret`, §4) its own: it drops `secret` from an
+`approval.request` a worker sends.
+
 Limitation: without a container or a separate OS user the agent sees the files
 and the process environment of the user, including other workspaces and session tokens on the
 same machine. The boundary is the absence of keys; prohibitions in settings are the first line,
@@ -4634,7 +4761,7 @@ it finds commands, their output and word forms and puts the best match first:
 - **Configuration `hqc`.** A copy of `russian` whose Latin words go to an English and the rest
   to a Russian Snowball stemmer, both without stop words, so every word stays searchable and
   "переезд" finds "переезда", "deploy" finds "deployed".
-- **Whose.** Until grants (iteration 6): the user's (the calling session's owner's) sessions,
+- **Whose.** Until grants (iteration 8): the user's (the calling session's owner's) sessions,
   archived ones included and marked `archived: true`, the workers' service sessions left out.
 - **Matching.** The hub parses the query itself into a `to_tsquery('hqc', …)`: every word must
   be there, `"a phrase"` in sequence, `or` either side, `-word` without it, `word*` a prefix
@@ -4960,7 +5087,7 @@ send from a session in a lower mode (§7.1).
    a session started in VS Code (live test `live_takeover`; checked by hand through the UI on a phone on 2026-10-25).
    Closed on 2026-10-25.
 3. hqc MCP: attach, send, ask, spawn, list, search, schedule; `mcp.call` frames;
-   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 6).
+   MCP server per §7.2. Tools work on the owner's own sessions only (grants are iteration 8).
    Tasks: `docs/ITERATION-3.md`. Criterion checked by hand on the production hub on 2026-10-31.
    Closed on 2026-10-31.
 4. Workspaces: ~~clone~~ (0.58, T45), ~~worktree~~ (0.60, T46), ~~ephemeral~~ (0.61, T47). Environments and bindings on the worker. Moved
@@ -4971,12 +5098,17 @@ send from a session in a lower mode (§7.1).
    session in the model menu; the hub keeps the owner's providers, a worker runs only those its
    `worker.toml` allows with the same `base_url`, keys stay on the worker; Claude Code stays the
    harness. Tasks: `docs/ITERATION-5.md`.
-6. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
+6. Secrets in a session (since 0.147): the owner gives a running agent a password or an ssh key
+   from the chat, and the agent asks for one (`hqc_secret`) or makes a key for its workspace
+   (`hqc_ssh_keygen`); the value reaches the agent's process, not the model, the transcript or
+   the hub's storage; a key may be kept for the workspace; only a worker with `session_secrets`
+   takes them (§14). Tasks: `docs/ITERATION-6.md`.
+7. Generic ACP adapter (the first agent is Hermes, including steer) and `acp_agents` on the
    worker; the bare model; the personal assistant session (moved from 3: its default runtime is
    the bare model, §8.3), until then `hqc_send` needs `session`.
-7. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
+8. Sharing: Grant, the "share" dialog, the "who pays" and foreign session rules. ~~Hub cron~~
    (0.38, T35, with `hqc_schedule`).
-8. Tauri, native notifications, several agents in one session.
+9. Tauri, native notifications, several agents in one session.
 
 ## 20. Hosting and security
 
@@ -5141,6 +5273,26 @@ the input queue for an offline worker and a single address for push need shared 
 without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
+
+### 0.146 → 0.147 (secrets in a session, iteration 6)
+§19: iteration 6 is secrets in a session, `docs/ITERATION-6.md`; ACP and Hermes move to 7,
+sharing to 8, the rest to 9 (the references to them follow). §14: `session_secrets = true` in
+`worker.toml` lets the owner give a running agent a secret (the file `$HQC_SECRETS/<name>` of its
+process, gone with it) or an ssh key (into the process's own ssh-agent, which every such process
+now has, empty at first), and keep a key for the workspace (`$HQC_HOME/workspace-keys/`, apart
+from the store of `ssh_keys`, loaded by every later session there); a passphrase is used by the
+worker and never kept. §5.3: `secret.put`, `workspace.keys`, `workspace.key_delete`; §5.4
+`hello.session_secrets`; §3 Worker `session_secrets` (hub migration `0044`), PendingRequest
+`secret`; §6 `POST /api/sessions/{id}/secrets` (the hub keeps nothing: no event, row or log line
+has the value; the answer's `note` goes into the user's message), `GET/DELETE
+/api/workspaces/{id}/keys`, the composer's Secret form, the `hqc_secret` card, the kept keys on
+the rules screen; §7 `hqc_secret` (a card the owner fills, from a password manager too) and
+`hqc_ssh_keygen` (the worker makes the key, the agent gets the public half), listed only where
+the worker gives secrets; §4 `approval.request.secret`, which the hub drops from a worker's event,
+and `system secret_given`; §8.1 `HQC_SECRETS` and the ssh-agent of such a process. The owner's
+three cases: a Wi-Fi password written into a device, a router's password once, the key of a
+Raspberry Pi set up in the session and kept for its workspace. 1Password's `op` on the worker
+is not done: the phone's autofill fills the form.
 
 ### 0.144 → 0.146 (a call's arguments as indented JSON)
 §10.1: an opened call's row (and a subagent's start card) showed `args_preview` as it came, one

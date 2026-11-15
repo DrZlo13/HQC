@@ -922,6 +922,27 @@ base_url = "http://192.168.1.229:8082"  # must equal the base URL there (a trail
   `API Error: No internet route … (EHOSTUNREACH)`. A rebuilt `hqc-worker` may need it turned on
   again.
 
+**Secrets in a session** (SPEC §14, since 0.147). With
+
+```toml
+session_secrets = true                  # at the top, before any [table]
+```
+
+and a restart of the worker, the chat of a session on this worker has a key button beside the
+attach one: give the agent a password (it gets the file `$HQC_SECRETS/<name>`, not the value;
+the form's note goes into your message) or an ssh private key (loaded into the session's own
+ssh-agent; "Remember for this workspace" keeps it for every later session there). The agent can
+ask for one itself (`hqc_secret`, a card in the chat; a phone's password manager fills it) or
+make a key for a device it sets up (`hqc_ssh_keygen`: it gets the public half to put into the
+device's `authorized_keys`). Only sessions of the worker's owner that are not restricted.
+
+- A secret is gone when the agent's process ends (stop, idle stop, restart): the agent asks
+  again. Kept keys are in `~/.hqc/workspace-keys/` (0600, without a passphrase); `hqc-worker env`
+  lists them by workspace, the workspace's rules screen in the client lists and deletes them.
+- The hub passes a secret through and stores it nowhere. What the agent does with a secret it
+  has is up to it: give one only to a session you see asking for a reason you know.
+- Off (the default): the button is not shown, and the worker refuses `secret.put`.
+
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with
 `entrypoint: sdk-cli`, and the VS Code extension's conversation history shows only its own

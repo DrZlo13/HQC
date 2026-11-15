@@ -16,7 +16,7 @@ import {
   type ChatActions,
 } from "../src/ui/cards";
 import { CANONICAL_LABELS } from "../src/ui/labels";
-import { buildFeed, cutJson, relativePaths, subagentState } from "../src/ui/feed";
+import { argsText, buildFeed, cutJson, relativePaths, subagentState } from "../src/ui/feed";
 
 const WIRE = join(import.meta.dirname, "../../crates/hqc-proto/examples/wire");
 const raw = (name: string): any =>
@@ -668,12 +668,17 @@ describe("tool groups (T26)", () => {
     t.apply(result(4, "b", true));
     t.apply(call(5, "c", "Bash", { command: "ls" }));
     t.apply(result(6, "c"));
+    // Arguments cut at 4 KB.
+    const cut = call(7, "d", "Bash", {});
+    (cut.payload as { args_preview: string }).args_preview = '{"command":"echo a\\necho b';
+    t.apply(cut);
+    t.apply(result(8, "d"));
     show(t);
     const g = root.querySelector(".tool-group")!;
     await act(async () =>
       g.querySelector<HTMLButtonElement>(".tool-group-head")!.click(),
     );
-    const [edit, multi, bash] = [...g.querySelectorAll("details.tool-row")];
+    const [edit, multi, bash, cutRow] = [...g.querySelectorAll("details.tool-row")];
     const labels = (row: Element) => [...row.querySelectorAll(".label")].map((l) => l.textContent);
     // An edit that went through has no Result; a failed one keeps its Error.
     expect(labels(edit)).toEqual([]);
@@ -696,6 +701,14 @@ describe("tool groups (T26)", () => {
     // Other tools keep their arguments.
     expect(bash.querySelector(".tool-change")).toBeNull();
     expect(bash.textContent).toContain("Arguments");
+    // As indented JSON.
+    expect(bash.querySelector(".tool-row-body .pre")!.textContent).toBe('{\n  "command": "ls"\n}');
+    expect(bash.querySelector(".tool-cut")).toBeNull();
+    // A cut preview as far as it goes, marked cut.
+    expect(cutRow.querySelector(".tool-row-body .pre")!.textContent).toBe('{\n  "command": "echo a\n    echo b"\n}');
+    expect(cutRow.querySelector(".tool-cut")!.textContent).toBe(
+      "The preview is cut at 4 KB: the rest of the arguments are not shown.",
+    );
   });
 
   it("shows a result without its call as a group of its own", () => {
@@ -2132,6 +2145,44 @@ describe("the feed like the Claude Code tab", () => {
     expect(cutJson('{"a":"x",')).toEqual({ value: { a: "x" }, cut: true });
     expect(cutJson('{"a":"x"}')).toEqual({ value: { a: "x" }, cut: false });
     expect(cutJson("not json")).toBeUndefined();
+  });
+
+  it("writes a call's arguments as indented JSON, the lines of a string under its key", () => {
+    const args = {
+      description: "Wait",
+      n: 2,
+      ok: true,
+      none: null,
+      tags: ["a", { b: [] }],
+      empty: {},
+      prompt: 'one\n\ntwo "q"\\n',
+    };
+    expect(argsText(JSON.stringify(args))).toEqual({
+      text: [
+        "{",
+        '  "description": "Wait",',
+        '  "n": 2,',
+        '  "ok": true,',
+        '  "none": null,',
+        '  "tags": [',
+        '    "a",',
+        "    {",
+        '      "b": []',
+        "    }",
+        "  ],",
+        '  "empty": {},',
+        '  "prompt": "one',
+        "",
+        '    two \\"q\\"\\\\n"',
+        "}",
+      ].join("\n"),
+      cut: false,
+    });
+    // A string that ends with a line break: its closing quote stays under the key.
+    expect(argsText('{"a":"x\\n"}')).toEqual({ text: '{\n  "a": "x\n    "\n}', cut: false });
+    // Cut at 4 KB: as far as it goes.
+    expect(argsText('{"prompt":"a\\nb')).toEqual({ text: '{\n  "prompt": "a\n    b"\n}', cut: true });
+    expect(argsText("not json")).toBeUndefined();
   });
 
   it("the group's header: its tools, or its one call; MCP tools by name and server, paths relative to the session's folder", async () => {

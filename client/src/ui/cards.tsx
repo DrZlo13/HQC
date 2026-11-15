@@ -12,6 +12,7 @@ import type { InvalidEvent, Item, PendingMessage, Timeline } from '../timeline';
 import type { ArtifactStore } from '../artifacts';
 import { AttachmentView, PendingAttachments, type ViewedArtifact } from './attachments';
 import {
+  argsText,
   askTarget,
   buildFeed,
   callArgs,
@@ -818,6 +819,7 @@ function ToolCallBody({
   const r = result?.payload;
   // An Edit, a MultiEdit or a Write shows its change, as its permission card does (SPEC §10.1).
   const change = call ? fileChange(call.payload.tool, call.payload.args_preview) : undefined;
+  const args = call && !change ? argsText(call.payload.args_preview) : undefined;
   return (
     <div class="tool-row-body">
       {change ? (
@@ -831,7 +833,8 @@ function ToolCallBody({
         call && (
           <>
             <div class="label">Arguments</div>
-            <pre class="pre">{call.payload.args_preview}</pre>
+            <pre class="pre">{args?.text ?? call.payload.args_preview}</pre>
+            {args?.cut && <div class="tool-cut muted">The preview is cut at 4 KB: the rest of the arguments are not shown.</div>}
           </>
         )
       )}

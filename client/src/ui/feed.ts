@@ -541,6 +541,34 @@ export function cutJson(s: string): { value: unknown; cut: boolean } | undefined
   }
 }
 
+/** A call's arguments as its opened row shows them: `args_preview` read as far as it goes
+ *  (cut at 4 KB, SPEC §4) and written as indented JSON, the lines of a string each on a line of
+ *  its own. `cut`: the preview was cut. Undefined if it is not JSON: then it is shown as it is. */
+export function argsText(argsPreview: string): { text: string; cut: boolean } | undefined {
+  const read = cutJson(argsPreview);
+  return read && { text: indentedJson(read.value, ''), cut: read.cut };
+}
+
+function indentedJson(v: unknown, indent: string): string {
+  const inner = `${indent}  `;
+  // A string's next lines go under its key, one step in; an empty line stays empty, but the
+  // last one carries the closing quote.
+  if (typeof v === 'string')
+    return `"${v
+      .split('\n')
+      .map((l, i, all) => (i && (l || i === all.length - 1) ? inner : '') + JSON.stringify(l).slice(1, -1))
+      .join('\n')}"`;
+  if (Array.isArray(v))
+    return v.length ? `[\n${v.map((x) => inner + indentedJson(x, inner)).join(',\n')}\n${indent}]` : '[]';
+  if (v && typeof v === 'object') {
+    const entries = Object.entries(v);
+    return entries.length
+      ? `{\n${entries.map(([k, x]) => `${inner}${JSON.stringify(k)}: ${indentedJson(x, inner)}`).join(',\n')}\n${indent}}`
+      : '{}';
+  }
+  return JSON.stringify(v);
+}
+
 /** One edit as a diff: the lines both sides share at the start and at the end as context,
  *  the rest removed, then added. `cut`: a side may end mid-line, so nothing is matched. */
 export function editDiff(before: string, after: string, cut = false): string {

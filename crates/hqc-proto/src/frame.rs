@@ -540,6 +540,15 @@ pub enum HubFrame {
     /// remove` (T46).
     #[serde(rename = "workspace.delete")]
     WorkspaceDelete(WorkspaceDelete),
+    /// A secret or an ssh key for a session's running agent (since SPEC 0.147, §5.3).
+    #[serde(rename = "secret.put")]
+    SecretPut(SecretPut),
+    /// The ssh keys remembered for a workspace (since SPEC 0.147).
+    #[serde(rename = "workspace.keys")]
+    WorkspaceKeys(WorkspaceKeysRequest),
+    /// Forget one of them (since SPEC 0.147).
+    #[serde(rename = "workspace.key_delete")]
+    WorkspaceKeyDelete(WorkspaceKeyDelete),
     #[serde(rename = "ack")]
     Ack(Ack),
     #[serde(rename = "error")]
@@ -792,6 +801,115 @@ pub enum ResultBody {
     Inspect(InspectResult),
     WorkspaceInspect(WorkspaceInspectResult),
     WorkspaceDelete(WorkspaceDeleteResult),
+    Secret(SecretPutResult),
+    WorkspaceKeys(WorkspaceKeysResult),
+    WorkspaceKeyDeleted(WorkspaceKeyDeleteResult),
+}
+
+/// A value that is never printed: `Debug` shows its length only, so a frame that is logged
+/// with `{:?}` does not carry it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretValue(pub String);
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SecretValue(<{} bytes>)", self.0.len())
+    }
+}
+
+/// What `secret.put` gives (SPEC §5.3, since 0.147).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretKind {
+    /// A file `$HQC_SECRETS/<name>` of the agent's process.
+    Secret,
+    /// A private key (OpenSSH format), loaded into the process's ssh-agent.
+    SshKey,
+    /// A new ed25519 key the worker makes, remembered for the workspace and loaded.
+    SshKeygen,
+}
+
+/// Longest secret value or private key `secret.put` takes, in bytes.
+pub const MAX_SECRET: usize = 64 * 1024;
+
+/// `secret.put {request_id, session_id, kind, name, value?, passphrase?, remember?, comment?}`
+/// -> `result` [`SecretPutResult`] or `error` (since SPEC 0.147, §5.3). `request_id` equals the
+/// frame `id`. The worker takes it only with `session_secrets`, for a session of its owner
+/// that is not restricted and whose agent runs now; `value` is the secret (`secret`) or the
+/// private key (`ssh_key`), absent for `ssh_keygen`; `passphrase` decrypts a key and is not
+/// kept; `remember` keeps an `ssh_key` for the session's workspace (`ssh_keygen` always
+/// does); `comment` is the comment of a made key. Never logged, never in the outbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretPut {
+    pub request_id: String,
+    pub session_id: Uuid,
+    pub kind: SecretKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<SecretValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<SecretValue>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remember: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// Result of `secret.put`: `{secret: {...}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretPutResult {
+    pub secret: SecretOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretOutcome {
+    /// What the agent is told: where the secret is, or that the key is loaded. Never the value.
+    pub note: String,
+    /// `secret`: the file, as the agent writes it (`$HQC_SECRETS/<name>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// A key's `SHA256:` fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// `ssh_keygen`: the public key, one OpenSSH line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    /// The key is kept for the workspace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remembered: bool,
+}
+
+/// `workspace.keys {request_id, path}` -> `result` [`WorkspaceKeysResult`] (since SPEC 0.147).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceKeysRequest {
+    pub request_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceKeysResult {
+    pub keys: Vec<WorkspaceKey>,
+}
+
+/// A key remembered for a workspace: its name and fingerprint, never the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceKey {
+    pub name: String,
+    pub fingerprint: String,
+}
+
+/// `workspace.key_delete {request_id, path, name}` -> `result` [`WorkspaceKeyDeleteResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceKeyDelete {
+    pub request_id: String,
+    pub path: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceKeyDeleteResult {
+    pub key_deleted: bool,
 }
 
 /// Result of `fs.stat`. `canonical` is the path with symlinks resolved, present when it
@@ -857,6 +975,10 @@ pub struct Hello {
     /// their names only, never `base_url` or a key. Absent — none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<String>,
+    /// `session_secrets = true` in `worker.toml` (since SPEC 0.147): the worker takes
+    /// `secret.put` for its owner's sessions. Absent — false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_secrets: bool,
     /// Fingerprint of the machine (T21, SPEC §5.1): hex sha256 of a stable machine id with
     /// the salt `hqc`; the id itself never leaves the machine. Absent from older workers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1340,6 +1462,9 @@ mod tests {
         "workspace.create",
         "workspace.inspect",
         "workspace.delete",
+        "secret.put",
+        "workspace.keys",
+        "workspace.key_delete",
         "ack",
         "error",
     ];
@@ -1489,6 +1614,26 @@ mod tests {
             "workspace.delete",
             include_str!("../examples/wire/hub.workspace.delete.json"),
         ),
+        (
+            "secret.put",
+            include_str!("../examples/wire/hub.secret.put.json"),
+        ),
+        (
+            "secret.put",
+            include_str!("../examples/wire/hub.secret.put.key.json"),
+        ),
+        (
+            "secret.put",
+            include_str!("../examples/wire/hub.secret.put.keygen.json"),
+        ),
+        (
+            "workspace.keys",
+            include_str!("../examples/wire/hub.workspace.keys.json"),
+        ),
+        (
+            "workspace.key_delete",
+            include_str!("../examples/wire/hub.workspace.key_delete.json"),
+        ),
         ("ack", include_str!("../examples/wire/hub.ack.json")),
         (
             "ack",
@@ -1546,6 +1691,22 @@ mod tests {
         (
             "result",
             include_str!("../examples/wire/worker.result.workspace.delete.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.secret.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.secret.keygen.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.workspace.keys.json"),
+        ),
+        (
+            "result",
+            include_str!("../examples/wire/worker.result.workspace.key_delete.json"),
         ),
         (
             "worker.approval.request",
@@ -1613,6 +1774,9 @@ mod tests {
             HubFrame::WorkspaceCreate(_) => "workspace.create",
             HubFrame::WorkspaceInspect(_) => "workspace.inspect",
             HubFrame::WorkspaceDelete(_) => "workspace.delete",
+            HubFrame::SecretPut(_) => "secret.put",
+            HubFrame::WorkspaceKeys(_) => "workspace.keys",
+            HubFrame::WorkspaceKeyDelete(_) => "workspace.key_delete",
             HubFrame::Ack(_) => "ack",
             HubFrame::Error(_) => "error",
         }
@@ -1899,6 +2063,31 @@ mod tests {
         assert!(a.seq.is_some());
     }
 
+    /// SPEC 0.147: a secret or a key in `secret.put` is not in the frame's `Debug`, which a log
+    /// line may carry.
+    #[test]
+    fn a_secret_is_not_in_debug() {
+        for src in [
+            include_str!("../examples/wire/hub.secret.put.json"),
+            include_str!("../examples/wire/hub.secret.put.key.json"),
+        ] {
+            let f: Envelope<HubFrame> = serde_json::from_str(src).unwrap();
+            let shown = format!("{f:?}");
+            assert!(
+                !shown.contains("horse")
+                    && !shown.contains("OPENSSH")
+                    && !shown.contains("\"pass\""),
+                "{shown}"
+            );
+            assert!(shown.contains("bytes>"), "{shown}");
+            // And it goes on the wire as it came.
+            assert_eq!(
+                serde_json::to_value(&f).unwrap(),
+                serde_json::from_str::<Value>(src).unwrap()
+            );
+        }
+    }
+
     #[test]
     fn results_answer_their_requests() {
         let pairs = [
@@ -1930,6 +2119,22 @@ mod tests {
                 include_str!("../examples/wire/hub.workspace.delete.json"),
                 include_str!("../examples/wire/worker.result.workspace.delete.json"),
             ),
+            (
+                include_str!("../examples/wire/hub.secret.put.json"),
+                include_str!("../examples/wire/worker.result.secret.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.secret.put.keygen.json"),
+                include_str!("../examples/wire/worker.result.secret.keygen.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.workspace.keys.json"),
+                include_str!("../examples/wire/worker.result.workspace.keys.json"),
+            ),
+            (
+                include_str!("../examples/wire/hub.workspace.key_delete.json"),
+                include_str!("../examples/wire/worker.result.workspace.key_delete.json"),
+            ),
         ];
         for (req, res) in pairs {
             let req: Envelope<HubFrame> = serde_json::from_str(req).unwrap();
@@ -1942,6 +2147,9 @@ mod tests {
                 HubFrame::PermissionsInspect(r) => (&r.request_id, 4),
                 HubFrame::WorkspaceInspect(r) => (&r.request_id, 5),
                 HubFrame::WorkspaceDelete(r) => (&r.request_id, 6),
+                HubFrame::SecretPut(r) => (&r.request_id, 7),
+                HubFrame::WorkspaceKeys(r) => (&r.request_id, 8),
+                HubFrame::WorkspaceKeyDelete(r) => (&r.request_id, 9),
                 other => panic!("not a request: {other:?}"),
             };
             assert_eq!(&req.id, request_id, "request_id is the frame id");
@@ -1957,6 +2165,9 @@ mod tests {
                 ResultBody::Inspect(_) => 4,
                 ResultBody::WorkspaceInspect(_) => 5,
                 ResultBody::WorkspaceDelete(_) => 6,
+                ResultBody::Secret(_) => 7,
+                ResultBody::WorkspaceKeys(_) => 8,
+                ResultBody::WorkspaceKeyDeleted(_) => 9,
             };
             assert_eq!(got, kind);
         }

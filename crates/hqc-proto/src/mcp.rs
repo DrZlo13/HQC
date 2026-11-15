@@ -35,6 +35,13 @@ pub const SPAWN: &str = "hqc_spawn";
 pub const SCHEDULE: &str = "hqc_schedule";
 pub const MOVE: &str = "hqc_move";
 pub const RENAME: &str = "hqc_rename";
+/// Since SPEC 0.147, listed only to an agent whose worker has `session_secrets`
+/// ([`SECRET_TOOLS`]).
+pub const SECRET: &str = "hqc_secret";
+pub const SSH_KEYGEN: &str = "hqc_ssh_keygen";
+/// The tools the hqc MCP server lists only with `HQC_SECRET_TOOLS=1` in its environment
+/// (SPEC §7, since 0.147).
+pub const SECRET_TOOLS: &[&str] = &[SECRET, SSH_KEYGEN];
 /// `instructions` of `initialize` (SPEC §7.2): the runtime keeps them in the system prompt while
 /// the tools themselves wait behind its tool search, so each tool is named here by its use.
 pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's owner; the user \
@@ -54,7 +61,9 @@ pub const INSTRUCTIONS: &str = "hqc tools act with the rights of this session's 
     hqc_search_history; later or recurring messages: hqc_schedule; moving this session to \
     another folder or project, only when the user asks (a folder that is not one of the user's \
     workspaces in the same environment waits for the user to allow it): hqc_move; renaming a \
-    session: hqc_rename.";
+    session: hqc_rename; where this machine allows it, a password or an ssh key from the user \
+    without it entering the conversation: hqc_secret, and an ssh key of your own for a device \
+    you set up: hqc_ssh_keygen.";
 
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -328,6 +337,67 @@ pub const TOOLS: &[Tool] = &[
                     }
                 },
                 "required": ["path"],
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
+        name: SECRET,
+        description: "Ask the user for a secret without it entering the conversation: a \
+            password (`kind: secret`, the default) or an ssh private key (`kind: ssh_key`). The \
+            user sees a card with `name` and `purpose` and fills it in, from a password manager \
+            too; the call waits for the answer and fails if the user declines or does not answer \
+            before the tool call times out. A secret becomes the file \"$HQC_SECRETS/<name>\" \
+            for as long as your process runs: use it inside a command, as \
+            \"$(cat \"$HQC_SECRETS/<name>\")\", never print it, echo it or write it into a reply \
+            or a file of the repository. A key is loaded into your ssh-agent (ssh and git use \
+            it); the user may keep it for this workspace. Returns `{note, path?, fingerprint?}`. \
+            Ask only for what the task needs, once: a secret you were given is still there.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "A name of letters, digits, '_', '-' and '.', as WIFI_PASS or pi-lab."
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "One line for the user: what it is for (\"the Wi-Fi password to write into the camera's config\")."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["secret", "ssh_key"],
+                        "description": "secret (a password, a token) or ssh_key (a private key); secret when absent."
+                    }
+                },
+                "required": ["name", "purpose"],
+                "additionalProperties": false
+            })
+        },
+    },
+    Tool {
+        name: SSH_KEYGEN,
+        description: "Make a new ed25519 ssh key for this workspace, for a device or a server \
+            you set up: the private key stays with hqc on this machine (not in the repository, \
+            not in the conversation), is loaded into your ssh-agent now and into that of every \
+            later session of this workspace. Returns `{name, fingerprint, public_key}`: put \
+            `public_key` into the device's ~/.ssh/authorized_keys, then ssh uses the key. A name \
+            that this workspace already has is an error.",
+        input_schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "A name of letters, digits, '_', '-' and '.', as pi-kitchen."
+                    },
+                    "comment": {
+                        "type": "string",
+                        "description": "The key's comment; `hqc <name>` when absent."
+                    }
+                },
+                "required": ["name"],
                 "additionalProperties": false
             })
         },

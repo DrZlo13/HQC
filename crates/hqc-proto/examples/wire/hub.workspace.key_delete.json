@@ -1,0 +1,5 @@
+{
+  "id": "h-35",
+  "type": "workspace.key_delete",
+  "payload": { "request_id": "h-35", "path": "/Users/home-mac/work/lab/pi", "name": "pi-kitchen" }
+}

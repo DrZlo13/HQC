@@ -373,7 +373,8 @@ impl AppState {
     /// memory: a worker that comes back reports it again.
     pub fn set_activity(&self, session_id: Uuid, activity: Option<hqc_proto::frame::Activity>) {
         let mut all = self.activity.lock().unwrap();
-        match activity {
+        // A kind this hub does not know (a newer worker's) is none to its clients.
+        match activity.filter(|a| *a != hqc_proto::frame::Activity::Unknown) {
             Some(a) => all.insert(session_id, a),
             None => all.remove(&session_id),
         };

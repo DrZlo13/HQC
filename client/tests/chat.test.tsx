@@ -625,6 +625,17 @@ describe('model', () => {
     expect($('.limit-notice + .composer-wrap')).not.toBeNull();
   });
 
+  it('shows no limit bar in a session on a provider, whose model is not on the subscription (SPEC 0.173)', async () => {
+    const { app, api } = setup('idle');
+    const soon = Math.floor(Date.now() / 1000) + 2 * 3600;
+    const limits = { status: 'rejected', rate_limit_type: 'five_hour', resets_at: soon, reported_at: '' };
+    (api as any).workers = vi.fn(async () => [{ id: 'wk1', name: 'drzlo-mac', limits }]);
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, provider: { id: 'pr1', label: 'GLM' } });
+    await mount(app);
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
+    expect($('.limit-notice')).toBeNull();
+  });
+
   it('says nothing of a limit or a window that has reset since it was reported (SPEC 0.173)', () => {
     const now = Date.UTC(2026, 10, 13, 12);
     const past = now / 1000 - 60;

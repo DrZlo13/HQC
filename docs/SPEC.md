@@ -1680,7 +1680,8 @@ the rest is marked "later"):
   `origin_runtime`: a fork before a message of the conversation before `/clear` cuts that
   transcript, one after the first answer after it the new one (before, every fork cut the new
   one, and the worker did not find the cut there); the cut is only among the answers after the
-  last `system conversation_cleared` before the message (its own or copied), so a fork before
+  last `system conversation_cleared` before the message, or before the place the client shows
+  it at (below; its own or copied), so a fork before
   the first answer after `/clear` starts a new conversation, like one before the first message,
   without the source's events. Since 0.108 a fork before a message with
   `during_text` keeps the `agent.message` the client shows above it (below, the WebSocket
@@ -3736,9 +3737,9 @@ turn's answer (live run `w1-clear`), and does not stream it: `system session_tit
 trimmed, an empty one dropped; the transcript's title, its last non-empty `custom-title`
 (`{"type": "custom-title", "customTitle": "<title>", "sessionId": "<uuid>"}`, a person's:
 `/rename`, the VS Code tab's rename), else its last `ai-title`, is read every 2 s of the first
-model turn of a new conversation (a new session, a fork, the first turn after `/clear`: the CLI
-writes `ai-title` then; a resumed transcript without one, tens of MB, is not read every 2 s;
-with the token rate, below) while the process has sent no title yet, and at the end of every
+model turn of a new conversation (a new session or the first turn after `/clear`: the CLI writes
+`ai-title` then, and not in a fork, whose own title the hub keeps; a resumed transcript without
+one, tens of MB, is not read every 2 s; with the token rate, below) while the process has sent no title yet, and at the end of every
 turn, so a title a person gave is not taken back by an older `ai-title`; either is sent only
 when it differs from the last one sent. Before 0.151 the transcript was read only at the end of
 a turn, so a new session got its title when its first turn ended.
@@ -5663,7 +5664,8 @@ releases the session (live run `w1-clear`, 2.1.312). The CLI writes the new tran
 70 ms before that `init`: the worker marks the folder from `conversation_reset` to `init`, and
 the mirror leaves a transcript there it has not read yet until then. The hub gives the events the
 session has when its `runtime_session_id` changes the old id as `origin_runtime`, so a fork
-before a message of the conversation before `/clear` cuts the old transcript. The client's
+before a message of the conversation before `/clear` cuts the old transcript, and one before the
+first answer after `/clear` starts a new conversation without the source's events. The client's
 header adds the last `session_cost_usd` before each `system conversation_cleared` to the latest
 one, also when the agent resumed the new transcript later or the chat was opened again.
 
@@ -5678,7 +5680,8 @@ time (live runs `x6-wake-*`).
 a new session got its title when its first turn ended and a later `ai-title` took back a
 `/rename`, and the slash commands came as names with `system/init`. The adapter now sends a
 person's title, `system session_title_changed`, at once, reads the transcript's title every 2 s
-of a turn while the process has none and at the end of every turn, the transcript's last
+of the first model turn of a new session or after `/clear` while the process has none and at the
+end of every turn, the transcript's last
 `custom-title` winning over its `ai-title`, and the commands come from the CLI's answer to
 `initialize` (skipped before) and from `system commands_changed` with the first line of each
 description and its argument hint, before the first turn. New optional `command_info`

@@ -102,6 +102,15 @@ describe('layout widths', () => {
     expect(rule('.perm-done-row .btn-link')['margin-left']).toBe('auto');
   });
 
+  it('on a phone the "started by" line takes the header\'s whole width, one line: a long address ends in an ellipsis instead of breaking', () => {
+    expect(rule('.chat-phone .chat-head:has(> .chat-spawned)')['flex-wrap']).toBe('wrap');
+    // The title's column has a basis of 0: it stays on the first line beside the buttons.
+    expect(rule('.chat-head-main')['flex']).toBe('1');
+    const spawned = rule('.chat-phone .chat-spawned');
+    expect(spawned['flex-basis']).toBe('100%');
+    expect([spawned['white-space'], spawned['overflow'], spawned['text-overflow']]).toEqual(['nowrap', 'hidden', 'ellipsis']);
+  });
+
   it("a dot has a width as well as a flex basis: Safari sizes a project's running mark by its items' widths", () => {
     expect([rule('.dot')['flex'], rule('.dot')['width']]).toEqual(['0 0 8px', '8px']);
     for (const sel of ['.sessions-phone .dot', '.preview-row .dot']) {

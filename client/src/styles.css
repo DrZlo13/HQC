@@ -4970,6 +4970,21 @@ a.relay-peer {
   text-overflow: ellipsis;
 }
 
+/* On a phone "started by" is the header's last line, as wide as the header (under its buttons
+   too) and lined up with the title past the back button, in the meta row's type; an address
+   too long for it ends in an ellipsis. */
+.chat-phone .chat-head:has(> .chat-spawned) {
+  flex-wrap: wrap;
+}
+.chat-phone .chat-spawned {
+  flex-basis: 100%;
+  padding-left: 46px; /* the back button, 44px, and the header's gap */
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .chat-phone .timeline {
   padding: 16px 16px 16px;
 }
@@ -5017,9 +5032,13 @@ a.relay-peer {
   font-size: 15px;
   line-height: 19px;
 }
-:root.list-compact .chat-phone .chat-meta {
+:root.list-compact .chat-phone .chat-meta,
+:root.list-compact .chat-phone .chat-spawned {
   font-size: 11.5px;
   line-height: 16px;
+}
+:root.list-compact .chat-phone .chat-spawned {
+  padding-left: 38px; /* the back button is 36px in this look */
 }
 
 /* ---- pages: project settings, settings, enroll ---- */

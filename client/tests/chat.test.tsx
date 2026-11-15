@@ -651,6 +651,18 @@ describe('header', () => {
     await mount(app);
     expect($('.chat-spawned')!.textContent).toBe('started by hqc/planner');
     expect($('.chat-spawned a')!.getAttribute('href')).toBe('#/s/s0');
+    expect($('.chat-meta .chat-spawned'), 'in the meta row on a computer').not.toBeNull();
+  });
+
+  it('on a phone "started by" is the header\'s last line, not in the meta row', async () => {
+    // Beside a running session's four buttons the meta row has no room for the address.
+    const { app } = setup('running', { spawned_by: { session_id: 's0', address: 'mpv-sendspin/session-4' } });
+    await mount(app, true);
+    expect($('.chat-meta .chat-spawned')).toBeNull();
+    const line = $('.chat-head > .chat-spawned')!;
+    expect($('.chat-head')!.lastElementChild).toBe(line);
+    expect(line.textContent).toBe('started by mpv-sendspin/session-4');
+    expect(line.querySelector('a')!.getAttribute('href')).toBe('#/s/s0');
   });
 
   it('pulses while a turn is on, no "Stop" when idle', async () => {

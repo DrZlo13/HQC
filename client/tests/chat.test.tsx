@@ -16,6 +16,7 @@ import {
   type HqcEvent,
   type PermissionMode,
   type EventOf,
+  type RoomMode,
   type SessionInfo,
   type SessionState,
   type SlashCommand,
@@ -77,6 +78,7 @@ function setup(
     foreground_calls?: string[];
     model?: string;
     paused_at?: string;
+    room_mode?: RoomMode;
   } = {},
 ) {
   const history = opts.history ?? HISTORY;
@@ -170,6 +172,7 @@ function setup(
     foreground_calls: opts.foreground_calls,
     model: opts.model,
     paused_at: opts.paused_at,
+    room_mode: opts.room_mode,
   };
   app.sessions.set('s1', info);
   app.sessions.set('sys', { ...info, id: 'sys', title: 'drzlo-mac', system: true, workspace_id: undefined, held_by: undefined, state: 'idle' });
@@ -723,6 +726,77 @@ describe('header', () => {
     expect($('.chat-head')!.lastElementChild).toBe(line);
     expect(line.textContent).toBe('started by mpv-sendspin/session-4');
     expect(line.querySelector('a')!.getAttribute('href')).toBe('#/s/s0');
+  });
+
+  it('a room: its mode in place of the model, its agents linked with their states, an agent\'s post from it; no model or permission switch', async () => {
+    const post = ev('event.peer.message', 2, (e) => {
+      e.payload = { from_session_id: 'm1', from: 'glazes/opus', mode: 'send', text: 'Cone 6 is **fine**' };
+      delete e.chain;
+    });
+    const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0], post] });
+    app.projects.set('p1', { id: 'p1', name: 'Glazes', slug: 'glazes', description: '', is_personal: false, color: 'blue', quick_messages: [], created_at: '2026-10-20T10:00:00Z' });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, title: string, more: Partial<SessionInfo>) =>
+      app.sessions.set(id, { ...room, id, title, slug: title.toLowerCase(), room_mode: undefined, room_id: 's1', ...more });
+    member('m1', 'Opus', { state: 'waiting' });
+    member('m2', 'Sonnet', { state: 'idle', subagents: 1 });
+    member('m9', 'Elsewhere', { room_id: 'r9' });
+    await mount(app);
+    expect($('.chat-room')!.textContent).toBe('Room · Council');
+    expect($('.chat-model')).toBeNull();
+    expect([...root.querySelectorAll('.chat-room-agent')].map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Opus · Waiting for reply', '#/s/m1'],
+      ['Sonnet · Running', '#/s/m2'],
+    ]);
+    // The agent's post in the room: a message from its session, linked. The first chat of a
+    // run renders its history later than the 50 ms `mount` waits.
+    for (let i = 0; i < 20 && !$('.relay'); i++) await act(async () => void (await new Promise((r) => setTimeout(r, 10))));
+    expect($('.relay-label')!.textContent).toBe('Message from');
+    expect($('.relay-peer')!.textContent).toBe('Opus');
+    expect($('.relay-peer')!.getAttribute('href')).toBe('#/s/m1');
+    expect($('.relay .text strong')!.textContent).toBe('fine');
+    // Nothing for its menu: no "More".
+    expect($('.btn-more')).toBeNull();
+    render(null, root);
+
+    // A phone's header says the same.
+    await mount(app, true);
+    expect($('.chat-room')!.textContent).toBe('Room · Council');
+    expect(root.querySelectorAll('.chat-room-agent')).toHaveLength(2);
+  });
+
+  it("a room's pill has its agents' state, as the list does; no Stop: the room has nothing to stop", async () => {
+    const { app } = setup('idle', { room_mode: 'conversation', commands: [], history: [HISTORY[0]] });
+    const room = app.sessions.get('s1')!;
+    const member = (id: string, state: SessionState) =>
+      app.sessions.set(id, { ...room, id, title: id, slug: id, room_mode: undefined, room_id: 's1', state });
+    member('m1', 'running');
+    member('m2', 'idle');
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Running');
+    expect($('.pill')!.classList.contains('state-running')).toBe(true);
+    expect($('.btn-stop')).toBeNull();
+    render(null, root);
+    // One of them waits for the owner: the room does.
+    member('m2', 'waiting');
+    await mount(app);
+    expect($('.pill')!.textContent).toBe('Waiting for reply');
+    expect($('.btn-stop')).toBeNull();
+  });
+
+  it('a room without a workspace has no "More" on a computer or a phone, unless a phone has Retry for it', async () => {
+    const { app } = setup('idle', { room_mode: 'council', commands: [], history: [HISTORY[0]] });
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, workspace_id: undefined, worker_id: undefined });
+    await mount(app);
+    expect($('.btn-more')).toBeNull();
+    render(null, root);
+    await mount(app, true);
+    expect($('.btn-more')).toBeNull();
+    render(null, root);
+    app.sessions.set('s1', { ...app.sessions.get('s1')!, state: 'error' });
+    await mount(app, true);
+    await act(async () => $('.btn-more')!.click());
+    expect([...root.querySelectorAll('.menu-item')].map((b) => b.textContent)).toEqual(['Retry']);
   });
 
   it('pulses while a turn is on, no "Stop" when idle', async () => {

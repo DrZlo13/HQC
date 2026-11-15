@@ -280,7 +280,8 @@ export function NewSessionChat({
 
 type Chip = 'workspace' | 'folder' | 'permissions' | 'model';
 
-const PERMISSIONS: [PermissionMode | undefined, string][] = [
+/** The permission modes a new session or room starts in. */
+export const PERMISSIONS: [PermissionMode | undefined, string][] = [
   [undefined, "The worker's default"],
   ['ask', 'Ask'],
   ['auto', 'Auto'],

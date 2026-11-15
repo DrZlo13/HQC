@@ -2617,6 +2617,24 @@ select.input {
   color: var(--text2);
 }
 
+/* A room: its mode where a session names its model, and its agents' sessions on a line of their
+   own, each with its state. */
+.chat-room {
+  color: var(--text2);
+  white-space: nowrap;
+}
+.chat-room-agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+}
+.chat-room-agent {
+  min-width: 0;
+  color: var(--text2);
+  overflow-wrap: anywhere;
+}
+
 .conn-lost {
   color: var(--danger);
 }
@@ -5229,6 +5247,66 @@ a.relay-peer {
 
 .layout-phone .input {
   font-size: 16px;
+}
+
+/* ---- a new room: its title and mode, where its agents work, the agents ---- */
+
+/* As wide as the page and no wider at 390 px: the form, the mode's fieldset (min-content by
+   default) and the text beside a radio may shrink; fields are 100 % wide. */
+.room-form {
+  min-width: 0;
+}
+.room-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.room-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+.room-mode input {
+  flex: none;
+  margin: 3px 0 0;
+}
+.room-mode-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.room-mode-name {
+  font-weight: 600;
+}
+.room-add-workspace {
+  align-self: flex-start;
+}
+.room-agent {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 14px;
+}
+.room-agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.room-agent-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+.room-prompt {
+  resize: vertical;
 }
 
 /* ---- project settings (T49) ---- */

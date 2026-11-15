@@ -200,6 +200,18 @@ describe('examples/wire', () => {
     }
   });
 
+  it('reads a room and the room of its member session', () => {
+    const room = parseSessionInfo(load('api.session.room.json'));
+    expect(room).toMatchObject({ room_mode: 'council', room_id: undefined, worker_id: undefined, workspace_id: undefined });
+    const member = parseSessionInfo(load('api.session.room.member.json'));
+    expect(member).toMatchObject({ room_id: room.id, room_mode: undefined, title: 'opus', model: 'opus' });
+    expect(parseSessionInfo({ ...(load('api.session.room.json') as object), room_mode: 'conversation' }).room_mode).toBe('conversation');
+    // A mode this build does not know is none; an ordinary session has neither.
+    expect(parseSessionInfo({ ...(load('api.session.room.json') as object), room_mode: 'debate' }).room_mode).toBeUndefined();
+    const s = parseSessionInfo(load('api.session.json'));
+    expect([s.room_mode, s.room_id]).toEqual([undefined, undefined]);
+  });
+
   it('reads the other REST bodies', () => {
     expect(parseEventPage(load('api.events.json')).last_seq).toBe(43);
     const sp = parseSearchPage(load('api.search.json'));

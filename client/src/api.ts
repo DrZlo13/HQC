@@ -48,6 +48,7 @@ import {
   type SearchPage,
   type Schedule,
   type ListMode,
+  type RoomMode,
   type SessionInfo,
   type SessionOrder,
   type Theme,
@@ -83,6 +84,19 @@ export interface NewSessionOptions {
   /** A provider the workspace's worker allows (SPEC 0.144); absent: the runtime's own
    *  endpoint. */
   provider_id?: string;
+}
+
+/** `POST /api/projects/{id}/rooms`: a room and one member session per agent, at least one. The
+ *  workspace, folder and permission mode are its agents', with the defaults of a new session;
+ *  an agent's absent `model` is the runtime's default, its `provider_id` one the workspace's
+ *  worker allows, as for a new session. */
+export interface NewRoom {
+  title?: string;
+  mode: RoomMode;
+  workspace_id?: string;
+  cwd?: string;
+  permission_mode?: PermissionMode;
+  agents: { model?: string; provider_id?: string; system_prompt?: string }[];
 }
 
 /** The filters, order and page of `GET /api/search` (SPEC §15). */
@@ -284,6 +298,11 @@ export class Api {
     if (opts.provider_id) body.provider_id = opts.provider_id;
     const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, body);
     return parseSessionInfo(data);
+  }
+
+  /** The room's session object. */
+  async createRoom(projectId: string, body: NewRoom): Promise<SessionInfo> {
+    return parseSessionInfo(await this.req('POST', `/api/projects/${enc(projectId)}/rooms`, body));
   }
 
   async patchSession(id: string, patch: SessionPatch): Promise<SessionInfo> {

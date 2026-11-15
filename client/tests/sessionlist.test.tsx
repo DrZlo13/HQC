@@ -12,8 +12,9 @@ import { render } from 'preact';
 import { act } from 'preact/test-utils';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Api } from '../src/api';
+import { Api, ApiError } from '../src/api';
 import { ARCHIVE_UNDO_MS, AppState } from '../src/app';
+import { tabMark } from '../src/favicon';
 import { parseEvent, type ListMode, type Project, type ProjectSort, type SessionInfo, type SessionState, type Workspace } from '../src/proto';
 import { trackHistory } from '../src/nav';
 import { applyLook } from '../src/theme';
@@ -308,7 +309,7 @@ const pressKey = (key: string) =>
   });
 
 describe('SessionList (desktop column)', () => {
-  it('a header in one row: the name, search, the order, the project menu, a new session; then the groups', async () => {
+  it('a header in one row: the name, search, the order, the project menu, a new room, a new session; then the groups', async () => {
     await mount(<SessionList app={makeApp()} current="net" />);
     const head = root.querySelector('.side-head')!;
     expect(head.querySelector('.project-title')!.textContent).toBe('physics-mp');
@@ -317,6 +318,7 @@ describe('SessionList (desktop column)', () => {
       'Search sessions and messages',
       'Session order: State',
       'Project: settings, favorites, archive',
+      'New room',
       'New session',
     ]);
     // No tile, no "1 needs you · 2 running", no gear, no row of State / Recent / Custom.
@@ -2176,7 +2178,7 @@ describe('loading a chat ahead', () => {
 });
 
 describe('SessionList (phone)', () => {
-  it('a project\'s screen: one header row — "‹", the name, search, State, "⋯", "+" — then the groups; no chips, gear or floating "New"', async () => {
+  it('a project\'s screen: one header row — "‹", the name, search, State, "⋯", a new room, "+" — then the groups; no chips, gear or floating "New"', async () => {
     await mount(<SessionList app={makeApp()} phone />);
     const head = root.querySelector('.sessions-phone > .side-head')!;
     expect([...head.children].map((c) => c.getAttribute('aria-label') ?? c.textContent)).toEqual([
@@ -2185,6 +2187,7 @@ describe('SessionList (phone)', () => {
       'Search sessions and messages',
       'Session order: State',
       'Project: settings, favorites, archive',
+      'New room',
       'New session',
     ]);
     expect(head.querySelector('.btn-back')!.getAttribute('href')).toBe('#/');
@@ -3559,6 +3562,275 @@ describe('a new session', () => {
     });
     expect(lists.allSessions).toHaveBeenCalledTimes(2);
     expect(app.sessions.has(s.id)).toBe(true);
+  });
+});
+
+// A room: a session with no worker whose agents are member sessions (`room_id`). The lists, the
+// counts and the marks show the room and not its agents, with the state of them all; "New room"
+// beside "+" opens its form.
+describe('a room', () => {
+  const room = (more: Partial<SessionInfo> = {}) =>
+    sess('room', 'Glaze review', 'idle', at(0.05), { room_mode: 'conversation', worker_id: undefined, ...more });
+  const member = (id: string, title: string, state: SessionState, more: Partial<SessionInfo> = {}) =>
+    sess(id, title, state, at(0.01), { room_id: 'room', ...more });
+  const summary = (id: string, title: string, state: SessionState) => ({
+    session_id: id,
+    project_id: 'p1',
+    title,
+    state,
+    queue_len: 0,
+    unread: 0,
+    last_seq: 1,
+    last_read_seq: 1,
+  });
+
+  it('lists the room, not its agents: Needs you while one of them waits, Running while one works, else its own state', async () => {
+    const app = makeApp([
+      ...LIST,
+      room(),
+      member('m1', 'Opus', 'waiting', { unread: 3, favorite_at: at(0.5) }),
+      member('m2', 'Sonnet', 'running'),
+      member('m3', 'Haiku', 'archived'),
+    ]);
+    await mount(<SessionList app={app} current="net" />);
+    // No favorite of an agent, no agent in the groups: the room waits for the user.
+    expect(groups()).toEqual([
+      ['Needs you', '2', ['Glaze review', 'Network sync']],
+      ['Running', '2', ['Stone textures', 'Step determinism']],
+      ['Idle · Yesterday', '1', ['Collision profiling']],
+      ['Idle · Last 7 days', '1', ['Cave scene port']],
+    ]);
+    // The counts and the marks count the room once, an agent's unread events not at all, and an
+    // archived agent is not in the archive.
+    expect(app.projectWaiting('p1')).toBe(2);
+    expect(app.projectUnread('p1')).toBe(false);
+    expect(app.workerRunning('wk1')).toBe(1);
+    expect(app.archivedSessions('p1')).toEqual([]);
+    await mount(<ProjectRail app={app} />);
+    expect([...root.querySelectorAll('.rail-badge')].map((b) => b.getAttribute('aria-label'))).toEqual(['needs you: 2']);
+    await mount(<PhoneHome app={app} />);
+    expect(phoneMarks('physics-mp')).toEqual(['running: 2', 'needs you: 2']);
+    expect(phoneRow('physics-mp').classList.contains('has-unread')).toBe(false);
+    expect(tabMark(makeApp([room(), member('m1', 'Opus', 'idle', { unread: 3 })]))).toBeUndefined();
+
+    // The agent answered: the other one still works, so does the room.
+    await mount(<SessionList app={app} current="net" />);
+    await act(async () => app.mergeSummary([summary('m1', 'Opus', 'idle')]));
+    expect(groups().slice(0, 2)).toEqual([
+      ['Needs you', '1', ['Network sync']],
+      ['Running', '3', ['Stone textures', 'Glaze review', 'Step determinism']],
+    ]);
+    expect(app.projectWaiting('p1')).toBe(1);
+    // Nobody waits or works: the room's own state.
+    await act(async () => app.mergeSummary([summary('m2', 'Sonnet', 'idle')]));
+    expect(groups().find((g) => g[0] === 'Idle · Today')).toEqual(['Idle · Today', '1', ['Glaze review']]);
+    expect(titles()).not.toContain('Opus');
+  });
+
+  it("the bar's stripe and hover text of a project with a room count the room's agents at work, not the room", async () => {
+    const app = makeApp([
+      sess('prof', 'Collision profiling', 'idle', at(22)),
+      room(),
+      member('m1', 'Opus', 'running', { output_per_s: 40, subagents: 2 }),
+      member('m2', 'Sonnet', 'idle', { background_tasks: 1, output_per_s: 3 }),
+      member('m3', 'Haiku', 'idle', { output_per_s: 9 }),
+      member('m4', 'Fable', 'archived', { state: 'running', output_per_s: 50 }),
+    ]);
+    // Opus with its two subagents and Sonnet's background task; the idle and the archived
+    // agent do not count.
+    expect([app.projectAgents('p1'), app.projectRate('p1')]).toEqual([4, 43]);
+    await mount(<ProjectRail app={app} />);
+    expect(root.querySelector('a.rail-project[aria-label="physics-mp"]')!.getAttribute('title')).toBe('physics-mp · 4 agents · 43 tokens/s');
+    expect(root.querySelectorAll('.rail-run')).toHaveLength(1);
+  });
+
+  it("a removed room's agents go with it: the hub deletes their sessions, the client forgets them", async () => {
+    const app = makeApp([
+      ...LIST,
+      room(),
+      member('m1', 'Opus', 'idle'),
+      member('m2', 'Sonnet', 'idle'),
+      member('x1', 'Other room', 'idle', { room_id: 'room2' }),
+    ]);
+    await mount(<SessionList app={app} current="net" />);
+    await act(async () => app.deleteSession('room'));
+    expect(titles()).not.toContain('Glaze review');
+    expect(titles()).not.toContain('Opus');
+    expect(titles()).not.toContain('Sonnet');
+    expect(['room', 'm1', 'm2', 'x1', 'net'].map((id) => app.sessions.has(id))).toEqual([false, false, false, true, true]);
+  });
+
+  describe('the form', () => {
+    /** The hash change and the hub's (mocked) replies. */
+    const settle = () =>
+      act(async () => {
+        for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+      });
+    const form = () => root.querySelector<HTMLFormElement>('.main form.room-form');
+    const $f = <E extends Element>(sel: string, i = 0) => form()!.querySelectorAll<E>(sel)[i];
+    /** A field's new value, and the events a user's typing or pick sends. */
+    const set = (el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string, events = ['input']) =>
+      act(async () => {
+        el.value = value;
+        for (const e of events) el.dispatchEvent(new Event(e, { bubbles: true }));
+      });
+    const submit = () =>
+      act(async () => {
+        form()!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        for (let i = 0; i < 5; i++) await Promise.resolve();
+      });
+
+    beforeEach(() => windowWidth(1280));
+    afterEach(() => {
+      location.hash = '';
+      windowWidth(1024);
+    });
+
+    it('"New room" beside "+" opens it; "Create room" sends the title, the mode, where the agents work and each agent, then opens the room', async () => {
+      let app!: AppState;
+      const api = {
+        ...hubApi(),
+        workspaces: async () => app.workspaces.get('p1') ?? [],
+        createRoom: vi.fn(async (_p: string, _b: unknown) => room({ room_mode: 'council' })),
+        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+        readCursor: vi.fn(async () => {}),
+      };
+      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+      location.hash = '#/p/p1';
+      await mount(<App app={app} />);
+      await click(root.querySelector('.side-head .btn-new-room'));
+      await settle();
+      expect(location.hash).toBe('#/p/p1/new-room');
+      expect(root.querySelector('.main .bar .title')!.textContent).toBe('New room');
+      // Conversation, the project's first workspace, the worker's permissions, two agents.
+      expect([...form()!.querySelectorAll('.room-mode')].map((m) => m.textContent)).toEqual([
+        "ConversationAn agent's reply wakes the other agents",
+        "CouncilOnly your message wakes the agents, all at once; they see the room's history",
+      ]);
+      expect($f<HTMLInputElement>('input[name=mode][value=conversation]').checked).toBe(true);
+      const workspace = $f<HTMLSelectElement>('select[name=workspace]');
+      expect([...workspace.options].map((o) => o.textContent)).toEqual([
+        'phys-mp — home-mac:~/work/games/phys-mp',
+        'phys-det — drzlo-mac:~/work/games/phys-det',
+      ]);
+      expect(workspace.value).toBe('w1');
+      expect([...$f<HTMLSelectElement>('select[name=permission_mode]').options].map((o) => o.textContent)).toEqual([
+        "The worker's default",
+        'Ask',
+        'Auto',
+        'Allow all',
+      ]);
+      expect(form()!.querySelectorAll('.room-agent')).toHaveLength(2);
+      expect([...form()!.querySelectorAll('.room-agent .field-label')].map((l) => l.textContent)).toEqual(['Model', 'Prompt', 'Model', 'Prompt']);
+
+      await set($f('input[name=title]'), 'Glaze review');
+      await act(async () => {
+        const council = $f<HTMLInputElement>('input[name=mode][value=council]');
+        council.checked = true;
+        council.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await set(workspace, 'w2', ['change']);
+      await set($f('input[name=cwd]'), ' net ');
+      await set($f('select[name=permission_mode]'), 'ask', ['change']);
+      await set($f('select[name=model]', 0), 'opus', ['change']);
+      await set($f('textarea[name=system_prompt]', 0), 'You judge glazes by their chemistry.');
+      await set($f('select[name=model]', 1), 'haiku', ['change']);
+      await set($f('textarea[name=system_prompt]', 1), 'You count the cost.');
+      // A third agent with another model; the second goes, the third keeps its fields.
+      await click($f('.btn-add-agent'));
+      expect(form()!.querySelectorAll('.room-agent')).toHaveLength(3);
+      await set($f('select[name=model]', 2), 'custom', ['change']);
+      await set($f('input[name=model_name]'), 'claude-sonnet-5-5', ['input', 'change']);
+      await click($f('.btn-remove-agent', 1));
+      expect([...form()!.querySelectorAll('.room-agent-name')].map((n) => n.textContent)).toEqual(['Agent 1', 'Agent 2']);
+      expect($f<HTMLInputElement>('input[name=model_name]').value).toBe('claude-sonnet-5-5');
+
+      // The hub refuses: its reason under the form, nothing opened.
+      api.createRoom.mockRejectedValueOnce(new ApiError(400, 'the workspace is not ready', 'bad_request'));
+      await submit();
+      await settle();
+      expect(form()!.querySelector('.error-text')!.textContent).toBe('the workspace is not ready');
+      expect(location.hash).toBe('#/p/p1/new-room');
+
+      await submit();
+      await settle();
+      const body = {
+        title: 'Glaze review',
+        mode: 'council',
+        workspace_id: 'w2',
+        cwd: 'net',
+        permission_mode: 'ask',
+        agents: [{ model: 'opus', system_prompt: 'You judge glazes by their chemistry.' }, { model: 'claude-sonnet-5-5' }],
+      };
+      expect(api.createRoom.mock.calls).toEqual([
+        ['p1', body],
+        ['p1', body],
+      ]);
+      // The room's chat, and the room in the list.
+      expect(location.hash).toBe('#/s/room');
+      expect(form()).toBeNull();
+      expect(root.querySelector('.main .chat-title')!.textContent).toBe('Glaze review');
+      expect(root.querySelector('.main .chat-room')!.textContent).toBe('Room · Council');
+      expect(titles()).toContain('Glaze review');
+    });
+
+    it("an agent's model menu has the providers the workspace's worker allows; Create room sends the one picked", async () => {
+      let app!: AppState;
+      const api = {
+        ...hubApi(),
+        workspaces: async () => app.workspaces.get('p1') ?? [],
+        createRoom: vi.fn(async (_p: string, _b: unknown) => room()),
+        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+        readCursor: vi.fn(async () => {}),
+      };
+      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+      app.providers = [
+        { id: 'pr1', name: 'qwen-local', label: 'Qwen 3.8 (local)', base_url: 'http://192.168.1.229:8082', model: 'qwen3.8-27b', workers: ['wk1'] },
+        { id: 'pr2', name: 'zai', label: 'GLM', base_url: 'https://api.z.ai/api/anthropic', model: 'glm-5', workers: ['wk2'] },
+      ];
+      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+      location.hash = '#/p/p1/new-room';
+      await mount(<App app={app} />);
+      await settle();
+      // The project's first workspace, on home-mac: its provider only, under the Claude models.
+      const options = [...$f<HTMLSelectElement>('select[name=model]', 0).options].map((o) => o.textContent);
+      expect(options.slice(-1)).toEqual(['Qwen 3.8 (local)']);
+      expect(options).not.toContain('GLM');
+      await set($f('select[name=model]', 0), 'provider:pr1', ['change']);
+      expect($f<HTMLSelectElement>('select[name=model]', 0).value).toBe('provider:pr1');
+      await submit();
+      await settle();
+      expect(api.createRoom.mock.calls).toEqual([['p1', { mode: 'conversation', workspace_id: 'w1', agents: [{ provider_id: 'pr1' }, {}] }]]);
+    });
+
+    it("a provider the newly chosen workspace's worker does not allow is neither shown nor sent, as on a new session", async () => {
+      let app!: AppState;
+      const api = {
+        ...hubApi(),
+        workspaces: async () => app.workspaces.get('p1') ?? [],
+        createRoom: vi.fn(async (_p: string, _b: unknown) => room()),
+        eventsBefore: vi.fn(async () => ({ events: [], invalid: [], maxSeq: 0, count: 0 })),
+        readCursor: vi.fn(async () => {}),
+      };
+      app = makeApp(LIST, api as unknown as ReturnType<typeof hubApi>);
+      app.providers = [
+        { id: 'pr1', name: 'qwen-local', label: 'Qwen 3.8 (local)', base_url: 'http://192.168.1.229:8082', model: 'qwen3.8-27b', workers: ['wk1'] },
+      ];
+      Object.assign(app.socket, { subscribe: vi.fn(() => () => {}) });
+      location.hash = '#/p/p1/new-room';
+      await mount(<App app={app} />);
+      await settle();
+      await set($f('select[name=model]', 0), 'provider:pr1', ['change']);
+      // drzlo-mac's workspace: home-mac's provider is not there.
+      await set($f('select[name=workspace]'), 'w2', ['change']);
+      const model = $f<HTMLSelectElement>('select[name=model]', 0);
+      expect([...model.options].map((o) => o.textContent)).not.toContain('Qwen 3.8 (local)');
+      expect(model.value).toBe('');
+      await submit();
+      await settle();
+      expect(api.createRoom.mock.calls).toEqual([['p1', { mode: 'conversation', workspace_id: 'w2', agents: [{}, {}] }]]);
+    });
   });
 });
 

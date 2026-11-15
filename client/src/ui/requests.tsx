@@ -81,7 +81,7 @@ export function ForeignRequest({ app, r, current }: { app: AppState; r: OpenRequ
 }
 
 /** Under the "Waiting for a reply" line: the open requests of the sessions this one waits
- *  on. */
+ *  on; in a room, those of its agents, each named by its head. */
 export function WaitedRequests({ app, sessionId }: { app: AppState; sessionId: string }) {
   const list = app.waitedRequests(sessionId);
   if (list.length === 0) return null;

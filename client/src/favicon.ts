@@ -1,6 +1,6 @@
 // The tab's icon keeps two of the marks the projects get, across all of them: an amber dot
 // when a session waits for the user (a request or an error), a light one when nothing waits but
-// something is unread (archived and service sessions aside).
+// something is unread (archived and service sessions aside, a room for its members).
 
 import type { AppState } from './app';
 import { STATUS } from './theme';
@@ -11,8 +11,7 @@ export type TabMark = 'waiting' | 'unread' | undefined;
 
 export function tabMark(app: AppState): TabMark {
   let unread = false;
-  for (const s of app.sessions.values()) {
-    if (s.archived || s.system) continue;
+  for (const s of app.countedSessions()) {
     if (s.state === 'waiting' || s.state === 'error') return 'waiting';
     if (s.unread > 0) unread = true;
   }

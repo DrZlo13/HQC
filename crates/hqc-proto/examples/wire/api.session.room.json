@@ -1,0 +1,28 @@
+{
+  "id": "0199f3a2-7c10-7000-8000-000000000030",
+  "project_id": "0199f3a2-7c10-7000-8000-0000000000d2",
+  "owner_id": "0199f3a2-7c10-7000-8000-0000000000aa",
+  "cwd": ".",
+  "title": "Storage design",
+  "title_source": "user",
+  "slug": "storage-design",
+  "agent": {
+    "runtime": "none",
+    "process_state": "stopped",
+    "disallowed_tools": [],
+    "restricted": false,
+    "start_failures": 0
+  },
+  "auto_approve": false,
+  "wake_on_send": true,
+  "locked_by": "none",
+  "last_seq": 4,
+  "archived": false,
+  "state": "idle",
+  "queue_len": 0,
+  "last_read_seq": 3,
+  "unread": 1,
+  "created_at": "2026-11-15T09:00:00Z",
+  "updated_at": "2026-11-15T09:02:10Z",
+  "room_mode": "council"
+}

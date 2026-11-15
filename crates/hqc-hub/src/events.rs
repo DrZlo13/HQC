@@ -475,6 +475,11 @@ async fn after_store(
                     crate::peers::on_final(app, s, *input, text, (row.event_id, row.seq)).await?;
                 }
             }
+            // An agent's answer to its room is its post there (SPEC §7.1.1).
+            if let (Source::Worker, Some(room), Some(input)) = (source, s.room_id, in_reply_to) {
+                // Boxed: the post is a hub event, which comes back here.
+                Box::pin(crate::rooms::on_final(app, s, room, *input, text, row)).await?;
+            }
         }
         EventKind::Status {
             state, in_reply_to, ..

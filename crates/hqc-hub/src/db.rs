@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use hqc_proto::{
-    api::{ProjectColor, ProjectIcon, WorkspaceState},
+    api::{ProjectColor, ProjectIcon, RoomMode, WorkspaceState},
     frame::{PermissionMode, TitleSource},
 };
 use serde_json::{Map, Value};
@@ -1567,6 +1567,10 @@ pub struct SessionRow {
     /// when it did; a process that ends another way keeps the time of the pause (SPEC §17.3).
     /// Null while it is not paused.
     pub paused_at: Option<DateTime<Utc>>,
+    /// `conversation` | `council`: the session is a room (SPEC §7.1.1).
+    pub room_mode: Option<String>,
+    /// The room this session is an agent of (SPEC §7.1.1).
+    pub room_id: Option<Uuid>,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1575,7 +1579,8 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
     s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode, \
-    s.permission_capped_by, s.subagents, s.background_tasks, s.provider_id, s.browser, s.paused_at";
+    s.permission_capped_by, s.subagents, s.background_tasks, s.provider_id, s.browser, s.paused_at, \
+    s.room_mode, s.room_id";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -1613,18 +1618,27 @@ pub struct Spawn {
     pub number: Option<i64>,
 }
 
+/// What an agent of a room records on its session (SPEC §7.1.1): the room, which is also its
+/// `spawned_by`, and the system prompt its runtime gets.
+#[derive(Debug, Clone, Copy)]
+pub struct Member<'a> {
+    pub room_id: Uuid,
+    pub system_prompt: Option<&'a str>,
+}
+
 /// Creates the session with a slug unique in the project (SPEC §3 Session) and a
 /// hub-assigned `runtime_session_id` for Claude Code (SPEC §8.1).
 pub async fn create_session(db: &PgPool, n: NewSession<'_>) -> sqlx::Result<Uuid> {
-    create_spawned_session(db, n, None).await
+    create_spawned_session(db, n, None, None).await
 }
 
-/// [`create_session`], recording `hqc_spawn`'s [`Spawn`] when given. A session with the
-/// spawn's id already there is a unique violation.
+/// [`create_session`], recording `hqc_spawn`'s [`Spawn`] or a room's [`Member`] when given. A
+/// session with the spawn's id already there is a unique violation.
 pub async fn create_spawned_session(
     db: &PgPool,
     n: NewSession<'_>,
     spawn: Option<Spawn>,
+    member: Option<Member<'_>>,
 ) -> sqlx::Result<Uuid> {
     let (title, source, base) = match n.title {
         Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
@@ -1650,9 +1664,9 @@ pub async fn create_spawned_session(
         let r = sqlx::query(
             "INSERT INTO sessions (id, project_id, owner_id, workspace_id, worker_id, cwd, title, slug,
                 model, auto_approve, runtime, runtime_session_id, title_source, spawned_by,
-                spawn_chain_id, permission_mode)
+                spawn_chain_id, permission_mode, system_prompt, room_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'claude_code', $11, $12, $13, $14,
-                $15)
+                $15, $16, $17)
              ON CONFLICT (project_id, slug) DO NOTHING",
         )
         .bind(id)
@@ -1667,9 +1681,11 @@ pub async fn create_spawned_session(
         .bind(n.auto_approve)
         .bind(Uuid::new_v4().to_string())
         .bind(source.as_str())
-        .bind(spawn.map(|s| s.by))
+        .bind(spawn.map(|s| s.by).or(member.map(|m| m.room_id)))
         .bind(spawn.map(|s| s.chain_id))
         .bind(n.permission_mode.map(PermissionMode::as_str))
+        .bind(member.and_then(|m| m.system_prompt))
+        .bind(member.map(|m| m.room_id))
         .execute(db)
         .await?;
         if r.rows_affected() == 1 {
@@ -1677,6 +1693,77 @@ pub async fn create_spawned_session(
         }
     }
     unreachable!()
+}
+
+/// Creates a room (SPEC §7.1.1): a session with no workspace, no worker and no agent
+/// (`runtime: none`), titled `title`, or "Room N" with N and the slug `room-N` as for "Session
+/// N".
+pub async fn create_room(
+    db: &PgPool,
+    project_id: Uuid,
+    owner_id: Uuid,
+    title: Option<&str>,
+    mode: RoomMode,
+) -> sqlx::Result<Uuid> {
+    let (title, source, base) = match title {
+        Some(t) => (t.to_string(), TitleSource::User, slugify(t)),
+        None => {
+            let num = next_session_number(db, project_id).await?;
+            (
+                format!("Room {num}"),
+                TitleSource::Default,
+                format!("room-{num}"),
+            )
+        }
+    };
+    for i in 1.. {
+        let slug = if i == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{i}")
+        };
+        let id = new_id();
+        let r = sqlx::query(
+            "INSERT INTO sessions (id, project_id, owner_id, title, slug, runtime, title_source,
+                room_mode)
+             VALUES ($1, $2, $3, $4, $5, 'none', $6, $7)
+             ON CONFLICT (project_id, slug) DO NOTHING",
+        )
+        .bind(id)
+        .bind(project_id)
+        .bind(owner_id)
+        .bind(&title)
+        .bind(&slug)
+        .bind(source.as_str())
+        .bind(mode.as_str())
+        .execute(db)
+        .await?;
+        if r.rows_affected() == 1 {
+            return Ok(id);
+        }
+    }
+    unreachable!()
+}
+
+/// The agents of room `room` that are not archived, in the order they were created.
+pub async fn room_members(db: &PgPool, room: Uuid) -> sqlx::Result<Vec<SessionRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {SESSION_COLS} FROM sessions s WHERE s.room_id = $1 AND NOT s.archived
+         ORDER BY s.created_at, s.id"
+    ))
+    .bind(room)
+    .fetch_all(db)
+    .await
+}
+
+/// Every agent of room `room`, archived ones too.
+pub async fn room_agents(db: &PgPool, room: Uuid) -> sqlx::Result<Vec<SessionRow>> {
+    sqlx::query_as(&format!(
+        "SELECT {SESSION_COLS} FROM sessions s WHERE s.room_id = $1"
+    ))
+    .bind(room)
+    .fetch_all(db)
+    .await
 }
 
 /// N of the default title "Session N": the session's number in the project, the workers'
@@ -2945,7 +3032,8 @@ pub async fn mark_delivered(
 ) -> sqlx::Result<Option<EventRow>> {
     sqlx::query_as(&format!(
         "UPDATE events SET delivery = 'delivered', delivered_at = now(),
-           payload = CASE WHEN $2 AND type = 'user.message' AND payload->'schedule_id' IS NULL
+           payload = CASE WHEN $2 AND ((type = 'user.message' AND payload->'schedule_id' IS NULL)
+                                       OR (type = 'peer.message' AND payload ? 'room'))
                           THEN jsonb_set(payload, '{{joined}}', 'true') ELSE payload END
          WHERE event_id = $1 AND delivery = 'pending' RETURNING {EVENT_COLS}"
     ))

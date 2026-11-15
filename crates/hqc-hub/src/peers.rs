@@ -1,7 +1,7 @@
 //! `hqc_send` and `hqc_ask` (SPEC §7.1): messages between the sessions of one owner.
 //!
 //! - The target is an address `<project-slug>/<session-slug>` or an id of a session of the
-//!   caller's owner, not archived, not a worker's service session; anything else is
+//!   caller's owner, not archived, not a worker's service session, not a room; anything else is
 //!   `not_found`. The calling session itself, a blank text and a target driven from VS Code
 //!   are refused at once.
 //! - The message is a `peer.message` in the target, authored by the calling agent, with the
@@ -128,8 +128,11 @@ pub(crate) async fn target(
             .into_iter()
             .find(|x| x.slug == s)
     };
+    // A room has no agent: its agents are the targets (SPEC §7.1.1).
     let t = found
-        .filter(|t| t.owner_id == caller.owner_id && !t.archived && !t.system)
+        .filter(|t| {
+            t.owner_id == caller.owner_id && !t.archived && !t.system && t.room_mode.is_none()
+        })
         .ok_or_else(not_found)?;
     let a = address(app, &t).await.map_err(internal)?;
     Ok((t, a))
@@ -207,7 +210,11 @@ async fn checked_files(
 
 /// Links artifacts `ids` to session `session_id`, so that its worker may download them
 /// (SPEC §12).
-async fn link_files(app: &AppState, session_id: Uuid, ids: &[Uuid]) -> anyhow::Result<()> {
+pub(crate) async fn link_files(
+    app: &AppState,
+    session_id: Uuid,
+    ids: &[Uuid],
+) -> anyhow::Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
@@ -247,7 +254,7 @@ async fn last_delivered(app: &AppState, session_id: Uuid) -> anyhow::Result<Opti
 /// The chain of input `input` of a session: its own, or for a human's input one derived
 /// from it; capped by `buffered` when the send buffer the input carried had a lower cap than
 /// its own chain (T40, [`take_prefix`]).
-fn input_chain(
+pub(crate) fn input_chain(
     session_id: Uuid,
     input: Uuid,
     chain: Option<Value>,
@@ -1047,7 +1054,7 @@ pub async fn on_final(
             }
         }
         let to = p.payload["to"].as_str().unwrap_or_default().to_string();
-        let files = reply_files(app, s, p.session_id, in_reply_to, seq, &sent_files).await?;
+        let files = reply_files(app, s, p.session_id, in_reply_to, 0, seq, &sent_files).await?;
         tracing::info!(session_id = %p.session_id, request_id = %p.request_id, files = files.len(), joined = joined.len(), "peer ask answered");
         let mut result = json!({"from": to, "reply": reply});
         if !files.is_empty() {
@@ -1074,10 +1081,10 @@ pub async fn on_final(
 }
 
 /// The files of a reply (T41, SPEC §7.1): the artifacts of the `attachment` events of
-/// session `s` in the answering turn, after the question `question` and after the last end of a
-/// turn before the final message at `seq` (a question that came while a turn ran waited for a
-/// turn of its own, SPEC §6), oldest first, once each, at most [`MAX_FILES`]. Only artifacts of
-/// the session's owner count: a worker
+/// session `s` in the answering turn, after the question `question` (or `since`, a `seq` of `s`,
+/// when that is later) and after the last end of a turn before the final message at `seq` (a
+/// question that came while a turn ran waited for a turn of its own, SPEC §6), oldest first, once
+/// each, at most [`MAX_FILES`]. Only artifacts of the session's owner count: a worker
 /// may write `attachment` events of its own, and the id of another owner's artifact in one
 /// must not reach the asking worker. Then `sent`, the files of the messages the turn sent to
 /// the asker (T42), in order. They are linked to the asking session `asker`, so its worker may
@@ -1087,6 +1094,7 @@ pub async fn reply_files(
     s: &SessionRow,
     asker: Uuid,
     question: Uuid,
+    since: i64,
     seq: i64,
     sent: &[Uuid],
 ) -> anyhow::Result<Vec<ReplyArtifact>> {
@@ -1104,13 +1112,14 @@ pub async fn reply_files(
                                             AND t.payload ->> 'state' IN ('idle', 'error'))
                                         OR (t.type = 'system'
                                             AND t.payload ->> 'code' = 'turn_lost'))), 0)
-           AND e.seq < $4
+           AND e.seq > $5 AND e.seq < $4
          ORDER BY e.seq"#,
     )
     .bind(s.id)
     .bind(s.owner_id)
     .bind(question)
     .bind(seq)
+    .bind(since)
     .fetch_all(&app.db)
     .await?;
     if !sent.is_empty() {

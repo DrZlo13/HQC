@@ -2085,12 +2085,12 @@ here" (§9.3). "Retry" of a failed session is a filled button. In the feed a mes
 stands at the right end of its first line, inside the bubble or plate for the user's, after a
 note on that line ("joined the turn", §17.2; "instead of the request", §10.1) and before "·
 scheduled", "· awaiting delivery", "· queued" (since 0.137, an input that came while a turn
-ran, see the WebSocket below), "· not delivered" or "· forking…"; its buttons show on hover: the user's copy
-and "Fork from here" inside the bubble left of the time, an agent message's copy in the margin
-left of the feed, on a phone under the message. Since 0.156, until the hub answers
-a fork (it copies the source's history first, seconds for a long session) the message says "·
-forking…" and its "Fork from here" is disabled; the client asks for no second fork before the
-same message meanwhile. A run of tool calls is "N tool calls ·
+ran, see the WebSocket below), "· not delivered" or "· forking…"; its buttons show on hover: the
+user's copy and "Fork from here" inside the bubble left of the time, an agent message's copy in the
+margin left of the feed, on a phone under the message. Since 0.156, until the hub answers a fork (it
+copies the source's history first, seconds for a long session) the message says "· forking…" and its
+"Fork from here" is disabled; the client asks for no second fork before the same message meanwhile.
+A run of tool calls is "N tool calls ·
 time" and the call's line when it is one, else the tools it called, each once, in the order
 first called ("(Bash, Read, chrome-devtools/take_screenshot)", an MCP tool as
 `<server>/<tool>`); a Skill call's line names its skill; thinking and tool lines are fainter
@@ -3232,9 +3232,10 @@ transcripts; since 0.155 any call's input has its fields from the shortest value
 values of 3 KB or more counted as equally long, fields of the same length in sorted order (an
 Edit of two long strings keeps `new_string` before `old_string`), an `Agent` or `Task` call's
 `prompt` still last, so the cut falls in the longest values and a Write's `file_path` or a Bash
-call's `description` comes whole; the mirror builds it the same way, §9.1); `tool_result` → `tool.result`; `result` →
-`usage` and `status idle`. Since 0.137 the `result` also gives, after the `usage` and before `status
-idle`, one `system` line that says how the turn ended when it did not complete: `turn_interrupted`
+call's `description` comes whole; the mirror builds it the same way, §9.1); `tool_result` →
+`tool.result`; `result` → `usage` and `status idle`. Since 0.137 the `result` also gives, after the
+`usage` and before `status idle`, one `system` line that says how the turn ended when it did not
+complete: `turn_interrupted`
 "Interrupted" for a `terminal_reason` `aborted_streaming` (during the reply) or `aborted_tools`
 (during a tool call); `turn_ended_early` for an error `result` (`subtype` other than `success`, or
 `is_error: true`) or a `terminal_reason` other than `completed`, `background_requested` (the model
@@ -4221,7 +4222,8 @@ only the event (§5.2). On `POST /stop` the hub cancels with `stopped` the reque
 (a move, §7; a secret), then sends `session.stop`. Since 0.137 it leaves the runtime's approvals
 and questions to a connected worker: the adapter cancels those of the interrupted turn when the
 turn ends (below), and a background subagent's stay open, as the subagent goes on (§8.1); with no
-worker connected the hub cancels them as on expiry. The adapter and the worker's supervisor do
+worker connected the hub cancels them with `stopped` too, with the event and the frame it sends on
+expiry. The adapter and the worker's supervisor do
 not emit a cancel on `session.stop` itself. Since 0.69 the Claude Code adapter cancels a request of the main agent
 or of a foreground subagent still open when the runtime's turn ends with
 `approval.cancel`/`clarify.cancel {stopped}`: after "No" to one of two parallel calls the CLI

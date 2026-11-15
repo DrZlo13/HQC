@@ -154,6 +154,10 @@ pub struct Agent {
     /// endpoint and `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderRef>,
+    /// The owner gave the agent their Chrome (since SPEC 0.148, `PATCH .../sessions/{id}
+    /// {browser}`); absent — no browser.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub browser: bool,
 }
 
 /// The provider of a session's agent, as the session object names it.

@@ -897,6 +897,31 @@ rm /tmp/infra_ed25519                                              # the store h
   `~/.ssh` and use what is there; the store only helps for keys that are no longer there.
 - `hqc-worker env` and the logs show key names, never keys; `hello` carries no key names.
 
+**Model providers** (SPEC §3 Provider, §14, since 0.144). A provider is an Anthropic-compatible
+endpoint with one model (a local model behind gpu-arbiter, a GLM at z.ai, an Anthropic API key),
+picked per session in the model menu. Describe it once in the client (Settings → Models: name,
+label, base URL, model, context window), then allow it on each worker that should run it:
+
+```toml
+[providers.qwen-local]                  # the provider's name in Settings → Models
+base_url = "http://192.168.1.229:8082"  # must equal the base URL there (a trailing / does not count)
+# api_key = "..."                       # for an endpoint that needs one; stays on this machine
+```
+
+- Restart the worker; Settings → Models then lists it among the workers that allow the
+  provider, and the model menus of sessions on this worker offer it.
+- A session on a provider: every model name of Claude Code (subagents and the small fast model
+  too) goes to the provider's one model; the session's title is still made with Haiku on the
+  subscription; the chat header shows the provider, not a cost.
+- A provider this worker does not allow, or allows with another `base_url`, is not run: the
+  session starts on Claude Code's own endpoint and its feed says why (`provider_refused`).
+- A session without a provider runs as before: an `ANTHROPIC_BASE_URL` of the worker's own
+  environment or of an environment's `env` (a gateway of yours) passes unchanged.
+- On macOS a provider on the local network needs Local Network access for the worker: System
+  Settings → Privacy & Security → Local Network → `hqc-worker` on. Without it the CLI fails with
+  `API Error: No internet route … (EHOSTUNREACH)`. A rebuilt `hqc-worker` may need it turned on
+  again.
+
 `show_in_vscode` (default `true`): the worker starts Claude Code with
 `CLAUDE_CODE_ENTRYPOINT=claude-vscode`; otherwise the CLI writes the transcript with
 `entrypoint: sdk-cli`, and the VS Code extension's conversation history shows only its own

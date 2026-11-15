@@ -3,12 +3,13 @@
 // the list order (T50) of the projects that have been looked at, a session archived from the
 // list that has not gone to the hub yet, and the archived projects the project search finds.
 
-import { Api, ApiError, type NewSessionOptions, type SessionPatch } from './api';
+import { Api, ApiError, type NewSessionOptions, type ProviderFields, type SessionPatch } from './api';
 import type {
   ClarifyAnswer,
   ListMode,
   LookName,
   Me,
+  ModelProvider,
   OpenRequest,
   PermissionMode,
   Project,
@@ -41,6 +42,8 @@ export interface NewSessionDraft {
   cwd: string;
   permission_mode?: PermissionMode;
   model?: string;
+  /** A provider instead of a Claude model (SPEC 0.144). */
+  provider_id?: string;
   started?: string;
 }
 
@@ -287,6 +290,8 @@ export class AppState {
       this.currentProjectId ??= this.me.personal_project_id;
       this.syncTimezone();
       await this.refreshSessions();
+      // The model menus list them; without them the menus offer the Claude models only.
+      void this.loadProviders().catch(() => {});
       this.error = null;
     } catch (e) {
       this.error = (e as Error).message;
@@ -1042,11 +1047,16 @@ export class AppState {
     const d = this.newSession;
     if (!d) throw new Error('no new session open');
     if (!this.me) throw new Error('not signed in');
+    const workspaceId = this.newSessionWorkspace(d);
+    const worker = this.workspaces.get(d.projectId)?.find((w) => w.id === workspaceId)?.worker_id;
+    // A provider the chosen workspace's worker does not allow is left out, as its chip does.
+    const provider = this.providersFor(worker).find((p) => p.id === d.provider_id)?.id;
     const s = await this.api.createSession(d.projectId, undefined, {
-      workspace_id: this.newSessionWorkspace(d),
+      workspace_id: workspaceId,
       cwd: d.cwd.trim(),
       permission_mode: d.permission_mode,
-      model: d.model,
+      model: provider ? undefined : d.model,
+      provider_id: provider,
     });
     this.sessions.set(s.id, s);
     // In the same change: the list never shows both the draft and its session.
@@ -1085,12 +1095,40 @@ export class AppState {
     this.edited();
   }
 
-  /** Changes the session's model (`null`: the runtime's default). A running agent switches
-   *  to a named model at once; `null` takes effect at its next start. */
-  async setAgentSettings(sessionId: string, patch: Pick<SessionPatch, 'model'>): Promise<void> {
+  /** Changes the session's model (`null`: the runtime's default) or provider (`null`: the
+   *  runtime's own endpoint). A running agent switches to a named model at once; `null` takes
+   *  effect at its next start; a change of provider restarts it (SPEC 0.144). */
+  async setAgentSettings(sessionId: string, patch: Pick<SessionPatch, 'model' | 'provider_id'>): Promise<void> {
     const s = await this.api.patchSession(sessionId, patch);
     this.sessions.set(s.id, s);
     this.edited();
+  }
+
+  /** The owner's model providers (SPEC 0.144), as the hub last listed them. */
+  providers: ModelProvider[] = [];
+
+  async loadProviders(): Promise<void> {
+    this.providers = await this.api.providers();
+    this.changed();
+  }
+
+  /** The providers worker `workerId` allows: the ones a session there may run on. */
+  providersFor(workerId: string | undefined): ModelProvider[] {
+    return workerId ? this.providers.filter((p) => p.workers.includes(workerId)) : [];
+  }
+
+  async saveProvider(id: string | undefined, f: ProviderFields): Promise<void> {
+    const p = id ? await this.api.updateProvider(id, f) : await this.api.createProvider(f);
+    this.providers = [...this.providers.filter((x) => x.id !== p.id), p].sort((a, b) => a.label.localeCompare(b.label));
+    // Its sessions show the new label after they are fetched again.
+    if (id) await this.refreshSessions().catch(() => {});
+    this.changed();
+  }
+
+  async deleteProvider(id: string): Promise<void> {
+    await this.api.deleteProvider(id);
+    this.providers = this.providers.filter((p) => p.id !== id);
+    this.changed();
   }
 
   async createProject(name: string): Promise<Project> {

@@ -238,6 +238,22 @@ order stay as they are: its sessions are not archived and stay in `GET /api/sess
 of it keeps working, and it opens, takes new sessions and is changed like any project. Archiving
 it again keeps the first time; the personal project is not archived (`409 personal_project`).
 
+### Provider
+Since 0.144 (iteration 5): a model provider of a user, an Anthropic-compatible endpoint
+(`<base_url>/v1/messages`) with one model behind it: a local model behind a proxy such as
+gpu-arbiter, a GLM at z.ai, an Anthropic API key. `owner_id`, `name` (letters, digits, `-` and
+`_`, unique per owner; the `[providers.<name>]` a worker allows, §14), `label` (shown in the model
+menus), `base_url` (`http://` or `https://`, stored without a trailing `/`), `model` (every model
+name of the runtime goes to it), `context_tokens?` (the model's window, for the runtime's
+compaction; absent — the runtime's own assumption), `created_at`, `updated_at`; hub migration
+`0043`. Nothing in it is secret: a key, if the endpoint needs one, is only in the worker's
+`worker.toml`. A session's `provider_id` (nullable) names the provider its agent runs on; null —
+the runtime's own endpoint and `model`. The hub keeps a provider in use (`409 provider_in_use`
+on delete) and hands its description to the worker in `session.start.provider` (§5.3); the
+worker runs it only if its `worker.toml` allows the name with the same `base_url` (§14), since an
+endpoint sees the agent's whole context and decides its tool calls. The worker's `providers[]`
+from `hello` (§5.4) are the names it allows.
+
 ### Workspace
 `project_id`, `worker_id`, `path`, `label`, `environment` (a name; a display of the binding
 from the worker's local config: since 0.56 the hub sets it from the worker's `env_bindings` when
@@ -534,6 +550,7 @@ the client renders only them. The "source" column is the component that produces
 | `session_not_moved` | hub | since 0.95: the owner allowed a move after the transcript (§9.2), and the session could not move then; `text` names the folder and why |
 | `session_released` | hub | the session was continued or opened outside hqc (VS Code, `claude` in a terminal): the worker stopped the agent at once, interrupting a turn in progress (since 0.30), `pending` inputs became `failed`; field `reason`: `vscode_open` — a live foreign process holds the transcript, `foreign_write` — the file was written from outside (§9.3) |
 | `session_forked` | worker (mirror) | a fork in the transcript: the writer continued from an earlier record, and the other line's turns did not get into its context; fields `at_uuid` (the record with two lines), `branch_from` (`vscode` \| `hqc` — who started the new line), `orphaned_turns` (turns in the other line). The client draws it as a line with a warning (§9.3) |
+| `provider_refused` | worker (adapter) | since 0.144: `session.start.provider` names a provider this worker's `worker.toml` does not allow, or allows with another `base_url`; the agent starts on the runtime's own endpoint, and the text says which (§8.1, §14) |
 | `transcript_missing` | worker (adapter) | since 0.100: a session with `session.start.has_history` has no transcript to resume (Claude Code deletes transcripts older than its `cleanupPeriodDays`, 30 days by default), so the agent starts without the earlier conversation (§8.1); the feed before it stays |
 | `worker_log` | worker | a warn/error line of the worker's log in its service session, the level is in the `level` field (§10.2); not counted as unread (§6), no push (§16) |
 | `workspace_unknown` | hub (0.16 migration) | an iteration 1 session without a workspace whose worker did not report a folder: archived when the hub was upgraded |
@@ -868,7 +885,7 @@ MCP calls (worker → hub → worker):
 - `session.start` {session_id, mode, runtime, acp_agent?, model?, workspace_path | null,
   cwd, runtime_session_id?, system_prompt?, disallowed_tools[], restricted,
   auto_approve, session_token, owner_is_worker_owner, ask_timeout_s, requested_by_owner?,
-  permission_mode?, allow_rules?[], fork?}
+  permission_mode?, allow_rules?[], fork?, has_history?, provider?}
   — `mode`: `new` | `resume` (§5.2); `fork` (since 0.80) — {runtime_session_id, at_event_ids[]}
   of a session forked before a message of its user (§6): the Claude Code adapter, while the
   session has no transcript yet, reads transcript `runtime_session_id` in the session's own
@@ -876,7 +893,11 @@ MCP calls (worker → hub → worker):
   first) and starts the fork there (§8.1); with none of them in it the start fails; once the
   transcript is there, the start resumes it; `has_history` (since 0.100) — `true` once the
   session's feed has an `agent.message`, absent otherwise: the runtime should have a transcript
-  to resume (§8.1 `transcript_missing`); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
+  to resume (§8.1 `transcript_missing`); `provider` (since 0.144) — {name, base_url, model,
+  context_tokens?} of the session's provider (§3 Provider), absent without one; the worker runs
+  it only if `[providers.<name>]` of its `worker.toml` has the same `base_url` (a trailing `/`
+  does not count), and otherwise starts the agent without it and writes `system
+  provider_refused` (§4, §8.1); `allow_rules` (since 0.52, T48) — hqc's allow rules of the
   session's workspace (§3 Workspace), absent when none; the worker keeps the latest list per
   canonical workspace, shared by its sessions there, and drops a rule that is not valid hqc
   syntax; `permission_mode` (since 0.42, T38) — `ask` | `auto` | `allow_all` (since 0.129),
@@ -1148,8 +1169,10 @@ MCP calls (worker → hub → worker):
 
 ### 5.4 Worker → hub frames
 - `hello` {protocol_version, boot_id, capabilities, environments[], env_bindings[],
-  allowed_roots[], allow_foreign_sessions, share_local_models, local_models[], machine_id?}
-  — `boot_id`: a uuid, new on every start of the worker process, the same in every `hello`
+  allowed_roots[], allow_foreign_sessions, share_local_models, local_models[], providers[]?,
+  machine_id?}
+  — `providers` (since 0.144): the names of the `[providers.*]` its `worker.toml` allows, never
+  a `base_url` or a key; absent — none; `boot_id`: a uuid, new on every start of the worker process, the same in every `hello`
   of that process (§5.2, §17.3); `machine_id` — the machine fingerprint (since 0.23, §5.1). `capabilities` — `{claude_code?: {version,
   sessions_registry?, moves?}, acp_agents[]}`; `sessions_registry: true` — the worker reads the Claude
   Code live sessions registry and reports holders (§9.3); `moves: true` (since 0.75) — the worker
@@ -1463,10 +1486,22 @@ the rest is marked "later"):
   service sessions included), the newest `updated_at` first. The client fetches its list with
   it and `GET /api/projects` (since 0.114 also `?archived=1`), not one request per project
 - `GET/POST /api/projects/{id}/sessions` (list: `{sessions: [<session>]}`; create:
-  {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?} → `201` and
+  {title?, workspace_id?, worker_id?, cwd?, model?, auto_approve?, permission_mode?,
+  provider_id?} → `201` and
   the session object, `api.session.request.json`), `GET/PATCH/DELETE /api/sessions/{id}` (§17.4).
   `permission_mode` (since 0.42, T38): `ask` | `auto` | `allow_all` (since 0.129; anything else:
-  `422`, the body cannot be read); absent — the worker's default. `PATCH /api/sessions/{id}` {title?, auto_approve?, permission_mode?, model?}:
+  `422`, the body cannot be read); absent — the worker's default. `PATCH /api/sessions/{id}` {title?, auto_approve?, permission_mode?, model?, provider_id?}:
+  `provider_id` (since 0.144) — absent: unchanged, `null`: the runtime's own endpoint; a provider
+  of the session's owner that the session's worker allows (its last `hello.providers`), else
+  `400` (not the owner's) or `422 provider_not_allowed`, both on creation too; a change restarts a
+  running agent (`session.kill`, then `session.start` with the new description, the transcript
+  resumed), a stopped one starts on it; a session on a provider keeps the provider's model,
+  `session.model` does not reach its runtime. The session object's `agent.provider` is {id,
+  label}. `GET/POST /api/providers` ({providers: [...]} and `201`), `PATCH/DELETE
+  /api/providers/{id}` (§3 Provider; `PATCH` replaces every field; `409 provider_exists` for a
+  name the owner has, `409 provider_in_use` on deleting one sessions run on): {name, label,
+  base_url, model, context_tokens?} (`context_tokens` 1000 to 10 000 000); a provider object has
+  `workers[]`, the owner's workers whose last `hello` allowed it.
   `model` (since 0.74) — absent: unchanged, `null`: the runtime's default; it is checked as on
   creation before anything is written, the service session answers `409 system_session`, and
   the hub sends the worker `session.model` (§5.3). It is not in `session.summary`: another
@@ -1742,7 +1777,15 @@ a row of light tiles, a click applies it at once). On a light theme the client s
 once, at its next start or only when added again. The Settings page (since 0.114) has a back
 arrow to the address it was opened from (on a computer, from `#/`, the current project);
 "Web search" (since 0.142) picks where "Search in …" of selected text searches: Google (the
-default), DuckDuckGo, Bing or Yandex, kept on this device (`localStorage`), not on the hub; and
+default), DuckDuckGo, Bing or Yandex, kept on this device (`localStorage`), not on the hub;
+"Models" (since 0.144) lists the user's providers (§3 Provider), each with its model, `base_url`
+and the workers that allow it, or the `[providers.<name>] base_url = "…"` line a `worker.toml`
+needs when none does, with Edit and Delete, and "Add a provider"; the model menus of a session
+(the new session's model chip and the chat's "More") list, below the Claude models, the
+providers its worker allows; picking one in a chat asks once ("The agent restarts on …"), and a
+Claude model picked there leaves the provider in the same `PATCH`; a provider session's chat
+header names the provider instead of the model and shows no cost, which the CLI computes at a
+made-up rate for a model it does not know; and
 "Workers" lists a line per worker: its online dot, name, system (macOS, Linux, Windows), status
 and "Revoke", or "Delete" for a revoked one. The project settings (`#/p/<id>/settings`, "Project
 settings…" in the project's menu, below) have Appearance (the "Project appearance" dialog: the
@@ -2868,7 +2911,18 @@ The process environment is scrubbed: from the worker's environment only `PATH`, 
 those, e.g. `PATH`), then the worker's own `SSH_AUTH_SOCK` (only in an environment with
 `ssh_keys`: the socket of this process's own ssh-agent, §14; since 0.57 the user's
 `SSH_AUTH_SOCK` no longer passes), `CLAUDE_CODE_ENTRYPOINT` and `MCP_TOOL_TIMEOUT`;
-`HQC_*` never. The worker
+`HQC_*` never. A session on a provider (since 0.144, §3 Provider) gets on top of the environment's
+`env`: `ANTHROPIC_BASE_URL` (its `base_url`), `ANTHROPIC_AUTH_TOKEN` (the `api_key` of
+`worker.toml`, else a placeholder, so the CLI sends no OAuth token of the subscription there),
+`ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`,
+`ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` all set to its `model`, so that a
+server which swaps models on one GPU is never asked for another, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+from `context_tokens`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and `--model` its `model`;
+the worker's own `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` do not pass then, so they
+never reach another endpoint. A session without a provider gets the environment exactly as
+above: an `ANTHROPIC_BASE_URL` of the worker's own environment or of an environment's `env` (an
+owner's gateway) passes unchanged. The session's title is still made by the worker's own
+`claude` with the worker's environment (§8.1 titles), not by the provider. The worker
 stores the working directory in canonical form, requires it to exist and rechecks it before
 every process start (a symlink could have changed). At most `max_sessions`
 (local config, default 8) agent processes at once; the next start gets
@@ -4452,6 +4506,10 @@ deny = ["Bash(git push:*)"]           # added to the worker's deny
 [[env_bindings]]
 path = "/Users/drzlo/work/lab/infra"
 environment = "infra"
+
+[providers.qwen-local]                # since 0.144: a provider of the hub it may run
+base_url = "http://192.168.1.229:8082" # must equal the hub's description
+# api_key = "..."                     # for an endpoint that needs one; never leaves the machine
 ```
 
 - `ssh_keys` (since 0.57, T44): names of keys in the worker's store (below). Every agent process
@@ -5070,15 +5128,22 @@ without a hub each of these would have to be done peer-to-peer.
 
 ## 23. Change history
 
-### 0.143 → 0.144 (iteration 5 is model providers)
-§19: iteration 5 is model providers, `docs/ITERATION-5.md`: an Anthropic-compatible endpoint
-with one model, picked per session; the hub keeps the descriptions, a worker allows a provider
-by name and `base_url` in `worker.toml` and keeps its key. Claude Code over a local model
-through gpu-arbiter's `/v1/messages` was checked end to end on 2026-11-15. The ACP adapter and
-Hermes move to iteration 6, sharing to 7, the rest to 8. The pool of subscriptions of issue #43
-is left out: Anthropic's terms for Claude Code rule out routing requests through consumer
-subscriptions against their limits. No change of the protocol yet: the sections follow with
-the tasks.
+### 0.143 → 0.144 (model providers, iteration 5)
+§19: iteration 5 is model providers, `docs/ITERATION-5.md`; the ACP adapter and Hermes move to
+iteration 6, sharing to 7, the rest to 8. §3 Provider (hub migration `0043`): an
+Anthropic-compatible endpoint with one model, a user's, picked per session; §6 `/api/providers`,
+`provider_id` on creating and patching a session (a change restarts a running agent), the
+session object's `agent.provider`; §5.3 `session.start.provider`, §5.4 `hello.providers`; §14
+`[providers.<name>]` of `worker.toml` (`base_url`, `api_key?`): the worker runs a provider only
+by its name with the same `base_url` and keeps the key, the hub keeps the description in one
+place; §8.1 the CLI's variables for a provider, the worker's own Anthropic credentials left out,
+and a session without a provider exactly as before (an owner's gateway in the worker's
+environment keeps working); §4 `system provider_refused`; §6 client layout: "Models" in Settings,
+providers in the model menus, the header without cost. Checked end to end on 2026-11-15:
+Claude Code over `qwen3.8-27b` through gpu-arbiter's `/v1/messages` (tool calls, streaming, the
+prefix cache, auto mode's classifier). The pool of subscriptions of issue #43 is left out:
+Anthropic's terms for Claude Code rule out routing requests through consumer subscriptions
+against their limits.
 
 ### 0.142 → 0.143 (Stop ends a stuck session)
 §8.1: Stop sent `interrupt`, then SIGINT to the process group after 10 s, and nothing after

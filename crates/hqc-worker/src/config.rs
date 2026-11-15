@@ -39,6 +39,10 @@
 //! [[env_bindings]]               # the longest path that contains the workspace wins
 //! path = "/Users/me/work/lab/infra"
 //! environment = "infra"
+//!
+//! [providers.qwen-local]         # SPEC 0.144: a model provider of the hub this worker runs
+//! base_url = "http://192.168.1.229:8082"   # must equal the hub's description
+//! # api_key = "..."              # for an endpoint that needs one; never in `hello` or logs
 //! ```
 
 use std::collections::BTreeMap;

@@ -7542,3 +7542,30 @@ button.ps-look {
 .is-phone .worktree-branch-kind label {
   min-height: 36px;
 }
+
+/* "Models" of Settings (SPEC 0.144): a provider per row, its workers under it. */
+.provider-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 2px 8px;
+  align-items: center;
+}
+.provider-row .provider-label {
+  font-weight: 600;
+}
+.provider-row .provider-meta,
+.provider-row .provider-workers {
+  grid-column: 1;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.provider-row .btn {
+  grid-row: 1;
+}
+.provider-form {
+  display: grid;
+  gap: 8px;
+  max-width: 520px;
+  margin: 8px 0;
+}

@@ -50,7 +50,7 @@ working (below).
 - **Cost.** The CLI prices an unknown model at a default rate (`costBasis: unknown`): a
   provider session's header and usage lines show tokens, not dollars.
 
-## T54. Providers on the worker
+## T54. Providers on the worker (done, SPEC 0.144)
 
 Sections: §2.1, §5.1 (`hello`), §5.3 (`session.start`), §8.1, §14.
 - `worker.toml`:
@@ -75,7 +75,7 @@ one (unknown name, another `base_url`) starts without it, the key never in `hell
 a session without a provider passes the worker's own `ANTHROPIC_BASE_URL` unchanged; a live
 run against a local endpoint behind `HQC_LIVE_CLAUDE=1`.
 
-## T55. Providers on the hub
+## T55. Providers on the hub (done, SPEC 0.144)
 
 Sections: §3 (a new object Provider, Session `provider_id`), §6 (REST), §5.3.
 - A provider of the owner: `name` (a slug, unique per owner), `label`, `base_url`, `model`,
@@ -92,7 +92,7 @@ Acceptance: the common checks; hub tests: the API and its owner checks, a sessio
 provider its worker does not allow, a change restarts the agent with the new `session.start`,
 a worker's new `hello` without the provider leaves its sessions on it but offers it no more.
 
-## T56. The model menu and Settings
+## T56. The model menu and Settings (done, SPEC 0.144)
 
 Sections: §6 client layout.
 - Settings has a section "Models": the owner's providers, each with its fields and the workers
@@ -108,6 +108,16 @@ sends the `PATCH` after the confirmation, the header and the usage lines of a pr
 Order: T54 and T55 can run in parallel once `session.start.provider` and `hello.providers` are
 agreed (this file); T56 needs T55. The `local-qwen` environment on home-mac (a binding of one
 folder, 2026-11-15) is the experiment this replaces: it goes when T54 is in.
+
+Done in one pull request with this plan (2026-11-15): `Provider` in `hqc-proto` (`frame.rs`,
+`api.rs`); the worker's `[providers.*]` (`config.rs`, `Config::provider`), `provider_env` in the
+Claude Code adapter, `provider_refused`, `hqc-worker env`; the hub's migration `0043`,
+`providers.rs` (REST and the checks), `session.start.provider`, a change restarting the agent
+(`api::restart_agent`); the client's "Models" (`ui/Providers.tsx`), the model menus
+(`agentSettings.tsx`, `NewSession.tsx`), the header. Tests: worker `config::tests::providers_*`,
+`command_line_of_a_provider`, `env_cmd::tests::providers_are_listed_without_keys`,
+`tests/worker.rs::environments_in_hello_and_inspect`; hub `tests/providers.rs`; client
+`chat.test.tsx` (switching to a provider and back), `appearance.test.tsx` (Settings → Models).
 
 Notes for the RUNBOOK: on macOS the worker needs Local Network access (System Settings →
 Privacy & Security → Local Network → `hqc-worker`) to reach an endpoint on the LAN; without it

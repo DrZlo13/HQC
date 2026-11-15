@@ -38,6 +38,8 @@ import {
   type HqcEvent,
   type LookName,
   type Me,
+  type ModelProvider,
+  parseModelProvider,
   type PermissionMode,
   type Project,
   type ProjectSort,
@@ -78,6 +80,9 @@ export interface NewSessionOptions {
   permission_mode?: PermissionMode;
   /** Absent: the runtime's default model. */
   model?: string;
+  /** A provider the workspace's worker allows (SPEC 0.144); absent: the runtime's own
+   *  endpoint. */
+  provider_id?: string;
 }
 
 /** The filters, order and page of `GET /api/search` (SPEC §15). */
@@ -99,6 +104,17 @@ export interface SessionPatch {
   title?: string;
   permission_mode?: PermissionMode;
   model?: string | null;
+  /** `null`: back to the runtime's own endpoint; a change restarts a running agent. */
+  provider_id?: string | null;
+}
+
+/** The fields of `POST /api/providers` and `PATCH /api/providers/{id}` (all of them). */
+export interface ProviderFields {
+  name: string;
+  label: string;
+  base_url: string;
+  model: string;
+  context_tokens?: number;
 }
 
 /** A page of events; `invalid` are raw events that failed validation (shown, not dropped). */
@@ -233,6 +249,7 @@ export class Api {
     if (opts.cwd && opts.cwd !== '.') body.cwd = opts.cwd;
     if (opts.permission_mode) body.permission_mode = opts.permission_mode;
     if (opts.model) body.model = opts.model;
+    if (opts.provider_id) body.provider_id = opts.provider_id;
     const data = await this.req('POST', `/api/projects/${enc(projectId)}/sessions`, body);
     return parseSessionInfo(data);
   }
@@ -559,6 +576,25 @@ export class Api {
   }
 
   /** Workers that are not revoked; `includeRevoked` adds revoked ones (`status: revoked`). */
+  /** The owner's model providers (SPEC 0.144). */
+  async providers(): Promise<ModelProvider[]> {
+    const data = (await this.req('GET', '/api/providers')) as { providers?: unknown };
+    if (!Array.isArray(data?.providers)) throw new ApiError(500, 'providers: expected a list');
+    return data.providers.map(parseModelProvider);
+  }
+
+  async createProvider(f: ProviderFields): Promise<ModelProvider> {
+    return parseModelProvider(await this.req('POST', '/api/providers', f));
+  }
+
+  async updateProvider(id: string, f: ProviderFields): Promise<ModelProvider> {
+    return parseModelProvider(await this.req('PATCH', `/api/providers/${enc(id)}`, f));
+  }
+
+  async deleteProvider(id: string): Promise<void> {
+    await this.req('DELETE', `/api/providers/${enc(id)}`);
+  }
+
   async workers(opts: { includeRevoked?: boolean } = {}): Promise<WorkerInfo[]> {
     const q = opts.includeRevoked ? '?include_revoked=1' : '';
     const data = (await this.req('GET', `/api/workers${q}`)) as { workers?: unknown };

@@ -7,6 +7,7 @@ import type { LookName, Theme } from '../proto';
 import { pushStatus, subscribePush, type PushStatus } from '../push';
 import { BASES, LOOKS, THEMES } from '../theme';
 import { WEB_SEARCHES } from '../websearch';
+import { ProvidersSection } from './Providers';
 
 const THEME_GROUPS = [
   { id: 'dark', label: 'Dark' },
@@ -193,6 +194,8 @@ export function Settings({ app, back = '#/' }: { app: AppState; back?: string })
           Where "Search in …" of the menu of text selected in a chat searches, in a new tab. On this
           device.
         </p>
+
+        <ProvidersSection app={app} />
 
         <h2>Notifications</h2>
         <p class="muted">{push ? PUSH_TEXT[push] : '…'}</p>

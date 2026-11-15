@@ -99,6 +99,13 @@ function setup(
       permission_mode: patch.permission_mode,
       effective_permission_mode: patch.permission_mode,
       model: patch.model === undefined ? info.model : (patch.model ?? undefined),
+      // SPEC 0.144: the provider as the hub names it.
+      provider:
+        patch.provider_id === undefined
+          ? info.provider
+          : patch.provider_id
+            ? { id: patch.provider_id, label: app.providers.find((p) => p.id === patch.provider_id)?.label ?? '' }
+            : undefined,
     })),
     // POST /api/sessions/{id}/fork: the new session.
     forkSession: vi.fn(async () => ({ ...info, id: 's2', title: 'test 12 (fork)', last_seq: 4, last_read_seq: 4 })),
@@ -416,6 +423,39 @@ describe('model', () => {
     await set('model', '');
     expect(api.patchSession).toHaveBeenLastCalledWith('s1', { model: null });
     expect(field('model_name')).toBeNull();
+  });
+
+  it('switches to a provider the session\'s worker allows, after a confirmation, and back to a Claude model', async () => {
+    const { app, api } = setup('running');
+    app.providers = [
+      { id: 'pr1', name: 'qwen-local', label: 'Qwen 3.8 (local)', base_url: 'http://192.168.1.229:8082', model: 'qwen3.8-27b', workers: ['wk1'] },
+      { id: 'pr2', name: 'zai', label: 'GLM', base_url: 'https://api.z.ai/api/anthropic', model: 'glm-5', workers: ['wk2'] },
+    ];
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    await mount(app);
+    await open();
+    // Only the worker's providers, under the Claude models.
+    const options = [...field('model')!.options].map((o) => o.textContent);
+    expect(options.slice(-1)).toEqual(['Qwen 3.8 (local)']);
+    expect(options).not.toContain('GLM');
+    // Declined: nothing changes.
+    await set('model', 'provider:pr1');
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(api.patchSession).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await set('model', 'provider:pr1');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { provider_id: 'pr1' });
+    expect(app.sessions.get('s1')!.provider?.label).toBe('Qwen 3.8 (local)');
+    // The header names the provider and shows no cost.
+    expect($('.chat-provider')!.textContent).toBe('Qwen 3.8 (local)');
+    expect($('.chat-cost')).toBeNull();
+    expect(field('model')!.value).toBe('provider:pr1');
+    // A Claude model leaves the provider in the same PATCH.
+    await set('model', 'opus');
+    expect(api.patchSession).toHaveBeenLastCalledWith('s1', { provider_id: null, model: 'opus' });
+    expect(app.sessions.get('s1')!.provider).toBeUndefined();
+    vi.unstubAllGlobals();
   });
 
   it('the header names a model switched to since the last turn at once', async () => {

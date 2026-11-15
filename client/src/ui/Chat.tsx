@@ -4,7 +4,7 @@ import type { AppState } from '../app';
 import { ArtifactStore, formatSize, type LinkCache } from '../artifacts';
 import { HEIC_NAME, dataUrl, heicToJpeg } from '../heic';
 import { onBack } from '../nav';
-import { PERMISSION_MODES, type PermissionMode, type SessionInfo, type SessionState } from '../proto';
+import { PERMISSION_MODES, type ModelProvider, type PermissionMode, type SessionInfo, type SessionState } from '../proto';
 import type { OutgoingFile } from '../session';
 import { duringText, type Timeline } from '../timeline';
 import { ModelField } from './agentSettings';
@@ -392,10 +392,18 @@ export function Chat({
     if (line && !confirm(line)) return;
     void act(() => app.setPermissionMode(sessionId, mode), 'Not switched');
   };
-  const setAgent = (patch: AgentPatch) => void act(() => app.setAgentSettings(sessionId, patch), 'Not changed');
+  const setAgent = (patch: AgentPatch) => {
+    // Another provider restarts the agent (SPEC 0.144): asked once, as a switch to Auto is.
+    if (patch.provider_id !== undefined && patch.provider_id !== (info?.provider?.id ?? null)) {
+      const to = patch.provider_id ? app.providers.find((p) => p.id === patch.provider_id)?.label : "Claude Code's own endpoint";
+      if (!confirm(`The agent restarts on ${to ?? 'the provider'}; its conversation is read again from the start of the context.`)) return;
+    }
+    void act(() => app.setAgentSettings(sessionId, patch), 'Not changed');
+  };
   const usage = t.usageTotals();
-  const model = shownModel(info?.model, usage.model);
-  const cost = usage.cost;
+  // A provider's model is what the provider names; the CLI prices it at a made-up rate.
+  const model = info?.provider ? undefined : shownModel(info?.model, usage.model);
+  const cost = info?.provider ? undefined : usage.cost;
   // Running, as in the list, while a background subagent or task works after the turn.
   const shown = info && atWorkAfterTurn(info) ? 'running' : state;
   const pill = <StatePill state={shown} timeline={t} where={locked ? `In ${holder}${worker ? ` on ${worker}` : ''}` : undefined} />;
@@ -482,6 +490,14 @@ export function Chat({
                     </span>
                   </>
                 )}
+                {info?.provider && (
+                  <>
+                    <span class="sep">/</span>
+                    <span class="chat-model chat-provider" title={info.provider.label}>
+                      {info.provider.label}
+                    </span>
+                  </>
+                )}
                 {model && (
                   <>
                     <span class="sep">/</span>
@@ -556,6 +572,7 @@ export function Chat({
             onMove={() => setMoving(true)}
             onPermissionMode={setMode}
             onAgent={setAgent}
+            providers={app.providersFor(info.worker_id)}
           />
         )}
       </header>
@@ -866,7 +883,7 @@ export function currentMode(info: SessionInfo): PermissionMode {
   return info.permission_mode ?? info.effective_permission_mode ?? 'ask';
 }
 
-type AgentPatch = Pick<SessionPatch, 'model'>;
+type AgentPatch = Pick<SessionPatch, 'model' | 'provider_id'>;
 
 /** "More": schedules, the move to another project, the permission mode and the model; on
  *  a phone also the path, the model of the last turn and the cost. Archiving is on the
@@ -883,6 +900,7 @@ function MoreMenu({
   onPermissionMode,
   onAgent,
   loadLimits,
+  providers,
 }: {
   info: SessionInfo;
   phone: boolean;
@@ -899,6 +917,8 @@ function MoreMenu({
   onAgent: (patch: AgentPatch) => void;
   /** The usage limits of the session's worker account, read when the menu opens. */
   loadLimits: () => Promise<WorkerLimits | undefined>;
+  /** The providers the session's worker allows (SPEC 0.144). */
+  providers: ModelProvider[];
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -967,7 +987,13 @@ function MoreMenu({
             )}
           {!info.archived && (
             <div class="menu-settings">
-              <ModelField value={info.model} onChange={(m) => onAgent({ model: m ?? null })} />
+              <ModelField
+                value={info.model}
+                onChange={(m) => onAgent(info.provider ? { provider_id: null, model: m ?? null } : { model: m ?? null })}
+                providers={providers}
+                provider={info.provider?.id}
+                onProvider={(id) => onAgent({ provider_id: id })}
+              />
               <Limits load={loadLimits} />
             </div>
           )}

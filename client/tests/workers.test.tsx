@@ -37,6 +37,7 @@ function settingsApp(api: Partial<Api>) {
     theme: () => 'warm',
     lookName: () => 'spacious',
     webSearch: WEB_SEARCHES[0],
+    providers: [],
     reloadSessions: vi.fn(async () => {}),
   } as unknown as AppState;
 }

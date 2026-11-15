@@ -1122,6 +1122,40 @@ export interface SessionInfo {
   favorite_at?: string;
   /** The model hqc starts the agent with (`agent.model`); absent: the runtime's default. */
   model?: string;
+  /** The model provider the agent runs on (`agent.provider`, SPEC 0.144); absent: the
+   *  runtime's own endpoint and `model`. */
+  provider?: ProviderRef;
+}
+
+/** A session's provider as the session object names it. */
+export interface ProviderRef {
+  id: Uuid;
+  label: string;
+}
+
+/** A model provider of the owner (SPEC §3 Provider, since 0.144): `GET /api/providers`.
+ *  `workers`: the owner's workers whose `worker.toml` allows it. */
+export interface ModelProvider {
+  id: Uuid;
+  name: string;
+  label: string;
+  base_url: string;
+  model: string;
+  context_tokens?: number;
+  workers: Uuid[];
+}
+
+export function parseModelProvider(v: unknown): ModelProvider {
+  const o = obj(v, 'provider');
+  return {
+    id: str(o, 'id'),
+    name: str(o, 'name'),
+    label: str(o, 'label'),
+    base_url: str(o, 'base_url'),
+    model: str(o, 'model'),
+    context_tokens: optNum(o, 'context_tokens'),
+    workers: optStrArr(o, 'workers') ?? [],
+  };
 }
 
 /** `spawned_by` of a session: the spawning session and its address. */
@@ -1217,7 +1251,14 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     foreground_calls: optStrArr(o, 'foreground_calls'),
     favorite_at: optStr(o, 'favorite_at'),
     model: optStr(agent, 'model'),
+    provider: optProviderRef(agent),
   };
+}
+
+function optProviderRef(agent: Obj): ProviderRef | undefined {
+  if (!present(agent, 'provider')) return undefined;
+  const p = obj(agent.provider, 'provider');
+  return { id: str(p, 'id'), label: str(p, 'label') };
 }
 
 function optSpawnedBy(o: Obj): SpawnedBy | undefined {

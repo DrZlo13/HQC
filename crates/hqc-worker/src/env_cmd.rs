@@ -83,6 +83,15 @@ pub fn summary(cfg: &Config) -> String {
         "session_secrets: {}",
         if cfg.session_secrets { "on" } else { "off" }
     );
+    let _ = writeln!(
+        out,
+        "browser: {}",
+        if cfg.browser {
+            "on (a session its owner gives it runs with --chrome)"
+        } else {
+            "off"
+        }
+    );
     out.push_str("workspace keys:\n");
     match cfg.secrets.all() {
         Ok(all) if all.is_empty() => out.push_str("  none\n"),

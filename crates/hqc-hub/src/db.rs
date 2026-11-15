@@ -412,6 +412,8 @@ pub struct WorkerRow {
     pub providers: Value,
     /// Its last `hello` had `session_secrets` (SPEC 0.147).
     pub session_secrets: bool,
+    /// Its last `hello` had `browser` (SPEC 0.148).
+    pub browser: bool,
 }
 
 impl WorkerRow {
@@ -426,7 +428,7 @@ impl WorkerRow {
 const WORKER_COLS: &str = "id, owner_id, name, os, revoked_at, last_seen, protocol_version, \
     capabilities, environments, env_bindings, allowed_roots, allow_foreign_sessions, \
     share_local_models, local_models, system_session_id, created_at, updated_at, machine_hash, \
-    providers, session_secrets";
+    providers, session_secrets, browser";
 
 pub async fn worker(db: &PgPool, id: Uuid) -> sqlx::Result<Option<WorkerRow>> {
     sqlx::query_as(&format!("SELECT {WORKER_COLS} FROM workers WHERE id = $1"))
@@ -467,7 +469,7 @@ pub async fn worker_hello(
             env_bindings = $5, allowed_roots = $6, allow_foreign_sessions = $7,
             share_local_models = $8, local_models = $9, boot_id = $10, last_seen = now(),
             machine_hash = COALESCE($11, machine_hash), providers = $12, session_secrets = $13,
-            updated_at = now()
+            browser = $14, updated_at = now()
          WHERE id = $1 AND revoked_at IS NULL
          RETURNING (SELECT boot_id FROM old)",
     )
@@ -484,6 +486,7 @@ pub async fn worker_hello(
     .bind(h.machine_id.as_deref().and_then(machine_hash))
     .bind(serde_json::to_value(&h.providers).unwrap_or_default())
     .bind(h.session_secrets)
+    .bind(h.browser)
     .fetch_optional(db)
     .await
 }
@@ -1550,6 +1553,8 @@ pub struct SessionRow {
     /// The model provider the session runs on (SPEC §3 Provider, since 0.144); `None`: the
     /// runtime's own endpoint.
     pub provider_id: Option<Uuid>,
+    /// The owner gave the agent their Chrome (SPEC 0.148).
+    pub browser: bool,
 }
 
 const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.worker_id, s.cwd, \
@@ -1558,7 +1563,7 @@ const SESSION_COLS: &str = "s.id, s.project_id, s.owner_id, s.workspace_id, s.wo
     s.disallowed_tools, s.restricted, s.start_failures, s.turn_open, s.last_turn_error, \
     s.start_sent, s.system, s.vscode_active_at, s.held_by, s.vscode_held_at, s.commands, s.created_at, \
     s.updated_at, s.spawned_by, s.permission_mode, s.effective_permission_mode, \
-    s.permission_capped_by, s.subagents, s.background_tasks, s.provider_id";
+    s.permission_capped_by, s.subagents, s.background_tasks, s.provider_id, s.browser";
 
 pub async fn session(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SessionRow>> {
     sqlx::query_as(&format!(
@@ -2046,6 +2051,16 @@ pub async fn sessions_on_provider(db: &PgPool, id: Uuid) -> sqlx::Result<Vec<Uui
         .bind(id)
         .fetch_all(db)
         .await
+}
+
+/// The browser of session `id` on or off (SPEC 0.148).
+pub async fn set_session_browser(db: &PgPool, id: Uuid, on: bool) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sessions SET browser = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(on)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 pub async fn set_session_provider(

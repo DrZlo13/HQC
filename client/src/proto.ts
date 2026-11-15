@@ -625,6 +625,8 @@ const FRAME_PARSERS: Record<string, (p: Obj) => void> = {
     optStrArr(p, 'providers');
     // SPEC 0.147: the worker takes secrets for its owner's sessions.
     optBool(p, 'session_secrets');
+    // SPEC 0.148: a session of the owner may run with the user's Chrome there.
+    optBool(p, 'browser');
   },
   'hello.ack': (p) => {
     num(p, 'protocol_version');
@@ -1160,6 +1162,8 @@ export interface SessionInfo {
   /** The model provider the agent runs on (`agent.provider`, SPEC 0.144); absent: the
    *  runtime's own endpoint and `model`. */
   provider?: ProviderRef;
+  /** The owner gave the agent their Chrome (`agent.browser`, SPEC 0.148); absent: no browser. */
+  browser?: boolean;
 }
 
 /** A session's provider as the session object names it. */
@@ -1287,6 +1291,7 @@ export function parseSessionInfo(v: unknown): SessionInfo {
     favorite_at: optStr(o, 'favorite_at'),
     model: optStr(agent, 'model'),
     provider: optProviderRef(agent),
+    browser: optBool(agent, 'browser') || undefined,
   };
 }
 

@@ -979,6 +979,10 @@ pub struct Hello {
     /// `secret.put` for its owner's sessions. Absent — false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub session_secrets: bool,
+    /// `browser = true` in `worker.toml` (since SPEC 0.148): a session of the worker's owner
+    /// may run with the user's Chrome on this machine (`session.start.browser`). Absent — false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub browser: bool,
     /// Fingerprint of the machine (T21, SPEC §5.1): hex sha256 of a stable machine id with
     /// the salt `hqc`; the id itself never leaves the machine. Absent from older workers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1228,6 +1232,12 @@ pub struct SessionStart {
     /// absent — the runtime's own endpoint, the CLI's environment as it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// Since SPEC 0.148: the owner turned the browser on for this session: Claude Code runs with
+    /// `--chrome` and drives the user's Chrome on the worker's machine, if its `worker.toml` has
+    /// `browser = true`; else the agent starts without it (`system browser_refused`). Absent —
+    /// off: the CLI runs with `--no-chrome`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub browser: bool,
 }
 
 /// A model provider (SPEC §3 Provider, since 0.144): an Anthropic-compatible endpoint with one

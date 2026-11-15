@@ -404,6 +404,15 @@ export function Chat({
     }
     void act(() => app.setAgentSettings(sessionId, patch), 'Not changed');
   };
+  // SPEC 0.148: the user's Chrome for the agent, on a worker that gives it; either way the
+  // agent restarts, so it is asked once.
+  const setBrowser = (on: boolean) => {
+    const line = on
+      ? `Give the agent your browser?\n\nThe agent restarts with your Chrome on ${worker ?? 'its worker'}: it opens its own tabs in your profile, signed in as you, and sees the tabs you drag into its tab group. It can click and type there; it cannot upload files. Watch what it does.`
+      : 'The agent restarts without the browser.';
+    if (!confirm(line)) return;
+    void act(() => app.setBrowser(sessionId, on), on ? 'Browser not given' : 'Browser not taken away');
+  };
   const usage = t.usageTotals();
   // A provider's model is what the provider names; the CLI prices it at a made-up rate.
   const model = info?.provider ? undefined : shownModel(info?.model, usage.model);
@@ -505,6 +514,14 @@ export function Chat({
                     </span>
                   </>
                 )}
+                {info?.browser && (
+                  <>
+                    <span class="sep">/</span>
+                    <span class="chat-model chat-browser" title={`The agent has your Chrome on ${worker ?? 'its worker'}`}>
+                      Browser
+                    </span>
+                  </>
+                )}
                 {model && (
                   <>
                     <span class="sep">/</span>
@@ -580,6 +597,7 @@ export function Chat({
             onPermissionMode={setMode}
             onAgent={setAgent}
             providers={app.providersFor(info.worker_id)}
+            onBrowser={!system && app.givesBrowser(info.worker_id) ? setBrowser : undefined}
           />
         )}
         {phone && spawned}
@@ -910,6 +928,7 @@ function MoreMenu({
   onAgent,
   loadLimits,
   providers,
+  onBrowser,
 }: {
   info: SessionInfo;
   phone: boolean;
@@ -928,6 +947,8 @@ function MoreMenu({
   loadLimits: () => Promise<WorkerLimits | undefined>;
   /** The providers the session's worker allows (SPEC 0.144). */
   providers: ModelProvider[];
+  /** Turns the browser on or off (SPEC 0.148); absent: the worker gives none. */
+  onBrowser?: (on: boolean) => void;
 }) {
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
@@ -994,6 +1015,11 @@ function MoreMenu({
             PERMISSION_MODES.filter((m) => m !== currentMode(info)).map((m) =>
               item(`btn-mode-${m}`, `Switch to ${MODE_LABELS[m]}`, () => onPermissionMode(m), SWITCH_TITLES[m]),
             )}
+          {!info.archived &&
+            onBrowser &&
+            (info.browser
+              ? item('btn-browser btn-browser-off', 'Browser: on · Turn off', () => onBrowser(false), 'The agent restarts without your Chrome')
+              : item('btn-browser btn-browser-on', 'Browser: off · Give the browser', () => onBrowser(true), 'The agent restarts with your Chrome on its worker'))}
           {!info.archived && (
             <div class="menu-settings">
               <ModelField

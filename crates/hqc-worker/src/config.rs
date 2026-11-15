@@ -19,6 +19,7 @@
 //! # allow_subagent_messages = false # keep SendMessage for own subagents, refuse other sessions'
 //! # show_in_vscode = true          # sessions run by hqc appear in VS Code's history
 //! # session_secrets = false        # take secrets and ssh keys for a session from the chat
+//! # browser = false                # a session the owner gives it to drives Chrome here
 //!
 //! [permissions]                  # optional, see crate::permissions
 //! mode = "ask"                   # "ask" | "auto" | "allow_all": sessions that ask for none
@@ -109,6 +110,8 @@ struct RawConfig {
     show_in_vscode: bool,
     #[serde(default)]
     session_secrets: bool,
+    #[serde(default)]
+    browser: bool,
     #[serde(default)]
     permissions: Option<RawPermissions>,
     #[serde(default)]
@@ -420,6 +423,10 @@ pub struct Config {
     /// restricted (SPEC §14, since 0.147): a secret becomes a file of the agent's process, a key
     /// goes into its ssh-agent and may be kept for the workspace. Off by default.
     pub session_secrets: bool,
+    /// A session its owner gives the browser runs Claude Code with `--chrome`: the user's
+    /// Chrome on this machine, through the Claude in Chrome extension (SPEC §14, since 0.148).
+    /// Off by default; every other session runs with `--no-chrome`.
+    pub browser: bool,
     /// `[permissions]`: the worker's allow/deny rules and the ask/auto mode (SPEC §14). A
     /// session runs with its environment's [`Environment::permissions`], built on these.
     pub permissions: Permissions,
@@ -493,6 +500,11 @@ pub struct StartSpec {
     /// restricted (SPEC §14): the process gets `HQC_SECRETS`, an ssh-agent and the workspace's
     /// kept keys. `None`: none of it.
     pub secrets: Option<SessionSecrets>,
+    /// `session.start.browser` as this worker allows it (SPEC 0.148): `--chrome`.
+    pub browser: bool,
+    /// Why `session.start.browser` was not run (`system browser_refused`): the session starts
+    /// without it.
+    pub browser_refused: Option<String>,
 }
 
 impl StartSpec {
@@ -611,6 +623,7 @@ impl Config {
             allow_subagent_messages: raw.allow_subagent_messages,
             show_in_vscode: raw.show_in_vscode,
             session_secrets: raw.session_secrets,
+            browser: raw.browser,
             default_environment: Arc::new(Environment::default_of(&permissions)),
             permissions,
             environments,
@@ -664,6 +677,19 @@ impl Config {
                 Err(why) => (None, Some(why)),
             },
         };
+        // SPEC 0.148: the user's Chrome, only where `worker.toml` gives it, for the owner.
+        let (browser, browser_refused) = if !s.browser {
+            (false, None)
+        } else if !self.browser {
+            (
+                false,
+                Some("this worker gives no browser: browser is off in its worker.toml".to_string()),
+            )
+        } else if !s.owner_is_worker_owner || s.restricted || s.runtime != Runtime::ClaudeCode {
+            (false, Some("only an unrestricted Claude Code session of the worker's owner gets the browser".to_string()))
+        } else {
+            (true, None)
+        };
         let secrets = (self.session_secrets
             && s.owner_is_worker_owner
             && !s.restricted
@@ -697,6 +723,8 @@ impl Config {
             provider,
             provider_refused,
             secrets,
+            browser,
+            browser_refused,
         })
     }
 
@@ -947,6 +975,41 @@ mod tests {
         let mut foreign = s.clone();
         foreign.owner_is_worker_owner = false;
         assert!(on.check_start(&foreign).unwrap().secrets.is_none());
+    }
+
+    /// SPEC 0.148: the browser only with `browser = true`, for the owner's unrestricted
+    /// session; otherwise the session starts without it and says why.
+    #[test]
+    fn the_browser_only_where_the_worker_gives_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ws")).unwrap();
+        let toml = |extra: &str| {
+            format!(
+                "hub_url = \"http://127.0.0.1:1/\"\nallowed_roots = [{:?}]\nallow_foreign_sessions = true\n{extra}",
+                dir.path().display().to_string(),
+            )
+        };
+        let mut s = start(&dir.path().join("ws"));
+        s.owner_is_worker_owner = true;
+        s.restricted = false;
+        let off = Config::parse(&toml("")).unwrap();
+        let on = Config::parse(&toml("browser = true\n")).unwrap();
+        let plain = on.check_start(&s).unwrap();
+        assert!(
+            !plain.browser && plain.browser_refused.is_none(),
+            "not asked for"
+        );
+        s.browser = true;
+        let given = on.check_start(&s).unwrap();
+        assert!(given.browser && given.browser_refused.is_none());
+        let refused = off.check_start(&s).unwrap();
+        assert!(!refused.browser && refused.browser_refused.unwrap().contains("browser is off"));
+        let mut foreign = s.clone();
+        foreign.owner_is_worker_owner = false;
+        assert!(on.check_start(&foreign).unwrap().browser_refused.is_some());
+        let mut restricted = s.clone();
+        restricted.restricted = true;
+        assert!(!on.check_start(&restricted).unwrap().browser);
     }
 
     /// SPEC 0.144: a provider runs only by its name in `[providers.*]` with the same

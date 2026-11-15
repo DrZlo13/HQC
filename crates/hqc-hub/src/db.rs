@@ -2309,6 +2309,9 @@ pub async fn turn_answered(db: &PgPool, session_id: Uuid, input_id: Uuid) -> sql
     .await
 }
 
+/// `updated_at`, which orders the session lists (SPEC §5.4, §6), moves only when
+/// `process_state`, `locked_by` or `runtime_session_id` changes: a repeat, such as the
+/// `session.state` the worker sends again after `hello`, keeps it.
 pub async fn set_process_state(
     db: &PgPool,
     id: Uuid,
@@ -2321,7 +2324,9 @@ pub async fn set_process_state(
             runtime_session_id = COALESCE($3, runtime_session_id), locked_by = $4,
             vscode_active_at = CASE WHEN $4 = 'vscode' AND locked_by <> 'vscode'
                 THEN now() ELSE vscode_active_at END,
-            updated_at = now()
+            updated_at = CASE WHEN process_state <> $2 OR locked_by <> $4
+                    OR runtime_session_id IS DISTINCT FROM COALESCE($3, runtime_session_id)
+                THEN now() ELSE updated_at END
          WHERE id = $1",
     )
     .bind(id)

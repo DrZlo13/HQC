@@ -125,6 +125,10 @@ pub struct SessionSummary {
     /// As in the session object: the user's, so the list of favorites follows other devices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favorite_at: Option<DateTime<Utc>>,
+    /// As in the session object (SPEC 0.160): the session's menu offers Resume, and its line says
+    /// "Pausing after this turn" while the turn runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

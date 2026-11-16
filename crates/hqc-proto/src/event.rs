@@ -71,6 +71,9 @@ pub enum SessionState {
     Waiting,
     Error,
     Running,
+    /// Paused by its user (SPEC §17.3): no turn runs and nothing is delivered until it is
+    /// resumed.
+    Paused,
     Queued,
     Idle,
     #[serde(other)]
@@ -828,6 +831,7 @@ mod tests {
             (SessionState::Waiting, "waiting"),
             (SessionState::Error, "error"),
             (SessionState::Running, "running"),
+            (SessionState::Paused, "paused"),
             (SessionState::Queued, "queued"),
             (SessionState::Idle, "idle"),
         ];

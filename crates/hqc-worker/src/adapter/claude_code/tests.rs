@@ -1920,6 +1920,33 @@ fn the_answer_to_initialize_gives_the_commands() {
     );
 }
 
+/// The commands reported are those the hub keeps (SPEC §5.4): a name longer than 100
+/// characters is dropped and the list stops at 500, so a CLI with more does not make the frame
+/// the hub refuses.
+#[test]
+fn the_commands_reported_are_what_the_hub_keeps() {
+    let mut core = Core::new(Uuid::now_v7(), false);
+    let mut names = vec!["x".repeat(101), "y".repeat(100)];
+    names.extend((0..600).map(|i| format!("c{i}")));
+    let changed = json!({"type": "system", "subtype": "commands_changed",
+        "commands": names.iter().map(|n| json!({"name": n, "description": "", "argumentHint": ""}))
+            .collect::<Vec<_>>(),
+        "uuid": Uuid::new_v4(), "session_id": CLI_SESSION});
+    let lists: Vec<Vec<SlashCommand>> = emitted(core.on_line(&changed.to_string()))
+        .into_iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Commands(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    let [list] = lists.as_slice() else {
+        panic!("{} lists", lists.len())
+    };
+    assert_eq!(list.len(), 500);
+    assert_eq!(list[0].name, "y".repeat(100));
+    assert_eq!(list[499].name, "c498");
+}
+
 /// A new conversation, whose title the ticker reads during its first model turn: a new session's
 /// or the one `/clear` starts, not a resumed one or a fork; `/clear`'s own result does not end
 /// that turn.
@@ -6449,6 +6476,125 @@ async fn a_cleared_folder_is_marked_until_init() {
     assert!(!own.is_clearing(&folder), "the process is gone");
 }
 
+/// A `/clear` whose turn ends with no `init` naming a new transcript unmarks the folder at that
+/// turn's `result` (SPEC §9.2): the mark does not hold the mirror back until the process ends.
+/// A question holds the scripted CLI after `conversation_reset`.
+#[tokio::test]
+async fn a_cleared_folder_is_unmarked_when_the_turn_of_clear_ends() {
+    let old = Uuid::new_v4();
+    let stream = [
+        json!({"type": "system", "subtype": "init", "session_id": old,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string(),
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": old}).to_string(),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+        json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+            "total_cost_usd": 0.0, "session_id": old, "local_command": "clear",
+            "usage": {"input_tokens": 0, "output_tokens": 0}})
+        .to_string(),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let folder =
+        super::paths::transcript_path(config.path(), &work.path().canonicalize().unwrap(), &old)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.input(&user_input(s.session_id, "/clear")).await.unwrap();
+    let q1 = first(&mut events, |ev| match ev {
+        AdapterEvent::Event(e) => match &e.kind {
+            EventKind::ClarifyRequest { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    assert!(own.is_clearing(&folder), "after conversation_reset");
+    a.answer_clarify(&q1, &BTreeMap::new()).await.unwrap();
+    first(&mut events, |ev| {
+        matches!(ev, AdapterEvent::TurnEnded { .. }).then_some(())
+    })
+    .await;
+    assert!(!own.is_clearing(&folder), "the turn of /clear ended");
+    a.kill().await.unwrap();
+}
+
+/// What the process wrote to its transcript right before `/clear` and the mirror reads only
+/// after the switch stays the process's (SPEC §9.2): the output of `/cost` there is no
+/// `mirror.event`, which the hub, with the session on the new transcript, would import as a
+/// session of someone else's. A question holds the scripted CLI after the switch.
+#[tokio::test]
+async fn a_command_output_before_clear_is_the_processs_after_the_switch() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let stream = [
+        init(old),
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": old}).to_string(),
+        init(new),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let workdir = work.path().canonicalize().unwrap();
+    let transcript = super::paths::transcript_path(config.path(), &workdir, &old);
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    // The shape of 2.1.312.
+    let output = json!({"parentUuid": null, "isSidechain": false, "uuid": Uuid::new_v4(),
+        "timestamp": "2026-11-16T10:00:00.000Z", "cwd": workdir.display().to_string(),
+        "sessionId": old, "type": "system", "subtype": "local_command",
+        "content": "<local-command-stdout>Total cost: $0.0123</local-command-stdout>",
+        "level": "info", "isMeta": false});
+    std::fs::write(&transcript, format!("{output}\n")).unwrap();
+    let opts = options(config.path());
+    let own = opts.own_records.clone();
+    let factory = ClaudeCodeAdapters::new(opts, Arc::new(ScriptedClaude::new(&stream)));
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.input(&user_input(s.session_id, "/clear")).await.unwrap();
+    first(&mut events, |ev| match ev {
+        AdapterEvent::Event(e) => matches!(e.kind, EventKind::ClarifyRequest { .. }).then_some(()),
+        _ => None,
+    })
+    .await;
+    assert!(own.is_live(new) && !own.is_live(old), "switched");
+    let mut mirror = crate::mirror::Mirror::new(
+        config.path().join("projects"),
+        Arc::new(crate::mirror::store::Store::memory()),
+        own.clone(),
+    );
+    mirror.set(workdir, true, vec![]);
+    let out = mirror.poll(std::time::Instant::now(), std::time::SystemTime::now());
+    assert!(
+        !out.iter()
+            .any(|o| matches!(o, crate::mirror::Output::Event(_))),
+        "{out:?}"
+    );
+    a.kill().await.unwrap();
+}
+
 /// What `want` makes of the first adapter event it takes, within 5 s each.
 async fn first<T>(
     events: &mut mpsc::Receiver<AdapterEvent>,
@@ -6519,6 +6665,181 @@ async fn a_title_written_during_a_turn_is_reported_before_its_end() {
     })
     .await;
     assert_eq!(title, "Build fix");
+}
+
+/// After `/clear` in a process that has sent a title, the title the CLI writes into the new
+/// transcript during the new conversation's first model turn is reported while that turn still
+/// runs (SPEC §8.1): the title sent before is forgotten at the switch. A question holds
+/// the turn.
+#[tokio::test]
+async fn after_clear_the_new_title_is_reported_during_the_first_turn() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let init = |session: Uuid| {
+        json!({"type": "system", "subtype": "init", "session_id": session,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string()
+    };
+    let done = |session: Uuid, local: Option<&str>| {
+        let mut v = json!({"type": "result", "subtype": "success", "is_error": false,
+            "num_turns": 1, "total_cost_usd": 0.001, "session_id": session,
+            "usage": {"input_tokens": 4, "output_tokens": 2}});
+        if let Some(l) = local {
+            v["local_command"] = json!(l);
+        }
+        v.to_string()
+    };
+    let stream = [
+        init(old),
+        reply("ONE"),
+        done(old, None),
+        json!({"type": "conversation_reset", "trigger": "clear", "session_id": old}).to_string(),
+        init(new),
+        done(new, Some("clear")),
+        init(new),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+    ]
+    .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let workdir = work.path().canonicalize().unwrap();
+    let path = |session: &Uuid| super::paths::transcript_path(config.path(), &workdir, session);
+    let title_line = |session: Uuid, title: &str| {
+        format!("{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\",\"sessionId\":\"{session}\"}}\n")
+    };
+    std::fs::create_dir_all(path(&old).parent().unwrap()).unwrap();
+    std::fs::write(path(&old), title_line(old, "Before")).unwrap();
+    let factory = ClaudeCodeAdapters::new(
+        options(config.path()),
+        Arc::new(ScriptedClaude::new(&stream)),
+    );
+    let s = spec(Uuid::now_v7(), work.path(), old);
+    let (tx, mut events) = mpsc::channel(1024);
+    let mut a = factory.create(&s, tx);
+    a.start(&s).await.unwrap();
+    a.input(&user_input(s.session_id, "x")).await.unwrap();
+    let title = |ev: &AdapterEvent| match ev {
+        AdapterEvent::Title(t) => Some(t.clone()),
+        _ => None,
+    };
+    assert_eq!(first(&mut events, title).await, "Before");
+    first(&mut events, |ev| match ev {
+        AdapterEvent::Event(e) => matches!(e.kind, EventKind::ClarifyRequest { .. }).then_some(()),
+        _ => None,
+    })
+    .await;
+    std::fs::write(path(&new), title_line(new, "After")).unwrap();
+    let after = first(&mut events, |ev| match ev {
+        AdapterEvent::TurnEnded { .. } => panic!("the turn ended"),
+        ev => title(ev),
+    })
+    .await;
+    assert_eq!(after, "After");
+    a.kill().await.unwrap();
+}
+
+/// A tick between `conversation_reset` and the `init` that names the new transcript (~70 ms,
+/// `w1-clear`) reads the old transcript and stores its title; the switch forgets it, so the ticks
+/// of the new conversation's first turn still read its title (SPEC §8.1).
+#[tokio::test]
+async fn a_title_read_before_the_switch_does_not_stop_the_new_ones() {
+    let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+    let dir = tempfile::tempdir().unwrap();
+    let old_path = dir.path().join(format!("{old}.jsonl"));
+    std::fs::write(
+        &old_path,
+        format!("{{\"type\":\"ai-title\",\"aiTitle\":\"Before\",\"sessionId\":\"{old}\"}}\n"),
+    )
+    .unwrap();
+    let (tx, mut events) = mpsc::channel(16);
+    let stdin: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>> = Box::pin(tokio::io::sink());
+    let io = super::Io {
+        session_id: Uuid::now_v7(),
+        stdin: tokio::sync::Mutex::new(stdin),
+        events: tx,
+        signal: Box::new(|_: Sig| -> std::io::Result<()> { Ok(()) }),
+        transcript: std::sync::Mutex::new(Some(old_path)),
+        title: std::sync::Mutex::new(None),
+        runtime: std::sync::Mutex::new(old),
+        own: options(dir.path()).own_records,
+    };
+    io.report_title(None).await;
+    assert!(matches!(events.try_recv(), Ok(AdapterEvent::Title(t)) if t == "Before"));
+    io.moved_to(new);
+    assert!(
+        super::lock(&io.title).is_none(),
+        "the old transcript's title would keep the ticks from reading the new one"
+    );
+}
+
+/// A transcript over 4 MiB is not read for its title on the ticks of a first turn, only when
+/// the turn ends (SPEC §8.1): without a title of the CLI's (a first message under 10
+/// characters) the reads would go on for the whole turn. A question holds the turn.
+#[tokio::test]
+async fn a_large_transcript_is_read_for_its_title_only_at_the_turns_end() {
+    let claude_session = Uuid::new_v4();
+    let stream = [
+        json!({"type": "system", "subtype": "init", "session_id": CLI_SESSION,
+            "model": "claude-haiku-5-5", "permissionMode": "default"})
+        .to_string(),
+        json!({"type": "control_request", "request_id": "q1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {"questions": [
+                {"question": "Go on?", "header": "Go", "multiSelect": false,
+                    "options": [{"label": "Yes"}]}]}}})
+        .to_string(),
+        json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 1,
+            "total_cost_usd": 0.001, "session_id": CLI_SESSION,
+            "usage": {"input_tokens": 4, "output_tokens": 2}})
+        .to_string(),
+    ]
+    .join("\n");
+    let mut h = Harness::start(&stream, claude_session).await;
+    let transcript = super::paths::transcript_path(
+        h._dirs.1.path(),
+        &h._dirs.0.path().canonicalize().unwrap(),
+        &claude_session,
+    );
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    h.adapter
+        .input(&user_input(h.session_id, "Hi"))
+        .await
+        .unwrap();
+    let q1 = first(&mut h.events, |ev| match ev {
+        AdapterEvent::Event(e) => match &e.kind {
+            EventKind::ClarifyRequest { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        },
+        _ => None,
+    })
+    .await;
+    let filler = json!({"type": "user", "message": {"role": "user",
+        "content": "x".repeat(4 * 1024 * 1024)}});
+    std::fs::write(
+        &transcript,
+        format!("{filler}\n{{\"type\":\"ai-title\",\"aiTitle\":\"Big\",\"sessionId\":\"{claude_session}\"}}\n"),
+    )
+    .unwrap();
+    // A tick at least: every 2 s.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    while let Ok(ev) = h.events.try_recv() {
+        assert!(
+            !matches!(ev, AdapterEvent::Title(_)),
+            "read on a tick: {ev:?}"
+        );
+    }
+    h.adapter
+        .answer_clarify(&q1, &BTreeMap::new())
+        .await
+        .unwrap();
+    let title = first(&mut h.events, |ev| match ev {
+        AdapterEvent::Title(t) => Some(t.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(title, "Big");
 }
 
 /// `system/session_title_changed` (2.1.312: a title a person gave, `/rename`) is the session's

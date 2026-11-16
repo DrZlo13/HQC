@@ -21,10 +21,11 @@
 //! another uuid; a message typed during a turn then ([`map::is_queued_prompt`]), which
 //! stream-json does not repeat; and a slash command's output ([`map::is_local_command`]) or a
 //! compaction's summary ([`map::is_compact_summary`]) then: only the adapter writes that
-//! process's stdin, and the adapter reported the compaction. A transcript the mirror has not
-//! read yet waits while a process of the worker has cleared its conversation in that folder
-//! and not named the new transcript ([`OwnRecords::is_clearing`]): the CLI begins that one
-//! before it names it. Any other main-chain record is someone else's:
+//! process's stdin, and the adapter reported the compaction; these also in a transcript the
+//! process wrote before its `/clear` ([`OwnRecords::of_live_process`]). A transcript the
+//! mirror has not read yet waits while a process of the worker has cleared its conversation in
+//! that folder and not named the new transcript ([`OwnRecords::is_clearing`]): the CLI begins
+//! that one before it names it. Any other main-chain record is someone else's:
 //! - while a process of this worker runs the session (`locked_by: hqc`) the mirror does not
 //!   emit it and does not move past it for [`GRACE`] (stream-json may lag behind the file).
 //!   Then, with Claude Code's registry of live sessions (below), it goes out like any other
@@ -537,8 +538,9 @@ impl Mirror {
             // the adapter reported its stream-json line (`system task_notification`), which
             // has another uuid; the record is the CLI's own, not another writer's. So is a
             // message typed during a turn: only the adapter writes that process's stdin, and
-            // the hub has the input already.
-            let reported = live
+            // the hub has the input already. Also in a transcript that process wrote before its
+            // `/clear`: what it wrote there last may be read only after the switch.
+            let reported = self.own.of_live_process(runtime)
                 && (map::is_task_notification(&rec)
                     || map::is_queued_prompt(&rec)
                     || map::is_local_command(&rec)

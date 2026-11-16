@@ -27,6 +27,8 @@ use crate::adapter::AdapterEvent;
 const TICK: Duration = Duration::from_secs(2);
 /// The rate is the output tokens of this last stretch, per second.
 const WINDOW: Duration = Duration::from_secs(20);
+/// A transcript larger than this is not read for its title on a tick, only at a turn's end.
+const TITLE_MAX: u64 = 4 * 1024 * 1024;
 
 /// What has been read of one subagent's transcript.
 #[derive(Debug, Default)]
@@ -146,9 +148,10 @@ pub(super) async fn meter(
         // conversation and does not stream it (`session_title_changed` carries only a
         // person's): it is read on each tick of that turn until the process has one, not only
         // at the turn's end (SPEC §8.1). A resumed conversation without one gets none, and its
-        // transcript, tens of MB, is not read every tick.
+        // transcript, tens of MB, is not read every tick; nor is one over [`TITLE_MAX`], which a
+        // first turn the CLI writes no title in (a first message under 10 characters) grows.
         if reads_title(working, fresh, lock(&io.title).is_some()) {
-            io.report_title().await;
+            io.report_title(Some(TITLE_MAX)).await;
         }
         let now = Instant::now();
         if working {

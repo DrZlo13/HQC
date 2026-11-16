@@ -169,6 +169,10 @@ pub const CONVERSATION_CLEARED_TEXT: &str = "Conversation cleared";
 pub const COMMAND_OUTPUT: &str = "command_output";
 /// At most this many bytes of a slash command's description and argument hint are reported.
 pub const COMMAND_TEXT_LIMIT: usize = 200;
+/// At most this many slash commands are reported, and none whose name is longer than
+/// [`COMMAND_NAME_LIMIT`] characters: what the hub keeps (SPEC §5.4).
+pub const COMMANDS_LIMIT: usize = 500;
+pub const COMMAND_NAME_LIMIT: usize = 100;
 /// `message.model` of a reply the CLI wrote itself instead of the model ("Credit balance is
 /// too low", API errors; 2.1.312, stream-json and transcript alike): `agent.message` with
 /// `runtime: true`.
@@ -349,6 +353,9 @@ pub struct Core {
     /// A `conversation_reset` came (`/clear`): the next `system/init` with another
     /// `session_id` names the transcript the CLI goes on in.
     cleared: bool,
+    /// [`Core::clearing`]: from `conversation_reset` until that `system/init` or the `result`
+    /// of the turn it came in.
+    clearing: bool,
     /// The conversation is new (a new session, `/clear`) and its first model turn has not
     /// ended: the CLI writes its `ai-title` then.
     fresh: bool,
@@ -410,9 +417,10 @@ pub struct Core {
 }
 
 impl Core {
-    /// A `conversation_reset` came and no `system/init` has named the new transcript yet.
+    /// A `conversation_reset` came, and neither has a `system/init` named the new transcript
+    /// yet nor has the turn it came in ended.
     pub fn clearing(&self) -> bool {
-        self.cleared
+        self.clearing
     }
 
     /// Uuids of the main-chain `user`/`assistant` messages (with the prompt echoes) read
@@ -455,6 +463,7 @@ impl Core {
             init_commands: None,
             terminal_commands: Vec::new(),
             cleared: false,
+            clearing: false,
             fresh: false,
             wakeup_calls: HashSet::new(),
             wakeup: None,
@@ -906,6 +915,7 @@ impl Core {
             "conversation_reset" => {
                 tracing::info!(session_id = %self.session_id, trigger = ?v["trigger"].as_str(), "conversation cleared");
                 self.cleared = true;
+                self.clearing = true;
                 self.fresh = true;
                 self.cost_total = None;
                 vec![self.emit_system(CONVERSATION_CLEARED, CONVERSATION_CLEARED_TEXT.into())]
@@ -933,6 +943,7 @@ impl Core {
                         .and_then(|id| id.parse::<Uuid>().ok())
                     {
                         self.cleared = false;
+                        self.clearing = false;
                         tracing::info!(session_id = %self.session_id, runtime_session_id = %new, "the conversation goes on in a new transcript");
                         out.push(Action::Emit(AdapterEvent::RuntimeSessionId(new.to_string())));
                     }
@@ -1155,8 +1166,9 @@ impl Core {
     /// `commands_changed` with their descriptions and argument hints, else (before either, or
     /// a CLI without them) the names of `slash_commands` of the latest `system/init`; without
     /// those that only work in the terminal UI (`terminal_slash_commands` of the latest
-    /// `init`) and the CLI's internal ones (`__name`). Reported once per process and again only
-    /// when the list changes (`/reload-plugins`, a new skill).
+    /// `init`) and the CLI's internal ones (`__name`), within [`COMMANDS_LIMIT`] and
+    /// [`COMMAND_NAME_LIMIT`]. Reported once per process and again only when the list changes
+    /// (`/reload-plugins`, a new skill).
     fn report_commands(&mut self) -> Vec<Action> {
         let all: Vec<SlashCommand> = match (&self.listed, &self.init_commands) {
             (Some(l), _) => l.clone(),
@@ -1174,10 +1186,14 @@ impl Core {
         for c in all {
             if !c.name.is_empty()
                 && !c.name.starts_with('_')
+                && c.name.chars().count() <= COMMAND_NAME_LIMIT
                 && !self.terminal_commands.contains(&c.name)
                 && !list.iter().any(|l| l.name == c.name)
             {
                 list.push(c);
+                if list.len() == COMMANDS_LIMIT {
+                    break;
+                }
             }
         }
         if self.commands.as_ref() == Some(&list) {
@@ -1755,6 +1771,9 @@ impl Core {
 
     fn on_result(&mut self, v: &Value) -> Vec<Action> {
         self.self_turn = false;
+        // The turn of `/clear` ended without an `init` naming the new transcript: the folder is
+        // not held for it any longer.
+        self.clearing = false;
         // A local command's result (`/clear`'s own) ends no model turn.
         if v["local_command"].is_null() {
             self.fresh = false;

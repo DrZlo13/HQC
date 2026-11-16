@@ -79,7 +79,8 @@ pub enum AdapterEvent {
     RuntimeSessionId(String),
     /// The runtime named the session (Claude Code: a title a person gave, `/rename`, from
     /// `system/session_title_changed` at once; the transcript's title, the CLI's own included,
-    /// read every 2 s of a turn until the process has one and when a turn ends, SPEC §8.1);
+    /// read every 2 s of the first model turn of a new session (`Launch::New`) or after
+    /// `/clear` while this process has sent no title, and at the end of each turn, SPEC §8.1);
     /// sent as `session.state.title`. Reported when it changes.
     Title(String),
     /// The runtime's slash commands, without `/`, with what it says of each (Claude Code: the

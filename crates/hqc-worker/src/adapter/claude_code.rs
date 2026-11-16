@@ -86,8 +86,25 @@ impl Drop for Live {
     }
 }
 
+/// A transcript the live process wrote before its `/clear`, in [`OwnRecords`] until the
+/// process ends: the mirror may read what it wrote there last only after the switch.
+struct Earlier(Arc<OwnRecords>, Uuid);
+
+impl Earlier {
+    fn new(own: Arc<OwnRecords>, uuid: Uuid) -> Self {
+        own.begin_earlier(uuid);
+        Self(own, uuid)
+    }
+}
+
+impl Drop for Earlier {
+    fn drop(&mut self) {
+        self.0.end_earlier(self.1);
+    }
+}
+
 /// The transcript folder of a process that cleared its conversation, marked in [`OwnRecords`]
-/// until the process names the new transcript or ends.
+/// until the process names the new transcript, the turn of `/clear` ends or the process does.
 struct Clearing(Arc<OwnRecords>, PathBuf);
 
 impl Clearing {
@@ -404,7 +421,7 @@ impl Io {
         for a in actions {
             match a {
                 Action::Emit(ev @ AdapterEvent::TurnEnded { .. }) => {
-                    self.report_title().await;
+                    self.report_title(None).await;
                     let _ = self.events.send(ev).await;
                 }
                 // A person's title (`/rename`): the transcript gives the same one later.
@@ -430,11 +447,20 @@ impl Io {
     /// After a turn, and during the first turn of a new conversation until the process has a
     /// title ([`rate::meter`]): the transcript's title (its last `custom-title`, else its last
     /// `ai-title`), if there is one and it is new. The CLI writes `ai-title` after the first
-    /// prompt; a missing file or title is not an error.
-    async fn report_title(&self) {
+    /// prompt; a missing file or title is not an error. `max`: a transcript larger than this
+    /// many bytes is not read.
+    async fn report_title(&self, max: Option<u64>) {
         let Some(path) = self.transcript() else {
             return;
         };
+        if let Some(max) = max {
+            if tokio::fs::metadata(&path)
+                .await
+                .is_ok_and(|m| m.len() > max)
+            {
+                return;
+            }
+        }
         let text = match tokio::fs::read_to_string(&path).await {
             Ok(t) => t,
             Err(e) => {
@@ -469,8 +495,11 @@ impl Io {
         *lock(&self.runtime)
     }
 
-    /// After `/clear` the CLI writes transcript `new` in the same folder (SPEC §8.1).
+    /// After `/clear` the CLI writes transcript `new` in the same folder (SPEC §8.1). The title
+    /// sent before is forgotten here, not at `conversation_reset`: a tick between the two reads
+    /// the old transcript and would store its title again.
     fn moved_to(&self, new: Uuid) {
+        *lock(&self.title) = None;
         *lock(&self.runtime) = new;
         if let Some(p) = lock(&self.transcript).as_mut() {
             p.set_file_name(format!("{new}.jsonl"));
@@ -1310,6 +1339,7 @@ async fn monitor(
     let mut rd = BufReader::new(stdout);
     let mut buf = Vec::new();
     let mut clearing: Option<Clearing> = None;
+    let mut earlier: Vec<Earlier> = Vec::new();
     let mut drain = exited.clone();
     let after_exit = async move {
         let _ = drain.wait_for(Option::is_some).await;
@@ -1338,16 +1368,18 @@ async fn monitor(
                             .map(|d| Clearing::new(io.own.clone(), d.to_path_buf()));
                     }
                     // After `/clear` the process writes the new transcript: its records from
-                    // this line on are that one's, and the old one is no longer written.
+                    // this line on are that one's, and the old one is no longer written; what
+                    // it wrote there stays its own (SPEC §9.2).
                     for a in &actions {
                         if let Action::Emit(AdapterEvent::RuntimeSessionId(r)) = a {
                             if let Ok(new) = r.parse::<Uuid>() {
                                 io.moved_to(new);
+                                earlier.push(Earlier::new(io.own.clone(), live.1));
                                 live = Live::new(io.own.clone(), new, live.2);
                             }
                         }
                     }
-                    // Unmarked once the new transcript is live.
+                    // Unmarked once the new transcript is live, or the turn of `/clear` ended.
                     if !cleared {
                         clearing = None;
                     }
@@ -1370,6 +1402,7 @@ async fn monitor(
     // The process wrote its last record: the mirror may treat what follows as another
     // writer's.
     drop(live);
+    drop(earlier);
     drop(clearing);
     // Its ssh-agent goes with it (T44), its secrets (SPEC 0.147) and the fork copy it resumed
     // (SPEC §8.1).

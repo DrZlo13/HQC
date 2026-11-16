@@ -14,7 +14,8 @@
 //! after a worker restart the mirror's offsets on disk say what was already handled. After
 //! `/clear` the process goes on in a new transcript of the same folder, which the CLI writes
 //! before it names it (`w1-clear`): until then the folder is marked
-//! ([`OwnRecords::mark_clearing`]).
+//! ([`OwnRecords::mark_clearing`]); the transcript before stays the process's until it ends
+//! ([`OwnRecords::begin_earlier`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -40,6 +41,8 @@ struct Entry {
     /// Processes of the session alive now (a new one may start before the old one's
     /// monitor has finished).
     live: u32,
+    /// Live processes that wrote the transcript and went on in another after `/clear`.
+    earlier: u32,
     /// Their pids, when known: their entries in Claude Code's session registry are not
     /// another holder (SPEC §9.3).
     pids: Vec<u32>,
@@ -115,6 +118,27 @@ impl OwnRecords {
     /// A process of this worker writes the transcript now (`locked_by: hqc`).
     pub fn is_live(&self, session: Uuid) -> bool {
         self.lock().get(&session).is_some_and(|e| e.live > 0)
+    }
+
+    /// The live process of transcript `session` went on in another one after `/clear`: what
+    /// it wrote there stays its own until it ends ([`OwnRecords::of_live_process`]).
+    pub fn begin_earlier(&self, session: Uuid) {
+        self.lock().entry(session).or_default().earlier += 1;
+    }
+
+    /// That process is gone.
+    pub fn end_earlier(&self, session: Uuid) {
+        if let Some(e) = self.lock().get_mut(&session) {
+            e.earlier = e.earlier.saturating_sub(1);
+        }
+    }
+
+    /// A process of this worker writes the transcript now ([`OwnRecords::is_live`]) or wrote
+    /// it before its `/clear` and still runs.
+    pub fn of_live_process(&self, session: Uuid) -> bool {
+        self.lock()
+            .get(&session)
+            .is_some_and(|e| e.live > 0 || e.earlier > 0)
     }
 
     /// A process with its transcript in `folder` cleared its conversation (`/clear`): a

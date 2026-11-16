@@ -46,13 +46,26 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
     if s.archived || s.system || s.locked_by == "vscode" {
         return Ok(());
     }
+    if s.paused_at.is_some() {
+        // A paused session gets no start and no input until it is resumed (§17.3). A turn that
+        // still runs gets the answers its worker has not acknowledged: after a reconnect only
+        // the `ack` of a start would send them.
+        if let Some(w) = s.worker_id.filter(|_| s.turn_open) {
+            for p in db::undelivered_results(&app.db, w).await? {
+                if p.session_id == session_id {
+                    requests::deliver_result(app, &p).await;
+                }
+            }
+        }
+        return Ok(());
+    }
     let Some(conn) = s.worker_id.and_then(|w| app.workers.get(w)) else {
         return Ok(());
     };
     let mut guard = conn.st.lock().await;
     let ConnState { replies, sessions } = &mut *guard;
     let sc = sessions.entry(session_id).or_default();
-    let pending = db::pending_inputs(&app.db, session_id).await?;
+    let mut pending = db::pending_inputs(&app.db, session_id).await?;
     match sc.start {
         StartState::NotStarted => {
             if force_start || !pending.is_empty() {
@@ -64,6 +77,8 @@ async fn kick_inner(app: &AppState, session_id: Uuid, force_start: bool) -> anyh
         }
         StartState::Starting => {}
         StartState::Started => {
+            // The note of a resume goes ahead of the inputs typed during the pause (SPEC §17.3).
+            pending.sort_by_key(|p| p.payload.get("resume") != Some(&Value::Bool(true)));
             for p in pending {
                 if sc.inflight.contains(&p.event_id) {
                     continue;

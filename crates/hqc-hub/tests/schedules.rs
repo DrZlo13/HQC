@@ -287,6 +287,47 @@ async fn a_target_that_takes_no_input_skips_the_run() {
     hub.finish().await;
 }
 
+/// A paused target (SPEC §16, §17.3): a `cron` run is skipped, an `at` run is stored and waits.
+#[tokio::test]
+async fn a_paused_target_skips_a_cron_run_and_keeps_an_at() {
+    let hub = TestHub::start().await;
+    let (_, t) = hub.enroll("one").await;
+    let (mut w, _) = FakeWorker::online(&hub, &t, WS_PATH).await;
+    let (a, _) = started(&hub, &mut w, "Paused").await;
+    hub.app.clock.set(utc("2026-06-01T08:00:00Z"));
+    let (s, v) = hub
+        .post(
+            "/api/schedules",
+            json!({"session_id": a, "cron": "0 9 * * *", "message": "daily"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = hub
+        .post(
+            "/api/schedules",
+            json!({"session_id": a, "at": "2026-06-01T09:30:00Z", "message": "once"}),
+        )
+        .await;
+    assert_eq!(s, 201, "{v}");
+    let (s, v) = hub
+        .post(&format!("/api/sessions/{a}/pause"), json!({}))
+        .await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("paused")), "{v}");
+    assert_eq!(run_at(&hub, "2026-06-01T09:00:00Z").await, 0);
+    assert!(scheduled_inputs(&hub, &a).await.is_empty());
+    assert_eq!(run_at(&hub, "2026-06-01T09:30:00Z").await, 1);
+    let ev = scheduled_inputs(&hub, &a).await;
+    assert_eq!(
+        (
+            ev.len(),
+            ev[0]["payload"]["text"].as_str(),
+            ev[0]["delivery"].as_str()
+        ),
+        (1, Some("once"), Some("pending"))
+    );
+    hub.finish().await;
+}
+
 #[tokio::test]
 async fn refusals_and_limits() {
     let hub = TestHub::start().await;

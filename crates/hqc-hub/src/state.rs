@@ -28,6 +28,8 @@ pub struct StateInputs {
     pub failed_input: bool,
     pub last_turn_error: bool,
     pub turn_open: bool,
+    /// `paused_at` is set (SPEC §17.3).
+    pub paused: bool,
     pub queue_len: i64,
 }
 
@@ -45,6 +47,8 @@ pub fn compute_state(i: StateInputs) -> SessionState {
         SessionState::Error
     } else if i.turn_open {
         SessionState::Running
+    } else if i.paused {
+        SessionState::Paused
     } else if i.queue_len > 0 {
         SessionState::Queued
     } else {
@@ -127,6 +131,7 @@ pub async fn views(
                 failed_input: a.has_failed,
                 last_turn_error: s.last_turn_error,
                 turn_open: s.turn_open,
+                paused: s.paused_at.is_some(),
                 queue_len: a.queue_len,
             });
             let count = |n: i64| n.max(0) as u64;
@@ -189,6 +194,7 @@ pub async fn views(
                     },
                 ),
                 favorite_at: a.favorite_at,
+                paused_at: s.paused_at,
             })
         })
         .collect())
@@ -212,6 +218,7 @@ mod tests {
             failed_input: true,
             last_turn_error: true,
             turn_open: true,
+            paused: true,
             queue_len: 1,
         };
         assert_eq!(compute_state(all), SessionState::Archived);
@@ -249,6 +256,8 @@ mod tests {
             turn_open: false,
             ..i
         };
+        assert_eq!(compute_state(i), SessionState::Paused);
+        let i = StateInputs { paused: false, ..i };
         assert_eq!(compute_state(i), SessionState::Queued);
         let i = StateInputs { queue_len: 0, ..i };
         assert_eq!(compute_state(i), SessionState::Idle);

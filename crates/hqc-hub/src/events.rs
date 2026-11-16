@@ -489,8 +489,13 @@ async fn after_store(
                 if let Some(input) = in_reply_to {
                     Box::pin(crate::peers::turn_stopped(app, s, *input)).await?;
                 }
+                // A session paused during the turn stops now (SPEC §17.3).
+                crate::pause::stop_if_paused(app, s.id).await?;
             }
-            SessionState::Error => db::set_turn(&app.db, s.id, false, true).await?,
+            SessionState::Error => {
+                db::set_turn(&app.db, s.id, false, true).await?;
+                crate::pause::stop_if_paused(app, s.id).await?;
+            }
             // A turn the runtime started by itself, with no input to open it (SPEC §17.1); only
             // while its process runs: the outbox of a restarted worker sends it again after the
             // `hello` that stopped the session and lost its turn (§17.3).
@@ -549,6 +554,7 @@ pub async fn turn_timed_out(
         &format!("no events for {} s", idle.as_secs()),
     )
     .await?;
+    crate::pause::stop_if_paused(app, session_id).await?;
     Ok(())
 }
 

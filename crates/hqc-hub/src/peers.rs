@@ -668,6 +668,13 @@ pub async fn ask(app: &AppState, caller: &SessionRow, c: &McpCall) -> Result<Ans
         None => max,
     };
     let (t, to) = checked_target(app, caller, &a.text, &a.session).await?;
+    if t.paused_at.is_some() {
+        // No silent wait for its timeout: nothing answers until it is resumed (SPEC §7.1, §17.3).
+        return Err(err(
+            error_code::UNAVAILABLE,
+            format!("{to} is paused; it takes no questions until it is resumed"),
+        ));
+    }
     let files = checked_files(app, caller, &a.artifact_ids).await?;
     let chain = outgoing_chain(app, caller, c, true).await?;
     let open: i64 = sqlx::query_scalar(

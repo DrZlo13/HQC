@@ -86,8 +86,9 @@ final class Notifier {
         center.requestAuthorization(options: [.badge]) { granted, error in
             NSLog("%@", "HQC badge: granted=\(granted) error=\(error.map { "\($0)" } ?? "nil")")
         }
-        // A Focus or a shared screen starts and ends at any moment: looked at every 2 s.
-        RunLoop.main.add(Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+        // A Focus or a shared screen starts and ends at any moment: looked at every minute, and
+        // at every event (notify).
+        RunLoop.main.add(Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             self?.refreshQuiet()
         }, forMode: .common)
     }

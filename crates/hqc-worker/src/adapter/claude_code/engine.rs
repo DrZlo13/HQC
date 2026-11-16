@@ -2105,30 +2105,33 @@ fn compact(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or_default()
 }
 
+/// The length of a value in [`args_preview`] from which it counts as long: 3 KB.
+const LONG_FIELD: usize = PREVIEW_LIMIT * 3 / 4;
+
 /// `args_preview` of a `tool_use` with `input` (SPEC §4): the input as JSON, cut to
-/// [`PREVIEW_LIMIT`]. An `Agent` (`Task` in older Claude Code) input has its `prompt` last: the
-/// keys come sorted, and a long prompt cut at 4 KB took `subagent_type` and `run_in_background`,
-/// which the subagent's card shows, with it. The adapter and the mirror both use it.
+/// [`PREVIEW_LIMIT`]. An object's fields go from the shortest value to the longest: with the keys
+/// sorted, a cut at 4 KB took the fields after a long value with it (a Write's `file_path` after
+/// its `content`, a Bash call's `description` after its script), while now it falls in the longest
+/// values and the others come whole. Values of `LONG_FIELD` or more count as equally long and
+/// keep their sorted order: an Edit of two long strings still shows the start of its
+/// `new_string`, not only a cut `old_string` that took the whole preview. An `Agent` (`Task` in
+/// older Claude Code) input has its `prompt` last whatever its length: the client reads a cut one
+/// by it. The adapter and the mirror both use it.
 pub fn args_preview(tool: &str, input: &Value) -> String {
     let json = match input.as_object() {
-        Some(o) if (tool == "Agent" || tool == "Task") && o.contains_key("prompt") => {
-            let rest: serde_json::Map<String, Value> = o
+        Some(o) => {
+            let agent = tool == "Agent" || tool == "Task";
+            let mut fields: Vec<(&String, String)> =
+                o.iter().map(|(k, v)| (k, compact(v))).collect();
+            // A stable sort: fields of the same length keep their sorted order.
+            fields.sort_by_key(|(k, v)| (agent && k.as_str() == "prompt", v.len().min(LONG_FIELD)));
+            let body: Vec<String> = fields
                 .iter()
-                .filter(|(k, _)| k.as_str() != "prompt")
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| format!("{}:{v}", serde_json::to_string(k).unwrap_or_default()))
                 .collect();
-            // `{…}` of the other fields, then `"prompt":…` before its `}`.
-            let mut s = compact(&Value::Object(rest));
-            s.pop();
-            if s.len() > 1 {
-                s.push(',');
-            }
-            s.push_str("\"prompt\":");
-            s.push_str(&compact(&o["prompt"]));
-            s.push('}');
-            s
+            format!("{{{}}}", body.join(","))
         }
-        _ => compact(input),
+        None => compact(input),
     };
     preview(&json, PREVIEW_LIMIT)
 }

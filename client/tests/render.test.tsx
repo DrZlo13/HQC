@@ -760,7 +760,7 @@ describe("tool groups (T26)", () => {
 
   it("shows the first line of a script whose arguments the worker cut at 4 KB", async () => {
     const t = new Timeline();
-    // `command` is the first key, so the cut falls inside it and the other keys are lost.
+    // A worker before SPEC 0.155: `command` the first key, the cut inside it, the other keys lost.
     const script = `cat > /tmp/ruler.py <<'EOF'\n${"print('ruler')\n".repeat(400)}EOF`;
     const cut = JSON.stringify({ command: script, description: "Check the ruler", timeout: 60000 }).slice(0, 4096);
     t.apply(

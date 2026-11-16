@@ -415,8 +415,8 @@ export function callArgs(argsPreview: string): Record<string, unknown> {
 const BRIEF_KEYS = ['file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'command', 'description', 'prompt', 'skill'];
 
 /** One line for a call: `$ command` for Bash, else the tool and its main argument. The
- *  preview is read as far as it goes (cut at 4 KB, SPEC §4): a script longer than that, its
- *  `command` the first key and cut, still shows its first line; `cut`: the preview was cut, so
+ *  preview is read as far as it goes (cut at 4 KB, SPEC §4): a script longer than that, cut
+ *  inside its `command`, still shows its first line; `cut`: the preview was cut, so
  *  more lines may follow than are counted. */
 export function callLine(tool: string, argsPreview: string): { shell: boolean; text: string; more?: number; cut?: boolean } {
   const read = cutJson(argsPreview);

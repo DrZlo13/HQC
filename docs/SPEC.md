@@ -539,7 +539,7 @@ the client renders only them. The "source" column is the component that produces
 |---|---|---|
 | `user.message` | `text` (since 0.69 the client shows it as typed, line breaks kept, without Markdown), `artifact_ids[]`, `schedule_id?` (since 0.38: sent by the hub cron for that `ScheduledMessage`, §16; the client marks it "scheduled"), `during_text?` (since 0.108, set by the hub: the agent's text was being written when the input came; absent when false; §6), `joined?` (since 0.112: `true` once the runtime took the message into the turn already running, written by the hub on the worker's `ack {joined: true}`, §5.2, §17.2; absent when false; the client marks it "joined the turn"), `resume?` (since 0.160: `true` on the note of a resume, §17.3; absent otherwise) | client; hub cron (§16, authored by the owner; since 0.39 the run of an agent's schedule has its `chain`, §7.1); hub after `hqc_move` (§7, since 0.76: authored by the owner, with the call's chain); hub on a resume (§17.3, since 0.160: authored by the user who resumed); mirror — prompts from the Claude Code transcript (§9.1) |
 | `agent.delta` | `text`, `reset?` (since 0.161: `true` when the runtime abandoned the attempt that wrote the text so far, which the hub and the client drop, §6, §8.1; `text` is then empty; absent when false) | adapter; transport only, not written to the database |
-| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands, Monitors left out, in the order they became rows, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row and a command's say, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row and `command` for a command's; a command's row carries only `task_id`, `description` (its Bash call's description, or the command), `duration_ms`, `call_id?`, `kind` and `stoppable` |
+| `subagents.live` | `agents[{task_id, description, activity?, total_tokens?, tool_uses?, duration_ms, call_id?, kind?, stoppable?, due_in_ms?}]` | adapter (since 0.113); transport only, not written to the database: the subagents the agent runs now (those of `session.state.subagents`, §5.4), the whole list each time, in the order they started, then (since 0.127) the main agent's background shell commands and (since 0.168) Monitor watchers, in the order they became rows, then (since 0.168) the wakeup the agent armed and its cron jobs, empty when none (§8.1). `description` is the subagent's task, `activity` what it does now (absent before any progress), `total_tokens` and `tool_uses` its counts so far, `duration_ms` how long it has run when the list was sent, `call_id` (since 0.135) the `call_id` of the `tool.call` that started it (absent before the runtime names it; the client finds a subagent's card in the feed by it, §6), `stoppable` (since 0.161; absent when false) that the runtime stops it alone on `session.stop_task` (§5.3), which a subagent's row, a command's and (since 0.168) a Monitor's say, `kind` (since 0.141; absent from an older worker, an unknown value reads as "unknown") `agent` for a subagent's row, `command` for a command's and, since 0.168, `monitor` for a Monitor's, `wakeup` for the agent's wakeup and `cron` for one of its cron jobs; a command's or a Monitor's row carries only `task_id`, `description` (its Bash call's description, or the command; the Monitor's description), `duration_ms`, `call_id?`, `kind` and `stoppable`; a wakeup's and a job's row also `due_in_ms` (since 0.168), the milliseconds until it fires when the list was sent, by the worker's clock, 0 once due, absent on a job whose next fire is not known |
 | `tokens.rate` | `output_per_s` | adapter (since 0.122); transport only, not written to the database: the output tokens per second (text, thinking and tool input; reading context does not count) the agent and its subagents spent over the last 20 s (a subagent's response counts when it ends), sent when it changes, 0 once no turn and no subagent runs and when the agent's process stops (§8.1) |
 | `agent.message` | `text`, `final`, `in_reply_to?` (event_id of the input that started the turn), `runtime?` (since 0.69: `true` for a reply the runtime wrote itself instead of the model — an API error, "Credit balance is too low"; absent when false), `interrupted?` (since 0.161: `true` for a reply an interrupt cut off before the runtime finished it — Stop, "No" to a permission request, §8.1; absent when false; the client shows it muted with " · interrupted" after its time) | adapter. `final: true` — end of the turn; `final: false` — text between tool calls. A `runtime` message is held and ended like any other text (§8.1), so it is the turn's final message when it ends the turn; the client shows it as a service line, not as the agent's text. Since 0.54 (T51) the final message that answered an `hqc_ask` carries, from the hub to clients only, `reply_delivered_at` beside `delivered_at` once the asking worker acknowledged the reply (§6, §7.1) |
 | `agent.thinking` | `text` | adapter, if the runtime provides it |
@@ -3481,13 +3481,14 @@ keeps the first time, and a `tool_use_id` that differs replaces the row's `call_
 that stops counting is forgotten. Since 0.127 the list holds, after the subagents, the main
 agent's background shell commands: the entries of the latest `background_tasks_changed` list with
 `task_type: local_bash`, without `ambient: true` (tasks the SDK says hosts should leave out of
-activity indicators), whose `task_started` has come and was not that of a `Monitor` call, and
-whose `parent_task_id` is none or a subagent that has reported. 2.1.312 registers a Monitor's
+activity indicators), whose `task_started` has come, and whose `parent_task_id` is none or a
+subagent that has reported. 2.1.312 registers a Monitor's
 task as `local_bash` too, without `ambient`, and nothing in the list tells it from a command:
 the adapter remembers the ids of the `Monitor` `tool_use` blocks of every `assistant` line, the
 agent's and its subagents', and marks the task whose `task_started` names one as its
-`tool_use_id`. A background task joins the list before its `task_started` (SDK), so a
-command's row comes at its `task_started` and a Monitor never shows; a Bash call moved to the
+`tool_use_id`; since 0.168 its row has `kind: monitor` (before, a Monitor never showed), with
+the Monitor's `description`. A background task joins the list before its `task_started` (SDK),
+so a command's or a Monitor's row comes at its `task_started`; a Bash call moved to the
 background later, whose `task_started` came while it ran in the foreground, gets its row when the
 list takes it. A task whose `task_started` this process did not see has no row, nor has one after
 its `task_notification`. A subagent's row stands for its own commands; a command that a subagent
@@ -3497,13 +3498,37 @@ the entry's, which 2.1.312 sets to the Bash call's `description`, or to the comm
 to 4096 bytes as `args_preview` — and `duration_ms`, the worker's own time since the command's first
 `task_started` (for a command a subagent left, since the command started, not since it got its row);
 no `activity`, `total_tokens` or `tool_uses`. Since 0.141 each row has `kind`:
-`agent` for a subagent's, `command` for a command's. Commands go in the order they became rows; the list is
-sent again when one comes, goes or its `description` changes. They never change
-`session.state.subagents`. The worker sends `subagents.live` directly, not through the outbox, as
+`agent` for a subagent's, `command` for a command's, since 0.168 `monitor` for a Monitor's.
+Commands and Monitors go in the order they became rows; the list is sent again when one comes,
+goes or its `description` changes. They never change `session.state.subagents`.
+Since 0.168 the list holds, after them, the main agent's own wakeup and cron jobs (2.1.312;
+a subagent's calls arm none and add no row), each told by what the CLI says of it. A wakeup
+(`kind: wakeup`): the `ScheduleWakeup` call's result, when it did not fail, gives its
+`scheduledFor` (epoch ms; 0 for a stop, which clears it); its `task_id` and `call_id` are the
+call's `tool_use_id`, its `description` the call's `reason`, its `duration_ms` the time since the
+result came, its `due_in_ms` the time to `scheduledFor`. The CLI keeps one wakeup: a later call
+replaces the row. It goes when a `command_lifecycle` `started` with `wakeup_source:
+loop_wakeup` has the armed `scheduled_for` (one with an older one leaves it) or a call stops
+it. A cron job (`kind: cron`): a successful `CronCreate` result `{id, humanSchedule, recurring,
+nextFireAt?}` gives the row, `task_id` its `id`, `description` the call's `prompt` (cut to 4096
+bytes), `activity` its `humanSchedule`, `call_id` the call's `tool_use_id`, `duration_ms` the
+time since the result, `due_in_ms` the time to `nextFireAt`, none without it; a successful
+`CronDelete` result `{id}` removes the job. A cron fire arrives as `command_lifecycle`
+`started` with `wakeup_source: schedule_wakeup` and names no job: the adapter takes the job with
+the smallest due time that is no later than 90 s after now; a line with none is the CLI's notice
+of tasks it missed and changes nothing. A one-shot job is then removed; so is a recurring job
+created 7 days or more ago (the CLI deletes it after that fire); any other waits for its next
+fire, which the adapter works out as the CLI does (`Hmn` with its default settings): the next
+match of the expression after the fire in the machine's local time zone, put off by the first 8
+hex digits of the id as a fraction of 2^32 times half the interval to the match after it, but
+by 30 minutes at most; a job of `*/N * * * *` whose interval is 5 minutes up to 5 minutes less
+15 s fires at 15 s short of that interval from the fire. A change of the wakeup or of a job
+sends the list again; none of them changes `session.state.subagents`, `background_tasks` or the
+state. The worker sends `subagents.live` directly, not through the outbox, as
 `agent.delta`, ignores a list read after the agent's process stopped and sends an empty list when it
 stops; after every reconnect it sends the last list it sent again, unless that one was empty,
-`duration_ms` grown by the time since it was sent, since a restarted hub has none and lists sent
-while disconnected are lost. Since 0.127 it also sends again an empty list that followed a non-empty
+`duration_ms` grown and `due_in_ms` (down to 0) shrunk by the time since it was sent, since a
+restarted hub has none and lists sent while disconnected are lost. Since 0.127 it also sends again an empty list that followed a non-empty
 one, on every reconnect until a non-empty list or the process's stop: the hub keeps the last
 non-empty list while a background task runs, and an empty one lost with the link would leave rows of
 work that has ended. Since 0.122 the adapter counts the session's token rate (`tokens.rate`, §4)
